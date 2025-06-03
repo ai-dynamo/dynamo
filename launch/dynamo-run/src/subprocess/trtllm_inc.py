@@ -151,7 +151,7 @@ class RequestHandlerConfig:
     component: object
     engine: object
     default_sampling_params: object
-    publishers: object
+    publisher: object
     disaggregation_mode: str
     remote_prefill_client: object
 
@@ -165,7 +165,7 @@ class RequestHandler:
         self.engine = config.engine
         self.component = config.component
         self.default_sampling_params = config.default_sampling_params
-        self.publishers = config.publishers
+        self.publisher = config.publisher
         self.disaggregation_mode = config.disaggregation_mode
         self.remote_prefill_client = config.remote_prefill_client
         self.first_generation = True
@@ -220,9 +220,9 @@ class RequestHandler:
         return remote_prefill_response
 
     async def generate(self, request):
-        # Check if there is an error in the publishers error queue
+        # Check if there is an error in the publisher error queue
         publishers_error = (
-            self.publishers.check_error_queue() if self.publishers else None
+            self.publisher.check_error_queue() if self.publisher else None
         )
         if publishers_error:
             raise publishers_error
@@ -288,8 +288,8 @@ class RequestHandler:
         ):
             # TRTLLM engine needs to start generating tokens first before stats
             # can be retrieved.
-            if self.first_generation and self.publishers:
-                self.publishers.start()
+            if self.first_generation and self.publisher:
+                self.publisher.start()
                 self.first_generation = False
 
             if res.finished and self.disaggregation_mode != "prefill":
@@ -408,11 +408,21 @@ async def init(runtime: DistributedRuntime, config: Config):
                 kv_cache_block_size=config.kv_block_size,
             )
 
+        # publisher will be set later if publishing is enabled.
+        handler_config = RequestHandlerConfig(
+            component=component,
+            engine=engine,
+            default_sampling_params=default_sampling_params,
+            publisher=None,
+            disaggregation_mode=config.disaggregation_mode,
+            remote_prefill_client=remote_prefill_client,
+        )
+
         if (
             config.publish_events_and_metrics
             and config.disaggregation_mode != "prefill"
         ):
-            # Initialize and pass in the publishers to the request handler to
+            # Initialize and pass in the publisher to the request handler to
             # publish events and metrics.
             kv_listener = runtime.namespace(config.namespace).component(
                 config.component
@@ -424,26 +434,10 @@ async def init(runtime: DistributedRuntime, config: Config):
                 int(endpoint.lease_id()),
                 config.kv_block_size,
             ) as publisher:
-                handler_config = RequestHandlerConfig(
-                    component=component,
-                    engine=engine,
-                    default_sampling_params=default_sampling_params,
-                    publishers=publisher,
-                    disaggregation_mode=config.disaggregation_mode,
-                    remote_prefill_client=remote_prefill_client,
-                )
+                handler_config.publisher = publisher
                 handler = RequestHandler(handler_config)
                 await endpoint.serve_endpoint(handler.generate)
         else:
-            # No publishers, so just pass in None to the request handler.
-            handler_config = RequestHandlerConfig(
-                component=component,
-                engine=engine,
-                default_sampling_params=default_sampling_params,
-                publishers=None,
-                disaggregation_mode=config.disaggregation_mode,
-                remote_prefill_client=remote_prefill_client,
-            )
             handler = RequestHandler(handler_config)
             await endpoint.serve_endpoint(handler.generate)
 
