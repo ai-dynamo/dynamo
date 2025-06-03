@@ -326,7 +326,12 @@ def with_request_id(param_name: str = "request_id"):
                 if hasattr(self, "ensure_request_id") and callable(
                     self.ensure_request_id
                 ):
-                    request_id = self.ensure_request_id(request_id)
+                    # If request_id is explicitly None (not provided), generate fresh UUID
+                    # to ensure call isolation, don't use existing context
+                    if request_id is None:
+                        request_id = str(uuid.uuid4())
+                    else:
+                        request_id = self.ensure_request_id(request_id)
                 else:
                     request_id = request_id or str(uuid.uuid4())
 
