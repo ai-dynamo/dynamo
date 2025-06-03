@@ -219,7 +219,7 @@ async fn completions(
         json_response
             .headers_mut()
             .insert("x-request-id", request_id.parse().unwrap());
-        Ok(Json(response).into_response())
+        Ok(json_response)
     }
 }
 
@@ -358,7 +358,7 @@ async fn chat_completions(
         json_response
             .headers_mut()
             .insert("x-request-id", request_id.parse().unwrap());
-        Ok(Json(response).into_response())
+        Ok(json_response)
     }
 }
 
