@@ -56,7 +56,7 @@ const (
 	KubeLabelValueTrue  = "true"
 
 	KubeLabelDynamoImageBuilderPod = "nvidia.com/dynamo-image-builder-pod"
-	KubeLabelDynamoDeploymentPod   = "nvidia.com/dynamo-deployment-pod"
+	KubeLabelDynamoComponentPod    = "nvidia.com/dynamo-component-pod"
 
 	KubeAnnotationDynamoRepository             = "nvidia.com/dynamo-repository"
 	KubeAnnotationDynamoVersion                = "nvidia.com/dynamo-version"

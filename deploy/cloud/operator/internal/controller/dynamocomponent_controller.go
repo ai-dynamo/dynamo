@@ -23,9 +23,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/md5"
-	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -40,9 +38,11 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/apparentlymart/go-shquot/shquot"
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/image"
+	dockerClient "github.com/docker/docker/client"
 	"github.com/huandu/xstrings"
 	"github.com/mitchellh/hashstructure/v2"
-	"github.com/prune998/docker-registry-client/registry"
 	"github.com/rs/xid"
 	"github.com/sergeymakinen/go-quote/unix"
 	"github.com/sirupsen/logrus"
@@ -594,65 +594,6 @@ func (r *DynamoComponentReconciler) getApiStoreClient(ctx context.Context) (*api
 	return apiStoreClient, apiStoreConf, nil
 }
 
-func (r *DynamoComponentReconciler) RetrieveDockerRegistrySecret(ctx context.Context, secretName string, namespace string, dockerRegistry *schemas.DockerRegistrySchema) error {
-	secret := &corev1.Secret{}
-	err := r.Get(ctx, types.NamespacedName{
-		Namespace: namespace,
-		Name:      secretName,
-	}, secret)
-	if err != nil {
-		err = errors.Wrapf(err, "get docker config json secret %s", secretName)
-		return err
-	}
-	configJSON, ok := secret.Data[dockerConfigSecretKey]
-	if !ok {
-		err = errors.Errorf("docker config json secret %s does not have %s key", secretName, dockerConfigSecretKey)
-		return err
-	}
-	var configObj struct {
-		Auths map[string]struct {
-			Auth string `json:"auth"`
-		} `json:"auths"`
-	}
-	err = json.Unmarshal(configJSON, &configObj)
-	if err != nil {
-		err = errors.Wrapf(err, "unmarshal docker config json secret %s", secretName)
-		return err
-	}
-	var server string
-	var auth string
-	if dockerRegistry.Server != "" {
-		for k, v := range configObj.Auths {
-			if k == dockerRegistry.Server {
-				server = k
-				auth = v.Auth
-				break
-			}
-		}
-		if server == "" {
-			for k, v := range configObj.Auths {
-				if strings.Contains(k, dockerRegistry.Server) {
-					server = k
-					auth = v.Auth
-					break
-				}
-			}
-		}
-	}
-	if server == "" {
-		err = errors.Errorf("no auth in docker config json secret %s for server %s", secretName, dockerRegistry.Server)
-		return err
-	}
-	var credentials []byte
-	credentials, err = base64.StdEncoding.DecodeString(auth)
-	if err != nil {
-		err = errors.Wrapf(err, "cannot base64 decode auth in docker config json secret %s", secretName)
-		return err
-	}
-	dockerRegistry.Username, _, dockerRegistry.Password = xstrings.Partition(string(credentials), ":")
-	return nil
-}
-
 //nolint:nakedret
 func (r *DynamoComponentReconciler) getDockerRegistry(ctx context.Context, DynamoComponent *nvidiacomv1alpha1.DynamoComponent) (dockerRegistry *schemas.DockerRegistrySchema, err error) {
 
@@ -677,13 +618,6 @@ func (r *DynamoComponentReconciler) getDockerRegistry(ctx context.Context, Dynam
 		DynamoRepositoryURI: dynamoRepositoryURI,
 		SecretName:          dockerRegistryConfig.SecretName,
 	}
-
-	err = r.RetrieveDockerRegistrySecret(ctx, dockerRegistryConfig.SecretName, DynamoComponent.Namespace, dockerRegistry)
-	if err != nil {
-		err = errors.Wrap(err, "retrieve docker registry secret")
-		return
-	}
-
 	return
 }
 
@@ -732,7 +666,6 @@ func checkImageExists(DynamoComponent *nvidiacomv1alpha1.DynamoComponent, docker
 	if DynamoComponent.Annotations["nvidia.com/force-build-image"] == commonconsts.KubeLabelValueTrue {
 		return false, nil
 	}
-
 	server, _, imageName := xstrings.Partition(imageName, "/")
 	if strings.Contains(server, "docker.io") {
 		server = "index.docker.io"
@@ -742,27 +675,18 @@ func checkImageExists(DynamoComponent *nvidiacomv1alpha1.DynamoComponent, docker
 	} else {
 		server = fmt.Sprintf("http://%s", server)
 	}
-	hub, err := registry.New(server, dockerRegistry.Username, dockerRegistry.Password, logrus.Debugf)
+	client, err := dockerClient.NewClientWithOpts(dockerClient.WithHost(server), dockerClient.FromEnv)
 	if err != nil {
 		err = errors.Wrapf(err, "create docker registry client for %s", server)
 		return false, err
 	}
-	imageName, _, tag := xstrings.LastPartition(imageName, ":")
-	tags, err := hub.Tags(imageName)
-	isNotFound := err != nil && strings.Contains(err.Error(), "404")
-	if isNotFound {
-		return false, nil
-	}
+	filters := filters.NewArgs()
+	filters.Add("reference", imageName)
+	images, err := client.ImageList(context.Background(), image.ListOptions{Filters: filters})
 	if err != nil {
-		err = errors.Wrapf(err, "get tags for docker image %s", imageName)
 		return false, err
 	}
-	for _, tag_ := range tags {
-		if tag_ == tag {
-			return true, nil
-		}
-	}
-	return false, nil
+	return len(images) > 0, nil
 }
 
 type ImageInfo struct {
@@ -1196,13 +1120,16 @@ echo "Done"
 	builderContainerEnvFrom := make([]corev1.EnvFromSource, 0)
 	builderContainerEnvs := []corev1.EnvVar{
 		{
-			Name:  "DOCKER_CONFIG",
-			Value: "/kaniko/.docker/",
-		},
-		{
 			Name:  "IFS",
 			Value: "''",
 		},
+	}
+
+	if dockerConfigJSONSecretName != "" {
+		builderContainerEnvs = append(builderContainerEnvs, corev1.EnvVar{
+			Name:  "DOCKER_CONFIG",
+			Value: "/kaniko/.docker/",
+		})
 	}
 
 	kanikoCacheRepo := os.Getenv("KANIKO_CACHE_REPO")
