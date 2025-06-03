@@ -307,6 +307,9 @@ pub trait DeltaGeneratorExt<ResponseType: Send + Sync + 'static + std::fmt::Debu
         &mut self,
         response: common::llm_backend::BackendOutput,
     ) -> Result<ResponseType>;
+
+    /// Gets the current prompt token count (Input Sequence Length).
+    fn get_isl(&self) -> Option<u32>;
 }
 
 #[cfg(test)]

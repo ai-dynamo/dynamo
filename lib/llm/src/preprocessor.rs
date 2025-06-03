@@ -193,6 +193,7 @@ impl OpenAIPreprocessor {
             response_generator: Box<dyn DeltaGeneratorExt<Resp>>,
             context: Arc<dyn AsyncEngineContext>,
             cancelled: bool,
+            cumulative_output_tokens: usize,
         }
 
         let state = State {
@@ -200,6 +201,7 @@ impl OpenAIPreprocessor {
             response_generator: generator,
             context: context.clone(),
             cancelled: false,
+            cumulative_output_tokens: 0,
         };
 
         // transform the common response stream into a chat response stream
@@ -220,7 +222,20 @@ impl OpenAIPreprocessor {
                         response
                     );
 
-                    let response = response.map_data(|data| {
+                    let (chunk_tokens, isl) = if let Some(ref backend_output) = response.data {
+                        let chunk_tokens = backend_output.token_ids.len();
+                        inner.cumulative_output_tokens += chunk_tokens;
+
+                        let isl = inner.response_generator.get_isl().unwrap_or(0) as usize;
+
+                        (chunk_tokens, isl)
+                    } else {
+                        (0, 0)
+                    };
+
+                    let current_osl = inner.cumulative_output_tokens;
+
+                    let mut response = response.map_data(|data| {
                         inner
                             .response_generator
                             .choice_from_postprocessor(data)
@@ -235,6 +250,10 @@ impl OpenAIPreprocessor {
                             })
                             .map_err(|e| e.to_string())
                     });
+
+                    response.chunk_tokens = Some(chunk_tokens);
+                    response.input_tokens = Some(isl);
+                    response.output_tokens = Some(current_osl);
 
                     tracing::trace!(
                         request_id = inner.context.id(),

@@ -35,12 +35,12 @@ context_servers:
     enable_block_reuse: true
   cache_transceiver_config:
     max_num_tokens: 10240
-  pytorch_backend_config:
-    # NOTE: This field is called 'enable_overlap_scheduler' in older TRTLLM versions
-    # Overlap scheduler not currently supported in context-only
-    disable_overlap_scheduler: true
-    use_cuda_graph: false
-    enable_iter_perf_stats: true
+  # NOTE: pytorch_backend_config section flattened since: https://github.com/NVIDIA/TensorRT-LLM/pull/4603
+  # NOTE: This field is called 'enable_overlap_scheduler' in older TRTLLM versions
+  # Overlap scheduler not currently supported in context-only
+  disable_overlap_scheduler: true
+  use_cuda_graph: false
+  enable_iter_perf_stats: true
   urls:
       - "localhost:8001"
 
@@ -55,10 +55,10 @@ generation_servers:
     enable_block_reuse: true
   cache_transceiver_config:
     max_num_tokens: 256
-  pytorch_backend_config:
-    # NOTE: This field is called 'enable_overlap_scheduler' in older TRTLLM versions
-    disable_overlap_scheduler: false
-    use_cuda_graph: false
-    enable_iter_perf_stats: true
+  # NOTE: pytorch_backend_config section flattened since: https://github.com/NVIDIA/TensorRT-LLM/pull/4603
+  # NOTE: This field is called 'enable_overlap_scheduler' in older TRTLLM versions
+  disable_overlap_scheduler: false
+  use_cuda_graph: false
+  enable_iter_perf_stats: true
   urls:
       - "localhost:8002"
