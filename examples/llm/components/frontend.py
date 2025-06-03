@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 
@@ -23,11 +24,14 @@ from components.worker import VllmWorker
 from pydantic import BaseModel
 
 from dynamo import sdk
-from dynamo.sdk import async_on_shutdown, depends, service
+from dynamo.sdk import api, async_on_shutdown, depends, service
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
 
 logger = logging.getLogger(__name__)
+
+# TODO: temp workaround to avoid port conflict with subprocess HTTP server; remove this once ingress is fixed
+os.environ["DYNAMO_PORT"] = "3999"
 
 
 def get_http_binary_path():
@@ -104,6 +108,17 @@ class Frontend:
             stdout=None,
             stderr=None,
         )
+
+    @api()
+    def dummy_api(self) -> None:
+        """
+        Dummy API to enable the HTTP server for the Dynamo operator.
+        This API is not used by the model.
+
+        NOTE: this is a temporary solution to expose ingress
+        for the LLM examples. Will be fixed and removed in the future.
+        The resulting api_endpoints in dynamo.yaml will be incorrect.
+        """
 
     @async_on_shutdown
     def cleanup(self):
