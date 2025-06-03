@@ -30,5 +30,5 @@ VllmDecodeWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 16
+      gpu: '16'
   common-configs: [model, served_model_name]
