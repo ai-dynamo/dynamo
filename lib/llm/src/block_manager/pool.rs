@@ -188,6 +188,7 @@ enum PriorityRequest<S: Storage, M: BlockMetadata> {
     AllocateBlocks(Unary<usize, Result<Vec<MutableBlock<S, M>>, BlockPoolError>>),
     RegisterBlocks(Unary<MutableBlocks<S, M>, Result<ImmutableBlocks<S, M>, BlockPoolError>>),
     MatchSequenceHashes(Unary<Vec<SequenceHash>, Vec<ImmutableBlock<S, M>>>),
+    NumFreeBlocks(Unary<(), usize>),
 }
 
 enum ControlRequest<S: Storage, M: BlockMetadata> {
@@ -466,6 +467,27 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
         // Await a response
         Ok(resp_rx)
     }
+
+    pub async fn num_free_blocks(&self) -> Result<usize, BlockPoolError> {
+        self._num_free_blocks()?
+            .await
+            .map_err(|_| BlockPoolError::ProgressEngineShutdown)
+    }
+
+    pub fn num_free_blocks_blocking(&self) -> Result<usize, BlockPoolError> {
+        self._num_free_blocks()?
+            .recv()
+            .map_err(|_| BlockPoolError::ProgressEngineShutdown)
+    }
+
+    fn _num_free_blocks(&self) -> UnaryResponse<usize> {
+        let (req, resp_rx) = Unary::<_, usize>::make_request(());
+        self.priority_tx
+            .send(PriorityRequest::NumFreeBlocks(req))
+            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
+
+        Ok(resp_rx)
+    }
 }
 
 struct State<S: Storage, M: BlockMetadata> {
@@ -581,6 +603,48 @@ mod tests {
         assert_eq!(progress.state.inactive.available_blocks(), 6);
         progress.step().await;
         assert_eq!(progress.state.inactive.available_blocks(), 7);
+    }
+
+    #[tokio::test]
+    async fn test_num_free_blocks() -> anyhow::Result<()> {
+        let layout = setup_layout(None)?;
+        let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)
+            .unwrap()
+            .into_blocks()?;
+
+        let (pool, mut progress) = BlockPool::builder()
+            .blocks(blocks)
+            .build_with_progress_engine()?;
+
+        let pool_clone = pool.clone();
+        let num_free_blocks = tokio::spawn(async move { pool_clone.num_free_blocks().await });
+        progress.step().await;
+        assert_eq!(num_free_blocks.await??, 7);
+
+        let block = progress.state.allocate_blocks(1)?;
+
+        let pool_clone = pool.clone();
+        let num_free_blocks = tokio::spawn(async move { pool_clone.num_free_blocks().await });
+        progress.step().await;
+        assert_eq!(num_free_blocks.await??, 6);
+
+        drop(block);
+        progress.step().await;
+
+        let pool_clone = pool.clone();
+        let num_free_blocks = tokio::spawn(async move { pool_clone.num_free_blocks().await });
+        progress.step().await;
+        assert_eq!(num_free_blocks.await??, 7);
+
+        let blocks = progress.state.allocate_blocks(7)?;
+        assert_eq!(blocks.len(), 7);
+
+        let pool_clone = pool.clone();
+        let num_free_blocks = tokio::spawn(async move { pool_clone.num_free_blocks().await });
+        progress.step().await;
+        assert_eq!(num_free_blocks.await??, 0);
+
+        Ok(())
     }
 
     #[test]
