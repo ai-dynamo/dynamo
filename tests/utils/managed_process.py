@@ -20,7 +20,7 @@ import socket
 import subprocess
 import time
 from dataclasses import dataclass, field
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import psutil
 import requests
@@ -30,19 +30,21 @@ import requests
 class ManagedProcess:
     command: List[str]
     env: Optional[dict] = None
-    health_check_ports: Optional[List[int]] = field(default_factory=list)
-    health_check_urls: Optional[List[str]] = field(default_factory=list)
+    health_check_ports: List[int] = field(default_factory=list)
+    health_check_urls: List[Any] = field(default_factory=list)
     timeout: int = 300
     working_dir: Optional[str] = None
     display_output: bool = False
     data_dir: Optional[str] = None
     terminate_existing: bool = True
-    stragglers: Optional[List[str]] = field(default_factory=list)
+    stragglers: List[str] = field(default_factory=list)
     log_dir: str = os.getcwd()
 
-    _logger = None
+    _logger = logging.getLogger()
     _command_name = None
     _log_path = None
+    _tee_proc = None
+    _sed_proc = None
 
     def __enter__(self):
         try:
@@ -68,22 +70,25 @@ class ManagedProcess:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         process_list = [self.proc, self._tee_proc, self._sed_proc]
-        for proc in process_list:
-            if proc:
-                if proc.stdout:
-                    proc.stdout.close()
-                if proc.stdin:
-                    proc.stdin.close()
-                self._terminate_process_tree(proc.pid)
-                proc.wait()
+        for process in process_list:
+            if process:
+                if process.stdout:
+                    process.stdout.close()
+                if process.stdin:
+                    process.stdin.close()
+                self._terminate_process_tree(process.pid)
+                process.wait()
         if self.data_dir:
             self._remove_directory(self.data_dir)
 
-        for proc in psutil.process_iter(["name", "cmdline"]):
-            if proc.name() in self.stragglers:
-                self._terminate_process_tree(proc.pid)
+        for ps_process in psutil.process_iter(["name", "cmdline"]):
+            if ps_process.name() in self.stragglers:
+                self._terminate_process_tree(ps_process.pid)
 
     def _start_process(self):
+        assert self._command_name
+        assert self._log_path
+
         self._logger.info(
             f"Running command: {' '.join(self.command)} in {self.working_dir or os.getcwd()}"
         )
@@ -202,7 +207,9 @@ class ManagedProcess:
         except psutil.NoSuchProcess:
             self._logger.warn(f"PID {process.pid} no longer exists")
         except psutil.TimeoutExpired:
-            self._logger(f"PID {process.pid} did not terminate in timeout, killing")
+            self._logger.warn(
+                f"PID {process.pid} did not terminate in timeout, killing"
+            )
             process.kill()
 
     def _terminate_process_tree(self, pid):
