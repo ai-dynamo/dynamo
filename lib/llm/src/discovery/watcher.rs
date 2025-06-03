@@ -106,8 +106,12 @@ impl ModelWatcher {
                             tracing::info!(model_name = model_entry.name, "added model");
                             self.notify_on_model.notify_waiters();
                         }
-                        Err(e) => {
-                            tracing::error!(%e, "error adding model {}", model_entry.name);
+                        Err(err) => {
+                            tracing::error!(
+                                error = format!("{err:#}"),
+                                "error adding model {}",
+                                model_entry.name
+                            );
                         }
                     }
                 }

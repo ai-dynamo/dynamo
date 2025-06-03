@@ -1,27 +1,16 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::collections::HashMap;
 
 use crate::model_card::model::ModelDeploymentCard;
 use anyhow::{Context, Result};
-use std::fs::{self, File};
-use std::io::BufReader;
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::model_card::model::{ModelInfoType, PromptFormatterArtifact, TokenizerKind};
+
+use super::model::GenerationConfig;
 
 impl ModelDeploymentCard {
     /// Allow user to override the name we register this model under.
@@ -98,6 +87,7 @@ impl ModelDeploymentCard {
             service_name: model_name.to_string(),
             model_info: Some(ModelInfoType::GGUF(gguf_file.to_path_buf())),
             tokenizer: Some(TokenizerKind::from_gguf(gguf_file)?),
+            gen_config: None, // AFAICT there is no equivalent in a GGUF
             prompt_formatter: Some(PromptFormatterArtifact::GGUF(gguf_file.to_path_buf())),
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
@@ -116,13 +106,13 @@ impl ModelDeploymentCard {
 
     async fn from_repo(repo_id: &str, model_name: &str) -> anyhow::Result<Self> {
         // This is usually the right choice
-        let context_length = file_json_field(
+        let context_length = crate::file_json_field(
             &Path::join(&PathBuf::from(repo_id), "config.json"),
             "max_position_embeddings",
         )
         // But sometimes this is
         .or_else(|_| {
-            file_json_field(
+            crate::file_json_field(
                 &Path::join(&PathBuf::from(repo_id), "tokenizer_config.json"),
                 "model_max_length",
             )
@@ -135,6 +125,7 @@ impl ModelDeploymentCard {
             service_name: model_name.to_string(),
             model_info: Some(ModelInfoType::from_repo(repo_id).await?),
             tokenizer: Some(TokenizerKind::from_repo(repo_id).await?),
+            gen_config: Some(GenerationConfig::from_repo(repo_id).await?),
             prompt_formatter: PromptFormatterArtifact::from_repo(repo_id).await?,
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
@@ -186,6 +177,20 @@ impl TokenizerKind {
     async fn try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
         Ok(Self::HfTokenizerJson(
             check_for_file(repo, "tokenizer.json").await?,
+        ))
+    }
+}
+
+impl GenerationConfig {
+    pub async fn from_repo(repo_id: &str) -> Result<Self> {
+        Self::try_is_hf_repo(repo_id)
+            .await
+            .with_context(|| format!("unable to extract generation config from repo {repo_id}"))
+    }
+
+    async fn try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
+        Ok(Self::HfGenerationConfigJson(
+            check_for_file(repo, "generation_config.json").await?,
         ))
     }
 }
@@ -246,59 +251,4 @@ fn check_valid_local_repo_path(path: impl AsRef<Path>) -> Result<()> {
         ));
     }
     Ok(())
-}
-
-/// Reads a JSON file, extracts a specific field, and deserializes it into type T.
-///
-/// # Arguments
-///
-/// * `json_file_path`: Path to the JSON file.
-/// * `field_name`: The name of the field to extract from the JSON map.
-///
-/// # Returns
-///
-/// A `Result` containing the deserialized value of type `T` if successful,
-/// or an `anyhow::Error` if any step fails (file I/O, JSON parsing, field not found,
-/// or deserialization to `T` fails).
-///
-/// # Type Parameters
-///
-/// * `T`: The expected type of the field's value. `T` must implement `serde::de::DeserializeOwned`.
-fn file_json_field<T: serde::de::DeserializeOwned>(
-    json_file_path: &Path,
-    field_name: &str,
-) -> anyhow::Result<T> {
-    // 1. Open the file
-    let file = File::open(json_file_path)
-        .with_context(|| format!("Failed to open file: {:?}", json_file_path))?;
-    let reader = BufReader::new(file);
-
-    // 2. Parse the JSON file into a generic serde_json::Value
-    // We parse into `serde_json::Value` first because we need to look up a specific field.
-    // If we tried to deserialize directly into `T`, `T` would need to represent the whole JSON structure.
-    let json_data: serde_json::Value = serde_json::from_reader(reader)
-        .with_context(|| format!("Failed to parse JSON from file: {:?}", json_file_path))?;
-
-    // 3. Ensure the root of the JSON is an object (map)
-    let map = json_data.as_object().ok_or_else(|| {
-        anyhow::anyhow!("JSON root is not an object in file: {:?}", json_file_path)
-    })?;
-
-    // 4. Get the specific field's value
-    let field_value = map.get(field_name).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Field '{}' not found in JSON file: {:?}",
-            field_name,
-            json_file_path
-        )
-    })?;
-
-    // 5. Deserialize the field's value into the target type T
-    // We need to clone `field_value` because `from_value` consumes its input.
-    serde_json::from_value(field_value.clone()).with_context(|| {
-        format!(
-            "Failed to deserialize field '{}' (value: {:?}) to the expected type from file: {:?}",
-            field_name, field_value, json_file_path
-        )
-    })
 }
