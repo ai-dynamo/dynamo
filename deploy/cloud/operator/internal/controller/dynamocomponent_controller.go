@@ -235,7 +235,7 @@ func (r *DynamoComponentReconciler) ensureImageExists(ctx context.Context, opt e
 	DynamoComponent = opt.DynamoComponent
 	req := opt.req
 
-	imageInfo, err = r.getImageInfo(ctx, GetImageInfoOption{
+	imageInfo, err = r.getImageInfo(GetImageInfoOption{
 		DynamoComponent: DynamoComponent,
 	})
 	if err != nil {
@@ -263,7 +263,7 @@ func (r *DynamoComponentReconciler) ensureImageExists(ctx context.Context, opt e
 			return
 		}
 		r.Recorder.Eventf(DynamoComponent, corev1.EventTypeNormal, "CheckingImage", "Checking image exists: %s", imageInfo.ImageName)
-		imageExists, err = checkImageExists(DynamoComponent, imageInfo.DockerRegistry, imageInfo.ImageName)
+		imageExists, err = checkImageExists(DynamoComponent, imageInfo.ImageName)
 		if err != nil {
 			err = errors.Wrapf(err, "check image %s exists", imageInfo.ImageName)
 			return
@@ -594,7 +594,7 @@ func (r *DynamoComponentReconciler) getApiStoreClient(ctx context.Context) (*api
 }
 
 //nolint:nakedret
-func (r *DynamoComponentReconciler) getDockerRegistry(ctx context.Context, DynamoComponent *nvidiacomv1alpha1.DynamoComponent) (dockerRegistry *schemas.DockerRegistrySchema, err error) {
+func (r *DynamoComponentReconciler) getDockerRegistry(DynamoComponent *nvidiacomv1alpha1.DynamoComponent) (dockerRegistry *schemas.DockerRegistrySchema, err error) {
 
 	dockerRegistryConfig := commonconfig.GetDockerRegistryConfig()
 
@@ -661,7 +661,7 @@ func getDynamoComponentImageName(DynamoComponent *nvidiacomv1alpha1.DynamoCompon
 	return fmt.Sprintf("%s:%s", uri, tag)
 }
 
-func checkImageExists(DynamoComponent *nvidiacomv1alpha1.DynamoComponent, dockerRegistry schemas.DockerRegistrySchema, imageName string) (bool, error) {
+func checkImageExists(DynamoComponent *nvidiacomv1alpha1.DynamoComponent, imageName string) (bool, error) {
 	if DynamoComponent.Annotations["nvidia.com/force-build-image"] == commonconsts.KubeLabelValueTrue {
 		return false, nil
 	}
@@ -701,9 +701,9 @@ type GetImageInfoOption struct {
 }
 
 //nolint:nakedret
-func (r *DynamoComponentReconciler) getImageInfo(ctx context.Context, opt GetImageInfoOption) (imageInfo ImageInfo, err error) {
+func (r *DynamoComponentReconciler) getImageInfo(opt GetImageInfoOption) (imageInfo ImageInfo, err error) {
 	dynamoComponentRepositoryName, _, dynamoComponentVersion := xstrings.Partition(opt.DynamoComponent.Spec.DynamoComponent, ":")
-	dockerRegistry, err := r.getDockerRegistry(ctx, opt.DynamoComponent)
+	dockerRegistry, err := r.getDockerRegistry(opt.DynamoComponent)
 	if err != nil {
 		err = errors.Wrap(err, "get docker registry")
 		return
