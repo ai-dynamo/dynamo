@@ -146,35 +146,61 @@ def depends(
         )
 
 
-def liveness(func: G) -> G:
-    """Decorator for liveness probe."""
-    if not callable(func):
-        raise TypeError("@liveness can only decorate callable methods")
+def liveness(name: str | None = None) -> Callable[[G], G]:
+    """Decorator for liveness probe.
 
-    func.__is_liveness_probe__ = True  # type: ignore
-    return func
+    Args:
+        name: Optional name for the liveness probe route. Defaults to "/healthz".
+    """
+
+    def decorator(func: G) -> G:
+        if not callable(func):
+            raise TypeError("@liveness can only decorate callable methods")
+
+        func.__is_liveness_probe__ = True  # type: ignore
+        func.__liveness_route__ = name  # type: ignore
+        return func
+
+    # Handle case where decorator is used without parentheses
+    if callable(name):
+        func, name = name, None
+        return decorator(func)
+    return decorator
 
 
 def get_liveness_handler(obj):
     for attr in dir(obj):
         fn = getattr(obj, attr)
         if callable(fn) and getattr(fn, "__is_liveness_probe__", False):
-            return fn
-    return None
+            return fn, getattr(fn, "__liveness_route__", None)
+    return None, None
 
 
-def readiness(func: G) -> G:
-    """Decorator for readiness probe."""
-    if not callable(func):
-        raise TypeError("@readiness can only decorate callable methods")
+def readiness(name: str | None = None) -> Callable[[G], G]:
+    """Decorator for readiness probe.
 
-    func.__is_readiness_probe__ = True  # type: ignore
-    return func
+    Args:
+        name: Optional name for the readiness probe route. Defaults to "/readyz".
+    """
+
+    def decorator(func: G) -> G:
+        if not callable(func):
+            raise TypeError("@readiness can only decorate callable methods")
+
+        func.__is_readiness_probe__ = True  # type: ignore
+        func.__readiness_route__ = name  # type: ignore
+        return func
+
+    # Handle case where decorator is used without parentheses
+    if callable(name):
+        func, name = name, None
+        return decorator(func)
+    return decorator
 
 
 def get_readiness_handler(obj):
     for attr in dir(obj):
         fn = getattr(obj, attr)
         if callable(fn) and getattr(fn, "__is_readiness_probe__", False):
-            return fn
-    return None
+            return fn, getattr(fn, "__readiness_route__", None)
+    return None, None

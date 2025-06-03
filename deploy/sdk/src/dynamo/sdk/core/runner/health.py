@@ -20,6 +20,8 @@ from typing import Any, Awaitable, Union
 
 from fastapi import FastAPI, Response
 
+from dynamo.sdk.core.lib import get_liveness_handler, get_readiness_handler
+
 
 # TODO: These defaults should be set by the provider. For now, I'm just adding them so that something is exposed when we do --use-default-health-checks
 def default_liveness_check() -> bool:
@@ -50,19 +52,17 @@ def register_liveness_probe(
                                     Defaults to False.
     """
 
-    # Find the decorated method.
-    decorated_method = None
-    for attr in dir(instance):
-        method = getattr(instance, attr)
-        if callable(method) and getattr(method, "__is_liveness_probe__", False):
-            decorated_method = method
-            break
+    # Find the decorated method and its custom route if any
+    decorated_method, custom_route = get_liveness_handler(instance)
 
     if not decorated_method and not use_default:
         # Do nothing if no @liveness() decorator found and default not requested
         return
 
-    @app.get(route)
+    # Use custom route if specified, otherwise use default route
+    final_route = custom_route or route
+
+    @app.get(final_route)
     async def liveness_check():
         try:
             # Use decorated method if available, otherwise use default
@@ -96,19 +96,17 @@ def register_readiness_probe(
                                     Defaults to False.
     """
 
-    # Find the decorated method.
-    decorated_method = None
-    for attr in dir(instance):
-        method = getattr(instance, attr)
-        if callable(method) and getattr(method, "__is_readiness_probe__", False):
-            decorated_method = method
-            break
+    # Find the decorated method and its custom route if any
+    decorated_method, custom_route = get_readiness_handler(instance)
 
     if not decorated_method and not use_default:
         # Do nothing if no @readiness() decorator found and default not requested
         return
 
-    @app.get(route)
+    # Use custom route if specified, otherwise use default route
+    final_route = custom_route or route
+
+    @app.get(final_route)
     async def readiness_check():
         try:
             # Use decorated method if available, otherwise use default
