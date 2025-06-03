@@ -28,7 +28,7 @@ class DeploymentGraph:
     directory: str
     endpoint: str
     response_handler: Callable[[Any], str]
-    timeout: int = 100
+    timeout: int = 1200
 
 
 @dataclass

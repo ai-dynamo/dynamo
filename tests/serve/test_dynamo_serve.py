@@ -139,7 +139,7 @@ deployment_graphs = {
 
 
 class DynamoServeProcess(ManagedProcess):
-    def __init__(self, graph: DeploymentGraph, request, port=8000, timeout=300):
+    def __init__(self, graph: DeploymentGraph, request, port=8000, timeout=1200):
         command = ["dynamo", "serve", graph.module]
 
         if graph.config:
