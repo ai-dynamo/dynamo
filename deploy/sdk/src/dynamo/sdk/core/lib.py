@@ -16,9 +16,11 @@
 
 import logging
 import os
+from functools import wraps
 from typing import Any, Callable, Optional, Type, TypeVar
 
 from fastapi import FastAPI
+from nats.aio.client import Client as NATS
 
 from dynamo.sdk.core.protocol.interface import (
     DependencyInterface,
@@ -36,6 +38,8 @@ _target: DeploymentTarget
 logger = logging.getLogger(__name__)
 
 DYNAMO_IMAGE = os.getenv("DYNAMO_IMAGE", "dynamo:latest-vllm")
+
+nats_client: NATS = None
 
 
 def set_target(target: DeploymentTarget) -> None:
@@ -85,13 +89,31 @@ def depends(
     return provider.create_dependency(on=on, **kwargs)
 
 
+def is_nats_connected() -> bool:
+    try:
+        # nats_client = NATS()
+        # await nats_client.connect("nats://localhost:4222")
+        return nats_client is not None and nats_client.is_connected
+    except Exception as e:
+        logger.warning(f"NATS connection check failed: {e}")
+        return False
+
+
 def liveness(func: G) -> G:
     """Decorator for liveness probe."""
     if not callable(func):
         raise TypeError("@liveness can only decorate callable methods")
 
-    func.__is_liveness_probe__ = True  # type: ignore
-    return func
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        if not is_nats_connected():
+            return {"status": "unhealthy", "reason": "NATS not connected"}, 503
+        # if not is_etcd_healthy():
+        #     return {"status": "unhealthy", "reason": "etcd not healthy"}, 503
+        return func(*args, **kwargs)
+
+    wrapper.__is_liveness_probe__ = True  # type: ignore
+    return wrapper
 
 
 def get_liveness_handler(obj):
