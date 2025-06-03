@@ -42,7 +42,8 @@ pub type CriticalTaskHandler<Fut> = dyn FnOnce(CancellationToken) -> Fut + Send 
 pub struct CriticalTaskExecutionHandle {
     monitor_task: JoinHandle<()>,
     graceful_shutdown_token: CancellationToken,
-    result_receiver: oneshot::Receiver<Result<()>>,
+    result_receiver: Option<oneshot::Receiver<Result<()>>>,
+    detached: bool,
 }
 
 impl CriticalTaskExecutionHandle {
@@ -161,7 +162,8 @@ impl CriticalTaskExecutionHandle {
         Ok(Self {
             monitor_task,
             graceful_shutdown_token,
-            result_receiver,
+            result_receiver: Some(result_receiver),
+            detached: false,
         })
     }
 
@@ -193,13 +195,26 @@ impl CriticalTaskExecutionHandle {
     /// - `Err(...)` if the task failed or panicked, preserving the original error
     ///
     /// Note: Both errors and panics trigger parent cancellation immediately via the monitor task.
-    pub async fn join(self) -> Result<()> {
-        match self.result_receiver.await {
+    pub async fn join(mut self) -> Result<()> {
+        match self.result_receiver.take().unwrap().await {
             Ok(task_result) => task_result,
             Err(_) => {
                 // This should rarely happen - means monitor task was dropped/cancelled
                 Err(anyhow::anyhow!("Critical task monitor was cancelled"))
             }
+        }
+    }
+
+    /// Detach the task. This allows the task to continue running after the handle is dropped.
+    pub fn detach(mut self) {
+        self.detached = true;
+    }
+}
+
+impl Drop for CriticalTaskExecutionHandle {
+    fn drop(&mut self) {
+        if !self.detached {
+            panic!("Critical task was not detached prior to drop!");
         }
     }
 }

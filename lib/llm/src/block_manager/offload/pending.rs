@@ -455,7 +455,7 @@ where
                 self.cancellation_token.clone(),
                 "Transfer Batcher",
                 &self.runtime,
-            )?;
+            )?.detach();
         }
 
         Ok(())

@@ -153,7 +153,8 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             cancellation_token.clone(),
             "Device -> Host offload worker",
             &async_rt_handle,
-        )?;
+        )?
+        .detach();
 
         let transfer_ctx = Arc::new(TransferContext::new(
             nixl_agent.clone(),
@@ -183,7 +184,8 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             cancellation_token.clone(),
             "Host -> Disk offload worker",
             &async_rt_handle,
-        )?;
+        )?
+        .detach();
 
         // Host -> Device onboarding
         let host_to_device_task = OffloadManager::onboard_worker(
@@ -207,7 +209,8 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             cancellation_token.clone(),
             "Host -> Device onboarding worker",
             &async_rt_handle,
-        )?;
+        )?
+        .detach();
 
         // Disk -> Device onboarding
         let disk_to_device_task = OffloadManager::onboard_worker(
@@ -232,7 +235,8 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             cancellation_token.clone(),
             "Disk -> Device onboarding worker",
             &async_rt_handle,
-        )?;
+        )?
+        .detach();
 
         Ok(this_clone)
     }
