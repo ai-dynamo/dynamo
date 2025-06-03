@@ -38,9 +38,8 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/apparentlymart/go-shquot/shquot"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/image"
-	dockerClient "github.com/docker/docker/client"
+	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/huandu/xstrings"
 	"github.com/mitchellh/hashstructure/v2"
 	"github.com/rs/xid"
@@ -67,10 +66,6 @@ import (
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
-)
-
-const (
-	dockerConfigSecretKey = ".dockerconfigjson"
 )
 
 // DynamoComponentReconciler reconciles a DynamoComponent object
@@ -666,27 +661,19 @@ func checkImageExists(DynamoComponent *nvidiacomv1alpha1.DynamoComponent, docker
 	if DynamoComponent.Annotations["nvidia.com/force-build-image"] == commonconsts.KubeLabelValueTrue {
 		return false, nil
 	}
-	server, _, imageName := xstrings.Partition(imageName, "/")
-	if strings.Contains(server, "docker.io") {
-		server = "index.docker.io"
-	}
-	if dockerRegistry.Secure {
-		server = fmt.Sprintf("https://%s", server)
-	} else {
-		server = fmt.Sprintf("http://%s", server)
-	}
-	client, err := dockerClient.NewClientWithOpts(dockerClient.WithHost(server), dockerClient.FromEnv)
+	ref, err := name.ParseReference(imageName)
 	if err != nil {
-		err = errors.Wrapf(err, "create docker registry client for %s", server)
-		return false, err
+		return false, fmt.Errorf("parsing image reference: %w", err)
 	}
-	filters := filters.NewArgs()
-	filters.Add("reference", imageName)
-	images, err := client.ImageList(context.Background(), image.ListOptions{Filters: filters})
+	// Automatically picks up auth from DOCKER_CONFIG env var
+	_, err = remote.Head(ref)
 	if err != nil {
-		return false, err
+		if strings.Contains(err.Error(), "manifest unknown") || strings.Contains(err.Error(), "not found") {
+			return false, nil
+		}
+		return false, fmt.Errorf("checking image: %w", err)
 	}
-	return len(images) > 0, nil
+	return true, nil
 }
 
 type ImageInfo struct {
