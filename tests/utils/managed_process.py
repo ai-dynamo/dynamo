@@ -172,8 +172,6 @@ class ManagedProcess:
         while time.time() - start_time < timeout:
             try:
                 response = requests.get(url, timeout=timeout)
-                print(response)
-                print(response.json())
                 if response.status_code == 200:
                     if response_check and response_check(response):
                         self._logger.info(f"SUCCESS: Check URL:{url}")
