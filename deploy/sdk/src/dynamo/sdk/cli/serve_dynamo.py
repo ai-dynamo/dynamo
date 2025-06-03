@@ -29,9 +29,11 @@ import typer
 import uvicorn
 import uvloop
 from fastapi.responses import StreamingResponse
+from nats.aio.client import Client as NATS
 
 from dynamo.runtime import DistributedRuntime, dynamo_endpoint, dynamo_worker
 from dynamo.sdk import dynamo_context
+from dynamo.sdk.core.lib import set_nats_client
 from dynamo.sdk.core.protocol.interface import DynamoTransport, LinkedServices
 from dynamo.sdk.core.runner.health import (
     register_liveness_probe,
@@ -170,6 +172,7 @@ def main(
     async def dyn_worker(runtime: DistributedRuntime):
         nonlocal class_instance
         global dynamo_context
+
         dynamo_context["runtime"] = runtime
         if service_name and service_name != service.name:
             server_context.service_type = "service"
@@ -298,6 +301,14 @@ def main(
         await instanceReady.wait()
         if not service.system_app:
             raise ValueError("System app not defined for service")
+        # Setup nats client for readyness and liveliness health checks.
+        try:
+            nats_client = NATS()
+            await nats_client.connect("nats://localhost:4222")
+            set_nats_client(nats_client)
+            logger.info("Connected to NATS and set global client for probes")
+        except Exception as e:
+            logger.warning(f"Failed to connect NATS for probes: {e}")
 
         # Register system endpoints
         use_default_health_checks = (

@@ -42,6 +42,17 @@ DYNAMO_IMAGE = os.getenv("DYNAMO_IMAGE", "dynamo:latest-vllm")
 nats_client: NATS = None
 
 
+def set_nats_client(client: NATS) -> None:
+    """Set the global NATS client."""
+    global _nats_client
+    _nats_client = client
+
+
+def get_nats_client() -> Optional[NATS]:
+    """Return the global NATS client."""
+    return _nats_client
+
+
 def set_target(target: DeploymentTarget) -> None:
     """Set the global service provider implementation"""
     global _target
@@ -91,8 +102,6 @@ def depends(
 
 def is_nats_connected() -> bool:
     try:
-        # nats_client = NATS()
-        # await nats_client.connect("nats://localhost:4222")
         return nats_client is not None and nats_client.is_connected
     except Exception as e:
         logger.warning(f"NATS connection check failed: {e}")
