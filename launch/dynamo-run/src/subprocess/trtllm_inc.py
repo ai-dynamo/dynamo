@@ -10,8 +10,8 @@
 #
 # Disaggregated serving:
 # - Ingress: dynamo run in=http out=dyn
-# - Decode Worker: python3 trtllm_inc.py --disagg-mode=decode --extra-engine-args=trtllm_config/sample.yaml
-# - Prefill Worker: python3 trtllm_inc.py --disagg-mode=prefill --extra-engine-args=trtllm_config/sample.yaml
+# - Decode Worker: python3 trtllm_inc.py --task=decode --extra-engine-args=trtllm_config/sample.yaml
+# - Prefill Worker: python3 trtllm_inc.py --task=prefill --extra-engine-args=trtllm_config/sample.yaml
 
 
 import argparse
@@ -45,7 +45,7 @@ DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 # Qwen/Qwen3-0.6B is not supported by TRTLLM yet.
 DEFAULT_MODEL = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 # Default endpoint for the remote prefill service.
-DEFAULT_PREFILL_ENDPOINT = "dyn://dynamo.backend.prefill"
+DEFAULT_PREFILL_ENDPOINT = "dyn://dynamo.prefill.generate"
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
@@ -57,10 +57,10 @@ def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
     endpoint_str = endpoint.replace("dyn://", "", 1)
     endpoint_parts = endpoint_str.split(".")
     if len(endpoint_parts) != 3:
-        logging.error(
-            f"Invalid endpoint format: '{endpoint}'. Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
+        raise ValueError(
+            f"Invalid endpoint format: '{endpoint}'. "
+            "Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
         )
-        sys.exit(1)
 
     return tuple(endpoint_parts)
 
@@ -82,8 +82,13 @@ class DisaggregatedParamsCodec:
                 if disaggregated_params.opaque_state is not None
                 else None
             )
-            disaggregated_params.opaque_state = opaque_state
-            return disaggregated_params
+            return DisaggregatedParams(
+                request_type=disaggregated_params.request_type,
+                first_gen_tokens=disaggregated_params.first_gen_tokens,
+                ctx_request_id=disaggregated_params.ctx_request_id,
+                opaque_state=opaque_state,
+                draft_tokens=disaggregated_params.draft_tokens,
+            )
 
     @staticmethod
     def encode(
@@ -97,8 +102,13 @@ class DisaggregatedParamsCodec:
                 if disaggregated_params.opaque_state is not None
                 else None
             )
-            disaggregated_params.opaque_state = encoded_opaque_state
-            return disaggregated_params
+            return DisaggregatedParams(
+                request_type=disaggregated_params.request_type,
+                first_gen_tokens=disaggregated_params.first_gen_tokens,
+                ctx_request_id=disaggregated_params.ctx_request_id,
+                opaque_state=encoded_opaque_state,
+                draft_tokens=disaggregated_params.draft_tokens,
+            )
 
 
 class Config:
@@ -115,6 +125,21 @@ class Config:
     publish_events_and_metrics: bool
     disaggregation_mode: str
     remote_prefill_endpoint: str
+
+    def __str__(self) -> str:
+        return (
+            f"Config(namespace={self.namespace}, "
+            f"component={self.component}, "
+            f"endpoint={self.endpoint}, "
+            f"model_path={self.model_path}, "
+            f"model_name={self.model_name}, "
+            f"tensor_parallel_size={self.tensor_parallel_size}, "
+            f"kv_block_size={self.kv_block_size}, "
+            f"extra_engine_args={self.extra_engine_args}, "
+            f"publish_events_and_metrics={self.publish_events_and_metrics}, "
+            f"disaggregation_mode={self.disaggregation_mode}, "
+            f"remote_prefill_endpoint={self.remote_prefill_endpoint})"
+        )
 
 
 class RequestHandler:
@@ -269,6 +294,8 @@ async def init(runtime: DistributedRuntime, config: Config):
     """
     Instantiate and serve
     """
+
+    logging.info(f"Initializing the worker with config: {config}")
 
     remote_prefill_client = None
     if config.disaggregation_mode == "decode":
@@ -436,11 +463,12 @@ def cmd_line_args():
         help="Publish events and metrics to the dynamo components. Note: This is not supported when running in prefill disaggregation mode.",
     )
     parser.add_argument(
-        "--disagg-mode",
+        "--task",
         type=str,
-        choices=["none", "prefill", "decode"],
-        default="none",
-        help="Specifies the disaggregation mode for the engine. none: aggregated serving, prefill: disaggregated prefill, decode: disaggregated decode",
+        action="append",
+        choices=["prefill", "decode", "prefill_and_decode"],
+        default=[],
+        help="Specifies the task for the engine. Can be specified multiple time for different tasks. Will raise an error if conflicting tasks are specified.",
     )
     parser.add_argument(
         "--remote-prefill-endpoint",
@@ -458,7 +486,21 @@ def cmd_line_args():
         )
 
     endpoint = args.endpoint
-    if args.disagg_mode == "prefill":
+
+    # disaggregation mode
+    disaggregation_mode = None
+    for choice in ["prefill", "decode", "prefill_and_decode"]:
+        if choice in args.task:
+            if disaggregation_mode is not None:
+                raise ValueError(
+                    f"Conflicting tasks specified: {args.task}. Please specify only one task."
+                )
+            disaggregation_mode = choice
+
+    if disaggregation_mode is None:
+        disaggregation_mode = "prefill_and_decode"
+
+    if disaggregation_mode == "prefill":
         if args.remote_prefill_endpoint != DEFAULT_PREFILL_ENDPOINT:
             logging.error(
                 "--remote-prefill-endpoint is not supported when running in prefill disaggregation mode."
@@ -492,7 +534,7 @@ def cmd_line_args():
     config.kv_block_size = args.kv_block_size
     config.extra_engine_args = args.extra_engine_args
     config.publish_events_and_metrics = args.publish_events_and_metrics
-    config.disaggregation_mode = args.disagg_mode
+    config.disaggregation_mode = disaggregation_mode
     config.remote_prefill_endpoint = args.remote_prefill_endpoint
 
     return config
