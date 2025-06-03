@@ -21,6 +21,7 @@ llamacpp = ["dep:dynamo-engine-llamacpp"]
 cuda = ["dynamo-engine-llamacpp/cuda", "dynamo-engine-mistralrs/cuda"]
 metal = ["dynamo-engine-llamacpp/metal", "dynamo-engine-mistralrs/metal"]
 vulkan = ["dynamo-engine-llamacpp/vulkan"]
+openmp = ["dynamo-engine-llamacpp/openmp"]
 
 [dependencies]
 dynamo-llm = { workspace = true }
