@@ -135,8 +135,10 @@ class VllmDecodeWorker:
                 self.disaggregated_router = None
 
             model = LlavaForConditionalGeneration.from_pretrained(
-                self.engine_args.model
-            )
+                self.engine_args.model,
+                device_map="auto",
+                torch_dtype=torch.bfloat16,
+            ).eval()
             vision_tower = model.vision_tower
             self.embedding_size = (
                 vision_tower.vision_model.embeddings.position_embedding.num_embeddings
