@@ -157,7 +157,7 @@ markers = [
     "pre_merge: marks tests to run before merging",
     "nightly: marks tests to run nightly",
     "weekly: marks tests to run weekly",
-    "gpu: marks tests to run on GPU",
+    "gpu_1: marks tests to run on GPU",
     "gpu_2: marks tests to run on 2GPUs",
     "e2e: marks tests as end-to-end tests",
     "vllm: marks tests as requiring vllm",

@@ -8,15 +8,10 @@ This document outlines the testing framework for the Dynamo runtime system, incl
 
 ```
 tests/
-├── unit/               # Unit tests for individual components
-│   ├── conftest.py     # Unit test fixtures and configuration
-│   └── unittest_utils.py
-├── integration/        # Integration tests between components
-│   ├── conftest.py     # Integration test fixtures and configuration
-│   └── integtest_utils.py
-├── e2e/                # End-to-end system tests
-│   ├── conftest.py     # E2E test fixtures and configuration
-│   └── e2etest_utils.py
+├── serve/              # E2E tests using dynamo serve
+│   ├── conftest.py     # test fixtures as needed for specific test area
+├── run/                # E2E tests using dynamo run
+│   ├── conftest.py     # test fixtures as needed for specific test area
 ├── conftest.py         # Shared fixtures and configuration
 └── README.md           # This file
 ```
@@ -26,14 +21,12 @@ tests/
 Pytest automatically discovers tests based on their naming convention. All test files must follow this pattern:
 
 ```
-test_<type>_<component>_<flow>.py
+test_<component>.py
 ```
 
 Where:
-- `type`: Test category (e2e, integ, unit)
 - `component`: The component being tested (e.g., planner, kv_router)
   - For e2e tests, this could be the API or simply "dynamo"
-- `flow`: The specific functionality or scenario being tested
 
 ## Running Tests
 
@@ -61,6 +54,20 @@ pytest -s
 
 Markers help control which tests run under different conditions. Add these decorators to your test functions:
 
+```
+markers = [
+    "pre_merge: marks tests to run before merging",
+    "nightly: marks tests to run nightly",
+    "weekly: marks tests to run weekly",
+    "gpu_1: marks tests to run on GPU",
+    "gpu_2: marks tests to run on 2GPUs",
+    "e2e: marks tests as end-to-end tests",
+    "vllm: marks tests as requiring vllm",
+    "sglang: marks tests as requiring sglang",
+    "slow: marks tests as known to be slow"
+]
+```
+
 ### Frequency-based markers
 - `@pytest.mark.nightly` - Tests run nightly
 - `@pytest.mark.weekly` - Tests run weekly
@@ -83,52 +90,6 @@ Markers help control which tests run under different conditions. Add these decor
 - `@pytest.mark.slow` - Tests that take a long time to run
 - `@pytest.mark.skip(reason="Example: KV Manager is under development")` - Skip these tests
 - `@pytest.mark.xfail(reason="Expected to fail because...")` - Tests expected to fail
-
-## Writing Tests
-
-### Test Classes
-When using class-based tests, utilize the setup and teardown methods:
-
-```python
-class TestComponent:
-    def setup_method(self):
-        # Setup code runs before each test method
-        self.component = Component()
-
-    def teardown_method(self):
-        # Cleanup code runs after each test method
-        self.component.cleanup()
-
-    def test_feature(self):
-        # Test code here
-        assert self.component.feature() == expected_result
-```
-
-### Testing Error Cases
-To test scenarios expected to fail:
-
-```python
-def test_integ_planner_fail_to_forward():
-    with pytest.mark.raises(RoutingError):
-        planner_func(route_req, cache_context)
-```
-
-### Mocking
-Use mocking to isolate the system under test:
-
-```python
-@patch('module.external_service')
-def test_with_mock(mock_service):
-    # Configure the mock
-    mock_service.return_value = expected_data
-
-    # Test code that uses the external service
-    result = function_under_test()
-
-    # Assertions
-    assert result == expected_result
-    mock_service.assert_called_once()
-```
 
 ## Environment Setup
 
