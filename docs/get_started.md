@@ -20,7 +20,7 @@ limitations under the License.
 
 ## Development Environment
 
-Ths section describes how to set up your development environment.
+This section describes how to set up your development environment.
 
 ### Recommended Setup: Using Dev Container
 

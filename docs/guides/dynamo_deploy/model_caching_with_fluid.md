@@ -207,5 +207,5 @@ spec:
 - [Alluxio Documentation](https://docs.alluxio.io/)
 - [MinIO Documentation](https://min.io/docs/)
 - [HuggingFace Hub](https://huggingface.co/docs/hub/index)
-- [Dynamo README](README.md)
+- [Dynamo README](../../../README.md)
 - [Dynamo Documentation](https://docs.nvidia.com/dynamo/)

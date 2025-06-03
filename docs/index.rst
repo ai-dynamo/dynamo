@@ -111,7 +111,7 @@ and is driven by a transparent development approach. Check out our repo at https
    Deploying Dynamo Inference Graphs to Kubernetes using the Dynamo Cloud Platform <guides/dynamo_deploy/operator_deployment.md>
    Manual Helm Deployment <guides/dynamo_deploy/manual_helm_deployment.md>
    Minikube Setup Guide <guides/dynamo_deploy/minikube.md>
-   Model Caching with Fluid <guides/dynamo_deploy//model_caching_with_fluid.md>
+   Model Caching with Fluid <guides/dynamo_deploy/model_caching_with_fluid.md>
 
 .. toctree::
    :hidden:
@@ -125,7 +125,7 @@ and is driven by a transparent development approach. Check out our repo at https
    :caption: Examples
 
    Hello World Example: Basic <examples/hello_world.md>
-   Hello World Example: Aggregated and Disaggregated Deployment <examples/disagg_skeleton>
+   Hello World Example: Aggregated and Disaggregated Deployment <examples/disagg_skeleton.md>
    LLM Deployment Examples <examples/llm_deployment.md>
    Multinode Examples <examples/multinode.md>
    LLM Deployment Examples using TensorRT-LLM <examples/trtllm.md>
