@@ -44,13 +44,17 @@ class BentoEndpoint(DynamoEndpoint):
 
     def __init__(
         self,
-        bentoml_endpoint: Any,
+        bentoml_endpoint: DynamoEndpoint,
         name: Optional[str] = None,
         transports: Optional[List[DynamoTransport]] = None,
+        http_method: Optional[str] = None,
     ):
         self.bentoml_endpoint = bentoml_endpoint
         self._name = name or bentoml_endpoint.name
         self._transports = transports or bentoml_endpoint.transports
+        self._http_method = http_method or bentoml_endpoint.http_method
+        if self._http_method:
+            self._http_method = self._http_method.upper()
 
     @property
     def name(self) -> str:
@@ -62,6 +66,10 @@ class BentoEndpoint(DynamoEndpoint):
     @property
     def transports(self) -> List[DynamoTransport]:
         return self._transports
+
+    @property
+    def http_method(self) -> str:
+        return self._http_method
 
 
 class BentoServiceAdapter(ServiceMixin, ServiceInterface[T]):
@@ -123,7 +131,7 @@ class BentoServiceAdapter(ServiceMixin, ServiceInterface[T]):
             field = getattr(service_cls, field_name)
             if isinstance(field, DynamoEndpoint):
                 self._endpoints[field.name] = BentoEndpoint(
-                    field, field.name, field.transports
+                    field, field.name, field.transports, field.http_method
                 )
                 if DynamoTransport.HTTP in field.transports:
                     # Ensure endpoint path starts with '/'

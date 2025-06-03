@@ -19,6 +19,8 @@ import sys
 
 from components.processor import Processor
 from components.utils import GeneralRequest
+from typing import Dict
+
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 
@@ -44,6 +46,11 @@ class Frontend:
     def handle_exit(self, signum, frame):
         logger.debug(f"Received signal {signum}, shutting down...")
         sys.exit(0)
+
+    @api(http_method="GET")
+    async def ping(self) -> Dict[str, str]:
+        """Check health status."""
+        return {"status": "healthy"}
 
     @api()
     async def generate(self, prompt, request_id):  # from request body keys
