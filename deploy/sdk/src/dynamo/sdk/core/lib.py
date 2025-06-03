@@ -39,7 +39,7 @@ logger = logging.getLogger(__name__)
 
 DYNAMO_IMAGE = os.getenv("DYNAMO_IMAGE", "dynamo:latest-vllm")
 
-nats_client: NATS = None
+_nats_client: Optional[NATS] = None
 
 
 def set_nats_client(client: NATS) -> None:
@@ -51,6 +51,16 @@ def set_nats_client(client: NATS) -> None:
 def get_nats_client() -> Optional[NATS]:
     """Return the global NATS client."""
     return _nats_client
+
+
+def is_nats_connected() -> bool:
+    try:
+        nats_client = get_nats_client()
+        # TODO async?
+        return nats_client is not None and nats_client.is_connected
+    except Exception as e:
+        logger.warning(f"NATS connection check failed: {e}")
+        return False
 
 
 def set_target(target: DeploymentTarget) -> None:
@@ -98,14 +108,6 @@ def depends(
     """Create a dependency using the current service provider"""
     provider = get_target()
     return provider.create_dependency(on=on, **kwargs)
-
-
-def is_nats_connected() -> bool:
-    try:
-        return nats_client is not None and nats_client.is_connected
-    except Exception as e:
-        logger.warning(f"NATS connection check failed: {e}")
-        return False
 
 
 def liveness(func: G) -> G:

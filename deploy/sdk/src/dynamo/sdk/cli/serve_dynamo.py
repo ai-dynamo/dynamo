@@ -172,7 +172,6 @@ def main(
     async def dyn_worker(runtime: DistributedRuntime):
         nonlocal class_instance
         global dynamo_context
-
         dynamo_context["runtime"] = runtime
         if service_name and service_name != service.name:
             server_context.service_type = "service"
