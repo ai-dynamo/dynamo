@@ -94,11 +94,11 @@ class TestComponent:
     def setup_method(self):
         # Setup code runs before each test method
         self.component = Component()
-        
+
     def teardown_method(self):
         # Cleanup code runs after each test method
         self.component.cleanup()
-        
+
     def test_feature(self):
         # Test code here
         assert self.component.feature() == expected_result
@@ -121,10 +121,10 @@ Use mocking to isolate the system under test:
 def test_with_mock(mock_service):
     # Configure the mock
     mock_service.return_value = expected_data
-    
+
     # Test code that uses the external service
     result = function_under_test()
-    
+
     # Assertions
     assert result == expected_result
     mock_service.assert_called_once()
@@ -145,7 +145,7 @@ def test_with_mock(mock_service):
 
 ### Model Download Cache
 
-The tests will automatically use a local cache at `~/.cache/huggingface` to avoid 
+The tests will automatically use a local cache at `~/.cache/huggingface` to avoid
 repeated downloads of model files. This cache is shared across test runs to improve performance.
 
 ## Troubleshooting
