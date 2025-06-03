@@ -38,7 +38,11 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/apparentlymart/go-shquot/shquot"
+	"github.com/awslabs/amazon-ecr-credential-helper/ecr-login"
+	"github.com/chrismellard/docker-credential-acr-env/pkg/credhelper"
+	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
+	"github.com/google/go-containerregistry/pkg/v1/google"
 	"github.com/google/go-containerregistry/pkg/v1/remote"
 	"github.com/huandu/xstrings"
 	"github.com/mitchellh/hashstructure/v2"
@@ -665,8 +669,17 @@ func checkImageExists(DynamoComponent *nvidiacomv1alpha1.DynamoComponent, docker
 	if err != nil {
 		return false, fmt.Errorf("parsing image reference: %w", err)
 	}
-	// Automatically picks up auth from DOCKER_CONFIG env var
-	_, err = remote.Head(ref)
+	keychain := authn.NewMultiKeychain(
+		// This picks up auth from DOCKER_CONFIG env var
+		authn.DefaultKeychain,
+		// This picks up auth from GCR
+		google.Keychain,
+		// This picks up auth from ECR
+		authn.NewKeychainFromHelper(ecr.NewECRHelper()),
+		// This picks up auth from ACR
+		authn.NewKeychainFromHelper(credhelper.NewACRCredentialsHelper()),
+	)
+	_, err = remote.Head(ref, remote.WithAuthFromKeychain(keychain))
 	if err != nil {
 		if strings.Contains(err.Error(), "manifest unknown") || strings.Contains(err.Error(), "not found") {
 			return false, nil

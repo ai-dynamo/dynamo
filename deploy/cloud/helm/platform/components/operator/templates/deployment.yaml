@@ -47,10 +47,6 @@ spec:
         env:
         - name: KUBERNETES_CLUSTER_DOMAIN
           value: {{ quote .Values.kubernetesClusterDomain }}
-        {{if .Values.dynamo.dockerRegistry.useKubernetesSecret}}
-        - name: DOCKER_CONFIG
-          value: /docker/.docker
-        {{end}}
         image: {{ .Values.controllerManager.kubeRbacProxy.image.repository }}:{{
           .Values.controllerManager.kubeRbacProxy.image.tag | default .Chart.AppVersion
           }}
@@ -105,6 +101,10 @@ spec:
         env:
         - name: KUBERNETES_CLUSTER_DOMAIN
           value: {{ quote .Values.kubernetesClusterDomain }}
+        {{if .Values.dynamo.dockerRegistry.useKubernetesSecret}}
+        - name: DOCKER_CONFIG
+          value: /docker/.docker
+        {{end}}
         envFrom:
         - secretRef:
             name: dynamo-deployment-env
