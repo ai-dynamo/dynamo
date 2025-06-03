@@ -33,7 +33,7 @@ VllmPrefillWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 1
+      gpu: 16
   common-configs: [model, kv_transfer_config, served_model_name]
 
 
@@ -42,5 +42,5 @@ VllmDecodeWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 1
+      gpu: 16
   common-configs: [model, kv_transfer_config, served_model_name]
