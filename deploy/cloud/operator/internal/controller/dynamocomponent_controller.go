@@ -663,9 +663,6 @@ func (r *DynamoComponentReconciler) getDockerRegistry(ctx context.Context, Dynam
 		dynamoRepositoryName = dockerRegistryConfig.DynamoComponentsRepositoryName
 	}
 	dynamoRepositoryURI := fmt.Sprintf("%s/%s", strings.TrimRight(dockerRegistryConfig.Server, "/"), dynamoRepositoryName)
-	if strings.Contains(dockerRegistryConfig.Server, "docker.io") {
-		dynamoRepositoryURI = fmt.Sprintf("docker.io/%s", dynamoRepositoryName)
-	}
 
 	if DynamoComponent != nil && DynamoComponent.Spec.DockerConfigJSONSecretName != "" {
 		dockerRegistryConfig.SecretName = DynamoComponent.Spec.DockerConfigJSONSecretName
