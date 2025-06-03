@@ -21,15 +21,12 @@ import time
 import pytest
 import requests
 
-from tests.serve.deployment_graph import (
+from tests.utils.deployment_graph import (
     DeploymentGraph,
     Payload,
     completions_response_handler,
 )
 from tests.utils.managed_process import ManagedProcess
-
-# from tests.e2e.testutils import dynamo_serve_process, get_test_deployment_graphs
-
 
 text_prompt = "Tell me a short joke about AI."
 
