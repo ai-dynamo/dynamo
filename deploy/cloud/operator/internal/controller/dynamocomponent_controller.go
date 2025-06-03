@@ -681,7 +681,7 @@ func checkImageExists(DynamoComponent *nvidiacomv1alpha1.DynamoComponent, docker
 	)
 	_, err = remote.Head(ref, remote.WithAuthFromKeychain(keychain))
 	if err != nil {
-		if strings.Contains(err.Error(), "manifest unknown") || strings.Contains(err.Error(), "not found") {
+		if strings.Contains(err.Error(), "404") {
 			return false, nil
 		}
 		return false, fmt.Errorf("checking image: %w", err)
