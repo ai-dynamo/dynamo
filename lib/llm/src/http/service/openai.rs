@@ -296,7 +296,6 @@ async fn chat_completions(
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::ChatCompletions, streaming);
 
-
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     // setup context
