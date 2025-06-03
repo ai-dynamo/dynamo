@@ -511,11 +511,7 @@ impl AsyncEngine<SingleIn<CompletionRequest>, ManyOut<Annotated<CompletionRespon
                 .map(to_stop_tokens)
                 .or(det.stop_toks),
             max_len: {
-                let requested_max_tokens = request
-                    .inner
-                    .max_tokens
-                    .or(request.inner.max_tokens)
-                    .map(|m| m as usize);
+                let requested_max_tokens = request.inner.max_tokens.map(|m| m as usize);
 
                 // Ensure max_len doesn't exceed context length
                 match requested_max_tokens {
