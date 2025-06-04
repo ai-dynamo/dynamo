@@ -1,23 +1,6 @@
-# Fluid: Cloud-Native Data Orchestration and Acceleration
+# Model Caching with Fluid: Cloud-Native Data Orchestration and Acceleration
 
 Fluid is an open-source, cloud-native data orchestration and acceleration platform for Kubernetes. It virtualizes and accelerates data access from various sources (object storage, distributed file systems, cloud storage), making it ideal for AI, machine learning, and big data workloads.
-
----
-
-## Table of Contents
-
-1. [Key Features](#key-features)
-2. [Installation](#installation)
-3. [Quick Start](#quick-start)
-4. [Mounting Data Sources](#mounting-data-sources)
-    - [WebUFS Example](#webufs-example)
-    - [S3 Example](#s3-example)
-5. [Using HuggingFace Models with Fluid](#using-huggingface-models-with-fluid)
-6. [Usage with Dynamo](#usage-with-dynamo)
-7. [Troubleshooting & FAQ](#troubleshooting--faq)
-8. [Resources](#resources)
-
----
 
 ## Key Features
 
@@ -26,11 +9,9 @@ Fluid is an open-source, cloud-native data orchestration and acceleration platfo
 - **Kubernetes Native:** Integrates with Kubernetes using CRDs for data management.
 - **Scalability:** Supports large-scale data and compute clusters.
 
----
-
 ## Installation
 
-Fluid can be installed on any Kubernetes cluster using Helm.
+You can install Fluid on any Kubernetes cluster using Helm.
 
 **Prerequisites:**
 - Kubernetes >= 1.18
@@ -46,15 +27,12 @@ helm install fluid fluid/fluid -n fluid-system
 ```
 For advanced configuration, see the [Fluid Installation Guide](https://fluid-cloudnative.github.io/docs/get-started/installation).
 
----
-
 ## Quick Start
 
-1. **Install Fluid (see above).**
-2. **Create a Dataset and Runtime (see examples below).**
-3. **Mount the resulting PVC in your workload.**
+1. Install Fluid (see [Installation](#installation)).
+2. Create a Dataset and Runtime (see [the following example](#webufs-example)).
+3. Mount the resulting PVC in your workload.
 
----
 
 ## Mounting Data Sources
 
@@ -87,9 +65,7 @@ spec:
         high: "0.95"
         low: "0.7"
 ```
-> After applying, Fluid creates a PersistentVolumeClaim (PVC) named `webufs-model` containing the files.
-
----
+After applying, Fluid creates a PersistentVolumeClaim (PVC) named `webufs-model` containing the files.
 
 ### S3 Example
 
@@ -137,9 +113,8 @@ spec:
     - path: "/"
       replicas: 1
 ```
-> The resulting PVC is named `s3-model`.
 
----
+The resulting PVC is named `s3-model`.
 
 ## Using HuggingFace Models with Fluid
 
@@ -190,9 +165,8 @@ spec:
     - name: tmp-volume
       emptyDir: {}
 ```
-> You can then use `s3://hf-models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B` as your Dataset mount.
 
----
+You can then use `s3://hf-models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B` as your Dataset mount.
 
 ## Usage with Dynamo
 
@@ -221,15 +195,11 @@ spec:
         mountPoint: /model
 ```
 
----
-
 ## Troubleshooting & FAQ
 
 - **PVC not created?** Check Fluid and AlluxioRuntime pod logs.
 - **Model not found?** Ensure the model was uploaded to the correct bucket/path.
 - **Permission errors?** Verify S3/MinIO credentials and bucket policies.
-
----
 
 ## Resources
 
@@ -237,4 +207,5 @@ spec:
 - [Alluxio Documentation](https://docs.alluxio.io/)
 - [MinIO Documentation](https://min.io/docs/)
 - [HuggingFace Hub](https://huggingface.co/docs/hub/index)
-- [Dynamo Documentation](README.md)
+- [Dynamo README](../../../README.md)
+- [Dynamo Documentation](https://docs.nvidia.com/dynamo/)

@@ -16,9 +16,12 @@
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
+mod aggregator;
 mod nvext;
 
 pub use nvext::{NvExt, NvExtProvider};
+// pub use delta::DeltaGenerator;
+pub use aggregator::DeltaAggregator;
 
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 
@@ -59,7 +62,7 @@ impl NvCreateEmbeddingResponse {
     }
 }
 
-/// Implements `NvExtProvider` for `NvCr    eateEmbeddingRequest`,
+/// Implements `NvExtProvider` for `NvCreateEmbeddingRequest`,
 /// providing access to NVIDIA-specific extensions.
 impl NvExtProvider for NvCreateEmbeddingRequest {
     /// Returns a reference to the optional `NvExt` extension, if available.
