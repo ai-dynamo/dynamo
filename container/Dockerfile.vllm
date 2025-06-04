@@ -72,31 +72,41 @@ RUN apt-get update -y && \
     autoconf \
     libtool
 
+# These headers are missing with the hpcx installer, required
+# by UCX to find RDMA devices
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    --reinstall libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
+    libnuma-dev librdmacm-dev ibverbs-providers
+
+ARG NIXL_UCX_REF=v1.19.x
+
 WORKDIR /workspace
 
 ### UCX EFA Setup ###
 RUN rm -rf /opt/hpcx/ucx
 RUN rm -rf /usr/local/ucx
-RUN cd /usr/local/src && \
+RUN echo "Building UCX with reference $NIXL_UCX_REF"
+RUN cd /usr/local/src &&                            \
     git clone https://github.com/openucx/ucx.git && \
-    cd ucx &&                   \
-    git checkout v1.19.x &&     \
-    ./autogen.sh && ./configure \
-    --prefix=/usr/local/ucx     \
-    --enable-shared             \
-    --disable-static            \
-    --disable-doxygen-doc       \
-    --enable-optimizations      \
-    --enable-cma                \
-    --enable-devel-headers      \
-    --with-cuda=/usr/local/cuda \
-    --with-verbs                \
-    --with-efa                  \
-    --with-dm                   \
-    --with-gdrcopy=/usr/local   \
-    --enable-mt &&              \
-    make -j &&                  \
-    make -j install-strip &&    \
+    cd ucx &&                                       \
+    git checkout $NIXL_UCX_REF &&                   \
+    ./autogen.sh && ./configure                     \
+    --prefix=/usr/local/ucx                         \
+    --enable-shared                                 \
+    --disable-static                                \
+    --disable-doxygen-doc                           \
+    --enable-optimizations                          \
+    --enable-cma                                    \
+    --enable-devel-headers                          \
+    --with-cuda=/usr/local/cuda                     \
+    --with-verbs                                    \
+    --with-efa                                      \
+    --with-dm                                       \
+    --with-gdrcopy=/usr/local                       \
+    --enable-mt &&                                  \
+    make -j &&                                      \
+    make -j install-strip &&                        \
     ldconfig
 
 ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
@@ -114,14 +124,14 @@ COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
 RUN if [ "$ARCH" = "arm64" ]; then \
         cd /opt/nixl && \
         mkdir build && \
-        meson setup build/ --prefix=/usr/local/nixl -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
+        meson setup build/ --buildtype=release --prefix=/usr/local/nixl -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
         cd build/ && \
         ninja && \
         ninja install; \
     else \
         cd /opt/nixl && \
         mkdir build && \
-        meson setup build/ --prefix=/usr/local/nixl && \
+        meson setup build/ --buildtype=release --prefix=/usr/local/nixl && \
         cd build/ && \
         ninja && \
         ninja install; \

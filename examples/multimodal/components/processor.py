@@ -188,11 +188,12 @@ class Processor(ProcessMixIn):
     # The generate endpoint will be used by the frontend to handle incoming requests.
     @endpoint()
     async def generate(self, raw_request: MultiModalRequest):
+        prompt = str(self.engine_args.prompt_template).replace(
+            "<prompt>", raw_request.messages[0].content[0].text
+        )
         msg = {
             "role": "user",
-            "content": "USER: <image>\nQuestion:"
-            + raw_request.messages[0].content[0].text
-            + " Answer:",
+            "content": prompt,
         }
 
         chat_request = ChatCompletionRequest(
