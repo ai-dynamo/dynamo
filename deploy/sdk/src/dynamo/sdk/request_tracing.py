@@ -39,6 +39,11 @@ _request_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "request_id", default=None
 )
 
+# Track whether context was set by decorator (for independence) vs externally (for preservation)
+_context_source_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "context_source", default=None
+)
+
 
 def extract_or_generate_request_id(
     headers: Optional[dict] = None,
@@ -66,9 +71,10 @@ def extract_or_generate_request_id(
     return request_id
 
 
-def set_request_context(request_id: str) -> None:
+def set_request_context(request_id: str, source: str = "external") -> None:
     """Set the current request ID in thread-local context."""
     _request_id_ctx.set(request_id)
+    _context_source_ctx.set(source)
 
 
 def get_current_request_id() -> Optional[str]:
@@ -76,9 +82,15 @@ def get_current_request_id() -> Optional[str]:
     return _request_id_ctx.get()
 
 
+def get_context_source() -> Optional[str]:
+    """Get the source of the current context (external or decorator)."""
+    return _context_source_ctx.get()
+
+
 def clear_request_context() -> None:
     """Clear the current request context."""
     _request_id_ctx.set(None)
+    _context_source_ctx.set(None)
 
 
 def add_request_id_to_response(
@@ -187,17 +199,20 @@ class RequestTracingMixin:
                 self.log("info", "Processing data")  # No need to pass request_id
     """
 
-    def ensure_request_id(self, request_id: Optional[str] = None) -> str:
+    def ensure_request_id(
+        self, request_id: Optional[str] = None, reuse_context: bool = True
+    ) -> str:
         """Ensure we have a request ID, either from parameter or context."""
         if request_id:
             return request_id
 
-        context_id = get_current_request_id()
-        if context_id:
-            return context_id
+        if reuse_context:
+            context_id = get_current_request_id()
+            if context_id:
+                return context_id
 
         new_id = str(uuid.uuid4())
-        set_request_context(new_id)
+        set_request_context(new_id, source="ensure_method")
         return new_id
 
     def log(self, level: str, message: str):
@@ -233,7 +248,7 @@ class RequestTracingMixin:
         # If still None, generate a new one
         if req_id is None:
             req_id = str(uuid.uuid4())
-            set_request_context(req_id)
+            set_request_context(req_id, source="log_method")
 
         log_message = f"[request_id={req_id}] {message}"
         _method = getattr(logger, level.lower(), None)
@@ -255,6 +270,8 @@ def with_request_id(param_name: str = "request_id"):
     1. Accepts a request ID parameter that may be None in the function signature
     2. Ensures the parameter is a non-None string when the function executes
     3. Sets the request ID in thread-local storage for logging
+    4. Maintains the context after function completion (unlike with_request_tracing)
+    5. Uses existing context if available, otherwise generates new UUID
 
     Usage:
         @with_request_id()
@@ -323,35 +340,32 @@ def with_request_id(param_name: str = "request_id"):
                             args = ()
 
                 # Ensure we have a non-None request ID
-                if hasattr(self, "ensure_request_id") and callable(
-                    self.ensure_request_id
-                ):
-                    request_id = self.ensure_request_id(request_id)
-                else:
-                    request_id = request_id or str(uuid.uuid4())
+                if not request_id:
+                    # Check if there's existing external context to preserve
+                    existing_context = get_current_request_id()
+                    context_source = get_context_source()
+
+                    if existing_context and context_source == "external":
+                        # Preserve externally-set context
+                        request_id = existing_context
+                    else:
+                        # Generate new UUID for independence between decorator calls
+                        request_id = str(uuid.uuid4())
 
                 # Update the parameter value
                 kwargs[param_name] = request_id
 
-                # Also set it in thread-local storage for logging
-                # Use token pattern for proper context management and isolation
-                _token = _request_id_ctx.set(request_id)
+                # Set it in thread-local storage for logging (mark as decorator-sourced)
+                set_request_context(request_id, source="decorator")
             else:
                 # If the function doesn't have the request_id parameter, still set context for logging
                 existing_context = get_current_request_id()
                 if not existing_context:
                     new_id = str(uuid.uuid4())
-                    _token = _request_id_ctx.set(new_id)
-                else:
-                    _token = None
+                    set_request_context(new_id, source="decorator")
 
-            # Call the original function
-            try:
-                return await func(self, *args, **kwargs)
-            finally:
-                # Restore previous context (or None) for proper isolation
-                if "_token" in locals() and _token is not None:
-                    _request_id_ctx.reset(_token)
+            # Call the original function - no try/finally needed since we want persistent context
+            return await func(self, *args, **kwargs)
 
         return cast(F, wrapper)
 
@@ -371,7 +385,7 @@ def trace_processor_method(func: Callable) -> Callable:
         if "request_id" not in kwargs or not kwargs["request_id"]:
             new_id = get_current_request_id() or str(uuid.uuid4())
             kwargs["request_id"] = new_id
-            set_request_context(new_id)
+            set_request_context(new_id, source="processor_decorator")
 
         return await func(*args, **kwargs)
 
