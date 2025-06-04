@@ -33,9 +33,6 @@ def start_server(server):
     server.serve_forever()
 
 
-PORT = 7001
-
-
 # From Richard's code, should merged together
 class HealthServer(HTTPServer):
     def __init__(self, *args, **kwargs):
