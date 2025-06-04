@@ -115,15 +115,20 @@ impl ModelDeploymentCard {
     }
 
     async fn from_repo(repo_id: &str, model_name: &str) -> anyhow::Result<Self> {
+        // This is usually the right choice
         let context_length = file_json_field(
-            &Path::join(&PathBuf::from(repo_id), "tokenizer_config.json"),
-            "model_max_length",
+            &Path::join(&PathBuf::from(repo_id), "config.json"),
+            "max_position_embeddings",
         )
+        // But sometimes this is
+        .or_else(|_| {
+            file_json_field(
+                &Path::join(&PathBuf::from(repo_id), "tokenizer_config.json"),
+                "model_max_length",
+            )
+        })
+        // If neither of those are present let the engine default it
         .unwrap_or(0);
-        tracing::trace!(
-            context_length,
-            "Loaded context length (model_max_length) from tokenizer_config.json"
-        );
 
         Ok(Self {
             display_name: model_name.to_string(),

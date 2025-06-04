@@ -188,3 +188,40 @@ This demonstrates the service pipeline:
 1. The Frontend receives "test"
 2. The Middle service adds "-mid" to create "test-mid"
 3. The Backend service adds "-back" to create "test-mid-back"
+
+## Using Kubernetes Secrets for Environment Variables
+
+Dynamo supports securely injecting environment variables from Kubernetes secrets into your deployment. This is only supported when deploying with `--target kubernetes`.
+
+### Creating a Secret
+
+First, create a Kubernetes secret containing your sensitive values:
+
+```bash
+export HF_TOKEN=your_hf_token
+kubectl create secret generic dynamo-env-secrets \
+  --from-literal=huggingface.token=$HF_TOKEN \
+  --from-literal=another_secret.key=value \
+  -n $KUBE_NS
+```
+
+### Referencing Secrets in Your Deployment
+
+You can reference secret keys in your deployment using the `--env-from-secret` flag:
+
+- `--env-from-secret HF_TOKEN=huggingface.token` will set the `HF_TOKEN` environment variable from the `huggingface.token` key in the secret.
+- `--env-from-secret ANOTHER_SECRET=another_secret.key` will set the `ANOTHER_SECRET` environment variable from the same-named key in the secret.
+- You can also mix normal envs: `--env NORMAL_ENV_KEY=value`.
+
+By default, Dynamo will look for a secret named `dynamo-env-secrets`. You can override this with the `--env-secrets-name` flag or the `DYNAMO_ENV_SECRETS` environment variable.
+
+### Example Full Command
+
+```bash
+dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml \
+  --env NORMAL_ENV_KEY=value \
+  --env-from-secret HF_TOKEN=huggingface.token \
+  --env-from-secret ANOTHER_SECRET=another_secret.key \
+  --target kubernetes
+```
+

@@ -5,7 +5,7 @@ use dynamo_runtime::component::Component;
 
 use crate::discovery::ModelEntry;
 
-use crate::kv_router::scheduler::DefaultWorkerSelector;
+use crate::kv_router::{scheduler::DefaultWorkerSelector, KvRouterConfig};
 use crate::{
     kv_router::KvRouter,
     types::openai::{
@@ -56,6 +56,10 @@ impl ModelManager {
             entries: Mutex::new(HashMap::new()),
             kv_choosers: Mutex::new(HashMap::new()),
         }
+    }
+
+    pub fn get_model_entries(&self) -> Vec<ModelEntry> {
+        self.entries.lock().unwrap().values().cloned().collect()
     }
 
     pub fn has_model_any(&self, model: &str) -> bool {
@@ -179,11 +183,22 @@ impl ModelManager {
         model_name: &str,
         component: &Component,
         kv_cache_block_size: usize,
+        kv_router_config: Option<KvRouterConfig>,
     ) -> anyhow::Result<Arc<KvRouter>> {
         if let Some(kv_chooser) = self.get_kv_chooser(model_name) {
+            // Check if the existing router has a different block size
+            if kv_chooser.block_size() != kv_cache_block_size {
+                tracing::warn!(
+                    model_name = %model_name,
+                    existing_block_size = %kv_chooser.block_size(),
+                    requested_block_size = %kv_cache_block_size,
+                    "KV Router block size mismatch! Model is requesting a different kv_cache_block_size than the existing router. \
+                     This will cause routing to fail silently. Consider using the same block size or restarting the router."
+                );
+            }
             return Ok(kv_chooser);
         }
-        self.create_kv_chooser(model_name, component, kv_cache_block_size)
+        self.create_kv_chooser(model_name, component, kv_cache_block_size, kv_router_config)
             .await
     }
 
@@ -197,8 +212,9 @@ impl ModelManager {
         model_name: &str,
         component: &Component,
         kv_cache_block_size: usize,
+        kv_router_config: Option<KvRouterConfig>,
     ) -> anyhow::Result<Arc<KvRouter>> {
-        let selector = Box::new(DefaultWorkerSelector {});
+        let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
         let chooser = KvRouter::new(component.clone(), kv_cache_block_size, Some(selector)).await?;
         let new_kv_chooser = Arc::new(chooser);
         self.kv_choosers

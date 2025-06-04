@@ -107,7 +107,7 @@ dynamo:
     cacheRepo: ''
     snapshotMode: '' # options: full, redo, time
 
-imagePullSecrets: []
+#imagePullSecrets: []
 kubernetesClusterDomain: cluster.local
 metricsService:
   ports:
@@ -116,3 +116,6 @@ metricsService:
     protocol: TCP
     targetPort: https
   type: ClusterIP
+
+natsAddr: ""
+etcdAddr: ""

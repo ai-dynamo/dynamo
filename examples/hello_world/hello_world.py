@@ -19,7 +19,15 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sdk import DYNAMO_IMAGE, api, depends, endpoint, service
+from dynamo.sdk import (
+    DYNAMO_IMAGE,
+    api,
+    depends,
+    endpoint,
+    liveness,
+    readiness,
+    service,
+)
 from dynamo.sdk.lib.config import ServiceConfig
 
 logger = logging.getLogger(__name__)
@@ -59,7 +67,7 @@ class ResponseType(BaseModel):
     dynamo={
         "namespace": "inference",
     },
-    resource={"cpu": 1, "memory": "500Mi"},
+    resources={"cpu": 1, "memory": "500Mi"},
     workers=2,
     image=DYNAMO_IMAGE,
 )
@@ -136,3 +144,11 @@ class Frontend:
                 yield f"Frontend: {response}"
 
         return StreamingResponse(content_generator())
+
+    @liveness
+    def is_alive(self):
+        return True
+
+    @readiness
+    def is_ready(self):
+        return True

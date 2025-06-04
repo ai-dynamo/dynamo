@@ -1,24 +1,37 @@
 # Running Dynamo (`dynamo run`)
 
-* [Quickstart with pip and vllm](#quickstart-with-pip-and-vllm)
-    * [Automatically download a model from Hugging Face](#use-model-from-hugging-face)
-    * [Run a model from local file](#run-a-model-from-local-file)
-    * [Distributed system](#distributed-system)
-    * [Network names](#network-names)
-    * [KV-aware routing](#kv-aware-routing)
-* [Full usage details](#full-usage-details)
-    * [Setup](#setup)
-    * [mistral.rs](#mistralrs)
-    * [llama.cpp](#llamacpp)
-    * [Sglang](#sglang)
-    * [Vllm](#vllm)
-    * [TensorRT-LLM](#tensorrt-llm-engine)
-    * [Echo Engines](#echo-engines)
-    * [Writing your own engine in Python](#writing-your-own-engine-in-python)
-* [Batch mode](#batch-mode)
-* [Defaults](#defaults)
-* [Extra engine arguments](#extra-engine-arguments)
-
+- [Running Dynamo (`dynamo run`)](#running-dynamo-dynamo-run)
+  - [Quickstart with pip and vllm](#quickstart-with-pip-and-vllm)
+    - [Use model from Hugging Face](#use-model-from-hugging-face)
+    - [Run a model from local file](#run-a-model-from-local-file)
+      - [Download model from Hugging Face](#download-model-from-hugging-face)
+      - [Run model from local file](#run-model-from-local-file)
+    - [Distributed System](#distributed-system)
+    - [Network names](#network-names)
+    - [KV-aware routing](#kv-aware-routing)
+  - [Full usage details](#full-usage-details)
+    - [Getting Started](#getting-started)
+      - [Setup](#setup)
+        - [Step 1: Install libraries](#step-1-install-libraries)
+        - [Step 2: Install Rust](#step-2-install-rust)
+        - [Step 3: Build](#step-3-build)
+      - [Defaults](#defaults)
+    - [Running Inference with Pre-built Engines](#running-inference-with-pre-built-engines)
+      - [mistralrs](#mistralrs)
+      - [llamacpp](#llamacpp)
+      - [sglang](#sglang)
+      - [vllm](#vllm)
+      - [trtllm](#trtllm)
+        - [Step 1: Build the environment](#step-1-build-the-environment)
+        - [Step 2: Run the environment](#step-2-run-the-environment)
+        - [Step 3: Execute `dynamo run` command](#step-3-execute-dynamo-run-command)
+      - [Echo Engines](#echo-engines)
+        - [echo\_core](#echo_core)
+        - [echo\_full](#echo_full)
+        - [Configuration](#configuration)
+      - [Batch mode](#batch-mode)
+    - [Extra engine arguments](#extra-engine-arguments)
+    - [Writing your own engine in Python](#writing-your-own-engine-in-python)
 
 This guide explains the`dynamo run` command.
 
@@ -28,12 +41,19 @@ It supports these engines: mistralrs, llamacpp, sglang, vllm, and tensorrt-llm. 
 
 Usage:
 ```
-dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv]
+dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=2.0] [--kv-gpu-cache-usage-weight=1.0] [--kv-waiting-requests-weight=1.0] [--verbosity (-v|-vv)]
 ```
 
 Example: `dynamo run Qwen/Qwen3-0.6B`
 
 Set the environment variable `DYN_LOG` to adjust the logging level; for example, `export DYN_LOG=debug`. It has the same syntax as `RUST_LOG`.
+
+To adjust verbosity, use `-v` to enable debug logging or `-vv` to enable full trace logging. For example:
+
+```bash
+dynamo-run in=http out=mistralrs -v  # enables debug logging
+dynamo-run in=text out=llamacpp -vv  # enables full trace logging
+```
 
 ## Quickstart with pip and vllm
 
@@ -305,10 +325,16 @@ If you have multiple GPUs, mistral.rs does automatic tensor parallelism. You do 
 
 #### llamacpp
 
-Currently [llama.cpp](https://github.com/ggml-org/llama.cpp) is not included by default. Build it like this:
+[llama.cpp](https://github.com/ggml-org/llama.cpp) is built for CPU by default. For an optimized build pass the appropriate feature flag (highly recommended):
 
 ```
-cargo build --features llamacpp[,cuda|metal|vulkan] -p dynamo-run
+cargo build --features cuda|metal|vulkan -p dynamo-run
+```
+
+For GNU OpenMP support add the `openmp` feature. On Ubuntu this requires `libgomp1` (part of `build-essential`) at build and runtime.
+
+```
+cargo build --features cuda,openmp -p dynamo-run
 ```
 
 ```
@@ -437,10 +463,13 @@ Startup can be slow so you may want to `export DYN_LOG=debug` to see progress.
 
 Shutdown: `ray stop`
 
-#### TensorRT-LLM engine
+#### trtllm
 
-To run a TRT-LLM model with dynamo-run we have included a python based [async engine] (https://github.com/ai-dynamo/dynamo/blob/main/examples/tensorrt_llm/engines/agg_engine.py).
-To configure the TensorRT-LLM async engine please see [llm_api_config.yaml](https://github.com/ai-dynamo/dynamo/blob/main/examples/tensorrt_llm/configs/llm_api_config.yaml). The file defines the options that need to be passed to the LLM engine. Follow the steps below to serve trtllm on dynamo run.
+Using [TensorRT-LLM's LLM API](https://nvidia.github.io/TensorRT-LLM/llm-api/), a high-level Python API.
+
+You can use `--extra-engine-args` to pass extra arguments to LLM API engine.
+
+The trtllm engine requires requires [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`) to be running.
 
 ##### Step 1: Build the environment
 
@@ -454,7 +483,7 @@ See instructions [here](https://github.com/ai-dynamo/dynamo/blob/main/examples/t
 
 Execute the following to load the TensorRT-LLM model specified in the configuration.
 ```
-dynamo run out=pystr:/workspace/examples/tensorrt_llm/engines/trtllm_engine.py  -- --engine_args /workspace/examples/tensorrt_llm/configs/llm_api_config.yaml
+dynamo-run in=http out=trtllm TinyLlama/TinyLlama-1.1B-Chat-v1.0
 ```
 
 #### Echo Engines
@@ -529,6 +558,20 @@ Pass it like this:
 ```
 dynamo-run out=sglang ~/llms/Llama-3.2-3B-Instruct --extra-engine-args sglang_extra.json
 ```
+
+The tensorrtllm backend also support passing any argument the engine accepts. However, in this case config should be a yaml file.
+
+```
+backend: pytorch
+kv_cache_config:
+  event_buffer_max_size: 1024
+```
+
+Pass it like this:
+```
+dynamo-run in=http out=trtllm TinyLlama/TinyLlama-1.1B-Chat-v1.0 --extra-engine-args trtllm_extra.yaml
+```
+
 ### Writing your own engine in Python
 
 Note: This section replaces "bring-your-own-engine".

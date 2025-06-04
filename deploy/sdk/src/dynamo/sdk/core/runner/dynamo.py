@@ -19,7 +19,6 @@ import logging
 import os
 import shlex
 import sys
-from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Set, Type, TypeVar
 
 import psutil
@@ -33,7 +32,6 @@ from dynamo.sdk.core.protocol.deployment import Env
 from dynamo.sdk.core.protocol.interface import (
     DependencyInterface,
     DeploymentTarget,
-    DynamoConfig,
     DynamoEndpointInterface,
     DynamoTransport,
     LinkedServices,
@@ -71,22 +69,19 @@ class LocalService(ServiceMixin, ServiceInterface[T]):
         self,
         inner_cls: Type[T],
         config: ServiceConfig,
-        dynamo_config: Optional[DynamoConfig] = None,
         watcher: Optional[Watcher] = None,
         socket: Optional[CircusSocket] = None,
         app: Optional[FastAPI] = None,
+        system_app: Optional[FastAPI] = None,
     ):
         self._inner_cls = inner_cls
-        self._config = config
         name = inner_cls.__name__
-        self._dynamo_config = dynamo_config or DynamoConfig(
-            name=name, namespace="default"
-        )
         # Add the dynamo config to the service config
-        self._config["dynamo"] = asdict(self._dynamo_config)
+        self._config = config
         self._watcher = watcher
         self._socket = socket
         self.app = app or FastAPI(title=name)
+        self.system_app = system_app or FastAPI(title=f"{name}-system")
         self._dependencies: Dict[str, "DependencyInterface"] = {}
         self._endpoints: Dict[str, LocalEndpoint] = {}
         for field_name in dir(inner_cls):
@@ -118,7 +113,7 @@ class LocalService(ServiceMixin, ServiceInterface[T]):
 
     @property
     def envs(self) -> List[Env]:
-        return self._config.get("envs", [])
+        return self._config.envs or []
 
     @property
     def inner(self) -> Type[T]:
@@ -146,7 +141,7 @@ class LocalService(ServiceMixin, ServiceInterface[T]):
                 del self._dependencies[dep_key]
 
     def dynamo_address(self) -> tuple[str, str]:
-        return (self._dynamo_config.namespace, self._dynamo_config.name)
+        return (self._config.dynamo.namespace, self._config.dynamo.name)
 
     @property
     def dependencies(self) -> dict[str, "DependencyInterface"]:
@@ -171,6 +166,10 @@ class LocalDependency(DependencyInterface[T]):
     @property
     def on(self) -> Optional[ServiceInterface[T]]:
         return self._on_service
+    
+    @on.setter
+    def on(self, value: Optional[ServiceInterface[T]]) -> None:
+        self._on_service = value
 
     def get(self, *args: Any, **kwargs: Any) -> Any:
         # Return a client that can communicate with the service
@@ -215,7 +214,8 @@ class LocalDeploymentTarget(DeploymentTarget):
         self,
         service_cls: Type[T],
         config: ServiceConfig,
-        dynamo_config: Optional[DynamoConfig] = None,
+        app: Optional[FastAPI] = None,
+        system_app: Optional[FastAPI] = None,
         **kwargs,
     ) -> ServiceInterface[T]:
         # Get parameters needed for creating a circus watcher
@@ -257,7 +257,6 @@ class LocalDeploymentTarget(DeploymentTarget):
         return LocalService(
             inner_cls=service_cls,
             config=config,
-            dynamo_config=dynamo_config,
             watcher=watcher,
             socket=socket,
         )

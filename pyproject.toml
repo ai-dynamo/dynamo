@@ -15,7 +15,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.2.1"
+version = "0.3.0"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -29,11 +29,11 @@ dependencies = [
     "bentoml==1.4.8",
     "types-psutil==7.0.0.20250218",
     "kubernetes==32.0.1",
-    "ai-dynamo-runtime==0.2.1",
+    "ai-dynamo-runtime==0.3.0",
     "fastapi==0.115.6",
     "distro",
     "typer",
-    "circus>=0.17.0",
+    "circus==0.19.0",
     "click<8.2.0",
 ]
 
@@ -87,6 +87,9 @@ packages = ["deploy/sdk/src/dynamo", "components/planner/src/dynamo"]
 [tool.hatch.build.hooks.custom]
 path = "hatch_build.py"
 
+[tool.hatch.metadata]
+allow-direct-references = true
+
 [tool.codespell]
 # note: pre-commit passes explicit lists of files here, which this skip file list doesn't override -
 # this is only to allow you to run codespell interactively
@@ -134,6 +137,7 @@ addopts = [
     "--ignore-glob=*model.py",
     "--ignore-glob=*_inc.py",
     "--ignore-glob=deploy/cloud/api-store/*",
+    "--ignore-glob=*/llm/tensorrtllm*",
     # FIXME: Get relative/generic blob paths to work here
 ]
 xfail_strict = true
@@ -142,7 +146,8 @@ filterwarnings = [
     "error",
     "ignore:.*cuda*:DeprecationWarning", # Need this to avoid deprecation warnings from CUDA in tensorrt_llm.
     "ignore:.*pkg_resources.*:DeprecationWarning",
-    "ignore:.*multipart.*:PendingDeprecationWarning"
+    "ignore:.*pkg_resources.*:UserWarning",
+    "ignore:.*multipart.*:PendingDeprecationWarning",
 ]
 
 

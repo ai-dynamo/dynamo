@@ -17,6 +17,7 @@
 
 use std::{collections::HashMap, fs::File, path::Path};
 
+use chrono::{DateTime, Local};
 use either::Either;
 use ggus::{GGufMetaKV, GGufReader};
 use memmap2::Mmap;
@@ -224,4 +225,11 @@ pub fn tojson(value: Value, kwargs: Kwargs) -> Result<Value, Error> {
         }
         Value::from_safe_string(rv)
     })
+}
+
+pub fn strftime_now(format_str: &str) -> Result<Value, Error> {
+    let local: DateTime<Local> = Local::now();
+    Ok(Value::from_safe_string(
+        local.format(format_str).to_string(),
+    ))
 }

@@ -58,6 +58,7 @@ pub enum GGUFArchitecture {
     Qwen2,
     Qwen3,
     Gemma3,
+    Granite,
 }
 
 // Wraps from_str() for some convenience:

@@ -14,6 +14,7 @@
 #  limitations under the License.
 #  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
 
+import logging
 import os
 from typing import Any, Dict, Optional, Type, TypeVar, Union, Set, List, Tuple
 
@@ -22,15 +23,15 @@ from fastapi import FastAPI
 from dynamo.sdk.core.protocol.interface import (
     DependencyInterface,
     DeploymentTarget,
-    DynamoConfig,
     ServiceConfig,
     ServiceInterface,
     AbstractDynamoService,
     validate_dynamo_interfaces,
+    DynamoConfig,
 )
 from dynamo.sdk.core.decorators.endpoint import DynamoEndpoint
 
-T = TypeVar("T", bound=object)
+G = TypeVar("G", bound=Callable[..., Any])
 
 #  Note: global service provider.
 # this should be set to a concrete implementation of the DeploymentTarget interface
@@ -40,6 +41,7 @@ _target: DeploymentTarget
 _abstract_service_cache: Dict[Type[AbstractDynamoService], ServiceInterface[Any]] = {}
 
 
+logger = logging.getLogger(__name__)
 
 DYNAMO_IMAGE = os.getenv("DYNAMO_IMAGE", "dynamo:latest-vllm")
 
@@ -73,7 +75,7 @@ def _get_or_create_abstract_service_instance(
         dynamo_config_for_abstract = DynamoConfig(enabled=True)
 
         # Call the main service() decorator/function to create the service instance
-        # validate_dynamo_interfaces is False because validating an interface has implemented dynamo endpoints will obviously fail
+        # validate_dynamo_interfaces is False because validating an interface has implemented dynamo endpoints will obviously failc
         service_instance = service(
             inner=abstract_service_cls,
             dynamo=dynamo_config_for_abstract,
@@ -85,39 +87,29 @@ def _get_or_create_abstract_service_instance(
 
 # TODO: dynamo_component
 def service(
-    inner: Optional[Type[T]] = None,
+    inner: Optional[Type[G]] = None,
     /,
     *,
-    dynamo: Optional[Union[Dict[str, Any], DynamoConfig]] = None,
     app: Optional[FastAPI] = None,
     validate_dynamo_interfaces: bool = True,
+    system_app: Optional[FastAPI] = None,
     **kwargs: Any,
 ) -> Any:
     """Service decorator that's adapter-agnostic"""
-    config = ServiceConfig(kwargs)
-    # Parse dict into DynamoConfig object
-    dynamo_config: Optional[DynamoConfig] = None
-    if dynamo is not None:
-        if isinstance(dynamo, dict):
-            dynamo_config = DynamoConfig(**dynamo)
-        else:
-            dynamo_config = dynamo
+    config = ServiceConfig(**kwargs)
 
-    assert isinstance(dynamo_config, DynamoConfig)
-
-    def decorator(inner: Type[T]) -> ServiceInterface[T]:
+    def decorator(inner: Type[G]) -> ServiceInterface[G]:
         # Ensures that all declared dynamo endpoints on the parent interfaces are implemented
         if validate_dynamo_interfaces:
             validate_dynamo_interfaces(inner)
-
         provider = get_target()
         if inner is not None:
-            dynamo_config.name = inner.__name__
+            config.dynamo.name = inner.__name__
         return provider.create_service(
             service_cls=inner,
             config=config,
-            dynamo_config=dynamo_config,
             app=app,
+            system_app=system_app,
             **kwargs,
         )
 
@@ -126,9 +118,8 @@ def service(
 
 
 def depends(
-    on: Optional[Union[ServiceInterface[T], Type[AbstractDynamoService]]] = None,
-    **kwargs: Any
-) -> DependencyInterface[T]:
+    on: Optional[Union[ServiceInterface[G], Type[AbstractDynamoService]]] = None, **kwargs: Any
+) -> DependencyInterface[G]:
     """Create a dependency using the current service provider.
 
     If 'on' is an AbstractDynamoService type, a placeholder service will be
@@ -151,3 +142,37 @@ def depends(
         raise TypeError(
             "depends() expects 'on' to be a ServiceInterface, an AbstractDynamoService type"
         )
+
+
+def liveness(func: G) -> G:
+    """Decorator for liveness probe."""
+    if not callable(func):
+        raise TypeError("@liveness can only decorate callable methods")
+
+    func.__is_liveness_probe__ = True  # type: ignore
+    return func
+
+
+def get_liveness_handler(obj):
+    for attr in dir(obj):
+        fn = getattr(obj, attr)
+        if callable(fn) and getattr(fn, "__is_liveness_probe__", False):
+            return fn
+    return None
+
+
+def readiness(func: G) -> G:
+    """Decorator for readiness probe."""
+    if not callable(func):
+        raise TypeError("@readiness can only decorate callable methods")
+
+    func.__is_readiness_probe__ = True  # type: ignore
+    return func
+
+
+def get_readiness_handler(obj):
+    for attr in dir(obj):
+        fn = getattr(obj, attr)
+        if callable(fn) and getattr(fn, "__is_readiness_probe__", False):
+            return fn
+    return None
