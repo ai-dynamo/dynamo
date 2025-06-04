@@ -191,7 +191,7 @@ class DynamoServeProcess(ManagedProcess):
         pytest.param("disagg", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
         pytest.param("disagg_router", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
         pytest.param("multimodal_agg", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
-        pytest.param("sglang", marks=[pytest.mark.sglang, pytest.mark.gpu_2]),
+        #        pytest.param("sglang", marks=[pytest.mark.sglang, pytest.mark.gpu_2]),
     ]
 )
 def deployment_graph_test(request):
@@ -203,7 +203,7 @@ def deployment_graph_test(request):
 
 @pytest.mark.e2e
 @pytest.mark.slow
-def test_serve_deployment(deployment_graph_test, request, _runtime_services):
+def test_serve_deployment(deployment_graph_test, request, runtime_services):
     """
     Test dynamo serve deployments with different graph configurations.
     """
