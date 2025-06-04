@@ -249,9 +249,6 @@ impl ModelDeploymentCard {
                                 url::Url::parse(&target)?,
                             )
                             .await?;
-
-                        tracing::debug!(target, "Moved to NATS");
-
                         $field = Some($enum_variant(target));
                     }
                 }
