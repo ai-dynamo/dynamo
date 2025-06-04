@@ -28,16 +28,16 @@ The examples are based on the [llava-1.5-7b-hf](https://huggingface.co/llava-hf/
 - processor: Tokenizes the prompt and passes it to the decode worker.
 - frontend: HTTP endpoint to handle incoming requests.
 
-### Deployment
+### Graph
 
-In this deployment, we have two workers, [encode_worker](components/encode_worker.py) and [decode_worker](components/decode_worker.py).
+In this graph, we have two workers, [encode_worker](components/encode_worker.py) and [decode_worker](components/decode_worker.py).
 The encode worker is responsible for encoding the image and passing the embeddings to the decode worker via a combination of NATS and RDMA.
 The work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface.
 Its decode worker then prefills and decodes the prompt, just like the [LLM aggregated serving](../llm/README.md) example.
 By separating the encode from the prefill and decode stages, we can have a more flexible deployment and scale the
 encode worker independently from the prefill and decode workers if needed.
 
-This figure shows the flow of the deployment:
+This figure shows the flow of the graph:
 ```mermaid
 flowchart LR
   HTTP --> processor
@@ -89,7 +89,7 @@ You should see a response similar to this:
 {"id": "c37b946e-9e58-4d54-88c8-2dbd92c47b0c", "object": "chat.completion", "created": 1747725277, "model": "llava-hf/llava-1.5-7b-hf", "choices": [{"index": 0, "message": {"role": "assistant", "content": " In the image, there is a city bus parked on a street, with a street sign nearby on the right side. The bus appears to be stopped out of service. The setting is in a foggy city, giving it a slightly moody atmosphere."}, "finish_reason": "stop"}]}
 ```
 
-## Multimodal Disaggregated serving
+## Multimodal Disaggregated Serving
 
 ### Components
 
@@ -97,16 +97,16 @@ You should see a response similar to this:
 - processor: Tokenizes the prompt and passes it to the decode worker.
 - frontend: HTTP endpoint to handle incoming requests.
 
-### Local Serving
+### Graph
 
-In this deployment, we have three workers, [encode_worker](components/encode_worker.py), [decode_worker](components/decode_worker.py), and [prefill_worker](components/prefill_worker.py).
+In this graph, we have three workers, [encode_worker](components/encode_worker.py), [decode_worker](components/decode_worker.py), and [prefill_worker](components/prefill_worker.py).
 For the Llava model, embeddings are only required during the prefill stage. As such, the encode worker is connected directly to the prefill worker.
 The encode worker is responsible for encoding the image and passing the embeddings to the prefill worker via a combination of NATS and RDMA.
 Its work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface.
 The prefill worker performs the prefilling step and forwards the KV cache to the decode worker for decoding.
 For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](../llm/README.md) example.
 
-This figure shows the flow of the deployment:
+This figure shows the flow of the graph:
 ```mermaid
 flowchart LR
   HTTP --> processor
