@@ -1,11 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::HashMap;
-
 use crate::model_card::model::ModelDeploymentCard;
 use anyhow::{Context, Result};
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::model_card::model::{ModelInfoType, PromptFormatterArtifact, TokenizerKind};
@@ -107,13 +104,13 @@ impl ModelDeploymentCard {
     async fn from_repo(repo_id: &str, model_name: &str) -> anyhow::Result<Self> {
         // This is usually the right choice
         let context_length = crate::file_json_field(
-            &Path::join(&PathBuf::from(repo_id), "config.json"),
+            &PathBuf::from(repo_id).join("config.json"),
             "max_position_embeddings",
         )
         // But sometimes this is
         .or_else(|_| {
             crate::file_json_field(
-                &Path::join(&PathBuf::from(repo_id), "tokenizer_config.json"),
+                &PathBuf::from(repo_id).join("tokenizer_config.json"),
                 "model_max_length",
             )
         })
@@ -125,7 +122,7 @@ impl ModelDeploymentCard {
             service_name: model_name.to_string(),
             model_info: Some(ModelInfoType::from_repo(repo_id).await?),
             tokenizer: Some(TokenizerKind::from_repo(repo_id).await?),
-            gen_config: Some(GenerationConfig::from_repo(repo_id).await?),
+            gen_config: GenerationConfig::from_repo(repo_id).await.ok(), // optional
             prompt_formatter: PromptFormatterArtifact::from_repo(repo_id).await?,
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
@@ -197,35 +194,12 @@ impl GenerationConfig {
 
 /// Checks if the provided path contains the expected file.
 async fn check_for_file(repo_id: &str, file: &str) -> anyhow::Result<String> {
-    let mut files = check_for_files(repo_id, vec![file.to_string()]).await?;
-    let file = files
-        .remove(file)
-        .ok_or(anyhow::anyhow!("file {} not found", file))?;
-    Ok(file)
-}
-
-async fn check_for_files(repo_id: &str, files: Vec<String>) -> Result<HashMap<String, String>> {
-    let dir_entries =
-        fs::read_dir(repo_id).with_context(|| format!("Failed to read directory: {}", repo_id))?;
-    let mut found_files = HashMap::new();
-    for entry in dir_entries {
-        let entry =
-            entry.with_context(|| format!("Failed to read directory entry in {}", repo_id))?;
-        let path = entry.path();
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow::anyhow!("Invalid file name in {}", repo_id))?;
-        if files.contains(&file_name.to_string()) {
-            found_files.insert(
-                file_name.to_string(),
-                path.to_str()
-                    .ok_or_else(|| anyhow::anyhow!("Invalid path"))?
-                    .to_string(),
-            );
-        }
+    let p = PathBuf::from(repo_id).join(file);
+    let name = p.display().to_string();
+    if !p.exists() {
+        anyhow::bail!("File not found: {name}")
     }
-    Ok(found_files)
+    Ok(name)
 }
 
 /// Checks if the provided path is a valid local repository path.

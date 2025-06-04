@@ -240,12 +240,12 @@ impl ModelDeploymentCard {
 
         macro_rules! nats_upload {
             ($field:expr, $enum_variant:path, $filename:literal) => {
-                if let Some($enum_variant(ref src_file)) = $field {
-                    if !nats::is_nats_url(src_file) {
+                if let Some($enum_variant(src_file)) = $field.take() {
+                    if !nats::is_nats_url(&src_file) {
                         let target = format!("nats://{nats_addr}/{bucket_name}/{}", $filename);
                         nats_client
                             .object_store_upload(
-                                &std::path::PathBuf::from(src_file),
+                                &std::path::PathBuf::from(&src_file),
                                 url::Url::parse(&target)?,
                             )
                             .await?;
@@ -295,11 +295,11 @@ impl ModelDeploymentCard {
 
         macro_rules! nats_download {
             ($field:expr, $enum_variant:path, $filename:literal) => {
-                if let Some($enum_variant(ref src_url)) = $field {
-                    if nats::is_nats_url(src_url) {
+                if let Some($enum_variant(src_url)) = $field.take() {
+                    if nats::is_nats_url(&src_url) {
                         let target = target_dir.path().join($filename);
                         nats_client
-                            .object_store_download(Url::parse(src_url)?, &target)
+                            .object_store_download(Url::parse(&src_url)?, &target)
                             .await?;
                         $field = Some($enum_variant(target.display().to_string()));
                     }
@@ -369,10 +369,12 @@ pub trait ModelInfo: Send + Sync {
     fn eos_token_ids(&self) -> Vec<TokenIdType>;
 
     /// Maximum position embeddings / max sequence length
-    fn max_position_embeddings(&self) -> usize;
+    /// TODO: This is only used in a single test, no other code. Remove?
+    fn max_position_embeddings(&self) -> Option<usize>;
 
     /// Vocabulary size
-    fn vocab_size(&self) -> usize;
+    /// TODO: This is only used in a single test, no other code. Remove?
+    fn vocab_size(&self) -> Option<usize>;
 }
 
 impl ModelInfoType {
@@ -462,26 +464,38 @@ impl HFConfig {
         let final_bos_token_id = text_config.bos_token_id.take().unwrap();
         text_config.final_bos_token_id = final_bos_token_id;
 
+        // TODO: refactor this when we switch to per-architecture tokenization
         let final_eos_token_ids: Vec<TokenIdType> = config
             .eos_token_id
             .as_ref()
             .or(text_config.eos_token_id.as_ref())
-            .map(|v| {
+            .and_then(|v| {
                 if v.is_number() {
-                    vec![v.as_number().and_then(|n| n.as_u64()).unwrap_or(0) as TokenIdType]
+                    v.as_number()
+                        .and_then(|n| n.as_u64())
+                        .map(|n| vec![n as TokenIdType])
                 } else if v.is_array() {
-                    v.as_array()
-                        .unwrap()
-                        .iter()
-                        .map(|inner_v| {
-                            inner_v.as_number().and_then(|n| n.as_u64()).unwrap_or(0) as TokenIdType
-                        })
-                        .collect()
+                    let arr = v.as_array().unwrap(); // Safety: We just checked
+                    Some(
+                        arr.iter()
+                            .filter_map(|inner_v| {
+                                inner_v
+                                    .as_number()
+                                    .and_then(|n| n.as_u64())
+                                    .map(|n| n as TokenIdType)
+                            })
+                            .collect(),
+                    )
                 } else {
-                    vec![0] // TODO
+                    tracing::error!(
+                        ?v,
+                        file,
+                        "eos_token_id is not a number or an array, cannot use"
+                    );
+                    None
                 }
             })
-            .unwrap_or_else(|| {
+            .or_else(|| {
                 // Maybe it's in generation_config.json
                 crate::file_json_field(
                     &Path::join(
@@ -490,11 +504,16 @@ impl HFConfig {
                     ),
                     "eos_token_id",
                 )
-                .context(
-                    "missing eos_token_id in generation_config.json and config.json, cannot load",
+                .inspect_err(
+                    |err| tracing::warn!(%err, "Missing eos_token_id in generation_config.json"),
                 )
-                .unwrap()
-            });
+                .ok()
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing eos_token_id in config.json and generation_config.json, cannot load"
+                )
+            })?;
         text_config.final_eos_token_ids = final_eos_token_ids;
 
         Ok(Arc::new(config))
@@ -556,18 +575,12 @@ impl ModelInfo for HFConfig {
             .clone()
     }
 
-    fn max_position_embeddings(&self) -> usize {
-        self.text_config
-            .as_ref()
-            .unwrap()
-            .max_position_embeddings
-            .unwrap_or(0) // TODO, Gemma 3 4B and up does not have
+    fn max_position_embeddings(&self) -> Option<usize> {
+        self.text_config.as_ref().unwrap().max_position_embeddings
     }
 
-    fn vocab_size(&self) -> usize {
-        // TODO instead of 0 what should the default be? Or return Option?
-        // Gemma 3 4B (and up) does not have
-        self.text_config.as_ref().unwrap().vocab_size.unwrap_or(0)
+    fn vocab_size(&self) -> Option<usize> {
+        self.text_config.as_ref().unwrap().vocab_size
     }
 }
 
