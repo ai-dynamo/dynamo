@@ -195,6 +195,119 @@ spec:
         mountPoint: /model
 ```
 
+
+## Full example with llama3.3 70B
+
+### Performance
+
+When deploying LLaMA 3.3 70B using Fluid as the caching layer, we observed the best performance by configuring a single-node cache that holds 100% of the model files locally. By ensuring that the vllm worker pod is scheduled on the same node as the Fluid cache, we were able to eliminate network I/O bottlenecks, which resulted in the fastest model startup time and the highest inference efficiency during our tests.
+
+| Cache Configuration                          | vLLM Pod Placement               | Startup Time    |
+|----------------------------------------------|----------------------------------|-----------------|
+| ❌ No Cache (Download from HuggingFace)      | N/A                              | ~9 minutes      |
+| 🟡 Multi-Node Cache (100% Model Cached)      | Not on Cache Node                | ~18 minutes     |
+| 🟡 Multi-Node Cache (100% Model Cached)      | On Cache Node                    | ~10 minutes     |
+| ✅ Single-Node Cache (100% Model Cached)     | On Cache Node                    | ~80 seconds     |
+
+
+### Resources
+
+```yaml
+# dataset.yaml
+apiVersion: data.fluid.io/v1alpha1
+kind: Dataset
+metadata:
+  name: llama-3-3-70b-instruct-model
+spec:
+  mounts:
+    - mountPoint: s3://hf-models/meta-llama/Llama-3.3-70B-Instruct
+      options:
+        alluxio.underfs.s3.endpoint: http://jsm2-minio:9000
+        alluxio.underfs.s3.disable.dns.buckets: "true"
+        aws.secretKey: "minioadmin"
+        aws.accessKeyId: "minioadmin"
+        alluxio.underfs.s3.streaming.upload.enabled: "true"
+        alluxio.underfs.s3.multipart.upload.threads: "20"
+        alluxio.underfs.s3.socket.timeout: "50s"
+        alluxio.underfs.s3.request.timeout: "60s"
+---
+# runtime.yaml
+apiVersion: data.fluid.io/v1alpha1
+kind: AlluxioRuntime
+metadata:
+  name: llama-3-3-70b-instruct-model
+spec:
+  replicas: 1
+  properties:
+    alluxio.user.file.readtype.default: CACHE_PROMOTE
+    alluxio.user.file.write.type.default: CACHE_THROUGH
+    alluxio.user.block.size.bytes.default: 128MB
+  tieredstore:
+    levels:
+      - mediumtype: MEM
+        path: /dev/shm
+        quota: 300Gi
+        high: "1.0"
+        low: "0.7"
+---
+# DataLoad - Preloads the model into cache
+apiVersion: data.fluid.io/v1alpha1
+kind: DataLoad
+metadata:
+  name: llama-3-3-70b-instruct-model-loader
+spec:
+  dataset:
+    name: llama-3-3-70b-instruct-model
+    namespace: jsm2
+  loadMetadata: true
+  target:
+    - path: "/"
+      replicas: 1
+```
+
+and the associated DynamoGraphDeployment with pod affinity to schedule the vllm worker on the same node than the Alluxio cache worker
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-hello-world
+spec:
+  dynamoGraph: frontend:214c1690
+  envs:
+  - name: DYN_LOG
+    value: "debug"
+  - name: DYN_DEPLOYMENT_CONFIG
+    value: '{"Common": {"model": "/model", "block-size": 64, "max-model-len": 16384},
+      "Frontend": {"served_model_name": "meta-llama/Llama-3.3-70B-Instruct", "endpoint":
+      "dynamo.Processor.chat/completions", "port": 8000}, "Processor": {"router":
+      "round-robin", "router-num-threads": 4, "common-configs": ["model", "block-size",
+      "max-model-len"]}, "VllmWorker": {"tensor-parallel-size": 4, "enforce-eager": true, "max-num-batched-tokens":
+      16384, "enable-prefix-caching": true, "ServiceArgs": {"workers": 1, "resources":
+      {"gpu": "4", "memory": "40Gi"}}, "common-configs": ["model", "block-size", "max-model-len"]},
+      "Planner": {"environment": "kubernetes", "no-operation": true}}'
+  services:
+    Processor:
+      pvc:
+        mountPoint: /model
+        name: llama-3-3-70b-instruct-model
+    VllmWorker:
+      pvc:
+        mountPoint: /model
+        name: llama-3-3-70b-instruct-model
+      extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                  - key: fluid.io/s-alluxio-jsm2-llama-3-3-70b-instruct-model
+                    operator: In
+                    values:
+                      - "true"
+```
+
+
 ## Troubleshooting & FAQ
 
 - **PVC not created?** Check Fluid and AlluxioRuntime pod logs.
@@ -209,3 +322,4 @@ spec:
 - [HuggingFace Hub](https://huggingface.co/docs/hub/index)
 - [Dynamo README](../../../README.md)
 - [Dynamo Documentation](https://docs.nvidia.com/dynamo/)
+- [Fluid](https://fluid-cloudnative.github.io/docs)
