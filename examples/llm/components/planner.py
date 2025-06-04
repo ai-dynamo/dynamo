@@ -412,12 +412,6 @@ if __name__ == "__main__":
         help="Namespace planner will look at",
     )
     parser.add_argument(
-        "--served-model-name",
-        type=str,
-        default=PlannerDefaults.served_model_name,
-        help="Model name that is being served (used for prefill queue name)",
-    )
-    parser.add_argument(
         "--no-operation",
         action="store_true",
         default=PlannerDefaults.no_operation,
