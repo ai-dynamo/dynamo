@@ -326,12 +326,7 @@ def with_request_id(param_name: str = "request_id"):
                 if hasattr(self, "ensure_request_id") and callable(
                     self.ensure_request_id
                 ):
-                    # If request_id is explicitly None (not provided), generate fresh UUID
-                    # to ensure call isolation, don't use existing context
-                    if request_id is None:
-                        request_id = str(uuid.uuid4())
-                    else:
-                        request_id = self.ensure_request_id(request_id)
+                    request_id = self.ensure_request_id(request_id)
                 else:
                     request_id = request_id or str(uuid.uuid4())
 
@@ -339,16 +334,24 @@ def with_request_id(param_name: str = "request_id"):
                 kwargs[param_name] = request_id
 
                 # Also set it in thread-local storage for logging
-                set_request_context(request_id)
+                # Use token pattern for proper context management and isolation
+                _token = _request_id_ctx.set(request_id)
             else:
                 # If the function doesn't have the request_id parameter, still set context for logging
                 existing_context = get_current_request_id()
                 if not existing_context:
                     new_id = str(uuid.uuid4())
-                    set_request_context(new_id)
+                    _token = _request_id_ctx.set(new_id)
+                else:
+                    _token = None
 
             # Call the original function
-            return await func(self, *args, **kwargs)
+            try:
+                return await func(self, *args, **kwargs)
+            finally:
+                # Restore previous context (or None) for proper isolation
+                if "_token" in locals() and _token is not None:
+                    _request_id_ctx.reset(_token)
 
         return cast(F, wrapper)
 
