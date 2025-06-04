@@ -196,13 +196,15 @@ impl CriticalTaskExecutionHandle {
     ///
     /// Note: Both errors and panics trigger parent cancellation immediately via the monitor task.
     pub async fn join(mut self) -> Result<()> {
-        match self.result_receiver.take().unwrap().await {
+        self.detached = true;
+        let result = match self.result_receiver.take().unwrap().await {
             Ok(task_result) => task_result,
             Err(_) => {
                 // This should rarely happen - means monitor task was dropped/cancelled
                 Err(anyhow::anyhow!("Critical task monitor was cancelled"))
             }
-        }
+        };
+        result
     }
 
     /// Detach the task. This allows the task to continue running after the handle is dropped.
@@ -552,7 +554,7 @@ mod tests {
         // - Demonstrates true "critical task" behavior with immediate failure propagation
         let parent_token = CancellationToken::new();
 
-        let _handle = CriticalTaskExecutionHandle::new(
+        let handle = CriticalTaskExecutionHandle::new(
             |_cancel_token| async move {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 panic!("Critical failure!");
@@ -570,6 +572,7 @@ mod tests {
             parent_token.is_cancelled(),
             "Parent token should be cancelled immediately when critical task panics"
         );
+        assert!(handle.join().await.is_err());
     }
 
     #[tokio::test]
@@ -582,7 +585,7 @@ mod tests {
         // - Demonstrates consistent critical failure behavior
         let parent_token = CancellationToken::new();
 
-        let _handle = CriticalTaskExecutionHandle::new(
+        let handle = CriticalTaskExecutionHandle::new(
             |_cancel_token| async move {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 anyhow::bail!("Critical error!");
@@ -600,5 +603,6 @@ mod tests {
             parent_token.is_cancelled(),
             "Parent token should be cancelled immediately when critical task errors"
         );
+        assert!(handle.join().await.is_err());
     }
 }
