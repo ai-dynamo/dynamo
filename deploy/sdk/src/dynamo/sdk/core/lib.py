@@ -21,7 +21,7 @@ from typing import Any, Callable, Dict, Optional, Type, TypeVar, Union
 from fastapi import FastAPI
 
 from dynamo.sdk.core.protocol.interface import (
-    AbstractDynamoService,
+    AbstractService,
     DependencyInterface,
     DeploymentTarget,
     DynamoConfig,
@@ -37,7 +37,7 @@ G = TypeVar("G", bound=Callable[..., Any])
 _target: DeploymentTarget
 
 # Add global cache for abstract services
-_abstract_service_cache: Dict[Type[AbstractDynamoService], ServiceInterface[Any]] = {}
+_abstract_service_cache: Dict[Type[AbstractService], ServiceInterface[Any]] = {}
 
 
 logger = logging.getLogger(__name__)
@@ -57,40 +57,32 @@ def get_target() -> DeploymentTarget:
     return _target
 
 
-# Helper function to get or create service instance for AbstractDynamoService
+# Helper function to get or create service instance for AbstractService
 def _get_or_create_abstract_service_instance(
-    abstract_service_cls: Type[AbstractDynamoService], provider: DeploymentTarget
+    abstract_service_cls: Type[AbstractService],
 ) -> ServiceInterface[Any]:
     """
     Retrieves a service instance from cache or creates a new one
-    for the given AbstractDynamoService class.
+    for the given AbstractService class.
     """
     global _abstract_service_cache
-    logger.debug(
-        f"Getting/creating abstract service instance for {abstract_service_cls.__name__}"
-    )
-    logger.debug(f"Provider type: {type(provider).__name__}")
 
     if abstract_service_cls in _abstract_service_cache:
-        logger.debug(f"Found cached instance for {abstract_service_cls.__name__}")
         return _abstract_service_cache[abstract_service_cls]
-    else:
-        logger.debug(f"Creating new instance for {abstract_service_cls.__name__}")
-        # This placeholder service will be a singleton, and will be used for all dependencies that depend on this abstract service.
-        # The name for DynamoConfig will be the class name of the abstract service.
-        dynamo_config_for_abstract = DynamoConfig(enabled=True)
-        logger.debug(f"Created DynamoConfig for {abstract_service_cls.__name__}")
 
-        # Call the main service() decorator/function to create the service instance
-        # validate_dynamo_interfaces is False because validating an interface has implemented dynamo endpoints will obviously failc
-        service_instance = service(
-            abstract_service_cls,
-            dynamo=dynamo_config_for_abstract,
-            should_validate_dynamo_interfaces=False,
-        )
-        logger.debug(f"Created service instance for {abstract_service_cls.__name__}")
-        _abstract_service_cache[abstract_service_cls] = service_instance
-        return service_instance
+    # This placeholder service will be a singleton, and will be used for all dependencies that depend on this abstract service.
+    # The name for DynamoConfig will be the class name of the abstract service.
+    dynamo_config_for_abstract = DynamoConfig(enabled=True)
+
+    # Call the main service() decorator/function to create the service instance
+    # validate_dynamo_interfaces is False because validating an interface has implemented dynamo endpoints will obviously failc
+    service_instance = service(
+        abstract_service_cls,
+        dynamo=dynamo_config_for_abstract,
+        should_validate_dynamo_interfaces=False,
+    )
+    _abstract_service_cache[abstract_service_cls] = service_instance
+    return service_instance
 
 
 # TODO: dynamo_component
@@ -104,25 +96,16 @@ def service(
     **kwargs: Any,
 ) -> Any:
     """Service decorator that's adapter-agnostic"""
-    logger.debug(
-        f"Service decorator called with inner={inner}, validate={should_validate_dynamo_interfaces}"
-    )
-    logger.debug(f"Service kwargs: {kwargs}")
 
     config = ServiceConfig(**kwargs)
-    logger.debug(f"Created ServiceConfig: {config}")
 
     def decorator(inner: Type[G]) -> ServiceInterface[G]:
-        logger.debug(f"Decorating service class: {inner.__name__}")
         # Ensures that all declared dynamo endpoints on the parent interfaces are implemented
         if should_validate_dynamo_interfaces:
-            logger.debug(f"Validating dynamo interfaces for {inner.__name__}")
             validate_dynamo_interfaces(inner)
         provider = get_target()
-        logger.debug(f"Provider type: {type(provider).__name__}")
         if inner is not None:
             config.dynamo.name = inner.__name__
-            logger.debug(f"Set service name to {inner.__name__}")
         service_instance = provider.create_service(
             service_cls=inner,
             config=config,
@@ -130,7 +113,6 @@ def service(
             system_app=system_app,
             **kwargs,
         )
-        logger.debug(f"Created service instance for {inner.__name__}")
         return service_instance
 
     ret = decorator(inner) if inner is not None else decorator
@@ -138,19 +120,19 @@ def service(
 
 
 def depends(
-    on: Optional[Union[ServiceInterface[G], Type[AbstractDynamoService]]] = None,
+    on: Optional[Union[ServiceInterface[G], Type[AbstractService]]] = None,
     **kwargs: Any,
 ) -> DependencyInterface[G]:
     """Create a dependency using the current service provider.
 
-    If 'on' is an AbstractDynamoService type, a placeholder service will be
+    If 'on' is an AbstractService type, a placeholder service will be
     created and used for the dependency.
     """
     provider = get_target()
     actual_on_service: Optional[ServiceInterface[Any]] = None
 
-    if isinstance(on, type) and issubclass(on, AbstractDynamoService):
-        actual_on_service = _get_or_create_abstract_service_instance(on, provider)
+    if isinstance(on, type) and issubclass(on, AbstractService):
+        actual_on_service = _get_or_create_abstract_service_instance(on)
         # The type of actual_on_service here would be ServiceInterface[NameOfAbstractClass]
         # So, T would be NameOfAbstractClass.
         return provider.create_dependency(on=actual_on_service, **kwargs)
@@ -161,7 +143,7 @@ def depends(
         return provider.create_dependency(on=actual_on_service, **kwargs)
     else:
         raise TypeError(
-            "depends() expects 'on' to be a ServiceInterface, an AbstractDynamoService type"
+            "depends() expects 'on' to be a ServiceInterface, an AbstractService type"
         )
 
 

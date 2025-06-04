@@ -28,7 +28,7 @@ from dynamo.sdk.core.protocol.deployment import Env
 T = TypeVar("T", bound=object)
 
 
-class AbstractDynamoService(abc.ABC):
+class AbstractService(abc.ABC):
     """Base class for Dynamo service interfaces."""
 
     pass
@@ -255,15 +255,15 @@ class ServiceInterface(Generic[T], ABC):
         """Check if this service is ready to be served.
 
         A service is servable if:
-        1. It is not a subclass of AbstractDynamoService (concrete service)
-        2. If it is a subclass of AbstractDynamoService, all abstract methods are implemented
+        1. It is not a subclass of AbstractService (concrete service)
+        2. If it is a subclass of AbstractService, all abstract methods are implemented
            with @dynamo_endpoint decorators
         """
-        # If not a AbstractDynamoService, it's servable by default
-        if not issubclass(self.inner, AbstractDynamoService):
+        # If not a AbstractService, it's servable by default
+        if not issubclass(self.inner, AbstractService):
             return True
 
-        # For AbstractDynamoService, check implementations
+        # For AbstractService, check implementations
         abstract_endpoints = _get_abstract_dynamo_endpoints(self.inner)
         if (
             not abstract_endpoints
