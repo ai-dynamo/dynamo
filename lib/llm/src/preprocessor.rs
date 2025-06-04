@@ -251,9 +251,13 @@ impl OpenAIPreprocessor {
                             .map_err(|e| e.to_string())
                     });
 
-                    response.chunk_tokens = Some(chunk_tokens);
-                    response.input_tokens = Some(isl);
-                    response.output_tokens = Some(current_osl);
+                    // Store token information in comment field
+                    let token_info = vec![
+                        format!("chunk_tokens: {}", chunk_tokens),
+                        format!("input_tokens: {}", isl),
+                        format!("output_tokens: {}", current_osl),
+                    ];
+                    response.comment = Some(token_info);
 
                     tracing::trace!(
                         request_id = inner.context.id(),
