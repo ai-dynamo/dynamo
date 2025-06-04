@@ -326,7 +326,7 @@ def validate_dynamo_interfaces(cls: type) -> None:
         problems.append(f"missing implementation(s): {', '.join(missing)}")
     if undecorated:
         problems.append(
-            f"method(s) not decorated with @dynamo_endpoint: {', '.join(undecorated)}"
+            f"method(s) not decorated with @endpoint: {', '.join(undecorated)}"
         )
     if not_callable:
         problems.append(
