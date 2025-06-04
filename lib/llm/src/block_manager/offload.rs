@@ -42,9 +42,10 @@
 //! The [`OffloadManager::onboard_worker`] is responsible for onboarding blocks.
 //!
 //! The kind of offloads/onboards they perform is dictated by the source and target arguments
-//! of the [`OffloadManager::offload`] and [`OffloadManager::onboard`] methods.
+//! of the [`OffloadManager::offload_worker`] and [`OffloadManager::onboard_worker`] methods.
 
 use super::block::{BlockError, BlockMetadata, BlockState, ImmutableBlock};
+use super::metrics::{BlockManagerMetrics, PoolMetrics};
 use super::pool::BlockPoolError;
 use super::state::TransferContext;
 use super::storage::{Cuda, Storage};
@@ -99,6 +100,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         device: Option<Arc<BlockPool<DeviceStorage, Metadata>>>,
         nixl_agent: Arc<Option<NixlAgent>>,
         async_rt_handle: Handle,
+        metrics: Arc<BlockManagerMetrics>,
     ) -> Result<Arc<Self>> {
         let (device_offload_tx, device_offload_rx) = mpsc::unbounded_channel();
         let (host_offload_tx, host_offload_rx) = mpsc::unbounded_channel();
@@ -117,8 +119,6 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             tick: Arc::new(Mutex::new(0)),
         });
 
-        let this_clone = this.clone();
-
         let cuda_ctx = Cuda::device_or_create(0)?;
 
         // We want cuda offloads to happen in parallel with host onboards, so we need to use a different stream.
@@ -130,6 +130,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         // Device -> Host offload
         let device_clone = this.device.clone();
         let host_clone = this.host.clone();
+        let device_offload_metrics = metrics.pool("device");
         async_rt_handle.spawn(async move {
             let res = OffloadManager::offload_worker(
                 device_clone,
@@ -139,6 +140,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     CudaTransferManager::new(device_offload_transfer_ctx, MAX_CONCURRENT_TRANSFERS),
                     MAX_TRANSFER_BATCH_SIZE,
                 )),
+                device_offload_metrics,
             )
             .await;
             tracing::warn!("Offload worker terminated: {:?}", res);
@@ -153,6 +155,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let host_clone = this.host.clone();
         let disk_clone = this.disk.clone();
         let transfer_ctx_clone = transfer_ctx.clone();
+        let host_offload_metrics = metrics.pool("host");
         async_rt_handle.spawn(async move {
             let res = OffloadManager::offload_worker(
                 host_clone,
@@ -162,6 +165,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     DiskTransferManager::new(transfer_ctx_clone, MAX_CONCURRENT_TRANSFERS),
                     MAX_TRANSFER_BATCH_SIZE,
                 )),
+                host_offload_metrics,
             )
             .await;
             tracing::warn!("Offload worker terminated: {:?}", res);
@@ -171,6 +175,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let host_clone = this.host.clone();
         let device_clone = this.device.clone();
         let transfer_ctx_clone = transfer_ctx.clone();
+        let host_onboard_metrics = metrics.pool("host");
         async_rt_handle.spawn(async move {
             let res = OffloadManager::onboard_worker(
                 host_clone,
@@ -180,6 +185,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     CudaTransferManager::new(transfer_ctx_clone, MAX_CONCURRENT_TRANSFERS),
                     MAX_TRANSFER_BATCH_SIZE,
                 )),
+                host_onboard_metrics,
             )
             .await;
             tracing::warn!("Onboard worker terminated: {:?}", res);
@@ -189,6 +195,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let disk_clone = this.disk.clone();
         let device_clone = this.device.clone();
         let transfer_ctx_clone = transfer_ctx.clone();
+        let disk_onboard_metrics = metrics.pool("disk");
         async_rt_handle.spawn(async move {
             let res = OffloadManager::onboard_worker(
                 disk_clone,
@@ -198,12 +205,13 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     DiskTransferManager::new(transfer_ctx_clone, MAX_CONCURRENT_TRANSFERS),
                     MAX_TRANSFER_BATCH_SIZE,
                 )),
+                disk_onboard_metrics,
             )
             .await;
             tracing::warn!("Onboard worker terminated: {:?}", res);
         });
 
-        Ok(this_clone)
+        Ok(this)
     }
 
     async fn offload_worker<Source: Storage, Target: Storage>(
@@ -211,6 +219,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         target_pool: Option<Arc<BlockPool<Target, Metadata>>>,
         mut offload_rx: mpsc::UnboundedReceiver<OffloadRequest<Source, Metadata>>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Metadata>>,
+        pool_metrics: Arc<PoolMetrics>,
     ) -> Result<()> {
         if source_pool.is_none() || target_pool.is_none() {
             return Ok(());
@@ -227,6 +236,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                 match offload_rx.try_recv() {
                     Ok(request) => {
                         queue.insert(request);
+                        pool_metrics.gauge("offload_queue_size").inc();
                     }
                     Err(TryRecvError::Empty) => {
                         break;
@@ -237,6 +247,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
 
             // If there is a request, process it.
             if let Some(request) = queue.pop_first() {
+                pool_metrics.gauge("offload_queue_size").dec();
                 // Try to upgrade the block to a strong reference.
                 let block = match request.block.upgrade() {
                     Some(block) => Some(block),
@@ -268,6 +279,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     };
 
                     if let Some(target_block) = target_blocks.into_iter().next() {
+                        pool_metrics.counter("offload_processed").inc();
                         transfer_manager
                             .enqueue_transfer(PendingTransfer::new(
                                 vec![block],
@@ -282,6 +294,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                 // Await the next request.
                 if let Some(request) = offload_rx.recv().await {
                     queue.insert(request);
+                    pool_metrics.gauge("offload_queue_size").inc();
                 }
             }
         }
@@ -292,6 +305,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         target_pool: Option<Arc<BlockPool<Target, Metadata>>>,
         mut onboard_rx: mpsc::UnboundedReceiver<OnboardRequest<Source, Target, Metadata>>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Metadata>>,
+        pool_metrics: Arc<PoolMetrics>,
     ) -> Result<()> {
         if source_pool.is_none() || target_pool.is_none() {
             return Ok(());
@@ -301,6 +315,9 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
 
         // Loop on incoming requests
         while let Some(request) = onboard_rx.recv().await {
+            pool_metrics
+                .gauge("onboard_queue_size")
+                .set(onboard_rx.len() as i64);
             // Try to allocate blocks on the device.
             let target_blocks = match target_pool.allocate_blocks(request.blocks.len()).await {
                 Ok(blocks) => blocks,
@@ -309,6 +326,10 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     continue;
                 }
             };
+
+            pool_metrics
+                .counter("onboard_processed")
+                .inc_by(request.blocks.len() as u64);
 
             let sources = request
                 .blocks
@@ -484,6 +505,7 @@ mod tests {
 
     use aligned_vec::avec;
     use cudarc::runtime::sys::{cudaMemcpy, cudaMemcpyKind, cudaMemset};
+    use prometheus::Registry;
     use std::fs::File;
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::mem::ManuallyDrop;
@@ -568,6 +590,7 @@ mod tests {
             device_pool.clone(),
             agent_arc,
             async_rt_handle,
+            BlockManagerMetrics::new(&Arc::new(Registry::new()))?,
         )?;
 
         Ok((manager, device_pool, host_pool, disk_pool))
