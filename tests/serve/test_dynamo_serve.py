@@ -208,6 +208,8 @@ def test_serve_deployment(deployment_graph_test, request, runtime_services):
     Test dynamo serve deployments with different graph configurations.
     """
 
+    # runtime_services is used to start nats and etcd
+
     logger = logging.getLogger(request.node.name)
     logger.info("Starting test_deployment")
 
