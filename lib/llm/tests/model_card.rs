@@ -25,8 +25,8 @@ async fn test_model_info_from_hf_like_local_repo() {
     assert_eq!(info.model_type(), "llama");
     assert_eq!(info.bos_token_id(), 1);
     assert_eq!(info.eos_token_ids(), vec![2]);
-    assert_eq!(info.max_position_embeddings(), 2048);
-    assert_eq!(info.vocab_size(), 32000);
+    assert_eq!(info.max_position_embeddings(), Some(2048));
+    assert_eq!(info.vocab_size(), Some(32000));
 }
 
 #[tokio::test]
