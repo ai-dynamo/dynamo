@@ -87,7 +87,7 @@ if [[ -n "${DOCKER_USERNAME:-}" && -n "${DOCKER_PASSWORD:-}" ]]; then
 
   # Transform docker.io URLs to index.docker.io/v1/
   DOCKER_SERVER_FOR_SECRET="$DOCKER_SERVER"
-  if [[ "$DOCKER_SERVER" == "docker.io" || "$DOCKER_SERVER" == docker.io/* ]]; then
+  if [[ "$DOCKER_SERVER" == "docker.io" || "$DOCKER_SERVER" == "docker.io/"* ]]; then
     DOCKER_SERVER_FOR_SECRET="https://index.docker.io/v1/"
   fi
 
