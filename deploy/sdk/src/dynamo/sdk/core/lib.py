@@ -85,7 +85,6 @@ def _get_or_create_abstract_service_instance(
     return service_instance
 
 
-# TODO: dynamo_component
 def service(
     inner: Optional[Type[G]] = None,
     /,

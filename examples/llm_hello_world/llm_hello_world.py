@@ -19,7 +19,7 @@ import random
 
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
-from llm_types import ChatRequest
+from pydantic import BaseModel
 
 from dynamo.sdk import (
     DYNAMO_IMAGE,
@@ -32,6 +32,11 @@ from dynamo.sdk import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class ChatRequest(BaseModel):
+    text: str
+
 
 """
 Pipeline Architecture:
@@ -164,8 +169,6 @@ class Frontend:
 # Frontend.link(SlowRouter).link(TRTLLMWorker) # type: ignore[attr-defined]
 # slow_pipeline = Frontend.link(SlowRouter).link(VllmWorker) # type: ignore[attr-defined]
 Frontend.link(FastRouter).link(VllmWorker)  # type: ignore[attr-defined]
-
-# Try to pass a
 
 """
 Example usage:
