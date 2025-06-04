@@ -22,12 +22,14 @@ mod block;
 mod block_list;
 mod dlpack;
 mod layer;
+mod pool;
 
 /// Add bingings from this crate to the provided module
 pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<layer::Layer>()?;
     m.add_class::<block::Block>()?;
     m.add_class::<block_list::BlockList>()?;
+    m.add_class::<pool::BlockPool>()?;
     m.add_class::<BlockManager>()?;
     Ok(())
 }
@@ -44,6 +46,7 @@ pub struct BlockManager {
 impl BlockManager {
     #[new]
     #[pyo3(signature = (worker_id, num_layer, outer_dim, page_size, inner_dim, dtype=None, host_num_blocks=None, device_num_blocks=None, device_id=0))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         worker_id: u64,
         num_layer: usize,
@@ -89,7 +92,7 @@ impl BlockManager {
                 }
             };
         }
-        model_config = model_config.dtype(dtype_.clone());
+        model_config = model_config.dtype(dtype_);
         config = config.model(model_config.build().map_err(to_pyerr)?);
         if let Some(host_num_blocks) = host_num_blocks {
             config = config.host_layout(
@@ -126,103 +129,21 @@ impl BlockManager {
                     .map_err(to_pyerr)?,
             ),
             dtype: dtype_,
-            device_id: device_id,
+            device_id,
         })
     }
 
-    fn allocate_host_blocks_blocking(&self, count: usize) -> PyResult<block_list::BlockList> {
-        let blocks = self
-            .inner
-            .host()
-            .ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Host allocator not available")
-            })?
-            .allocate_blocks_blocking(count)
-            .map_err(to_pyerr)?;
-        // Wrap each block in an enum accounting for Pinned & Device block
-        let blocks = blocks
-            .into_iter()
-            .map(|b| block::BlockType::Pinned(b))
-            .collect();
-        Ok(block_list::BlockList::from_rust(
-            blocks,
-            self.dtype.clone(),
-            self.device_id,
-        ))
+    fn host(&self) -> Option<pool::BlockPool> {
+        let pool = self.inner.host();
+
+        pool.as_ref()
+            .map(|pool| pool::BlockPool::from_host_pool(pool.clone(), self.dtype, self.device_id))
     }
 
-    #[pyo3(signature = (count))]
-    fn allocate_host_blocks<'py>(
-        &self,
-        py: Python<'py>,
-        count: usize,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
-        let dtype = self.dtype.clone();
-        let device_id = self.device_id;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let blocks = inner
-                .host()
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err("Host allocator not available")
-                })?
-                .allocate_blocks(count)
-                .await
-                .map_err(to_pyerr)?;
-            // Wrap each block in an enum accounting for Pinned & Device block
-            let blocks = blocks
-                .into_iter()
-                .map(|b| block::BlockType::Pinned(b))
-                .collect();
-            Ok(block_list::BlockList::from_rust(blocks, dtype, device_id))
-        })
-    }
+    fn device(&self) -> Option<pool::BlockPool> {
+        let pool = self.inner.device();
 
-    fn allocate_device_blocks_blocking(&self, count: usize) -> PyResult<block_list::BlockList> {
-        let blocks = self
-            .inner
-            .device()
-            .ok_or_else(|| {
-                pyo3::exceptions::PyRuntimeError::new_err("Device allocator not available")
-            })?
-            .allocate_blocks_blocking(count)
-            .map_err(to_pyerr)?;
-        // Wrap each block in an enum accounting for Pinned & Device block
-        let blocks = blocks
-            .into_iter()
-            .map(|b| block::BlockType::Device(b))
-            .collect();
-        Ok(block_list::BlockList::from_rust(
-            blocks,
-            self.dtype.clone(),
-            self.device_id,
-        ))
-    }
-
-    #[pyo3(signature = (count))]
-    fn allocate_device_blocks<'py>(
-        &self,
-        py: Python<'py>,
-        count: usize,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let inner = self.inner.clone();
-        let dtype = self.dtype.clone();
-        let device_id = self.device_id;
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let blocks = inner
-                .device()
-                .ok_or_else(|| {
-                    pyo3::exceptions::PyRuntimeError::new_err("Device allocator not available")
-                })?
-                .allocate_blocks(count)
-                .await
-                .map_err(to_pyerr)?;
-            // Wrap each block in an enum accounting for Pinned & Device block
-            let blocks = blocks
-                .into_iter()
-                .map(|b| block::BlockType::Device(b))
-                .collect();
-            Ok(block_list::BlockList::from_rust(blocks, dtype, device_id))
-        })
+        pool.as_ref()
+            .map(|pool| pool::BlockPool::from_device_pool(pool.clone(), self.dtype, self.device_id))
     }
 }

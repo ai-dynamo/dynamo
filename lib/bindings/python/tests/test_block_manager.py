@@ -108,7 +108,11 @@ async def test_block_manager_initialization():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 async def test_cpu_block_access(block_manager: BlockManager):
     block_count = 2
-    block_list = block_manager.allocate_host_blocks_blocking(block_count)
+
+    host_pool = block_manager.host()
+    assert host_pool is not None
+
+    block_list = host_pool.allocate_blocks_blocking(block_count)
     blocks = block_list.to_list()
     assert len(blocks) == block_count
     tensors = [torch.from_dlpack(b) for b in blocks]
@@ -135,7 +139,11 @@ async def test_cpu_block_access(block_manager: BlockManager):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 async def test_gpu_block_access(block_manager: BlockManager):
     block_count = 6
-    block_list = block_manager.allocate_device_blocks_blocking(block_count)
+
+    device_pool = block_manager.device()
+    assert device_pool is not None
+
+    block_list = device_pool.allocate_blocks_blocking(block_count)
     blocks = block_list.to_list()
     assert len(blocks) == block_count
     tensors = [torch.from_dlpack(b) for b in blocks]
@@ -162,7 +170,7 @@ async def test_gpu_block_access(block_manager: BlockManager):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 async def test_block_list_iteration(block_manager: BlockManager):
     block_count = 4
-    block_list = await block_manager.allocate_host_blocks(block_count)
+    block_list = await block_manager.host().allocate_blocks(block_count)
     # Test __len__()
     assert len(block_list) == block_count
     # Test __getitem__()
@@ -190,8 +198,8 @@ async def test_block_list_iteration(block_manager: BlockManager):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 async def test_block_copy_g1_g2(block_manager: BlockManager):
     # Allocate device (G1) and host (G2) block
-    host_block_list = await block_manager.allocate_host_blocks(1)
-    device_block_list = await block_manager.allocate_device_blocks(1)
+    host_block_list = await block_manager.host().allocate_blocks(1)
+    device_block_list = await block_manager.device().allocate_blocks(1)
     # Populate host block with unique values
     host_tensor = torch.from_dlpack(host_block_list[0])
     for i in range(NUM_LAYER):
@@ -243,7 +251,7 @@ async def test_block_copy_g1_g2(block_manager: BlockManager):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 async def test_cpu_layer_access(block_manager: BlockManager):
-    block_list = block_manager.allocate_host_blocks_blocking(1)
+    block_list = block_manager.host().allocate_blocks_blocking(1)
     block = block_list[0]
     layers = block.to_list()
     assert len(layers) == NUM_LAYER
@@ -270,7 +278,7 @@ async def test_cpu_layer_access(block_manager: BlockManager):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 async def test_gpu_layer_access(block_manager: BlockManager):
-    block_list = block_manager.allocate_device_blocks_blocking(1)
+    block_list = block_manager.device().allocate_blocks_blocking(1)
     block = block_list[0]
     layers = block.to_list()
     assert len(layers) == NUM_LAYER
@@ -297,7 +305,7 @@ async def test_gpu_layer_access(block_manager: BlockManager):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 async def test_block_iteration(block_manager: BlockManager):
-    block = (await block_manager.allocate_host_blocks(1))[0]
+    block = (await block_manager.host().allocate_blocks(1))[0]
     # Test __len__()
     assert len(block) == NUM_LAYER
     # Test __getitem__()
@@ -325,8 +333,8 @@ async def test_block_iteration(block_manager: BlockManager):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
 async def test_block_layer_copy_g1_g2(block_manager: BlockManager):
     # Allocate device (G1) and host (G2) block
-    host_block = (await block_manager.allocate_host_blocks(1))[0]
-    device_block = (await block_manager.allocate_device_blocks(1))[0]
+    host_block = (await block_manager.host().allocate_blocks(1))[0]
+    device_block = (await block_manager.device().allocate_blocks(1))[0]
     # Populate host block at layer level with unique values
     host_layer_tensors = [torch.from_dlpack(bl) for bl in host_block]
     for i in range(NUM_LAYER):

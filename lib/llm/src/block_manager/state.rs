@@ -421,16 +421,16 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
         Ok(blocks)
     }
 
-    pub fn disk(&self) -> Option<&BlockPool<DiskStorage, Metadata>> {
-        self.disk_pool.as_ref().map(|pool| pool.as_ref())
+    pub fn disk(&self) -> Option<Arc<BlockPool<DiskStorage, Metadata>>> {
+        self.disk_pool.as_ref().map(|pool| pool.clone())
     }
 
-    pub fn host(&self) -> Option<&BlockPool<PinnedStorage, Metadata>> {
-        self.host_pool.as_ref().map(|pool| pool.as_ref())
+    pub fn host(&self) -> Option<Arc<BlockPool<PinnedStorage, Metadata>>> {
+        self.host_pool.as_ref().map(|pool| pool.clone())
     }
 
-    pub fn device(&self) -> Option<&BlockPool<DeviceStorage, Metadata>> {
-        self.device_pool.as_ref().map(|pool| pool.as_ref())
+    pub fn device(&self) -> Option<Arc<BlockPool<DeviceStorage, Metadata>>> {
+        self.device_pool.as_ref().map(|pool| pool.clone())
     }
 
     pub fn worker_id(&self) -> WorkerID {
