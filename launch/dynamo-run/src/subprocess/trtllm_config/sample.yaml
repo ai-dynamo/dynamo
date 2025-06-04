@@ -12,23 +12,13 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-Common:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
-Frontend:
-  endpoint: dynamo.SimpleLoadBalancer.generate_agg
-  port: 8000
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+# This is a sample config for TensorRT-LLM engine.
+# The config provides smaller free_gpu_memory_fraction to ensure that the engine
+# does not use all the GPU memory and both prefill and decode workers can fit in
+# the GPU memory when running in disaggregated mode.
+# You might have to tweak this config based on your model size and GPU memory.
 
-SimpleLoadBalancer:
-  enable_disagg: false
-  common-configs: [model, served_model_name]
-
-VllmDecodeWorker:
-  enforce-eager: true
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: '1'
-  common-configs: [model, served_model_name]
+backend: pytorch
+kv_cache_config:
+  free_gpu_memory_fraction: 0.40

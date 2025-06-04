@@ -1378,10 +1378,16 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 				}
 			}
 			envsSeen[env.Name] = struct{}{}
-			envs = append(envs, corev1.EnvVar{
-				Name:  env.Name,
-				Value: env.Value,
-			})
+			envVar := corev1.EnvVar{
+				Name: env.Name,
+			}
+			if env.Value != "" {
+				envVar.Value = env.Value
+			}
+			if env.ValueFrom != nil {
+				envVar.ValueFrom = env.ValueFrom
+			}
+			envs = append(envs, envVar)
 		}
 	}
 

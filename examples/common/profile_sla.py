@@ -60,6 +60,7 @@ logger.addHandler(console_handler)
 
 
 def get_dynamo_serve_cmd(config_file_path):
+    config_file_path = os.path.abspath(config_file_path)
     return [
         "dynamo",
         "serve",
@@ -82,8 +83,6 @@ def _get_common_genai_perf_cmd(
         model,
         "--tokenizer",
         model,
-        "--service-kind",
-        "openai",
         "--endpoint-type",
         "chat",
         "--endpoint",
@@ -175,12 +174,6 @@ def get_decode_genai_perf_cmd(
 
 def convert_config(config: dict, target: Literal["prefill", "decode"]) -> dict:
     config = config.copy()
-
-    # all profiles runs with a single prefill/decode worker, hence router doesn't matter
-    if "Common" in config and "router" in config["Common"]:
-        config["Common"]["router"] = "round-robin"
-    else:
-        config["Processor"]["router"] = "round-robin"
 
     # disable planner
     if "Planner" in config:
@@ -353,7 +346,16 @@ def get_kv_cache_size_from_dynamo_log(dynamo_log_fn: str) -> int:
 
 
 def get_gap_result(artifact_dir: str) -> dict:
-    with open(f"{artifact_dir}/profile_export_genai_perf.json", "r") as f:
+    json_file_path = None
+    for root, _, files in os.walk(artifact_dir):
+        if "profile_export_genai_perf.json" in files:
+            json_file_path = os.path.join(root, "profile_export_genai_perf.json")
+            break
+    if json_file_path is None:
+        raise FileNotFoundError(
+            f"profile_export_genai_perf.json not found in {artifact_dir}"
+        )
+    with open(json_file_path, "r") as f:
         return json.load(f)
 
 
@@ -433,7 +435,20 @@ def benchmark_decode(isl, osl, num_request, genai_perf_artifact_dir, model_name,
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--backend",
+        type=str,
+        default="vllm_v0",
+        choices=["vllm_v0"],
+        help="backend type (currently only vllm is supported)",
+    )
+    parser.add_argument(
         "--config", type=str, required=True, help="Path to the dynamo config file"
+    )
+    parser.add_argument(
+        "--example-dir",
+        type=str,
+        default=None,
+        help="path to the example directory, if not provided, will try to infer from config file location",
     )
     parser.add_argument(
         "--output-dir",
@@ -451,7 +466,7 @@ if __name__ == "__main__":
         "--ttft", type=int, default=50, help="target Time To First Token in ms"
     )
     parser.add_argument(
-        "--itl", type=int, default=5, help="target Inter Token Latency in ms"
+        "--itl", type=int, default=10, help="target Inter Token Latency in ms"
     )
     # below are arguments used for interpolating TTFT and ITL under different ISL/OSL
     parser.add_argument(
@@ -473,6 +488,18 @@ if __name__ == "__main__":
         help="how many samples to benchmark to interpolate ITL under different active kv cache size and decode context length",
     )
     args = parser.parse_args()
+
+    if args.example_dir is None:
+        logger.info(
+            "Example directory not provided, inferring from config file location..."
+        )
+        try:
+            args.example_dir = os.path.dirname(os.path.dirname(args.config))
+        except Exception:
+            logger.error(
+                "Failed to infer example directory, please provide explicitly using --example-dir <path-to-example-dir>"
+            )
+            exit(1)
 
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
@@ -516,6 +543,7 @@ if __name__ == "__main__":
                 stdout=dynamo_log_f,
                 stderr=subprocess.STDOUT,
                 text=True,
+                cwd=args.example_dir,
                 preexec_fn=os.setsid,  # Use process group for clean termination
             )
 
@@ -595,6 +623,7 @@ if __name__ == "__main__":
                 stdout=dynamo_log_f,
                 stderr=subprocess.STDOUT,
                 text=True,
+                cwd=args.example_dir,
                 preexec_fn=os.setsid,  # Use process group for clean termination
             )
 
@@ -721,10 +750,11 @@ if __name__ == "__main__":
     prefill_config = set_config_tp_size(prefill_config, tp_size)
     logger.info(f"Dynamo config: {prefill_config}")
 
-    work_dir = f"{args.output_dir}/prefill_tp{tp_size}_interpolation"
+    work_dir = f"{args.output_dir}/selected_prefill_interpolation"
     os.makedirs(work_dir, exist_ok=True)
 
     prefill_config_fn = f"{work_dir}/config.yaml"
+
     dynamo_log_fn = f"{work_dir}/dynamo.log"
     with open(prefill_config_fn, "w") as f:
         yaml.dump(prefill_config, f)
@@ -738,6 +768,7 @@ if __name__ == "__main__":
             stdout=dynamo_log_f,
             stderr=subprocess.STDOUT,
             text=True,
+            cwd=args.example_dir,
             preexec_fn=os.setsid,  # Use process group for clean termination
         )
 
@@ -770,6 +801,14 @@ if __name__ == "__main__":
         prefill_isl_np = np.array(prefill_isl)
         prefill_ttft_np = np.array(prefill_ttft)
         prefill_thpt_per_gpu_np = np.array(prefill_thpt_per_gpu)
+
+        save_path = f"{work_dir}/raw_data.npz"
+        np.savez(
+            save_path,
+            prefill_isl=prefill_isl_np,
+            prefill_ttft=prefill_ttft_np,
+            prefill_thpt_per_gpu=prefill_thpt_per_gpu_np,
+        )
 
         # Fit quadratic functions
         ttft_coeffs = np.polyfit(prefill_isl_np, prefill_ttft_np, 2)
@@ -844,7 +883,7 @@ if __name__ == "__main__":
     decode_config = set_config_tp_size(decode_config, best_decode_tp)
     logger.info(f"Dynamo config: {decode_config}")
 
-    work_dir = f"{args.output_dir}/decode_tp{best_decode_tp}_interpolation"
+    work_dir = f"{args.output_dir}/selected_decode_interpolation"
     os.makedirs(work_dir, exist_ok=True)
 
     decode_config_fn = f"{work_dir}/config.yaml"
@@ -861,6 +900,7 @@ if __name__ == "__main__":
             stdout=dynamo_log_f,
             stderr=subprocess.STDOUT,
             text=True,
+            cwd=args.example_dir,
             preexec_fn=os.setsid,  # Use process group for clean termination
         )
 
@@ -902,7 +942,7 @@ if __name__ == "__main__":
         shutdown_deployment(dynamo_process)
 
         # Save the data points to a .npz file
-        save_path = f"{work_dir}/decode_tp{tp_size}_data.npz"
+        save_path = f"{work_dir}/raw_data.npz"
         np.savez(
             save_path,
             x_kv_usage=np.array(x_kv_usage),
