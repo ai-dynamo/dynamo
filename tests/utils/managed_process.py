@@ -205,7 +205,7 @@ class ManagedProcess:
             self._logger.warning(f"PID {process.pid} no longer exists")
         except psutil.TimeoutExpired:
             self._logger.warning(
-                f"PID {process.pid} did not terminate in timeout, killing"
+                f"PID {process.pid} did not terminate before timeout, killing"
             )
             process.kill()
 
