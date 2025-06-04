@@ -27,6 +27,7 @@ from dynamo.sdk.core.protocol.interface import (
     DynamoConfig,
     ServiceConfig,
     ServiceInterface,
+    validate_dynamo_interfaces,
 )
 
 G = TypeVar("G", bound=Callable[..., Any])
@@ -77,7 +78,7 @@ def _get_or_create_abstract_service_instance(
         service_instance = service(
             inner=abstract_service_cls,
             dynamo=dynamo_config_for_abstract,
-            validate_dynamo_interfaces=False,
+            should_validate_dynamo_interfaces=False,
         )
         _abstract_service_cache[abstract_service_cls] = service_instance
         return service_instance
@@ -89,7 +90,7 @@ def service(
     /,
     *,
     app: Optional[FastAPI] = None,
-    validate_dynamo_interfaces: bool = True,
+    should_validate_dynamo_interfaces: bool = True,
     system_app: Optional[FastAPI] = None,
     **kwargs: Any,
 ) -> Any:
@@ -98,7 +99,7 @@ def service(
 
     def decorator(inner: Type[G]) -> ServiceInterface[G]:
         # Ensures that all declared dynamo endpoints on the parent interfaces are implemented
-        if validate_dynamo_interfaces:
+        if should_validate_dynamo_interfaces:
             validate_dynamo_interfaces(inner)
         provider = get_target()
         if inner is not None:
