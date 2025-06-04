@@ -64,7 +64,7 @@ class Planner:
         self._prefill_queue_nats_server = os.getenv(
             "NATS_SERVER", "nats://localhost:4222"
         )
-        self._prefill_queue_stream_name = self.args.served_model_name
+        self._prefill_queue_stream_name = f"{self.namespace}_prefill_queue"
 
         self.prefill_client: Any | None = None
         self.workers_client: Any | None = None
