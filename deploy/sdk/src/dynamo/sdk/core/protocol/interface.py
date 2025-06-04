@@ -201,7 +201,6 @@ class ServiceInterface(Generic[T], ABC):
         _, _, matching_dep = matching_deps[0]
 
         # Let's hot swap the on of the existing dependency with the new service
-        # TODO: Subtle issue here
         matching_dep.on = next_service
 
         # Record the link

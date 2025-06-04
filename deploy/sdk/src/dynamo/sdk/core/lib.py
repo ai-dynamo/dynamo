@@ -75,7 +75,7 @@ def _get_or_create_abstract_service_instance(
     dynamo_config_for_abstract = DynamoConfig(enabled=True)
 
     # Call the main service() decorator/function to create the service instance
-    # validate_dynamo_interfaces is False because validating an interface has implemented dynamo endpoints will obviously failc
+    # validate_dynamo_interfaces is False because validating an interface has implemented dynamo endpoints will obviously fail
     service_instance = service(
         abstract_service_cls,
         dynamo=dynamo_config_for_abstract,
