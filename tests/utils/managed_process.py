@@ -178,14 +178,11 @@ class ManagedProcess:
             try:
                 response = requests.get(url, timeout=timeout)
                 if response.status_code == 200:
-                    if response_check and response_check(response):
+                    if response_check is None or response_check(response):
                         self._logger.info(f"SUCCESS: Check URL:{url}")
                         return time.time() - start_time
-                    else:
-                        self._logger.info(f"SUCCESS: Check URL:{url}")
-                        return time.time() - start_time
-            except Exception:
-                pass
+            except requests.RequestException as e:
+                self._logger.warn(f"URL check failed: {e}")
             time.sleep(sleep)
 
         self._logger.error(f"FAILED: Check URL: {url}")
