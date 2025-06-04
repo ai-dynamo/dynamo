@@ -161,9 +161,9 @@ class Frontend:
 
 
 # Mix and match pipelines (Tests)
-Frontend.link(SlowRouter).link(TRTLLMWorker)
-# slow_pipeline = Frontend.link(SlowRouter).link(VllmWorker)
-# mixed_pipeline = Frontend.link(FastRouter).link(VllmWorker)
+# Frontend.link(SlowRouter).link(TRTLLMWorker) # type: ignore[attr-defined]
+# slow_pipeline = Frontend.link(SlowRouter).link(VllmWorker) # type: ignore[attr-defined]
+Frontend.link(FastRouter).link(VllmWorker)  # type: ignore[attr-defined]
 
 # Try to pass a
 

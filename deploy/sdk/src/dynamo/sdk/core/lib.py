@@ -66,20 +66,29 @@ def _get_or_create_abstract_service_instance(
     for the given AbstractDynamoService class.
     """
     global _abstract_service_cache
+    logger.debug(
+        f"Getting/creating abstract service instance for {abstract_service_cls.__name__}"
+    )
+    logger.debug(f"Provider type: {type(provider).__name__}")
+
     if abstract_service_cls in _abstract_service_cache:
+        logger.debug(f"Found cached instance for {abstract_service_cls.__name__}")
         return _abstract_service_cache[abstract_service_cls]
     else:
+        logger.debug(f"Creating new instance for {abstract_service_cls.__name__}")
         # This placeholder service will be a singleton, and will be used for all dependencies that depend on this abstract service.
         # The name for DynamoConfig will be the class name of the abstract service.
         dynamo_config_for_abstract = DynamoConfig(enabled=True)
+        logger.debug(f"Created DynamoConfig for {abstract_service_cls.__name__}")
 
         # Call the main service() decorator/function to create the service instance
         # validate_dynamo_interfaces is False because validating an interface has implemented dynamo endpoints will obviously failc
         service_instance = service(
-            inner=abstract_service_cls,
+            abstract_service_cls,
             dynamo=dynamo_config_for_abstract,
             should_validate_dynamo_interfaces=False,
         )
+        logger.debug(f"Created service instance for {abstract_service_cls.__name__}")
         _abstract_service_cache[abstract_service_cls] = service_instance
         return service_instance
 
@@ -95,22 +104,34 @@ def service(
     **kwargs: Any,
 ) -> Any:
     """Service decorator that's adapter-agnostic"""
+    logger.debug(
+        f"Service decorator called with inner={inner}, validate={should_validate_dynamo_interfaces}"
+    )
+    logger.debug(f"Service kwargs: {kwargs}")
+
     config = ServiceConfig(**kwargs)
+    logger.debug(f"Created ServiceConfig: {config}")
 
     def decorator(inner: Type[G]) -> ServiceInterface[G]:
+        logger.debug(f"Decorating service class: {inner.__name__}")
         # Ensures that all declared dynamo endpoints on the parent interfaces are implemented
         if should_validate_dynamo_interfaces:
+            logger.debug(f"Validating dynamo interfaces for {inner.__name__}")
             validate_dynamo_interfaces(inner)
         provider = get_target()
+        logger.debug(f"Provider type: {type(provider).__name__}")
         if inner is not None:
             config.dynamo.name = inner.__name__
-        return provider.create_service(
+            logger.debug(f"Set service name to {inner.__name__}")
+        service_instance = provider.create_service(
             service_cls=inner,
             config=config,
             app=app,
             system_app=system_app,
             **kwargs,
         )
+        logger.debug(f"Created service instance for {inner.__name__}")
+        return service_instance
 
     ret = decorator(inner) if inner is not None else decorator
     return ret

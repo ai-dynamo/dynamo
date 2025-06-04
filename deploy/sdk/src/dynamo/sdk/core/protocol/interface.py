@@ -27,8 +27,6 @@ from dynamo.sdk.core.protocol.deployment import Env
 
 T = TypeVar("T", bound=object)
 
-T = TypeVar("T", bound=object)
-
 
 class AbstractDynamoService(abc.ABC):
     """Base class for Dynamo service interfaces."""
@@ -174,8 +172,10 @@ class ServiceInterface(Generic[T], ABC):
 
         # Get all the deps of the service
         inner_deps = [
-            (dep.on.inner, dep_key, dep) for dep_key, dep in self.dependencies.items()
-        ]
+            (dep.on.inner, dep_key, dep)
+            for dep_key, dep in self.dependencies.items()
+            if dep.on is not None
+        ]  # type: ignore
 
         # Get the inner class of the passed in service
         curr_inner = next_service.inner
@@ -272,7 +272,7 @@ class ServiceInterface(Generic[T], ABC):
         return all(
             _check_dynamo_endpoint_implemented(self.inner, name)
             for name in abstract_endpoints
-        )
+        )  # type: ignore[return-value]
 
 
 def _get_abstract_dynamo_endpoints(cls: type) -> Set[str]:
@@ -289,7 +289,11 @@ def _check_dynamo_endpoint_implemented(cls: type, name: str) -> bool:
     """Check if an endpoint is properly implemented."""
     impl = getattr(cls, name, None)
     # Ensure the implementation is a callable DynamoEndpointInterface
-    return impl and callable(impl) and isinstance(impl, DynamoEndpointInterface)
+    return (
+        impl is not None
+        and callable(impl)
+        and isinstance(impl, DynamoEndpointInterface)
+    )
 
 
 def validate_dynamo_interfaces(cls: type) -> None:

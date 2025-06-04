@@ -18,7 +18,16 @@ import abc
 import asyncio
 import typing as t
 from functools import wraps
-from typing import Any, Callable, Dict, List, Optional, TypeVar, get_type_hints
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Protocol,
+    TypeVar,
+    get_type_hints,
+)
 
 from dynamo.runtime import DistributedRuntime
 from dynamo.sdk.core.protocol.interface import (
@@ -28,6 +37,12 @@ from dynamo.sdk.core.protocol.interface import (
 )
 
 T = TypeVar("T")
+
+
+class AbstractDynamoEndpoint(Protocol):
+    """Protocol for functions that can be marked as abstract dynamo endpoints."""
+
+    __is_abstract_dynamo__: bool
 
 
 class DynamoEndpoint(DynamoEndpointInterface):
@@ -77,7 +92,7 @@ class DynamoEndpoint(DynamoEndpointInterface):
 # Decorator for abstract dynamo endpoints
 def abstract_dynamo_endpoint(func: t.Callable) -> t.Callable:
     """Mark an abstract endpoint in an interface."""
-    func.__is_abstract_dynamo__ = True
+    func.__is_abstract_dynamo__ = True  # type: ignore
     return abc.abstractmethod(func)
 
 
