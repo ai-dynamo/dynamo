@@ -96,12 +96,15 @@ spec:
         {{- if .Values.dynamo.enableLWS }}
           - --enable-lws
         {{- end }}
-
         command:
         - /manager
         env:
         - name: KUBERNETES_CLUSTER_DOMAIN
           value: {{ quote .Values.kubernetesClusterDomain }}
+        {{if .Values.dynamo.dockerRegistry.useKubernetesSecret}}
+        - name: DOCKER_CONFIG
+          value: /docker/.docker
+        {{end}}
         envFrom:
         - secretRef:
             name: dynamo-deployment-env
@@ -124,6 +127,19 @@ spec:
           10 }}
         securityContext: {{- toYaml .Values.controllerManager.manager.containerSecurityContext
           | nindent 10 }}
+      {{if .Values.dynamo.dockerRegistry.useKubernetesSecret}}
+        volumeMounts:
+        - name: docker-config
+          mountPath: /docker/.docker
+          readOnly: true
+      volumes:
+      - name: docker-config
+        secret:
+          secretName: dynamo-regcred
+          items:
+          - key: .dockerconfigjson
+            path: config.json
+      {{end}}
       securityContext:
         runAsNonRoot: true
       serviceAccountName: {{ include "dynamo-operator.fullname" . }}-controller-manager
