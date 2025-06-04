@@ -75,7 +75,7 @@ RUN apt-get update -y && \
 # These headers are missing with the hpcx installer, required
 # by UCX to find RDMA devices
 RUN apt-get update -y && \
-    apt-get install -y   \
+    apt-get install -y --no-install-recommends \
     --reinstall libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
     libnuma-dev librdmacm-dev ibverbs-providers
 

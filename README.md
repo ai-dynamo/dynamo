@@ -71,8 +71,8 @@ Notes about builds for specific frameworks:
 - For specific details on the `--framework vllm` build, see [here](examples/llm/README.md).
 - For specific details on the `--framework tensorrtllm` build, see [here](examples/tensorrt_llm/README.md).
 
-Notes about cloud environments:
-- If deploying Dynamo in AWS then make sure to build container with EFA support using the --make-efa flag.
+Note about AWS environments:
+- If deploying Dynamo in AWS, make sure to build the container with EFA support using the `--make-efa` flag.
 
 After building, you can use this image by setting the `DYNAMO_IMAGE` environment variable to point to your built image:
 ```bash

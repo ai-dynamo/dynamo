@@ -507,7 +507,7 @@ if [  ! -z ${RELEASE_BUILD} ]; then
     BUILD_ARGS+=" --build-arg RELEASE_BUILD=${RELEASE_BUILD} "
 fi
 
-if [ ! -z ${NIXL_UCX_REF} ]; then
+if [ -n "${NIXL_UCX_REF}" ]; then
     BUILD_ARGS+=" --build-arg NIXL_UCX_REF=${NIXL_UCX_REF} "
 fi
 
