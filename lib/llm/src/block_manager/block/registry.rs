@@ -212,7 +212,7 @@ impl BlockRegistry {
         }
     }
 
-    pub fn create_publish_handle(
+    fn create_publish_handle(
         token_block: &TokenBlock,
         event_manager: Arc<dyn EventManager>,
     ) -> PublishHandle {

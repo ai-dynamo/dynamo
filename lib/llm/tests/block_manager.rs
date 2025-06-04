@@ -375,18 +375,28 @@ mod tests {
 
     #[allow(unused_imports)]
     use super::llm_kvbm::*;
+    use futures::stream::StreamExt;
+    use std::sync::Arc;
+    use tokio::time::Duration;
+
     use dynamo_llm::block_manager as kvbm;
-    use kvbm::block::BasicMetadata;
 
-    use dynamo_llm::block_manager::block::registry::BlockRegistry;
-    use dynamo_llm::block_manager::NixlOptions;
-    use dynamo_llm::block_manager::{
-        KvBlockManager, KvBlockManagerConfig, KvManagerLayoutConfig, KvManagerModelConfig,
+    use dynamo_llm::tokens::{TokenBlockSequence, Tokens};
+    use dynamo_runtime::{
+        traits::events::{EventPublisher, EventSubscriber},
+        DistributedRuntime, Runtime,
     };
-    use dynamo_runtime::{DistributedRuntime, Runtime};
+    use kvbm::{
+        block::registry::BlockRegistry,
+        block::state::CompleteState,
+        block::BlockState,
+        block::GlobalRegistry,
+        events::EventManager,
+        storage::{DeviceAllocator, DiskAllocator, PinnedAllocator},
+        KvBlockManagerConfig, KvManagerLayoutConfig, KvManagerModelConfig, NixlOptions,
+        ReferenceBlockManager,
+    };
 
-    use dynamo_llm::block_manager::events::EventManager;
-    use dynamo_llm::block_manager::storage::{DeviceAllocator, DiskAllocator, PinnedAllocator};
     use dynamo_llm::kv_router::{
         indexer::RouterEvent,
         protocols::{
@@ -394,13 +404,6 @@ mod tests {
             KvCacheStoreData, KvCacheStoredBlockData, LocalBlockHash,
         },
     };
-    use dynamo_llm::tokens::{TokenBlockSequence, Tokens};
-    use dynamo_runtime::traits::events::{EventPublisher, EventSubscriber};
-    use futures::stream::StreamExt;
-    use std::sync::Arc;
-    use tokio::time::Duration;
-
-    pub type ReferenceBlockManager = KvBlockManager<BasicMetadata>;
 
     fn create_sequence() -> TokenBlockSequence {
         let tokens = Tokens::from(vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
@@ -523,161 +526,6 @@ mod tests {
 
         // Run the async function in the runtime
         let _block_manager = rt.block_on(async { create_dynamo_block_manager().await });
-    }
-
-    #[tokio::test]
-    async fn test_dynamo_event_manager_drop() {
-        dynamo_runtime::logging::init();
-        let sequence = create_sequence();
-        let (kvbm_component, rt) = setup_kvbm_component(Duration::from_secs(10), 1).await;
-        let mut subscriber = kvbm_component
-            .namespace()
-            .subscribe(KV_EVENT_SUBJECT.to_string())
-            .await
-            .unwrap();
-        let manager = Arc::new(DynamoEventManager::new(kvbm_component));
-        let event_manager: Arc<dyn EventManager> = manager;
-
-        // Create a Vec of publish_handles
-        let publish_handles: Vec<_> = sequence
-            .blocks()
-            .iter()
-            .map(|block| BlockRegistry::create_publish_handle(block, event_manager.clone()))
-            .collect();
-
-        // No event should have been triggered yet
-        let timeout =
-            tokio::time::timeout(std::time::Duration::from_millis(100), subscriber.next()).await;
-        assert!(
-            timeout.is_err(),
-            "Unexpected event triggered before dropping publish_handles"
-        );
-
-        drop(publish_handles);
-
-        let expected_events = sequence.blocks().len() * 2; // 2 events per handle
-        let mut event_count = 0;
-        let timeout = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while let Some(msg) = subscriber.next().await {
-                let _received = String::from_utf8(msg.payload.to_vec())
-                    .expect("Failed to decode message payload");
-                event_count += 1;
-
-                if event_count == expected_events {
-                    break;
-                }
-            }
-        })
-        .await;
-
-        if timeout.is_err() {
-            panic!("Test timed out while waiting for events");
-        }
-
-        assert_eq!(
-            event_count, expected_events,
-            "Expected {} events to be triggered",
-            expected_events
-        );
-
-        let timeout =
-            tokio::time::timeout(std::time::Duration::from_millis(100), subscriber.next()).await;
-        assert!(
-            timeout.is_err(),
-            "Unexpected event received after the expected events"
-        );
-        rt.shutdown();
-    }
-
-    #[tokio::test]
-    async fn test_mock_event_manager_publisher_multiple_handles() {
-        dynamo_runtime::logging::init();
-        let sequence = create_sequence();
-        let rt = Runtime::from_current().unwrap();
-        let dtr = DistributedRuntime::from_settings(rt.clone()).await.unwrap();
-        let namespace_name = "test_event_manager_publisher".to_string();
-        let ns = dtr.namespace(namespace_name).unwrap();
-        let kvbm_component = KVBMDynamoRuntimeComponent::new(
-            dtr.clone(),
-            "kvbm_component".to_string(),
-            ns.clone(),
-            Duration::from_millis(500),
-            2, /*max_batch_size*/
-        );
-
-        let manager = Arc::new(DynamoEventManager::new(kvbm_component.clone()));
-        let mut publisher = manager.publisher();
-        let event_manager: Arc<dyn EventManager> = manager;
-        // Create a subscriber
-        let mut subscriber = ns.subscribe(KV_EVENT_SUBJECT.to_string()).await.unwrap();
-
-        let publish_handle1 =
-            BlockRegistry::create_publish_handle(&sequence.blocks()[0], event_manager.clone());
-        let publish_handle2 =
-            BlockRegistry::create_publish_handle(&sequence.blocks()[1], event_manager.clone());
-
-        // Remove handles before adding to publisher
-        let _reg_handle1 = publish_handle1.remove_handle();
-
-        // Add disarmed handles to publisher
-        publisher.take_handle(publish_handle1);
-
-        publisher.publish();
-
-        let _timeout = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while let Some(msg) = subscriber.next().await {
-                let _received = String::from_utf8(msg.payload.to_vec())
-                    .expect("Failed to decode message payload");
-                break;
-            }
-        })
-        .await;
-
-        let _reg_handle2 = publish_handle2.remove_handle();
-        publisher.take_handle(publish_handle2);
-
-        // No event should have been triggered yet
-        let timeout =
-            tokio::time::timeout(std::time::Duration::from_millis(1000), subscriber.next()).await;
-        assert!(
-            timeout.is_err(),
-            "Unexpected event triggered before dropping publish_handles"
-        );
-
-        drop(publisher);
-
-        let expected_events = 1; // 2 events per handle, but should only get one
-        let mut event_count = 0;
-        let timeout = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-            while let Some(msg) = subscriber.next().await {
-                let _received = String::from_utf8(msg.payload.to_vec())
-                    .expect("Failed to decode message payload");
-                event_count += 1;
-
-                if event_count == expected_events {
-                    break;
-                }
-            }
-        })
-        .await;
-
-        if timeout.is_err() {
-            panic!("Test timed out while waiting for events");
-        }
-
-        assert_eq!(
-            event_count, expected_events,
-            "Expected {} events to be triggered",
-            expected_events
-        );
-
-        let timeout =
-            tokio::time::timeout(std::time::Duration::from_millis(1000), subscriber.next()).await;
-        assert!(
-            timeout.is_err(),
-            "Unexpected event received after the expected events"
-        );
-        rt.shutdown();
     }
 
     #[tokio::test]
@@ -859,6 +707,181 @@ mod tests {
         assert!(
             timeout.is_err(),
             "Should not receive any more events after channel closure"
+        );
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_dynamo_event_manager() {
+        dynamo_runtime::logging::init();
+        let sequence = create_sequence();
+        let (kvbm_component, rt) = setup_kvbm_component(Duration::from_secs(10), 1).await;
+        let mut subscriber = kvbm_component
+            .namespace()
+            .subscribe(KV_EVENT_SUBJECT.to_string())
+            .await
+            .unwrap();
+        let manager = Arc::new(DynamoEventManager::new(kvbm_component));
+        let event_manager: Arc<dyn EventManager> = manager;
+
+        let global_registry = GlobalRegistry::default();
+
+        let mut block_registry =
+            BlockRegistry::new(event_manager, global_registry.clone(), rt.primary().clone());
+
+        // Register a block
+        // Create CompleteState from TokenBlock
+        let complete_state = CompleteState::new(sequence.blocks()[0].clone());
+        let mut block_state = BlockState::Complete(complete_state);
+        let publish_handle = block_registry.register_block(&mut block_state).unwrap();
+
+        // No event should have been triggered yet
+        let timeout =
+            tokio::time::timeout(std::time::Duration::from_millis(100), subscriber.next()).await;
+        assert!(
+            timeout.is_err(),
+            "Unexpected event triggered before dropping publish_handles"
+        );
+
+        // Dropping the publish handle should trigger a `Store` event
+        drop(publish_handle);
+
+        let timeout =
+            tokio::time::timeout(std::time::Duration::from_secs(5), subscriber.next()).await;
+
+        match timeout {
+            Ok(Some(msg)) => {
+                let _received = String::from_utf8(msg.payload.to_vec())
+                    .expect("Failed to decode message payload");
+            }
+            Ok(None) => {
+                panic!("Subscriber channel closed without receiving event");
+            }
+            Err(_) => {
+                panic!("Timeout waiting for remove event");
+            }
+        }
+
+        // Dropping the block state should trigger a `Remove` event
+        drop(block_state);
+
+        let timeout =
+            tokio::time::timeout(std::time::Duration::from_secs(5), subscriber.next()).await;
+
+        match timeout {
+            Ok(Some(msg)) => {
+                let _received = String::from_utf8(msg.payload.to_vec())
+                    .expect("Failed to decode message payload");
+            }
+            Ok(None) => {
+                panic!("Subscriber channel closed without receiving event");
+            }
+            Err(_) => {
+                panic!("Timeout waiting for remove event");
+            }
+        }
+
+        let timeout =
+            tokio::time::timeout(std::time::Duration::from_millis(100), subscriber.next()).await;
+        assert!(
+            timeout.is_err(),
+            "Unexpected event received after the expected events"
+        );
+        rt.shutdown();
+    }
+
+    #[tokio::test]
+    async fn test_dynamo_event_manager_multiple_handles() {
+        dynamo_runtime::logging::init();
+        let sequence = create_sequence();
+        let (kvbm_component, rt) = setup_kvbm_component(Duration::from_secs(10), 1).await;
+        let mut subscriber = kvbm_component
+            .namespace()
+            .subscribe(KV_EVENT_SUBJECT.to_string())
+            .await
+            .unwrap();
+        let manager = Arc::new(DynamoEventManager::new(kvbm_component));
+        let mut publisher = manager.publisher();
+        let event_manager: Arc<dyn EventManager> = manager;
+
+        let global_registry = GlobalRegistry::default();
+
+        let mut block_registry =
+            BlockRegistry::new(event_manager, global_registry.clone(), rt.primary().clone());
+
+        // Register first block
+        let complete_state_1 = CompleteState::new(sequence.blocks()[0].clone());
+        let mut block_state_1 = BlockState::Complete(complete_state_1);
+        let publish_handle_1 = block_registry.register_block(&mut block_state_1).unwrap();
+
+        // Register second block
+        let complete_state_2 = CompleteState::new(sequence.blocks()[1].clone());
+        let mut block_state_2 = BlockState::Complete(complete_state_2);
+        let publish_handle_2 = block_registry.register_block(&mut block_state_2).unwrap();
+        drop(block_state_2);
+        drop(block_state_1);
+
+        // No event should have been triggered yet
+        let timeout =
+            tokio::time::timeout(std::time::Duration::from_millis(100), subscriber.next()).await;
+        assert!(
+            timeout.is_err(),
+            "Unexpected event triggered before dropping publish_handles"
+        );
+
+        publisher.take_handle(publish_handle_1.unwrap());
+        publisher.take_handle(publish_handle_2.unwrap());
+
+        publisher.publish();
+
+        let timeout =
+            tokio::time::timeout(std::time::Duration::from_secs(5), subscriber.next()).await;
+
+        match timeout {
+            Ok(Some(msg)) => {
+                let _received = String::from_utf8(msg.payload.to_vec())
+                    .expect("Failed to decode message payload");
+            }
+            Ok(None) => {
+                panic!("Subscriber channel closed without receiving event");
+            }
+            Err(_) => {
+                panic!("Timeout waiting for remove event");
+            }
+        }
+
+        drop(publisher);
+
+        let expected_events = 2; // 2 events per handle per remove
+        let mut event_count = 0;
+        let timeout = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(msg) = subscriber.next().await {
+                let _received = String::from_utf8(msg.payload.to_vec())
+                    .expect("Failed to decode message payload");
+                event_count += 1;
+
+                if event_count == expected_events {
+                    break;
+                }
+            }
+        })
+        .await;
+
+        if timeout.is_err() {
+            panic!("Test timed out while waiting for events");
+        }
+
+        assert_eq!(
+            event_count, expected_events,
+            "Expected {} events to be triggered",
+            expected_events
+        );
+
+        let timeout =
+            tokio::time::timeout(std::time::Duration::from_millis(1000), subscriber.next()).await;
+        assert!(
+            timeout.is_err(),
+            "Unexpected event received after the expected events"
         );
         rt.shutdown();
     }
