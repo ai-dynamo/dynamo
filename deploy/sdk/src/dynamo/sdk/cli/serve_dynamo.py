@@ -18,10 +18,12 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import inspect
 import json
 import logging
 import os
+import signal
 import typing as t
 from typing import Any
 
@@ -309,6 +311,31 @@ def main(
     async def run_concurrent_workers(tasks):
         await asyncio.gather(*tasks)
 
+    def exit_handler():
+        """Exit handler that runs shutdown hooks before process termination."""
+        if class_instance is not None:
+            logger.info("Running shutdown hooks on exit")
+            try:
+                run_shutdown_hooks(class_instance)
+                logger.info("Shutdown hooks completed successfully")
+            except Exception as e:
+                logger.error(f"Error running shutdown hooks: {e}")
+        else:
+            logger.debug("No class instance available for shutdown hooks")
+
+    # Register the exit handler
+    atexit.register(exit_handler)
+
+    # Also handle signals for graceful shutdown
+    def signal_handler(signum, frame):
+        logger.info(f"Received signal {signum}, initiating graceful shutdown")
+        exit_handler()
+        # Exit the process after running shutdown hooks
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
     worker_tasks = []
 
     uvloop.install()
@@ -328,6 +355,14 @@ def main(
     # Always start the dynamo worker, no reason not to
     worker_tasks.append(dyn_worker())
     asyncio.run(run_concurrent_workers(worker_tasks))
+
+
+def run_shutdown_hooks(class_instance):
+    """Run all shutdown hooks on the class instance."""
+    for name, member in vars(class_instance.__class__).items():
+        if callable(member) and getattr(member, "__dynamo_shutdown_hook__", False):
+            shutdown_func = getattr(class_instance, name)
+            shutdown_func()
 
 
 if __name__ == "__main__":

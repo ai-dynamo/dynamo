@@ -23,13 +23,13 @@ warnings.filterwarnings("ignore", category=UserWarning, message=".*pkg_resources
 # flake8: noqa: E402
 from dynamo.sdk.core.decorators.endpoint import api, endpoint
 from dynamo.sdk.core.lib import DYNAMO_IMAGE, depends, liveness, readiness, service
-from dynamo.sdk.lib.decorators import async_on_shutdown, async_on_start
+from dynamo.sdk.lib.decorators import async_on_start, on_shutdown
 
 dynamo_context: dict[str, Any] = {}
 
 __all__ = [
     "DYNAMO_IMAGE",
-    "async_on_shutdown",
+    "on_shutdown",
     "async_on_start",
     "depends",
     "dynamo_context",

@@ -99,8 +99,8 @@ def async_on_start(func: F) -> F:
     return func
 
 
-def async_on_shutdown(func: F) -> F:
-    """Decorator for async onshutdown functions."""
+def on_shutdown(func: F) -> F:
+    """Decorator for shutdown hook."""
     # Mark the function as a shutdown hook
     setattr(func, "__dynamo_shutdown_hook__", True)
     return func
