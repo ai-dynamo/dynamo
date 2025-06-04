@@ -6,7 +6,7 @@ This document outlines the testing framework for the Dynamo runtime system, incl
 
 ## Directory Structure
 
-```
+```bash
 tests/
 ├── serve/              # E2E tests using dynamo serve
 │   ├── conftest.py     # test fixtures as needed for specific test area
@@ -20,12 +20,12 @@ tests/
 
 Pytest automatically discovers tests based on their naming convention. All test files must follow this pattern:
 
-```
+```bash
 test_<component_or_flow>.py
 ```
 
 Where:
-- `component_or_flow`: The component or flow being tested (e.g.,planner, kv_router)
+- `component_or_flow`: The component or flow being tested (e.g., planner, kv_router)
   - For e2e tests, this could be the API or simply "dynamo"
 
 ## Running Tests
