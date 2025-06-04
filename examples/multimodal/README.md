@@ -195,10 +195,10 @@ DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk
 # Deploy to Kubernetes
 export DEPLOYMENT_NAME=multimodal-agg
 # For aggregated serving:
-dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
+dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
 # For disaggregated serving:
 # export DEPLOYMENT_NAME=multimodal-disagg
-# dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/disagg.yaml
+# dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/disagg.yaml
 ```
 
 **Note**: To avoid rate limiting from unauthenticated requests to HuggingFace (HF), you can provide your `HF_TOKEN` as a secret in your deployment. See the [operator deployment guide](../../docs/guides/dynamo_deploy/operator_deployment.md#referencing-secrets-in-your-deployment) for instructions on referencing secrets like `HF_TOKEN` in your deployment configuration.
