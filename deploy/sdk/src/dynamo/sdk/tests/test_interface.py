@@ -1,11 +1,11 @@
 import pytest
 
-from dynamo.sdk.lib.decorators import (
+from dynamo.sdk import (
     AbstractDynamoService,
     abstract_dynamo_endpoint,
     endpoint,
+    service,
 )
-from dynamo.sdk.lib.service import service
 
 
 class TestInterface(AbstractDynamoService):

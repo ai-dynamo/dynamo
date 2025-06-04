@@ -14,9 +14,10 @@
 #  limitations under the License.
 #  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
 
+import abc
 import asyncio
-from functools import wraps
 import typing as t
+from functools import wraps
 from typing import Any, Callable, Dict, List, Optional, TypeVar, get_type_hints
 
 from dynamo.runtime import DistributedRuntime
@@ -25,8 +26,9 @@ from dynamo.sdk.core.protocol.interface import (
     DynamoTransport,
     ServiceInterface,
 )
-import abc
+
 T = TypeVar("T")
+
 
 class DynamoEndpoint(DynamoEndpointInterface):
     """
@@ -71,11 +73,13 @@ class DynamoEndpoint(DynamoEndpointInterface):
     def transports(self) -> List[DynamoTransport]:
         return self._transports
 
+
 # Decorator for abstract dynamo endpoints
 def abstract_dynamo_endpoint(func: t.Callable) -> t.Callable:
     """Mark an abstract endpoint in an interface."""
     func.__is_abstract_dynamo__ = True
     return abc.abstractmethod(func)
+
 
 def endpoint(
     name: Optional[str] = None,

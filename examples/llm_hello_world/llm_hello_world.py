@@ -25,9 +25,9 @@ from dynamo.sdk import (
     DYNAMO_IMAGE,
     AbstractDynamoService,
     abstract_dynamo_endpoint,
+    api,
     depends,
     endpoint,
-    api,
     service,
 )
 
@@ -142,6 +142,7 @@ class Frontend:
     @api()
     async def generate(self, request: ChatRequest):
         print(f"Received request: {request}")
+
         async def content_generator():
             async for response in self.router.generate(request.model_dump_json()):
                 print(f"Received response: {response}")
@@ -154,9 +155,10 @@ class Frontend:
             headers={
                 "Cache-Control": "no-cache",
                 "Connection": "keep-alive",
-                "X-Accel-Buffering": "no"
-            }
+                "X-Accel-Buffering": "no",
+            },
         )
+
 
 # Mix and match pipelines (Tests)
 Frontend.link(SlowRouter).link(TRTLLMWorker)

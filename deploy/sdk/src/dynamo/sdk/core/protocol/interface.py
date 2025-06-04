@@ -14,6 +14,7 @@
 #  limitations under the License.
 #  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
 
+import abc
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from enum import Enum, auto
@@ -27,12 +28,13 @@ from dynamo.sdk.core.protocol.deployment import Env
 T = TypeVar("T", bound=object)
 
 T = TypeVar("T", bound=object)
-import abc
+
 
 class AbstractDynamoService(abc.ABC):
     """Base class for Dynamo service interfaces."""
 
     pass
+
 
 class LeaseConfig(BaseModel):
     """Configuration for custom dynamo leases"""
@@ -171,7 +173,9 @@ class ServiceInterface(Generic[T], ABC):
             raise ValueError(f"link must be passed a Service, got {type(next_service)}")
 
         # Get all the deps of the service
-        inner_deps = [(dep.on.inner, dep_key, dep) for dep_key, dep in self.dependencies.items()]
+        inner_deps = [
+            (dep.on.inner, dep_key, dep) for dep_key, dep in self.dependencies.items()
+        ]
 
         # Get the inner class of the passed in service
         curr_inner = next_service.inner
@@ -182,7 +186,6 @@ class ServiceInterface(Generic[T], ABC):
             if issubclass(curr_inner, dep_inner):
                 matching_deps.append((dep_inner, dep_key, original_dep))
 
-        
         if not matching_deps:
             raise ValueError(
                 f"{curr_inner.__name__} does not fulfill any dependencies required by {self.name}"
@@ -262,7 +265,9 @@ class ServiceInterface(Generic[T], ABC):
 
         # For AbstractDynamoService, check implementations
         abstract_endpoints = _get_abstract_dynamo_endpoints(self.inner)
-        if not abstract_endpoints: # No abstract endpoints to implement, so it's servable
+        if (
+            not abstract_endpoints
+        ):  # No abstract endpoints to implement, so it's servable
             return True
         return all(
             _check_dynamo_endpoint_implemented(self.inner, name)

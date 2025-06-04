@@ -34,7 +34,6 @@ from dynamo.sdk.core.protocol.interface import (
     DeploymentTarget,
     DynamoEndpointInterface,
     DynamoTransport,
-    LinkedServices,
     ServiceConfig,
     ServiceInterface,
 )
@@ -166,7 +165,7 @@ class LocalDependency(DependencyInterface[T]):
     @property
     def on(self) -> Optional[ServiceInterface[T]]:
         return self._on_service
-    
+
     @on.setter
     def on(self, value: Optional[ServiceInterface[T]]) -> None:
         self._on_service = value

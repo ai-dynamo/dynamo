@@ -30,7 +30,6 @@ from dynamo.sdk.core.protocol.interface import (
     DynamoConfig,
     DynamoEndpointInterface,
     DynamoTransport,
-    LinkedServices,
     ServiceConfig,
     ServiceInterface,
 )

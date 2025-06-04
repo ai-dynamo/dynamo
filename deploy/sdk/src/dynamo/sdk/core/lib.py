@@ -16,20 +16,18 @@
 
 import logging
 import os
-from typing import Any, Dict, Optional, Type, TypeVar, Union, Set, List, Tuple
+from typing import Any, Callable, Dict, Optional, Type, TypeVar, Union
 
 from fastapi import FastAPI
 
 from dynamo.sdk.core.protocol.interface import (
+    AbstractDynamoService,
     DependencyInterface,
     DeploymentTarget,
+    DynamoConfig,
     ServiceConfig,
     ServiceInterface,
-    AbstractDynamoService,
-    validate_dynamo_interfaces,
-    DynamoConfig,
 )
-from dynamo.sdk.core.decorators.endpoint import DynamoEndpoint
 
 G = TypeVar("G", bound=Callable[..., Any])
 
@@ -118,7 +116,8 @@ def service(
 
 
 def depends(
-    on: Optional[Union[ServiceInterface[G], Type[AbstractDynamoService]]] = None, **kwargs: Any
+    on: Optional[Union[ServiceInterface[G], Type[AbstractDynamoService]]] = None,
+    **kwargs: Any,
 ) -> DependencyInterface[G]:
     """Create a dependency using the current service provider.
 
