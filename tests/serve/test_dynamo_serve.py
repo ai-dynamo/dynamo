@@ -203,7 +203,7 @@ def deployment_graph_test(request):
 
 @pytest.mark.e2e
 @pytest.mark.slow
-def test_serve_deployment(deployment_graph_test, request, runtime_services):
+def test_serve_deployment(deployment_graph_test, request, _runtime_services):
     """
     Test dynamo serve deployments with different graph configurations.
     """
