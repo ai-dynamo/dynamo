@@ -182,7 +182,7 @@ class ManagedProcess:
                         self._logger.info(f"SUCCESS: Check URL:{url}")
                         return time.time() - start_time
             except requests.RequestException as e:
-                self._logger.warn(f"URL check failed: {e}")
+                self._logger.warning(f"URL check failed: {e}")
             time.sleep(sleep)
 
         self._logger.error(f"FAILED: Check URL: {url}")
