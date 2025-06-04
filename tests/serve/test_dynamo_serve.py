@@ -249,6 +249,11 @@ def test_serve_deployment(deployment_graph_test, request, runtime_services):
                 )
             else:
                 break
+        else:
+            pytest.fail(
+                f"Service did not return a successful response within "
+                f"{deployment_graph.timeout} s"
+            )
 
         content = deployment_graph.response_handler(response)
 
