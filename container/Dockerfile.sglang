@@ -136,8 +136,9 @@ RUN if [ "$ARCH" = "arm64" ]; then \
 
 # Install sglang
 # Once either 0.4.6post6 or 0.4.7 is released, we can switch back to using the published version
-# This commit references a fix for DP attention and NIXL https://github.com/sgl-project/sglang/pull/6473
-ARG SGLANG_COMMIT="e806f708c954020bda7d1cc98035a44fd6a4eb96"
+# This commit references multiple perf fixes for DP attention and NIXL https://github.com/sgl-project/sglang/pull/6780
+# 6/2(ishan) - moving to ToT for performance purposes
+ARG SGLANG_COMMIT="6376b632eb4daef306b89ede0eabdcb89ddff728"
 RUN --mount=type=cache,target=/root/.cache/uv \
     git clone https://github.com/sgl-project/sglang.git && \
     cd sglang && \

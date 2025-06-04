@@ -118,6 +118,9 @@ where
             data,
             id: value.id,
             event: value.event,
+            chunk_tokens: None,
+            input_tokens: None,
+            output_tokens: None,
             comment: value.comments,
         })
     }
