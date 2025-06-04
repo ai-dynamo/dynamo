@@ -166,8 +166,6 @@ class DynamoServeProcess(ManagedProcess):
         if "multimodal" in graph.directory:
             health_check_urls = []
 
-        print(request)
-        print(request.node.name)
         super().__init__(
             command=command,
             timeout=timeout,
@@ -211,7 +209,7 @@ def test_serve_deployment(deployment_graph_test, request, runtime_services):
     """
 
     logger = logging.getLogger(request.node.name)
-    logging.info("Starting test_deployment")
+    logger.info("Starting test_deployment")
 
     deployment_graph, payload = deployment_graph_test
 
@@ -224,7 +222,7 @@ def test_serve_deployment(deployment_graph_test, request, runtime_services):
                 response = requests.post(url, json=payload.payload, timeout=300)
             except Exception as e:
                 # pytest.fail(f"Request failed: {str(e)}")
-                print(e)
+                logger.warning(e)
                 time.sleep(5)
                 continue
             logger.info(f"Response{response}")
