@@ -25,8 +25,7 @@ test_<component_or_flow>.py
 ```
 
 Where:
-- `component_or_flow`: The component or flow being tested (e.g.,
-  planner, kv_router)
+- `component_or_flow`: The component or flow being tested (e.g.,planner, kv_router)
   - For e2e tests, this could be the API or simply "dynamo"
 
 ## Running Tests
