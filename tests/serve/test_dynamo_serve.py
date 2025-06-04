@@ -138,6 +138,17 @@ deployment_graphs = {
         ),
         multimodal_payload,
     ),
+    "vllm_v1_agg": (
+        DeploymentGraph(
+            "graphs.agg:Frontend",
+            "configs/agg.yaml",
+            "/workspace/examples/vllm_v1",
+            "v1/chat/completions",
+            completions_response_handler,
+            marks=[pytest.mark.gpu_1, pytest.mark.vllm],
+        ),
+        text_payload,
+    ),
 }
 
 
@@ -177,8 +188,8 @@ class DynamoServeProcess(ManagedProcess):
 
 @pytest.fixture(
     params=[
-        pytest.param("agg", marks=[pytest.mark.vllm, pytest.mark.gpu]),
-        pytest.param("agg_router", marks=[pytest.mark.vllm, pytest.mark.gpu]),
+        pytest.param("agg", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
+        pytest.param("agg_router", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
         pytest.param("disagg", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
         pytest.param("disagg_router", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
         pytest.param("multimodal_agg", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
@@ -200,7 +211,7 @@ def test_serve_deployment(deployment_graph_test, request, runtime_services):
     Test dynamo serve deployments with different graph configurations.
     """
 
-    logging.getLogger("test_serve_deployment")
+    logger = logging.getLogger(request.node.name)
     logging.info("Starting test_deployment")
 
     deployment_graph, payload = deployment_graph_test
@@ -217,10 +228,17 @@ def test_serve_deployment(deployment_graph_test, request, runtime_services):
                 print(e)
                 time.sleep(5)
                 continue
-            logging.info(f"Response{response}")
+            logger.info(f"Response{response}")
             if (
                 response.status_code == 500
                 and "no instances" in response.json()["error"]
+            ):
+                time.sleep(5)
+                continue
+
+            if (
+                response.status_code == 404
+                and "Model not found" in response.json()["error"]
             ):
                 time.sleep(5)
                 continue
@@ -235,7 +253,10 @@ def test_serve_deployment(deployment_graph_test, request, runtime_services):
 
         content = deployment_graph.response_handler(response)
 
+        logger.info(f"Received Content: {content}")
+
         # Check for expected responses
         assert content, "Empty response content"
+
         for expected in payload.expected_response:
             assert expected in content, f"Expected '{expected}' not found in response"

@@ -21,11 +21,12 @@ tests/
 Pytest automatically discovers tests based on their naming convention. All test files must follow this pattern:
 
 ```
-test_<component>.py
+test_<component_or_flow>.py
 ```
 
 Where:
-- `component`: The component being tested (e.g., planner, kv_router)
+- `component_or_flow`: The component or flow being tested (e.g.,
+  planner, kv_router)
   - For e2e tests, this could be the API or simply "dynamo"
 
 ## Running Tests
@@ -54,20 +55,6 @@ pytest -s
 
 Markers help control which tests run under different conditions. Add these decorators to your test functions:
 
-```
-markers = [
-    "pre_merge: marks tests to run before merging",
-    "nightly: marks tests to run nightly",
-    "weekly: marks tests to run weekly",
-    "gpu_1: marks tests to run on GPU",
-    "gpu_2: marks tests to run on 2GPUs",
-    "e2e: marks tests as end-to-end tests",
-    "vllm: marks tests as requiring vllm",
-    "sglang: marks tests as requiring sglang",
-    "slow: marks tests as known to be slow"
-]
-```
-
 ### Frequency-based markers
 - `@pytest.mark.nightly` - Tests run nightly
 - `@pytest.mark.weekly` - Tests run weekly
@@ -82,6 +69,8 @@ markers = [
 
 ### Component-specific markers
 - `@pytest.mark.vllm` - Framework tests
+- `@pytest.mark.sglang` - Framework tests
+- `@pytest.mark.tensorrtllm` - Framework tests
 - `@pytest.mark.planner` - Planner component tests
 - `@pytest.mark.kv_router` - KV Router component tests
 - etc.
@@ -93,11 +82,10 @@ markers = [
 
 ## Environment Setup
 
-### Requirements
-- etcd service
-- nats-server service
-- Python dependencies: pytest, requests, transformers, huggingface_hub
-- For GPU tests: CUDA-compatible GPU with appropriate drivers
+Tests are designed to run in the appropriate framework container built
+via ```./container/build.sh --framework X``` and run via
+```./container/run.sh --mount-workspace -it -- pytest```.
+
 
 ### Environment Variables
 - `HF_TOKEN` - Your HuggingFace API token to avoid rate limits
@@ -109,14 +97,3 @@ markers = [
 The tests will automatically use a local cache at `~/.cache/huggingface` to avoid
 repeated downloads of model files. This cache is shared across test runs to improve performance.
 
-## Troubleshooting
-
-Common issues and solutions:
-
-1. **"Model registration timed out"** - Increase the timeout in `conftest.py` or ensure your GPU has enough memory.
-
-2. **"HTTP server failed to start"** - Check that no other services are using the same port.
-
-3. **"Service health check timed out"** - Verify that the component registration order matches test expectations.
-
-4. **"429 Too Many Requests"** - You're hitting HuggingFace rate limits. Set the `HF_TOKEN` environment variable or try again later.
