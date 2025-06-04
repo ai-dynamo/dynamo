@@ -138,7 +138,7 @@ class ManagedProcess:
         """Remove a directory."""
         try:
             shutil.rmtree(path, ignore_errors=True)
-        except Exception as e:
+        except (OSError, IOError) as e:
             self._logger.warning(f"Warning: Failed to remove directory {path}: {e}")
 
     def _check_ports(self, timeout):
