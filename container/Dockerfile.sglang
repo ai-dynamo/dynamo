@@ -10,7 +10,6 @@ ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
-ARG GENAI_PERF_VERSION=0.0.13
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -363,11 +362,6 @@ ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/
 ########## Development Image ###########
 ########################################
 FROM ci_minimum AS dev
-
-ARG GENAI_PERF_VERSION
-
-# Install genai-perf for benchmarking
-RUN uv pip install genai-perf==$GENAI_PERF_VERSION
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
