@@ -46,7 +46,7 @@ use crate::protocols::{
     common::{SamplingOptionsProvider, StopConditionsProvider},
     openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-        completions::{CompletionRequest, CompletionResponse},
+        completions::{CompletionResponse, NvCreateCompletionRequest},
         nvext::NvExtProvider,
         DeltaGeneratorExt,
     },
@@ -341,7 +341,7 @@ impl
 #[async_trait]
 impl
     Operator<
-        SingleIn<CompletionRequest>,
+        SingleIn<NvCreateCompletionRequest>,
         ManyOut<Annotated<CompletionResponse>>,
         SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<BackendOutput>>,
@@ -349,7 +349,7 @@ impl
 {
     async fn generate(
         &self,
-        request: SingleIn<CompletionRequest>,
+        request: SingleIn<NvCreateCompletionRequest>,
         next: Arc<
             dyn AsyncEngine<
                 SingleIn<PreprocessedRequest>,
