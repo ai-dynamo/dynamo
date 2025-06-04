@@ -90,7 +90,7 @@ class DynamoEndpoint(DynamoEndpointInterface):
 
 
 # Decorator for abstract dynamo endpoints
-def abstract_dynamo_endpoint(func: t.Callable) -> t.Callable:
+def abstract_endpoint(func: t.Callable) -> t.Callable:
     """Mark an abstract endpoint in an interface."""
     func.__is_abstract_dynamo__ = True  # type: ignore
     return abc.abstractmethod(func)

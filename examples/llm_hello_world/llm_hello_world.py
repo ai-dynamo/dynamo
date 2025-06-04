@@ -24,7 +24,7 @@ from llm_types import ChatRequest
 from dynamo.sdk import (
     DYNAMO_IMAGE,
     AbstractDynamoService,
-    abstract_dynamo_endpoint,
+    abstract_endpoint,
     api,
     depends,
     endpoint,
@@ -58,7 +58,7 @@ Users/Clients (HTTP)
 class WorkerInterface(AbstractDynamoService):
     """Interface for LLM workers."""
 
-    @abstract_dynamo_endpoint  # enforces that the service implements the method, but also that it is properly decorated
+    @abstract_endpoint  # enforces that the service implements the method, but also that it is properly decorated
     async def generate(self, request: ChatRequest):
         pass
 
@@ -66,7 +66,7 @@ class WorkerInterface(AbstractDynamoService):
 class RouterInterface(AbstractDynamoService):
     """Interface for request routers."""
 
-    @abstract_dynamo_endpoint
+    @abstract_endpoint
     async def generate(self, request: ChatRequest):
         pass
 

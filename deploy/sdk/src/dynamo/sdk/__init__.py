@@ -24,7 +24,7 @@ warnings.filterwarnings("ignore", category=UserWarning, message=".*pkg_resources
 from bentoml import on_shutdown as async_on_shutdown
 
 # flake8: noqa: E402
-from dynamo.sdk.core.decorators.endpoint import abstract_dynamo_endpoint, api, endpoint
+from dynamo.sdk.core.decorators.endpoint import abstract_endpoint, api, endpoint
 from dynamo.sdk.core.lib import DYNAMO_IMAGE, depends, liveness, readiness, service
 from dynamo.sdk.core.protocol.interface import AbstractDynamoService
 from dynamo.sdk.lib.decorators import async_on_start
@@ -41,7 +41,7 @@ __all__ = [
     "api",
     "service",
     "AbstractDynamoService",
-    "abstract_dynamo_endpoint",
+    "abstract_endpoint",
     "liveness",
     "readiness",
 ]

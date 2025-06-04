@@ -18,7 +18,7 @@ Here's a simple example:
 ```python
 # Define what we need (the interface)
 class StorageInterface(AbstractDynamoService):
-    @abstract_dynamo_endpoint
+    @abstract_endpoint
     async def save(self, data: str):
         pass
 
@@ -75,11 +75,11 @@ This separation of concerns is what makes the system so powerful - services can 
 Interfaces in Dynamo are the foundation of your service architecture. They define the contracts that your services must follow, ensuring type safety and clear communication between components. Here's how to define an interface:
 
 ```python
-from dynamo.sdk.lib.decorators import abstract_dynamo_endpoint
+from dynamo.sdk.lib.decorators import abstract_endpoint
 from dynamo.sdk.lib.service import AbstractDynamoService
 
 class WorkerInterface(AbstractDynamoService):
-    @abstract_dynamo_endpoint
+    @abstract_endpoint
     async def generate(self, request: GenerateRequest):
         """Generate text based on the request.
 
@@ -92,13 +92,13 @@ class WorkerInterface(AbstractDynamoService):
         pass
 ```
 
-By inheriting from `AbstractDynamoService`, you're telling Dynamo that this is an interface that other services can implement. The `@abstract_dynamo_endpoint` decorator marks methods that must be implemented by any concrete service that uses this interface.
+By inheriting from `AbstractDynamoService`, you're telling Dynamo that this is an interface that other services can implement. The `@abstract_endpoint` decorator marks methods that must be implemented by any concrete service that uses this interface.
 
 You can also include non-abstract methods in your interfaces to provide default implementations:
 
 ```python
 class WorkerInterface(AbstractDynamoService):
-    @abstract_dynamo_endpoint
+    @abstract_endpoint
     async def generate(self, request: GenerateRequest):
         pass
 
@@ -142,12 +142,12 @@ For example:
 ```python
 # Define interfaces
 class WorkerInterface(AbstractDynamoService):
-    @abstract_dynamo_endpoint
+    @abstract_endpoint
     async def generate(self, request: GenerateRequest):
         pass
 
 class RouterInterface(AbstractDynamoService):
-    @abstract_dynamo_endpoint
+    @abstract_endpoint
     async def route(self, request: RouteRequest):
         pass
 
@@ -183,20 +183,20 @@ This automatic detection means you don't need to explicitly specify which interf
 Let's put it all together in a complete example. We'll create a simple LLM pipeline with different worker implementations and routing strategies:
 
 ```python
-from dynamo.sdk.lib.decorators import abstract_dynamo_endpoint, dynamo_endpoint, service
+from dynamo.sdk.lib.decorators import abstract_endpoint, dynamo_endpoint, service
 from dynamo.sdk.lib.service import AbstractDynamoService
 from dynamo.sdk.lib.dependency import depends
 from typing import AsyncGenerator
 
 # Define our interfaces
 class WorkerInterface(AbstractDynamoService):
-    @abstract_dynamo_endpoint
+    @abstract_endpoint
     async def generate(self, request: GenerateRequest) -> AsyncGenerator[str, None]:
         """Generate text based on the request."""
         pass
 
 class RouterInterface(AbstractDynamoService):
-    @abstract_dynamo_endpoint
+    @abstract_endpoint
     async def route(self, request: RouteRequest) -> AsyncGenerator[str, None]:
         """Route requests to appropriate workers."""
         pass

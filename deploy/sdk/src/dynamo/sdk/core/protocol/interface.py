@@ -298,7 +298,7 @@ def _check_dynamo_endpoint_implemented(cls: type, name: str) -> bool:
 
 def validate_dynamo_interfaces(cls: type) -> None:
     """
-    Validate that *cls* fully implements every @abstract_dynamo_endpoint
+    Validate that *cls* fully implements every @abstract_endpoint
     declared in its ancestors and that each implementation is
     decorated with @dynamo_endpoint.
     """
