@@ -605,4 +605,19 @@ mod tests {
         );
         assert!(handle.join().await.is_err());
     }
+
+    #[tokio::test]
+    #[should_panic]
+    async fn test_task_detach() {
+        // Dropping without detaching should panic
+        let parent_token = CancellationToken::new();
+        let _handle = CriticalTaskExecutionHandle::new(
+            |_cancel_token| async move { Ok(()) },
+            parent_token,
+            "test-detach-task",
+        )
+        .unwrap();
+
+        // Dropping without detaching should panic
+    }
 }
