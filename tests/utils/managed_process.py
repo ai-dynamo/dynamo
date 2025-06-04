@@ -139,7 +139,7 @@ class ManagedProcess:
         try:
             shutil.rmtree(path, ignore_errors=True)
         except Exception as e:
-            self._logger.warn(f"Warning: Failed to remove directory {path}: {e}")
+            self._logger.warning(f"Warning: Failed to remove directory {path}: {e}")
 
     def _check_ports(self, timeout):
         time_taken = 0
@@ -203,11 +203,11 @@ class ManagedProcess:
             self._logger.info(f"Terminating {process}")
             process.terminate()
         except psutil.AccessDenied:
-            self._logger.warn(f"Access denied for PID {process.pid}")
+            self._logger.warning(f"Access denied for PID {process.pid}")
         except psutil.NoSuchProcess:
-            self._logger.warn(f"PID {process.pid} no longer exists")
+            self._logger.warning(f"PID {process.pid} no longer exists")
         except psutil.TimeoutExpired:
-            self._logger.warn(
+            self._logger.warning(
                 f"PID {process.pid} did not terminate in timeout, killing"
             )
             process.kill()
