@@ -117,7 +117,7 @@ class ManagedProcess:
             )
 
         else:
-            with open(self._log_path, "w") as f:
+            with open(self._log_path, "w", encoding="utf-8") as f:
                 self.proc = subprocess.Popen(
                     self.command,
                     env=self.env or os.environ.copy(),
