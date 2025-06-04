@@ -218,11 +218,12 @@ apiVersion: data.fluid.io/v1alpha1
 kind: Dataset
 metadata:
   name: llama-3-3-70b-instruct-model
+  namespace: my-namespace
 spec:
   mounts:
     - mountPoint: s3://hf-models/meta-llama/Llama-3.3-70B-Instruct
       options:
-        alluxio.underfs.s3.endpoint: http://jsm2-minio:9000
+        alluxio.underfs.s3.endpoint: http://minio:9000
         alluxio.underfs.s3.disable.dns.buckets: "true"
         aws.secretKey: "minioadmin"
         aws.accessKeyId: "minioadmin"
@@ -236,6 +237,7 @@ apiVersion: data.fluid.io/v1alpha1
 kind: AlluxioRuntime
 metadata:
   name: llama-3-3-70b-instruct-model
+  namespace: my-namespace
 spec:
   replicas: 1
   properties:
@@ -258,7 +260,7 @@ metadata:
 spec:
   dataset:
     name: llama-3-3-70b-instruct-model
-    namespace: jsm2
+    namespace: my-namespace
   loadMetadata: true
   target:
     - path: "/"
@@ -301,7 +303,7 @@ spec:
             requiredDuringSchedulingIgnoredDuringExecution:
               nodeSelectorTerms:
                 - matchExpressions:
-                  - key: fluid.io/s-alluxio-jsm2-llama-3-3-70b-instruct-model
+                  - key: fluid.io/s-alluxio-my-namespace-llama-3-3-70b-instruct-model
                     operator: In
                     values:
                       - "true"
