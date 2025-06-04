@@ -436,9 +436,7 @@ func updateDynDeploymentConfig(dynamoDeploymentComponent *v1alpha1.DynamoCompone
 			}
 			// Safely navigate and update the config
 			if serviceConfig, ok := config[dynamoDeploymentComponent.Spec.ServiceName].(map[string]any); ok {
-				if _, portExists := serviceConfig["port"]; portExists {
-					serviceConfig["port"] = newPort
-				}
+				serviceConfig["port"] = newPort
 			}
 			// Marshal back to JSON string
 			updated, err := json.Marshal(config)
