@@ -200,7 +200,6 @@ def deployment_graph_test(request):
     """
     Fixture that provides different deployment graph test configurations.
     """
-    global deployment_graphs
     return deployment_graphs[request.param]
 
 
