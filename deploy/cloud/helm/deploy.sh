@@ -41,7 +41,7 @@ export ENABLE_LWS="${ENABLE_LWS:=false}"
 
 # Add command line options
 INTERACTIVE=false
-
+INSTALL_CRDS=false
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
   key="$1"
@@ -50,11 +50,16 @@ while [[ $# -gt 0 ]]; do
       INTERACTIVE=true
       shift
       ;;
+    --crds)
+      INSTALL_CRDS=true
+      shift
+      ;;
     --help)
       echo "Usage: $0 [options]"
       echo "Options:"
       echo "  --interactive       Run in interactive mode"
       echo "  --help              Show this help message"
+      echo "  --crds              Also install the CRDs"
       exit 0
       ;;
     *)
@@ -80,10 +85,16 @@ fi
 if [[ -n "${DOCKER_USERNAME:-}" && -n "${DOCKER_PASSWORD:-}" ]]; then
   echo "Creating/updating Docker registry secret '$DOCKER_SECRET_NAME' in namespace '$NAMESPACE'..."
 
+  # Transform docker.io URLs to index.docker.io/v1/
+  DOCKER_SERVER_FOR_SECRET="$DOCKER_SERVER"
+  if [[ "$DOCKER_SERVER" == "docker.io" || "$DOCKER_SERVER" == "docker.io/"* ]]; then
+    DOCKER_SERVER_FOR_SECRET="https://index.docker.io/v1/"
+  fi
+
   kubectl create secret docker-registry "$DOCKER_SECRET_NAME" \
     --docker-username="$DOCKER_USERNAME" \
     --docker-password="$DOCKER_PASSWORD" \
-    --docker-server="$DOCKER_SERVER" \
+    --docker-server="$DOCKER_SERVER_FOR_SECRET" \
     --namespace "$NAMESPACE" \
     --dry-run=client -o yaml | kubectl apply -f -
 else
@@ -115,15 +126,6 @@ retry_command "$HELM_CMD repo add bitnami https://charts.bitnami.com/bitnami" 5 
 retry_command "$HELM_CMD repo add minio https://charts.min.io/" 5 5 && \
 retry_command "$HELM_CMD repo update" 5 5
 
-cd platform
-cd components/operator
-retry_command "$HELM_CMD dependency update" 5 5
-cd ../..
-cd components/api-store
-retry_command "$HELM_CMD dependency update" 5 5
-cd ../..
-retry_command "$HELM_CMD dep update" 7 5
-cd ..
 
 # Generate the values file
 echo "Generating values file with:"
@@ -143,6 +145,7 @@ echo "INGRESS_CLASS: $INGRESS_CLASS"
 echo "ISTIO_GATEWAY: $ISTIO_GATEWAY"
 echo "DYNAMO_INGRESS_SUFFIX: $DYNAMO_INGRESS_SUFFIX"
 echo "VIRTUAL_SERVICE_SUPPORTS_HTTPS: $VIRTUAL_SERVICE_SUPPORTS_HTTPS"
+echo "INSTALL_CRDS: $INSTALL_CRDS"
 
 envsubst '${NAMESPACE} ${RELEASE_NAME} ${DOCKER_USERNAME} ${DOCKER_PASSWORD} ${DOCKER_SERVER} ${IMAGE_TAG} ${DYNAMO_INGRESS_SUFFIX} ${PIPELINES_DOCKER_SERVER} ${PIPELINES_DOCKER_USERNAME} ${PIPELINES_DOCKER_PASSWORD} ${DOCKER_SECRET_NAME} ${INGRESS_ENABLED} ${ISTIO_ENABLED} ${INGRESS_CLASS} ${ISTIO_GATEWAY} ${VIRTUAL_SERVICE_SUPPORTS_HTTPS} ${ENABLE_LWS}' < dynamo-platform-values.yaml > generated-values.yaml
 echo "generated file contents:"
@@ -156,6 +159,12 @@ echo "Building helm dependencies..."
 cd platform
 retry_command "$HELM_CMD dep build" 5 5
 cd ..
+
+# Install/upgrade the helm chart for the CRDs
+if [ "$INSTALL_CRDS" = true ]; then
+  echo "Installing/upgrading helm chart for the CRDs..."
+  $HELM_CMD upgrade --install dynamo-crds crds/ --namespace default --wait --atomic
+fi
 
 # Install/upgrade the helm chart
 echo "Installing/upgrading helm chart..."

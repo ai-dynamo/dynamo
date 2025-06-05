@@ -31,7 +31,7 @@ use crate::{
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
         scoring::ProcessedEndpoints,
     },
-    preprocessor::BackendInput,
+    preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
     tokens::TokenBlockSequence,
 };
@@ -54,6 +54,51 @@ pub trait WorkerSelector {
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
 }
 
+/// KV Router configuration parameters
+#[derive(Debug, Clone)]
+pub struct KvRouterConfig {
+    /// Weight for overlap score in worker selection.
+    /// Higher values prioritize KV cache reuse. Default: 2.0
+    pub overlap_score_weight: f64,
+
+    /// Weight for GPU cache usage in worker selection.
+    /// Higher values avoid workers with nearly full KV caches. Default: 1.0
+    pub gpu_cache_usage_weight: f64,
+
+    /// Weight for waiting requests in worker selection.
+    /// Higher values avoid workers with queued requests. Default: 1.0
+    pub waiting_requests_weight: f64,
+}
+
+impl Default for KvRouterConfig {
+    fn default() -> Self {
+        Self {
+            overlap_score_weight: 2.0,
+            gpu_cache_usage_weight: 1.0,
+            waiting_requests_weight: 1.0,
+        }
+    }
+}
+
+impl KvRouterConfig {
+    /// Create a new KvRouterConfig with optional weight values.
+    /// If a weight is None, the default value will be used.
+    pub fn new(
+        overlap_score_weight: Option<f64>,
+        gpu_cache_usage_weight: Option<f64>,
+        waiting_requests_weight: Option<f64>,
+    ) -> Self {
+        let default = Self::default();
+        Self {
+            overlap_score_weight: overlap_score_weight.unwrap_or(default.overlap_score_weight),
+            gpu_cache_usage_weight: gpu_cache_usage_weight
+                .unwrap_or(default.gpu_cache_usage_weight),
+            waiting_requests_weight: waiting_requests_weight
+                .unwrap_or(default.waiting_requests_weight),
+        }
+    }
+}
+
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
 pub struct KvRouter {
@@ -73,7 +118,7 @@ impl KvRouter {
             .primary_lease()
             .expect("Cannot KV route static workers")
             .primary_token();
-
+        tracing::info!("KV Routing initialized");
         let metrics_aggregator =
             KvMetricsAggregator::new(component.clone(), cancellation_token.clone()).await;
         let indexer = KvIndexer::new(cancellation_token.clone(), block_size);
@@ -129,7 +174,8 @@ impl KvRouter {
     }
 
     /// Give these tokens, find the worker with the best match in it's KV cache.
-    async fn find_best_match(&self, tokens: &[u32]) -> anyhow::Result<i64> {
+    /// Returned overlap amount is in number of blocks.
+    async fn find_best_match(&self, tokens: &[u32]) -> anyhow::Result<(i64, u32)> {
         let isl_tokens = tokens.len();
         let block_size = self.block_size;
 
@@ -141,8 +187,17 @@ impl KvRouter {
             .map(|block| LocalBlockHash(block.block_hash()))
             .collect();
         let overlap_scores = self.indexer.find_matches(local_block_hashes).await?;
-        let worker_id = self.scheduler.schedule(overlap_scores, isl_tokens).await?;
-        Ok(worker_id)
+        let worker_id = self
+            .scheduler
+            .schedule(overlap_scores.clone(), isl_tokens)
+            .await?;
+        let overlap_amount = overlap_scores.scores.get(&worker_id).copied().unwrap_or(0);
+        Ok((worker_id, overlap_amount))
+    }
+
+    /// Get the block size this router was configured with
+    pub fn block_size(&self) -> usize {
+        self.block_size
     }
 }
 
@@ -153,7 +208,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         request: SingleIn<RouterRequest>,
     ) -> Result<ManyOut<Annotated<RouterResponse>>> {
         let (request, ctx) = request.into_parts();
-        let worker_id = self.find_best_match(&request.tokens).await?;
+        let (worker_id, _) = self.find_best_match(&request.tokens).await?;
 
         let response = RouterResponse { worker_id };
         let response = Annotated::from_data(response);
@@ -163,13 +218,13 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
 }
 
 pub struct KvPushRouter {
-    inner: PushRouter<BackendInput, Annotated<LLMEngineOutput>>,
+    inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     chooser: Arc<KvRouter>,
 }
 
 impl KvPushRouter {
     pub fn new(
-        inner: PushRouter<BackendInput, Annotated<LLMEngineOutput>>,
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
     ) -> Self {
         KvPushRouter { inner, chooser }
@@ -177,18 +232,23 @@ impl KvPushRouter {
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for KvPushRouter
 {
     async fn generate(
         &self,
-        request: SingleIn<BackendInput>,
+        request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         match self.inner.client.instance_source.as_ref() {
             InstanceSource::Static => self.inner.r#static(request).await,
             InstanceSource::Dynamic(_) => {
-                let instance_id = self.chooser.find_best_match(&request.token_ids).await?;
-                self.inner.direct(request, instance_id).await
+                let (instance_id, overlap_amount) =
+                    self.chooser.find_best_match(&request.token_ids).await?;
+                // Update the request with the estimated prefix hit blocks
+                let (mut backend_input, context) = request.into_parts();
+                backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
+                let updated_request = context.map(|_| backend_input);
+                self.inner.direct(updated_request, instance_id).await
             }
         }
     }

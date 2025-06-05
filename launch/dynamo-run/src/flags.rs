@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use clap::ValueEnum;
+use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_runtime::pipeline::RouterMode as RuntimeRouterMode;
 
 /// Required options depend on the in and out choices
@@ -105,6 +106,21 @@ pub struct Flags {
     #[arg(long, default_value = "round-robin")]
     pub router_mode: RouterMode,
 
+    /// KV Router: Weight for overlap score in worker selection.
+    /// Higher values prioritize KV cache reuse. Default: 2.0
+    #[arg(long)]
+    pub kv_overlap_score_weight: Option<f64>,
+
+    /// KV Router: Weight for GPU cache usage in worker selection.
+    /// Higher values avoid workers with nearly full KV caches. Default: 1.0
+    #[arg(long)]
+    pub kv_gpu_cache_usage_weight: Option<f64>,
+
+    /// KV Router: Weight for waiting requests in worker selection.
+    /// Higher values avoid workers with queued requests. Default: 1.0
+    #[arg(long)]
+    pub kv_waiting_requests_weight: Option<f64>,
+
     /// Max model context length. Reduce this if you don't have enough VRAM for the full model
     /// context length (e.g. Llama 4).
     /// Defaults to the model's max, which is usually model_max_length in tokenizer_config.json.
@@ -138,6 +154,15 @@ pub struct Flags {
 }
 
 impl Flags {
+    /// Get KV router configuration
+    pub fn kv_router_config(&self) -> KvRouterConfig {
+        KvRouterConfig::new(
+            self.kv_overlap_score_weight,
+            self.kv_gpu_cache_usage_weight,
+            self.kv_waiting_requests_weight,
+        )
+    }
+
     /// Convert the flags back to a command line. Including only the non-null values, but
     /// include the defaults. Includes the canonicalized model path and normalized model name.
     ///
@@ -174,6 +199,18 @@ impl Flags {
         if let Some(extra_engine_args) = self.extra_engine_args.as_ref() {
             out.push("--extra-engine-args".to_string());
             out.push(extra_engine_args.display().to_string());
+        }
+        if let Some(weight) = self.kv_overlap_score_weight {
+            out.push("--kv-overlap-score-weight".to_string());
+            out.push(weight.to_string());
+        }
+        if let Some(weight) = self.kv_gpu_cache_usage_weight {
+            out.push("--kv-gpu-cache-usage-weight".to_string());
+            out.push(weight.to_string());
+        }
+        if let Some(weight) = self.kv_waiting_requests_weight {
+            out.push("--kv-waiting-requests-weight".to_string());
+            out.push(weight.to_string());
         }
         out.extend(self.last.clone());
         out

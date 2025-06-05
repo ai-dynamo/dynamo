@@ -18,14 +18,14 @@ use dynamo_runtime::{
 
 use crate::{
     backend::Backend,
-    kv_router::KvPushRouter,
+    kv_router::{KvPushRouter, KvRouterConfig},
     model_type::ModelType,
-    preprocessor::{BackendInput, OpenAIPreprocessor},
+    preprocessor::{OpenAIPreprocessor, PreprocessedRequest},
     protocols::common::llm_backend::LLMEngineOutput,
     protocols::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
-    protocols::openai::completions::{CompletionRequest, CompletionResponse},
+    protocols::openai::completions::{CompletionResponse, NvCreateCompletionRequest},
     protocols::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
 };
 
@@ -36,6 +36,7 @@ pub struct ModelWatcher {
     drt: DistributedRuntime,
     router_mode: RouterMode,
     notify_on_model: Notify,
+    kv_router_config: Option<KvRouterConfig>,
 }
 
 impl ModelWatcher {
@@ -43,12 +44,14 @@ impl ModelWatcher {
         runtime: DistributedRuntime,
         model_manager: Arc<ModelManager>,
         router_mode: RouterMode,
+        kv_router_config: Option<KvRouterConfig>,
     ) -> ModelWatcher {
         Self {
             manager: model_manager,
             drt: runtime,
             router_mode,
             notify_on_model: Notify::new(),
+            kv_router_config,
         }
     }
 
@@ -103,8 +106,12 @@ impl ModelWatcher {
                             tracing::info!(model_name = model_entry.name, "added model");
                             self.notify_on_model.notify_waiters();
                         }
-                        Err(e) => {
-                            tracing::error!(%e, "error adding model {}", model_entry.name);
+                        Err(err) => {
+                            tracing::error!(
+                                error = format!("{err:#}"),
+                                "error adding model {}",
+                                model_entry.name
+                            );
                         }
                     }
                 }
@@ -196,11 +203,12 @@ impl ModelWatcher {
                 >::new();
                 let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
                 let backend = Backend::from_mdc(card.clone()).await?.into_operator();
-                let router = PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
-                    client.clone(),
-                    self.router_mode,
-                )
-                .await?;
+                let router =
+                    PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
+                        client.clone(),
+                        self.router_mode,
+                    )
+                    .await?;
                 let service_backend = match self.router_mode {
                     RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
                         ServiceBackend::from_engine(Arc::new(router))
@@ -208,7 +216,12 @@ impl ModelWatcher {
                     RouterMode::KV => {
                         let chooser = self
                             .manager
-                            .kv_chooser_for(&model_entry.name, &component, card.kv_cache_block_size)
+                            .kv_chooser_for(
+                                &model_entry.name,
+                                &component,
+                                card.kv_cache_block_size,
+                                self.kv_router_config.clone(),
+                            )
                             .await?;
                         let kv_push_router = KvPushRouter::new(router, chooser);
                         ServiceBackend::from_engine(Arc::new(kv_push_router))
@@ -226,16 +239,17 @@ impl ModelWatcher {
                     .add_chat_completions_model(&model_entry.name, chat_engine)?;
 
                 let frontend = SegmentSource::<
-                    SingleIn<CompletionRequest>,
+                    SingleIn<NvCreateCompletionRequest>,
                     ManyOut<Annotated<CompletionResponse>>,
                 >::new();
                 let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
                 let backend = Backend::from_mdc(card.clone()).await?.into_operator();
-                let router = PushRouter::<BackendInput, Annotated<LLMEngineOutput>>::from_client(
-                    client,
-                    self.router_mode,
-                )
-                .await?;
+                let router =
+                    PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
+                        client,
+                        self.router_mode,
+                    )
+                    .await?;
                 let service_backend = match self.router_mode {
                     RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
                         ServiceBackend::from_engine(Arc::new(router))
@@ -243,7 +257,12 @@ impl ModelWatcher {
                     RouterMode::KV => {
                         let chooser = self
                             .manager
-                            .kv_chooser_for(&model_entry.name, &component, card.kv_cache_block_size)
+                            .kv_chooser_for(
+                                &model_entry.name,
+                                &component,
+                                card.kv_cache_block_size,
+                                self.kv_router_config.clone(),
+                            )
                             .await?;
                         let kv_push_router = KvPushRouter::new(router, chooser);
                         ServiceBackend::from_engine(Arc::new(kv_push_router))
@@ -271,12 +290,11 @@ impl ModelWatcher {
                     .add_chat_completions_model(&model_entry.name, engine)?;
             }
             ModelType::Completion => {
-                let push_router =
-                    PushRouter::<CompletionRequest, Annotated<CompletionResponse>>::from_client(
-                        client,
-                        Default::default(),
-                    )
-                    .await?;
+                let push_router = PushRouter::<
+                    NvCreateCompletionRequest,
+                    Annotated<CompletionResponse>,
+                >::from_client(client, Default::default())
+                .await?;
                 let engine = Arc::new(push_router);
                 self.manager
                     .add_completions_model(&model_entry.name, engine)?;

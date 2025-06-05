@@ -75,7 +75,7 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_cmpl_endpoints: bool,
 
-    #[builder(default = "false")]
+    #[builder(default = "true")]
     enable_embeddings_endpoints: bool,
 
     #[builder(default = "None")]
@@ -147,6 +147,7 @@ impl HttpServiceConfigBuilder {
         let mut routes = vec![
             metrics::router(registry, None),
             super::openai::list_models_router(state.clone(), None),
+            super::health::health_check_router(state.clone(), None),
         ];
 
         if config.enable_chat_endpoints {

@@ -10,6 +10,9 @@ const (
 	DynamoServicePortName   = "http"
 	DynamoContainerPortName = "http"
 
+	DynamoHealthPort     = 5000
+	DynamoHealthPortName = "health"
+
 	DynamoImageBuilderComponentName = "dynamo-image-builder"
 
 	DynamoApiServerComponentName = "api-server"
@@ -53,7 +56,7 @@ const (
 	KubeLabelValueTrue  = "true"
 
 	KubeLabelDynamoImageBuilderPod = "nvidia.com/dynamo-image-builder-pod"
-	KubeLabelDynamoDeploymentPod   = "nvidia.com/dynamo-deployment-pod"
+	KubeLabelDynamoComponentPod    = "nvidia.com/dynamo-component-pod"
 
 	KubeAnnotationDynamoRepository             = "nvidia.com/dynamo-repository"
 	KubeAnnotationDynamoVersion                = "nvidia.com/dynamo-version"
@@ -64,4 +67,6 @@ const (
 	KubeAnnotationDynamoComponentHash            = "nvidia.com/dynamo-request-hash"
 	KubeAnnotationDynamoComponentImageBuiderHash = "nvidia.com/dynamo-request-image-builder-hash"
 	KubeAnnotationDynamoComponentStorageNS       = "nvidia.com/dynamo-storage-namespace"
+
+	DynamoDeploymentConfigEnvVar = "DYN_DEPLOYMENT_CONFIG"
 )

@@ -13,23 +13,29 @@
 #  See the License for the specific language governing permissions and
 #  limitations under the License.
 
+import warnings
 from typing import Any
 
-from bentoml import on_shutdown as async_on_shutdown
+# Suppress warning from setuptools caused by bentoml
+# TODO: Remove this line after the bentoml import is removed from this file
+warnings.filterwarnings("ignore", category=UserWarning, message=".*pkg_resources.*")
 
+# flake8: noqa: E402
 from dynamo.sdk.core.decorators.endpoint import api, endpoint
-from dynamo.sdk.core.lib import DYNAMO_IMAGE, depends, service
-from dynamo.sdk.lib.decorators import async_on_start
+from dynamo.sdk.core.lib import DYNAMO_IMAGE, depends, liveness, readiness, service
+from dynamo.sdk.lib.decorators import async_on_start, on_shutdown
 
 dynamo_context: dict[str, Any] = {}
 
 __all__ = [
     "DYNAMO_IMAGE",
-    "async_on_shutdown",
+    "on_shutdown",
     "async_on_start",
     "depends",
     "dynamo_context",
     "endpoint",
     "api",
     "service",
+    "liveness",
+    "readiness",
 ]

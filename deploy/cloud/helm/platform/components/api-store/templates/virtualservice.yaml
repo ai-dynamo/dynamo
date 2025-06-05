@@ -17,7 +17,7 @@
 apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
-  name: dynamo-ingress
+  name: {{ include "helm.fullname" . }}
 spec:
   gateways:
   - {{ .Values.istio.gateway }}
@@ -29,7 +29,7 @@ spec:
         prefix: /
     route:
     - destination:
-        host: dynamo-store.{{ .Release.Namespace }}.svc.cluster.local
+        host: {{ include "helm.fullname" . }}.{{ .Release.Namespace }}.svc.cluster.local
         port:
           number: 80
 {{- end }}

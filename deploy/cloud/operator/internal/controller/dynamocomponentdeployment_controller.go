@@ -38,7 +38,6 @@ import (
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/config"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -82,6 +81,7 @@ const (
 	KubeAnnotationLWSSize        = "nvidia.com/lws-size"
 	DeploymentTypeStandard       = "standard"
 	DeploymentTypeLeaderWorker   = "leader-worker"
+	ComponentTypePlanner         = "Planner"
 )
 
 // DynamoComponentDeploymentReconciler reconciles a DynamoComponentDeployment object
@@ -594,6 +594,12 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx 
 		return nil, fmt.Errorf("generateLeaderPodTemplateSpec: GPU limit is not set for Ray leader pod")
 	}
 
+	// TODO: Liveness and readiness probes are temporarily disabled for leader worker sets
+	// until we implement proper probe configuration that can differentiate between
+	// leader and worker pods.
+	leaderPodTemplateSpec.Spec.Containers[0].LivenessProbe = nil
+	leaderPodTemplateSpec.Spec.Containers[0].ReadinessProbe = nil
+
 	leaderPodTemplateSpec.Spec.Containers[0].Args[0] = fmt.Sprintf("ray start --head --port=6379 && %s", currentArgs)
 
 	return leaderPodTemplateSpec, nil
@@ -632,6 +638,12 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 	if opt.dynamoComponentDeployment.Spec.Resources == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits.GPU == "" {
 		return nil, fmt.Errorf("generateWorkerPodTemplateSpec: GPU limit is not set for Ray worker pod")
 	}
+
+	// TODO: Liveness and readiness probes are temporarily disabled for leader worker sets
+	// until we implement proper probe configuration that can differentiate between
+	// leader and worker pods.
+	workerPodTemplateSpec.Spec.Containers[0].LivenessProbe = nil
+	workerPodTemplateSpec.Spec.Containers[0].ReadinessProbe = nil
 
 	workerPodTemplateSpec.Spec.Containers[0].Args[0] = "ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"
 
@@ -1365,10 +1377,16 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 				}
 			}
 			envsSeen[env.Name] = struct{}{}
-			envs = append(envs, corev1.EnvVar{
-				Name:  env.Name,
-				Value: env.Value,
-			})
+			envVar := corev1.EnvVar{
+				Name: env.Name,
+			}
+			if env.Value != "" {
+				envVar.Value = env.Value
+			}
+			if env.ValueFrom != nil {
+				envVar.ValueFrom = env.ValueFrom
+			}
+			envs = append(envs, envVar)
 		}
 	}
 
@@ -1416,6 +1434,11 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	args = append(args, "cd", "src", "&&", "uv", "run", "dynamo", "serve")
 
+	// ensure liveness and readiness probes are enabled for the dynamo components
+	args = append(args, "--system-app-port", fmt.Sprintf("%d", commonconsts.DynamoHealthPort))
+	args = append(args, "--enable-system-app")
+	args = append(args, "--use-default-health-checks")
+
 	// todo : remove this line when https://github.com/ai-dynamo/dynamo/issues/345 is fixed
 	enableDependsOption := false
 	if len(opt.dynamoComponentDeployment.Spec.ExternalServices) > 0 && enableDependsOption {
@@ -1449,7 +1472,9 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		if opt.dynamoComponentDeployment.Spec.DynamoNamespace != nil && *opt.dynamoComponentDeployment.Spec.DynamoNamespace != "" {
 			args = append(args, fmt.Sprintf("--%s.ServiceArgs.dynamo.namespace=%s", opt.dynamoComponentDeployment.Spec.ServiceName, *opt.dynamoComponentDeployment.Spec.DynamoNamespace))
 		}
-		args = append(args, fmt.Sprintf("--%s.environment=%s", opt.dynamoComponentDeployment.Spec.ServiceName, KubernetesDeploymentStrategy))
+		if componentType, exists := opt.dynamoComponentDeployment.Labels[commonconsts.KubeLabelDynamoComponent]; exists && componentType == ComponentTypePlanner {
+			args = append(args, fmt.Sprintf("--%s.environment=%s", opt.dynamoComponentDeployment.Spec.ServiceName, KubernetesDeploymentStrategy))
+		}
 	}
 
 	if len(opt.dynamoComponentDeployment.Spec.Envs) > 0 {
@@ -1549,8 +1574,48 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 				Name:          commonconsts.DynamoContainerPortName,
 				ContainerPort: int32(containerPort), // nolint: gosec
 			},
+			{
+				Protocol:      corev1.ProtocolTCP,
+				Name:          commonconsts.DynamoHealthPortName,
+				ContainerPort: int32(commonconsts.DynamoHealthPort),
+			},
 		},
 		SecurityContext: mainContainerSecurityContext,
+	}
+
+	// Set default probes if none are provided
+	if livenessProbe == nil {
+		container.LivenessProbe = &corev1.Probe{
+			// TODO: Initial delay and other probe settings should be read off sdk, these are default settings that should cover vllm / hello-world
+			InitialDelaySeconds: 60, // 1 minute
+			PeriodSeconds:       60, // Check every 1 minute
+			TimeoutSeconds:      5,  // 5 second timeout
+			FailureThreshold:    10, // Allow 10 failures before declaring unhealthy
+			SuccessThreshold:    1,  // Need 1 success to be considered healthy
+			ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{
+					Path: "/healthz",
+					Port: intstr.FromString(commonconsts.DynamoHealthPortName),
+				},
+			},
+		}
+	}
+
+	if readinessProbe == nil {
+		container.ReadinessProbe = &corev1.Probe{
+			// TODO: Initial delay and other probe settings should be read off sdk, these are default settings that should cover vllm / hello-world
+			InitialDelaySeconds: 60, // 1 minute
+			PeriodSeconds:       60, // Check every 1 minute
+			TimeoutSeconds:      5,  // 5 second timeout
+			FailureThreshold:    10, // Allow 10 failures before declaring not ready
+			SuccessThreshold:    1,  // Need 1 success to be considered ready
+			ProbeHandler: corev1.ProbeHandler{
+				HTTPGet: &corev1.HTTPGetAction{
+					Path: "/readyz",
+					Port: intstr.FromString(commonconsts.DynamoHealthPortName),
+				},
+			},
+		}
 	}
 
 	if opt.dynamoComponentDeployment.Spec.EnvFromSecret != nil {
@@ -1631,17 +1696,18 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		Volumes:    volumes,
 	}
 
-	podSpec.ImagePullSecrets = []corev1.LocalObjectReference{
-		{
-			Name: config.GetDockerRegistryConfig().SecretName,
-		},
-	}
+	imagePullSecrets := []corev1.LocalObjectReference{}
+
 	if opt.dynamoComponent.Spec.DockerConfigJSONSecretName != "" {
-		podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, corev1.LocalObjectReference{
+		imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{
 			Name: opt.dynamoComponent.Spec.DockerConfigJSONSecretName,
 		})
 	}
-	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, opt.dynamoComponent.Spec.ImagePullSecrets...)
+	imagePullSecrets = append(imagePullSecrets, opt.dynamoComponent.Spec.ImagePullSecrets...)
+
+	if len(imagePullSecrets) > 0 {
+		podSpec.ImagePullSecrets = imagePullSecrets
+	}
 
 	extraPodMetadata := opt.dynamoComponentDeployment.Spec.ExtraPodMetadata
 
@@ -1670,7 +1736,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	if podSpec.ServiceAccountName == "" {
 		serviceAccounts := &corev1.ServiceAccountList{}
 		err = r.List(ctx, serviceAccounts, client.InNamespace(opt.dynamoComponentDeployment.Namespace), client.MatchingLabels{
-			commonconsts.KubeLabelDynamoDeploymentPod: commonconsts.KubeLabelValueTrue,
+			commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue,
 		})
 		if err != nil {
 			err = errors.Wrapf(err, "failed to list service accounts in namespace %s", opt.dynamoComponentDeployment.Namespace)

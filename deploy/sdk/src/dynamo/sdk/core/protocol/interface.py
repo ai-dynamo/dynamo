@@ -16,15 +16,37 @@
 
 from abc import ABC, abstractmethod
 from collections import defaultdict
-from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, Dict, Generic, List, Optional, Set, Tuple, Type, TypeVar
 
 from fastapi import FastAPI
+from pydantic import BaseModel, ConfigDict, Field
 
-from dynamo.sdk.core.protocol.deployment import Env
+from .deployment import Env
 
 T = TypeVar("T", bound=object)
+
+
+class LeaseConfig(BaseModel):
+    """Configuration for custom dynamo leases"""
+
+    ttl: int = 1  # seconds
+
+
+class ComponentType:
+    """Types of Dynamo components"""
+
+    PLANNER = "planner"
+
+
+class DynamoConfig(BaseModel):
+    """Configuration for Dynamo components"""
+
+    enabled: bool = True
+    name: str | None = None
+    namespace: str | None = None
+    custom_lease: LeaseConfig | None = None
+    component_type: str | None = None  # Indicates if this is a meta/system component
 
 
 class DynamoTransport(Enum):
@@ -34,10 +56,26 @@ class DynamoTransport(Enum):
     HTTP = auto()
 
 
-class ServiceConfig(Dict[str, Any]):
+class ResourceConfig(BaseModel):
+    """Configuration for Dynamo resources"""
+
+    # auto convert gpu and cpu values to string from int
+    model_config = ConfigDict(coerce_numbers_to_str=True)
+
+    cpu: str = Field(default="1")
+    memory: str = Field(default="500Mi")
+    gpu: str = Field(default="0")
+
+
+class ServiceConfig(BaseModel):
     """Base service configuration that can be extended by adapters"""
 
-    pass
+    dynamo: DynamoConfig
+    resources: ResourceConfig = ResourceConfig()
+    workers: int = 1
+    image: str | None = None
+    envs: List[Env] | None = None
+    labels: Dict[str, str] | None = None
 
 
 class DynamoEndpointInterface(ABC):
@@ -157,30 +195,6 @@ class ServiceInterface(Generic[T], ABC):
         raise NotImplementedError()
 
 
-@dataclass
-class LeaseConfig:
-    """Configuration for custom dynamo leases"""
-
-    ttl: int = 1  # seconds
-
-
-class ComponentType:
-    """Types of Dynamo components"""
-
-    PLANNER = "planner"
-
-
-@dataclass
-class DynamoConfig:
-    """Configuration for Dynamo components"""
-
-    enabled: bool = True
-    name: str | None = None
-    namespace: str | None = None
-    custom_lease: LeaseConfig | None = None
-    component_type: str | None = None  # Indicates if this is a meta/system component
-
-
 class DeploymentTarget(ABC):
     """Interface for service provider implementations"""
 
@@ -189,7 +203,6 @@ class DeploymentTarget(ABC):
         self,
         service_cls: Type[T],
         config: ServiceConfig,
-        dynamo_config: Optional[DynamoConfig] = None,
         app: Optional[FastAPI] = None,
         **kwargs,
     ) -> ServiceInterface[T]:

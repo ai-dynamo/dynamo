@@ -4,20 +4,23 @@
 # https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
 # Rust
-*.rs @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @alec-flowers @kkranen @oandreeva-nv @ai-dynamo/Devops @jthomson04
+*.rs @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @alec-flowers @kkranen @oandreeva-nv @ai-dynamo/Devops @jthomson04 @PeaBrane
 Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @kkranen @oandreeva-nv @ai-dynamo/Devops
 
 # Python Libraries
-*.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen @ai-dynamo/Devops @jthomson04 @ishandhanani
+*.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen @ai-dynamo/Devops @jthomson04 @ishandhanani @PeaBrane
 
 # Container/Environments
-/container/ @rmccorm4 @tanmayv25 @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @ai-dynamo/Devops
+/container/ @rmccorm4 @tanmayv25 @richardhuo-nv @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @ai-dynamo/Devops
 
 # Dynamo deploy
 /deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @nnshah1 @mohammedabdulwahhab
 
-# Dynamo deploy
+# All examples
 /examples/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen @sshchoi @PeaBrane @mohammedabdulwahhab @ai-dynamo/Devops
+
+# TRTLLM
+/examples/tensorrt_llm/ @tanmayv25 @rmccorm4 @guanluo @richardhuo-nv
 
 # Multimodal
 /examples/multimodal/ @indrajit96 @whoisj @krishung5

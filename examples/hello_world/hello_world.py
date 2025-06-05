@@ -19,7 +19,16 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sdk import DYNAMO_IMAGE, api, depends, endpoint, service
+from dynamo.sdk import (
+    DYNAMO_IMAGE,
+    api,
+    depends,
+    endpoint,
+    liveness,
+    on_shutdown,
+    readiness,
+    service,
+)
 from dynamo.sdk.lib.config import ServiceConfig
 
 logger = logging.getLogger(__name__)
@@ -59,7 +68,7 @@ class ResponseType(BaseModel):
     dynamo={
         "namespace": "inference",
     },
-    resource={"cpu": 1, "memory": "500Mi"},
+    resources={"cpu": 1, "memory": "500Mi"},
     workers=2,
     image=DYNAMO_IMAGE,
 )
@@ -78,6 +87,10 @@ class Backend:
         text = f"{req_text}-{self.message}"
         for token in text.split():
             yield f"Backend: {token}"
+
+    @on_shutdown
+    def shutdown(self):
+        logger.info("Shutting down backend")
 
 
 @service(
@@ -103,6 +116,10 @@ class Middle:
         async for response in self.backend.generate(next_request):
             logger.info(f"Middle received response: {response}")
             yield f"Middle: {response}"
+
+    @on_shutdown
+    def shutdown(self):
+        logger.info("Shutting down middle")
 
 
 @service(
@@ -136,3 +153,15 @@ class Frontend:
                 yield f"Frontend: {response}"
 
         return StreamingResponse(content_generator())
+
+    @liveness
+    def is_alive(self):
+        return True
+
+    @readiness
+    def is_ready(self):
+        return True
+
+    @on_shutdown
+    def shutdown(self):
+        logger.info("Shutting down frontend")

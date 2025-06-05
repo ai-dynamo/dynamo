@@ -191,7 +191,7 @@ class VllmPrefillWorker:
         image_url = request.multimodal_data_source["image_url"]
 
         logger.info(
-            f"Received prefill request {{ id: {request_id}, engine_id: {engine_id}, image_url: '{image_url}' }}."
+            f"Received prefill request {{ id: {request_id}, engine_id: {engine_id} }}."
         )
 
         # Extract the pre-allocated, reusable image embeddings tensor and its descriptor.
@@ -246,8 +246,8 @@ class VllmPrefillWorker:
                 self._loaded_metadata.add(engine_id)
 
             # To make sure the decode worker can pre-allocate the memory with the correct size for the prefill worker to transfer the kv cache,
-            # some placeholder dummy tokens were inserted based on the embedding size in the worker.py.
-            # The structure of the prompt is "\nUSER: <image> <dummy_tokens>\n<user_prompt>\nASSISTANT:", need to remove the dummy tokens after the image token.
+            # some placeholder dummy tokens are inserted based on the embedding size in the worker.py.
+            # TODO: make this more flexible/model-dependent
             IMAGE_TOKEN_ID = 32000
             embedding_size = embeddings.shape[1]
             padding_size = embedding_size - 1

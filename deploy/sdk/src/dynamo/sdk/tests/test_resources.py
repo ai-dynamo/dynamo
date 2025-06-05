@@ -16,6 +16,7 @@
 import pytest
 
 from dynamo.sdk.cli.utils import configure_target_environment
+from dynamo.sdk.core.protocol.interface import ServiceInterface
 from dynamo.sdk.core.runner import TargetEnum
 
 pytestmark = pytest.mark.pre_merge
@@ -23,14 +24,12 @@ pytestmark = pytest.mark.pre_merge
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_and_teardown():
-    configure_target_environment(TargetEnum.BENTO)
-    yield
     configure_target_environment(TargetEnum.DYNAMO)
+    yield
 
 
 def test_gpu_resources(setup_and_teardown):
     """Test resource configurations"""
-    from _bentoml_sdk import Service as BentoService
 
     from dynamo.sdk import service
 
@@ -42,7 +41,28 @@ def test_gpu_resources(setup_and_teardown):
         def __init__(self) -> None:
             pass
 
-    svc: BentoService = MyService.get_bentoml_service()  # type: ignore
-    assert svc.config["resources"]["cpu"] == "2"
-    assert svc.config["resources"]["gpu"] == "1"
-    assert svc.config["resources"]["memory"] == "4Gi"
+    dyn_svc: ServiceInterface = MyService
+    assert dyn_svc.config is not None  # type: ignore
+    assert dyn_svc.config.resources.cpu == "2"
+    assert dyn_svc.config.resources.gpu == "1"
+    assert dyn_svc.config.resources.memory == "4Gi"
+
+
+def test_gpu_resources_coercing_from_integers(setup_and_teardown):
+    """Test resource configurations"""
+
+    from dynamo.sdk import service
+
+    @service(
+        resources={"cpu": 3, "gpu": 4, "memory": "4Gi"},
+        dynamo={"namespace": "test"},
+    )
+    class MockService:
+        def __init__(self) -> None:
+            pass
+
+    dyn_svc: ServiceInterface = MockService
+    assert dyn_svc.config is not None  # type: ignore
+    assert dyn_svc.config.resources.cpu == "3"
+    assert dyn_svc.config.resources.gpu == "4"
+    assert dyn_svc.config.resources.memory == "4Gi"

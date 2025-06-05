@@ -49,7 +49,7 @@ mkdir -p $HOME/dynamo/.build/target
 export CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 
 # build project, it will be saved at $HOME/dynamo/.build/target
-cargo build --locked --profile dev --features mistralrs,python
+cargo build --locked --profile dev --features mistralrs
 cargo doc --no-deps
 
 # create symlinks for the binaries in the deploy directory
@@ -64,7 +64,15 @@ cd $HOME/dynamo && retry env DYNAMO_BIN_PATH=$HOME/dynamo/.build/target/debug uv
 
 export PYTHONPATH=/home/ubuntu/dynamo/components/planner/src:$PYTHONPATH
 
-# source the venv and set the VLLM_KV_CAPI_PATH in bashrc
-echo "source /opt/dynamo/venv/bin/activate" >> ~/.bashrc
-echo "export VLLM_KV_CAPI_PATH=$HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so" >> ~/.bashrc
-echo "export GPG_TTY=$(tty)" >> ~/.bashrc
+# Add to bashrc only if not already present
+if ! grep -q "source /opt/dynamo/venv/bin/activate" ~/.bashrc; then
+    echo "source /opt/dynamo/venv/bin/activate" >> ~/.bashrc
+fi
+
+if ! grep -q "export VLLM_KV_CAPI_PATH=" ~/.bashrc; then
+    echo "export VLLM_KV_CAPI_PATH=$HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so" >> ~/.bashrc
+fi
+
+if ! grep -q "export GPG_TTY=" ~/.bashrc; then
+    echo "export GPG_TTY=$(tty)" >> ~/.bashrc
+fi

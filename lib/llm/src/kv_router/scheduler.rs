@@ -20,13 +20,13 @@ use serde::{Deserialize, Serialize};
 use std::borrow::BorrowMut;
 use std::collections::HashMap;
 
+use super::protocols::WorkerSelectionResult;
+use super::WorkerSelector;
 use crate::kv_router::indexer::OverlapScores;
 pub use crate::kv_router::protocols::ForwardPassMetrics;
 use crate::kv_router::scoring::ProcessedEndpoints;
+use crate::kv_router::KvRouterConfig;
 use crate::kv_router::KV_HIT_RATE_SUBJECT;
-
-use super::protocols::WorkerSelectionResult;
-use super::WorkerSelector;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KVHitRateEvent {
@@ -96,7 +96,7 @@ impl KvScheduler {
         endpoints_rx: tokio::sync::watch::Receiver<ProcessedEndpoints>,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
     ) -> Result<Self, KvSchedulerError> {
-        let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector));
+        let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
         let mut endpoints_rx = endpoints_rx;
         let mut endpoints: ProcessedEndpoints = endpoints_rx.borrow_and_update().clone();
 
@@ -231,8 +231,18 @@ pub fn process_worker_selection(
 }
 
 // Default implementation matching the Python _cost_function
-#[derive(Default)]
-pub struct DefaultWorkerSelector;
+#[derive(Debug, Clone, Default)]
+pub struct DefaultWorkerSelector {
+    pub kv_router_config: KvRouterConfig,
+}
+
+impl DefaultWorkerSelector {
+    pub fn new(kv_router_config: Option<KvRouterConfig>) -> Self {
+        Self {
+            kv_router_config: kv_router_config.unwrap_or_default(),
+        }
+    }
+}
 
 impl WorkerSelector for DefaultWorkerSelector {
     fn select_worker(
@@ -277,8 +287,7 @@ impl WorkerSelector for DefaultWorkerSelector {
             let score = worker_scores.get(&worker_id).copied().unwrap_or(0.0);
 
             // Calculate normalized metrics
-            assert!(ep.data.kv_total_blocks > 0);
-            let gpu_cache_usage = ep.data.kv_active_blocks as f64 / ep.data.kv_total_blocks as f64;
+            let gpu_cache_usage = ep.data.gpu_cache_usage_perc as f64;
             let normalized_waiting = if max_waiting > 0.0 {
                 ep.data.num_requests_waiting as f64 / max_waiting
             } else {
@@ -286,10 +295,15 @@ impl WorkerSelector for DefaultWorkerSelector {
             };
 
             // Calculate logit using same formula as Python
-            let logit = 2.0 * score - gpu_cache_usage - normalized_waiting;
+            let logit = self.kv_router_config.overlap_score_weight * score
+                - self.kv_router_config.gpu_cache_usage_weight * gpu_cache_usage
+                - self.kv_router_config.waiting_requests_weight * normalized_waiting;
 
             tracing::trace!(
-                "Formula for {worker_id}: {logit:.3} = 2.0 * {score:.3} - {gpu_cache_usage:.3} - {normalized_waiting:.3}",
+                "Formula for {worker_id}: {logit:.3} = {:.1} * {score:.3} - {:.1} * {gpu_cache_usage:.3} - {:.1} * {normalized_waiting:.3}",
+                self.kv_router_config.overlap_score_weight,
+                self.kv_router_config.gpu_cache_usage_weight,
+                self.kv_router_config.waiting_requests_weight,
             );
 
             // Track best workers
@@ -325,7 +339,7 @@ impl WorkerSelector for DefaultWorkerSelector {
         tracing::debug!("Selected worker: {worker_id}, logit: {best_logit:.3}");
 
         // Log selection metrics
-        let total_blocks = std::cmp::min(request.isl_tokens / block_size, 1) as u64;
+        let total_blocks = std::cmp::max(request.isl_tokens / block_size, 1) as u64;
         let overlap_blocks = request.overlap.scores.get(&worker_id).copied().unwrap_or(0) as usize;
 
         Ok(WorkerSelectionResult {

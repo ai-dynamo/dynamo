@@ -51,6 +51,12 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
         default=3,
         help="Maximum queue size for remote prefill. If the prefill queue size is greater than this value, prefill phase of the incoming request will be executed locally.",
     )
+    parser.add_argument(
+        "--prompt-template",
+        type=str,
+        default="<prompt>",
+        help="Prompt template to use for the model",
+    )
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args(vllm_args)
     engine_args = AsyncEngineArgs.from_cli_args(args)
@@ -59,4 +65,5 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     engine_args.conditional_disagg = args.conditional_disagg
     engine_args.max_local_prefill_length = args.max_local_prefill_length
     engine_args.max_prefill_queue_size = args.max_prefill_queue_size
+    engine_args.prompt_template = args.prompt_template
     return engine_args
