@@ -82,9 +82,12 @@ class ManagedProcess:
             self._remove_directory(self.data_dir)
 
         for ps_process in psutil.process_iter(["name", "cmdline"]):
-            if ps_process.name() in self.stragglers:
-                self._terminate_process_tree(ps_process.pid)
-
+            try:
+                if ps_process.name() in self.stragglers:
+                    self._terminate_process_tree(ps_process.pid)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                # Process may have terminated or become inaccessible during iteration
+                pass
     def _start_process(self):
         assert self._command_name
         assert self._log_path
@@ -216,10 +219,14 @@ class ManagedProcess:
             process.kill()
 
     def _terminate_process_tree(self, pid):
-        parent = psutil.Process(pid)
-        for child in parent.children(recursive=True):
-            self._terminate_process(child)
-        self._terminate_process(parent)
+        try:
+            parent = psutil.Process(pid)
+            for child in parent.children(recursive=True):
+                self._terminate_process(child)
+            self._terminate_process(parent)
+        except psutil.NoSuchProcess:
+            # Process already terminated
+            pass
 
 
 def main():
