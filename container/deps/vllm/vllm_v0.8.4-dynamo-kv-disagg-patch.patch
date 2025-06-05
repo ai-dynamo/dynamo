@@ -1121,7 +1121,7 @@ index 000000000..4c5ed707f
 +
 +
 +        self._tp_size[engine_id] = vllm_config.parallel_config.tensor_parallel_size
-+        self._is_mla = "deepseek" in vllm_config.model_config.architectures[0].lower()
++        self._is_mla = vllm_config.model_config.use_mla
 +        
 +
 +    @property
