@@ -4628,6 +4628,8 @@ Subdependencies:
 
 ### github.com/dustin/go-humanize
 
+License Identifier: MIT
+
 License Text:
 ```
 Copyright (c) 2005-2008  Dustin Sallings <dustin@spy.net>
@@ -5487,6 +5489,8 @@ License Text:
 
 ### go.uber.org/zap
 
+License Identifier: MIT
+
 License Text:
 ```
 Copyright (c) 2016-2017 Uber Technologies, Inc.
@@ -5719,6 +5723,8 @@ License Text:
 ```
 
 ### github.com/beorn7/perks
+
+License Identifier: MIT
 
 License Text:
 ```
