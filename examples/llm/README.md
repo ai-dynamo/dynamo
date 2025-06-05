@@ -225,17 +225,18 @@ dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
 
 ### Testing the Deployment
 
-Once the deployment is complete, you can test it using:
+Once the deployment is complete, you can test it. If you have ingress available for your deployment, you can directly call the url returned
+in `dynamo deployment get ${DEPLOYMENT_NAME}` and skip the steps to find and forward the frontend pod.
 
 ```bash
 # Find your frontend pod
 export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
 
 # Forward the pod's port to localhost
-kubectl port-forward pod/$FRONTEND_POD 8000:8000 -n ${KUBE_NS}
+kubectl port-forward pod/$FRONTEND_POD 3000:3000 -n ${KUBE_NS}
 
 # Test the API endpoint
-curl localhost:8000/v1/chat/completions \
+curl localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",

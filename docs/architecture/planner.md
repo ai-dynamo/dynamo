@@ -52,9 +52,11 @@ There are two additional rules set by planner to prevent over-compensation:
 
 To ensure dynamo serve complies with the SLA, we provide a pre-deployment script to profile the model performance with different parallelization mappings and recommend the parallelization mapping for prefill and decode workers and planner configurations. To use this script, the user needs to provide the target ISL, OSL, TTFT SLA, and ITL SLA.
 
-> [!NOTE]
-> Currently, the script considers a fixed ISL/OSL without KV cache reuse. If the real ISL/OSL has a large variance or a significant amount of KV cache can be reused, the result might be inaccurate.
-> Currently, we assume there is no piggy-backed prefill requests in the decode engine. Even if there are some short piggy-backed prefill requests in the decode engine, it should not affect the ITL too much in most conditions. However, if the piggy-backed prefill requests are too much, the ITL might be inaccurate.
+```{note}
+The script considers a fixed ISL/OSL without KV cache reuse. If the real ISL/OSL has a large variance or a significant amount of KV cache can be reused, the result might be inaccurate.
+
+We assume there is no piggy-backed prefill requests in the decode engine. Even if there are some short piggy-backed prefill requests in the decode engine, it should not affect the ITL too much in most conditions. However, if the piggy-backed prefill requests are too much, the ITL might be inaccurate.
+```
 
 ```bash
 python -m utils.profile_sla \
@@ -78,7 +80,6 @@ For the prefill performance, the script will plot the TTFT for different TP size
 For the decode performance, the script will plot the ITL for different TP sizes and different in-flight requests. Similarly, it will select the best point that satisfies the ITL SLA and delivers the best throughput per GPU and recommend the upper and lower bounds of the kv cache utilization rate to be used in planner.
 
 The following information will be printed out in the terminal:
-```
 2025-05-16 15:20:24 - __main__ - INFO - Analyzing results and generate recommendations...
 2025-05-16 15:20:24 - __main__ - INFO - Suggested prefill TP:4 (TTFT 48.37 ms, throughput 15505.23 tokens/s/GPU)
 2025-05-16 15:20:24 - __main__ - INFO - Suggested planner upper/lower bound for prefill queue size: 0.24/0.10
@@ -89,113 +90,96 @@ The following information will be printed out in the terminal:
 After finding the best TP size for prefill and decode, the script will then interpolate the TTFT with ISL and ITL with active KV cache and decode context length. This is to provide a more accurate estimation of the performance when ISL and OSL changes. The results will be saved to `<output_dir>/<decode/prefill>_tp<best_tp>_interpolation`.
 
 ## Usage
-The planner is started automatically as part of Dynamo pipelines when running `dynamo serve`. You can configure the planner just as you would any other component in your pipeline either via YAML configuration or through CLI arguments.
 
-Usage:
+`dynamo serve` automatically starts the planner. Configure it through YAML files or command-line arguments:
+
 ```bash
-# Configure the planner through YAML configuration
+# YAML configuration
 dynamo serve graphs.disagg:Frontend -f disagg.yaml
 
 # disagg.yaml
-# ...
-# Planner:
-#   environment: local
-#   no-operation: false
-#   log-dir: log/planner
+Planner:
+  environment: local
+  no-operation: false
+  log-dir: log/planner
 
-# Configure the planner through CLI arguments
+# Command-line configuration
 dynamo serve graphs.disagg:Frontend -f disagg.yaml --Planner.environment=local --Planner.no-operation=false --Planner.log-dir=log/planner
 ```
 
-The planner accepts the following configuration options:
-* `namespace` (str, default: "dynamo"): Namespace planner will look at
-* `environment` (str, default: "local"): Environment to run the planner in (local, kubernetes)
-* `served-model-name` (str, default: "vllm"): Model name that is being served
-* `no-operation` (bool, default: false): Do not make any adjustments, just observe the metrics and log to tensorboard
-* `log-dir` (str, default: None): Tensorboard logging directory
-* `adjustment-interval` (int, default: 30): Interval in seconds between scaling adjustments
-* `metric-pulling-interval` (int, default: 1): Interval in seconds between metric pulls
-* `max-gpu-budget` (int, default: 8): Maximum number of GPUs to use, planner will not scale up more than this number of GPUs for prefill plus decode workers
-* `min-gpu-budget` (int, default: 1): Minimum number of GPUs to use, planner will not scale down below this number of GPUs for prefill or decode workers
-* `decode-kv-scale-up-threshold` (float, default: 0.9): KV cache utilization threshold to scale up decode workers
-* `decode-kv-scale-down-threshold` (float, default: 0.5): KV cache utilization threshold to scale down decode workers
-* `prefill-queue-scale-up-threshold` (float, default: 0.5): Queue utilization threshold to scale up prefill workers
-* `prefill-queue-scale-down-threshold` (float, default: 0.2): Queue utilization threshold to scale down prefill workers
-* `decode-engine-num-gpu` (int, default: 1): Number of GPUs per decode engine
-* `prefill-engine-num-gpu` (int, default: 1): Number of GPUs per prefill engine
+Configuration options:
+* `namespace` (str, default: "dynamo"): Target namespace for planner operations
+* `environment` (str, default: "local"): Target environment (local, kubernetes)
+* `no-operation` (bool, default: false): Run in observation mode only
+* `log-dir` (str, default: None): Tensorboard log directory
+* `adjustment-interval` (int, default: 30): Seconds between adjustments
+* `metric-pulling-interval` (int, default: 1): Seconds between metric pulls
+* `max-gpu-budget` (int, default: 8): Maximum GPUs for all workers
+* `min-gpu-budget` (int, default: 1): Minimum GPUs per worker type
+* `decode-kv-scale-up-threshold` (float, default: 0.9): KV cache threshold for scale-up
+* `decode-kv-scale-down-threshold` (float, default: 0.5): KV cache threshold for scale-down
+* `prefill-queue-scale-up-threshold` (float, default: 0.5): Queue threshold for scale-up
+* `prefill-queue-scale-down-threshold` (float, default: 0.2): Queue threshold for scale-down
+* `decode-engine-num-gpu` (int, default: 1): GPUs per decode engine
+* `prefill-engine-num-gpu` (int, default: 1): GPUs per prefill engine
 
-Alternatively, you can run the planner as a standalone python process. The configuration options above can be directly passed in as CLI arguments.
+Run as standalone process:
 ```bash
-PYTHONPATH=/workspace/examples/llm python components/planner.py <arguments>
-
-# Example
-# PYTHONPATH=/workspace/examples/llm python components/planner.py --namespace=dynamo --served-model-name=vllm --no-operation --log-dir=log/planner
+PYTHONPATH=/workspace/examples/llm python components/planner.py --namespace=dynamo --served-model-name=vllm --no-operation --log-dir=log/planner
 ```
 
-
-### Tensorboard
-
-Planner logs to tensorboard to visualize the metrics and the scaling actions. You can start tensorboard with the following command:
+Monitor metrics with Tensorboard:
 ```bash
 tensorboard --logdir=<path-to-tensorboard-log-dir>
 ```
 
 ## Backends
-We currently support two backends:
-1. `local` - uses circus to start/stop worker subprocesses
-2. `kubernetes` - uses kubernetes to scale up/down the number of worker pods by updating the replicas count of the DynamoGraphDeployment resource
+
+The planner supports local and kubernetes backends for worker management.
 
 ### Local Backend
 
-Circus is a Python program that can be used to monitor and control processes and sockets. Dynamo serve uses circus to start each node in a graph and monitors each subprocesses. We leverage a core feature to do this called `Watcher`. A `Watcher` is the target program that you would like to run (which in our case is `serve_dynamo.py`). When planner decides to scale up or down, it either adds or removes a watcher from the existing `circus`.
+The local backend uses Circus to control worker processes. A Watcher tracks each `serve_dynamo.py` process. The planner adds or removes watchers to scale workers.
 
-``` {note}
-Although circus allows you to `increment` an existing watcher, it was not designed to allow variables to be passed in which does not allow us to schedule on a GPU. So instead we start a new watcher per process. When planner decides to add or remove a worker, we have logic to handle this adding/removing and incrementing/decrementing the workers.
-```
+Note: Circus's `increment` feature doesn't support GPU scheduling variables, so we create separate watchers per process.
 
-#### Statefile
+#### State Management
 
-The statefile is a json file created when initially running `dynamo serve` and is filled in with custom leases in `serve_dynamo`. Each worker is named `{namespace}_{component_name}` when it is initially created. The `resources` come from the allocator and allows us to keep track of which GPUs are available. This statefile is read in by the LocalConnector and after each planner update we make the relevant change to the statefile. Currently, this statefile is locally saved in `~/.dynamo/state/{namespace}.json` (or in `DYN_LOCAL_STATE_DIR `) and is automatically cleaned up when the arbiter dies.
+The planner maintains state in a JSON file at `~/.dynamo/state/{namespace}.json`. This file:
+* Tracks worker names as `{namespace}_{component_name}`
+* Records GPU allocations from the allocator
+* Updates after each planner action
+* Cleans up automatically when the arbiter exits
 
-When one Decode worker is spun up, the statefile looks like:
-
+Example state file evolution:
 ```none
+# Initial decode worker
+{
+  "dynamo_VllmWorker": {..., resources={...}}
+}
+
+# After adding worker
 {
   "dynamo_VllmWorker": {..., resources={...}},
+  "dynamo_VllmWorker_1": {..., resources={...}}
 }
-```
 
-Now another decode worker is added:
-
-```none
+# After removing worker
 {
-  "dynamo_VllmWorker": {..., resources={...}},
-  "dynamo_VllmWorker_1": {..., resources={...}},
+  "dynamo_VllmWorker": {..., resources={...}}
 }
-```
 
-Then one decode worker is removed:
-
-```none
+# After removing last worker
 {
-  "dynamo_VllmWorker": {..., resources={...}},
+  "dynamo_VllmWorker": {...}
 }
 ```
 
-If the last decode worker is removed, the statefile looks like:
-
-```none
-{
-  "dynamo_VllmWorker": {...},
-}
-```
-
-We keep the initial non-suffix entry in order to know what cmd we'll need to spin up another worker. This is the same for prefill workers as well.
-
-``` {note}
-At the moment - planner work best if your initial replicas per worker are 1. This is because if you specify replicas > 1 when you initially start `dynamo serve`, the current implementation in `serving.py` starts each process in the same watcher.
-```
+Note: Start with one replica per worker. Multiple initial replicas currently share a single watcher.
 
 ### Kubernetes Backend
 
-The Kubernetes backend works by updating the replicas count of the DynamoGraphDeployment custom resource. When the planner detects the need to scale up or down a specific worker type, it uses the Kubernetes API to patch the DynamoGraphDeployment resource, modifying the replicas count for the appropriate component. The Kubernetes operator then reconciles this change by creating or removing the necessary pods. This provides a seamless scaling experience in Kubernetes environments without requiring manual intervention.
+The Kubernetes backend scales workers by updating DynamoGraphDeployment replica counts. When scaling needs change, the planner:
+1. Updates the deployment's replica count
+2. Lets the Kubernetes operator create/remove pods
+3. Maintains seamless scaling without manual intervention

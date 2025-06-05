@@ -40,8 +40,6 @@ VllmWorker:
     workers: 1
     resources:
       gpu: '1'
-      cpu: '10'
-      memory: '20Gi'
   common-configs: [model, block-size, max-model-len, router, kv-transfer-config]
 
 Planner:

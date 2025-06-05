@@ -10,7 +10,6 @@ ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
-ARG GENAI_PERF_VERSION=0.0.13
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -72,31 +71,41 @@ RUN apt-get update -y && \
     autoconf \
     libtool
 
+# These headers are missing with the hpcx installer, required
+# by UCX to find RDMA devices
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    --reinstall libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
+    libnuma-dev librdmacm-dev ibverbs-providers
+
+ARG NIXL_UCX_REF=v1.19.x
+
 WORKDIR /workspace
 
 ### UCX EFA Setup ###
 RUN rm -rf /opt/hpcx/ucx
 RUN rm -rf /usr/local/ucx
-RUN cd /usr/local/src && \
+RUN echo "Building UCX with reference $NIXL_UCX_REF"
+RUN cd /usr/local/src &&                            \
     git clone https://github.com/openucx/ucx.git && \
-    cd ucx &&                   \
-    git checkout v1.19.x &&     \
-    ./autogen.sh && ./configure \
-    --prefix=/usr/local/ucx     \
-    --enable-shared             \
-    --disable-static            \
-    --disable-doxygen-doc       \
-    --enable-optimizations      \
-    --enable-cma                \
-    --enable-devel-headers      \
-    --with-cuda=/usr/local/cuda \
-    --with-verbs                \
-    --with-efa                  \
-    --with-dm                   \
-    --with-gdrcopy=/usr/local   \
-    --enable-mt &&              \
-    make -j &&                  \
-    make -j install-strip &&    \
+    cd ucx &&                                       \
+    git checkout $NIXL_UCX_REF &&                   \
+    ./autogen.sh && ./configure                     \
+    --prefix=/usr/local/ucx                         \
+    --enable-shared                                 \
+    --disable-static                                \
+    --disable-doxygen-doc                           \
+    --enable-optimizations                          \
+    --enable-cma                                    \
+    --enable-devel-headers                          \
+    --with-cuda=/usr/local/cuda                     \
+    --with-verbs                                    \
+    --with-efa                                      \
+    --with-dm                                       \
+    --with-gdrcopy=/usr/local                       \
+    --enable-mt &&                                  \
+    make -j &&                                      \
+    make -j install-strip &&                        \
     ldconfig
 
 ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
@@ -114,14 +123,14 @@ COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
 RUN if [ "$ARCH" = "arm64" ]; then \
         cd /opt/nixl && \
         mkdir build && \
-        meson setup build/ --prefix=/usr/local/nixl -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
+        meson setup build/ --buildtype=release --prefix=/usr/local/nixl -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
         cd build/ && \
         ninja && \
         ninja install; \
     else \
         cd /opt/nixl && \
         mkdir build && \
-        meson setup build/ --prefix=/usr/local/nixl && \
+        meson setup build/ --buildtype=release --prefix=/usr/local/nixl && \
         cd build/ && \
         ninja && \
         ninja install; \
@@ -428,9 +437,6 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
 RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/dist/ai_dynamo*any.whl
 
-# TODO: remove kantoku as a transitive dependency
-RUN uv pip uninstall kantoku circus && uv pip install circus==0.19.0
-
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
@@ -444,11 +450,6 @@ ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/
 ########## Development Image ###########
 ########################################
 FROM ci_minimum AS dev
-
-ARG GENAI_PERF_VERSION
-
-# Install genai-perf for benchmarking
-RUN uv pip install genai-perf==$GENAI_PERF_VERSION
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
@@ -506,9 +507,6 @@ RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
     uv pip install nixl --find-links wheelhouse && \
     ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
     rm -r wheelhouse
-
-# TODO: remove kantoku as a transitive dependency
-RUN uv pip uninstall kantoku circus && uv pip install circus==0.19.0
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"

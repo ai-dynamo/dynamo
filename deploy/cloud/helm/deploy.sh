@@ -85,10 +85,16 @@ fi
 if [[ -n "${DOCKER_USERNAME:-}" && -n "${DOCKER_PASSWORD:-}" ]]; then
   echo "Creating/updating Docker registry secret '$DOCKER_SECRET_NAME' in namespace '$NAMESPACE'..."
 
+  # Transform docker.io URLs to index.docker.io/v1/
+  DOCKER_SERVER_FOR_SECRET="$DOCKER_SERVER"
+  if [[ "$DOCKER_SERVER" == "docker.io" || "$DOCKER_SERVER" == "docker.io/"* ]]; then
+    DOCKER_SERVER_FOR_SECRET="https://index.docker.io/v1/"
+  fi
+
   kubectl create secret docker-registry "$DOCKER_SECRET_NAME" \
     --docker-username="$DOCKER_USERNAME" \
     --docker-password="$DOCKER_PASSWORD" \
-    --docker-server="$DOCKER_SERVER" \
+    --docker-server="$DOCKER_SERVER_FOR_SECRET" \
     --namespace "$NAMESPACE" \
     --dry-run=client -o yaml | kubectl apply -f -
 else

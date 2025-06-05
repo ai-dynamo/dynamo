@@ -16,9 +16,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Deployment Examples
+# Hello World: Aggregated and Disaggregated Deployment Examples
 
-This directory contains a hello world example which implements a simplified disaggregated serving architecture used for deploying Large Language Models (LLMs). It removes the LLM related inference code and focuses on how Dynamo handles routing, task queue, and metadata communication between prefill and decode workers.
+The `example` directory contains a [hello world example](../examples/hello_world.md) that implements a simplified disaggregated serving architecture used for deploying Large Language Models (LLMs). It removes the LLM related inference code and focuses on how Dynamo handles routing, task queue, and metadata communication between prefill and decode workers.
 
 ## Components
 
