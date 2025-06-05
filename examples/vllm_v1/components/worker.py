@@ -219,7 +219,7 @@ class VllmPrefillWorker(VllmBaseWorker):
             request_id=request.request_id,
         )
         async for response in gen:
-            logger.info(f"Response kv_transfer_params: {response.kv_transfer_params}")
+            logger.debug(f"Response kv_transfer_params: {response.kv_transfer_params}")
             yield MyRequestOutput(
                 request_id=response.request_id,
                 prompt=response.prompt,
@@ -282,21 +282,21 @@ class VllmDecodeWorker(VllmBaseWorker):
         data_parallel_rank = request.dp_rank
         vllm_request = self._prepare_request(request)
 
-        logger.info("Prepared requests with id %s", vllm_request.request_id)
+        logger.debug("Prepared requests with id %s", vllm_request.request_id)
 
         if self.engine_args.enable_disagg:
-            logger.info("Sending request to prefill")
+            logger.debug("Sending request to prefill")
             prefill_response = await self.send_request_to_prefill(vllm_request)
             extra_args = vllm_request.sampling_params.extra_args or {}
             extra_args["kv_transfer_params"] = prefill_response.kv_transfer_params
             vllm_request.sampling_params.extra_args = extra_args
 
-            logger.info(
+            logger.debug(
                 "Prefill kv transfer params: %s",
                 vllm_request.sampling_params.extra_args["kv_transfer_params"],
             )
 
-        logger.info("Sending request to decode")
+        logger.debug("Sending request to decode")
 
         gen = self.engine_client.generate(
             prompt=vllm_request.prompt,
@@ -304,7 +304,7 @@ class VllmDecodeWorker(VllmBaseWorker):
             request_id=vllm_request.request_id,
             data_parallel_rank=data_parallel_rank,
         )
-        logger.info("Streaming response")
+        logger.debug("Streaming response")
         async for res in self._stream_response(gen):
             yield res
 
