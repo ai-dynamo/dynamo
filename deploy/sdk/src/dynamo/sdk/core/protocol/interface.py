@@ -76,6 +76,7 @@ class ServiceConfig(BaseModel):
     image: str | None = None
     envs: List[Env] | None = None
     labels: Dict[str, str] | None = None
+    http_exposed: bool = False
 
 
 class DynamoEndpointInterface(ABC):

@@ -125,6 +125,7 @@ class Middle:
 @service(
     dynamo={"namespace": "inference"},
     image=DYNAMO_IMAGE,
+    http_exposed=True,
 )
 class Frontend:
     """A simple frontend HTTP API that forwards requests to the dynamo graph."""

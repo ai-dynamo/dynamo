@@ -34,6 +34,7 @@ logger = logging.getLogger(__name__)
     workers=1,
     image=DYNAMO_IMAGE,
     app=FastAPI(title="Multimodal Example"),
+    http_exposed=True,
 )
 class Frontend:
     processor = depends(Processor)

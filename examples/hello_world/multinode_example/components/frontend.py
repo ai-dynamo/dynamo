@@ -34,6 +34,7 @@ app = FastAPI(title="Hello World!")
     },
     image=DYNAMO_IMAGE,
     app=app,
+    http_exposed=True,
 )
 class Frontend:
     processor = depends(Processor)

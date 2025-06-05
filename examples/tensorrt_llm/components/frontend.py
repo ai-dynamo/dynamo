@@ -54,6 +54,7 @@ class FrontendConfig(BaseModel):
     workers=1,
     image=DYNAMO_IMAGE,
     app=FastAPI(title="TensorRT LLM Example"),
+    http_exposed=True,
 )
 # todo this should be called ApiServer
 class Frontend:

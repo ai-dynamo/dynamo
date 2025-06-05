@@ -54,6 +54,7 @@ class FrontendConfig(BaseModel):
     workers=1,
     image=DYNAMO_IMAGE,
     app=FastAPI(title="LLM Example"),
+    http_exposed=True,
 )
 class Frontend:
     worker = depends(SGLangWorker)

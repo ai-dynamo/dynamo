@@ -153,6 +153,9 @@ def main(
     # will be set once dyn_worker has created class_instance
     instanceReady = asyncio.Event()
 
+    if service.config.http_exposed:
+        logger.info(f"exposing HTTP service for {service.name}")
+
     @dynamo_worker()
     async def dyn_worker(runtime: DistributedRuntime):
         nonlocal class_instance

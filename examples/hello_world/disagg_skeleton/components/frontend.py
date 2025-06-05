@@ -33,6 +33,7 @@ app = FastAPI(title="Hello World LLM")
     dynamo={"namespace": "dynamo-demo"},
     image=DYNAMO_IMAGE,
     app=app,
+    http_exposed=True,
 )
 class Frontend:
     processor = depends(Processor)

@@ -60,6 +60,7 @@ class FrontendConfig(BaseModel):
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
     image=DYNAMO_IMAGE,
+    http_exposed=True,
 )
 class Frontend:
     planner = depends(Planner)
