@@ -56,7 +56,6 @@ def texts_to_hashes(
         parent_hash = 0
         hashes: List[int] = []
 
-        print(blocks)
         for block in blocks:
             combined = (parent_hash, hash(tuple(block)))
             global_hash = hash(combined)

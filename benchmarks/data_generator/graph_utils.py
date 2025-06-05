@@ -19,6 +19,30 @@ from data_generator.protocols import CACHE_END, END_NODE, SUPER_ROOT
 from data_generator.sampler import get_cdf
 
 
+def _verify_tree(G: nx.DiGraph) -> None:
+    invalid_nodes = [(node, d) for node, d in G.in_degree() if d > 1]
+    if invalid_nodes:
+        print("ERROR: The following nodes have multiple parents (in-degree > 1):")
+        for node, in_degree in invalid_nodes:
+            parents = list(G.predecessors(node))
+            print(f"  Node {node}: in-degree={in_degree}, parents={parents}")
+        raise ValueError(
+            "Graph is not a valid tree: nodes with multiple parents detected"
+        )
+
+
+def _mark_visited(G: nx.DiGraph) -> None:
+    # visits to leaf nodes (non-core branches) are considered as ended
+    for node in G.nodes():
+        if "to_leaf" not in G.nodes[node]:
+            G.nodes[node]["to_leaf"] = 0
+        if G.nodes[node]["visited"] <= 1:
+            continue
+        for child in G.successors(node):
+            if G.nodes[child]["visited"] == 1:
+                G.nodes[node]["to_leaf"] += 1
+
+
 def _merge_chains(G: nx.DiGraph) -> nx.DiGraph:
     """
     Make the graph radix-like (meaning all unary paths are contracted).
@@ -73,7 +97,9 @@ def _merge_chains(G: nx.DiGraph) -> nx.DiGraph:
                 chain_len += 1
                 succ = list(G.successors(end_node))
 
-            G.add_edge(node_pred, end_node, weight=weight)
+            G.add_edge(
+                node_pred, end_node, weight=weight
+            )  # may overwrite the edge (should be harmless)
             G.nodes[end_node]["length"] = chain_len
 
         G.remove_nodes_from(nodes_rm)

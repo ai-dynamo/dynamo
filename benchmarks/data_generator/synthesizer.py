@@ -21,9 +21,11 @@ import networkx as nx
 import numpy as np
 import pandas as pd
 from data_generator.graph_utils import (
+    _mark_visited,
     _merge_chains,
     _precompute_transition_cdfs,
     _remove_leaves,
+    _verify_tree,
 )
 from data_generator.protocols import CACHE_END, END_NODE, SUPER_ROOT
 from data_generator.sampler import EmpiricalSampler, sample_from_cdf
@@ -87,7 +89,7 @@ class Synthesizer:
         assert (
             isinstance(self.prefix_len_multiplier, float)
             and self.prefix_len_multiplier > 0
-        ), "context_len_multiplier must be a positive float"
+        ), "prefix_len_multiplier must be a positive float"
         assert (
             isinstance(self.prompt_len_multiplier, float)
             and self.prompt_len_multiplier > 0
@@ -134,28 +136,9 @@ class Synthesizer:
         self.G.nodes[SUPER_ROOT]["visited"] = num_paths
         self.max_hash_id = max_hash_id
 
-        invalid_nodes = [(node, d) for node, d in self.G.in_degree() if d > 1]
-        if invalid_nodes:
-            print("ERROR: The following nodes have multiple parents (in-degree > 1):")
-            for node, in_degree in invalid_nodes:
-                parents = list(self.G.predecessors(node))
-                print(f"  Node {node}: in-degree={in_degree}, parents={parents}")
-            raise ValueError(
-                "Graph is not a valid tree: nodes with multiple parents detected"
-            )
-
-        # visits to leaf nodes (non-core branches) are considered as ended
-        for node in self.G.nodes():
-            if "to_leaf" not in self.G.nodes[node]:
-                self.G.nodes[node]["to_leaf"] = 0
-            if self.G.nodes[node]["visited"] <= 1:
-                continue
-            for child in self.G.successors(node):
-                if self.G.nodes[child]["visited"] == 1:
-                    self.G.nodes[node]["to_leaf"] += 1
-
-        # make graph radix-like
-        self.G = _merge_chains(self.G)
+        _verify_tree(self.G)
+        _mark_visited(self.G)
+        self.G = _merge_chains(self.G)  # make graph radix-like
         self.G, leaves_lens = _remove_leaves(self.G)
 
         # Apply prompt_len_multiplier to leaves_lens
