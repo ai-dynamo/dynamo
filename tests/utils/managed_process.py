@@ -148,7 +148,7 @@ class ManagedProcess:
             self._logger.warning("Warning: Failed to remove directory %s: %s", path, e)
 
     def _check_ports(self, timeout):
-        elapsed = 0
+        elapsed = 0.0
         for port in self.health_check_ports:
             elapsed += self._check_port(port, timeout - elapsed)
         return elapsed
@@ -157,7 +157,7 @@ class ManagedProcess:
         """Check if a port is open on localhost."""
         start_time = time.time()
         self._logger.info("Checking Port: %s", port)
-        elapsed = 0
+        elapsed = 0.0
         while elapsed < timeout:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 if s.connect_ex(("localhost", port)) == 0:
@@ -169,7 +169,7 @@ class ManagedProcess:
         raise RuntimeError("FAILED: Check Port: %s" % port)
 
     def _check_urls(self, timeout):
-        elapsed = 0
+        elapsed = 0.0
         for url in self.health_check_urls:
             elapsed += self._check_url(url, timeout - elapsed)
         return elapsed
@@ -182,7 +182,7 @@ class ManagedProcess:
             response_check = None
         start_time = time.time()
         self._logger.info("Checking URL %s", url)
-        elapsed = 0
+        elapsed = 0.0
         while elapsed < timeout:
             try:
                 response = requests.get(url, timeout=timeout - elapsed)

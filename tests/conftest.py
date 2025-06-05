@@ -15,6 +15,7 @@
 
 import logging
 import os
+import tempfile
 
 import pytest
 
@@ -46,18 +47,19 @@ class EtcdServer(ManagedProcess):
             "/tmp/etcd-test-data",
         ]
         super().__init__(
+            env=etcd_env,
             command=command,
             timeout=timeout,
             display_output=False,
             health_check_ports=[port],
-            data_dir="/tmp/etcd-test-data",
+            data_dir=tempfile.mkdtemp(prefix="etcd_"),
             log_dir=request.node.name,
         )
 
 
 class NatsServer(ManagedProcess):
     def __init__(self, request, port=4222, timeout=300):
-        data_dir = "/tmp/nats/jetstream"
+        data_dir = tempfile.mkdtemp(prefix="nats")
         command = ["nats-server", "-js", "--trace", "--store_dir", data_dir]
         super().__init__(
             command=command,

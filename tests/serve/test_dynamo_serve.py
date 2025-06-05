@@ -180,7 +180,10 @@ class DynamoServeProcess(ManagedProcess):
         )
 
     def _check_model(self, response):
-        data = response.json()
+        try:
+            data = response.json()
+        except ValueError:
+            return False
         if data.get("data") and len(data["data"]) > 0:
             return True
         return False
@@ -221,7 +224,7 @@ def test_serve_deployment(deployment_graph_test, request, runtime_services):
         url = f"http://localhost:{server_process.port}/{deployment_graph.endpoint}"
         start_time = time.time()
         retry_delay = 5
-        elapsed = 0
+        elapsed = 0.0
         while time.time() - start_time < deployment_graph.timeout:
             elapsed = time.time() - start_time
             try:
