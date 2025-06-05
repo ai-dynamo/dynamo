@@ -43,10 +43,17 @@ cd examples/vllm_v1
 dynamo serve graphs.agg:Frontend -f configs/agg.yaml
 ```
 
+or to run with P/D disagg:
+
+```bash
+cd examples/vllm_v1
+dynamo serve graphs.disagg:Frontend -f configs/disagg.yaml
+```
+
 To run other dp ranks headless on same node or other nodes can run
 
 ```
-VLLM_LOGGING_LEVEL=DEBUG CUDA_VISIBLE_DEVICES=1 VLLM_USE_V1=1 vllm serve Qwen/Qwen3-0.6B -dp 1 -dpr 1 --data-parallel-address 127.0.0.1 --data-parallel-rpc-port 62300 --data-parallel-size-local 1 --enforce-eager --headless --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq"}' --enable-prefix-caching
+CUDA_VISIBLE_DEVICES=2 VLLM_USE_V1=1 vllm serve Qwen/Qwen3-0.6B -dp 1 -dpr 1 --data-parallel-address 127.0.0.1 --data-parallel-rpc-port 62300 --data-parallel-size-local 1 --enforce-eager --headless --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq"}' --enable-prefix-caching &
 ```
 
 To test can run this curl reqeust. KV Routing will mean this will keep routing to a single node, so you will need to switch it up to see routing to different dp workers.

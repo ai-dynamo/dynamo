@@ -12,8 +12,24 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+Common:
+  model: /lustre/fsw/portfolios/coreai/users/gluo/huggingface/hub/models--deepseek-ai--DeepSeek-R1/snapshots/56d4cbbb4d29f4355bab4b9a39ccb717a14ad5ad/
+  served_model_name: deepseek-ai/DeepSeek-R1
 
-from components.frontend import Frontend
-from components.worker import VllmDecodeWorker, VllmPrefillWorker
+Frontend:
+  endpoint: dynamo.SimpleLoadBalancer.generate
+  port: 8000
+  common-configs: [served_model_name]
 
-Frontend.link(VllmDecodeWorker).link(VllmPrefillWorker)
+SimpleLoadBalancer:
+  enable_disagg: false
+  common-configs: [model, served_model_name]
+
+VllmDecodeWorker:
+  tensor_parallel_size: 16
+  enforce_eager: true
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: '16'
+  common-configs: [model, served_model_name]

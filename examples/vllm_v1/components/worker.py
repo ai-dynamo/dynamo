@@ -13,8 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
+import abc
 import asyncio
+import copy
 import logging
 import os
 import signal
@@ -23,9 +24,9 @@ import uuid
 from typing import Optional
 
 from utils.args import parse_vllm_args
-from utils.protocol import PreprocessedRequest
+from utils.protocol import MyRequestOutput, PreprocessedRequest, vLLMGenerateRequest
 from vllm.config import VllmConfig
-from vllm.distributed.kv_events import KVEventsConfig, ZmqEventPublisher
+from vllm.distributed.kv_events import ZmqEventPublisher
 from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.usage.usage_lib import UsageContext
@@ -41,7 +42,7 @@ from dynamo.llm import (
     register_llm,
 )
 from dynamo.runtime import Component
-from dynamo.sdk import async_on_start, dynamo_context, endpoint, service
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -99,13 +100,10 @@ class StatLoggerFactory:
 BLOCK_SIZE = 16
 
 
-class VllmBaseWorker:
+class VllmBaseWorker(abc.ABC):
     def __init__(self):
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
-        self.engine_args.kv_events_config = KVEventsConfig(
-            enable_kv_cache_events=True, publisher="zmq"
-        )
         if not self.engine_args.block_size:
             logger.info(f"block_size not set, default to {BLOCK_SIZE}")
             self.engine_args.block_size = BLOCK_SIZE
@@ -126,15 +124,6 @@ class VllmBaseWorker:
         # Taken from build_async_engine_client_from_engine_args()
         usage_context = UsageContext.OPENAI_API_SERVER
         vllm_config = self.engine_args.create_engine_config(usage_context=usage_context)
-
-        await register_llm(
-            ModelType.Backend,
-            dynamo_context["endpoints"][0],
-            self.engine_args.model,
-            self.engine_args.served_model_name[0],
-            context_length=self.engine_args.max_model_len,
-            kv_cache_block_size=self.engine_args.block_size,
-        )
 
         # Explicitly pass our custom stat logger for metrics
         self.engine_client = AsyncLLM.from_vllm_config(
@@ -190,53 +179,6 @@ class VllmBaseWorker:
         finally:
             loop.stop()
 
-    @endpoint()
-    async def generate(self, request: PreprocessedRequest):
-        request_id = str(uuid.uuid4().hex)
-
-        prompt = TokensPrompt(prompt_token_ids=request.token_ids)
-
-        sampling_params = SamplingParams(**self.default_sampling_params)
-        for key, value in request.sampling_options.model_dump().items():
-            if not value:
-                continue
-            if hasattr(sampling_params, key):
-                setattr(sampling_params, key, value)
-
-        max_tokens = request.stop_conditions.max_tokens
-        if max_tokens:
-            sampling_params.max_tokens = max_tokens
-
-        gen = self.engine_client.generate(
-            prompt=prompt,
-            sampling_params=sampling_params,
-            request_id=request_id,
-            data_parallel_rank=request.dp_rank,
-        )
-        num_output_tokens_so_far = 0
-        async for res in gen:
-            # res is vllm's RequestOutput
-
-            # This is the expected way for a request to end.
-            # The new token ID will be eos, don't forward it.
-            if res.finished:
-                yield {"finish_reason": "stop", "token_ids": []}
-                break
-
-            if not res.outputs:
-                yield {"finish_reason": "error", "token_ids": []}
-                break
-
-            output = res.outputs[0]
-            next_total_toks = len(output.token_ids)
-            out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
-            if output.finish_reason:
-                out["finish_reason"] = output.finish_reason
-            if output.stop_reason:
-                out["stop_reason"] = output.stop_reason
-            yield out
-            num_output_tokens_so_far = next_total_toks
-
     def set_side_channel_host_and_port(
         self, hostname: Optional[str] = None, port: Optional[int] = None
     ):
@@ -269,6 +211,26 @@ class VllmPrefillWorker(VllmBaseWorker):
         await super().async_init()
         logger.info("VllmPrefillWorker has been initialized")
 
+    @endpoint()
+    async def prefill(self, request: vLLMGenerateRequest):
+        gen = self.engine_client.generate(
+            prompt=request.prompt,
+            sampling_params=request.sampling_params,
+            request_id=request.request_id,
+        )
+        async for response in gen:
+            logger.info(f"Response kv_transfer_params: {response.kv_transfer_params}")
+            yield MyRequestOutput(
+                request_id=response.request_id,
+                prompt=response.prompt,
+                prompt_token_ids=response.prompt_token_ids,
+                prompt_logprobs=response.prompt_logprobs,
+                outputs=response.outputs,
+                finished=response.finished,
+                metrics=response.metrics,
+                kv_transfer_params=response.kv_transfer_params,
+            ).model_dump_json()
+
 
 @service(
     dynamo={
@@ -279,7 +241,137 @@ class VllmPrefillWorker(VllmBaseWorker):
     workers=1,
 )
 class VllmDecodeWorker(VllmBaseWorker):
+    prefill_worker = depends(VllmPrefillWorker)
+
     @async_on_start
     async def async_init(self):
         await super().async_init()
+        comp_ns, comp_name = VllmDecodeWorker.dynamo_address()  # type: ignore
+        runtime = dynamo_context["runtime"]
+        for served_model_name in self.engine_args.served_model_name:
+            logger.info(
+                f"Registering endpoint generate with model {self.engine_args.model} and served_model_name {served_model_name}"
+            )
+            endpoint = (
+                runtime.namespace(comp_ns).component(comp_name).endpoint("generate")
+            )
+            await register_llm(
+                ModelType.Backend,
+                endpoint,
+                self.engine_args.model,
+                served_model_name,
+                context_length=self.engine_args.max_model_len,
+                kv_cache_block_size=self.engine_args.block_size,
+            )
+
+        if self.engine_args.enable_disagg:
+            comp_ns, comp_name = VllmPrefillWorker.dynamo_address()  # type: ignore
+            self.prefill_worker_client = (
+                await runtime.namespace(comp_ns)
+                .component(comp_name)
+                .endpoint("prefill")
+                .client()
+            )
+        else:
+            self.prefill_worker_client = None
+
         logger.info("VllmDecodeWorker has been initialized")
+
+    @endpoint()
+    async def generate(self, request: PreprocessedRequest):
+        data_parallel_rank = request.dp_rank
+        vllm_request = self._prepare_request(request)
+
+        logger.info("Prepared requests with id %s", vllm_request.request_id)
+
+        if self.engine_args.enable_disagg:
+            logger.info("Sending request to prefill")
+            prefill_response = await self.send_request_to_prefill(vllm_request)
+            extra_args = vllm_request.sampling_params.extra_args or {}
+            extra_args["kv_transfer_params"] = prefill_response.kv_transfer_params
+            vllm_request.sampling_params.extra_args = extra_args
+
+            logger.info(
+                "Prefill kv transfer params: %s",
+                vllm_request.sampling_params.extra_args["kv_transfer_params"],
+            )
+
+        logger.info("Sending request to decode")
+
+        gen = self.engine_client.generate(
+            prompt=vllm_request.prompt,
+            sampling_params=vllm_request.sampling_params,
+            request_id=vllm_request.request_id,
+            data_parallel_rank=data_parallel_rank,
+        )
+        logger.info("Streaming response")
+        async for res in self._stream_response(gen):
+            yield res
+
+    async def send_request_to_prefill(
+        self, request: vLLMGenerateRequest
+    ) -> MyRequestOutput:
+        logger.debug("Sending request to prefill")
+
+        prefill_request = copy.deepcopy(request)
+        extra_args = prefill_request.sampling_params.extra_args or {}
+        extra_args["kv_transfer_params"] = {
+            "do_remote_decode": True,
+        }
+        prefill_request.sampling_params.extra_args = extra_args
+        prefill_request.sampling_params.max_tokens = 1
+        prefill_request.sampling_params.min_tokens = 1
+
+        logger.debug("Prefill request: %s", prefill_request.model_dump_json())
+
+        async for prefill_response in await self.prefill_worker_client.round_robin(
+            prefill_request.model_dump_json()
+        ):
+            return MyRequestOutput.model_validate_json(prefill_response.data())
+
+    def _prepare_request(self, request: PreprocessedRequest) -> vLLMGenerateRequest:
+        request_id = str(uuid.uuid4().hex)
+
+        prompt = TokensPrompt(prompt_token_ids=request.token_ids)
+
+        sampling_params = SamplingParams(**self.default_sampling_params)
+        for key, value in request.sampling_options.model_dump().items():
+            if not value:
+                continue
+            if hasattr(sampling_params, key):
+                setattr(sampling_params, key, value)
+
+        max_tokens = request.stop_conditions.max_tokens
+        if max_tokens:
+            sampling_params.max_tokens = max_tokens
+
+        return vLLMGenerateRequest(
+            prompt=prompt,
+            sampling_params=sampling_params,
+            request_id=request_id,
+        )
+
+    async def _stream_response(self, gen):
+        num_output_tokens_so_far = 0
+        async for res in gen:
+            # res is vllm's RequestOutput
+
+            # This is the expected way for a request to end.
+            # The new token ID will be eos, don't forward it.
+            if res.finished:
+                yield {"finish_reason": "stop", "token_ids": []}
+                break
+
+            if not res.outputs:
+                yield {"finish_reason": "error", "token_ids": []}
+                break
+
+            output = res.outputs[0]
+            next_total_toks = len(output.token_ids)
+            out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+            if output.finish_reason:
+                out["finish_reason"] = output.finish_reason
+            if output.stop_reason:
+                out["stop_reason"] = output.stop_reason
+            yield out
+            num_output_tokens_so_far = next_total_toks

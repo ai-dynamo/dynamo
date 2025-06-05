@@ -13,31 +13,43 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 Common:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  model: Qwen/Qwen3-0.6B
+
+  block-size: 16
+  max-model-len: 16384
+  served_model_name: Qwen/Qwen3-0.6B
   kv-transfer-config: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
 Frontend:
-  endpoint: dynamo.SimpleLoadBalancer.generate_disagg
   port: 8000
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  router_mode: kv
 
-SimpleLoadBalancer:
-  enable_disagg: true
-  common-configs: [model, kv-transfer-config, served_model_name]
+VllmDecodeWorker:
+  enable-disagg: true
+  enforce-eager: true
+  max-num-batched-tokens: 16384
+  enable-prefix-caching: true
+  data-parallel-address: 127.0.0.1
+  data-parallel-rpc-port: 62300
+  data-parallel-size: 2
+  data-parallel-size-local: 1
+  kv-events-config: '{"enable_kv_cache_events": true, "publisher": "zmq"}'
+  # api-server-count: 2
+
+  ServiceArgs:
+    workers: 1  # 2 workers
+    resources:
+      gpu: 1  # 2 dp ranks
+  common-configs: [model, served_model_name, block-size, max-model-len, kv-transfer-config]
 
 VllmPrefillWorker:
   enforce-eager: true
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: '1'
-  common-configs: [model, kv-transfer-config, served_model_name]
+  max-num-batched-tokens: 16384
+  enable-prefix-caching: true
+  served_model_name: prefill-Qwen/Qwen3-0.6B
 
-VllmDecodeWorker:
-  enforce-eager: true
   ServiceArgs:
-    workers: 1
+    workers: 1  # 2 workers
     resources:
-      gpu: '1'
-  common-configs: [model, kv-transfer-config, served_model_name]
+      gpu: 1  # 2 dp ranks
+  common-configs: [model, block-size, max-model-len, kv-transfer-config]

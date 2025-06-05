@@ -27,6 +27,7 @@ VllmDecodeWorker:
   data-parallel-rpc-port: 62300
   data-parallel-size: 2
   data-parallel-size-local: 1
+  kv-events-config: '{"enable_kv_cache_events": true, "publisher": "zmq"}'
   # api-server-count: 2
 
   ServiceArgs:
