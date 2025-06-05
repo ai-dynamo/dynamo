@@ -137,20 +137,25 @@ async def check_required_workers(
     workers_clients, required_workers: int, timeout: int, poll_interval=1
 ):
     """Wait until the minimum number of workers are ready."""
-    num_workers = sum(map(lambda wc: len(wc.instance_ids()), workers_clients))
+async def check_required_workers(
+    workers_clients, required_workers: int, timeout: int, poll_interval=1
+):
+    """Wait until the minimum number of workers are ready."""
     start_time = time.time()
+    num_workers = 0
     while num_workers < required_workers and time.time() - start_time < timeout:
-        new_count = sum(map(lambda wc: len(wc.instance_ids()), workers_clients))
-
-        if new_count != required_workers:
+        num_workers = sum(map(lambda wc: len(wc.instance_ids()), workers_clients))
+        if num_workers < required_workers:
             logger.info(
                 f"Waiting for more workers to be ready.\n"
-                f" Current: {new_count},"
+                f" Current: {num_workers},"
                 f" Required: {required_workers}"
             )
-        await asyncio.sleep(poll_interval)
-        num_workers = new_count
-    if time.time() - start_time > timeout:
+            await asyncio.sleep(poll_interval)
+    if num_workers < required_workers:
+        raise TimeoutError(
+            f"Timed out waiting for {required_workers} workers to be ready."
+        )
         raise TimeoutError(
             f"Timed out waiting for {required_workers} workers to be ready."
         )
