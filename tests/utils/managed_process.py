@@ -217,10 +217,14 @@ class ManagedProcess:
             process.kill()
 
     def _terminate_process_tree(self, pid):
-        parent = psutil.Process(pid)
-        for child in parent.children(recursive=True):
-            self._terminate_process(child)
-        self._terminate_process(parent)
+        try:
+            parent = psutil.Process(pid)
+            for child in parent.children(recursive=True):
+                self._terminate_process(child)
+            self._terminate_process(parent)
+        except psutil.NoSuchProcess:
+            # Process already terminated
+            pass
 
 
 def main():
