@@ -78,12 +78,11 @@ class Frontend:
             f"Starting HTTP server and processor on port {self.frontend_config.port}"
         )
         dynamo_run_binary = get_dynamo_run_binary()
-        endpoint = "dyn"
 
         cmd = [
             dynamo_run_binary,
             "in=http",
-            f"out={endpoint}",
+            "out=dyn",
             "--http-port",
             str(self.frontend_config.port),
             "--router-mode",
@@ -97,3 +96,24 @@ class Frontend:
             stdout=None,
             stderr=None,
         )
+
+    def close(self):
+        """Clean up resources by terminating the subprocess."""
+        if self.process is not None:
+            try:
+                logger.info("Terminating subprocess...")
+                self.process.terminate()
+                # Wait for process to terminate with a timeout
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.warning("Subprocess did not terminate gracefully, forcing kill")
+                self.process.kill()
+                self.process.wait()
+            except Exception as e:
+                logger.error(f"Error while terminating subprocess: {e}")
+            finally:
+                self.process = None
+
+    def __del__(self):
+        """Destructor to ensure subprocess is cleaned up."""
+        self.close()

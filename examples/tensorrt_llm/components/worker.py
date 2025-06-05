@@ -70,13 +70,18 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
         comp_ns, comp_name = TensorRTLLMWorker.dynamo_address()  # type: ignore
         endpoint = runtime.namespace(comp_ns).component(comp_name).endpoint("generate")
 
-        await register_llm(
-            ModelType.Backend,
-            endpoint,
-            self._engine_config.model_name,
-            self.served_model_name,
-            kv_cache_block_size=self._kv_block_size,
-        )
+        try:
+            await register_llm(
+                ModelType.Backend,
+                endpoint,
+                self._engine_config.model_name,
+                self.served_model_name,
+                kv_cache_block_size=self._kv_block_size,
+            )
+            logger.info("Successfully registered LLM for discovery")
+        except Exception as e:
+            logger.error(f"Failed to register LLM for discovery: {e}")
+            raise
 
         if self._remote_prefill:
             runtime = dynamo_context["runtime"]

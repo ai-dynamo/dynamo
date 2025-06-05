@@ -16,7 +16,7 @@ from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 logging.basicConfig(level=logging.DEBUG)
 
 
-def _to_signed_i64(value: int | None) -> int:
+def _to_signed_i64(value: int | None) -> int | None:
     """Convert a Python int to signed 64-bit range by two's complement."""
     if value is None:
         return None

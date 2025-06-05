@@ -60,7 +60,7 @@ def update_args_from_disagg_config(
     return engine_config
 
 
-def _to_signed_i64(value: int | None) -> int:
+def _to_signed_i64(value: int | None) -> int | None:
     """Convert a Python int to signed 64-bit range by two's complement."""
     if value is None:
         return None
@@ -73,9 +73,9 @@ def _to_signed_i64(value: int | None) -> int:
 
 
 def get_sampling_params(sampling_params_dict, default_sampling_params):
-    sampling_params = default_sampling_params
+    sampling_params = copy.deepcopy(default_sampling_params)
     for key, value in sampling_params_dict.items():
-        if not value:
+        if value is None:
             continue
         if hasattr(sampling_params, key):
             setattr(sampling_params, key, value)
