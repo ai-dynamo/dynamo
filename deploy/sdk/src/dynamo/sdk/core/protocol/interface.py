@@ -23,7 +23,7 @@ from typing import Any, Dict, Generic, List, Optional, Set, Tuple, Type, TypeVar
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field
 
-from dynamo.sdk.core.protocol.deployment import Env
+from .deployment import Env
 
 T = TypeVar("T", bound=object)
 

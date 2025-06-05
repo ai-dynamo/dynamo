@@ -24,7 +24,7 @@ from components.worker import VllmWorker
 from pydantic import BaseModel
 
 from dynamo import sdk
-from dynamo.sdk import api, async_on_shutdown, depends, service
+from dynamo.sdk import api, depends, on_shutdown, service
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
 
@@ -120,7 +120,7 @@ class Frontend:
         The resulting api_endpoints in dynamo.yaml will be incorrect.
         """
 
-    @async_on_shutdown
+    @on_shutdown
     def cleanup(self):
         """Clean up resources before shutdown."""
 
