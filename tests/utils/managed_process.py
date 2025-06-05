@@ -59,8 +59,8 @@ class ManagedProcess:
 
             self._terminate_existing()
             self._start_process()
-            self.timeout -= self._check_ports(self.timeout)
-            self.timeout -= self._check_urls(self.timeout)
+            elapsed = self._check_ports(self.timeout)
+            self._check_urls(self.timeout - elapsed)
 
             return self.proc
 
@@ -144,29 +144,31 @@ class ManagedProcess:
             self._logger.warning("Warning: Failed to remove directory %s: %s", path, e)
 
     def _check_ports(self, timeout):
-        time_taken = 0
+        elapsed = 0
         for port in self.health_check_ports:
-            time_taken += self._check_port(port, timeout)
-        return time_taken
+            elapsed += self._check_port(port, timeout - elapsed)
+        return elapsed
 
     def _check_port(self, port, timeout=30, sleep=0.1):
         """Check if a port is open on localhost."""
         start_time = time.time()
         self._logger.info("Checking Port: %s", port)
-        while time.time() - start_time < timeout:
+        elapsed = 0
+        while elapsed < timeout:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 if s.connect_ex(("localhost", port)) == 0:
                     self._logger.info("SUCCESS: Check Port: %s", port)
                     return time.time() - start_time
             time.sleep(sleep)
+            elapsed = time.time() - start_time
         self._logger.error("FAILED: Check Port: %s", port)
         raise RuntimeError("FAILED: Check Port: %s" % port)
 
     def _check_urls(self, timeout):
-        time_taken = 0
+        elapsed = 0
         for url in self.health_check_urls:
-            time_taken += self._check_url(url, timeout)
-        return time_taken
+            elapsed += self._check_url(url, timeout - elapsed)
+        return elapsed
 
     def _check_url(self, url, timeout=30, sleep=0.1):
         if isinstance(url, tuple):
