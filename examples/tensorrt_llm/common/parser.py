@@ -122,6 +122,12 @@ def parse_tensorrt_llm_args(
         "--engine_args", type=str, required=True, help="Path to the engine args file"
     )
     parser.add_argument(
+        "--served_model_name",
+        type=str,
+        help="Name of the model to serve",
+        default=None,
+    )
+    parser.add_argument(
         "--llmapi-disaggregated-config",
         "-c",
         type=str,
