@@ -37,6 +37,7 @@ class EtcdServer(ManagedProcess):
         port_string = str(port)
         etcd_env = os.environ.copy()
         etcd_env["ALLOW_NONE_AUTHENTICATION"] = "yes"
+        data_dir = tempfile.mkdtemp(prefix="etcd_")
         command = [
             "etcd",
             "--listen-client-urls",
@@ -44,7 +45,7 @@ class EtcdServer(ManagedProcess):
             "--advertise-client-urls",
             f"http://0.0.0.0:{port_string}",
             "--data-dir",
-            "/tmp/etcd-test-data",
+            data_dir,
         ]
         super().__init__(
             env=etcd_env,
@@ -59,7 +60,7 @@ class EtcdServer(ManagedProcess):
 
 class NatsServer(ManagedProcess):
     def __init__(self, request, port=4222, timeout=300):
-        data_dir = tempfile.mkdtemp(prefix="nats")
+        data_dir = tempfile.mkdtemp(prefix="nats_")
         command = ["nats-server", "-js", "--trace", "--store_dir", data_dir]
         super().__init__(
             command=command,
