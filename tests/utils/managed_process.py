@@ -90,7 +90,9 @@ class ManagedProcess:
         assert self._log_path
 
         self._logger.info(
-            f"Running command: {' '.join(self.command)} in {self.working_dir or os.getcwd()}"
+            "Running command: %s in %s",
+            " ".join(self.command),
+            self.working_dir or os.getcwd(),
         )
 
         stdin = subprocess.DEVNULL
@@ -139,7 +141,7 @@ class ManagedProcess:
         try:
             shutil.rmtree(path, ignore_errors=True)
         except (OSError, IOError) as e:
-            self._logger.warning(f"Warning: Failed to remove directory {path}: {e}")
+            self._logger.warning("Warning: Failed to remove directory %s: %s", path, e)
 
     def _check_ports(self, timeout):
         time_taken = 0
@@ -150,15 +152,15 @@ class ManagedProcess:
     def _check_port(self, port, timeout=30, sleep=0.1):
         """Check if a port is open on localhost."""
         start_time = time.time()
-        self._logger.info(f"Checking Port: {port}")
+        self._logger.info("Checking Port: %s", port)
         while time.time() - start_time < timeout:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 if s.connect_ex(("localhost", port)) == 0:
-                    self._logger.info(f"SUCCESS: Check Port:{port}")
+                    self._logger.info("SUCCESS: Check Port: %s", port)
                     return time.time() - start_time
             time.sleep(sleep)
-        self._logger.error(f"FAILED: Check Port: {port}")
-        raise RuntimeError(f"FAILED: Check Port: {port}")
+        self._logger.error("FAILED: Check Port: %s", port)
+        raise RuntimeError("FAILED: Check Port: %s" % port)
 
     def _check_urls(self, timeout):
         time_taken = 0
@@ -173,39 +175,41 @@ class ManagedProcess:
         else:
             response_check = None
         start_time = time.time()
-        self._logger.info(f"Checking URL {url}")
-        while time.time() - start_time < timeout:
+        self._logger.info("Checking URL %s", url)
+        elapsed = 0
+        while elapsed < timeout:
             try:
-                response = requests.get(url, timeout=timeout)
+                response = requests.get(url, timeout=timeout - elapsed)
                 if response.status_code == 200:
                     if response_check is None or response_check(response):
-                        self._logger.info(f"SUCCESS: Check URL:{url}")
+                        self._logger.info("SUCCESS: Check URL: %s", url)
                         return time.time() - start_time
             except requests.RequestException as e:
-                self._logger.warning(f"URL check failed: {e}")
+                self._logger.warn("URL check failed: %s", e)
             time.sleep(sleep)
+            elapsed = time.time() - start_time
 
-        self._logger.error(f"FAILED: Check URL: {url}")
-        raise RuntimeError(f"FAILED: Check URL: {url}")
+        self._logger.error("FAILED: Check URL: %s", url)
+        raise RuntimeError("FAILED: Check URL: %s" % url)
 
     def _terminate_existing(self):
         if self.terminate_existing:
-            self._logger.info(f"Terminating Existing {self._command_name}")
+            self._logger.info("Terminating Existing %s", self._command_name)
             for proc in psutil.process_iter(["name", "cmdline"]):
                 if proc.name() == self._command_name or proc.name() in self.stragglers:
                     self._terminate_process_tree(proc.pid)
 
     def _terminate_process(self, process):
         try:
-            self._logger.info(f"Terminating {process}")
+            self._logger.info("Terminating %s", process)
             process.terminate()
         except psutil.AccessDenied:
-            self._logger.warning(f"Access denied for PID {process.pid}")
+            self._logger.warning("Access denied for PID %s", process.pid)
         except psutil.NoSuchProcess:
-            self._logger.warning(f"PID {process.pid} no longer exists")
+            self._logger.warning("PID %s no longer exists", process.pid)
         except psutil.TimeoutExpired:
             self._logger.warning(
-                f"PID {process.pid} did not terminate before timeout, killing"
+                "PID %s did not terminate before timeout, killing", process.pid
             )
             process.kill()
 

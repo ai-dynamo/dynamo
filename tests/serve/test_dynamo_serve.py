@@ -224,43 +224,51 @@ def test_serve_deployment(deployment_graph_test, request, runtime_services):
                 response = requests.post(url, json=payload.payload, timeout=300)
             except Exception as e:
                 # pytest.fail(f"Request failed: {str(e)}")
-                logger.warning(e)
+                logger.warning("Request failed: %s", e)
                 time.sleep(5)
                 continue
-            logger.info(f"Response{response}")
-            if (
-                response.status_code == 500
-                and "no instances" in response.json()["error"]
-            ):
-                time.sleep(5)
-                continue
-
-            if (
-                response.status_code == 404
-                and "Model not found" in response.json()["error"]
-            ):
-                time.sleep(5)
-                continue
-
+            logger.info("Response%r", response)
+            if response.status_code == 500:
+                error = response.json().get("error", "")
+                if "no instances" in error:
+                    logger.warning("Retrying due to no instances available")
+                    time.sleep(5)
+                    continue
+            if response.status_code == 404:
+                error = response.json().get("error", "")
+                if "Model not found" in error:
+                    logger.warning("Retrying due to model not found")
+                    time.sleep(5)
+                    continue
             # Process the response
             if response.status_code != 200:
+                logger.error(
+                    "Service returned status code %s: %s",
+                    response.status_code,
+                    response.text,
+                )
                 pytest.fail(
-                    f"Service returned status code {response.status_code}: {response.text}"
+                    "Service returned status code %s: %s"
+                    % (response.status_code, response.text)
                 )
             else:
                 break
         else:
+            logger.error(
+                "Service did not return a successful response within %s s",
+                deployment_graph.timeout,
+            )
             pytest.fail(
-                f"Service did not return a successful response within "
-                f"{deployment_graph.timeout} s"
+                "Service did not return a successful response within %s s"
+                % deployment_graph.timeout
             )
 
         content = deployment_graph.response_handler(response)
 
-        logger.info(f"Received Content: {content}")
+        logger.info("Received Content: %s", content)
 
         # Check for expected responses
         assert content, "Empty response content"
 
         for expected in payload.expected_response:
-            assert expected in content, f"Expected '{expected}' not found in response"
+            assert expected in content, "Expected '%s' not found in response" % expected
