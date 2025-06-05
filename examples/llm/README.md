@@ -64,9 +64,9 @@ sequenceDiagram
 
 ### Prerequisites
 
-Start required services (etcd and NATS) using [Docker Compose](../../deploy/docker-compose.yml)
+Start required services (etcd and NATS) using [Docker Compose](../../deploy/metrics/docker-compose.yml)
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
 ### Build docker
@@ -124,6 +124,9 @@ This figure shows an overview of the major components to deploy:
                                  +------------------+
 
 ```
+
+> [!NOTE]
+> The planner component is enabled by default for all deployment architectures but is set to no-op mode. This means the planner observes metrics but doesn't take scaling actions. To enable active scaling, you can add `--Planner.no-operation=false` to your `dynamo serve` command. For more details, see the [Planner documentation](../../components/planner/README.md).
 
 ### Example architectures
 _Note_: For a non-dockerized deployment, first export `DYNAMO_HOME` to point to the dynamo repository root, e.g. `export DYNAMO_HOME=$(pwd)`
@@ -186,7 +189,7 @@ These examples can be deployed to a Kubernetes cluster using [Dynamo Cloud](../.
 
 ### Prerequisites
 
-You must have first followed the instructions in [deploy/dynamo/helm/README.md](../../deploy/dynamo/helm/README.md) to install Dynamo Cloud on your Kubernetes cluster.
+You must have first followed the instructions in [deploy/cloud/helm/README.md](../../deploy/cloud/helm/README.md) to install Dynamo Cloud on your Kubernetes cluster.
 
 **Note**: The `KUBE_NS` variable in the following steps must match the Kubernetes namespace where you installed Dynamo Cloud. You must also expose the `dynamo-store` service externally. This will be the endpoint the CLI uses to interface with Dynamo Cloud.
 
@@ -216,19 +219,24 @@ export DEPLOYMENT_NAME=llm-agg
 dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
 ```
 
+**Note**: To avoid rate limiting from unauthenticated requests to HuggingFace (HF), you can provide your `HF_TOKEN` as a secret in your deployment. See the [operator deployment guide](../../docs/guides/dynamo_deploy/operator_deployment.md#referencing-secrets-in-your-deployment) for instructions on referencing secrets like `HF_TOKEN` in your deployment configuration.
+
+**Note**: Optionally add `--Planner.no-operation=false` at the end of the deployment command to enable the planner component to take scaling actions on your deployment.
+
 ### Testing the Deployment
 
-Once the deployment is complete, you can test it using:
+Once the deployment is complete, you can test it. If you have ingress available for your deployment, you can directly call the url returned
+in `dynamo deployment get ${DEPLOYMENT_NAME}` and skip the steps to find and forward the frontend pod.
 
 ```bash
 # Find your frontend pod
 export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
 
 # Forward the pod's port to localhost
-kubectl port-forward pod/$FRONTEND_POD 8000:8000 -n ${KUBE_NS}
+kubectl port-forward pod/$FRONTEND_POD 3000:3000 -n ${KUBE_NS}
 
 # Test the API endpoint
-curl localhost:8000/v1/chat/completions \
+curl localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",

@@ -14,20 +14,24 @@
 # limitations under the License.
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 
+from components.planner_service import Planner
 from components.processor import Processor
 from components.worker import VllmWorker
-from fastapi import FastAPI
 from pydantic import BaseModel
 
 from dynamo import sdk
-from dynamo.sdk import async_on_shutdown, depends, service
+from dynamo.sdk import api, depends, on_shutdown, service
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
 
 logger = logging.getLogger(__name__)
+
+# TODO: temp workaround to avoid port conflict with subprocess HTTP server; remove this once ingress is fixed
+os.environ["DYNAMO_PORT"] = "3999"
 
 
 def get_http_binary_path():
@@ -51,25 +55,22 @@ class FrontendConfig(BaseModel):
 # todo this should be called ApiServer
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "dynamo",
     },
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
     image=DYNAMO_IMAGE,
-    app=FastAPI(title="LLM Example"),
 )
 class Frontend:
+    planner = depends(Planner)
     worker = depends(VllmWorker)
     processor = depends(Processor)
 
     def __init__(self):
         """Initialize Frontend service with HTTP server and model configuration."""
-        config = ServiceConfig.get_instance()
-        frontend_config = FrontendConfig(**config.get("Frontend", {}))
+        frontend_config = FrontendConfig(**ServiceConfig.get_parsed_config("Frontend"))
         self.frontend_config = frontend_config
         self.process = None
-
         self.setup_model()
         self.start_http_server()
 
@@ -108,7 +109,18 @@ class Frontend:
             stderr=None,
         )
 
-    @async_on_shutdown
+    @api()
+    def dummy_api(self) -> None:
+        """
+        Dummy API to enable the HTTP server for the Dynamo operator.
+        This API is not used by the model.
+
+        NOTE: this is a temporary solution to expose ingress
+        for the LLM examples. Will be fixed and removed in the future.
+        The resulting api_endpoints in dynamo.yaml will be incorrect.
+        """
+
+    @on_shutdown
     def cleanup(self):
         """Clean up resources before shutdown."""
 

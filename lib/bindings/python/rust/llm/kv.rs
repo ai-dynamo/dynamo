@@ -14,13 +14,15 @@
 // limitations under the License.
 
 use std::collections::HashMap;
+use std::sync::atomic::AtomicU32;
 
 use super::*;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
 use rs::traits::events::EventSubscriber;
 use tracing;
 
-use llm_rs::kv_router::{indexer::compute_block_hash_for_seq, protocols::*};
+use llm_rs::kv_router::protocols::*;
+use llm_rs::kv_router::publisher::{create_stored_blocks, KvEventSourceConfig};
 
 #[pyclass]
 pub(crate) struct KvRouter {
@@ -37,7 +39,9 @@ impl KvRouter {
                 llm_rs::kv_router::KvRouter::new(component.inner.clone(), kv_block_size, None)
                     .await
                     .map_err(to_pyerr)?;
-            Ok(Self { inner })
+            Ok(Self {
+                inner: Arc::new(inner),
+            })
         })
     }
 
@@ -59,33 +63,32 @@ impl KvRouter {
 }
 
 #[pyclass]
-pub(crate) struct KvMetricsPublisher {
-    inner: Arc<llm_rs::kv_router::publisher::KvMetricsPublisher>,
+pub(crate) struct WorkerMetricsPublisher {
+    inner: Arc<llm_rs::kv_router::publisher::WorkerMetricsPublisher>,
 }
 
 #[pymethods]
-impl KvMetricsPublisher {
+impl WorkerMetricsPublisher {
     #[new]
     fn new() -> PyResult<Self> {
-        let inner = llm_rs::kv_router::publisher::KvMetricsPublisher::new().map_err(to_pyerr)?;
+        let inner =
+            llm_rs::kv_router::publisher::WorkerMetricsPublisher::new().map_err(to_pyerr)?;
         Ok(Self {
             inner: inner.into(),
         })
     }
 
-    #[pyo3(signature = (component, lease=None))]
+    #[pyo3(signature = (component))]
     fn create_endpoint<'p>(
         &self,
         py: Python<'p>,
         component: Component,
-        lease: Option<&PyLease>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let rs_publisher = self.inner.clone();
         let rs_component = component.inner.clone();
-        let lease = lease.map(|l| l.inner.clone());
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             rs_publisher
-                .create_endpoint(rs_component, lease)
+                .create_endpoint(rs_component)
                 .await
                 .map_err(to_pyerr)?;
             Ok(())
@@ -93,6 +96,7 @@ impl KvMetricsPublisher {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (request_active_slots, request_total_slots, kv_active_blocks, kv_total_blocks, num_requests_waiting, gpu_cache_usage_perc, gpu_prefix_cache_hit_rate, data_parallel_rank = 0))]
     fn publish(
         &self,
         _py: Python,
@@ -103,10 +107,12 @@ impl KvMetricsPublisher {
         num_requests_waiting: u64,
         gpu_cache_usage_perc: f32,
         gpu_prefix_cache_hit_rate: f32,
+        data_parallel_rank: u32,
     ) -> PyResult<()> {
         self.inner
             .publish(
                 llm_rs::kv_router::protocols::ForwardPassMetrics {
+                    data_parallel_rank: Some(data_parallel_rank),
                     request_active_slots,
                     request_total_slots,
                     kv_active_blocks,
@@ -122,9 +128,74 @@ impl KvMetricsPublisher {
 }
 
 #[pyclass]
+#[derive(Clone)]
+pub struct ZmqKvEventPublisherConfig {
+    #[pyo3(get, set)]
+    pub worker_id: i64,
+    #[pyo3(get, set)]
+    pub kv_block_size: usize,
+    #[pyo3(get, set)]
+    pub zmq_endpoint: String,
+    #[pyo3(get, set)]
+    pub zmq_topic: String,
+}
+
+#[pymethods]
+impl ZmqKvEventPublisherConfig {
+    #[new]
+    #[pyo3(signature = (
+        worker_id,
+        kv_block_size,
+        zmq_endpoint = "tcp://127.0.0.1:5557".to_string(),
+        zmq_topic = "".to_string()
+    ))]
+    pub fn new(
+        worker_id: i64,
+        kv_block_size: usize,
+        zmq_endpoint: String,
+        zmq_topic: String,
+    ) -> Self {
+        Self {
+            worker_id,
+            kv_block_size,
+            zmq_endpoint,
+            zmq_topic,
+        }
+    }
+}
+
+#[pyclass]
+pub(crate) struct ZmqKvEventPublisher {
+    inner: llm_rs::kv_router::publisher::KvEventPublisher,
+}
+
+#[pymethods]
+impl ZmqKvEventPublisher {
+    #[new]
+    fn new(component: Component, config: ZmqKvEventPublisherConfig) -> PyResult<Self> {
+        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
+            component.inner,
+            config.worker_id,
+            config.kv_block_size,
+            Some(KvEventSourceConfig::Zmq {
+                endpoint: config.zmq_endpoint,
+                topic: config.zmq_topic,
+            }),
+        )
+        .map_err(to_pyerr)?;
+        Ok(Self { inner })
+    }
+
+    fn shutdown(&mut self) {
+        self.inner.shutdown()
+    }
+}
+
+#[pyclass]
 pub(crate) struct KvEventPublisher {
     inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
-    warning_count: u32,
+    kv_block_size: usize,
+    warning_count: Arc<AtomicU32>,
 }
 
 #[pymethods]
@@ -132,14 +203,17 @@ impl KvEventPublisher {
     #[new]
     fn new(component: Component, worker_id: i64, kv_block_size: usize) -> PyResult<Self> {
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
-            component.inner.clone(),
+            component.inner,
             worker_id,
             kv_block_size,
+            None,
         )
         .map_err(to_pyerr)?;
+
         Ok(Self {
             inner: inner.into(),
-            warning_count: 0,
+            kv_block_size,
+            warning_count: Arc::new(AtomicU32::new(0)),
         })
     }
 
@@ -151,19 +225,21 @@ impl KvEventPublisher {
         event_id: u64,
         token_ids: Vec<u32>,
         num_block_tokens: Vec<u64>,
-        block_hashes: Vec<u64>,
+        block_hashes: Vec<i64>,
         lora_id: u64,
-        parent_hash: Option<u64>,
+        parent_hash: Option<i64>,
     ) -> PyResult<()> {
         let event = KvCacheEvent {
             event_id,
             data: KvCacheEventData::Stored(KvCacheStoreData {
-                parent_hash: parent_hash.map(ExternalSequenceBlockHash),
-                blocks: self.create_stored_blocks(
+                parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
+                blocks: create_stored_blocks(
+                    self.kv_block_size,
                     &token_ids,
                     &num_block_tokens,
                     &block_hashes,
                     lora_id,
+                    &self.warning_count,
                 ),
             }),
         };
@@ -171,10 +247,10 @@ impl KvEventPublisher {
         self.inner.publish(event).map_err(to_pyerr)
     }
 
-    fn publish_removed(&self, _py: Python, event_id: u64, block_hashes: Vec<u64>) -> PyResult<()> {
+    fn publish_removed(&self, _py: Python, event_id: u64, block_hashes: Vec<i64>) -> PyResult<()> {
         let block_hashes: Vec<ExternalSequenceBlockHash> = block_hashes
             .iter()
-            .map(|&v| ExternalSequenceBlockHash(v))
+            .map(|&h| ExternalSequenceBlockHash::from(h))
             .collect();
         let event = KvCacheEvent {
             event_id,
@@ -182,50 +258,6 @@ impl KvEventPublisher {
         };
 
         self.inner.publish(event).map_err(to_pyerr)
-    }
-}
-
-impl KvEventPublisher {
-    fn create_stored_block_from_parts(
-        &self,
-        block_hash: u64,
-        token_ids: &[u32],
-        _lora_id: u64,
-    ) -> KvCacheStoredBlockData {
-        let tokens_hash = compute_block_hash_for_seq(token_ids, self.inner.kv_block_size())[0];
-        KvCacheStoredBlockData {
-            block_hash: ExternalSequenceBlockHash(block_hash),
-            tokens_hash,
-        }
-    }
-
-    fn create_stored_blocks(
-        &mut self,
-        token_ids: &[u32],
-        num_block_tokens: &[u64],
-        block_hashes: &[u64],
-        lora_id: u64,
-    ) -> Vec<KvCacheStoredBlockData> {
-        let mut blocks: Vec<KvCacheStoredBlockData> = Vec::new();
-
-        let mut token_offset: usize = 0;
-        for (num_tokens_it, block_hash_it) in num_block_tokens.iter().zip(block_hashes.iter()) {
-            if (self.warning_count < 3) && (*num_tokens_it != self.inner.kv_block_size() as u64) {
-                tracing::warn!(
-                    "Block not published. Block size must be {} tokens to be published. Block size is: {}",
-                    self.inner.kv_block_size(),
-                    *num_tokens_it
-                );
-                self.warning_count += 1;
-                break;
-            }
-
-            let tokens = &token_ids[token_offset..(token_offset + *num_tokens_it as usize)];
-            blocks.push(self.create_stored_block_from_parts(*block_hash_it, tokens, lora_id));
-            token_offset += *num_tokens_it as usize;
-        }
-
-        blocks
     }
 }
 

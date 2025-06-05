@@ -114,7 +114,7 @@ mod integration {
             .client::<String, Annotated<String>>()
             .await?;
 
-        client.wait_for_endpoints().await?;
+        client.wait_for_instances().await?;
         let client = Arc::new(client);
 
         let start = Instant::now();

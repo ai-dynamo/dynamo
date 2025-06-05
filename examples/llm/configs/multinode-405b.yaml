@@ -49,7 +49,7 @@ VllmWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 8
+      gpu: '8'
 
 PrefillWorker:
   model: nvidia/Llama-3.1-405B-Instruct-FP8
@@ -63,4 +63,4 @@ PrefillWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 8
+      gpu: '8'

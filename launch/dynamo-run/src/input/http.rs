@@ -1,34 +1,24 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::sync::Arc;
 
 use crate::input::common;
 use crate::{EngineConfig, Flags};
-use dynamo_llm::http::service::ModelManager;
+use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_llm::{
+    discovery::{ModelManager, ModelWatcher, MODEL_ROOT_PATH},
     engines::StreamingEngineAdapter,
-    http::service::{discovery, service_v2},
+    http::service::service_v2,
     request_template::RequestTemplate,
     types::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
         },
-        openai::completions::{CompletionRequest, CompletionResponse},
+        openai::completions::{CompletionResponse, NvCreateCompletionRequest},
     },
 };
+use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::transports::etcd;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
@@ -43,26 +33,22 @@ pub async fn run(
         .port(flags.http_port)
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
+        .enable_embeddings_endpoints(true)
         .with_request_template(template)
         .build()?;
     match engine_config {
-        EngineConfig::Dynamic(endpoint) => {
+        EngineConfig::Dynamic => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
             match distributed_runtime.etcd_client() {
                 Some(etcd_client) => {
-                    // This will attempt to connect to NATS and etcd
-
-                    let component = distributed_runtime
-                        .namespace(endpoint.namespace)?
-                        .component(endpoint.component)?;
-                    let network_prefix = component.service_name();
-
                     // Listen for models registering themselves in etcd, add them to HTTP service
                     run_watcher(
-                        distributed_runtime.clone(),
-                        http_service.model_manager().clone(),
+                        distributed_runtime,
+                        http_service.state().manager_clone(),
                         etcd_client.clone(),
-                        &network_prefix,
+                        MODEL_ROOT_PATH,
+                        flags.router_mode.into(),
+                        Some(flags.kv_router_config()),
                     )
                     .await?;
                 }
@@ -71,58 +57,62 @@ pub async fn run(
                 }
             }
         }
-        EngineConfig::StaticFull {
-            service_name,
-            engine,
-            ..
-        } => {
+        EngineConfig::StaticFull { engine, model } => {
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = http_service.model_manager();
-            manager.add_completions_model(&service_name, engine.clone())?;
-            manager.add_chat_completions_model(&service_name, engine)?;
+            manager.add_completions_model(model.service_name(), engine.clone())?;
+            manager.add_chat_completions_model(model.service_name(), engine)?;
         }
         EngineConfig::StaticCore {
-            service_name,
             engine: inner_engine,
-            card,
+            model,
         } => {
             let manager = http_service.model_manager();
 
             let chat_pipeline = common::build_pipeline::<
                 NvCreateChatCompletionRequest,
                 NvCreateChatCompletionStreamResponse,
-            >(&card, inner_engine.clone())
+            >(model.card(), inner_engine.clone())
             .await?;
-            manager.add_chat_completions_model(&service_name, chat_pipeline)?;
+            manager.add_chat_completions_model(model.service_name(), chat_pipeline)?;
 
-            let cmpl_pipeline = common::build_pipeline::<CompletionRequest, CompletionResponse>(
-                &card,
-                inner_engine,
-            )
+            let cmpl_pipeline = common::build_pipeline::<
+                NvCreateCompletionRequest,
+                CompletionResponse,
+            >(model.card(), inner_engine)
             .await?;
-            manager.add_completions_model(&service_name, cmpl_pipeline)?;
+            manager.add_completions_model(model.service_name(), cmpl_pipeline)?;
         }
-        EngineConfig::None => unreachable!(),
     }
-    http_service.run(runtime.primary_token()).await
+    tracing::debug!(
+        "Supported routes: {:?}",
+        http_service
+            .route_docs()
+            .iter()
+            .map(|rd| rd.to_string())
+            .collect::<Vec<String>>()
+    );
+    http_service.run(runtime.primary_token()).await?;
+    runtime.shutdown(); // Cancel primary token
+    Ok(())
 }
 
 /// Spawns a task that watches for new models in etcd at network_prefix,
 /// and registers them with the ModelManager so that the HTTP service can use them.
 async fn run_watcher(
-    distributed_runtime: DistributedRuntime,
-    model_manager: ModelManager,
+    runtime: DistributedRuntime,
+    model_manager: Arc<ModelManager>,
     etcd_client: etcd::Client,
     network_prefix: &str,
+    router_mode: RouterMode,
+    kv_router_config: Option<KvRouterConfig>,
 ) -> anyhow::Result<()> {
-    let state = Arc::new(discovery::ModelWatchState {
-        prefix: network_prefix.to_string(),
-        manager: model_manager,
-        drt: distributed_runtime.clone(),
-    });
+    let watch_obj = ModelWatcher::new(runtime, model_manager, router_mode, kv_router_config);
     tracing::info!("Watching for remote model at {network_prefix}");
     let models_watcher = etcd_client.kv_get_and_watch_prefix(network_prefix).await?;
     let (_prefix, _watcher, receiver) = models_watcher.dissolve();
-    let _watcher_task = tokio::spawn(discovery::model_watcher(state, receiver));
+    let _watcher_task = tokio::spawn(async move {
+        watch_obj.watch(receiver).await;
+    });
     Ok(())
 }

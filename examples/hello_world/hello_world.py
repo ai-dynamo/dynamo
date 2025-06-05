@@ -15,15 +15,24 @@
 
 import logging
 
-from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sdk import DYNAMO_IMAGE, depends, dynamo_endpoint, service
+from dynamo.sdk import (
+    DYNAMO_IMAGE,
+    api,
+    depends,
+    endpoint,
+    liveness,
+    on_shutdown,
+    readiness,
+    service,
+)
 from dynamo.sdk.lib.config import ServiceConfig
 
 logger = logging.getLogger(__name__)
+
 
 """
 Pipeline Architecture:
@@ -57,9 +66,10 @@ class ResponseType(BaseModel):
 
 @service(
     dynamo={
-        "enabled": True,
         "namespace": "inference",
     },
+    resources={"cpu": 1, "memory": "500Mi"},
+    workers=2,
     image=DYNAMO_IMAGE,
 )
 class Backend:
@@ -69,7 +79,7 @@ class Backend:
         self.message = config.get("Backend", {}).get("message", "back")
         logger.info(f"Backend config message: {self.message}")
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, req: RequestType):
         """Generate tokens."""
         req_text = req.text
@@ -78,9 +88,13 @@ class Backend:
         for token in text.split():
             yield f"Backend: {token}"
 
+    @on_shutdown
+    def shutdown(self):
+        logger.info("Shutting down backend")
+
 
 @service(
-    dynamo={"enabled": True, "namespace": "inference"},
+    dynamo={"namespace": "inference"},
     image=DYNAMO_IMAGE,
 )
 class Middle:
@@ -92,7 +106,7 @@ class Middle:
         self.message = config.get("Middle", {}).get("message", "mid")
         logger.info(f"Middle config message: {self.message}")
 
-    @dynamo_endpoint()
+    @endpoint()
     async def generate(self, req: RequestType):
         """Forward requests to backend."""
         req_text = req.text
@@ -103,14 +117,14 @@ class Middle:
             logger.info(f"Middle received response: {response}")
             yield f"Middle: {response}"
 
-
-app = FastAPI(title="Hello World!")
+    @on_shutdown
+    def shutdown(self):
+        logger.info("Shutting down middle")
 
 
 @service(
-    dynamo={"enabled": True, "namespace": "inference"},
+    dynamo={"namespace": "inference"},
     image=DYNAMO_IMAGE,
-    app=app,
 )
 class Frontend:
     """A simple frontend HTTP API that forwards requests to the dynamo graph."""
@@ -128,7 +142,8 @@ class Frontend:
         logger.info(f"Frontend config message: {self.message}")
         logger.info(f"Frontend config port: {self.port}")
 
-    @dynamo_endpoint(is_api=True)
+    # alternative syntax: @endpoint(transports=[DynamoTransport.HTTP])
+    @api()
     async def generate(self, request: RequestType):
         """Stream results from the pipeline."""
         logger.info(f"Frontend received: {request.text}")
@@ -138,3 +153,15 @@ class Frontend:
                 yield f"Frontend: {response}"
 
         return StreamingResponse(content_generator())
+
+    @liveness
+    def is_alive(self):
+        return True
+
+    @readiness
+    def is_ready(self):
+        return True
+
+    @on_shutdown
+    def shutdown(self):
+        logger.info("Shutting down frontend")

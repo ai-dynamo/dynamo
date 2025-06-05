@@ -26,16 +26,12 @@ impl ModelDeploymentCard {}
 
 #[pymethods]
 impl ModelDeploymentCard {
+    // Previously called "from_local_path"
     #[staticmethod]
-    fn from_local_path(
-        path: String,
-        model_name: String,
-        py: Python<'_>,
-    ) -> PyResult<Bound<'_, PyAny>> {
+    fn load(path: String, model_name: String, py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let card = RsModelDeploymentCard::from_local_path(&path, Some(&model_name))
-                .await
-                .map_err(to_pyerr)?;
+            let mut card = RsModelDeploymentCard::load(&path).await.map_err(to_pyerr)?;
+            card.set_name(&model_name);
             Ok(ModelDeploymentCard { inner: card })
         })
     }
