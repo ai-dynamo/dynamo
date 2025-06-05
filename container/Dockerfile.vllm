@@ -384,8 +384,9 @@ RUN uv build --wheel --out-dir /workspace/dist && \
     uv pip install maturin[patchelf] && \
     maturin build --release --features block-manager --out /workspace/dist && \
     if [ "$RELEASE_BUILD" = "true" ]; then \
-        uv run --python 3.11 maturin build --release --features block-manager --out /workspace/dist && \
-        uv run --python 3.10 maturin build --release --features block-manager --out /workspace/dist; \
+        # do not enable KVBM feature, ensure compatibility with lower glibc
+        uv run --python 3.11 maturin build --release --out /workspace/dist && \
+        uv run --python 3.10 maturin build --release --out /workspace/dist; \
     fi
 
 #######################################
