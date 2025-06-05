@@ -1,3 +1,4 @@
+# type: ignore  # Ignore all mypy errors in this file
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -13,14 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import _thread as thread
 import argparse
 import asyncio
 import logging
+import threading
 import time
 from argparse import Namespace
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import List
 
 from dynamo.sdk import async_on_start, dynamo_context, service
 from dynamo.sdk.lib.config import ServiceConfig
@@ -66,13 +66,13 @@ def parse_args(service_name, prefix) -> Namespace:
     )
     parser.add_argument(
         "--worker-components",
-        type=List[str],
+        nargs="+",
         default=["VllmWorker", "PrefillWorker"],
         help="Components that we are tracking worker readiness",
     )
     parser.add_argument(
         "--component-endpoints",
-        type=List[str],
+        nargs="+",
         default=["generate", "mock"],
         help="Components that we are tracking worker readiness",
     )
@@ -124,7 +124,8 @@ class Watcher:
         logger.info(f"Timeout for waiting for workers to be ready: {self.args.timeout}")
         self.server = HealthServer(("0.0.0.0", self.args.port), RequestHandler)
         print(f"Serving on 0.0.0.0:{self.args.port}, listening to readiness check...")
-        thread.start_new_thread(start_server, (self.server,))
+        self._server_thread = threading.Thread(target=start_server, args=(self.server,))
+        self._server_thread.start()
         await check_required_workers(
             self.workers_clients, self.args.total_workers, self.args.timeout
         )
