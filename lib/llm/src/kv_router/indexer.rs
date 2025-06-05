@@ -259,7 +259,7 @@ impl<T: WorkerGeneral> RadixTree<T> {
     pub fn apply_event(&mut self, event: RouterEvent<T>) {
         let (worker_id, event) = (event.worker, event.event);
         let (id, op) = (event.event_id, event.data);
-        tracing::trace!(id, "Store operation: {:?}", op);
+        tracing::trace!(worker_id = ?worker_id, id=?id, "Store operation: {:?}", op);
 
         let worker_lookup = self.lookup.entry(worker_id.clone()).or_default();
 
@@ -278,7 +278,7 @@ impl<T: WorkerGeneral> RadixTree<T> {
                     None => {
                         tracing::warn!(
                             worker_id = ?worker_id,
-                            id,
+                            id = ?id,
                             parent_hash = ?op.parent_hash,
                             "Failed to find parent block; skipping store operation"
                         );
@@ -332,7 +332,7 @@ impl<T: WorkerGeneral> RadixTree<T> {
                         None => {
                             tracing::warn!(
                                 worker_id = ?worker_id,
-                                id,
+                                id = ?id,
                                 "Failed to find block to remove; skipping remove operation"
                             );
                             continue;
