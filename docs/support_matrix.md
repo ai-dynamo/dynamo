@@ -60,7 +60,6 @@ For **Linux**, the **ARM64** support is experimental and may have limitations. W
 **Known Issues**: KV Block Manager is supported only with Python 3.12. Python 3.12 support is currently limited to Ubuntu 24.04.
 ```
 
-
 ## Software Compatibility
 ### Runtime Dependency
 | **Python Package** | **Version**   | glibc version        | CUDA Version |
