@@ -28,9 +28,9 @@ This document provides the support matrix for Dynamo, including hardware, softwa
 | **x86_64**            | Supported     |
 | **ARM64**             | Experimental  |
 
-> **Note**:
-> While **x86_64** architecture is supported on systems with a minimum of 32 GB RAM and at least 4 CPU cores, the **ARM64** support is experimental and may have limitations.
-
+```{note}
+While **x86_64** architecture is supported on systems with a minimum of 32 GB RAM and at least 4 CPU cores, the **ARM64** support is experimental and may have limitations.
+```
 
 ### GPU Compatibility
 
@@ -54,10 +54,11 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | **Ubuntu**           | 24.04       | ARM64            | Experimental |
 | **CentOS Stream**    | 9           | x86_64           | Experimental |
 
-> **Note**:
-> - For **Linux**, the **ARM64** support is experimental and may have limitations. Wheels are built using a manylinux_2_28-compatible environment and they have been validated on CentOS 9 and Ubuntu (22.04, 24.04). Compatibility with other Linux distributions is expected but has not been officially verified yet.
-> - **Known Issues**: KV Block Manager is supported only with Python 3.12. Python 3.12 support is currently limited to Ubuntu 24.04.
+```{note}
+For **Linux**, the **ARM64** support is experimental and may have limitations. Wheels are built using a manylinux_2_28-compatible environment and they have been validated on CentOS 9 and Ubuntu (22.04, 24.04). Compatibility with other Linux distributions is expected but has not been officially verified yet.
 
+**Known Issues**: KV Block Manager is supported only with Python 3.12. Python 3.12 support is currently limited to Ubuntu 24.04.
+```
 
 
 ## Software Compatibility
@@ -77,10 +78,11 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | **TensorRT-LLM**     |    0.19.0** |
 | **NIXL**             |    0.3.0    |
 
-> **Note**:
-> - *ai-dynamo-vllm v0.8.4.post2 is a customized patch of v0.8.4 from vLLM.
-> - **Specific versions of TensorRT-LLM supported by Dynamo are subject to change.
+```{note}
+*ai-dynamo-vllm v0.8.4.post2 is a customized patch of v0.8.4 from vLLM.
 
+**Specific versions of TensorRT-LLM supported by Dynamo are subject to change.
+```
 
 ## Build Support
 **Dynamo** currently provides build support in the following ways:
