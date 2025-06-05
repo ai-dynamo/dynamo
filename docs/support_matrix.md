@@ -56,7 +56,6 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 > **Note**:
 > - For **Linux**, the **ARM64** support is experimental and may have limitations. Wheels are built using a manylinux_2_28-compatible environment and they have been validated on CentOS 9 and Ubuntu (22.04, 24.04). Compatibility with other Linux distributions is expected but has not been officially verified yet.
-
 > - **Known Issues**: KV Block Manager is supported only with Python 3.12. Python 3.12 support is currently limited to Ubuntu 24.04.
 
 
