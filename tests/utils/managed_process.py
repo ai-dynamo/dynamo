@@ -88,6 +88,7 @@ class ManagedProcess:
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 # Process may have terminated or become inaccessible during iteration
                 pass
+
     def _start_process(self):
         assert self._command_name
         assert self._log_path
