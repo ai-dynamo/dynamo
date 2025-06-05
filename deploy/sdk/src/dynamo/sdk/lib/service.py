@@ -26,6 +26,7 @@ from _bentoml_sdk import Service, ServiceConfig
 from _bentoml_sdk.images import Image
 from _bentoml_sdk.service.config import validate
 from fastapi import FastAPI
+from pydantic import BaseModel
 
 from dynamo.sdk.core.protocol.interface import DynamoTransport, LinkedServices
 from dynamo.sdk.lib.decorators import DynamoEndpoint
@@ -43,6 +44,24 @@ class ComponentType(str, Enum):
     # METRICS = "metrics"
     # MONITOR = "monitor"
     # etc.
+
+
+class PVC(BaseModel):
+    """Class for Kubernetes PVC Overwrites."""
+
+    create: Optional[bool] = None
+    name: Optional[str] = None
+    storage_class: Optional[str] = None
+    size: Optional[str] = None  # Represent `resource.Quantity` as a string, e.g. "10Gi"
+    volume_access_mode: Optional[str] = None  # e.g., "ReadWriteOnce", "ReadOnlyMany"
+    mount_point: Optional[str] = None
+
+
+class KubernetesOverwrites(BaseModel):
+    """Class for Kubernetes Overwrites."""
+
+    entrypoint: Optional[str] = None
+    pvc_settings: Optional[Dict[str, PVC]] = None
 
 
 @dataclass
@@ -76,6 +95,7 @@ class DynamoService(Service[T]):
         envs: Optional[list[dict[str, Any]]] = None,
         dynamo_config: Optional[DynamoConfig] = None,
         app: Optional[FastAPI] = None,
+        kubernetes_overwrites: Optional[KubernetesOverwrites] = None,
     ):
         service_name = inner.__name__
         service_args = self._get_service_args(service_name)
@@ -140,6 +160,7 @@ class DynamoService(Service[T]):
             self.config["api_endpoints"] = self._api_endpoints.copy()
 
         self._linked_services: List[DynamoService] = []  # Track linked services
+        self.kubernetes_overwrites = kubernetes_overwrites
 
     def _get_service_args(self, service_name: str) -> Optional[dict]:
         """Get ServiceArgs from environment config if specified"""
@@ -306,6 +327,7 @@ def service(
     envs: Optional[list[dict[str, Any]]] = None,
     dynamo: Optional[Union[Dict[str, Any], DynamoConfig]] = None,
     app: Optional[FastAPI] = None,
+    kubernetes_overwrites: Optional[Union[dict, KubernetesOverwrites]] = None,
     **kwargs: Any,
 ) -> Any:
     """Enhanced service decorator that supports Dynamo configuration
@@ -315,8 +337,11 @@ def service(
             - enabled: bool (default True)
             - name: str (default: class name)
             - namespace: str (default: "default")
+        kubernetes_overwrites: kubernetes overwrites i.e. entrypoint.
         **kwargs: Existing BentoML service configuration
     """
+    if isinstance(kubernetes_overwrites, dict):
+        kubernetes_overwrites = KubernetesOverwrites(**kubernetes_overwrites)
     config = kwargs
 
     # Parse dict into DynamoConfig object
@@ -337,6 +362,7 @@ def service(
             envs=envs or [],
             dynamo_config=dynamo_config,
             app=app,
+            kubernetes_overwrites=kubernetes_overwrites,
         )
 
     return decorator(inner) if inner is not None else decorator

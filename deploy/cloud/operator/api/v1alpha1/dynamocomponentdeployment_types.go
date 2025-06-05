@@ -79,6 +79,9 @@ type DynamoComponentDeploymentSharedSpec struct {
 	LivenessProbe  *corev1.Probe `json:"livenessProbe,omitempty"`
 	ReadinessProbe *corev1.Probe `json:"readinessProbe,omitempty"`
 	Replicas       *int32        `json:"replicas,omitempty"`
+
+	// Kubernetes overwrites for the deployment
+	KubernetesOverwrites *KubernetesOverwrites `json:"kubernetesOverwrites,omitempty"`
 }
 
 type RunMode struct {
@@ -105,6 +108,11 @@ type IngressSpec struct {
 	TLS                        *IngressTLSSpec   `json:"tls,omitempty"`
 	HostSuffix                 *string           `json:"hostSuffix,omitempty"`
 	IngressControllerClassName *string           `json:"ingressControllerClassName,omitempty"`
+}
+
+type KubernetesOverwrites struct {
+	Entrypoint  *string         `json:"entrypoint,omitempty"`
+	PVCSettings map[string]*PVC `json:"pvcSettings,omitempty"`
 }
 
 // DynamoComponentDeploymentStatus defines the observed state of DynamoComponentDeployment
