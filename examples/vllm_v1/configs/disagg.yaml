@@ -46,7 +46,6 @@ VllmPrefillWorker:
   enforce-eager: true
   max-num-batched-tokens: 16384
   enable-prefix-caching: true
-  served_model_name: prefill-Qwen/Qwen3-0.6B
 
   ServiceArgs:
     workers: 1  # 2 workers
