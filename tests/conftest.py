@@ -27,7 +27,7 @@ LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
 logging.basicConfig(
     level=logging.INFO,
     format=LOG_FORMAT,
-    datefmt="%Y-%m-%dT%H:%M:%S",  # ISO 8601 UTC format with microseconds
+    datefmt="%Y-%m-%dT%H:%M:%S",  # ISO 8601 UTC format
 )
 
 

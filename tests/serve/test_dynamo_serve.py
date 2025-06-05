@@ -161,17 +161,19 @@ class DynamoServeProcess(ManagedProcess):
 
         command.extend(["--Frontend.port", str(port)])
 
-        health_check_urls = [("http://localhost:8000/v1/models", self._check_model)]
+        health_check_urls = [(f"http://localhost:{port}/v1/models", self._check_model)]
 
         if "multimodal" in graph.directory:
             health_check_urls = []
+
+        self.port = port
 
         super().__init__(
             command=command,
             timeout=timeout,
             display_output=True,
             working_dir=graph.directory,
-            health_check_ports=[8000],
+            health_check_ports=[port],
             health_check_urls=health_check_urls,
             stragglers=["http"],
             log_dir=request.node.name,
@@ -215,30 +217,35 @@ def test_serve_deployment(deployment_graph_test, request, runtime_services):
 
     deployment_graph, payload = deployment_graph_test
 
-    with DynamoServeProcess(deployment_graph, request):
-        url = f"http://localhost:8000/{deployment_graph.endpoint}"
+    with DynamoServeProcess(deployment_graph, request) as server_process:
+        url = f"http://localhost:{server_process.port}/{deployment_graph.endpoint}"
         start_time = time.time()
-
+        retry_delay = 5
+        elapsed = 0
         while time.time() - start_time < deployment_graph.timeout:
+            elapsed = time.time() - start_time
             try:
-                response = requests.post(url, json=payload.payload, timeout=300)
-            except Exception as e:
-                # pytest.fail(f"Request failed: {str(e)}")
-                logger.warning("Request failed: %s", e)
-                time.sleep(5)
+                response = requests.post(
+                    url,
+                    json=payload.payload,
+                    timeout=deployment_graph.timeout - elapsed,
+                )
+            except (requests.RequestException, requests.Timeout) as e:
+                logger.warning("Retrying due to Request failed: %s", e)
+                time.sleep(retry_delay)
                 continue
             logger.info("Response%r", response)
             if response.status_code == 500:
                 error = response.json().get("error", "")
                 if "no instances" in error:
                     logger.warning("Retrying due to no instances available")
-                    time.sleep(5)
+                    time.sleep(retry_delay)
                     continue
             if response.status_code == 404:
                 error = response.json().get("error", "")
                 if "Model not found" in error:
                     logger.warning("Retrying due to model not found")
-                    time.sleep(5)
+                    time.sleep(retry_delay)
                     continue
             # Process the response
             if response.status_code != 200:

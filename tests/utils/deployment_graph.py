@@ -43,16 +43,6 @@ class Payload:
     expected_log: List[str]
 
 
-def multimodal_response_handler(response):
-    """
-    Process multimodal API responses.
-    """
-    if response.status_code != 200:
-        return ""
-    result = response.json()
-    return result
-
-
 def completions_response_handler(response):
     """
     Process chat completions API responses.

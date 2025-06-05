@@ -88,7 +88,7 @@ via ```./container/build.sh --framework X``` and run via
 
 ### Environment Variables
 - `HF_TOKEN` - Your HuggingFace API token to avoid rate limits
-  - Get a token from https://huggingface.co/settings/tokens
+  - Get a token from [HuggingFace Settings](https://huggingface.co/settings/tokens)
   - Set it before running tests: `export HF_TOKEN=your_token_here`
 
 ### Model Download Cache

@@ -62,7 +62,7 @@ class ManagedProcess:
             elapsed = self._check_ports(self.timeout)
             self._check_urls(self.timeout - elapsed)
 
-            return self.proc
+            return self
 
         except Exception as e:
             self.__exit__(None, None, None)
