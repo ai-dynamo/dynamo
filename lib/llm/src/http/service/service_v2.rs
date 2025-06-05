@@ -148,6 +148,7 @@ impl HttpServiceConfigBuilder {
             metrics::router(registry, None),
             super::openai::list_models_router(state.clone(), None),
             super::health::health_check_router(state.clone(), None),
+            super::clear_all_blocks::clear_all_blocks_router(state.clone(), None),
         ];
 
         if config.enable_chat_endpoints {
