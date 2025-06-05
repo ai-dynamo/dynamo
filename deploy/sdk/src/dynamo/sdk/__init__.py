@@ -21,8 +21,9 @@ from typing import Any
 warnings.filterwarnings("ignore", category=UserWarning, message=".*pkg_resources.*")
 
 # flake8: noqa: E402
-from dynamo.sdk.core.decorators.endpoint import api, endpoint
+from dynamo.sdk.core.decorators.endpoint import abstract_endpoint, api, endpoint
 from dynamo.sdk.core.lib import DYNAMO_IMAGE, depends, liveness, readiness, service
+from dynamo.sdk.core.protocol.interface import AbstractService
 from dynamo.sdk.lib.decorators import async_on_start, on_shutdown
 
 dynamo_context: dict[str, Any] = {}
@@ -36,6 +37,8 @@ __all__ = [
     "endpoint",
     "api",
     "service",
+    "AbstractService",
+    "abstract_endpoint",
     "liveness",
     "readiness",
 ]

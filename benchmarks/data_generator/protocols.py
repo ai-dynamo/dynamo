@@ -13,18 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-Frontend:
-  # This is the client-facing model name, you can set this to anything you'd like.
-  served_model_name: "nvidia/DeepSeek-R1-FP4"
-  endpoint: dynamo.TensorRTLLMWorker.generate
-  port: 8000
-  router: round-robin
+"""
+Protocol-level constants for synthetic data graph structure.
+"""
 
-TensorRTLLMWorker:
-  served_model_name: "nvidia/DeepSeek-R1-FP4"
-  engine_args: "configs/deepseek_r1/agg_llm_api_config.yaml"
-  router: round-robin
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: 4
+SUPER_ROOT = -1  # Dummy node preceding all real nodes; not an actual data root
+CACHE_END = -2  # Special node indicating end of a path
+END_NODE = -3  # Special node indicating to skip leaf sampling

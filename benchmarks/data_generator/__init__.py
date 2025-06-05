@@ -13,18 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-Frontend:
-  # This is the client-facing model name, you can set this to anything you'd like.
-  served_model_name: "nvidia/DeepSeek-R1-FP4"
-  endpoint: dynamo.TensorRTLLMWorker.generate
-  port: 8000
-  router: round-robin
+from data_generator.cli import main as cli_main
 
-TensorRTLLMWorker:
-  served_model_name: "nvidia/DeepSeek-R1-FP4"
-  engine_args: "configs/deepseek_r1/agg_llm_api_config.yaml"
-  router: round-robin
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: 4
+
+def main():
+    cli_main()

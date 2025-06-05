@@ -231,6 +231,10 @@ def serve_dynamo_graph(
                 for name, dep_svc in svc.all_services().items():
                     if name == svc.name or name in dependency_map:
                         continue
+                    if not dep_svc.is_servable():
+                        raise RuntimeError(
+                            f"Service {dep_svc.name} is not servable. Please use link to override with a concrete implementation."
+                        )
                     new_watcher, new_socket, uri = create_dynamo_watcher(
                         dynamo_pipeline,
                         dep_svc,

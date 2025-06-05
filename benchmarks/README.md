@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+<!-- # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -11,31 +11,20 @@
 # distributed under the License is distributed on an "AS IS" BASIS,
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
-# limitations under the License.
+# limitations under the License. -->
 
-accelerate==1.6.0
-fastapi==0.115.6
-ftfy
-genai-perf==0.0.13
-grpcio-tools==1.66.0
-httpx
-kubernetes==32.0.1
-matplotlib
-msgspec
-mypy
-numpy
-opentelemetry-api
-opentelemetry-sdk
-pip==25.0.1
-pre-commit
-protobuf==5.27.3
-pydantic==2.7.1
-pyright
-PyYAML
-scikit-learn
-sentencepiece
-tensorboard==2.19.0
-tensorboardX==2.6.2.2
-transformers
-types-PyYAML
-uvicorn
+# Benchmarks
+
+This directory contains benchmarking scripts and tools for performance evaluation.
+
+## Installation
+
+To install the necessary dependencies locally, run:
+
+```bash
+pip install -e .
+```
+
+Currently, this will install lightweight tools for:
+- Analyzing prefix-structured data (`datagen analyze`)
+- Synthesizing structured data customizable for testing purposes (`datagen synthesize`)
