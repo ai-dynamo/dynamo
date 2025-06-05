@@ -116,6 +116,7 @@ class ServiceInfo(BaseModel):
     module_path: str
     class_name: str
     config: ServiceConfig
+    kubernetes_overwrites: t.Optional[t.Dict[str, t.Any]] = None
 
     @classmethod
     def from_service(cls, service: ServiceInterface[T]) -> ServiceInfo:
@@ -145,12 +146,16 @@ class ServiceInfo(BaseModel):
             http_exposed=len(api_endpoints) > 0,
             api_endpoints=api_endpoints,
         )
+        kubernetes_overwrites = None
+        if hasattr(service, "kubernetes_overwrites") and service.kubernetes_overwrites:
+            kubernetes_overwrites = service.kubernetes_overwrites.model_dump()
 
         return cls(
             name=name,
             module_path=service.__module__,
             class_name=service_class.__name__,
             config=config,
+            kubernetes_overwrites=kubernetes_overwrites,
         )
 
 
@@ -225,6 +230,13 @@ class ManifestInfo(BaseModel):
                 service_dict["config"]["api_endpoints"] = service["config"][
                     "api_endpoints"
                 ]
+
+            # Add kubernetes overwrites if available
+            if service.get("kubernetes_overwrites"):
+                service_dict["config"]["kubernetes_overwrites"] = service[
+                    "kubernetes_overwrites"
+                ]
+
             services_dict.append(service_dict)
         result["services"] = services_dict
         return result

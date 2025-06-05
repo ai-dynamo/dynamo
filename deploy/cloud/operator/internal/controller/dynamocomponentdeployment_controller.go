@@ -1337,6 +1337,69 @@ func getDynamoComponentRepositoryNameAndDynamoComponentVersion(dynamoComponent *
 	return
 }
 
+func buildPVCVolumesAndMounts(
+	component *v1alpha1.DynamoComponentDeployment,
+) (volumes []corev1.Volume, mounts []corev1.VolumeMount) {
+	used := map[string]bool{}
+
+	// addPVC adds a volume and corresponding volume mount to the pod spec based on the provided PVC configuration.
+	addPVC := func(volumeName string, pvc *v1alpha1.PVC) {
+		if pvc == nil || pvc.Name == nil {
+			return
+		}
+		claimName := *pvc.Name
+		mountPath := "/mnt/default"
+		if pvc.MountPoint != nil && *pvc.MountPoint != "" {
+			mountPath = *pvc.MountPoint
+		}
+		volume := corev1.Volume{
+			Name: volumeName,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: claimName,
+				},
+			},
+		}
+		mount := corev1.VolumeMount{
+			Name:      volumeName,
+			MountPath: mountPath,
+		}
+		if used[volumeName] {
+			for i, v := range volumes {
+				if v.Name == volumeName {
+					volumes[i] = volume
+					break
+				}
+			}
+			for i, m := range mounts {
+				if m.Name == volumeName {
+					mounts[i] = mount
+					break
+				}
+			}
+		} else {
+			volumes = append(volumes, volume)
+			mounts = append(mounts, mount)
+			used[volumeName] = true
+		}
+	}
+
+	// Handle default PVC
+	if component.Spec.PVC != nil {
+		volumeName := getPvcName(component, component.Spec.PVC.Name)
+		addPVC(volumeName, component.Spec.PVC)
+	}
+
+	// Handle overwrites
+	if ow := component.Spec.KubernetesOverwrites; ow != nil && ow.PVCSettings != nil {
+		for volumeName, pvc := range ow.PVCSettings {
+			addPVC(volumeName, pvc)
+		}
+	}
+
+	return volumes, mounts
+}
+
 //nolint:gocyclo,nakedret
 func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption) (podTemplateSpec *corev1.PodTemplateSpec, err error) {
 	podLabels := r.getKubeLabels(opt.dynamoComponentDeployment, opt.dynamoComponent)
@@ -1499,33 +1562,10 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		sharedMemorySizeLimit.SetMilli(memoryLimit.MilliValue() / 2)
 	}
 
-	volumes = append(volumes, corev1.Volume{
-		Name: KubeValueNameSharedMemory,
-		VolumeSource: corev1.VolumeSource{
-			EmptyDir: &corev1.EmptyDirVolumeSource{
-				Medium:    corev1.StorageMediumMemory,
-				SizeLimit: &sharedMemorySizeLimit,
-			},
-		},
-	})
-	volumeMounts = append(volumeMounts, corev1.VolumeMount{
-		Name:      KubeValueNameSharedMemory,
-		MountPath: "/dev/shm",
-	})
-	if opt.dynamoComponentDeployment.Spec.PVC != nil {
-		volumes = append(volumes, corev1.Volume{
-			Name: getPvcName(opt.dynamoComponentDeployment, opt.dynamoComponentDeployment.Spec.PVC.Name),
-			VolumeSource: corev1.VolumeSource{
-				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-					ClaimName: getPvcName(opt.dynamoComponentDeployment, opt.dynamoComponentDeployment.Spec.PVC.Name),
-				},
-			},
-		})
-		volumeMounts = append(volumeMounts, corev1.VolumeMount{
-			Name:      getPvcName(opt.dynamoComponentDeployment, opt.dynamoComponentDeployment.Spec.PVC.Name),
-			MountPath: *opt.dynamoComponentDeployment.Spec.PVC.MountPoint,
-		})
-	}
+	// Handle default PVC settings. Apply overwrites if the name matches, add otherwise.
+	pvcVolumes, pvcMounts := buildPVCVolumesAndMounts(opt.dynamoComponentDeployment)
+	volumes = append(volumes, pvcVolumes...)
+	volumeMounts = append(volumeMounts, pvcMounts...)
 
 	imageName := opt.dynamoComponent.GetImage()
 	if imageName == "" {
@@ -1651,6 +1691,21 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			container.SecurityContext = &corev1.SecurityContext{}
 		}
 		container.SecurityContext.RunAsUser = &[]int64{0}[0]
+	}
+
+	if opt.dynamoComponentDeployment.Spec.KubernetesOverwrites != nil {
+		overwrites := opt.dynamoComponentDeployment.Spec.KubernetesOverwrites
+
+		// Handle Entrypoint overwrite. Entrypoint needs to be renamed to Command.
+		if overwrites.Entrypoint != nil {
+			parts := strings.Fields(*overwrites.Entrypoint)
+			if len(parts) > 0 {
+				container.Command = []string{parts[0]}
+				if len(parts) > 1 {
+					container.Args = parts[1:]
+				}
+			}
+		}
 	}
 
 	containers = append(containers, container)
