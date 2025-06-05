@@ -158,7 +158,7 @@ class ManagedProcess:
         start_time = time.time()
         self._logger.info("Checking Port: %s", port)
         elapsed = 0.0
-        while elapsed < timeout:
+        while elapsed < timeout and timeout > 0:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 if s.connect_ex(("localhost", port)) == 0:
                     self._logger.info("SUCCESS: Check Port: %s", port)
@@ -183,7 +183,7 @@ class ManagedProcess:
         start_time = time.time()
         self._logger.info("Checking URL %s", url)
         elapsed = 0.0
-        while elapsed < timeout:
+        while elapsed < timeout and timeout > 0:
             try:
                 response = requests.get(url, timeout=timeout - elapsed)
                 if response.status_code == 200:
