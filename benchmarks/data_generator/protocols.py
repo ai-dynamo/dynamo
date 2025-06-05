@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,29 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-accelerate==1.6.0
-fastapi==0.115.6
-ftfy
-genai-perf==0.0.13
-grpcio-tools==1.66.0
-httpx
-kubernetes==32.0.1
-matplotlib
-msgspec
-mypy
-numpy
-opentelemetry-api
-opentelemetry-sdk
-pip==25.0.1
-pre-commit
-protobuf==5.27.3
-pydantic==2.7.1
-pyright
-PyYAML
-scikit-learn
-sentencepiece
-tensorboard==2.19.0
-tensorboardX==2.6.2.2
-transformers
-types-PyYAML
-uvicorn
+"""
+Protocol-level constants for synthetic data graph structure.
+"""
+
+SUPER_ROOT = -1  # Dummy node preceding all real nodes; not an actual data root
+CACHE_END = -2  # Special node indicating end of a path
+END_NODE = -3  # Special node indicating to skip leaf sampling
