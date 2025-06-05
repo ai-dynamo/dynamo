@@ -11562,7 +11562,7 @@ SOFTWARE.
 
 ### github.com/kr/pretty
 
-License Indentifier: MIT
+License Identifier: MIT
 
 License Text:
 ```
@@ -14525,7 +14525,7 @@ CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 ### github.com/felixge/httpsnoop
 
-License Indentifier: MIT
+License Identifier: MIT
 
 License Text:
 ```
@@ -14792,7 +14792,7 @@ License Text:
 
 ### github.com/golang-jwt/jwt/v4
 
-License Indentifier: MIT
+License Identifier: MIT
 
 License Text:
 ```
@@ -16218,7 +16218,7 @@ SOFTWARE.
 
 ### github.com/tmc/grpc-websocket-proxy
 
-License Indentifier: MIT
+License Identifier: MIT
 
 License Text:
 ```
