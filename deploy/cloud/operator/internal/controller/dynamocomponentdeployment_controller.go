@@ -61,6 +61,8 @@ import (
 
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
+
+	"github.com/mattn/go-shellwords"
 )
 
 const (
@@ -1339,19 +1341,53 @@ func getDynamoComponentRepositoryNameAndDynamoComponentVersion(dynamoComponent *
 
 func buildPVCVolumesAndMounts(
 	component *v1alpha1.DynamoComponentDeployment,
-) (volumes []corev1.Volume, mounts []corev1.VolumeMount) {
+	sharedMemorySizeLimit resource.Quantity,
+) (volumes []corev1.Volume, mounts []corev1.VolumeMount /* claims []corev1.PersistentVolumeClaim */) {
+
+	// Keep track for overwrites.
 	used := map[string]bool{}
 
+	// Helper: create PVC object from your custom PVC struct
+	createClaim := func(volumeName string, pvc *v1alpha1.PVC) *corev1.PersistentVolumeClaim {
+		if pvc == nil || pvc.Create == nil || !*pvc.Create {
+			return nil
+		}
+		claimName := getPvcName(component, pvc.Name)
+		storageClassName := pvc.StorageClass
+		return &corev1.PersistentVolumeClaim{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: claimName,
+			},
+			Spec: corev1.PersistentVolumeClaimSpec{
+				AccessModes: []corev1.PersistentVolumeAccessMode{pvc.VolumeAccessMode},
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceStorage: pvc.Size,
+					},
+				},
+				StorageClassName: &storageClassName,
+			},
+		}
+	}
+
 	// addPVC adds a volume and corresponding volume mount to the pod spec based on the provided PVC configuration.
-	addPVC := func(volumeName string, pvc *v1alpha1.PVC) {
-		if pvc == nil || pvc.Name == nil {
+	addPVC := func(crd metav1.Object, volumeName string, pvc *v1alpha1.PVC) {
+		if pvc == nil {
 			return
 		}
-		claimName := *pvc.Name
-		mountPath := "/mnt/default"
+
+		// Use getPvcName to fall back to CRD name if pvc.Name is nil
+		claimName := getPvcName(crd, pvc.Name)
+		if claimName == "" {
+			return
+		}
+
+		// Fallback mountPath if not provided
+		mountPath := fmt.Sprintf("/mnt/%s", volumeName)
 		if pvc.MountPoint != nil && *pvc.MountPoint != "" {
 			mountPath = *pvc.MountPoint
 		}
+
 		volume := corev1.Volume{
 			Name: volumeName,
 			VolumeSource: corev1.VolumeSource{
@@ -1360,10 +1396,12 @@ func buildPVCVolumesAndMounts(
 				},
 			},
 		}
+
 		mount := corev1.VolumeMount{
 			Name:      volumeName,
 			MountPath: mountPath,
 		}
+
 		if used[volumeName] {
 			for i, v := range volumes {
 				if v.Name == volumeName {
@@ -1382,26 +1420,96 @@ func buildPVCVolumesAndMounts(
 			mounts = append(mounts, mount)
 			used[volumeName] = true
 		}
+
+		// TODO ?
+		// if claim := createClaim(volumeName, pvc); claim != nil {
+		// 	claims = append(claims, *claim)
+		// }
 	}
 
-	// Handle default PVC
+	// Add Shared Memory Volume.
+	volumes = append(volumes, corev1.Volume{
+		Name: KubeValueNameSharedMemory,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium:    corev1.StorageMediumMemory,
+				SizeLimit: &sharedMemorySizeLimit,
+			},
+		},
+	})
+	mounts = append(mounts, corev1.VolumeMount{
+		Name:      KubeValueNameSharedMemory,
+		MountPath: "/dev/shm",
+	})
+
+	// Add standard PVC(s)
 	if component.Spec.PVC != nil {
-		volumeName := getPvcName(component, component.Spec.PVC.Name)
-		addPVC(volumeName, component.Spec.PVC)
-	}
-
-	// Handle overwrites
-	if ow := component.Spec.KubernetesOverwrites; ow != nil && ow.PVCSettings != nil {
-		for volumeName, pvc := range ow.PVCSettings {
-			addPVC(volumeName, pvc)
+		for volumeName, pvc := range component.Spec.PVC {
+			addPVC(component, volumeName, pvc)
 		}
+
+	}
+	// Add PVC overrides and extras.
+	if component.Spec.ExtraPodSpec != nil {
+		extra := component.Spec.ExtraPodSpec
+
+		// Add Volumes from ExtraPodSpec.
+		for _, vol := range extra.Volumes {
+			if used[vol.Name] {
+				// Overwrite existing volume with same name
+				for i := range volumes {
+					if volumes[i].Name == vol.Name {
+						volumes[i] = vol
+						break
+					}
+				}
+			} else {
+				volumes = append(volumes, vol)
+				used[vol.Name] = true
+			}
+		}
+
+		// Add VolumeMounts from ExtraPodSpec
+		for _, mount := range extra.VolumeMounts {
+			if used[mount.Name] {
+				// Overwrite existing mount with same name
+				for i := range mounts {
+					if mounts[i].Name == mount.Name {
+						mounts[i] = mount
+						break
+					}
+				}
+			} else {
+				mounts = append(mounts, mount)
+				used[mount.Name] = true
+			}
+		}
+
+		// TODO: not sure about the claims in the overwrites.
+		// Add PVCClaims from ExtraPodSpec
+		for _, claim := range extra.PVCClaims {
+			if used[claim.Name] {
+				// Overwrite existing claim with same name
+				for i := range claims {
+					if claims[i].Name == claim.Name {
+						claims[i] = claim
+						break
+					}
+				}
+			} else {
+				claims = append(claims, claim)
+				used[claim.Name] = true
+			}
+		}
+
 	}
 
-	return volumes, mounts
+	return volumes, mounts /*. claims */
 }
 
 //nolint:gocyclo,nakedret
 func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption) (podTemplateSpec *corev1.PodTemplateSpec, err error) {
+	logger := log.FromContext(ctx)
 	podLabels := r.getKubeLabels(opt.dynamoComponentDeployment, opt.dynamoComponent)
 	if opt.isStealingTrafficDebugModeEnabled {
 		podLabels[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
@@ -1556,14 +1664,13 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		return nil, err
 	}
 
+	// Handle default PVC settings. Apply overwrites if the name matches, add otherwise.
 	sharedMemorySizeLimit := resource.MustParse("64Mi")
 	memoryLimit := resources.Limits[corev1.ResourceMemory]
 	if !memoryLimit.IsZero() {
 		sharedMemorySizeLimit.SetMilli(memoryLimit.MilliValue() / 2)
 	}
-
-	// Handle default PVC settings. Apply overwrites if the name matches, add otherwise.
-	pvcVolumes, pvcMounts := buildPVCVolumesAndMounts(opt.dynamoComponentDeployment)
+	pvcVolumes, pvcMounts := buildPVCVolumesAndMounts(opt.dynamoComponentDeployment, sharedMemorySizeLimit)
 	volumes = append(volumes, pvcVolumes...)
 	volumeMounts = append(volumeMounts, pvcMounts...)
 
@@ -1693,13 +1800,15 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		container.SecurityContext.RunAsUser = &[]int64{0}[0]
 	}
 
-	if opt.dynamoComponentDeployment.Spec.KubernetesOverwrites != nil {
-		overwrites := opt.dynamoComponentDeployment.Spec.KubernetesOverwrites
+	if opt.dynamoComponentDeployment.Spec.Entrypoint != nil {
+		entrypoint := opt.dynamoComponentDeployment.Spec.Entrypoint
 
 		// Handle Entrypoint overwrite. Entrypoint needs to be renamed to Command.
-		if overwrites.Entrypoint != nil {
-			parts := strings.Fields(*overwrites.Entrypoint)
-			if len(parts) > 0 {
+		if entrypoint != nil {
+			parts, err := shellwords.Parse(*entrypoint)
+			if err != nil {
+				logger.Error(err, "failed to parse entrypoint string")
+			} else if len(parts) > 0 {
 				container.Command = []string{parts[0]}
 				if len(parts) > 1 {
 					container.Args = parts[1:]

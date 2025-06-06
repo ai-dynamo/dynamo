@@ -66,7 +66,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	Autoscaling      *Autoscaling               `json:"autoscaling,omitempty"`
 	Envs             []corev1.EnvVar            `json:"envs,omitempty"`
 	EnvFromSecret    *string                    `json:"envFromSecret,omitempty"`
-	PVC              *PVC                       `json:"pvc,omitempty"`
+	PVC              map[string]*PVC            `json:"pvcSettings,omitempty"`
 	RunMode          *RunMode                   `json:"runMode,omitempty"`
 	ExternalServices map[string]ExternalService `json:"externalServices,omitempty"`
 
@@ -81,8 +81,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 	ReadinessProbe *corev1.Probe `json:"readinessProbe,omitempty"`
 	Replicas       *int32        `json:"replicas,omitempty"`
 
-	// Kubernetes overwrites for the deployment
-	KubernetesOverwrites *KubernetesOverwrites `json:"kubernetesOverwrites,omitempty"`
+	// +optional
+	Entrypoint *string `json:"entrypoint,omitempty"`
 }
 
 type RunMode struct {
@@ -109,11 +109,6 @@ type IngressSpec struct {
 	TLS                        *IngressTLSSpec   `json:"tls,omitempty"`
 	HostSuffix                 *string           `json:"hostSuffix,omitempty"`
 	IngressControllerClassName *string           `json:"ingressControllerClassName,omitempty"`
-}
-
-type KubernetesOverwrites struct {
-	Entrypoint  *string         `json:"entrypoint,omitempty"`
-	PVCSettings map[string]*PVC `json:"pvcSettings,omitempty"`
 }
 
 // DynamoComponentDeploymentStatus defines the observed state of DynamoComponentDeployment

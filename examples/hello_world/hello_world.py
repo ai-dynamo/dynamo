@@ -71,6 +71,7 @@ class ResponseType(BaseModel):
     resources={"cpu": 1, "memory": "500Mi"},
     workers=2,
     image=DYNAMO_IMAGE,
+    kubernetes_overrides={"entrypoint": "sh -c 'echo hello from anna'"},
 )
 class Backend:
     def __init__(self) -> None:
