@@ -117,7 +117,7 @@ get_options() {
             ;;
 	--workdir)
 	    if [ "$2" ]; then
-	        WORKDIR="/workspace/$2"
+	        WORKDIR="$2"
 	        shift
 	    else
 	        missing_requirement "$1"
