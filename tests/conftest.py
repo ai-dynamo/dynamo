@@ -33,12 +33,15 @@ logging.basicConfig(
 
 
 def pytest_collection_modifyitems(config, items):
-    # Handle tests marked with tensorrtllm
-    if config.getoption("-m") and "tensorrtllm" in config.getoption("-m"):
-        # User explicitly asked for tensorrtllm tests, do nothing
-        return
+    """
+    This function is called to modify the list of tests to run.
+    It is used to skip tests that are not supported on all environments.
+    """
 
-    # Otherwise, skip all tests marked with tensorrtllm
+    # Tests marked with tensorrtllm requires specific environment with tensorrtllm
+    # installed. Hence, we skip them if the user did not explicitly ask for them.
+    if config.getoption("-m") and "tensorrtllm" in config.getoption("-m"):
+        return
     skip_tensorrtllm = pytest.mark.skip(reason="need -m tensorrtllm to run")
     for item in items:
         if "tensorrtllm" in item.keywords:
