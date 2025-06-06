@@ -137,10 +137,6 @@ async def check_required_workers(
     workers_clients, required_workers: int, timeout: int, poll_interval=1
 ):
     """Wait until the minimum number of workers are ready."""
-async def check_required_workers(
-    workers_clients, required_workers: int, timeout: int, poll_interval=1
-):
-    """Wait until the minimum number of workers are ready."""
     start_time = time.time()
     num_workers = 0
     while num_workers < required_workers and time.time() - start_time < timeout:
@@ -153,9 +149,6 @@ async def check_required_workers(
             )
             await asyncio.sleep(poll_interval)
     if num_workers < required_workers:
-        raise TimeoutError(
-            f"Timed out waiting for {required_workers} workers to be ready."
-        )
         raise TimeoutError(
             f"Timed out waiting for {required_workers} workers to be ready."
         )
