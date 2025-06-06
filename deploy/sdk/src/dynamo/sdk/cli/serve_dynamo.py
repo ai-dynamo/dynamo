@@ -94,7 +94,7 @@ app = typer.Typer(pretty_exceptions_enable=False)
 
 @app.command()
 def main(
-    bento_identifier: str = typer.Argument(".", help="The bento identifier"),
+    dynamo_identifier: str = typer.Argument(".", help="The dynamo identifier"),
     service_name: str = typer.Option("", help="Service name"),
     runner_map: str = typer.Option(
         None,
@@ -112,7 +112,7 @@ def main(
     ),
     target: str = typer.Option(
         "dynamo",
-        help="Specify the target: 'dynamo' or 'bento'.",
+        help="Specify the target: 'dynamo' or 'dynamo'.",
     ),
 ) -> None:
     """Start a worker for the given service - either Dynamo or regular service"""
@@ -137,7 +137,7 @@ def main(
                     f"the maximum worker ID is {len(env_list)}"
                 )
             os.environ.update(env_list[worker_key])
-    service = find_and_load_service(bento_identifier)
+    service = find_and_load_service(dynamo_identifier)
     if service_name and service_name != service.name:
         service = service.find_dependent_by_name(service_name)
 

@@ -223,7 +223,7 @@ def load_entry_service(
     config_path = os.path.join(graph_dir, "dynamo.yaml")
     if not os.path.isfile(config_path):
         raise FileNotFoundError(
-            f"Pipeline config (bento.yaml) not found in {graph_dir}"
+            f"Pipeline config (dynamo.yaml) not found in {graph_dir}"
         )
     with open(config_path, encoding="utf-8") as f:
         graph_cfg = yaml.safe_load(f)
@@ -233,7 +233,7 @@ def load_entry_service(
     if src_dir not in sys.path:
         sys.path.insert(0, src_dir)
 
-    # Compute size_bytes as the total size of the bento directory
+    # Compute size_bytes as the total size of the dynamo directory
     size_bytes = _get_dir_size(graph_dir)
 
     service_name = graph_cfg.get("service")
