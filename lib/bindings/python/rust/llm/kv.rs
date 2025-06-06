@@ -291,9 +291,7 @@ impl RadixTree {
     #[new]
     #[pyo3(signature = (expiration_duration_secs=None))]
     fn new(expiration_duration_secs: Option<f64>) -> PyResult<Self> {
-        let expiration_duration =
-            expiration_duration_secs.map(|secs| std::time::Duration::from_secs_f64(secs));
-
+        let expiration_duration = expiration_duration_secs.map(std::time::Duration::from_secs_f64);
         let inner = llm_rs::kv_router::indexer::RadixTree::new_with_frequency(expiration_duration);
         Ok(Self { inner })
     }
