@@ -1,6 +1,6 @@
 # Running Dynamo (`dynamo run`)
 
-This guide explains the`dynamo run` command.
+This guide explains the `dynamo run` command.
 
 `dynamo-run` is a CLI tool for exploring the Dynamo components. It's also an example of how to use components from Rust. If you use the Python wheel, it's available as `dynamo run` .
 

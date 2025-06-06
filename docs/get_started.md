@@ -62,7 +62,7 @@ See [Support Matrix](support_matrix.md) for more information.
    DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0
    ```
 
-3. Set up Python environment:
+3. Set up the Python environment:
    ```bash
    python3 -m venv venv
    source venv/bin/activate
@@ -104,7 +104,7 @@ export DYNAMO_IMAGE=<your-registry>/dynamo-base:latest-vllm
 
 ## Running and Interacting with an LLM Locally
 
-To run a model and interact with it locally, call `dynamo run` with a Hugging Face model. `dynamo run` supports several backends, including: `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
+To run a model and interact with it locally, call `dynamo run` with a Hugging Face model. `dynamo run` supports several backends, including `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
 
 ### Example Command
 

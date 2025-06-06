@@ -26,7 +26,7 @@ Dynamo is NVIDIA's high-throughput, low-latency inference framework that's desig
 - **Accelerated data transfer** – Reduces inference response time using NIXL
 - **KV cache offloading** – Uses multiple memory hierarchies for higher system throughput
 
-Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach
+Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, Open Source Software (OSS)-first development approach
 
 ## Motivation behind Dynamo
 
