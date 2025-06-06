@@ -14,7 +14,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import argparse
 import json
 import os
 import re
@@ -207,16 +206,10 @@ def create_pareto_graph(results, title="", stat_value="avg"):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Accept exactly two artifact folder names."
-    )
-    parser.add_argument("artifacts", nargs=2, help="Exactly two artifact folder names")
-
-    args = parser.parse_args()
     genai_perf_profile_export_json_paths = get_genai_perf_profile_export_json_paths(
         [
-            args.artifacts[0],
-            args.artifacts[1],
+            "artifacts_vllm_serve_tp4dp2",
+            "artifacts_disagg_prefill_tp1dp4_decode_tp4dp1",
         ]
     )
     extracted_values = extract_val_and_concurrency(genai_perf_profile_export_json_paths)
