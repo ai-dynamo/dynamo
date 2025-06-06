@@ -291,8 +291,8 @@ impl RadixTree {
     #[new]
     #[pyo3(signature = (expiration_duration_secs=None))]
     fn new(expiration_duration_secs: Option<f64>) -> PyResult<Self> {
-        let expiration_duration = expiration_duration_secs
-            .map(|secs| std::time::Duration::from_secs_f64(secs));
+        let expiration_duration =
+            expiration_duration_secs.map(|secs| std::time::Duration::from_secs_f64(secs));
 
         let inner = llm_rs::kv_router::indexer::RadixTree::new_with_frequency(expiration_duration);
         Ok(Self { inner })
@@ -323,10 +323,12 @@ impl RadixTree {
         kv_cache_event_bytes: &[u8],
     ) -> PyResult<()> {
         let kv_cache_event: llm_rs::kv_router::protocols::KvCacheEvent =
-            serde_json::from_slice(kv_cache_event_bytes)
-                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                    format!("Failed to deserialize KvCacheEvent: {}", e)
-                ))?;
+            serde_json::from_slice(kv_cache_event_bytes).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Failed to deserialize KvCacheEvent: {}",
+                    e
+                ))
+            })?;
 
         let router_event = llm_rs::kv_router::indexer::RouterEvent::new(worker_id, kv_cache_event);
         self.inner.apply_event(router_event);
