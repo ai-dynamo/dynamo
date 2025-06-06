@@ -93,7 +93,7 @@ def test_build_latest_revision_from_cr_missing_fields():
     assert rev["targets"][0]["config"]["envs"] == []
 
 
-def test_build_latest_revision_from_cr_bento_colonless():
+def test_build_latest_revision_from_cr_dynamo_colonless():
     cr = {"spec": {"dynamoGraph": "justrepo"}}
     rev = build_latest_revision_from_cr(cr)
     assert rev["targets"][0]["bento"]["repository"]["name"] == "unknown"
