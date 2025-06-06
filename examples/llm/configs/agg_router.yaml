@@ -29,7 +29,7 @@ Processor:
 
 Router:
   min-workers: 1
-  common-configs: [model]
+  common-configs: [model, block-size, router]
 
 VllmWorker:
   enforce-eager: true
@@ -39,5 +39,9 @@ VllmWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 1
+      gpu: '1'
   common-configs: [model, block-size, max-model-len, router, kv-transfer-config]
+
+Planner:
+  environment: local
+  no-operation: true

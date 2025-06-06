@@ -1,3 +1,20 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+
 # Deploying Dynamo Inference Graphs to Kubernetes using the Dynamo Cloud Platform
 
 This guide walks you through deploying an inference graph created with the Dynamo SDK onto a Kubernetes cluster using the Dynamo cloud platform and the Dynamo deploy CLI. The Dynamo cloud platform provides a streamlined experience for deploying and managing your inference services.
@@ -6,17 +23,15 @@ This guide walks you through deploying an inference graph created with the Dynam
 
 Before proceeding with deployment, ensure you have:
 
-- [Dynamo CLI](../README.md#installation) installed
+- [Dynamo Python package](../../get_started.md#alternative-setup-manual-installation) installed
 - A Kubernetes cluster with the [Dynamo cloud platform](dynamo_cloud.md) installed
 - Ubuntu 24.04 as the base image for your services
 - Required dependencies:
   - Helm package manager
-  - Dynamo SDK and CLI tools
   - Rust packages and toolchain
 
-You must have first followed the instructions in [deploy/dynamo/helm/README.md](../../deploy/dynamo/helm/README.md) to install Dynamo Cloud on your Kubernetes cluster.
+You must have first followed the instructions in [deploy/dynamo/helm/README.md](https://github.com/ai-dynamo/dynamo/blob/main/deploy/dynamo/cloud/helm/README.md) to install Dynamo Cloud on your Kubernetes cluster.
 
-**Note**: Note the `KUBE_NS` variable in the following steps must match the Kubernetes namespace where you installed Dynamo Cloud. You must also expose the `dynamo-store` service externally. This will be the endpoint the CLI uses to interface with Dynamo Cloud.
 ## Understanding the Deployment Process
 
 The deployment process involves two main steps:
@@ -39,9 +54,12 @@ The deployment process involves two main steps:
 
 ## Deployment Steps
 
-### 1. Login to Dynamo Cloud
+### 1. Configure Environment Variables
 
-First, configure your environment and login to the Dynamo cloud:
+First, set up your environment variables for working with Dynamo Cloud. You have two options for accessing the `dynamo-store` service:
+
+#### Option 1: Using Port-Forward (Local Development)
+This is the simplest approach for local development and testing:
 
 ```bash
 # Set your project root directory
@@ -50,27 +68,48 @@ export PROJECT_ROOT=$(pwd)
 # Set your Kubernetes namespace (must match the namespace where Dynamo cloud is installed)
 export KUBE_NS=hello-world
 
-# Externally accessible endpoint to the `dynamo-store` service within your Dynamo Cloud installation
-export DYNAMO_CLOUD=https://${KUBE_NS}.dev.aire.nvidia.com
+# In a separate terminal, run port-forward to expose the dynamo-store service locally
+kubectl port-forward svc/dynamo-store 8080:80 -n $KUBE_NS
 
-# Login to the Dynamo cloud
-dynamo cloud login --api-token TEST-TOKEN --endpoint $DYNAMO_CLOUD
+# Set DYNAMO_CLOUD to use the local port-forward endpoint
+export DYNAMO_CLOUD=http://localhost:8080
+```
+
+#### Option 2: Using Ingress/VirtualService (Production)
+For production environments, you should use proper ingress configuration:
+
+```bash
+# Set your project root directory
+export PROJECT_ROOT=$(pwd)
+
+# Set your Kubernetes namespace (must match the namespace where Dynamo cloud is installed)
+export KUBE_NS=hello-world
+
+# Set DYNAMO_CLOUD to your externally accessible endpoint
+# This could be your Ingress hostname or VirtualService URL
+export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com  # Replace with your actual endpoint
+```
+
+``` {note}
+The `DYNAMO_CLOUD` environment variable is required for all Dynamo deployment commands. Make sure it's set before running any deployment operations.
 ```
 
 ### 2. Build the Dynamo Base Image
 
-> [!NOTE]
-> For instructions on building and pushing the Dynamo base image, see the [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image) section in the main README.
+Before building your service, you need to ensure the base image is properly set up:
 
+1. For detailed instructions on building and pushing the Dynamo base image, see the [Building the Dynamo Base Image](../../get_started.md#building-the-dynamo-base-image) section in the main README.
+
+2. Export the image from the previous step to your environment.
 ```bash
-# Set your runtime image name
-export DYNAMO_IMAGE=<dynamo_docker_image_name>
+# Export the image from the previous step to your environment
+export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
 
 # Navigate to your project directory
 cd $PROJECT_ROOT/examples/hello_world
 
 # Build the service and capture the tag
-DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk -F"\"" '{ print $2 }')
+DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk '{ print $3 }' | sed 's/\.$//')
 ```
 
 ### 3. Deploy to Kubernetes
@@ -82,12 +121,40 @@ Deploy your service using the Dynamo deployment command:
 export DEPLOYMENT_NAME=hello-world
 
 # Create the deployment
-dynamo deployment create $DYNAMO_TAG --no-wait -n $DEPLOYMENT_NAME
+dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME
 ```
 
-To delete an existing deployment:
+#### Managing Deployments
+
+Once you have deployments running, you can manage them using the following commands:
+
+To see a list of all deployments in your namespace:
+
 ```bash
-kubectl delete dynamodeployment $DEPLOYMENT_NAME
+dynamo deployment list
+```
+This command displays a table of all deployments.
+
+To get detailed information about a specific deployment:
+
+```bash
+dynamo deployment get $DEPLOYMENT_NAME
+```
+
+To update a specific deployment:
+
+```bash
+dynamo deployment update $DEPLOYMENT_NAME [--config-file FILENAME] [--env ENV_VAR]
+```
+
+To remove a deployment and all its associated resources:
+
+```bash
+dynamo deployment delete $DEPLOYMENT_NAME
+```
+
+```{warning}
+This command permanently deletes the deployment and all associated resources. Make sure you have any necessary backups before proceeding.
 ```
 
 ### 4. Test the Deployment
@@ -121,3 +188,39 @@ This demonstrates the service pipeline:
 1. The Frontend receives "test"
 2. The Middle service adds "-mid" to create "test-mid"
 3. The Backend service adds "-back" to create "test-mid-back"
+
+## Using Kubernetes Secrets for Environment Variables
+
+Dynamo supports securely injecting environment variables from Kubernetes secrets into your deployment. This is only supported when deploying with `--target kubernetes`.
+
+### Creating a Secret
+
+First, create a Kubernetes secret containing your sensitive values:
+
+```bash
+export HF_TOKEN=your_hf_token
+kubectl create secret generic dynamo-env-secrets \
+  --from-literal=huggingface.token=$HF_TOKEN \
+  --from-literal=another_secret.key=value \
+  -n $KUBE_NS
+```
+
+### Referencing Secrets in Your Deployment
+
+You can reference secret keys in your deployment using the `--env-from-secret` flag:
+
+- `--env-from-secret HF_TOKEN=huggingface.token` will set the `HF_TOKEN` environment variable from the `huggingface.token` key in the secret.
+- `--env-from-secret ANOTHER_SECRET=another_secret.key` will set the `ANOTHER_SECRET` environment variable from the same-named key in the secret.
+- You can also mix normal envs: `--env NORMAL_ENV_KEY=value`.
+
+By default, Dynamo will look for a secret named `dynamo-env-secrets`. You can override this with the `--env-secrets-name` flag or the `DYNAMO_ENV_SECRETS` environment variable.
+
+### Example Full Command
+
+```bash
+dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml \
+  --env NORMAL_ENV_KEY=value \
+  --env-from-secret HF_TOKEN=huggingface.token \
+  --env-from-secret ANOTHER_SECRET=another_secret.key \
+  --target kubernetes
+```

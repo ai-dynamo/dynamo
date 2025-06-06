@@ -21,18 +21,12 @@ import os
 import signal
 import threading
 from contextlib import asynccontextmanager
-from dataclasses import asdict
 from enum import Enum
 from queue import Queue
 from typing import Any, Optional
 
 from common.parser import LLMAPIConfig
-from common.protocol import (
-    DisaggregatedTypeConverter,
-    TRTLLMWorkerRequest,
-    TRTLLMWorkerResponse,
-    TRTLLMWorkerResponseOutput,
-)
+from common.protocol import DisaggregatedTypeConverter
 from common.utils import ManagedThread, ServerType
 from tensorrt_llm.executor import CppExecutorError
 from tensorrt_llm.llmapi import LLM, SamplingParams
@@ -40,11 +34,11 @@ from tensorrt_llm.llmapi.disagg_utils import (
     CtxGenServerConfig,
     parse_disagg_config_file,
 )
+from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from tensorrt_llm.serve.openai_protocol import DisaggregatedParams
 
-from dynamo.llm import KvMetricsPublisher
-
-from .kv_cache_event_publisher import KVCacheEventPublisher
+from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
+from dynamo.sdk import dynamo_context
 
 logger = logging.getLogger(__name__)
 
@@ -66,14 +60,26 @@ def update_args_from_disagg_config(
     return engine_config
 
 
-def get_sampling_params(sampling_params):
-    # Removes keys starting with '_' from the sampling params which gets
-    # added by the LLM API. TRTLLM does not support creating SamplingParams
-    # from a dictionary with keys starting with '_'.
-    cleaned_dict = {
-        key: value for key, value in sampling_params.items() if not key.startswith("_")
-    }
-    return SamplingParams(**cleaned_dict)
+def _to_signed_i64(value: int | None) -> int | None:
+    """Convert a Python int to signed 64-bit range by two's complement."""
+    if value is None:
+        return None
+
+    if value >= 2**63:
+        return value - 2**64
+    if value < -(2**63):
+        return ((value + 2**63) % 2**64) - 2**63
+    return value
+
+
+def get_sampling_params(sampling_params_dict, default_sampling_params):
+    sampling_params = copy.deepcopy(default_sampling_params)
+    for key, value in sampling_params_dict.items():
+        if value is None:
+            continue
+        if hasattr(sampling_params, key):
+            setattr(sampling_params, key, value)
+    return sampling_params
 
 
 class BaseTensorrtLLMEngine:
@@ -102,7 +108,7 @@ class BaseTensorrtLLMEngine:
         self._error_queue: Queue = Queue()
         self._kv_metrics_publisher = None
 
-        if self._remote_prefill:
+        if self._remote_prefill or self._server_type == ServerType.CTX:
             self._min_workers = min_workers
             if disagg_config_file is None or not os.path.exists(disagg_config_file):
                 raise ValueError(
@@ -135,7 +141,20 @@ class BaseTensorrtLLMEngine:
             self._publish_events = False
 
         if self._publish_stats:
-            self._kv_metrics_publisher = KvMetricsPublisher()
+            self._kv_metrics_publisher = WorkerMetricsPublisher()
+
+        if self._publish_events:
+            if self._worker_id is None:
+                raise ValueError("Worker ID is None!")
+
+            runtime = dynamo_context["runtime"]
+            kv_listener = runtime.namespace(self._namespace_str).component(
+                self._component_str
+            )
+            self._kv_event_publisher = KvEventPublisher(
+                kv_listener, int(self._worker_id), self._kv_block_size
+            )
+            logger.info("KvEventPublisher is initialized")
 
         self._engine_config = engine_config
 
@@ -148,6 +167,12 @@ class BaseTensorrtLLMEngine:
         self._event_thread = threading.Thread(
             target=asyncio.run, args=(self._run_llm_engine(),)
         )
+
+        # Populate default sampling params from the model
+        tokenizer = tokenizer_factory(self._engine_config.model_name)
+        self._default_sampling_params = SamplingParams()
+        self._default_sampling_params._setup(tokenizer)
+        self._default_sampling_params.stop = None
 
         self.publish_kv_cache_events_thread = None
         self.publish_stats_thread = None
@@ -170,11 +195,15 @@ class BaseTensorrtLLMEngine:
         try:
             if self._publish_stats:
                 self._init_publish_metrics_thread()
+        except Exception as e:
+            logger.error(f"Failed to initialize publish metrics threads: {e}")
+            raise e
 
+        try:
             if self._publish_events:
                 self._init_publish_kv_cache_events_thread()
         except Exception as e:
-            logger.error(f"Failed to initialize publish metrics threads: {e}")
+            logger.error(f"Failed to initialize publish events threads: {e}")
             raise e
 
     def _init_publish_metrics_thread(self):
@@ -216,20 +245,13 @@ class BaseTensorrtLLMEngine:
         )
 
     def _init_publish_kv_cache_events_thread(self):
-        if self._worker_id is None:
-            logger.error("Worker ID not initialized!")
+        if self._kv_event_publisher is None:
+            logger.error("KV event publisher not initialized!")
             return
 
-        # TODO: Use python bindings to publish kv cache events once they
-        # are available.
-        lib_path = "/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
-        self._kv_cache_events_publisher = KVCacheEventPublisher(
-            self._namespace_str,
-            self._component_str,
-            int(self._worker_id),
-            lib_path,
-            self._kv_block_size,
-        )
+        # A set to store the block hash of partial block (i.e. block containing less than kv_block_size tokens) hashes.
+        # It is used to prevent sending remove event to kv router since partial blocks are not stored.
+        self._partial_block_hashes = set()
 
         # Prepare threads for publishing kv cache events but don't start them yet.
         # TRTLLM needs to start generating tokens first before kv cache events
@@ -295,30 +317,65 @@ class BaseTensorrtLLMEngine:
             return
 
         events = self._llm_engine.get_kv_cache_events_async(timeout=5)
-        async for event_list in events:
-            for event in event_list:
-                data = event["data"]
-                if data["type"] == "stored":
-                    parent_hash = data["parent_hash"]
-                    for block in data["blocks"]:
-                        tokens = []
-                        for token in block["tokens"]:
-                            tokens.append(int(token["token_id"]))
-
-                        # Note: Currently data does not have lora_id.
-                        # Using 0 as default value. If later data has
-                        # lora_id, we need to verify if this is correct.
-                        lora_id = data.get("lora_id", 0)
-                        self._kv_cache_events_publisher.stored_event(
-                            parent_hash,
-                            block["block_hash"],
-                            tokens,
-                            lora_id,
+        async for event in events:
+            event_id = event["event_id"]
+            data = event["data"]
+            if data["type"] == "stored":
+                parent_hash = _to_signed_i64(data["parent_hash"])
+                token_ids = []
+                num_block_tokens = []
+                block_hashes = []
+                for block in data["blocks"]:
+                    token_num_in_block = len(block["tokens"])
+                    block_hash = _to_signed_i64(block["block_hash"])
+                    if token_num_in_block > self._kv_block_size:
+                        logger.error(
+                            f"Block {block_hash} contains {token_num_in_block} tokens, which is greater than kv_block_size {self._kv_block_size}"
                         )
-                        parent_hash = block["block_hash"]
-                elif data["type"] == "removed":
-                    for block_hash in data["block_hashes"]:
-                        self._kv_cache_events_publisher.removed_event(block_hash)
+                        return
+                    if token_num_in_block < self._kv_block_size:
+                        logger.debug(
+                            f"Early stop when block {block_hash} containing {token_num_in_block} tokens not equal to kv_block_size {self._kv_block_size}"
+                        )
+                        self._partial_block_hashes.add(block_hash)
+                        break
+                    num_block_tokens.append(token_num_in_block)
+                    block_hashes.append(block_hash)
+                    for token in block["tokens"]:
+                        token_ids.append(int(token["token_id"]))
+
+                # Note: Currently data does not have lora_id.
+                # Using 0 as default value. If later data has
+                # lora_id, we need to verify if this is correct.
+                lora_id = data.get("lora_id", 0)
+
+                logger.debug(
+                    f"publish stored event: event_id: {event_id}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_id: {lora_id}, parent_hash: {parent_hash}"
+                )
+                self._kv_event_publisher.publish_stored(
+                    event_id,
+                    token_ids,
+                    num_block_tokens,
+                    block_hashes,
+                    lora_id,
+                    parent_hash,
+                )
+            elif data["type"] == "removed":
+                block_hashes = []
+                for block_hash in data["block_hashes"]:
+                    block_hash = _to_signed_i64(block_hash)
+                    if block_hash in self._partial_block_hashes:
+                        logger.debug(
+                            f"Skipping removing block hash {block_hash} since it is a partial block"
+                        )
+                        self._partial_block_hashes.remove(block_hash)
+                        continue
+                    block_hashes.append(block_hash)
+
+                logger.debug(
+                    f"publish removed event: event_id: {event_id}, block_hashes: {block_hashes}"
+                )
+                self._kv_event_publisher.publish_removed(event_id, block_hashes)
         return True
 
     def _start_threads(self):
@@ -415,7 +472,8 @@ class BaseTensorrtLLMEngine:
 
     async def _get_remote_prefill_response(self, request):
         prefill_request = copy.deepcopy(request)
-        prefill_request.sampling_params["max_tokens"] = 1
+        # TRTLLM requires max_tokens to be set for prefill requests.
+        prefill_request.stop_conditions.max_tokens = 1
         prefill_request.disaggregated_params = DisaggregatedParams(
             request_type=DisaggRequestType.CONTEXT_ONLY.value
         )
@@ -423,7 +481,7 @@ class BaseTensorrtLLMEngine:
         if self._prefill_client is None:
             raise ValueError("Prefill client not initialized")
 
-        # TODO: Use smart KV router to determine which prefill worker to use.
+        # TODO: Use smart KV router to determine which prefill worker to use. This would also require supporting publishing events for prefill workers.
         ctx_responses = [
             ctx_response
             async for ctx_response in await self._prefill_client.round_robin(
@@ -437,17 +495,10 @@ class BaseTensorrtLLMEngine:
         logger.debug(
             f"Received response from prefill worker: {ctx_responses[0].data()}"
         )
-        ctx_response_obj = TRTLLMWorkerResponse.model_validate_json(
-            ctx_responses[0].data()
-        )
-        ctx_response_obj.outputs = [
-            TRTLLMWorkerResponseOutput(**ctx_response_obj.outputs[0])
-        ]
-        assert ctx_response_obj.outputs[0].disaggregated_params is not None
+        remote_prefill_response = ctx_responses[0]
+        return remote_prefill_response
 
-        return ctx_response_obj
-
-    async def generate(self, request: TRTLLMWorkerRequest):
+    async def generate(self, request):
         if self._llm_engine is None:
             raise RuntimeError("Engine not initialized")
 
@@ -457,7 +508,7 @@ class BaseTensorrtLLMEngine:
         self._ongoing_request_count += 1
 
         try:
-            worker_inputs = request.tokens.tokens
+            worker_inputs = request.token_ids
 
             disaggregated_params = (
                 DisaggregatedTypeConverter.to_llm_disaggregated_params(
@@ -465,17 +516,33 @@ class BaseTensorrtLLMEngine:
                 )
             )
 
-            if self._remote_prefill and self._server_type == ServerType.GEN:
-                ctx_response_obj = await self._get_remote_prefill_response(request)
+            num_output_tokens_so_far = 0
 
-                worker_inputs = ctx_response_obj.prompt_token_ids
+            if self._remote_prefill and self._server_type == ServerType.GEN:
+                ctx_response = await self._get_remote_prefill_response(request)
+                remote_prefill_response = ctx_response.data()
+                if (
+                    remote_prefill_response["finish_reason"] == "stop"
+                    or remote_prefill_response["finish_reason"] == "error"
+                ):
+                    yield remote_prefill_response
+                    return
+                num_output_tokens_so_far = len(remote_prefill_response["token_ids"])
+
+                # Decode the disaggregated params from the remote prefill response
                 disaggregated_params = (
                     DisaggregatedTypeConverter.to_llm_disaggregated_params(
                         DisaggregatedParams(
-                            **ctx_response_obj.outputs[0].disaggregated_params
+                            **remote_prefill_response["disaggregated_params"]
                         )
                     )
                 )
+
+                # Send the first token response to the client
+                first_token_response = remote_prefill_response
+                first_token_response.pop("disaggregated_params")
+                yield first_token_response
+
                 disaggregated_params.request_type = (
                     DisaggRequestType.GENERATION_ONLY.value
                 )
@@ -484,29 +551,44 @@ class BaseTensorrtLLMEngine:
                 f"Worker inputs: {worker_inputs}, disaggregated params: {disaggregated_params}"
             )
 
-            sampling_params = get_sampling_params(request.sampling_params)
+            sampling_params = get_sampling_params(
+                request.sampling_options.dict(), self._default_sampling_params
+            )
+            max_tokens = request.stop_conditions.max_tokens
+            if max_tokens:
+                sampling_params.max_tokens = max_tokens
+
             async for response in self._llm_engine.generate_async(
                 inputs=worker_inputs,
                 sampling_params=sampling_params,
                 disaggregated_params=disaggregated_params,
-                streaming=False
-                if self._server_type == ServerType.CTX
-                else request.streaming,
+                streaming=self._server_type != ServerType.CTX,
             ):
-                # Convert the disaggregated params to OAI format so
-                # it can be sent over the network.
-                response.outputs[
-                    0
-                ].disaggregated_params = DisaggregatedTypeConverter.to_oai_disaggregated_params(
-                    response.outputs[0].disaggregated_params
-                )
+                if response.finished and self._server_type != ServerType.CTX:
+                    yield {"finish_reason": "stop", "token_ids": []}
+                    break
 
-                yield TRTLLMWorkerResponse(
-                    request_id=request.id,
-                    prompt_token_ids=response.prompt_token_ids,
-                    outputs=[asdict(response.outputs[0])],
-                    finished=response.finished,
-                ).model_dump_json(exclude_unset=True)
+                if not response.outputs:
+                    yield {"finish_reason": "error", "token_ids": []}
+                    break
+
+                output = response.outputs[0]
+                next_total_toks = len(output.token_ids)
+                out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+                if output.finish_reason:
+                    out["finish_reason"] = output.finish_reason
+                if output.stop_reason:
+                    out["stop_reason"] = output.stop_reason
+                if self._server_type == ServerType.CTX:
+                    # Return the disaggregated params only when operating in prefill mode.
+                    out[
+                        "disaggregated_params"
+                    ] = DisaggregatedTypeConverter.to_oai_disaggregated_params(
+                        output.disaggregated_params
+                    ).dict()
+
+                yield out
+                num_output_tokens_so_far = next_total_toks
 
         except CppExecutorError:
             signal.raise_signal(signal.SIGINT)

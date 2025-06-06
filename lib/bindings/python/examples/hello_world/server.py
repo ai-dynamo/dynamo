@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import signal
 
 import uvloop
 
@@ -28,12 +29,34 @@ class RequestHandler:
     async def generate(self, request):
         print(f"Received request: {request}")
         for char in request:
+            await asyncio.sleep(1)
             yield char
 
 
-@dynamo_worker(static=True)
+@dynamo_worker(static=False)
 async def worker(runtime: DistributedRuntime):
+    print(
+        f"Primary lease ID: {runtime.etcd_client().primary_lease_id()}/{runtime.etcd_client().primary_lease_id():#x}"
+    )
+
+    # Set up signal handler for graceful shutdown
+    loop = asyncio.get_running_loop()
+
+    def signal_handler():
+        # Schedule the shutdown coroutine instead of calling it directly
+        asyncio.create_task(graceful_shutdown(runtime))
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
+
+    print("Signal handlers registered for graceful shutdown")
     await init(runtime, "dynamo")
+
+
+async def graceful_shutdown(runtime: DistributedRuntime):
+    print("Received shutdown signal, shutting down DistributedRuntime")
+    runtime.shutdown()
+    print("DistributedRuntime shutdown complete")
 
 
 async def init(runtime: DistributedRuntime, ns: str):
@@ -46,6 +69,9 @@ async def init(runtime: DistributedRuntime, ns: str):
 
     endpoint = component.endpoint("generate")
     print("Started server instance")
+
+    # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
+    # after the lease is revoked
     await endpoint.serve_endpoint(RequestHandler().generate)
 
 

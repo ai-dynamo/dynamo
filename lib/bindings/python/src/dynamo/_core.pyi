@@ -13,7 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import AsyncGenerator, AsyncIterator, Callable, Dict, List, Optional, Union
+from typing import (
+    Any,
+    AsyncGenerator,
+    AsyncIterator,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Union,
+)
 
 def log_message(level: str, message: str, module: str, file: str, line: int) -> None:
     """
@@ -49,10 +58,29 @@ class DistributedRuntime:
         """
         ...
 
+    def shutdown(self) -> None:
+        """
+        Shutdown the runtime by triggering the cancellation token
+        """
+        ...
 class EtcdClient:
     """
     Etcd is used for discovery in the DistributedRuntime
     """
+
+    def primary_lease_id(self) -> int:
+        """
+        return the primary lease id.
+        """
+        ...
+
+    async def kv_create(
+        self, key: str, value: bytes, lease_id: Optional[int] = None
+    ) -> None:
+        """
+        Atomically create a key in etcd, fail if the key already exists.
+        """
+        ...
 
     async def kv_create_or_validate(
         self, key: str, value: bytes, lease_id: Optional[int] = None
@@ -73,6 +101,12 @@ class EtcdClient:
     async def kv_get_prefix(self, prefix: str) -> List[Dict[str, JsonLike]]:
         """
         Get all keys with a given prefix
+        """
+        ...
+
+    async def revoke_lease(self, lease_id: int) -> None:
+        """
+        Revoke a lease
         """
         ...
 
@@ -140,6 +174,18 @@ class EtcdKvCache:
             key: The key to store
             value: The value to store
             lease_id: Optional lease ID to associate with this key-value pair
+        """
+        ...
+
+    async def delete(self, key: str) -> None:
+        """
+        Delete a key-value pair from the cache and etcd.
+        """
+        ...
+
+    async def clear_all(self) -> None:
+        """
+        Delete all key-value pairs from the cache and etcd.
         """
         ...
 
@@ -298,16 +344,16 @@ class DisaggregatedRouter:
         """
         ...
 
-class KvMetricsPublisher:
+class WorkerMetricsPublisher:
     """
-    A metrics publisher will provide KV metrics to the router.
+    A metrics publisher will provide metrics to the router.
     """
 
     ...
 
     def __init__(self) -> None:
         """
-        Create a `KvMetricsPublisher` object
+        Create a `WorkerMetricsPublisher` object
         """
 
     def create_service(self, component: Component) -> None:
@@ -322,6 +368,10 @@ class KvMetricsPublisher:
         request_total_slots: int,
         kv_active_blocks: int,
         kv_total_blocks: int,
+        num_requests_waiting: int,
+        gpu_cache_usage_perc: float,
+        gpu_prefix_cache_hit_rate: float,
+        data_parallel_rank: int = 0,
     ) -> None:
         """
         Update the KV metrics being reported.
@@ -529,6 +579,40 @@ class KvEventPublisher:
         """
         ...
 
+class ZmqKvEventPublisherConfig:
+    def __init__(
+        self,
+        worker_id: int,
+        kv_block_size: int,
+        zmq_endpoint: str = "tcp://127.0.0.1:5557",
+        zmq_topic: str = ""
+    ) -> None:
+        """
+        Configuration for the ZmqKvEventPublisher.
+
+        :param worker_id: The worker ID.
+        :param kv_block_size: The block size for the key-value store.
+        :param zmq_endpoint: The ZeroMQ endpoint. Defaults to "tcp://127.0.0.1:5557".
+        :param zmq_topic: The ZeroMQ topic to subscribe to. Defaults to an empty string.
+        """
+        ...
+
+class ZmqKvEventPublisher:
+    def __init__(self, component: Component, config: ZmqKvEventPublisherConfig) -> None:
+        """
+        Initializes a new ZmqKvEventPublisher instance.
+
+        :param component: The component to be used.
+        :param config: Configuration for the event publisher.
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Shuts down the event publisher, stopping any background tasks.
+        """
+        ...
+
 class HttpService:
     """
     A HTTP service for dynamo applications.
@@ -552,3 +636,286 @@ class HttpAsyncEngine:
     """
 
     ...
+
+class ModelType:
+    """What type of request this model needs: Chat, Component or Backend (pre-processed)"""
+    ...
+
+async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str] = None, context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None) -> None:
+    """Attach the model at path to the given endpoint, and advertise it as model_type"""
+    ...
+
+class NatsQueue:
+    """
+    A queue implementation using NATS JetStream for task distribution
+    """
+
+    def __init__(self, stream_name: str, nats_server: str, dequeue_timeout: float) -> None:
+        """
+        Create a new NatsQueue instance.
+
+        Args:
+            stream_name: Name of the NATS JetStream stream
+            nats_server: URL of the NATS server
+            dequeue_timeout: Default timeout in seconds for dequeue operations
+        """
+        ...
+
+    async def connect(self) -> None:
+        """
+        Connect to the NATS server
+        """
+        ...
+
+    async def ensure_connection(self) -> None:
+        """
+        Ensure connection to the NATS server, connecting if not already connected
+        """
+        ...
+
+    async def close(self) -> None:
+        """
+        Close the connection to the NATS server
+        """
+        ...
+
+    async def enqueue_task(self, task_data: bytes) -> None:
+        """
+        Enqueue a task to the NATS JetStream
+
+        Args:
+            task_data: The task data as bytes
+        """
+        ...
+
+    async def dequeue_task(self, timeout: Optional[float] = None) -> Optional[bytes]:
+        """
+        Dequeue a task from the NATS JetStream
+
+        Args:
+            timeout: Optional timeout in seconds for this specific dequeue operation.
+                    If None, uses the default timeout specified during initialization.
+
+        Returns:
+            The task data as bytes if available, None if no task is available
+        """
+        ...
+
+    async def get_queue_size(self) -> int:
+        """
+        Get the current size of the queue
+
+        Returns:
+            The number of messages in the queue
+        """
+        ...
+
+class Layer:
+    """
+    A KV cache block layer
+    """
+
+    ...
+
+    def __dlpack__(self, stream: Optional[Any] = None, max_version: Optional[Any] = None, dl_device: Optional[Any] = None, copy: Optional[bool] = None) -> Any:
+        """
+        Get a dlpack capsule of the layer
+        """
+        ...
+
+    def __dlpack_device__(self) -> Any:
+        """
+        Get the dlpack device of the layer
+        """
+        ...
+
+class Block:
+    """
+    A KV cache block
+    """
+
+    ...
+
+    def __len__(self) -> int:
+        """
+        Get the number of layers in the list
+        """
+        ...
+
+    def __getitem__(self, index: int) -> Layer:
+        """
+        Get a layer by index
+        """
+        ...
+
+    def __iter__(self) -> 'Block':
+        """
+        Get an iterator over the layers
+        """
+        ...
+
+    def __next__(self) -> Block:
+        """
+        Get the next layer in the iterator
+        """
+        ...
+
+    def to_list(self) -> List[Layer]:
+        """
+        Get a list of layers
+        """
+        ...
+
+    def __dlpack__(self, stream: Optional[Any] = None, max_version: Optional[Any] = None, dl_device: Optional[Any] = None, copy: Optional[bool] = None) -> Any:
+        """
+        Get a dlpack capsule of the block
+        Exception raised if the block is not contiguous
+        """
+        ...
+
+    def __dlpack_device__(self) -> Any:
+        """
+        Get the dlpack device of the block
+        """
+        ...
+
+class BlockList:
+    """
+    A list of KV cache blocks
+    """
+
+    ...
+
+    def __len__(self) -> int:
+        """
+        Get the number of blocks in the list
+        """
+        ...
+
+    def __getitem__(self, index: int) -> Block:
+        """
+        Get a block by index
+        """
+        ...
+
+    def __iter__(self) -> 'BlockList':
+        """
+        Get an iterator over the blocks
+        """
+        ...
+
+    def __next__(self) -> Block:
+        """
+        Get the next block in the iterator
+        """
+        ...
+
+    def to_list(self) -> List[Block]:
+        """
+        Get a list of blocks
+        """
+        ...
+
+class BlockManager:
+    """
+    A KV cache block manager
+    """
+
+    def __init__(
+        self,
+        worker_id: int,
+        num_layer: int,
+        page_size: int,
+        inner_dim: int,
+        dtype: Optional[str] = None,
+        host_num_blocks: Optional[int] = None,
+        device_num_blocks: Optional[int] = None,
+        device_id: int = 0
+    ) -> None:
+        """
+        Create a `BlockManager` object
+
+        Parameters:
+        -----------
+        worker_id: int
+            The worker ID for this block manager
+        num_layer: int
+            Number of layers in the model
+        page_size: int
+            Page size for blocks
+        inner_dim: int
+            Inner dimension size
+        dtype: Optional[str]
+            Data type (e.g., 'fp16', 'bf16', 'fp32'), defaults to 'fp16' if None
+        host_num_blocks: Optional[int]
+            Number of host blocks to allocate, None means no host blocks
+        device_num_blocks: Optional[int]
+            Number of device blocks to allocate, None means no device blocks
+        device_id: int
+            CUDA device ID, defaults to 0
+        """
+        ...
+
+    def allocate_host_blocks_blocking(self, count: int) -> BlockList:
+        """
+        Allocate a list of host blocks (blocking call)
+
+        Parameters:
+        -----------
+        count: int
+            Number of blocks to allocate
+
+        Returns:
+        --------
+        BlockList
+            List of allocated blocks
+        """
+        ...
+
+    async def allocate_host_blocks(self, count: int) -> BlockList:
+        """
+        Allocate a list of host blocks
+
+        Parameters:
+        -----------
+        count: int
+            Number of blocks to allocate
+
+        Returns:
+        --------
+        BlockList
+            List of allocated blocks
+        """
+        ...
+
+    def allocate_device_blocks_blocking(self, count: int) -> BlockList:
+        """
+        Allocate a list of device blocks (blocking call)
+
+        Parameters:
+        -----------
+        count: int
+            Number of blocks to allocate
+
+        Returns:
+        --------
+        BlockList
+            List of allocated blocks
+        """
+        ...
+
+    async def allocate_device_blocks(self, count: int) -> BlockList:
+        """
+        Allocate a list of device blocks
+
+        Parameters:
+        -----------
+        count: int
+            Number of blocks to allocate
+
+        Returns:
+        --------
+        BlockList
+            List of allocated blocks
+        """
+        ...

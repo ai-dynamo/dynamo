@@ -1,18 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
+use dynamo_llm::protocols::openai::nvext::NvExt;
 use dynamo_llm::types::openai::chat_completions::{
     NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
 };
@@ -21,7 +10,7 @@ use futures::StreamExt;
 use std::io::{ErrorKind, Write};
 
 use crate::input::common;
-use crate::{EngineConfig, Flags};
+use crate::{EngineConfig, Flags, RequestTemplate};
 
 /// Max response tokens for each single query. Must be less than model context size.
 /// TODO: Cmd line flag to overwrite this
@@ -29,22 +18,20 @@ const MAX_TOKENS: u32 = 8192;
 
 pub async fn run(
     runtime: Runtime,
-    flags: Flags,
+    _flags: Flags,
     single_prompt: Option<String>,
     engine_config: EngineConfig,
+    template: Option<RequestTemplate>,
 ) -> anyhow::Result<()> {
     let cancel_token = runtime.primary_token();
-    let (service_name, engine, inspect_template): (
-        String,
-        OpenAIChatCompletionsStreamingEngine,
-        bool,
-    ) = common::prepare_engine(runtime, flags, engine_config).await?;
+    let prepared_engine = common::prepare_engine(runtime, engine_config).await?;
     main_loop(
         cancel_token,
-        &service_name,
-        engine,
+        &prepared_engine.service_name,
+        prepared_engine.engine,
         single_prompt,
-        inspect_template,
+        prepared_engine.inspect_template,
+        template,
     )
     .await
 }
@@ -55,6 +42,7 @@ async fn main_loop(
     engine: OpenAIChatCompletionsStreamingEngine,
     mut initial_prompt: Option<String>,
     _inspect_template: bool,
+    template: Option<RequestTemplate>,
 ) -> anyhow::Result<()> {
     if initial_prompt.is_none() {
         tracing::info!("Ctrl-c to exit");
@@ -100,16 +88,27 @@ async fn main_loop(
             },
         );
         messages.push(user_message);
-
         // Request
         let inner = async_openai::types::CreateChatCompletionRequestArgs::default()
             .messages(messages.clone())
-            .model(service_name)
+            .model(
+                template
+                    .as_ref()
+                    .map_or_else(|| service_name.to_string(), |t| t.model.clone()),
+            )
             .stream(true)
-            .max_completion_tokens(MAX_TOKENS)
-            .temperature(0.7)
+            .max_completion_tokens(
+                template
+                    .as_ref()
+                    .map_or(MAX_TOKENS, |t| t.max_completion_tokens),
+            )
+            .temperature(template.as_ref().map_or(0.7, |t| t.temperature))
             .n(1) // only generate one response
             .build()?;
+        let nvext = NvExt {
+            ignore_eos: Some(true),
+            ..Default::default()
+        };
 
         // TODO We cannot set min_tokens with async-openai
         // if inspect_template {
@@ -117,10 +116,19 @@ async fn main_loop(
         //     req_builder.min_tokens(8192);
         // }
 
-        let req = NvCreateChatCompletionRequest { inner, nvext: None };
+        let req = NvCreateChatCompletionRequest {
+            inner,
+            nvext: Some(nvext),
+        };
 
         // Call the model
-        let mut stream = engine.generate(Context::new(req)).await?;
+        let mut stream = match engine.generate(Context::new(req)).await {
+            Ok(stream) => stream,
+            Err(err) => {
+                tracing::error!(%err, "Request failed.");
+                continue;
+            }
+        };
 
         // Stream the output to stdout
         let mut stdout = std::io::stdout();
@@ -177,6 +185,7 @@ async fn main_loop(
             break;
         }
     }
+    cancel_token.cancel(); // stop everything else
     println!();
     Ok(())
 }

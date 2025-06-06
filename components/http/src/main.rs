@@ -1,30 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use clap::Parser;
-use std::sync::Arc;
 
-use dynamo_llm::{
-    http::service::{
-        discovery::{model_watcher, ModelWatchState},
-        service_v2::HttpService,
-    },
-    model_type::ModelType,
-};
+use dynamo_llm::discovery::{ModelWatcher, MODEL_ROOT_PATH};
+use dynamo_llm::http::service::service_v2::HttpService;
 use dynamo_runtime::{
-    logging, transports::etcd::PrefixWatcher, DistributedRuntime, Result, Runtime, Worker,
+    logging, pipeline::RouterMode, transports::etcd::PrefixWatcher, DistributedRuntime, Result,
+    Runtime, Worker,
 };
 
 #[derive(Parser)]
@@ -47,10 +30,11 @@ struct Args {
     component: String,
 }
 
-fn main() -> Result<()> {
+#[tokio::main]
+async fn main() -> Result<()> {
     logging::init();
-    let worker = Worker::from_settings()?;
-    worker.execute(app)
+    let worker = Worker::from_current()?;
+    worker.execute_async(app).await
 }
 
 async fn app(runtime: Runtime) -> Result<()> {
@@ -61,7 +45,7 @@ async fn app(runtime: Runtime) -> Result<()> {
         .port(args.port)
         .host(args.host)
         .build()?;
-    let manager = http_service.model_manager().clone();
+    let manager = http_service.state().manager_clone();
 
     // todo - use the IntoComponent trait to register the component
     // todo - start a service
@@ -71,32 +55,17 @@ async fn app(runtime: Runtime) -> Result<()> {
     // written to etcd
     // the cli when operating on an `http` component will validate the namespace.component is
     // registered with HttpServiceComponentDefinition
-    let component = distributed
-        .namespace(&args.namespace)?
-        .component(&args.component)?;
-    let etcd_root = component.etcd_path();
 
-    // Create watchers for all model types
-    let mut watcher_tasks = Vec::new();
+    let watch_obj = ModelWatcher::new(distributed.clone(), manager, RouterMode::Random, None);
 
-    for model_type in ModelType::all() {
-        let etcd_path = format!("{}/models/{}/", etcd_root, model_type.as_str());
+    if let Some(etcd_client) = distributed.etcd_client() {
+        let models_watcher: PrefixWatcher =
+            etcd_client.kv_get_and_watch_prefix(MODEL_ROOT_PATH).await?;
 
-        let state = Arc::new(ModelWatchState {
-            prefix: etcd_path.clone(),
-            model_type,
-            manager: manager.clone(),
-            drt: distributed.clone(),
+        let (_prefix, _watcher, receiver) = models_watcher.dissolve();
+        tokio::spawn(async move {
+            watch_obj.watch(receiver).await;
         });
-
-        if let Some(etcd_client) = distributed.etcd_client() {
-            let models_watcher: PrefixWatcher =
-                etcd_client.kv_get_and_watch_prefix(etcd_path).await?;
-
-            let (_prefix, _watcher, receiver) = models_watcher.dissolve();
-            let watcher_task = tokio::spawn(model_watcher(state, receiver));
-            watcher_tasks.push(watcher_task);
-        }
     }
 
     // Run the service

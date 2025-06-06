@@ -126,19 +126,23 @@ impl ServiceClient {
         }
         let deadline = tokio::time::Instant::now() + timeout;
 
-        let services: Vec<ServiceInfo> = stream::until_deadline(sub, deadline)
-            .map(|message| serde_json::from_slice::<ServiceInfo>(&message.payload))
-            .filter_map(|info| async move {
-                match info {
-                    Ok(info) => Some(info),
-                    Err(e) => {
-                        log::debug!("error decoding service info: {:?}", e);
-                        None
-                    }
+        let mut services = vec![];
+        let mut s = stream::until_deadline(sub, deadline);
+        while let Some(message) = s.next().await {
+            if message.payload.is_empty() {
+                // Expected while we wait for KV metrics in worker to start
+                tracing::trace!(service_name, "collect_services: empty payload from nats");
+                continue;
+            }
+            let info = serde_json::from_slice::<ServiceInfo>(&message.payload);
+            match info {
+                Ok(info) => services.push(info),
+                Err(err) => {
+                    let payload = String::from_utf8_lossy(&message.payload);
+                    tracing::debug!(%err, service_name, %payload, "error decoding service info");
                 }
-            })
-            .collect()
-            .await;
+            }
+        }
 
         Ok(ServiceSet { services })
     }

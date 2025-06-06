@@ -45,9 +45,8 @@ async fn make_mdc_from_repo(
     //TODO: remove this once we have nim-hub support. See the NOTE above.
     let downloaded_path = maybe_download_model(local_path, hf_repo, hf_revision).await;
     let display_name = format!("{}--{}", hf_repo, hf_revision);
-    let mut mdc = ModelDeploymentCard::from_local_path(downloaded_path, Some(&display_name))
-        .await
-        .unwrap();
+    let mut mdc = ModelDeploymentCard::load(downloaded_path).await.unwrap();
+    mdc.set_name(&display_name);
     mdc.prompt_context = mixins;
     mdc
 }
@@ -237,16 +236,19 @@ impl Request {
             serde_json::from_str(messages).unwrap();
         let tools: Option<Vec<async_openai::types::ChatCompletionTool>> =
             tools.map(|x| serde_json::from_str(x).unwrap());
-        let tools = tools.unwrap();
-        let tool_choice = tool_choice.unwrap();
+        //let tools = tools.unwrap();
+        //let tool_choice = tool_choice.unwrap();
 
-        let inner = async_openai::types::CreateChatCompletionRequestArgs::default()
-            .model(model)
-            .messages(messages)
-            .tools(tools)
-            .tool_choice(tool_choice)
-            .build()
-            .unwrap();
+        let mut inner = async_openai::types::CreateChatCompletionRequestArgs::default();
+        inner.model(model);
+        inner.messages(messages);
+        if let Some(tools) = tools {
+            inner.tools(tools);
+        }
+        if let Some(tool_choice) = tool_choice {
+            inner.tool_choice(tool_choice);
+        }
+        let inner = inner.build().unwrap();
 
         NvCreateChatCompletionRequest { inner, nvext: None }
     }

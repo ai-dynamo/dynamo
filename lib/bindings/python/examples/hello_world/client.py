@@ -20,7 +20,7 @@ import uvloop
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 
-@dynamo_worker(static=True)
+@dynamo_worker(static=False)
 async def worker(runtime: DistributedRuntime):
     await init(runtime, "dynamo")
 
@@ -36,7 +36,7 @@ async def init(runtime: DistributedRuntime, ns: str):
     client = await endpoint.client()
 
     # wait for an endpoint to be ready
-    await client.wait_for_endpoints()
+    await client.wait_for_instances()
 
     # issue request
     stream = await client.generate("hello world")

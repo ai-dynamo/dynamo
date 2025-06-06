@@ -15,10 +15,10 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::str::FromStr;
 
 use clap::ValueEnum;
-use dynamo_runtime::component::RouterMode as RuntimeRouterMode;
+use dynamo_llm::kv_router::KvRouterConfig;
+use dynamo_runtime::pipeline::RouterMode as RuntimeRouterMode;
 
 /// Required options depend on the in and out choices
 #[derive(clap::Parser, Debug, Clone)]
@@ -46,6 +46,10 @@ pub struct Flags {
     #[arg(long)]
     pub model_name: Option<String>,
 
+    /// Verbose output (-v for debug, -vv for trace)
+    #[arg(short = 'v', action = clap::ArgAction::Count, default_value_t = 0)]
+    pub verbosity: u8,
+
     /// llamacpp only
     ///
     /// The path to the tokenizer and model config because:
@@ -55,7 +59,7 @@ pub struct Flags {
     #[arg(long)]
     pub model_config: Option<PathBuf>,
 
-    /// sglang, vllm, trtllm
+    /// sglang, vllm
     ///
     /// How many GPUs to use at once, total across all nodes.
     /// This must divide by num_nodes, and each node must use the same number of GPUs.
@@ -95,32 +99,53 @@ pub struct Flags {
     #[arg(long)]
     pub leader_addr: Option<String>,
 
-    /// If using `out=dyn://..` with multiple backends, this says how to route the requests.
+    /// If using `out=dyn` with multiple instances, this says how to route the requests.
     ///
     /// Mostly interesting for KV-aware routing.
-    /// Defaults to RouterMode::Random
-    #[arg(long, default_value = "random")]
+    /// Defaults to RouterMode::RoundRobin
+    #[arg(long, default_value = "round-robin")]
     pub router_mode: RouterMode,
 
-    /// Internal use only.
-    // Start the python vllm engine sub-process.
-    #[arg(long, hide = true, default_value = "false")]
-    pub internal_vllm_process: bool,
+    /// KV Router: Weight for overlap score in worker selection.
+    /// Higher values prioritize KV cache reuse. Default: 2.0
+    #[arg(long)]
+    pub kv_overlap_score_weight: Option<f64>,
 
-    /// Internal use only.
-    /// Start the sglang Python sub-process.
-    /// The params in the tuple are:
-    /// - the fd of the write end of a pipe where sglang will signal that it's ready.
-    /// - the node rank (0 for first host, 1 for second host, etc)
-    /// - the workers' rank (globally unique)
-    /// - the GPU to use (locally unique)
-    #[arg(long, hide = true, value_parser = parse_sglang_flags)]
-    pub internal_sglang_process: Option<SgLangFlags>,
+    /// KV Router: Weight for GPU cache usage in worker selection.
+    /// Higher values avoid workers with nearly full KV caches. Default: 1.0
+    #[arg(long)]
+    pub kv_gpu_cache_usage_weight: Option<f64>,
+
+    /// KV Router: Weight for waiting requests in worker selection.
+    /// Higher values avoid workers with queued requests. Default: 1.0
+    #[arg(long)]
+    pub kv_waiting_requests_weight: Option<f64>,
+
+    /// Max model context length. Reduce this if you don't have enough VRAM for the full model
+    /// context length (e.g. Llama 4).
+    /// Defaults to the model's max, which is usually model_max_length in tokenizer_config.json.
+    #[arg(long)]
+    pub context_length: Option<usize>,
+
+    /// KV cache block size (vllm only)
+    #[arg(long)]
+    pub kv_cache_block_size: Option<usize>,
 
     /// Additional engine-specific arguments from a JSON file.
     /// Contains a mapping of parameter names to values.
     #[arg(long)]
     pub extra_engine_args: Option<PathBuf>,
+
+    /// Path to a JSON file containing default request fields.
+    /// These fields will be merged with each request, but can be overridden by the request.
+    /// Example file contents:
+    /// {
+    ///     "model": "Qwen2.5-3B-Instruct",
+    ///     "temperature": 0.7,
+    ///     "max_completion_tokens": 4096
+    /// }
+    #[arg(long)]
+    pub request_template: Option<PathBuf>,
 
     /// Everything after a `--`.
     /// These are the command line arguments to the python engine when using `pystr` or `pytok`.
@@ -129,6 +154,15 @@ pub struct Flags {
 }
 
 impl Flags {
+    /// Get KV router configuration
+    pub fn kv_router_config(&self) -> KvRouterConfig {
+        KvRouterConfig::new(
+            self.kv_overlap_score_weight,
+            self.kv_gpu_cache_usage_weight,
+            self.kv_waiting_requests_weight,
+        )
+    }
+
     /// Convert the flags back to a command line. Including only the non-null values, but
     /// include the defaults. Includes the canonicalized model path and normalized model name.
     ///
@@ -166,6 +200,18 @@ impl Flags {
             out.push("--extra-engine-args".to_string());
             out.push(extra_engine_args.display().to_string());
         }
+        if let Some(weight) = self.kv_overlap_score_weight {
+            out.push("--kv-overlap-score-weight".to_string());
+            out.push(weight.to_string());
+        }
+        if let Some(weight) = self.kv_gpu_cache_usage_weight {
+            out.push("--kv-gpu-cache-usage-weight".to_string());
+            out.push(weight.to_string());
+        }
+        if let Some(weight) = self.kv_waiting_requests_weight {
+            out.push("--kv-waiting-requests-weight".to_string());
+            out.push(weight.to_string());
+        }
         out.extend(self.last.clone());
         out
     }
@@ -185,52 +231,22 @@ impl Flags {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct SgLangFlags {
-    pub pipe_fd: u32,
-    pub tp_rank: u32,
-    pub gpu_id: u32,
-}
-fn parse_sglang_flags(s: &str) -> Result<SgLangFlags, String> {
-    let nums: Vec<u32> = s
-        .split(',')
-        .map(u32::from_str)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-
-    if nums.len() != 3 {
-        return Err("Need exactly 3 numbers".into());
-    }
-
-    Ok(SgLangFlags {
-        pipe_fd: nums[0],
-        tp_rank: nums[1],
-        gpu_id: nums[2],
-    })
-}
-
-#[derive(Default, PartialEq, Eq, ValueEnum, Clone, Debug)]
+#[derive(Default, PartialEq, Eq, ValueEnum, Clone, Debug, Copy)]
 pub enum RouterMode {
     #[default]
-    Random,
     #[value(name = "round-robin")]
     RoundRobin,
+    Random,
     #[value(name = "kv")]
     KV,
-}
-
-impl RouterMode {
-    pub fn is_kv_routing(&self) -> bool {
-        *self == RouterMode::KV
-    }
 }
 
 impl From<RouterMode> for RuntimeRouterMode {
     fn from(r: RouterMode) -> RuntimeRouterMode {
         match r {
             RouterMode::RoundRobin => RuntimeRouterMode::RoundRobin,
-            RouterMode::KV => todo!("KV not implemented yet"),
-            _ => RuntimeRouterMode::Random,
+            RouterMode::Random => RuntimeRouterMode::Random,
+            RouterMode::KV => RuntimeRouterMode::KV,
         }
     }
 }

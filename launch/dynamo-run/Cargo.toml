@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 [package]
 name = "dynamo-run"
@@ -26,18 +14,14 @@ description = "Dynamo Run CLI"
 
 [features]
 # Build with `--no-default-features` to disable these defaults
-# We don't include llamacpp by default until we figure out when it needs external libraries
-default = ["mistralrs", "vllm", "sglang"]
+default = ["mistralrs", "llamacpp"]
 mistralrs = ["dep:dynamo-engine-mistralrs"]
 llamacpp = ["dep:dynamo-engine-llamacpp"]
-vllm = ["dep:dynamo-engine-vllm", "dep:netlink-packet-route", "dep:rtnetlink"]
-sglang = ["dep:dynamo-engine-sglang", "dep:netlink-packet-route", "dep:rtnetlink"]
-trtllm = ["dep:dynamo-engine-trtllm"]
-python = ["dep:dynamo-engine-python"]
 
 cuda = ["dynamo-engine-llamacpp/cuda", "dynamo-engine-mistralrs/cuda"]
 metal = ["dynamo-engine-llamacpp/metal", "dynamo-engine-mistralrs/metal"]
 vulkan = ["dynamo-engine-llamacpp/vulkan"]
+openmp = ["dynamo-engine-llamacpp/openmp"]
 
 [dependencies]
 dynamo-llm = { workspace = true }
@@ -45,33 +29,24 @@ dynamo-runtime = { workspace = true }
 
 dynamo-engine-llamacpp = { path = "../../lib/engines/llamacpp", optional = true }
 dynamo-engine-mistralrs = { path = "../../lib/engines/mistralrs", optional = true }
-dynamo-engine-sglang = { path = "../../lib/engines/sglang", optional = true }
-dynamo-engine-vllm = { path = "../../lib/engines/vllm", optional = true }
-dynamo-engine-trtllm = { path = "../../lib/engines/trtllm", optional = true }
-dynamo-engine-python = { path = "../../lib/engines/python", optional = true }
 
 anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
-hf-hub = { workspace = true }
 humantime = { workspace = true }
+libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tempfile = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
 
 async-openai = { version = "0.27.2" }
 clap = { version = "4.5", features = ["derive", "env"] }
 dialoguer = { version = "0.11", default-features = false, features = ["editor", "history"] }
 futures-util = { version = "0.3" }
-
-[target.x86_64-unknown-linux-gnu.dependencies]
-netlink-packet-route = { version = "0.19", optional = true }
-rtnetlink = { version = "0.14", optional = true }
-
-[target.x86_64-unknown-linux-musl.dependencies]
-netlink-packet-route = { version = "0.19", optional = true }
-rtnetlink = { version = "0.14", optional = true }
+regex = "1"

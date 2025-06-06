@@ -15,21 +15,21 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# 🚀 Dynamo Cloud Kubernetes Platform (Dynamo Deploy)
+# Dynamo Cloud Kubernetes Platform (Dynamo Deploy)
 
-The Dynamo Cloud platform is a comprehensive solution for deploying and managing Dynamo inference graphs (also referred to as pipelines) in Kubernetes environments. It provides a streamlined experience for deploying, scaling, and monitoring your inference services. You can interface with Dynamo Cloud using the `deploy` subcommand available in the Dynamo CLI (e.g `dynamo deploy`)
+The Dynamo Cloud platform is a comprehensive solution for deploying and managing Dynamo inference graphs (also referred to as pipelines) in Kubernetes environments. It provides a streamlined experience for deploying, scaling, and monitoring your inference services. You can interface with Dynamo Cloud using the `deploy` subcommand available in the Dynamo CLI (for example, `dynamo deploy`)
 
 ## Overview
 
 The Dynamo cloud platform consists of several key components:
 
-- **Dynamo Operator**: A Kubernetes operator that manages the lifecycle of Dynamo inference graphs from build ➡️ deploy.
+- **Dynamo Operator**: A Kubernetes operator that manages the lifecycle of Dynamo inference graphs from build ➡️ deploy. For more information on the operator, see [Dynamo Kubernetes Operator Documentation](../dynamo_deploy/dynamo_operator.md)
 - **API Store**: Stores and manages service configurations and metadata related to Dynamo deployments. Needs to be exposed externally.
 - **Custom Resources**: Kubernetes custom resources for defining and managing Dynamo services
 
 These components work together to provide a seamless deployment experience, handling everything from containerization to scaling and monitoring.
 
-![Dynamo Deploy](../../images/dynamo-deploy.png)
+![Dynamo Deploy system deployment diagram.](../../images/dynamo-deploy.png)
 
 ## Prerequisites
 
@@ -42,6 +42,10 @@ Before getting started with the Dynamo cloud platform, ensure you have:
 - `kubectl` configured to access your cluster
 - Helm installed (version 3.0 or later)
 
+```{tip}
+Don't have a Kubernetes cluster? Check out our [Minikube setup guide](./minikube.md) to set up a local environment!
+```
+
 ## Building Docker Images for Dynamo Cloud Components
 
 The Dynamo cloud platform components need to be built and pushed to a container registry before deployment. You can build these components individually or all at once.
@@ -51,50 +55,28 @@ The Dynamo cloud platform components need to be built and pushed to a container 
 First, set the required environment variables for building and pushing images:
 
 ```bash
-# Set your container registry and organization
-export CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION>
+# Set your container registry
+export DOCKER_SERVER=<CONTAINER_REGISTRY>
 # Set the image tag (e.g., latest, 0.0.1, etc.)
-export CI_COMMIT_SHA=<TAG>
+export IMAGE_TAG=<TAG>
 ```
 
 Where:
-- `<CONTAINER_REGISTRY>/<ORGANIZATION>`: Your container registry and organization name
-  - Examples: `nvcr.io/myorg`, `docker.io/myorg`
-- `<TAG>`: The version tag for your images
-  - Examples: `latest`, `0.0.1`, `v1.0.0`
+- `<CONTAINER_REGISTRY>`: Your container registry (e.g., `nvcr.io`, `docker.io/<your-username>`, etc.)
+- `<TAG>`: The version tag for your images (e.g., `latest`, `0.0.1`, `v1.0.0`)
 
-> [!IMPORTANT]
-> Make sure you're logged in to your container registry before pushing images:
-> ```bash
-> docker login <CONTAINER_REGISTRY>
-> ```
+```{important}
+Make sure you're logged in to your container registry before pushing images:
+```bash
+docker login <CONTAINER_REGISTRY>
+```
 
 ### Building Components
 
-You have two options for building the components:
-
-#### Option 1: Build All Components at Once
-
-This is the simplest approach and builds and pushes all components in a single command:
+You can build and push all platform components at once:
 
 ```bash
-earthly --push +all-docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
-```
-
-#### Option 2: Build Components Individually
-
-If you need to build components separately:
-
-1. **API Store**
-```bash
-cd deploy/dynamo/api-store
-earthly --push +docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
-```
-
-2. **Operator**
-```bash
-cd deploy/dynamo/operator
-earthly --push +docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
+earthly --push +all-docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 ```
 
 ## Deploying the Dynamo Cloud Platform
@@ -103,61 +85,102 @@ Once you've built and pushed the components, you can deploy the platform to your
 
 ### Prerequisites
 
-Make sure you're in the correct directory:
-```bash
-cd deploy/dynamo/helm
-```
+Before deploying Dynamo Cloud, ensure your Kubernetes cluster meets the following requirements:
 
-Set your namespace (this will be used for all deployments):
-```bash
-export KUBE_NS=hello-world    # Change this to your preferred namespace
-```
-
-### Deployment Steps
-
-1. **Create Namespace and Set Context**
+#### PVC Support with Default Storage Class
+Dynamo Cloud requires Persistent Volume Claim (PVC) support with a default storage class. Verify your cluster configuration:
 
 ```bash
-# Create a new namespace
-kubectl create namespace $KUBE_NS
+# Check if default storage class exists
+kubectl get storageclass
 
-# Set the namespace as your default context
-kubectl config set-context --current --namespace=$KUBE_NS
-
-# [Optional] Create image pull secrets if your registry requires authentication
-kubectl create secret docker-registry docker-imagepullsecret \
-  --docker-server=<your-registry> \
-  --docker-username=<your-username> \
-  --docker-password=<your-password> \
-  --namespace=$KUBE_NS
+# Expected output should show at least one storage class marked as (default)
+# Example:
+# NAME                 PROVISIONER             RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
+# standard (default)   kubernetes.io/gce-pd    Delete          Immediate              true                   1d
 ```
 
-2. **Deploy Using the Helm Chart**
+### Installation
 
-Set the required environment variables:
+1. Set the required environment variables:
 ```bash
-export NGC_TOKEN=$NGC_API_TOKEN
-export NAMESPACE=$KUBE_NS
-export CI_COMMIT_SHA=<TAG>  # Use the same tag you used when building the images
-export CI_REGISTRY_IMAGE=<CONTAINER_REGISTRY>/<ORGANIZATION>  # Use the same registry/org you used when building the images
-export RELEASE_NAME=$KUBE_NS
+export DOCKER_USERNAME=<your-docker-username>
+export DOCKER_PASSWORD=<your-docker-password>
+export DOCKER_SERVER=<your-docker-server>
+export IMAGE_TAG=<TAG>  # Use the same tag you used when building the images
+export NAMESPACE=dynamo-cloud    # change this to whatever you want!
 ```
 
-Deploy the platform:
+``` {note}
+DOCKER_USERNAME and DOCKER_PASSWORD are optional and only needed if you want to pull docker images from a private registry.
+A docker image pull secret is created automatically if these variables are set. Its name is `docker-imagepullsecret` unless overridden by the `DOCKER_SECRET_NAME` environment variable.
+```
+
+The Dynamo Cloud Platform auto-generates docker images for pipelines and pushes them to a container registry.
+By default, the platform uses the same container registry as the platform components (specified by `DOCKER_SERVER`).
+However, you can specify a different container registry for pipelines by additionally setting the following environment variables:
+
 ```bash
-./deploy.sh
+export PIPELINES_DOCKER_SERVER=<your-docker-server>
+export PIPELINES_DOCKER_USERNAME=<your-docker-username>
+export PIPELINES_DOCKER_PASSWORD=<your-docker-password>
 ```
 
-3. **Expose Dynamo Cloud Externally**
+If you wish to expose your Dynamo Cloud Platform externally, you can setup the following environment variables:
 
-You must also expose the `dynamo-store` service within the namespace externally. This will be the endpoint the CLI uses to interface with Dynamo Cloud. You might setup an Ingress, use an `ExternalService` with Istio, or simply port-forward. In our docs, we refer to this externally available endpoint as `DYNAMO_CLOUD`.
+```bash
+# if using ingress
+export INGRESS_ENABLED="true"
+export INGRESS_CLASS="nginx" # or whatever ingress class you have configured
+
+# if using istio
+export ISTIO_ENABLED="true"
+export ISTIO_GATEWAY="istio-system/istio-ingressgateway" # or whatever istio gateway you have configured
+```
+
+Running the installation script with `--interactive` guides you through the process of exposing your Dynamo Cloud Platform externally if you don't want to set these environment variables manually.
+
+2. [One-time Action] Create a new kubernetes namespace and set it as your default.
+
+```bash
+cd deploy/cloud/helm
+kubectl create namespace $NAMESPACE
+kubectl config set-context --current --namespace=$NAMESPACE
+```
+
+3. Deploy the Helm charts (install CRDs first, then platform) using the deployment script:
+
+```bash
+./deploy.sh --crds
+```
+
+if you want guidance during the process, run the deployment script with the `--interactive` flag:
+
+```bash
+./deploy.sh --crds --interactive
+```
+
+omitting `--crds` will skip the CRDs installation/upgrade. This is useful when installing on a shared cluster as CRDs are cluster-scoped resources.
+
+4. **Expose Dynamo Cloud Externally**
+
+``` {note}
+The script automatically displays information about the endpoint that you can use to access Dynamo Cloud. We refer to this externally available endpoint as `DYNAMO_CLOUD`.
+```
+
+The simplest way to expose the `dynamo-store` service within the namespace externally is to use a port-forward:
+
+```bash
+kubectl port-forward svc/dynamo-store <local-port>:80 -n $NAMESPACE
+export DYNAMO_CLOUD=http://localhost:<local-port>
+```
 
 ## Next Steps
 
 After deploying the Dynamo cloud platform, you can:
 
 1. Deploy your first inference graph using the [Dynamo CLI](operator_deployment.md)
-2. Deploy Dynamo LLM pipelines to Kubernetes using the [Dynamo CLI](../../../examples/llm/README.md)!
+2. Deploy Dynamo LLM pipelines to Kubernetes using the [Dynamo CLI](../../examples/llm_deployment.md)
 3. Manage your deployments using the Dynamo CLI
 
 For more detailed information about deploying inference graphs, see the [Dynamo Deploy Guide](README.md).

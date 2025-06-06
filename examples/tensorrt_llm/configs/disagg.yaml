@@ -15,20 +15,17 @@
 
 Frontend:
   served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  endpoint: dynamo.Processor.chat/completions
+  endpoint: dynamo.TensorRTLLMWorker.generate
   port: 8000
-
-Processor:
-  engine_args: "configs/llm_api_config.yaml"
   router: round-robin
-  remote-prefill: true
 
 TensorRTLLMWorker:
+  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   engine_args: "configs/llm_api_config.yaml"
   llmapi-disaggregated-config: "configs/llmapi_disagg_configs/single_node_config.yaml"
+  router: round-robin
   remote-prefill: true
   min-prefill-workers: 1
-  router: round-robin
   ServiceArgs:
     workers: 1
     resources:

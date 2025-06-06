@@ -25,10 +25,11 @@ use tokio::sync::{mpsc, RwLock};
 use validator::Validate;
 
 use etcd_client::{
-    Compare, CompareOp, GetOptions, PutOptions, Txn, TxnOp, TxnOpResponse, WatchOptions, Watcher,
+    Certificate, Compare, CompareOp, DeleteOptions, GetOptions, Identity, PutOptions, PutResponse,
+    TlsOptions, Txn, TxnOp, TxnOpResponse, WatchOptions, Watcher,
 };
-
 pub use etcd_client::{ConnectOptions, KeyValue, LeaseClient};
+use tokio::time::{interval, Duration};
 
 mod lease;
 use lease::*;
@@ -73,6 +74,13 @@ impl Lease {
     /// Revoke the lease triggering the [`CancellationToken`].
     pub fn revoke(&self) {
         self.cancel_token.cancel();
+    }
+
+    /// Check if the lease is still valid (not revoked)
+    pub async fn is_valid(&self) -> Result<bool> {
+        // A lease is valid if its cancellation token has not been triggered
+        // We can use try_cancelled which returns immediately with a boolean
+        Ok(!self.cancel_token.is_cancelled())
     }
 }
 
@@ -150,19 +158,29 @@ impl Client {
             .await?
     }
 
+    // Revoke an etcd lease given its lease id. A wrapper over etcd_client::LeaseClient::revoke
+    pub async fn revoke_lease(&self, lease_id: i64) -> Result<()> {
+        let lease_client = self.client.lease_client();
+        self.runtime
+            .secondary()
+            .spawn(revoke_lease(lease_client, lease_id))
+            .await?
+    }
+
     pub async fn kv_create(
         &self,
         key: String,
         value: Vec<u8>,
         lease_id: Option<i64>,
     ) -> Result<()> {
-        let put_options = lease_id.map(|id| PutOptions::new().with_lease(id));
+        let id = lease_id.unwrap_or(self.lease_id());
+        let put_options = PutOptions::new().with_lease(id);
 
         // Build the transaction
         let txn = Txn::new()
             .when(vec![Compare::version(key.as_str(), CompareOp::Equal, 0)]) // Ensure the lock does not exist
             .and_then(vec![
-                TxnOp::put(key.as_str(), value, put_options), // Create the object
+                TxnOp::put(key.as_str(), value, Some(put_options)), // Create the object
             ]);
 
         // Execute the transaction
@@ -185,14 +203,15 @@ impl Client {
         value: Vec<u8>,
         lease_id: Option<i64>,
     ) -> Result<()> {
-        let put_options = lease_id.map(|id| PutOptions::new().with_lease(id));
+        let id = lease_id.unwrap_or(self.lease_id());
+        let put_options = PutOptions::new().with_lease(id);
 
         // Build the transaction that either creates the key if it doesn't exist,
         // or validates the existing value matches what we expect
         let txn = Txn::new()
             .when(vec![Compare::version(key.as_str(), CompareOp::Equal, 0)]) // Key doesn't exist
             .and_then(vec![
-                TxnOp::put(key.as_str(), value.clone(), put_options), // Create it
+                TxnOp::put(key.as_str(), value.clone(), Some(put_options)), // Create it
             ])
             .or_else(vec![
                 // If key exists but values don't match, this will fail the transaction
@@ -229,17 +248,52 @@ impl Client {
         value: impl AsRef<[u8]>,
         lease_id: Option<i64>,
     ) -> Result<()> {
+        let id = lease_id.unwrap_or(self.lease_id());
+        let put_options = PutOptions::new().with_lease(id);
         let _ = self
             .client
             .kv_client()
-            .put(
-                key.as_ref(),
-                value.as_ref(),
-                lease_id.map(|id| PutOptions::new().with_lease(id)),
-            )
+            .put(key.as_ref(), value.as_ref(), Some(put_options))
             .await?;
-
         Ok(())
+    }
+
+    pub async fn kv_put_with_options(
+        &self,
+        key: impl AsRef<str>,
+        value: impl AsRef<[u8]>,
+        options: Option<PutOptions>,
+    ) -> Result<PutResponse> {
+        let options = options
+            .unwrap_or_default()
+            .with_lease(self.primary_lease().id());
+        self.client
+            .kv_client()
+            .put(key.as_ref(), value.as_ref(), Some(options))
+            .await
+            .map_err(|err| err.into())
+    }
+
+    pub async fn kv_get(
+        &self,
+        key: impl Into<Vec<u8>>,
+        options: Option<GetOptions>,
+    ) -> Result<Vec<KeyValue>> {
+        let mut get_response = self.client.kv_client().get(key, options).await?;
+        Ok(get_response.take_kvs())
+    }
+
+    pub async fn kv_delete(
+        &self,
+        key: impl Into<Vec<u8>>,
+        options: Option<DeleteOptions>,
+    ) -> Result<i64> {
+        self.client
+            .kv_client()
+            .delete(key, options)
+            .await
+            .map(|del_response| del_response.deleted())
+            .map_err(|err| err.into())
     }
 
     pub async fn kv_get_prefix(&self, prefix: impl AsRef<str>) -> Result<Vec<KeyValue>> {
@@ -291,33 +345,46 @@ impl Client {
         self.runtime.secondary().spawn(async move {
             for kv in kvs {
                 if tx.send(WatchEvent::Put(kv)).await.is_err() {
-                    // receiver is closed
-                    break;
+                    // receiver is already closed
+                    return;
                 }
             }
 
-            while let Some(Ok(response)) = watch_stream.next().await {
-                for event in response.events() {
-                    match event.event_type() {
-                        etcd_client::EventType::Put => {
-                            if let Some(kv) = event.kv() {
-                                if let Err(err) = tx.send(WatchEvent::Put(kv.clone())).await {
-                                    tracing::error!(
-                                        "kv watcher error forwarding WatchEvent::Put: {err}"
-                                    );
-                                    // receiver is closed
-                                    break;
+            loop {
+                tokio::select! {
+                    maybe_resp = watch_stream.next() => {
+                        // Early return for None or Err cases
+                        let Some(Ok(response)) = maybe_resp else {
+                            tracing::info!("kv watch stream closed");
+                            return;
+                        };
+
+                        // Process events
+                        for event in response.events() {
+                            // Extract the KeyValue if it exists
+                            let Some(kv) = event.kv() else {
+                                continue; // Skip events with no KV
+                            };
+
+                            // Handle based on event type
+                            match event.event_type() {
+                                etcd_client::EventType::Put => {
+                                    if let Err(err) = tx.send(WatchEvent::Put(kv.clone())).await {
+                                        tracing::error!("kv watcher error forwarding WatchEvent::Put: {err}");
+                                        return;
+                                    }
+                                }
+                                etcd_client::EventType::Delete => {
+                                    if tx.send(WatchEvent::Delete(kv.clone())).await.is_err() {
+                                        return;
+                                    }
                                 }
                             }
                         }
-                        etcd_client::EventType::Delete => {
-                            if let Some(kv) = event.kv() {
-                                if tx.send(WatchEvent::Delete(kv.clone())).await.is_err() {
-                                    // receiver is closed
-                                    break;
-                                }
-                            }
-                        }
+                    }
+                    _ = tx.closed() => {
+                        tracing::debug!("no more receivers, stopping watcher");
+                        return;
                     }
                 }
             }
@@ -359,9 +426,32 @@ pub struct ClientOptions {
 
 impl Default for ClientOptions {
     fn default() -> Self {
+        let mut connect_options = None;
+
+        if let (Ok(username), Ok(password)) = (
+            std::env::var("ETCD_AUTH_USERNAME"),
+            std::env::var("ETCD_AUTH_PASSWORD"),
+        ) {
+            // username and password are set
+            connect_options = Some(ConnectOptions::new().with_user(username, password));
+        } else if let (Ok(ca), Ok(cert), Ok(key)) = (
+            std::env::var("ETCD_AUTH_CA"),
+            std::env::var("ETCD_AUTH_CLIENT_CERT"),
+            std::env::var("ETCD_AUTH_CLIENT_KEY"),
+        ) {
+            // TLS is set
+            connect_options = Some(
+                ConnectOptions::new().with_tls(
+                    TlsOptions::new()
+                        .ca_certificate(Certificate::from_pem(ca))
+                        .identity(Identity::from_pem(cert, key)),
+                ),
+            );
+        }
+
         ClientOptions {
             etcd_url: default_servers(),
-            etcd_connect_options: None,
+            etcd_connect_options: connect_options,
             attach_lease: true,
         }
     }
@@ -497,7 +587,19 @@ impl KvCache {
         Ok(())
     }
 
-    // TODO: add a method to create/delete keys
+    /// Delete a key from both the cache and etcd
+    pub async fn delete(&self, key: &str) -> Result<()> {
+        let full_key = format!("{}{}", self.prefix, key);
+
+        // Delete from etcd first
+        self.client.kv_delete(full_key.clone(), None).await?;
+
+        // Then remove from local cache
+        let mut cache_write = self.cache.write().await;
+        cache_write.remove(&full_key);
+
+        Ok(())
+    }
 }
 
 #[cfg(feature = "integration")]

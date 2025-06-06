@@ -55,6 +55,7 @@ api_server_models/
 server/
 # Replay/Snapshot test artifacts
 *.new
+lib/llm/tests/data/sample-models/models--meta-llama--Llama-3.1-70B-Instruct/
 
 **/*backups*
 
@@ -76,6 +77,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.egg-info
 
 ### Helm ###
 *.tgz
@@ -89,4 +91,4 @@ TensorRT-LLM
 # Local build artifacts for devcontainer
 .build/
 # Copied binaries to ignore
-deploy/dynamo/sdk/src/dynamo/sdk/cli/bin
+deploy/sdk/src/dynamo/sdk/cli/bin

@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use axum::{
     extract::State,
@@ -26,25 +14,28 @@ use axum::{
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     pin::Pin,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use tokio_stream::wrappers::ReceiverStream;
 
-use super::DeploymentState;
 use super::{
     error::HttpError,
-    metrics::{Endpoint, InflightGuard},
-    RouteDoc,
+    metrics::{Endpoint, InflightGuard, ResponseMetricCollector},
+    service_v2, RouteDoc,
 };
 
+use crate::protocols::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse};
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionResponse, completions::CompletionResponse,
 };
+use crate::request_template::RequestTemplate;
 use crate::types::{
-    openai::{chat_completions::NvCreateChatCompletionRequest, completions::CompletionRequest},
+    openai::{
+        chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
+    },
     Annotated,
 };
 
@@ -130,8 +121,8 @@ impl From<HttpError> for ErrorResponse {
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
 #[tracing::instrument(skip_all)]
 async fn completions(
-    State(state): State<Arc<DeploymentState>>,
-    Json(request): Json<CompletionRequest>,
+    State(state): State<Arc<service_v2::State>>,
+    Json(request): Json<NvCreateCompletionRequest>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -148,7 +139,10 @@ async fn completions(
         ..request.inner
     };
 
-    let request = CompletionRequest { inner, nvext: None };
+    let request = NvCreateCompletionRequest {
+        inner,
+        nvext: request.nvext,
+    };
 
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
@@ -156,11 +150,16 @@ async fn completions(
 
     // todo - error handling should be more robust
     let engine = state
+        .manager()
         .get_completions_engine(model)
         .map_err(|_| ErrorResponse::model_not_found())?;
 
-    // this will increment the inflight gauge for the model
-    let mut inflight = state.create_inflight_guard(model, Endpoint::Completions, streaming);
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(model, Endpoint::Completions, streaming);
+
+    let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     // setup context
     // todo - inherit request_id from distributed trace details
@@ -179,17 +178,20 @@ async fn completions(
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
-        let stream = stream.map(|response| Event::try_from(EventConverter::from(response)));
-        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight).await;
+        let stream = stream.map(move |response| {
+            process_event_converter(EventConverter::from(response), &mut response_collector)
+        });
+        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight_guard).await;
 
         let mut sse_stream = Sse::new(stream);
 
-        if let Some(keep_alive) = state.sse_keep_alive {
+        if let Some(keep_alive) = state.sse_keep_alive() {
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
 
         Ok(sse_stream.into_response())
     } else {
+        // TODO: report ISL/OSL for non-streaming requests
         let response = CompletionResponse::from_annotated_stream(stream.into())
             .await
             .map_err(|e| {
@@ -201,9 +203,66 @@ async fn completions(
                 ErrorResponse::internal_server_error("Failed to fold completions stream")
             })?;
 
-        inflight.mark_ok();
+        inflight_guard.mark_ok();
         Ok(Json(response).into_response())
     }
+}
+
+#[tracing::instrument(skip_all)]
+async fn embeddings(
+    State(state): State<Arc<service_v2::State>>,
+    Json(request): Json<NvCreateEmbeddingRequest>,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    // return a 503 if the service is not ready
+    check_ready(&state)?;
+
+    // todo - extract distributed tracing id and context id from headers
+    let request_id = uuid::Uuid::new_v4().to_string();
+
+    // Embeddings are typically not streamed, so we default to non-streaming
+    let streaming = false;
+
+    // todo - make the protocols be optional for model name
+    // todo - when optional, if none, apply a default
+    let model = &request.inner.model;
+
+    // todo - error handling should be more robust
+    let engine = state
+        .manager()
+        .get_embeddings_engine(model)
+        .map_err(|_| ErrorResponse::model_not_found())?;
+
+    // this will increment the inflight gauge for the model
+    let mut inflight =
+        state
+            .metrics_clone()
+            .create_inflight_guard(model, Endpoint::Embeddings, streaming);
+
+    // setup context
+    // todo - inherit request_id from distributed trace details
+    let request = Context::with_id(request, request_id.clone());
+
+    // issue the generate call on the engine
+    let stream = engine
+        .generate(request)
+        .await
+        .map_err(|e| ErrorResponse::from_anyhow(e, "Failed to generate embeddings"))?;
+
+    // Embeddings are typically returned as a single response (non-streaming)
+    // so we fold the stream into a single response
+    let response = NvCreateEmbeddingResponse::from_annotated_stream(stream.into())
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fold embeddings stream for {}: {:?}",
+                request_id,
+                e
+            );
+            ErrorResponse::internal_server_error("Failed to fold embeddings stream")
+        })?;
+
+    inflight.mark_ok();
+    Ok(Json(response).into_response())
 }
 
 /// OpenAI Chat Completions Request Handler
@@ -216,11 +275,25 @@ async fn completions(
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
 #[tracing::instrument(skip_all)]
 async fn chat_completions(
-    State(state): State<Arc<DeploymentState>>,
-    Json(request): Json<NvCreateChatCompletionRequest>,
+    State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    Json(mut request): Json<NvCreateChatCompletionRequest>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
+
+    // Apply template values if present
+    if let Some(template) = template {
+        if request.inner.model.is_empty() {
+            request.inner.model = template.model.clone();
+        }
+        if request.inner.temperature.unwrap_or(0.0) == 0.0 {
+            request.inner.temperature = Some(template.temperature);
+        }
+        if request.inner.max_completion_tokens.unwrap_or(0) == 0 {
+            request.inner.max_completion_tokens = Some(template.max_completion_tokens);
+        }
+    }
+    tracing::trace!("Received chat completions request: {:?}", request.inner);
 
     // todo - extract distributed tracing id and context id from headers
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -233,9 +306,10 @@ async fn chat_completions(
         stream: Some(true),
         ..request.inner
     };
+
     let request = NvCreateChatCompletionRequest {
         inner: inner_request,
-        nvext: None,
+        nvext: request.nvext,
     };
 
     // todo - make the protocols be optional for model name
@@ -246,11 +320,16 @@ async fn chat_completions(
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
     let engine = state
+        .manager()
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorResponse::model_not_found())?;
 
-    // this will increment the inflight gauge for the model
-    let mut inflight = state.create_inflight_guard(model, Endpoint::ChatCompletions, streaming);
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(model, Endpoint::ChatCompletions, streaming);
+
+    let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     // setup context
     // todo - inherit request_id from distributed trace details
@@ -271,17 +350,20 @@ async fn chat_completions(
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
-        let stream = stream.map(|response| Event::try_from(EventConverter::from(response)));
-        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight).await;
+        let stream = stream.map(move |response| {
+            process_event_converter(EventConverter::from(response), &mut response_collector)
+        });
+        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight_guard).await;
 
         let mut sse_stream = Sse::new(stream);
 
-        if let Some(keep_alive) = state.sse_keep_alive {
+        if let Some(keep_alive) = state.sse_keep_alive() {
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
 
         Ok(sse_stream.into_response())
     } else {
+        // TODO: report ISL/OSL for non-streaming requests
         let response = NvCreateChatCompletionResponse::from_annotated_stream(stream.into())
             .await
             .map_err(|e| {
@@ -296,49 +378,18 @@ async fn chat_completions(
                 ))
             })?;
 
-        inflight.mark_ok();
+        inflight_guard.mark_ok();
         Ok(Json(response).into_response())
     }
 }
 
 // todo - abstract this to the top level lib.rs to be reused
 // todo - move the service_observer to its own state/arc
-fn check_ready(_state: &Arc<DeploymentState>) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     // if state.service_observer.stage() != ServiceStage::Ready {
     //     return Err(ErrorResponse::service_unavailable());
     // }
     Ok(())
-}
-
-/// list models handler, non-standard format
-async fn list_models_custom(
-    State(state): State<Arc<DeploymentState>>,
-) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
-    check_ready(&state)?;
-    let mut models = HashMap::new();
-
-    let chat_models = state
-        .chat_completion_engines
-        .lock()
-        .unwrap()
-        .engines
-        .keys()
-        .cloned()
-        .collect::<Vec<String>>();
-
-    let completion_models = state
-        .completion_engines
-        .lock()
-        .unwrap()
-        .engines
-        .keys()
-        .cloned()
-        .collect::<Vec<String>>();
-
-    models.insert("chat_completion_models", chat_models);
-    models.insert("completion_models", completion_models);
-
-    Ok(Json(models).into_response())
 }
 
 /// openai compatible format
@@ -355,7 +406,7 @@ async fn list_models_custom(
 ///    ]
 /// }
 async fn list_models_openai(
-    State(state): State<Arc<DeploymentState>>,
+    State(state): State<Arc<service_v2::State>>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     check_ready(&state)?;
 
@@ -365,19 +416,10 @@ async fn list_models_openai(
         .as_secs();
     let mut data = Vec::new();
 
-    let models: HashSet<String> = state
-        .chat_completion_engines
-        .lock()
-        .unwrap()
-        .engines
-        .keys()
-        .chain(state.completion_engines.lock().unwrap().engines.keys())
-        .cloned()
-        .collect();
-
-    for model_id in models {
+    let models: HashSet<String> = state.manager().model_display_names();
+    for model_name in models {
         data.push(ModelListing {
-            id: model_id.clone(),
+            id: model_name.clone(),
             object: "object",
             created,                        // Where would this come from? The GGUF?
             owned_by: "nvidia".to_string(), // Get organization from GGUF
@@ -416,12 +458,11 @@ async fn monitor_for_disconnects(
         Box<dyn Stream<Item = Result<axum::response::sse::Event, axum::Error>> + std::marker::Send>,
     >,
     context: Arc<dyn AsyncEngineContext>,
-    inflight: InflightGuard,
+    mut inflight_guard: InflightGuard,
 ) -> ReceiverStream<Result<Event, axum::Error>> {
     let (tx, rx) = tokio::sync::mpsc::channel(8);
 
     tokio::spawn(async move {
-        let mut inflight = inflight;
         let mut stream = stream;
         while let Some(event) = stream.next().await {
             let event = match event {
@@ -436,10 +477,9 @@ async fn monitor_for_disconnects(
             }
         }
 
-        // the stream completed successfully - mark as ok
-        // this will increment the request counter with an "success" status
+        // Stream completed successfully - mark as ok
         if tx.send(Ok(Event::default().data("[DONE]"))).await.is_ok() {
-            inflight.mark_ok();
+            inflight_guard.mark_ok();
         }
     });
 
@@ -454,46 +494,51 @@ impl<T> From<Annotated<T>> for EventConverter<T> {
     }
 }
 
-/// Convert an Annotated into an Event
-/// If the Event represents an Error, then return an axum::Error
-/// The [`monitor_for_disconnects`] method will handle the error, emit to the sse stream
-/// then stop the generation of completions.
-impl<T: Serialize> TryFrom<EventConverter<T>> for Event {
-    type Error = axum::Error;
+fn process_event_converter<T: Serialize>(
+    annotated: EventConverter<T>,
+    response_collector: &mut ResponseMetricCollector,
+) -> Result<Event, axum::Error> {
+    let annotated = annotated.0;
 
-    fn try_from(annotated: EventConverter<T>) -> Result<Self, Self::Error> {
-        let annotated = annotated.0;
+    let mut event = Event::default();
 
-        let mut event = Event::default();
-
-        if let Some(data) = annotated.data {
-            event = event.json_data(data)?;
-        }
-
-        if let Some(msg) = annotated.event {
-            if msg == "error" {
-                let msgs = annotated
-                    .comment
-                    .unwrap_or_else(|| vec!["unspecified error".to_string()]);
-                return Err(axum::Error::new(msgs.join(" -- ")));
-            }
-            event = event.event(msg);
-        }
-
-        if let Some(comments) = annotated.comment {
-            for comment in comments {
-                event = event.comment(comment);
-            }
-        }
-
-        Ok(event)
+    if let Some(data) = annotated.data {
+        event = event.json_data(data)?;
     }
+
+    if let Some(msg) = annotated.event {
+        if msg == "error" {
+            let msgs = annotated
+                .comment
+                .unwrap_or_else(|| vec!["unspecified error".to_string()]);
+            return Err(axum::Error::new(msgs.join(" -- ")));
+        }
+        event = event.event(msg);
+    }
+
+    if let Some(osl) = annotated.output_tokens {
+        response_collector.observe_current_osl(osl);
+    }
+
+    if let Some(isl) = annotated.input_tokens {
+        if let Some(chunk_tokens) = annotated.chunk_tokens {
+            response_collector.observe_response(isl, chunk_tokens);
+        }
+    }
+
+    if let Some(comments) = annotated.comment {
+        for comment in comments {
+            event = event.comment(comment);
+        }
+    }
+
+    Ok(event)
 }
 
 /// Create an Axum [`Router`] for the OpenAI API Completions endpoint
 /// If not path is provided, the default path is `/v1/completions`
 pub fn completions_router(
-    state: Arc<DeploymentState>,
+    state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/completions".to_string());
@@ -507,41 +552,51 @@ pub fn completions_router(
 /// Create an Axum [`Router`] for the OpenAI API Chat Completions endpoint
 /// If not path is provided, the default path is `/v1/chat/completions`
 pub fn chat_completions_router(
-    state: Arc<DeploymentState>,
+    state: Arc<service_v2::State>,
+    template: Option<RequestTemplate>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
     let path = path.unwrap_or("/v1/chat/completions".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(chat_completions))
+        .with_state((state, template));
+    (vec![doc], router)
+}
+
+/// Create an Axum [`Router`] for the OpenAI API Embeddings endpoint
+/// If not path is provided, the default path is `/v1/embeddings`
+pub fn embeddings_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/v1/embeddings".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(embeddings))
         .with_state(state);
     (vec![doc], router)
 }
 
 /// List Models
 pub fn list_models_router(
-    state: Arc<DeploymentState>,
+    state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    // TODO: Why do we have this endpoint?
-    let custom_path = path.unwrap_or("/dynamo/alpha/list-models".to_string());
-    let doc_for_custom = RouteDoc::new(axum::http::Method::GET, &custom_path);
-
     // Standard OpenAI compatible list models endpoint
-    let openai_path = "/v1/models".to_string();
+    let openai_path = path.unwrap_or("/v1/models".to_string());
     let doc_for_openai = RouteDoc::new(axum::http::Method::GET, &openai_path);
 
     let router = Router::new()
-        .route(&custom_path, get(list_models_custom))
         .route(&openai_path, get(list_models_openai))
         .with_state(state);
 
-    (vec![doc_for_custom, doc_for_openai], router)
+    (vec![doc_for_openai], router)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::super::ServiceHttpError;
+    use crate::discovery::ModelManagerError;
 
     use super::*;
 
@@ -555,7 +610,7 @@ mod tests {
     }
 
     fn other_error_from_engine() -> Result<(), anyhow::Error> {
-        Err(ServiceHttpError::ModelNotFound("foo".to_string()))?
+        Err(ModelManagerError::ModelNotFound("foo".to_string()))?
     }
 
     #[test]

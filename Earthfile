@@ -21,12 +21,12 @@ VERSION 0.8
 
 ############### SHARED LIBRARY TARGETS ##############################
 golang-base:
-    FROM golang:1.23
-    RUN apt-get update && apt-get install -y git && apt-get clean && rm -rf /var/lib/apt/lists/* && curl -sSfL https://github.com/golangci/golangci-lint/releases/download/v1.61.0/golangci-lint-1.61.0-linux-amd64.tar.gz | tar -xzv && mv golangci-lint-1.61.0-linux-amd64/golangci-lint /usr/local/bin/
+    FROM golang:1.24
+    RUN apt-get update && apt-get install -y git && apt-get clean && rm -rf /var/lib/apt/lists/* && go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
 
 operator-src:
     FROM +golang-base
-    COPY ./deploy/dynamo/operator /artifacts/operator
+    COPY ./deploy/cloud/operator /artifacts/operator
     SAVE ARTIFACT /artifacts/operator
 
 
@@ -75,29 +75,29 @@ rust-base:
     RUN wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb && \
         apt install -y ./cuda-keyring_1.1-1_all.deb && \
         apt update && \
-        apt install -y cuda-toolkit nvidia-utils-535 nvidia-driver-535 && \
+        apt install -y cuda-toolkit-12-8 nvidia-utils-535 nvidia-driver-535 && \
         rm cuda-keyring_1.1-1_all.deb
 
     # Set CUDA compute capability explicitly
     ENV CUDA_COMPUTE_CAP=80
 
-    ENV CUDA_HOME=/usr/local/cuda
-    ENV CUDA_ROOT=/usr/local/cuda
-    ENV CUDA_PATH=/usr/local/cuda
-    ENV CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda
-    ENV PATH=$CUDA_HOME/bin:$PATH
-    ENV LD_LIBRARY_PATH=$CUDA_HOME/lib64:$LD_LIBRARY_PATH
+    ENV CUDA_HOME=/usr/local/cuda-12.8
+    ENV CUDA_ROOT=/usr/local/cuda-12.8
+    ENV CUDA_PATH=/usr/local/cuda-12.8
+    ENV CUDA_TOOLKIT_ROOT_DIR=/usr/local/cuda-12.8
+    ENV PATH=/usr/local/cuda-12.8/bin:$PATH
+    ENV LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64:$LD_LIBRARY_PATH
 
     ENV RUSTUP_HOME=/usr/local/rustup
     ENV CARGO_HOME=/usr/local/cargo
     ENV PATH=/usr/local/cargo/bin:$PATH
-    ENV RUST_VERSION=1.86.0
+    ENV RUST_VERSION=1.87.0
     ENV RUSTARCH=x86_64-unknown-linux-gnu
 
     RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/x86_64-unknown-linux-gnu/rustup-init" && \
         echo "a3339fb004c3d0bb9862ba0bce001861fe5cbde9c10d16591eb3f39ee6cd3e7f *rustup-init" | sha256sum -c - && \
         chmod +x rustup-init && \
-        ./rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.86.0 --default-host x86_64-unknown-linux-gnu && \
+        ./rustup-init -y --no-modify-path --profile minimal --default-toolchain 1.87.0 --default-host x86_64-unknown-linux-gnu && \
         rm rustup-init && \
         chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
@@ -112,17 +112,17 @@ dynamo-build:
     COPY deploy/ deploy/
 
     ENV CARGO_TARGET_DIR=/workspace/target
-    RUN cargo build --release --locked --features llamacpp,python,cuda && \
+    RUN cargo build --release --locked --features llamacpp,cuda && \
         cargo doc --no-deps
 
     # Create symlinks for wheel building
-    RUN mkdir -p /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/ && \
+    RUN mkdir -p /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/ && \
         # Remove existing symlinks
-        rm -f /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/* && \
+        rm -f /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/* && \
         # Create new symlinks pointing to the correct location
-        ln -sf /workspace/target/release/dynamo-run /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/dynamo-run && \
-        ln -sf /workspace/target/release/http /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/http && \
-        ln -sf /workspace/target/release/llmctl /workspace/deploy/dynamo/sdk/src/dynamo/sdk/cli/bin/llmctl
+        ln -sf /workspace/target/release/dynamo-run /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/dynamo-run && \
+        ln -sf /workspace/target/release/http /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/http && \
+        ln -sf /workspace/target/release/llmctl /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/llmctl
 
 
     RUN cd /workspace/lib/bindings/python && \
@@ -136,11 +136,12 @@ dynamo-build:
 
 dynamo-base-docker:
     ARG IMAGE=dynamo-base-docker
-    ARG CI_REGISTRY_IMAGE=my-registry
-    ARG CI_COMMIT_SHA=latest
+    ARG DOCKER_SERVER=my-registry
+    ARG IMAGE_TAG=latest
 
     FROM ubuntu:24.04
     WORKDIR /workspace
+    COPY container/deps/requirements.txt /tmp/requirements.txt
 
     # Install Python and other dependencies
     RUN apt-get update && \
@@ -160,6 +161,8 @@ dynamo-base-docker:
     ENV VIRTUAL_ENV=/opt/dynamo/venv
     ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
+    RUN uv pip install -r /tmp/requirements.txt
+
     # Copy and install wheels -- ai-dynamo-runtime first, then ai-dynamo
     COPY +dynamo-build/ai_dynamo_runtime*.whl /tmp/wheels/
     COPY +dynamo-build/ai_dynamo*.whl /tmp/wheels/
@@ -167,20 +170,20 @@ dynamo-base-docker:
         uv pip install /tmp/wheels/*.whl && \
         rm -rf /tmp/wheels
 
-    SAVE IMAGE --push $CI_REGISTRY_IMAGE/$IMAGE:$CI_COMMIT_SHA
+    SAVE IMAGE --push $DOCKER_SERVER/$IMAGE:$IMAGE_TAG
 
 ############### ALL TARGETS ##############################
 all-test:
-    BUILD ./deploy/dynamo/operator+test
+    BUILD ./deploy/cloud/operator+test
 
 all-docker:
-    ARG CI_REGISTRY_IMAGE=my-registry
-    ARG CI_COMMIT_SHA=latest
-    BUILD ./deploy/dynamo/operator+docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
-    BUILD ./deploy/dynamo/api-store+docker --CI_REGISTRY_IMAGE=$CI_REGISTRY_IMAGE --CI_COMMIT_SHA=$CI_COMMIT_SHA
+    ARG DOCKER_SERVER=my-registry
+    ARG IMAGE_TAG=latest
+    BUILD ./deploy/cloud/operator+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+    BUILD ./deploy/cloud/api-store+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 
 all-lint:
-    BUILD ./deploy/dynamo/operator+lint
+    BUILD ./deploy/cloud/operator+lint
 
 all:
     BUILD +all-test
@@ -189,6 +192,6 @@ all:
 
 # For testing
 custom:
-    ARG CI_REGISTRY_IMAGE=my-registry
-    ARG CI_COMMIT_SHA=latest
+    ARG DOCKER_SERVER=my-registry
+    ARG IMAGE_TAG=latest
     BUILD +all-test
