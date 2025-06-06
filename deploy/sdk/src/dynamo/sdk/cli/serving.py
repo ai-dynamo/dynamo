@@ -265,7 +265,7 @@ def serve_dynamo_graph(
         # these resource_envs are passed to each individual worker's environment which is set in serve_dynamo
         if resource_envs:
             dynamo_args.extend(["--worker-env", json.dumps(resource_envs)])
-        # env is the base bentoml environment variables. We make a copy and update it to add any service configurations and additional env vars
+        # env is the base dynamlocal fault tolerence o environment variables. We make a copy and update it to add any service configurations and additional env vars
         worker_env = env.copy() if env else {}
 
         # Pass through the main service config
