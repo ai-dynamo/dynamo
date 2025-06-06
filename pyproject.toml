@@ -31,6 +31,8 @@ dependencies = [
     "ai-dynamo-runtime==0.3.0",
     "fastapi==0.115.6",
     "distro",
+    # filelock: required by planner
+    "filelock",
     "typer",
     "circus==0.19.0",
     "click<8.2.0",
