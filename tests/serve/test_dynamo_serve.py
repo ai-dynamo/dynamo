@@ -171,7 +171,7 @@ deployment_graphs = {
             # FIXME: This is a hack to allow deployments to start before sending any requests.
             # When using KV-router, if all the endpoints are not registered, the service
             # enters a non-recoverable state.
-            delayed_start=60,
+            delayed_start=0,
         ),
         text_payload,
     ),
@@ -312,7 +312,7 @@ def test_serve_deployment(deployment_graph_test, request, runtime_services):
             logger.info("Response%r", response)
             if response.status_code == 500:
                 error = response.json().get("error", "")
-                if "no instances" in error:
+                if "no instances" in error or "endpoint subscriber shutdown" in error:
                     logger.warning("Retrying due to no instances available")
                     time.sleep(retry_delay)
                     continue
