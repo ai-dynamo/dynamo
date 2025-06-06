@@ -21,7 +21,7 @@ limitations under the License.
 [![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/nvidia-dynamo)
 
-| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[Support Matrix](docs/support_matrix.md)** | **[Guides](docs/guides)** | **[Architecture and Features](docs/architecture/architecture.md)** | **[APIs](lib/bindings/python/README.md)** | **[SDK](deploy/dynamo/sdk/README.md)** |
+| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[User Guides](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Support Matrix](docs/support_matrix.md)** | **[Architecture and Features](docs/architecture/architecture.md)** | **[APIs](lib/bindings/python/README.md)** | **[SDK](deploy/dynamo/sdk/README.md)** |
 
 ### 📢 **Please join us for our** [ **first Dynamo in-person meetup with vLLM and SGLang leads**](https://events.nvidia.com/nvidiadynamousermeetups) **on 6/5 (Thu) in SF!** ###
 
@@ -70,6 +70,9 @@ docker push <your-registry>/dynamo-base:latest-vllm
 Notes about builds for specific frameworks:
 - For specific details on the `--framework vllm` build, see [here](examples/llm/README.md).
 - For specific details on the `--framework tensorrtllm` build, see [here](examples/tensorrt_llm/README.md).
+
+Note about AWS environments:
+- If deploying Dynamo in AWS, make sure to build the container with EFA support using the `--make-efa` flag.
 
 After building, you can use this image by setting the `DYNAMO_IMAGE` environment variable to point to your built image:
 ```bash

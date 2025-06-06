@@ -110,7 +110,6 @@ dynamo serve graphs.disagg:Frontend -f disagg.yaml --Planner.environment=local -
 Configuration options:
 * `namespace` (str, default: "dynamo"): Target namespace for planner operations
 * `environment` (str, default: "local"): Target environment (local, kubernetes)
-* `served-model-name` (str, default: "vllm"): Target model name
 * `no-operation` (bool, default: false): Run in observation mode only
 * `log-dir` (str, default: None): Tensorboard log directory
 * `adjustment-interval` (int, default: 30): Seconds between adjustments

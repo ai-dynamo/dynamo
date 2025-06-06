@@ -15,34 +15,24 @@
 
 Frontend:
   served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  endpoint_completions: dynamo.Processor.completions
-  endpoint_chat: dynamo.Processor.chat/completions
+  endpoint: dynamo.TensorRTLLMWorker.generate
   port: 8000
-
-Processor:
-  engine_args: "configs/llm_api_config_disagg_router.yaml"
-  router: "kv"
-  remote-prefill: true
-  ServiceArgs:
-    workers: 5 # to reduce the tokenization bottleneck at a high concurrency
-
-Router:
-  model-name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  min-workers: 1
+  router: kv
 
 TensorRTLLMWorker:
-  engine_args: "configs/llm_api_config_disagg_router.yaml"
+  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  engine_args: "configs/llm_api_config_router.yaml"
   llmapi-disaggregated-config: "configs/llmapi_disagg_router_configs/single_node_config.yaml"
+  router: kv
   remote-prefill: true
   min-prefill-workers: 1
-  router: kv
   ServiceArgs:
     workers: 1
     resources:
       gpu: 1
 
 TensorRTLLMPrefillWorker:
-  engine_args: "configs/llm_api_config_disagg_router.yaml"
+  engine_args: "configs/llm_api_config_router.yaml"
   llmapi-disaggregated-config: "configs/llmapi_disagg_router_configs/single_node_config.yaml"
   router: round-robin
   ServiceArgs:

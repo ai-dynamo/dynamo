@@ -83,12 +83,12 @@ class ServiceA:
         self.engine = await initialize_model_engine(self.model_name)
         print(f"ServiceA initialized with model: {self.model_name}")
 
-    @async_on_shutdown
-    async def async_shutdown(self):
+    @on_shutdown
+    def shutdown(self):
         # Clean up resources
         if self.engine:
-            await self.engine.shutdown()
-            print("ServiceA engine shut down")
+            self.engine.shutdown()
+        print("ServiceA engine shut down")
 
     @endpoint()
     async def generate(self, request: ChatCompletionRequest):
@@ -104,7 +104,7 @@ class ServiceA:
 Dynamo follows a class-based architecture similar to BentoML making it intuitive for users familiar with those frameworks. Each service is defined as a Python class, with the following components:
 1. Class attributes for dependencies using `depends()`
 2. An `__init__` method for standard initialization
-3. Optional lifecycle hooks like `@async_on_start` and `@async_on_shutdown`
+3. Optional lifecycle hooks like `@async_on_start` and `@on_shutdown`
 4. Endpoints defined with `@endpoint()`. Optionally, an endpoint can be given a name
    via `@endpoint("my_endpoint_name")`, but otherwise defaults to the name of the
    function being decorated if omitted.
@@ -170,15 +170,14 @@ This is especially useful for:
 - Initializing external connections
 - Setting up runtime resources that require async operations
 
-#### `@async_on_shutdown`
-The `@async_on_shutdown` hook is called when the service is shutdown handles cleanup.
+#### `@on_shutdown`
+The `@on_shutdown` hook is called when the service is shutdown handles cleanup.
 
 ```python
-@async_on_shutdown
-async def async_shutdown(self):
-    if self._engine_context is not None:
-        await self._engine_context.__aexit__(None, None, None)
-    print("VllmWorkerRouterLess shutting down")
+@on_shutdown
+def shutdown(self):
+    # gracefully Handle shutdown / cleanup
+    logger.info("worker shutting down")
 ```
 
 This ensures resources are properly released, preventing memory leaks and making sure external connections are properly closed. This is helpful to clean up vLLM engines that have been started outside of the main process.

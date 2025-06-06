@@ -19,6 +19,7 @@ use super::offload::OffloadManager;
 use super::{
     block::{Block, GlobalRegistry, ImmutableBlock},
     config::NixlOptions,
+    events::{EventManager, NullEventManager},
 };
 use cudarc::driver::CudaStream;
 use std::sync::Arc;
@@ -77,6 +78,10 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
         let mut nixl_backends: HashMap<String, Arc<nixl_sys::Backend>> = HashMap::new();
 
         let global_registry = GlobalRegistry::default();
+        let event_manager = config
+            .event_manager
+            .clone()
+            .unwrap_or_else(|| NullEventManager::new());
 
         // Create a NIXL agent if NIXL is enabled and instantiate requested backends
         // TODO: Build a map of NIXL backends to block pools/sets
@@ -150,6 +155,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                     worker_id,
                     global_registry.clone(),
                     async_rt_handle.clone(),
+                    Some(event_manager.clone()),
                 )?;
                 (Some(Arc::new(pool)), Some(blocks))
             }
@@ -172,6 +178,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 worker_id,
                 global_registry.clone(),
                 async_rt_handle.clone(),
+                Some(event_manager.clone()),
             )?;
             (Some(Arc::new(pool)), Some(blocks))
         } else {
@@ -193,6 +200,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 worker_id,
                 global_registry.clone(),
                 async_rt_handle.clone(),
+                Some(event_manager.clone()),
             )?;
             (Some(Arc::new(pool)), Some(blocks))
         } else {
@@ -495,12 +503,15 @@ fn create_block_pool<S: Storage + NixlRegisterableStorage, M: BlockMetadata>(
     worker_id: WorkerID,
     global_registry: GlobalRegistry,
     async_runtime: Handle,
+    event_manager: Option<Arc<dyn EventManager>>,
 ) -> Result<(BlockPool<S, M>, Vec<Block<S, M>>)> {
     let blocks = block::layout_to_blocks::<_, M>(layout, block_set_idx, worker_id)?;
+    let event_manager = event_manager.unwrap_or_else(|| NullEventManager::new());
     let pool = BlockPool::<S, M>::builder()
         .cancel_token(cancellation_token)
         .global_registry(global_registry)
         .async_runtime(async_runtime)
+        .event_manager(event_manager)
         .build()?;
     Ok((pool, blocks))
 }

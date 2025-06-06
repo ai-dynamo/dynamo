@@ -139,7 +139,7 @@ mod tests {
     use super::*;
     use dynamo_llm::types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-        completions::{CompletionRequest, CompletionResponse},
+        completions::{CompletionResponse, NvCreateCompletionRequest},
     };
 
     const HF_PATH: &str = concat!(
@@ -174,7 +174,7 @@ mod tests {
 
         // Build pipeline for completions
         let pipeline =
-            build_pipeline::<CompletionRequest, CompletionResponse>(&card, engine).await?;
+            build_pipeline::<NvCreateCompletionRequest, CompletionResponse>(&card, engine).await?;
 
         // Verify pipeline was created
         assert!(Arc::strong_count(&pipeline) >= 1);

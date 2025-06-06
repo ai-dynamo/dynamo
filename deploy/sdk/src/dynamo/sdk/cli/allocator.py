@@ -21,8 +21,7 @@ import logging
 import os
 from typing import Any
 
-from _bentoml_sdk import Service
-from simple_di import inject
+from dynamo.sdk.core.protocol.interface import ServiceInterface
 
 # Import our own resource module
 from dynamo.sdk.lib.resource import (
@@ -149,10 +148,9 @@ class ResourceAllocator:
         """Get detailed statistics for all GPUs."""
         return self.gpu_manager.get_gpu_stats()
 
-    @inject
     def get_resource_envs(
         self,
-        service: Service[Any],
+        service: ServiceInterface[Any],
     ) -> tuple[int, list[dict[str, str]]]:
         """
         Get resource environment variables for a service.
