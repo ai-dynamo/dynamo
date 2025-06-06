@@ -14,6 +14,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import json
 import os
 import re
@@ -64,8 +65,8 @@ def extract_val_and_concurrency(genai_perf_profile_export_json_paths, stat_value
             data = json.load(f)
             # output_token_throughput contains only avg
             output_token_throughput = data.get("output_token_throughput", {}).get("avg")
-            output_token_throughput_per_request = data.get(
-                "output_token_throughput_per_request", {}
+            output_token_throughput_per_user = data.get(
+                "output_token_throughput_per_user", {}
             ).get(stat_value)
             time_to_first_token = data.get("time_to_first_token", {}).get(stat_value)
             inter_token_latency = data.get("inter_token_latency", {}).get(stat_value)
@@ -92,7 +93,7 @@ def extract_val_and_concurrency(genai_perf_profile_export_json_paths, stat_value
                 "num_gpus": num_gpus,
                 "concurrency": float(concurrency),
                 "output_token_throughput_avg": output_token_throughput,
-                f"output_token_throughput_per_request_{stat_value}": output_token_throughput_per_request,
+                f"output_token_throughput_per_user_{stat_value}": output_token_throughput_per_user,
                 "output_token_throughput_per_gpu_avg": output_token_throughput_per_gpu,
                 f"time_to_first_token_{stat_value}": time_to_first_token,
                 f"inter_token_latency_{stat_value}": inter_token_latency,
@@ -108,8 +109,8 @@ def create_pareto_graph(results, title="", stat_value="avg"):
             "label": result["configuration"].split("/")[0],
             "configuration": result["configuration"],
             "concurrency": float(result["concurrency"]),
-            f"output_token_throughput_per_request_{stat_value}": result[
-                f"output_token_throughput_per_request_{stat_value}"
+            f"output_token_throughput_per_user_{stat_value}": result[
+                f"output_token_throughput_per_user_{stat_value}"
             ],
             "output_token_throughput_per_gpu_avg": result[
                 "output_token_throughput_per_gpu_avg"
@@ -154,7 +155,7 @@ def create_pareto_graph(results, title="", stat_value="avg"):
         group = df[df["label"] == label]
         # Scatter all points
         ax.scatter(
-            group[f"output_token_throughput_per_request_{stat_value}"],
+            group[f"output_token_throughput_per_user_{stat_value}"],
             group["output_token_throughput_per_gpu_avg"],
             label=f"Label {label}",
         )
@@ -164,7 +165,7 @@ def create_pareto_graph(results, title="", stat_value="avg"):
             group.index,
             group[
                 [
-                    f"output_token_throughput_per_request_{stat_value}",
+                    f"output_token_throughput_per_user_{stat_value}",
                     "output_token_throughput_per_gpu_avg",
                 ]
             ].values,
@@ -206,10 +207,16 @@ def create_pareto_graph(results, title="", stat_value="avg"):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Accept exactly two artifact folder names."
+    )
+    parser.add_argument("artifacts", nargs=2, help="Exactly two artifact folder names")
+
+    args = parser.parse_args()
     genai_perf_profile_export_json_paths = get_genai_perf_profile_export_json_paths(
         [
-            "artifacts_vllm_serve_tp4dp2",
-            "artifacts_disagg_prefill_tp1dp4_decode_tp4dp1",
+            args.artifacts[0],
+            args.artifacts[1],
         ]
     )
     extracted_values = extract_val_and_concurrency(genai_perf_profile_export_json_paths)
