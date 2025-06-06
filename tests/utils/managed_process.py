@@ -60,7 +60,6 @@ class ManagedProcess:
 
             self._terminate_existing()
             self._start_process()
-            print(f"delaying start: {self.delayed_start}")
             time.sleep(self.delayed_start)
             elapsed = self._check_ports(self.timeout)
             self._check_urls(self.timeout - elapsed)

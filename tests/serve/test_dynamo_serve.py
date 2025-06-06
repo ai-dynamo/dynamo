@@ -168,7 +168,9 @@ deployment_graphs = {
             endpoint="v1/chat/completions",
             response_handler=completions_response_handler,
             marks=[pytest.mark.gpu_1, pytest.mark.tensorrtllm],
-            # The agg_router can not handle the request immediately, so we delay the start.
+            # FIXME: This is a hack to allow deployments to start before sending any requests.
+            # When using KV-router, if all the endpoints are not registered, the service
+            # enters a non-recoverable state.
             delayed_start=60,
         ),
         text_payload,
@@ -192,7 +194,9 @@ deployment_graphs = {
             endpoint="v1/chat/completions",
             response_handler=completions_response_handler,
             marks=[pytest.mark.gpu_2, pytest.mark.tensorrtllm],
-            # The disagg_router can not handle the request immediately, so we delay the start.
+            # FIXME: This is a hack to allow deployments to start before sending any requests.
+            # When using KV-router, if all the endpoints are not registered, the service
+            # enters a non-recoverable state.
             delayed_start=120,
         ),
         text_payload,
