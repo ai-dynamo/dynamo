@@ -112,7 +112,7 @@ Dynamo follows a class-based architecture similar to BentoML making it intuitive
 This approach provides a clean separation of concerns and makes the service structure easy to understand.
 
 #### Service Dependencies with `depends()`
-The `depends()` function is a powerful BentoML feature that lets you create a dependency between services. When you use `depends(ServiceB)`, several things happen:
+The `depends()` function is a powerful feature that lets you create a dependency between services. When you use `depends(ServiceB)`, several things happen:
 1. It ensures that `ServiceB` is deployed when `ServiceA` is deployed by adding it to an internal service dependency graph
 2. It creates a client to the endpoints of `ServiceB` that is being served under the hood.
 3. You are able to access `ServiceB` endpoints as if it were a local function!
