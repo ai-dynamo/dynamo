@@ -165,7 +165,7 @@ class DynamoComponentVersionApiSchema(BaseModel):
 
 class DynamoComponentVersionManifestSchema(BaseModel):
     service: str
-    bentoml_version: Optional[str] = None
+    dynamo_version: Optional[str] = None
     apis: Dict[str, DynamoComponentVersionApiSchema]
     size_bytes: int
 

@@ -16,8 +16,6 @@
 import warnings
 from typing import Any
 
-# Suppress warning from setuptools caused by bentoml
-# TODO: Remove this line after the bentoml import is removed from this file
 warnings.filterwarnings("ignore", category=UserWarning, message=".*pkg_resources.*")
 
 # flake8: noqa: E402
