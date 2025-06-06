@@ -714,4 +714,69 @@ mod tests {
 
         Ok(())
     }
+
+    #[tokio::test]
+    async fn test_block_pool_parent_child() -> anyhow::Result<()> {
+        let (_, device_pool, _, _) = build_pools(3, None, None, None)?;
+        let device_pool = device_pool.as_ref().unwrap();
+
+        let tokens = vec![1, 2, 3, 4, 5];
+
+        let sequence = TokenBlockSequence::new(Tokens::from(tokens.clone()), 4, None);
+
+        // Create a root block, with two child blocks.
+
+        let mut root_block = device_pool.allocate_blocks(1).await?.pop().unwrap();
+        root_block.apply_token_block(sequence.blocks().first().unwrap().clone())?;
+
+        let root_block_hash = root_block.sequence_hash().unwrap();
+
+        let mut child_blocks = Vec::new();
+        let mut child_block_hashes = Vec::new();
+
+        for i in 0..2 {
+            let mut tokens = tokens.clone();
+            for _ in 0..4 {
+                tokens.push(i);
+            }
+            let seq = TokenBlockSequence::new(Tokens::from(tokens), 4, None);
+
+            let mut child_block = device_pool.allocate_blocks(1).await?.pop().unwrap();
+            child_block.apply_token_block(seq.blocks()[1].clone())?;
+
+            child_block_hashes.push(child_block.sequence_hash().unwrap());
+            child_blocks.push(child_block);
+        }
+
+        // Register the children first. This can happen with offloading.
+        let child_blocks = device_pool.register_blocks(child_blocks).await?;
+
+        // After the children are registered, we can register the root block.
+        let root_block = device_pool.register_blocks(vec![root_block]).await?;
+
+        // Drop both of them.
+        drop(root_block);
+        drop(child_blocks);
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Allocate two new blocks, which should evict both children.
+        device_pool.allocate_blocks(2).await?;
+
+        // Now, the root block should be the only block left.
+
+        for child_block_hash in child_block_hashes {
+            let matched = device_pool
+                .match_sequence_hashes(&[child_block_hash])
+                .await?;
+            assert_eq!(matched.len(), 0);
+        }
+
+        let matched = device_pool
+            .match_sequence_hashes(&[root_block_hash])
+            .await?;
+        assert_eq!(matched.len(), 1);
+
+        Ok(())
+    }
 }

@@ -20,11 +20,15 @@ use tracing::instrument;
 
 #[derive(Default)]
 pub struct InactiveBlockPool<S: Storage, M: BlockMetadata> {
-    // Direct lookup by sequence_hash
-    lookup_map: HashMap<SequenceHash, Block<S, M>>,
+    // Direct lookup by sequence_hash. Provides block + num inactive children.
+    lookup_map: HashMap<SequenceHash, (Block<S, M>, usize)>,
 
-    // Ordered by timestamp (oldest first)
-    priority_set: BTreeSet<PriorityKey<M>>,
+    // A priority ordering for the leaf nodes.
+    // Leaf nodes are defined as blocks that have no children in the inactive pool.
+    leaf_set: BTreeSet<PriorityKey<M>>,
+
+    // Children in the inactive pool that are waiting for their parent to be returned.
+    waiting_children: HashMap<SequenceHash, Vec<SequenceHash>>,
 
     // Fully Uninitialized
     uninitialized_set: VecDeque<Block<S, M>>,
@@ -45,7 +49,8 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     pub(crate) fn new() -> Self {
         Self {
             lookup_map: HashMap::new(),
-            priority_set: BTreeSet::new(),
+            leaf_set: BTreeSet::new(),
+            waiting_children: HashMap::new(),
             uninitialized_set: VecDeque::new(),
             return_tick: 0,
             total_blocks: 0,
@@ -89,22 +94,43 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     #[instrument(level = "trace", skip(self, block), fields(sequence_hash = ?sequence_hash))]
     fn insert_with_sequence_hash(&mut self, block: Block<S, M>, sequence_hash: SequenceHash) {
         let priority_key = PriorityKey::new(block.metadata().clone(), sequence_hash);
-        if self.priority_set.contains(&priority_key) {
-            tracing::trace!("multiple entries with the same priority key, resetting block and inserting into uninitialized set");
+        if self.lookup_map.contains_key(&sequence_hash) {
+            tracing::trace!("multiple entries with the same sequence hash, resetting block and inserting into uninitialized set");
             let mut block = block;
             block.reset();
             self.uninitialized_set.push_back(block);
-        } else if let std::collections::hash_map::Entry::Vacant(e) =
-            self.lookup_map.entry(sequence_hash)
-        {
-            tracing::trace!("inserting block to map and priority set");
-            self.priority_set.insert(priority_key);
-            e.insert(block);
         } else {
-            tracing::trace!("multiple entries in lookup map with the same sequence hash, inserting into uninitialized set");
-            let mut block = block;
-            block.reset();
-            self.uninitialized_set.push_back(block);
+            tracing::trace!("inserting block to map and priority set");
+
+            // If the block has a parent, we need to update the number of inactive children.
+            if let Ok(Some(parent)) = block.parent_sequence_hash() {
+                if let Some((parent_block, num_inactive_children)) =
+                    self.lookup_map.get_mut(&parent)
+                {
+                    *num_inactive_children += 1;
+
+                    if self
+                        .leaf_set
+                        .contains(&PriorityKey::new(parent_block.metadata().clone(), parent))
+                    {
+                        self.leaf_set
+                            .remove(&PriorityKey::new(parent_block.metadata().clone(), parent));
+                    }
+                } else {
+                    self.waiting_children
+                        .entry(parent)
+                        .or_default()
+                        .push(sequence_hash);
+                }
+            }
+
+            if let Some(children) = self.waiting_children.remove(&sequence_hash) {
+                self.lookup_map
+                    .insert(sequence_hash, (block, children.len()));
+            } else {
+                self.leaf_set.insert(priority_key);
+                self.lookup_map.insert(sequence_hash, (block, 0));
+            }
         }
     }
 
@@ -217,7 +243,7 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
         let count = blocks.len();
         tracing::debug!(count, "Returning blocks to pool");
         // return the block to the pool from tail to head
-        for (i, block) in blocks.into_iter().rev().enumerate() {
+        for (i, block) in blocks.into_iter().enumerate() {
             tracing::trace!(current = i + 1, total = count, "Returning block");
             // Note: return_block has its own instrumentation
             self.return_block(block);
@@ -237,10 +263,11 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     #[instrument(level = "trace", skip(self), fields(sequence_hash = ?sequence_hash))]
     fn take_with_sequence_hash(&mut self, sequence_hash: SequenceHash) -> Option<Block<S, M>> {
         match self.lookup_map.remove(&sequence_hash) {
-            Some(block) => {
-                // Remove from priority set
-                let priority_key = PriorityKey::new(block.metadata().clone(), sequence_hash);
-                self.priority_set.remove(&priority_key);
+            Some((block, _)) => {
+                // Remove from leaf set
+                self.leaf_set
+                    .remove(&PriorityKey::new(block.metadata().clone(), sequence_hash));
+
                 Some(block)
             }
             None => None,
@@ -366,12 +393,35 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
             return Some(block);
         }
 
-        // if we have blocks in the priority set, pop the first (it's sorted by priority)
+        // if we have blocks in the leaf set, pop the first (it's sorted by priority)
         // a fatal error will occur if the block is not found in the lookup map
-        if let Some(key) = self.priority_set.pop_first() {
+        if let Some(key) = self.leaf_set.pop_first() {
             tracing::trace!("Acquired priority/registered block map; resetting block");
             match self.lookup_map.remove(&key.sequence_hash()) {
-                Some(mut block) => {
+                Some((mut block, num_inactive_children)) => {
+                    if num_inactive_children > 0 {
+                        panic!(
+                            "Block has {} inactive children, but should have none.",
+                            num_inactive_children
+                        );
+                    }
+
+                    if let Ok(Some(parent)) = block.parent_sequence_hash() {
+                        if let Some((parent_block, num_inactive_children)) =
+                            self.lookup_map.get_mut(&parent)
+                        {
+                            *num_inactive_children -= 1;
+                            if *num_inactive_children == 0 {
+                                self.leaf_set.insert(PriorityKey::new(
+                                    parent_block.metadata().clone(),
+                                    parent,
+                                ));
+                            }
+                        } else {
+                            panic!("Parent block not found in lookup map! Inconsistency detected.");
+                        }
+                    }
+
                     block.reset();
                     self.return_tick += 1;
                     block.metadata_on_acquired(self.return_tick);
