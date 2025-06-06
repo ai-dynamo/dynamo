@@ -47,7 +47,7 @@ class ComponentType(str, Enum):
 
 
 class PVC(BaseModel):
-    """Class for Kubernetes PVC Overwrites."""
+    """Class for Kubernetes PVC Overrides."""
 
     create: Optional[bool] = None
     name: Optional[str] = None
@@ -57,8 +57,8 @@ class PVC(BaseModel):
     mount_point: Optional[str] = None
 
 
-class KubernetesOverwrites(BaseModel):
-    """Class for Kubernetes Overwrites."""
+class KubernetesOverrides(BaseModel):
+    """Class for Kubernetes Overrides."""
 
     entrypoint: Optional[str] = None
     pvc_settings: Optional[Dict[str, PVC]] = None
@@ -95,7 +95,7 @@ class DynamoService(Service[T]):
         envs: Optional[list[dict[str, Any]]] = None,
         dynamo_config: Optional[DynamoConfig] = None,
         app: Optional[FastAPI] = None,
-        kubernetes_overwrites: Optional[KubernetesOverwrites] = None,
+        kubernetes_overrides: Optional[KubernetesOverrides] = None,
     ):
         service_name = inner.__name__
         service_args = self._get_service_args(service_name)
@@ -160,7 +160,7 @@ class DynamoService(Service[T]):
             self.config["api_endpoints"] = self._api_endpoints.copy()
 
         self._linked_services: List[DynamoService] = []  # Track linked services
-        self.kubernetes_overwrites = kubernetes_overwrites
+        self.kubernetes_overrides = kubernetes_overrides
 
     def _get_service_args(self, service_name: str) -> Optional[dict]:
         """Get ServiceArgs from environment config if specified"""
@@ -327,7 +327,7 @@ def service(
     envs: Optional[list[dict[str, Any]]] = None,
     dynamo: Optional[Union[Dict[str, Any], DynamoConfig]] = None,
     app: Optional[FastAPI] = None,
-    kubernetes_overwrites: Optional[Union[dict, KubernetesOverwrites]] = None,
+    kubernetes_overrides: Optional[Union[dict, KubernetesOverrides]] = None,
     **kwargs: Any,
 ) -> Any:
     """Enhanced service decorator that supports Dynamo configuration
@@ -337,11 +337,11 @@ def service(
             - enabled: bool (default True)
             - name: str (default: class name)
             - namespace: str (default: "default")
-        kubernetes_overwrites: kubernetes overwrites i.e. entrypoint.
+        kubernetes_overrides: kubernetes overwrites i.e. entrypoint.
         **kwargs: Existing BentoML service configuration
     """
-    if isinstance(kubernetes_overwrites, dict):
-        kubernetes_overwrites = KubernetesOverwrites(**kubernetes_overwrites)
+    if isinstance(kubernetes_overrides, dict):
+        kubernetes_overrides = KubernetesOverrides(**kubernetes_overrides)
     config = kwargs
 
     # Parse dict into DynamoConfig object
@@ -362,7 +362,7 @@ def service(
             envs=envs or [],
             dynamo_config=dynamo_config,
             app=app,
-            kubernetes_overwrites=kubernetes_overwrites,
+            kubernetes_overrides=kubernetes_overrides,
         )
 
     return decorator(inner) if inner is not None else decorator
