@@ -247,7 +247,7 @@ func (r *DynamoComponentDeploymentReconciler) Reconcile(ctx context.Context, req
 	modified := false
 
 	// Reconcile PVC
-	_, err = r.reconcilePVC(ctx, dynamoComponentDeployment)
+	err = r.reconcilePVC(ctx, dynamoComponentDeployment)
 	if err != nil {
 		logs.Error(err, "Unable to create PVC", "crd", req.NamespacedName)
 		return ctrl.Result{}, err
@@ -814,39 +814,42 @@ func IsDeploymentReady(deployment *appsv1.Deployment) bool {
 	return false
 }
 
-func (r *DynamoComponentDeploymentReconciler) reconcilePVC(ctx context.Context, crd *v1alpha1.DynamoComponentDeployment) (*corev1.PersistentVolumeClaim, error) {
+func (r *DynamoComponentDeploymentReconciler) reconcilePVC(ctx context.Context, crd *v1alpha1.DynamoComponentDeployment) error {
 	logger := log.FromContext(ctx)
 	if crd.Spec.PVC == nil {
-		return nil, nil
+		return nil
 	}
-	pvcConfig := *crd.Spec.PVC
-	pvc := &corev1.PersistentVolumeClaim{}
-	pvcName := types.NamespacedName{Name: getPvcName(crd, pvcConfig.Name), Namespace: crd.GetNamespace()}
-	err := r.Get(ctx, pvcName, pvc)
-	if err != nil && client.IgnoreNotFound(err) != nil {
-		logger.Error(err, "Unable to retrieve PVC", "crd", crd.GetName())
-		return nil, err
+	for name, pvcConfig := range crd.Spec.PVC {
+		pvc := &corev1.PersistentVolumeClaim{}
+		pvcName := types.NamespacedName{Name: getPvcName(crd, pvcConfig.Name), Namespace: crd.GetNamespace()}
+
+		err := r.Get(ctx, pvcName, pvc)
+		if err != nil && client.IgnoreNotFound(err) != nil {
+			logger.Error(err, "Unable to retrieve PVC", "crd", crd.GetName(), "pvcKey", name)
+			return err
+		}
+
+		// If PVC does not exist, create a new one
+		if err != nil {
+			if pvcConfig.Create == nil || !*pvcConfig.Create {
+				logger.Error(err, "Unknown PVC", "pvc", pvc.Name, "pvcKey", name)
+				return err
+			}
+			pvc = constructPVC(crd, *pvcConfig)
+			if err := controllerutil.SetControllerReference(crd, pvc, r.Client.Scheme()); err != nil {
+				logger.Error(err, "Failed to set controller reference", "pvc", pvc.Name, "pvcKey", name)
+				return err
+			}
+			err = r.Create(ctx, pvc)
+			if err != nil {
+				logger.Error(err, "Failed to create pvc", "pvc", pvc.Name, "pvcKey", name)
+				return err
+			}
+			logger.Info("PVC created", "pvc", pvcName, "pvcKey", name)
+		}
 	}
 
-	// If PVC does not exist, create a new one
-	if err != nil {
-		if pvcConfig.Create == nil || !*pvcConfig.Create {
-			logger.Error(err, "Unknown PVC", "pvc", pvc.Name)
-			return nil, err
-		}
-		pvc = constructPVC(crd, pvcConfig)
-		if err := controllerutil.SetControllerReference(crd, pvc, r.Client.Scheme()); err != nil {
-			logger.Error(err, "Failed to set controller reference", "pvc", pvc.Name)
-			return nil, err
-		}
-		err = r.Create(ctx, pvc)
-		if err != nil {
-			logger.Error(err, "Failed to create pvc", "pvc", pvc.Name)
-			return nil, err
-		}
-		logger.Info("PVC created", "pvc", pvcName)
-	}
-	return pvc, nil
+	return nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) setStatusConditions(ctx context.Context, req ctrl.Request, conditions ...metav1.Condition) (dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, err error) {
@@ -1380,7 +1383,7 @@ func buildPVCVolumesAndMounts(
 
 		// Use getPvcName to fall back to CRD name if pvc.Name is nil
 		claimName := getPvcName(crd, pvc.Name)
-		if claimName == "" {
+		if claimName == "" || (pvc.Name != nil && *pvc.Name == "") {
 			return
 		}
 
@@ -1490,20 +1493,20 @@ func buildPVCVolumesAndMounts(
 
 		// TODO: not sure about the claims in the overwrites.
 		// Add PVCClaims from ExtraPodSpec
-		for _, claim := range extra.PVCClaims {
-			if used[claim.Name] {
-				// Overwrite existing claim with same name
-				for i := range claims {
-					if claims[i].Name == claim.Name {
-						claims[i] = claim
-						break
-					}
-				}
-			} else {
-				claims = append(claims, claim)
-				used[claim.Name] = true
-			}
-		}
+		// for _, claim := range extra.PVCClaims {
+		// 	if used[claim.Name] {
+		// 		// Overwrite existing claim with same name
+		// 		for i := range claims {
+		// 			if claims[i].Name == claim.Name {
+		// 				claims[i] = claim
+		// 				break
+		// 			}
+		// 		}
+		// 	} else {
+		// 		claims = append(claims, claim)
+		// 		used[claim.Name] = true
+		// 	}
+		// }
 
 	}
 
