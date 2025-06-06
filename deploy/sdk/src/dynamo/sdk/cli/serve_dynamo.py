@@ -98,8 +98,8 @@ def main(
     service_name: str = typer.Option("", help="Service name"),
     runner_map: str = typer.Option(
         None,
-        envvar="BENTOML_RUNNER_MAP",
-        help="JSON string of runners map, default sets to envars `BENTOML_RUNNER_MAP`",
+        envvar="DYNAMO_RUNNER_MAP",
+        help="JSON string of runners map, default sets to envars `DYNAMO_RUNNER_MAP`",
     ),
     worker_env: str = typer.Option(None, help="Environment variables"),
     worker_id: int = typer.Option(
