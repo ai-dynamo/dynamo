@@ -32,6 +32,19 @@ logging.basicConfig(
 )
 
 
+def pytest_collection_modifyitems(config, items):
+    # Handle tests marked with tensorrtllm
+    if config.getoption("-m") and "tensorrtllm" in config.getoption("-m"):
+        # User explicitly asked for tensorrtllm tests, do nothing
+        return
+
+    # Otherwise, skip all tests marked with tensorrtllm
+    skip_tensorrtllm = pytest.mark.skip(reason="need -m tensorrtllm to run")
+    for item in items:
+        if "tensorrtllm" in item.keywords:
+            item.add_marker(skip_tensorrtllm)
+
+
 class EtcdServer(ManagedProcess):
     def __init__(self, request, port=2379, timeout=300):
         port_string = str(port)

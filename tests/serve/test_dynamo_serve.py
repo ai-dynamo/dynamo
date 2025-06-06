@@ -149,6 +149,54 @@ deployment_graphs = {
         ),
         text_payload,
     ),
+    "trtllm_agg": (
+        DeploymentGraph(
+            module="graphs.agg:Frontend",
+            config="configs/agg.yaml",
+            directory="/workspace/examples/tensorrt_llm",
+            endpoint="v1/chat/completions",
+            response_handler=completions_response_handler,
+            marks=[pytest.mark.gpu_1, pytest.mark.tensorrtllm],
+        ),
+        text_payload,
+    ),
+    "trtllm_agg_router": (
+        DeploymentGraph(
+            module="graphs.agg_router:Frontend",
+            config="configs/agg_router.yaml",
+            directory="/workspace/examples/tensorrt_llm",
+            endpoint="v1/chat/completions",
+            response_handler=completions_response_handler,
+            marks=[pytest.mark.gpu_1, pytest.mark.tensorrtllm],
+            # The agg_router can not handle the request immediately, so we delay the start.
+            delayed_start=60,
+        ),
+        text_payload,
+    ),
+    "trtllm_disagg": (
+        DeploymentGraph(
+            module="graphs.disagg:Frontend",
+            config="configs/disagg.yaml",
+            directory="/workspace/examples/tensorrt_llm",
+            endpoint="v1/chat/completions",
+            response_handler=completions_response_handler,
+            marks=[pytest.mark.gpu_2, pytest.mark.tensorrtllm],
+        ),
+        text_payload,
+    ),
+    "trtllm_disagg_router": (
+        DeploymentGraph(
+            module="graphs.disagg_router:Frontend",
+            config="configs/disagg_router.yaml",
+            directory="/workspace/examples/tensorrt_llm",
+            endpoint="v1/chat/completions",
+            response_handler=completions_response_handler,
+            marks=[pytest.mark.gpu_2, pytest.mark.tensorrtllm],
+            # The disagg_router can not handle the request immediately, so we delay the start.
+            delayed_start=120,
+        ),
+        text_payload,
+    ),
 }
 
 
@@ -175,6 +223,7 @@ class DynamoServeProcess(ManagedProcess):
             working_dir=graph.directory,
             health_check_ports=[port],
             health_check_urls=health_check_urls,
+            delayed_start=graph.delayed_start,
             stragglers=["http"],
             log_dir=request.node.name,
         )
@@ -196,6 +245,16 @@ class DynamoServeProcess(ManagedProcess):
         pytest.param("disagg", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
         pytest.param("disagg_router", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
         pytest.param("multimodal_agg", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
+        pytest.param("trtllm_agg", marks=[pytest.mark.tensorrtllm, pytest.mark.gpu_1]),
+        pytest.param(
+            "trtllm_agg_router", marks=[pytest.mark.tensorrtllm, pytest.mark.gpu_1]
+        ),
+        pytest.param(
+            "trtllm_disagg", marks=[pytest.mark.tensorrtllm, pytest.mark.gpu_2]
+        ),
+        pytest.param(
+            "trtllm_disagg_router", marks=[pytest.mark.tensorrtllm, pytest.mark.gpu_2]
+        ),
         #        pytest.param("sglang", marks=[pytest.mark.sglang, pytest.mark.gpu_2]),
     ]
 )
@@ -219,6 +278,15 @@ def test_serve_deployment(deployment_graph_test, request, runtime_services):
     logger.info("Starting test_deployment")
 
     deployment_graph, payload = deployment_graph_test
+
+    def check_response(response):
+        assert response.status_code == 200, "Server is not healthy"
+        content = deployment_graph.response_handler(response)
+        logger.info("Received Content: %s", content)
+        # Check for expected responses
+        assert content, "Empty response content"
+        for expected in payload.expected_response:
+            assert expected in content, "Expected '%s' not found in response" % expected
 
     with DynamoServeProcess(deployment_graph, request) as server_process:
         url = f"http://localhost:{server_process.port}/{deployment_graph.endpoint}"
@@ -273,12 +341,13 @@ def test_serve_deployment(deployment_graph_test, request, runtime_services):
                 % deployment_graph.timeout
             )
 
-        content = deployment_graph.response_handler(response)
+        check_response(response)
 
-        logger.info("Received Content: %s", content)
-
-        # Check for expected responses
-        assert content, "Empty response content"
-
-        for expected in payload.expected_response:
-            assert expected in content, "Expected '%s' not found in response" % expected
+        # Run one more request to check the server is still healthy
+        # Router mode activates after the first request
+        response = requests.post(
+            url,
+            json=payload.payload,
+            timeout=deployment_graph.timeout - elapsed,
+        )
+        check_response(response)

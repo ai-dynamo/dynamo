@@ -29,6 +29,7 @@ class DeploymentGraph:
     endpoint: str
     response_handler: Callable[[Any], str]
     timeout: int = 900
+    delayed_start: int = 0
     marks: Optional[List[Any]] = field(default_factory=list)
 
 
