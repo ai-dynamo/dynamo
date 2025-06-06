@@ -47,12 +47,12 @@ _DYNAMO_WORKER_SCRIPT = "dynamo.sdk.cli.serve_dynamo"
 
 
 def _get_dynamo_worker_script(
-    bento_identifier: str, svc_name: str, target: TargetEnum
+    dynamo_identifier: str, svc_name: str, target: TargetEnum
 ) -> list[str]:
     args = [
         "-m",
         _DYNAMO_WORKER_SCRIPT,
-        bento_identifier,
+        dynamo_identifier,
         "--service-name",
         svc_name,
         "--worker-id",
@@ -64,7 +64,7 @@ def _get_dynamo_worker_script(
 
 
 def create_dynamo_watcher(
-    bento_identifier: str,
+    dynamo_identifier: str,
     svc: ServiceProtocol,
     uds_path: str,
     scheduler: ResourceAllocator,
@@ -77,7 +77,7 @@ def create_dynamo_watcher(
 
     num_workers, resource_envs = scheduler.get_resource_envs(svc)
     uri, socket = _get_server_socket(svc, uds_path)
-    args = _get_dynamo_worker_script(bento_identifier, svc.name, target)
+    args = _get_dynamo_worker_script(dynamo_identifier, svc.name, target)
     if resource_envs:
         args.extend(["--worker-env", json.dumps(resource_envs)])
 
