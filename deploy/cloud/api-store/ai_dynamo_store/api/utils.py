@@ -21,8 +21,8 @@ from typing import Any, Dict, List
 def get_deployment_status(resource: Dict[str, Any]) -> str:
     """
     Get the current status of a deployment.
-    Maps operator status to BentoML status values.
-    Returns lowercase status values matching BentoML's DeploymentStatus enum.
+    Maps operator status to Dynamo status values.
+    Returns lowercase status values matching Dynamo's DeploymentStatus enum.
     """
     status = resource.get("status", {})
     conditions = status.get("conditions", [])
@@ -43,7 +43,7 @@ def get_deployment_status(resource: Dict[str, Any]) -> str:
     if state == "failed":
         return "failed"
     elif state == "pending":
-        return "deploying"  # map pending to deploying to match BentoML states
+        return "deploying"  # map pending to deploying to match Dynamo states
 
     # Default fallback
     return "unknown"

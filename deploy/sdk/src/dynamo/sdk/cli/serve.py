@@ -109,7 +109,7 @@ def serve(
     target: TargetEnum = typer.Option(
         TargetEnum.DYNAMO,
         "--target",
-        help="Specify the target: 'dynamo' or 'bento'.",
+        help="Specify the target: 'dynamo'",
         case_sensitive=False,
     ),
 ):

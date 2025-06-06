@@ -83,7 +83,7 @@ def create_dynamo_deployment(
     Args:
         name: Deployment name
         namespace: Target namespace
-        dynamo_component: Bento name and version (format: name:version)
+        dynamo_component: Dynamo artifact name and version (format: name:version)
         labels: Resource labels
         envs: Optional list of environment variables
 
@@ -215,7 +215,7 @@ def update_dynamo_deployment(
     Args:
         name: Deployment name
         namespace: Target namespace
-        dynamo_nim: Bento name and version (format: name:version)
+        dynamo_nim: Dynamo artifact name and version (format: name:version)
         labels: Resource labels
         envs: Optional list of environment variables
 

@@ -51,8 +51,8 @@ docker login "$DOCKER_REGISTRY"
 # Change to the specified directory
 cd "$DYNAMO_DIRECTORY"
 
-# Build the Bento container
-echo "Building Bento image for $DYNAMO_IDENTIFIER..."
+# Build the Dynamo application container
+echo "Building Dynamo application image for $DYNAMO_IDENTIFIER..."
 DOCKER_DEFAULT_PLATFORM=linux/amd64 uv run dynamo build --containerize $DYNAMO_IDENTIFIER
 
 # Extract the module and the dynamo name
