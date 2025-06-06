@@ -444,6 +444,8 @@ async fn benchmark(
 
     // Block manager worker.
     let block_manager_worker = tokio::spawn(async move {
+        let mut handles = Vec::new();
+
         while let Some(mut sequence) = req_rx.recv().await {
             let manager = manager.clone();
             let stats = stats_clone.clone();
@@ -451,7 +453,7 @@ async fn benchmark(
             // We don't necessarily want to finish one request before starting the next.
             // So we spawn a new task for each request.
             // TODO: Could this be a bottleneck for very high request rates?
-            tokio::spawn(async move {
+            handles.push(tokio::spawn(async move {
                 let device = manager.device().unwrap();
                 let host = manager.host();
                 let disk = manager.disk();
@@ -572,8 +574,10 @@ async fn benchmark(
                         sequence_blocks.push(device_block);
                     }
                 }
-            });
+            }));
         }
+
+        futures::future::join_all(handles).await;
     });
 
     enqueue_worker.await?;
@@ -651,6 +655,37 @@ async fn benchmark(
     )
     .await
     .unwrap();
+
+    println!(
+        "Device cache hits: {}",
+        stats
+            .device_match_latency
+            .lock()
+            .await
+            .iter()
+            .map(|s| s.num_blocks)
+            .sum::<usize>()
+    );
+    println!(
+        "Host cache hits: {}",
+        stats
+            .host_match_latency
+            .lock()
+            .await
+            .iter()
+            .map(|s| s.num_blocks)
+            .sum::<usize>()
+    );
+    println!(
+        "Disk cache hits: {}",
+        stats
+            .disk_match_latency
+            .lock()
+            .await
+            .iter()
+            .map(|s| s.num_blocks)
+            .sum::<usize>()
+    );
 
     Ok(())
 }
