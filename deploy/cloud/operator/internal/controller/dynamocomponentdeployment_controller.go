@@ -33,6 +33,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog/v2"
 
 	"emperror.dev/errors"
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
@@ -1347,28 +1348,29 @@ func buildPVCVolumesAndMounts(
 	// Keep track for overwrites.
 	used := map[string]bool{}
 
+	// TODO use constructPVC() from common?
 	// Helper: create PVC object from your custom PVC struct
-	createClaim := func(volumeName string, pvc *v1alpha1.PVC) *corev1.PersistentVolumeClaim {
-		if pvc == nil || pvc.Create == nil || !*pvc.Create {
-			return nil
-		}
-		claimName := getPvcName(component, pvc.Name)
-		storageClassName := pvc.StorageClass
-		return &corev1.PersistentVolumeClaim{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: claimName,
-			},
-			Spec: corev1.PersistentVolumeClaimSpec{
-				AccessModes: []corev1.PersistentVolumeAccessMode{pvc.VolumeAccessMode},
-				Resources: corev1.ResourceRequirements{
-					Requests: corev1.ResourceList{
-						corev1.ResourceStorage: pvc.Size,
-					},
-				},
-				StorageClassName: &storageClassName,
-			},
-		}
-	}
+	// createClaim := func(volumeName string, pvc *v1alpha1.PVC) *corev1.PersistentVolumeClaim {
+	// 	if pvc == nil || pvc.Create == nil || *pvc.Name == "" || !*pvc.Create {
+	// 		return nil
+	// 	}
+	// 	claimName := getPvcName(component, pvc.Name)
+	// 	storageClassName := pvc.StorageClass
+	// 	return &corev1.PersistentVolumeClaim{
+	// 		ObjectMeta: metav1.ObjectMeta{
+	// 			Name: claimName,
+	// 		},
+	// 		Spec: corev1.PersistentVolumeClaimSpec{
+	// 			AccessModes: []corev1.PersistentVolumeAccessMode{pvc.VolumeAccessMode},
+	// 			Resources: corev1.VolumeResourceRequirements{
+	// 				Requests: corev1.ResourceList{
+	// 					corev1.ResourceStorage: pvc.Size,
+	// 				},
+	// 			},
+	// 			StorageClassName: &storageClassName,
+	// 		},
+	// 	}
+	// }
 
 	// addPVC adds a volume and corresponding volume mount to the pod spec based on the provided PVC configuration.
 	addPVC := func(crd metav1.Object, volumeName string, pvc *v1alpha1.PVC) {
@@ -1403,6 +1405,7 @@ func buildPVCVolumesAndMounts(
 		}
 
 		if used[volumeName] {
+			klog.Warningf("PVC volume %q was already added; overwriting with new configuration", volumeName)
 			for i, v := range volumes {
 				if v.Name == volumeName {
 					volumes[i] = volume
