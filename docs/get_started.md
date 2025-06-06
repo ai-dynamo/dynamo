@@ -27,20 +27,23 @@ This section describes how to set up your development environment.
 We recommend using our pre-configured development container:
 
 1. Install prerequisites:
-   * [Docker](https://www.docker.com/products/docker-desktop)
-   * [Visual Studio Code](https://code.visualstudio.com/)
-   * [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
+
+    - [Docker](https://www.docker.com/products/docker-desktop)
+    - [Visual Studio Code](https://code.visualstudio.com/)
+    - [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
 
 2. Get the code:
+
    ```bash
    git clone https://github.com/ai-dynamo/dynamo.git
    cd dynamo
    ```
 
 3. Open in Visual Studio Code:
-   * Launch Visual Studio Code
-   * Click the button in the bottom-left corner
-   * Select **Reopen in Container**
+
+    1. Launch Visual Studio Code
+    2. Click the button in the bottom-left corner
+    3. Select **Reopen in Container**
 
 Visual Studio Code builds and starts a container with all necessary dependencies for Dynamo development.
 
@@ -49,12 +52,14 @@ Visual Studio Code builds and starts a container with all necessary dependencies
 If you don't want to use the dev container, you can set the environment up manually:
 
 1. Ensure you have:
-   * Ubuntu 24.04 (recommended)
-   * x86_64 CPU
-   * Python 3.x
-   * Git
 
-See [Support Matrix](support_matrix.md) for more information.
+    - Ubuntu 24.04 (recommended)
+    - x86_64 CPU
+    - Python 3.x
+    - Git
+
+> [!Tip]
+> See [Support Matrix](support_matrix.md) for more information.
 
 2. Install required system packages:
    ```bash
@@ -73,16 +78,17 @@ See [Support Matrix](support_matrix.md) for more information.
    pip install "ai-dynamo[all]"
    ```
 
-```{note}
-To ensure compatibility, use the examples in the release branch or tag that matches the version you installed.
-```
+> [!Important]
+> To ensure compatibility, use the examples in the release branch or tag that matches the version you installed.
+
 
 ## Building the Dynamo Base Image
 
-Although not needed for local development, deploying your Dynamo pipelines to Kubernetes requires you to build and push a Dynamo base image to your container registry. You can use any container registry of your choice, such as:
-- Docker Hub (docker.io)
-- NVIDIA NGC Container Registry (nvcr.io)
-- Any private registry
+Although not needed for local development, deploying your Dynamo pipelines to Kubernetes requires you to build a Dynamo base image and push it to your container registry.
+You can use any container registry of your choice, such as:
+  - Docker Hub (docker.io)
+  - NVIDIA NGC Container Registry (nvcr.io)
+  - Any private registry
 
 To build it:
 
@@ -94,25 +100,32 @@ docker push <your-registry>/dynamo-base:latest-vllm
 ```
 
 This documentation describes these frameworks:
-- `--framework vllm` build: see [here](examples/llm_deployment.md).
-- `--framework tensorrtllm` build: see [here](examples/trtllm.md).
+
+  - `--framework vllm` build:
+    See [LLM Deployment Examples](examples/llm_deployment.md).
+
+  - `--framework tensorrtllm` build:
+    See [TRTLLM Deployment Examples](examples/trtllm.md).
 
 After building, use this image by setting the `DYNAMO_IMAGE` environment variable to point to your built image:
+
 ```bash
 export DYNAMO_IMAGE=<your-registry>/dynamo-base:latest-vllm
 ```
 
+
 ## Running and Interacting with an LLM Locally
 
-To run a model and interact with it locally, call `dynamo run` with a Hugging Face model. `dynamo run` supports several backends, including: `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
+To run a model and interact with it locally,  call `dynamo run` with a hugging face model.
+`dynamo run` supports several backends including: `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
 
 ### Example Command
 
-```
+``` base
 dynamo run out=vllm deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 ```
 
-```
+```bash
 ? User › Hello, how are you?
 ✔ User · Hello, how are you?
 Okay, so I'm trying to figure out how to respond to the user's greeting.
@@ -120,13 +133,19 @@ They said, "Hello, how are you?" and then followed it with "Hello! I'm just a pr
 Hmm, I need to come up with a suitable reply. ...
 ```
 
+
 ## LLM Serving
 
 Dynamo provides a simple way to spin up a local set of inference components including:
 
-- **OpenAI Compatible Frontend**–High performance OpenAI compatible http api server written in Rust.
-- **Basic and Kv Aware Router**–Route and load balance traffic to a set of workers.
-- **Workers**–Set of pre-configured LLM serving engines.
+  - **OpenAI Compatible Frontend**:
+    High performance OpenAI compatible http api server written in Rust.
+
+  - **Basic and Kv Aware Router**:
+    Route and load balance traffic to a set of workers.
+
+  - **Workers**:
+    Set of pre-configured LLM serving engines.
 
 To run a minimal configuration, use a pre-configured example.
 
@@ -137,6 +156,7 @@ To start the Dynamo Distributed Runtime services the first time:
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
 ```
+
 ### Start Dynamo LLM Serving Components
 
 Next, serve a minimal configuration with an http server, basic
@@ -150,7 +170,9 @@ dynamo serve graphs.agg:Frontend -f configs/agg.yaml
 ### Send a Request
 
 ```bash
-curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+curl localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "messages": [
     {
@@ -165,7 +187,8 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ## Local Development
 
-If you use vscode or cursor, use the .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions, see the [ReadMe](https://github.com/ai-dynamo/dynamo/blob/main/.devcontainer/README.md).
+If you use vscode or cursor, use the `.devcontainer` folder built on [Microsoft's Extension](https://code.visualstudio.com/docs/devcontainers/containers).
+For instructions, see the [ReadMe](https://github.com/ai-dynamo/dynamo/blob/main/.devcontainer/README.md).
 
 Otherwise, to develop locally, we recommend working inside of the container:
 
@@ -206,5 +229,3 @@ docker compose -f deploy/docker-compose.yml up -d
 cd examples/llm
 dynamo serve graphs.agg:Frontend -f configs/agg.yaml
 ```
-
-
