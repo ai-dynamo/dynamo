@@ -280,6 +280,70 @@ impl OverlapScores {
     }
 }
 
+// NOTE: the user needs to guarantee that this stays single threaded in Python land
+#[pyclass(unsendable)]
+pub(crate) struct RadixTree {
+    inner: llm_rs::kv_router::indexer::RadixTree,
+}
+
+#[pymethods]
+impl RadixTree {
+    #[new]
+    #[pyo3(signature = (expiration_duration_secs=None))]
+    fn new(expiration_duration_secs: Option<f64>) -> PyResult<Self> {
+        let expiration_duration = expiration_duration_secs
+            .map(|secs| std::time::Duration::from_secs_f64(secs));
+
+        let inner = llm_rs::kv_router::indexer::RadixTree::new_with_frequency(expiration_duration);
+        Ok(Self { inner })
+    }
+
+    #[pyo3(signature = (sequence, early_exit=false))]
+    fn find_matches(
+        &self,
+        _py: Python,
+        sequence: Vec<u64>,
+        early_exit: bool,
+    ) -> PyResult<OverlapScores> {
+        let local_block_hashes: Vec<llm_rs::kv_router::protocols::LocalBlockHash> = sequence
+            .into_iter()
+            .map(llm_rs::kv_router::protocols::LocalBlockHash)
+            .collect();
+
+        let rs_overlap_scores = self.inner.find_matches(local_block_hashes, early_exit);
+        Ok(OverlapScores {
+            inner: rs_overlap_scores,
+        })
+    }
+
+    fn apply_event(
+        &mut self,
+        _py: Python,
+        worker_id: i64,
+        kv_cache_event_bytes: &[u8],
+    ) -> PyResult<()> {
+        let kv_cache_event: llm_rs::kv_router::protocols::KvCacheEvent =
+            serde_json::from_slice(kv_cache_event_bytes)
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(
+                    format!("Failed to deserialize KvCacheEvent: {}", e)
+                ))?;
+
+        let router_event = llm_rs::kv_router::indexer::RouterEvent::new(worker_id, kv_cache_event);
+        self.inner.apply_event(router_event);
+        Ok(())
+    }
+
+    fn remove_worker(&mut self, _py: Python, worker_id: i64) -> PyResult<()> {
+        self.inner.remove_worker(worker_id);
+        Ok(())
+    }
+
+    fn clear_all_blocks(&mut self, _py: Python, worker_id: i64) -> PyResult<()> {
+        self.inner.clear_all_blocks(worker_id);
+        Ok(())
+    }
+}
+
 #[pyclass]
 pub(crate) struct KvIndexer {
     inner: Arc<llm_rs::kv_router::indexer::KvIndexer>,
