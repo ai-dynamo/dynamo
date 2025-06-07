@@ -33,6 +33,7 @@ from dynamo._core import KvRecorder as KvRecorder
 from dynamo._core import KvRouter as KvRouter
 from dynamo._core import ModelType as ModelType
 from dynamo._core import OverlapScores as OverlapScores
+from dynamo._core import WorkerDp as WorkerDp
 from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher
 from dynamo._core import ZmqKvEventPublisher as ZmqKvEventPublisher
 from dynamo._core import ZmqKvEventPublisherConfig as ZmqKvEventPublisherConfig

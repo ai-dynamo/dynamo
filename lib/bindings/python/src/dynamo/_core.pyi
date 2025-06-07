@@ -356,7 +356,7 @@ class WorkerMetricsPublisher:
         Create a `WorkerMetricsPublisher` object
         """
 
-    def create_service(self, component: Component) -> None:
+    def create_endpoint(self, component: Component, dp_rank: int) -> None:
         """
         Similar to Component.create_service, but only service created through
         this method will interact with KV router of the same component.
@@ -419,6 +419,24 @@ class OverlapScores:
     """
 
     ...
+
+class WorkerDp:
+    """
+    Worker data parallel information containing worker ID and optional DP rank.
+    """
+
+    worker_id: int
+    dp_rank: Optional[int]
+
+    def __init__(self, worker_id: int, dp_rank: Optional[int] = None) -> None:
+        """
+        Create a WorkerDp instance.
+
+        Args:
+            worker_id: The worker ID
+            dp_rank: Optional data parallel rank
+        """
+        ...
 
 class KvIndexer:
     """
