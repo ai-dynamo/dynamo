@@ -1161,6 +1161,7 @@ dependencies = [
  "async-openai",
  "async-stream",
  "async-trait",
+ "derive-getters",
  "dlpark",
  "dynamo-llm",
  "dynamo-runtime",

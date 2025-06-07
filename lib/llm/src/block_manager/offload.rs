@@ -366,7 +366,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
 
             let request = OffloadRequest {
                 block: Arc::downgrade(device_block.mutable_block()),
-                sequence_hash: device_block.sequence_hash()?,
+                sequence_hash: device_block.sequence_hash(),
                 key,
             };
 
@@ -381,7 +381,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
 
             let request = OffloadRequest {
                 block: Arc::downgrade(host_block.mutable_block()),
-                sequence_hash: host_block.sequence_hash()?,
+                sequence_hash: host_block.sequence_hash(),
                 key,
             };
 
@@ -763,13 +763,13 @@ mod tests {
 
         // Check that the block exists in the host pool
         let host_blocks = host_pool
-            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()?].as_slice())
+            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()].as_slice())
             .await?;
 
         assert_eq!(host_blocks.len(), 1);
         assert_eq!(
-            host_blocks[0].sequence_hash()?,
-            immutable_device_block.sequence_hash()?
+            host_blocks[0].sequence_hash(),
+            immutable_device_block.sequence_hash()
         );
 
         check_block_contents(&immutable_device_block, &host_blocks[0], 42)?;
@@ -802,7 +802,7 @@ mod tests {
 
         // The offload should fail gracefuly due to a lack of host blocks
         let matched_host_blocks = host_pool
-            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()?].as_slice())
+            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()].as_slice())
             .await?;
         assert_eq!(matched_host_blocks.len(), 0);
 
@@ -818,7 +818,7 @@ mod tests {
 
         // This time, the offload should succeed.
         let matched_host_blocks = host_pool
-            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()?].as_slice())
+            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()].as_slice())
             .await?;
         assert_eq!(matched_host_blocks.len(), 1);
 
@@ -851,8 +851,8 @@ mod tests {
         assert_eq!(onboarded_blocks.len(), 1);
         // Check that the sequence hash is the same.
         assert_eq!(
-            onboarded_blocks[0].sequence_hash()?,
-            immutable_host_block.sequence_hash()?
+            onboarded_blocks[0].sequence_hash(),
+            immutable_host_block.sequence_hash()
         );
         // Check that the block is registered.
         assert!(matches!(
@@ -865,12 +865,12 @@ mod tests {
         // Wait for the new value to show up in the device pool.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let device_blocks = device_pool
-            .match_sequence_hashes(vec![onboarded_blocks[0].sequence_hash()?].as_slice())
+            .match_sequence_hashes(vec![onboarded_blocks[0].sequence_hash()].as_slice())
             .await?;
         assert_eq!(device_blocks.len(), 1);
         assert_eq!(
-            device_blocks[0].sequence_hash()?,
-            onboarded_blocks[0].sequence_hash()?
+            device_blocks[0].sequence_hash(),
+            onboarded_blocks[0].sequence_hash()
         );
 
         // Check that this is the same block.
@@ -903,7 +903,7 @@ mod tests {
 
         // Check that the block exists in the host pool.
         let immutable_host_block = host_pool
-            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()?].as_slice())
+            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()].as_slice())
             .await?
             .into_iter()
             .next()
@@ -925,7 +925,7 @@ mod tests {
 
         // Check that the block is not in the device pool.
         let device_blocks = device_pool
-            .match_sequence_hashes(vec![immutable_host_block.sequence_hash()?].as_slice())
+            .match_sequence_hashes(vec![immutable_host_block.sequence_hash()].as_slice())
             .await?;
         assert_eq!(device_blocks.len(), 0);
 
@@ -935,8 +935,8 @@ mod tests {
             .await?;
         assert_eq!(onboarded_blocks.len(), 1);
         assert_eq!(
-            onboarded_blocks[0].sequence_hash()?,
-            immutable_host_block.sequence_hash()?
+            onboarded_blocks[0].sequence_hash(),
+            immutable_host_block.sequence_hash()
         );
         assert!(matches!(
             onboarded_blocks[0].state(),
@@ -1018,12 +1018,12 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         let disk_blocks = disk_pool
-            .match_sequence_hashes(vec![immutable_host_block.sequence_hash()?].as_slice())
+            .match_sequence_hashes(vec![immutable_host_block.sequence_hash()].as_slice())
             .await?;
         assert_eq!(disk_blocks.len(), 1);
         assert_eq!(
-            disk_blocks[0].sequence_hash()?,
-            immutable_host_block.sequence_hash()?
+            disk_blocks[0].sequence_hash(),
+            immutable_host_block.sequence_hash()
         );
 
         check_block_contents(&immutable_host_block, &disk_blocks[0], 42)?;
@@ -1056,12 +1056,12 @@ mod tests {
 
         assert_eq!(device_block.len(), 1);
         assert_eq!(
-            device_block[0].sequence_hash()?,
-            immutable_disk_block.sequence_hash()?
+            device_block[0].sequence_hash(),
+            immutable_disk_block.sequence_hash()
         );
         assert_eq!(
             device_pool
-                .match_sequence_hashes(vec![immutable_disk_block.sequence_hash()?].as_slice())
+                .match_sequence_hashes(vec![immutable_disk_block.sequence_hash()].as_slice())
                 .await?
                 .len(),
             1
@@ -1099,7 +1099,7 @@ mod tests {
 
         for (i, host_block) in immutable_host_blocks.iter().enumerate() {
             let blocks = disk_pool
-                .match_sequence_hashes(vec![host_block.sequence_hash()?].as_slice())
+                .match_sequence_hashes(vec![host_block.sequence_hash()].as_slice())
                 .await?;
             assert_eq!(blocks.len(), 1);
             check_block_contents(host_block, &blocks[0], i as u8)?;
@@ -1111,7 +1111,7 @@ mod tests {
 
         for (i, disk_block) in disk_blocks.iter().enumerate() {
             let blocks = device_pool
-                .match_sequence_hashes(vec![disk_block.sequence_hash()?].as_slice())
+                .match_sequence_hashes(vec![disk_block.sequence_hash()].as_slice())
                 .await?;
             assert_eq!(blocks.len(), 1);
             check_block_contents(disk_block, &blocks[0], i as u8)?;
@@ -1149,7 +1149,7 @@ mod tests {
 
         for (i, device_block) in device_blocks.iter().enumerate() {
             let blocks = device_pool
-                .match_sequence_hashes(vec![device_block.sequence_hash()?].as_slice())
+                .match_sequence_hashes(vec![device_block.sequence_hash()].as_slice())
                 .await?;
             check_block_contents(device_block, &blocks[0], i as u8)?;
             assert_eq!(blocks.len(), 1);
@@ -1207,7 +1207,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let host_blocks = host_pool
-            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()?].as_slice())
+            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()].as_slice())
             .await?;
         assert_eq!(host_blocks.len(), 1);
         check_block_contents(&immutable_device_block, &host_blocks[0], 42)?;
@@ -1239,7 +1239,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let host_blocks = host_pool
-            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()?].as_slice())
+            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()].as_slice())
             .await?;
         assert_eq!(host_blocks.len(), 1);
 
@@ -1288,7 +1288,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let host_blocks = host_pool
-            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()?].as_slice())
+            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()].as_slice())
             .await?;
         assert_eq!(host_blocks.len(), 1);
         check_block_contents(&immutable_device_block, &host_blocks[0], 42)?;
@@ -1300,7 +1300,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
         let disk_blocks = disk_pool
-            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()?].as_slice())
+            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()].as_slice())
             .await?;
         assert_eq!(disk_blocks.len(), 1);
         check_block_contents(&host_blocks[0], &disk_blocks[0], 42)?;

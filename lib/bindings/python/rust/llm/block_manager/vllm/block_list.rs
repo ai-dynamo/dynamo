@@ -71,11 +71,12 @@ impl KvbmBlockList {
     pub fn get_block_hash(&self, block_idx: usize) -> PyResult<Option<u64>> {
         let blocks = self.blocks.lock().unwrap();
         let sequence_hash = match &*blocks {
-            Some(BlockListType::Immutable(blocks)) => blocks
-                .get(block_idx)
-                .ok_or_else(|| to_pyerr("block not found"))?
-                .sequence_hash()
-                .ok(),
+            Some(BlockListType::Immutable(blocks)) => Some(
+                blocks
+                    .get(block_idx)
+                    .ok_or_else(|| to_pyerr("block not found"))?
+                    .sequence_hash(),
+            ),
             Some(BlockListType::Mutable(blocks)) => blocks
                 .get(block_idx)
                 .ok_or_else(|| to_pyerr("block not found"))?
@@ -113,6 +114,10 @@ impl BlockState {
     pub fn new(block_id: usize, tokens: Option<Vec<u32>>) -> Self {
         Self { block_id, tokens }
     }
+
+    pub fn block_id(&self) -> usize {
+        self.block_id
+    }
 }
 
 #[pyclass]
@@ -135,5 +140,13 @@ impl BlockStates {
 
     pub fn push_back(&mut self, state: BlockState) {
         self.states.push(state);
+    }
+
+    pub fn block_ids(&self) -> Vec<usize> {
+        self.states.iter().map(|s| s.block_id).collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.states.len()
     }
 }

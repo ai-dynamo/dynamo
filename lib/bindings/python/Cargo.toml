@@ -45,6 +45,7 @@ anyhow = { version = "1" }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
 async-openai = "0.27.2"
+derive-getters = "0.5"
 futures = { version = "0.3" }
 once_cell = { version = "1.20.3" }
 serde = { version = "1" }

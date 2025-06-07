@@ -375,7 +375,7 @@ mod tests {
         let host_blocks = block_manager
             .host()
             .unwrap()
-            .match_sequence_hashes(vec![immutable_device_blocks[0].sequence_hash()?].as_slice())
+            .match_sequence_hashes(vec![immutable_device_blocks[0].sequence_hash()].as_slice())
             .await
             .unwrap();
         assert_eq!(host_blocks.len(), 1);
@@ -383,7 +383,7 @@ mod tests {
         let disk_blocks = block_manager
             .disk()
             .unwrap()
-            .match_sequence_hashes(vec![immutable_device_blocks[0].sequence_hash()?].as_slice())
+            .match_sequence_hashes(vec![immutable_device_blocks[0].sequence_hash()].as_slice())
             .await
             .unwrap();
         assert_eq!(disk_blocks.len(), 1);

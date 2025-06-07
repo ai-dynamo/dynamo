@@ -85,6 +85,12 @@ impl From<&[Token]> for Tokens {
     }
 }
 
+impl From<Vec<usize>> for Tokens {
+    fn from(tokens: Vec<usize>) -> Self {
+        Tokens(tokens.into_iter().map(|t| t as u32).collect())
+    }
+}
+
 impl From<Vec<i32>> for Tokens {
     /// Converts `Vec<i32>` to `Tokens`, casting each `i32` to `u32`.
     fn from(tokens: Vec<i32>) -> Self {
@@ -462,6 +468,11 @@ impl TokenBlock {
     pub fn parent_sequence_hash(&self) -> Option<SequenceHash> {
         self.parent_sequence_hash
     }
+
+    /// Returns the number of tokens in the block.
+    pub fn block_size(&self) -> usize {
+        self.tokens.0.len()
+    }
 }
 
 /// Represents a sequence of tokens, segmented into fixed-size, hashed blocks.
@@ -483,6 +494,7 @@ pub struct TokenBlockSequence {
     blocks: Vec<TokenBlock>,
     current_block: PartialTokenBlock,
     salt_hash: SaltHash,
+    block_size: usize,
 }
 
 impl TokenBlockSequence {
@@ -509,6 +521,7 @@ impl TokenBlockSequence {
             blocks,
             current_block,
             salt_hash,
+            block_size,
         }
     }
 
@@ -710,6 +723,13 @@ impl TokenBlockSequence {
         self.truncate(len)
     }
 
+    /// Resets the sequence to the initial state.
+    pub fn reset(&mut self) {
+        self.blocks.clear();
+        self.current_block =
+            PartialTokenBlock::create_sequence_root(self.block_size, self.salt_hash);
+    }
+
     /// Removes the last token from the sequence and returns it, or [`None`] if it is empty.
     ///
     /// This operation is analogous to `Vec::pop`.
@@ -781,6 +801,11 @@ impl TokenBlockSequence {
         (self.blocks, self.current_block)
     }
 
+    /// Returns the block size used for this sequence.
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
     /// Returns the [`SaltHash`] used for this sequence.
     pub fn salt_hash(&self) -> SaltHash {
         self.salt_hash
@@ -789,8 +814,39 @@ impl TokenBlockSequence {
     /// Returns the total number of tokens in the sequence (sum of tokens in all completed blocks
     /// plus tokens in the current partial block).
     pub fn total_tokens(&self) -> usize {
-        let block_size = self.current_block.block_size;
-        (self.blocks.len() * block_size) + self.current_block.len()
+        (self.blocks.len() * self.block_size) + self.current_block.len()
+    }
+
+    /// Extract the token with the range
+    pub fn tokens_at(&self, range: Range<usize>) -> Tokens {
+        let total = self.total_tokens();
+
+        // Validate range - return empty tokens for invalid ranges
+        if range.start > range.end || range.end > total {
+            return Tokens::default();
+        }
+
+        // Handle empty range
+        if range.is_empty() {
+            return Tokens::default();
+        }
+
+        let mut result = Vec::with_capacity(range.len());
+
+        for i in range {
+            if i < self.blocks.len() * self.block_size {
+                // Token is in a completed block
+                let block_index = i / self.block_size;
+                let token_index = i % self.block_size;
+                result.push(self.blocks[block_index].tokens()[token_index]);
+            } else {
+                // Token is in the current partial block
+                let current_block_index = i - (self.blocks.len() * self.block_size);
+                result.push(self.current_block.tokens()[current_block_index]);
+            }
+        }
+
+        Tokens::from(result)
     }
 
     /// Splits a [`Tokens`] object into a vector of completed blocks and a final partial block.
@@ -1096,6 +1152,15 @@ mod tests {
             Some(SEQ_HASH_5_8)
         );
 
+        // Test tokens_at across blocks and partial block
+        assert_eq!(seq_multi.tokens_at(0..4).as_ref(), &[1, 2, 3, 4]); // First complete block
+        assert_eq!(seq_multi.tokens_at(4..8).as_ref(), &[5, 6, 7, 8]); // Second complete block
+        assert_eq!(seq_multi.tokens_at(8..9).as_ref(), &[9]); // Current partial block
+        assert_eq!(seq_multi.tokens_at(2..6).as_ref(), &[3, 4, 5, 6]); // Spanning blocks
+        assert_eq!(seq_multi.tokens_at(6..9).as_ref(), &[7, 8, 9]); // Spanning to partial
+        assert_eq!(seq_multi.tokens_at(5..5).as_ref(), &[0u32; 0]); // Empty range
+        assert_eq!(seq_multi.tokens_at(10..15).as_ref(), &[0u32; 0]); // Out of bounds
+
         // No salt hash
         let seq_no_salt = create_test_sequence(&[1, 2, 3, 4, 5], 4, None);
         assert_eq!(seq_no_salt.salt_hash(), 0);
@@ -1245,6 +1310,12 @@ mod tests {
         assert_eq!(seq7.current_block.remaining(), 0);
         assert_eq!(seq7.total_tokens(), 4);
         assert_eq!(seq7.current_block.parent_sequence_hash, None); // Still the root block
+
+        // Test tokens_at extraction
+        assert_eq!(seq7.tokens_at(0..2).as_ref(), &[1, 2]);
+        assert_eq!(seq7.tokens_at(1..3).as_ref(), &[2, 3]);
+        assert_eq!(seq7.tokens_at(0..4).as_ref(), &[1, 2, 3, 4]);
+        assert_eq!(seq7.tokens_at(2..2).as_ref(), &[0u32; 0]); // Empty range
     }
 
     #[test]

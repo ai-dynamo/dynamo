@@ -225,6 +225,11 @@ impl<S: Storage, M: BlockMetadata> Block<S, M> {
         &self.state
     }
 
+    /// Get a mutable reference to the state of the block
+    pub fn state_mut(&mut self) -> &mut BlockState {
+        &mut self.state
+    }
+
     /// Get the number of blocks in the block
     pub fn num_blocks(&self) -> usize {
         1
@@ -804,6 +809,7 @@ impl<S: Storage + NixlDescriptor, M: BlockMetadata> IntoReadableBlocks<M> for Mu
 #[derive(Debug)]
 pub struct ImmutableBlock<S: Storage, M: BlockMetadata> {
     block: Arc<MutableBlock<S, M>>,
+    sequence_hash: SequenceHash,
 }
 
 impl<S: Storage, M: BlockMetadata> BlockIdentifier for ImmutableBlock<S, M> {
@@ -824,17 +830,26 @@ impl<S: Storage, M: BlockMetadata> Clone for ImmutableBlock<S, M> {
     fn clone(&self) -> Self {
         Self {
             block: self.block.clone(),
+            sequence_hash: self.sequence_hash,
         }
     }
 }
 
 impl<S: Storage, M: BlockMetadata> ImmutableBlock<S, M> {
     pub(crate) fn new(block: Arc<MutableBlock<S, M>>) -> Self {
-        Self { block }
+        let sequence_hash = block.sequence_hash().expect("block is in the wrong state");
+        Self {
+            block,
+            sequence_hash,
+        }
     }
 
     pub fn mutable_block(&self) -> &Arc<MutableBlock<S, M>> {
         &self.block
+    }
+
+    pub fn sequence_hash(&self) -> SequenceHash {
+        self.sequence_hash
     }
 }
 

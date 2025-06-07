@@ -643,7 +643,7 @@ mod tests {
         let mut immutable_blocks = pool.register_blocks_blocking(vec![block]).unwrap();
         let block = immutable_blocks.pop().unwrap();
         assert!(block.state().is_registered());
-        assert_eq!(block.sequence_hash().unwrap(), sequence_hash);
+        assert_eq!(block.sequence_hash(), sequence_hash);
 
         // Dropping the immutable block should return the block to the pool
         // However, the block should remain in the BlockPool as an inactive block until it is reused
@@ -655,6 +655,6 @@ mod tests {
             .match_sequence_hashes_blocking(&[sequence_hash])
             .unwrap();
         assert_eq!(matched.len(), 1);
-        assert_eq!(matched[0].sequence_hash().unwrap(), sequence_hash);
+        assert_eq!(matched[0].sequence_hash(), sequence_hash);
     }
 }
