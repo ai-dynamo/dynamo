@@ -59,6 +59,7 @@ def chat_completions_response_handler(response):
     assert "content" in result["choices"][0]["message"], "Missing 'content' in message"
     return result["choices"][0]["message"]["content"]
 
+
 def completions_response_handler(response):
     """
     Process completions API responses.

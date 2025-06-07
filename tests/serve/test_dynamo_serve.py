@@ -24,8 +24,8 @@ import requests
 from tests.utils.deployment_graph import (
     DeploymentGraph,
     Payload,
-    completions_response_handler,
     chat_completions_response_handler,
+    completions_response_handler,
 )
 from tests.utils.managed_process import ManagedProcess
 
@@ -88,7 +88,10 @@ deployment_graphs = {
             config="configs/agg.yaml",
             directory="/workspace/examples/llm",
             endpoints=["v1/chat/completions", "v1/completions"],
-            response_handlers=[chat_completions_response_handler, completions_response_handler],
+            response_handlers=[
+                chat_completions_response_handler,
+                completions_response_handler,
+            ],
             marks=[pytest.mark.gpu_1, pytest.mark.vllm],
         ),
         text_payload,
@@ -99,7 +102,10 @@ deployment_graphs = {
             config="configs/agg.yaml",
             directory="/workspace/examples/sglang",
             endpoints=["v1/chat/completions", "v1/completions"],
-            response_handlers=[chat_completions_response_handler, completions_response_handler],
+            response_handlers=[
+                chat_completions_response_handler,
+                completions_response_handler,
+            ],
             marks=[pytest.mark.gpu_1, pytest.mark.sglang],
         ),
         text_payload,
@@ -110,7 +116,10 @@ deployment_graphs = {
             config="configs/disagg.yaml",
             directory="/workspace/examples/llm",
             endpoints=["v1/chat/completions", "v1/completions"],
-            response_handlers=[chat_completions_response_handler, completions_response_handler],
+            response_handlers=[
+                chat_completions_response_handler,
+                completions_response_handler,
+            ],
             marks=[pytest.mark.gpu_2, pytest.mark.vllm],
         ),
         text_payload,
@@ -121,7 +130,10 @@ deployment_graphs = {
             config="configs/agg_router.yaml",
             directory="/workspace/examples/llm",
             endpoints=["v1/chat/completions", "v1/completions"],
-            response_handlers=[chat_completions_response_handler, completions_response_handler],
+            response_handlers=[
+                chat_completions_response_handler,
+                completions_response_handler,
+            ],
             marks=[pytest.mark.gpu_1, pytest.mark.vllm],
         ),
         text_payload,
@@ -132,7 +144,10 @@ deployment_graphs = {
             config="configs/disagg_router.yaml",
             directory="/workspace/examples/llm",
             endpoints=["v1/chat/completions", "v1/completions"],
-            response_handlers=[chat_completions_response_handler, completions_response_handler],
+            response_handlers=[
+                chat_completions_response_handler,
+                completions_response_handler,
+            ],
             marks=[pytest.mark.gpu_2, pytest.mark.vllm],
         ),
         text_payload,
@@ -143,7 +158,10 @@ deployment_graphs = {
             config="configs/agg.yaml",
             directory="/workspace/examples/multimodal",
             endpoints=["v1/chat/completions", "v1/completions"],
-            response_handlers=[chat_completions_response_handler, completions_response_handler],
+            response_handlers=[
+                chat_completions_response_handler,
+                completions_response_handler,
+            ],
             marks=[pytest.mark.gpu_2, pytest.mark.vllm],
         ),
         multimodal_payload,
@@ -154,7 +172,10 @@ deployment_graphs = {
             config="configs/agg.yaml",
             directory="/workspace/examples/vllm_v1",
             endpoints=["v1/chat/completions", "v1/completions"],
-            response_handlers=[chat_completions_response_handler, completions_response_handler],
+            response_handlers=[
+                chat_completions_response_handler,
+                completions_response_handler,
+            ],
             marks=[pytest.mark.gpu_1, pytest.mark.vllm],
         ),
         text_payload,
@@ -165,7 +186,10 @@ deployment_graphs = {
             config="configs/agg.yaml",
             directory="/workspace/examples/tensorrt_llm",
             endpoints=["v1/chat/completions", "v1/completions"],
-            response_handlers=[chat_completions_response_handler, completions_response_handler],
+            response_handlers=[
+                chat_completions_response_handler,
+                completions_response_handler,
+            ],
             marks=[pytest.mark.gpu_1, pytest.mark.tensorrtllm],
         ),
         text_payload,
@@ -176,7 +200,10 @@ deployment_graphs = {
             config="configs/agg_router.yaml",
             directory="/workspace/examples/tensorrt_llm",
             endpoints=["v1/chat/completions", "v1/completions"],
-            response_handlers=[chat_completions_response_handler, completions_response_handler],
+            response_handlers=[
+                chat_completions_response_handler,
+                completions_response_handler,
+            ],
             marks=[pytest.mark.gpu_1, pytest.mark.tensorrtllm],
             # FIXME: This is a hack to allow deployments to start before sending any requests.
             # When using KV-router, if all the endpoints are not registered, the service
@@ -191,7 +218,10 @@ deployment_graphs = {
             config="configs/disagg.yaml",
             directory="/workspace/examples/tensorrt_llm",
             endpoints=["v1/chat/completions", "v1/completions"],
-            response_handlers=[chat_completions_response_handler, completions_response_handler],
+            response_handlers=[
+                chat_completions_response_handler,
+                completions_response_handler,
+            ],
             marks=[pytest.mark.gpu_2, pytest.mark.tensorrtllm],
         ),
         text_payload,
@@ -202,7 +232,10 @@ deployment_graphs = {
             config="configs/disagg_router.yaml",
             directory="/workspace/examples/tensorrt_llm",
             endpoints=["v1/chat/completions", "v1/completions"],
-            response_handlers=[chat_completions_response_handler, completions_response_handler],
+            response_handlers=[
+                chat_completions_response_handler,
+                completions_response_handler,
+            ],
             marks=[pytest.mark.gpu_2, pytest.mark.tensorrtllm],
             # FIXME: This is a hack to allow deployments to start before sending any requests.
             # When using KV-router, if all the endpoints are not registered, the service
@@ -301,17 +334,27 @@ def test_serve_deployment(deployment_graph_test, request, runtime_services):
         assert content, "Empty response content"
         for expected in payload.expected_response:
             assert expected in content, "Expected '%s' not found in response" % expected
+
     with DynamoServeProcess(deployment_graph, request) as server_process:
         first_success_pending = True
-        for endpoint, response_handler in zip(deployment_graph.endpoints, deployment_graph.response_handlers):
+        for endpoint, response_handler in zip(
+            deployment_graph.endpoints, deployment_graph.response_handlers
+        ):
             url = f"http://localhost:{server_process.port}/{endpoint}"
             start_time = time.time()
             retry_delay = 5
             elapsed = 0.0
-            request_body = payload.payload_chat if endpoint == "v1/chat/completions" else payload.payload_completions
+            request_body = (
+                payload.payload_chat
+                if endpoint == "v1/chat/completions"
+                else payload.payload_completions
+            )
 
-            # We can skip this 
-            while time.time() - start_time < deployment_graph.timeout and first_success_pending:
+            # We can skip this
+            while (
+                time.time() - start_time < deployment_graph.timeout
+                and first_success_pending
+            ):
                 elapsed = time.time() - start_time
                 try:
                     response = requests.post(
