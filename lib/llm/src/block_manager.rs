@@ -146,17 +146,17 @@ impl<Metadata: BlockMetadata> KvBlockManager<Metadata> {
     }
 
     /// Get a reference to the disk block pool
-    pub fn disk(&self) -> Option<&BlockPool<DiskStorage, Metadata>> {
+    pub fn disk(&self) -> Option<Arc<BlockPool<DiskStorage, Metadata>>> {
         self.state.disk()
     }
 
     /// Get a reference to the host block pool
-    pub fn host(&self) -> Option<&BlockPool<PinnedStorage, Metadata>> {
+    pub fn host(&self) -> Option<Arc<BlockPool<PinnedStorage, Metadata>>> {
         self.state.host()
     }
 
     /// Get a reference to the device block pool
-    pub fn device(&self) -> Option<&BlockPool<DeviceStorage, Metadata>> {
+    pub fn device(&self) -> Option<Arc<BlockPool<DeviceStorage, Metadata>>> {
         self.state.device()
     }
 
