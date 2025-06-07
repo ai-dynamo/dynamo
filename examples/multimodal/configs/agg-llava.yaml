@@ -16,33 +16,25 @@ Common:
   model: llava-hf/llava-1.5-7b-hf
   block-size: 64
   max-model-len: 4096
-  image-token-id: 32000
-  num-patches: 576
-  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
 
 Processor:
   router: round-robin
   prompt-template: "USER: <image>\n<prompt> ASSISTANT:"
-  common-configs: [model, block-size]
+  common-configs: [model, block-size, max-model-len]
 
 VllmDecodeWorker:
-  remote-prefill: true
-  conditional-disagg: true
-  max-local-prefill-length: 10
-  max-prefill-queue-size: 2
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: '1'
-  common-configs: [model, block-size, image-token-id, max-model-len, num-patches, kv-transfer-config]
-
-VllmPrefillWorker:
+  enforce-eager: true
   max-num-batched-tokens: 16384
+  enable-prefix-caching: true
+  image-token-id: 32000
+  num-patches: 576
+  router: random
+  tensor-parallel-size: 1
   ServiceArgs:
     workers: 1
     resources:
       gpu: '1'
-  common-configs: [model, block-size, image-token-id, max-model-len, num-patches, kv-transfer-config]
+  common-configs: [model, block-size, max-model-len]
 
 VllmEncodeWorker:
   tensor-parallel-size: 1

@@ -26,7 +26,8 @@ import connect
 import httpx
 import torch
 from PIL import Image
-from transformers import AutoImageProcessor, LlavaForConditionalGeneration
+from transformers import AutoImageProcessor
+from utils.model import load_vision_model
 from utils.protocol import EncodeRequest, EncodeResponse
 from utils.vllm import parse_vllm_args
 
@@ -66,10 +67,7 @@ class VllmEncodeWorker:
         self.image_processor = AutoImageProcessor.from_pretrained(
             self.MODEL_ID, trust_remote_code=True
         )
-
-        self.vision_model = LlavaForConditionalGeneration.from_pretrained(
-            self.MODEL_ID, device_map="auto", torch_dtype=torch.float16
-        ).eval()
+        self.vision_model = load_vision_model(self.MODEL_ID)
 
         self._image_cache: dict[str, Image.Image] = {}
         self._cache_queue: Queue[str] = Queue(maxsize=CACHE_SIZE_MAXIMUM)
@@ -167,16 +165,26 @@ class VllmEncodeWorker:
 
             logger.debug(f"Processing image for request: {{ id: {request_id} }}")
             image_embeds = self.image_processor(images=image, return_tensors="pt")
+            # Add a batch dimension to the pixel values
+            image_embeds["pixel_values"] = (
+                image_embeds["pixel_values"].unsqueeze(0).to(DEVICE)
+            )
+            logger.debug(f"Image embeds: {image_embeds}")
+            image_grid_thw = None
+            if "image_grid_thw" in image_embeds:
+                image_grid_thw = image_embeds["image_grid_thw"].tolist()
+            image_sizes = [image.size]
+            logger.debug(
+                f"Pixel values stats: mean={image_embeds['pixel_values'].mean().item()}, std={image_embeds['pixel_values'].std().item()}, min={image_embeds['pixel_values'].min().item()}, max={image_embeds['pixel_values'].max().item()}"
+            )
 
             with torch.no_grad():
-                logger.debug(f"Vision model device: {self.vision_model.device}")
-                vision_outputs = self.vision_model.vision_tower(
-                    image_embeds["pixel_values"].to(self.vision_model.device)
-                )
-                logger.debug("Vision model completed.")
-
-                embeddings = vision_outputs.last_hidden_state
-                embeddings = self.vision_model.multi_modal_projector(embeddings)
+                embeddings = self.vision_model.get_multimodal_embeddings(**image_embeds)
+                if isinstance(embeddings, tuple):
+                    # The result multimodal_embeddings is tuple of tensors, with each
+                    # tensor correspoending to a multimodal data item (image or video).
+                    # TODO: for multi-image support, this result will contain multiple tensors.
+                    embeddings = embeddings[0].unsqueeze(0)
 
                 logger.debug(
                     f"Embeddings: {{ shape: {embeddings.shape}, dtype: {embeddings.dtype}, device: {embeddings.device}, ptr: {embeddings.data_ptr()}, elements: {{ count: {embeddings.numel()}, size: {embeddings.element_size()} }} }}."
@@ -187,6 +195,9 @@ class VllmEncodeWorker:
                         f"Request serialized_request is None for request: {{ id: {request_id} }}."
                     )
 
+                assert (
+                    embeddings.is_contiguous()
+                ), "Embeddings tensor must be contiguous!"
                 # Create a descriptor for the embeddings, this will register the memory with the connector (and the NIXL runtime).
                 descriptor = connect.Descriptor(embeddings)
                 # Create a write operation using the serialized request and the descriptor.
@@ -201,6 +212,8 @@ class VllmEncodeWorker:
 
                 yield EncodeResponse(
                     request_id=request.request_id,
+                    image_grid_thw=image_grid_thw,
+                    image_sizes=image_sizes,
                 ).model_dump_json()
         except Exception as e:
             logger.error(f"Error processing request {request_id}: {e}")
