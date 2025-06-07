@@ -51,11 +51,11 @@ docker login "$DOCKER_REGISTRY"
 # Change to the specified directory
 cd "$DYNAMO_DIRECTORY"
 
-# Build the Bento container
-echo "Building Bento image for $DYNAMO_IDENTIFIER..."
+# Build the Dynamo application container
+echo "Building Dynamo application image for $DYNAMO_IDENTIFIER..."
 DOCKER_DEFAULT_PLATFORM=linux/amd64 uv run dynamo build --containerize $DYNAMO_IDENTIFIER
 
-# Extract the module and the bento name
+# Extract the module and the dynamo name
 DYNAMO_MODULE=$(echo "$DYNAMO_IDENTIFIER" | awk -F':' '{print $1}' | tr '[:upper:]' '[:lower:]')
 DYNAMO_NAME=$(echo "$DYNAMO_IDENTIFIER" | awk -F':' '{print $2}' | tr '[:upper:]' '[:lower:]')
 

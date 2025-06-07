@@ -97,7 +97,7 @@ def configure_dynamo_logging(
     configure_sglang_logging(dyn_level)
 
     # loggers that should be configured to ERROR
-    error_loggers = ["bentoml", "tag"]
+    error_loggers = ["tag"]
     for logger_name in error_loggers:
         logger = logging.getLogger(logger_name)
         logger.handlers = []
