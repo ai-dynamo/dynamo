@@ -486,11 +486,13 @@ struct ProgressEngine<S: Storage, M: BlockMetadata> {
 
 #[cfg(test)]
 mod tests {
-    use crate::block_manager::block::BlockExt;
-
     use super::super::block::{BasicMetadata, Blocks};
     use super::super::layout::tests::setup_layout;
     use super::*;
+
+    use crate::block_manager::block::BlockExt;
+    use crate::block_manager::offload::tests::build_pools;
+    use crate::tokens::{TokenBlockSequence, Tokens};
 
     /// Helper method to build a [`BlockPool`] with a [`ProgressEngine`] for unit testing
     impl<S: Storage, M: BlockMetadata> BlockPoolArgsBuilder<S, M> {
@@ -656,5 +658,270 @@ mod tests {
             .unwrap();
         assert_eq!(matched.len(), 1);
         assert_eq!(matched[0].sequence_hash().unwrap(), sequence_hash);
+    }
+
+    async fn create_blocks<S: Storage, M: BlockMetadata>(
+        pool: &BlockPool<S, M>,
+        num_blocks: usize,
+    ) -> anyhow::Result<(Vec<ImmutableBlock<S, M>>, Vec<SequenceHash>)> {
+        let tokens = vec![0; num_blocks * 4];
+        let token_blocks = TokenBlockSequence::new(Tokens::from(tokens), 4, None);
+        assert_eq!(token_blocks.blocks().len(), num_blocks);
+
+        let mut sequence_hashes = Vec::new();
+        let mut mutable_blocks = Vec::new();
+
+        for token_block in token_blocks.blocks().iter() {
+            let mut block = pool.allocate_blocks(1).await?.pop().unwrap();
+            block.apply_token_block(token_block.clone())?;
+
+            sequence_hashes.push(block.sequence_hash().unwrap());
+            mutable_blocks.push(block);
+        }
+        let immutable_blocks = pool.register_blocks(mutable_blocks).await?;
+
+        Ok((immutable_blocks, sequence_hashes))
+    }
+
+    #[tokio::test]
+    async fn test_block_pool_evict_leaves() -> anyhow::Result<()> {
+        let (_, device_pool, _, _) = build_pools(4, None, None, None)?;
+        let device_pool = device_pool.as_ref().unwrap();
+
+        let (_, sequence_hashes) = create_blocks(device_pool, 4).await?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        device_pool.allocate_blocks(1).await?;
+
+        let matched = device_pool
+            .match_sequence_hashes(sequence_hashes.as_slice())
+            .await?;
+        assert_eq!(matched.len(), 3);
+        drop(matched);
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        device_pool.allocate_blocks(2).await.unwrap();
+
+        let matched = device_pool
+            .match_sequence_hashes(sequence_hashes.as_slice())
+            .await?;
+        assert_eq!(matched.len(), 2);
+
+        drop(matched);
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let blocks = device_pool.allocate_blocks(4).await?;
+        assert_eq!(blocks.len(), 4);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_block_pool_parent_child() -> anyhow::Result<()> {
+        let (_, device_pool, _, _) = build_pools(3, None, None, None)?;
+        let device_pool = device_pool.as_ref().unwrap();
+
+        let tokens = vec![1, 2, 3, 4, 5];
+
+        let sequence = TokenBlockSequence::new(Tokens::from(tokens.clone()), 4, None);
+
+        // Create a root block, with two child blocks.
+
+        let mut root_block = device_pool.allocate_blocks(1).await?.pop().unwrap();
+        root_block.apply_token_block(sequence.blocks().first().unwrap().clone())?;
+
+        let root_block_hash = root_block.sequence_hash().unwrap();
+
+        let mut child_blocks = Vec::new();
+        let mut child_block_hashes = Vec::new();
+
+        for i in 0..2 {
+            let mut tokens = tokens.clone();
+            for _ in 0..4 {
+                tokens.push(i);
+            }
+            let seq = TokenBlockSequence::new(Tokens::from(tokens), 4, None);
+
+            let mut child_block = device_pool.allocate_blocks(1).await?.pop().unwrap();
+            child_block.apply_token_block(seq.blocks()[1].clone())?;
+
+            child_block_hashes.push(child_block.sequence_hash().unwrap());
+            child_blocks.push(child_block);
+        }
+
+        // Register the children first. This can happen with offloading.
+        let child_blocks = device_pool.register_blocks(child_blocks).await?;
+
+        // After the children are registered, we can register the root block.
+        let root_block = device_pool.register_blocks(vec![root_block]).await?;
+
+        // Drop both of them.
+        drop(root_block);
+        drop(child_blocks);
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Allocate two new blocks, which should evict both children.
+        device_pool.allocate_blocks(2).await?;
+
+        // Now, the root block should be the only block left.
+
+        for child_block_hash in child_block_hashes {
+            let matched = device_pool
+                .match_sequence_hashes(&[child_block_hash])
+                .await?;
+            assert_eq!(matched.len(), 0);
+        }
+
+        let matched = device_pool
+            .match_sequence_hashes(&[root_block_hash])
+            .await?;
+        assert_eq!(matched.len(), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_block_pool_fragmentation() -> anyhow::Result<()> {
+        let (_, device_pool, _, _) = build_pools(4, None, None, None)?;
+
+        let device_pool = device_pool.as_ref().unwrap();
+
+        let tokens = vec![0; 16];
+
+        let token_blocks = TokenBlockSequence::new(Tokens::from(tokens), 4, None);
+        assert_eq!(token_blocks.blocks().len(), 4);
+
+        let mut sequence_hashes = Vec::new();
+
+        for block in token_blocks.blocks()[..3].iter() {
+            let mut mutable_block = device_pool.allocate_blocks(1).await?.pop().unwrap();
+            mutable_block.apply_token_block(block.clone())?;
+
+            sequence_hashes.push(mutable_block.sequence_hash()?);
+            let _ = device_pool.register_blocks(vec![mutable_block]).await?;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let _ = device_pool.allocate_blocks(2).await?;
+
+        assert_eq!(
+            device_pool
+                .match_sequence_hashes(sequence_hashes.as_slice())
+                .await?
+                .len(),
+            2
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let mut mutable_block = device_pool
+            .allocate_blocks(1)
+            .await?
+            .into_iter()
+            .next()
+            .unwrap();
+
+        mutable_block.apply_token_block(token_blocks.blocks()[3].clone())?;
+
+        let _ = device_pool.register_blocks(vec![mutable_block]).await?;
+
+        assert_eq!(
+            device_pool
+                .match_sequence_hashes(sequence_hashes.as_slice())
+                .await?
+                .len(),
+            2
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let _ = device_pool.allocate_blocks(4).await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_block_pool_match_return() -> anyhow::Result<()> {
+        let (_, device_pool, _, _) = build_pools(4, None, None, None)?;
+
+        let device_pool = device_pool.as_ref().unwrap();
+
+        let (_, sequence_hashes) = create_blocks(device_pool, 4).await?;
+
+        assert_eq!(
+            device_pool
+                .match_sequence_hashes(vec![sequence_hashes[0]].as_slice())
+                .await?
+                .len(),
+            1
+        );
+
+        let _alloc_blocks1 = device_pool.allocate_blocks(3).await?;
+
+        assert_eq!(
+            device_pool
+                .match_sequence_hashes(sequence_hashes.as_slice())
+                .await?
+                .len(),
+            1
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let _alloc_blocks2 = device_pool.allocate_blocks(1).await?;
+
+        assert_eq!(
+            device_pool
+                .match_sequence_hashes(sequence_hashes.as_slice())
+                .await?
+                .len(),
+            0
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_block_pool_match_partial() -> anyhow::Result<()> {
+        let (_, device_pool, _, _) = build_pools(4, None, None, None)?;
+
+        let device_pool = device_pool.as_ref().unwrap();
+
+        let (_, sequence_hashes) = create_blocks(device_pool, 4).await?;
+
+        assert_eq!(
+            device_pool
+                .match_sequence_hashes(sequence_hashes.as_slice())
+                .await?
+                .len(),
+            4
+        );
+
+        let matched_suffix = device_pool
+            .match_sequence_hashes(&sequence_hashes[2..])
+            .await?;
+        assert_eq!(matched_suffix.len(), 2);
+
+        let new_alloc_block = device_pool.allocate_blocks(1).await?;
+        assert_eq!(new_alloc_block.len(), 0);
+
+        drop(matched_suffix);
+
+        assert_eq!(
+            device_pool
+                .match_sequence_hashes(sequence_hashes.as_slice())
+                .await?
+                .len(),
+            4
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        Ok(())
     }
 }

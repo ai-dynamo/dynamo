@@ -299,15 +299,18 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                         }
                     }
 
-                    let target_blocks = match target_pool.allocate_blocks(1).await {
-                        Ok(blocks) => blocks,
-                        Err(_) => {
-                            tracing::warn!("Target pool full. Skipping offload. This should only ever happen with very small pool sizes.");
-                            continue;
+                    let target_block = 'target_block: {
+                        if let Ok(blocks) = target_pool.allocate_blocks(1).await {
+                            if let Some(block) = blocks.into_iter().next() {
+                                break 'target_block Some(block);
+                            }
                         }
+
+                        tracing::warn!("Target pool full. Skipping offload. This should only ever happen with very small pool sizes.");
+                        None
                     };
 
-                    if let Some(target_block) = target_blocks.into_iter().next() {
+                    if let Some(target_block) = target_block {
                         transfer_manager
                             .enqueue_transfer(PendingTransfer::new(
                                 vec![block],
@@ -511,7 +514,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
 }
 
 #[cfg(all(test, feature = "testing-cuda"))]
-mod tests {
+pub mod tests {
     use super::*;
     use crate::block_manager::block::test_utils::get_private_token;
 
@@ -528,6 +531,7 @@ mod tests {
         },
         DType, LayoutConfig,
     };
+    use crate::tokens::{TokenBlockSequence, Tokens};
     use nixl_sys::{MemoryRegion, NixlDescriptor};
 
     use aligned_vec::avec;
@@ -555,7 +559,7 @@ mod tests {
         };
     }
 
-    fn build_pools(
+    pub fn build_pools(
         device_blocks: usize,
         host_blocks: Option<usize>,
         disk_blocks: Option<usize>,
@@ -1358,6 +1362,124 @@ mod tests {
         let device_blocks = offload_manager.onboard(disk_blocks.clone()).await?;
         assert_eq!(device_blocks.len(), 1);
         check_block_contents(&disk_blocks[0], &device_blocks[0], 42)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_offload_evict_order() -> Result<()> {
+        let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None, None)?;
+
+        let device_pool = device_pool.as_ref().unwrap();
+        let host_pool = host_pool.as_ref().unwrap();
+
+        let tokens = vec![0_u32; BLOCK_SIZE * 4];
+        let token_blocks = TokenBlockSequence::new(Tokens::from(tokens), 4, None);
+        assert_eq!(token_blocks.blocks().len(), 4);
+
+        let mut mutable_blocks = Vec::new();
+        let mut sequence_hashes = Vec::new();
+        for token_block in token_blocks.blocks() {
+            let mut mutable_block = device_pool
+                .allocate_blocks(1)
+                .await?
+                .into_iter()
+                .next()
+                .unwrap();
+            mutable_block.apply_token_block(token_block.clone())?;
+            sequence_hashes.push(mutable_block.sequence_hash()?);
+            mutable_blocks.push(mutable_block);
+        }
+
+        let immutable_blocks = device_pool.register_blocks(mutable_blocks).await?;
+
+        for block in &immutable_blocks {
+            offload_manager.offload(block, 0).await?;
+        }
+        // Wait for offloads.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Allocate 2 blocks on the host.
+        let _host_blocks = host_pool.allocate_blocks(2).await?;
+
+        // Check the existing blocks.
+        assert_eq!(
+            host_pool
+                .match_sequence_hashes(sequence_hashes.as_slice())
+                .await?
+                .len(),
+            2
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let _host_blocks2 = host_pool.allocate_blocks(1).await?;
+
+        // Now there should only be the first block on host.
+        assert_eq!(
+            host_pool
+                .match_sequence_hashes(sequence_hashes.as_slice())
+                .await?
+                .len(),
+            1
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_onboard_evict_order() -> Result<()> {
+        let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None, None)?;
+
+        let device_pool = device_pool.as_ref().unwrap();
+        let host_pool = host_pool.as_ref().unwrap();
+
+        let tokens = vec![0_u32; BLOCK_SIZE * 4];
+        let token_blocks = TokenBlockSequence::new(Tokens::from(tokens), 4, None);
+        assert_eq!(token_blocks.blocks().len(), 4);
+
+        let mut mutable_blocks = Vec::new();
+        let mut sequence_hashes = Vec::new();
+        for token_block in token_blocks.blocks() {
+            let mut block = host_pool
+                .allocate_blocks(1)
+                .await?
+                .into_iter()
+                .next()
+                .unwrap();
+            block.apply_token_block(token_block.clone())?;
+
+            sequence_hashes.push(block.sequence_hash()?);
+            mutable_blocks.push(block);
+        }
+
+        let immutable_blocks = host_pool.register_blocks(mutable_blocks).await?;
+
+        let _ = offload_manager.onboard(immutable_blocks).await?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let _device_blocks = device_pool.allocate_blocks(2).await?;
+
+        assert_eq!(
+            device_pool
+                .match_sequence_hashes(sequence_hashes.as_slice())
+                .await?
+                .len(),
+            2
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let _device_blocks2 = device_pool.allocate_blocks(1).await?;
+
+        assert_eq!(
+            device_pool
+                .match_sequence_hashes(sequence_hashes.as_slice())
+                .await?
+                .len(),
+            1
+        );
 
         Ok(())
     }
