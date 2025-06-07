@@ -1,0 +1,86 @@
+Frontend:
+  served_model_name: deepseek-ai/DeepSeek-R1
+  endpoint: dynamo.SGLangWorker.generate
+  port: 8000
+
+SGLangWorker:
+  model-path: /model/
+  served-model-name: deepseek-ai/DeepSeek-R1
+  skip-tokenizer-init: true
+  disaggregation-mode: prefill
+  disaggregation-transfer-backend: nixl
+  disaggregation-bootstrap-port: 30001
+  dist-init-addr: 10.52.53.73:29500
+  nnodes: 2
+  node-rank: 1
+  tp-size: 16
+  dp-size: 16
+  enable-dp-attention: true
+  decode-log-interval: 1
+  enable-deepep-moe: true
+  page-size: 1
+  trust-remote-code: true
+  moe-dense-tp-size: 1
+  enable-dp-lm-head: true
+  disable-radix-cache: true
+  watchdog-timeout: 1000000
+  enable-two-batch-overlap: true
+  deepep-mode: normal
+  mem-fraction-static: 0.85
+  # num_prefill_nodes * 131072 
+  chunked-prefill-size: 262144
+  # num_prefill_nodes * 2048
+  max-running-requests: 4096 
+  max-total-tokens: 131072
+  context-length: 8192
+  # sweep over these from the /configs dir
+  init-expert-location: /configs/prefill_in1000out1000.json
+  ep-num-redundant-experts: 32
+  ep-dispatch-algorithm: dynamic
+  eplb-algorithm: deepseek
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: 8
+    envs:
+      MC_TE_METRIC: true
+      SGLANG_TBO_DEBUG: 1
+
+SGLangDecodeWorker:
+  model-path: /model/
+  served-model-name: deepseek-ai/DeepSeek-R1
+  skip-tokenizer-init: true
+  disaggregation-mode: decode
+  disaggregation-transfer-backend: nixl
+  disaggregation-bootstrap-port: 30001
+  dist-init-addr: 10.52.53.75:29500
+  nnodes: 2
+  node-rank: 1
+  tp-size: 16
+  dp-size: 16
+  enable-dp-attention: true
+  decode-log-interval: 1
+  enable-deepep-moe: true
+  page-size: 1
+  trust-remote-code: true
+  moe-dense-tp-size: 1
+  enable-dp-lm-head: true
+  disable-radix-cache: true
+  watchdog-timeout: 1000000
+  enable-two-batch-overlap: true
+  deepep-mode: low_latency
+  mem-fraction-static: 0.835
+  # num_decode_nodes * 1024
+  max-running-requests: 2048
+  context-length: 4500
+  init-expert-location: /configs/decode_in1000out1000.json
+  ep-num-redundant-experts: 32
+  cuda-graph-bs: 256
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: 8
+    envs:
+      # missing the SGLANG_HACK_PD_DECODE_NUM_RESERVED_DECODE_TOKENS for now
+      MC_TE_METRIC: true
+      SGLANG_TBO_DEBUG: 1

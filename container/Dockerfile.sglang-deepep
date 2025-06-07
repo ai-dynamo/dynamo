@@ -1,0 +1,84 @@
+FROM docker.io/lmsysorg/sglang:deepep
+
+WORKDIR /sgl-workspace
+RUN git clone https://github.com/ai-dynamo/nixl.git
+WORKDIR /sgl-workspace/nixl
+RUN pip install . --config-settings=setup-args="-Ducx_path=/opt/hpcx/ucx"
+
+RUN pip3 install mooncake-transfer-engine
+
+WORKDIR /sgl-workspace
+
+# need our fixed nixl version
+RUN pip uninstall -y sglang
+RUN rm -rf sglang 
+# main as of 5/29 10:38AM PST - https://github.com/sgl-project/sglang/pull/6742
+ARG SGLANG_COMMIT="6df81e8a391961ed6c0a243010175e36371b42c5"
+RUN git clone https://github.com/sgl-project/sglang.git && cd sglang && git checkout ${SGLANG_COMMIT} && pip install -e "python[all]"
+
+RUN git clone https://github.com/ai-dynamo/dynamo.git
+
+# install dynamo in editable mode
+WORKDIR /sgl-workspace/dynamo
+# Rust build/dev dependencies
+RUN apt update -y && \
+    apt install --no-install-recommends -y \
+    build-essential \
+    protobuf-compiler \
+    cmake \
+    libssl-dev \
+    pkg-config \
+    clang \
+    libclang-dev \
+    git
+
+ARG ARCH_ALT=x86_64
+
+# Define Rust target based on ARCH_ALT ARG
+ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH \
+    RUST_VERSION=1.86.0
+
+# Install Rust using RUSTARCH derived from ARCH_ALT
+RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
+    # TODO: Add SHA check back based on RUSTARCH
+    chmod +x rustup-init && \
+    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
+    rm rustup-init && \
+    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
+
+ARG CARGO_BUILD_JOBS
+# Set CARGO_BUILD_JOBS to 16 if not provided
+# This is to prevent cargo from building $(nproc) jobs in parallel,
+# which might exceed the number of opened files limit.
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
+
+RUN cargo build --release
+RUN mkdir -p deploy/sdk/src/dynamo/sdk/cli/bin
+RUN cp target/release/http deploy/sdk/src/dynamo/sdk/cli/bin
+RUN cp target/release/llmctl deploy/sdk/src/dynamo/sdk/cli/bin
+RUN cp target/release/dynamo-run deploy/sdk/src/dynamo/sdk/cli/bin
+
+RUN cd lib/bindings/python && pip install -e . && cd ../../..
+RUN pip install -e .
+
+ENV PYTHONPATH=/sgl-workspace/dynamo/components/planner/src
+
+ARG ARCH=amd64
+
+RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-${ARCH}.deb && \
+    dpkg -i nats-server-v2.10.24-${ARCH}.deb && rm nats-server-v2.10.24-${ARCH}.deb
+
+ENV ETCD_VERSION="v3.5.18"
+RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
+    mkdir -p /usr/local/bin/etcd && \
+    tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
+    rm /tmp/etcd.tar.gz
+ENV PATH=/usr/local/bin/etcd/:$PATH
+
+COPY examples/sglang/configs/deepep/* /sgl-workspace/dynamo/examples/sglang/configs/
+
+WORKDIR /sgl-workspace
