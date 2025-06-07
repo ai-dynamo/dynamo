@@ -418,9 +418,6 @@ impl
                             id: None,
                             data: Some(delta),
                             event: None,
-                            chunk_tokens: None,
-                            input_tokens: None,
-                            output_tokens: None,
                             comment: None,
                         };
                         yield ann;
@@ -585,9 +582,6 @@ impl AsyncEngine<SingleIn<NvCreateCompletionRequest>, ManyOut<Annotated<Completi
                             id: None,
                             data: Some(inner),
                             event: None,
-                            chunk_tokens: None,
-                            input_tokens: None,
-                            output_tokens: None,
                             comment: None,
                         };
                         yield ann;
