@@ -149,12 +149,29 @@ impl ModelInfoType {
 
 impl PromptFormatterArtifact {
     pub async fn from_repo(repo_id: &str) -> Result<Option<Self>> {
-        // we should only error if we expect a prompt formatter and it's not found
-        // right now, we don't know when to expect it, so we just return Ok(Some/None)
-        Ok(Self::try_is_hf_repo(repo_id)
+        // First try to find the formatter artifact
+        let formatter_artifact = Self::try_is_hf_repo(repo_id)
             .await
             .with_context(|| format!("unable to extract prompt format from repo {}", repo_id))
-            .ok())
+            .ok();
+
+        // If we found a formatter artifact, check if it's a tokenizer.json with a chat_template
+        if let Some(PromptFormatterArtifact::HfTokenizerConfigJson(file)) = &formatter_artifact {
+            let content = tokio::fs::read_to_string(file).await.inspect_err(|e| {
+                tracing::error!("Found tokenizer.json but failed to read it: {}", e);
+            })?;
+
+            let json = serde_json::from_str::<serde_json::Value>(&content).inspect_err(|e| {
+                tracing::error!("Found tokenizer.json but failed to parse it: {}", e);
+            })?;
+
+            if json.get("chat_template").is_none() {
+                tracing::warn!("tokenizer.json doesn't contain a chat_template field");
+                return Ok(None);
+            }
+        }
+        // Return the original formatter artifact
+        Ok(formatter_artifact)
     }
 
     async fn try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {

@@ -68,13 +68,19 @@ pub async fn run(
             model,
         } => {
             let manager = http_service.model_manager();
-
-            let chat_pipeline = common::build_pipeline::<
-                NvCreateChatCompletionRequest,
-                NvCreateChatCompletionStreamResponse,
-            >(model.card(), inner_engine.clone())
-            .await?;
-            manager.add_chat_completions_model(model.service_name(), chat_pipeline)?;
+            match &model.card().prompt_formatter {
+                Some(_prompt_formatter) => {
+                    let chat_pipeline = common::build_pipeline::<
+                        NvCreateChatCompletionRequest,
+                        NvCreateChatCompletionStreamResponse,
+                    >(model.card(), inner_engine.clone())
+                    .await?;
+                    manager.add_chat_completions_model(model.service_name(), chat_pipeline)?;
+                }
+                None => {
+                    tracing::warn!("Chat Completions endpoint can't be deployed: Model tokenizer does not contain chat template.");
+                }
+            }
 
             let cmpl_pipeline = common::build_pipeline::<
                 NvCreateCompletionRequest,
