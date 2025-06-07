@@ -66,7 +66,7 @@ Before pushing code to github remember to run `cargo fmt` and `cargo clippy`
 If you make changes to rust code and want to propogate to python bindings then can use [maturin](https://www.maturin.rs/#usage) (pre-installed). This will update the python bindings with your new rust changes.
 
 ```
-cd /home/ubuntu/dynamo/lib/bindings/python && maturin develop
+cd ~/dynamo/lib/bindings/python && maturin develop
 ```
 
 ## What's Inside
