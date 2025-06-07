@@ -58,7 +58,7 @@ If `post-create.sh` fails, you can try to debug or [submit](https://github.com/a
 If you make changes to rust code and you want to compile, use [cargo build](https://doc.rust-lang.org/cargo/commands/cargo-build.html). This will update rust binaries such as dynamo-run.
 
 ```
-cd /home/ubuntu/dynamo && cargo build --locked --profile dev
+cd ~/dynamo && cargo build --locked --profile dev
 ```
 
 Before pushing code to github remember to run `cargo fmt` and `cargo clippy`
