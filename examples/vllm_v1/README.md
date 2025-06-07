@@ -17,16 +17,15 @@ limitations under the License.
 
 # vLLM Deployment Examples
 
-This directory contains examples for deploying vLLM models in both aggregated and disaggregated configurations.
+This directory contains examples for deploying vLLM models aggregated with with DP.
 
 ## Prerequisites
 
 1. Install vLLM:
 ```bash
-# Note: Currently requires installation from main branch
-# From vLLM 0.8.6 onwards, you can install directly from wheel
 git clone https://github.com/vllm-project/vllm.git
-VLLM_USE_PRECOMPILED=1 uv pip install --editable ./vllm/
+cd vllm && git checkout d459fae0a2c464e28680bc6d564c1de1b295029e
+VLLM_USE_PRECOMPILED=1 uv pip install --editable .
 ```
 
 2. Start required services:
@@ -36,78 +35,46 @@ docker compose -f deploy/metrics/docker-compose.yml up -d
 
 ## Running the Server
 
-### Aggregated Deployment
+### Aggregated Deployment with Multiple disconnected DP engines
+
+Serves the leader AsyncLLM engine + number of dp ranks you specify
 ```bash
 cd examples/vllm_v1
 dynamo serve graphs.agg:Frontend -f configs/agg.yaml
 ```
 
-### Disaggregated Deployment
-```bash
-cd examples/vllm_v1
-dynamo serve graphs.disagg:Frontend -f configs/disagg.yaml
+To run other dp ranks headless on same node or other nodes can run
+
+```
+VLLM_LOGGING_LEVEL=DEBUG CUDA_VISIBLE_DEVICES=1 VLLM_USE_V1=1 vllm serve Qwen/Qwen3-0.6B -dp 1 -dpr 1 --data-parallel-address 127.0.0.1 --data-parallel-rpc-port 62300 --data-parallel-size-local 1 --enforce-eager --headless --kv-events-config '{"enable_kv_cache_events": true, "publisher": "zmq"}' --enable-prefix-caching
 ```
 
-## Testing the API
+To test can run this curl reqeust. KV Routing will mean this will keep routing to a single node, so you will need to switch it up to see routing to different dp workers.
 
-Send a test request using curl:
-```bash
-curl localhost:8000/v1/completions \
+```
+curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    "prompt": "In the heart of Eldoria...",
-    "stream": false,
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [
+    {
+        "role": "user",
+        "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
+    }
+    ],
+    "stream":false,
     "max_tokens": 30
   }'
+  ```
+
+TODO:
+- Currently if you run more than one instance or worker on the same node this will fail because the ZmqKvPublishers will overlap ports, need to add some port offsetting to manage that.
 ```
+  ServiceArgs:
+    workers: 1  # 2 workers not supported
+```
+- It would be best to distill the vLLM serve into a VllmHeadlessWorker using - run_headless(self.engine_args). This is relatively simple, the main difficulty here is if you want to add the ZmqKvEventPublisher to these nodes (which would be easier for multi-node because then you just need to set-up nats and not worry about port stuff) they will have a different lease_id than the leader worker. This is a problem because we don't actually route requests to these dp_ranks directly but in the KV Router and KV Indexer it will see these KVEvents as coming from a seperate "worker". We still need to route the KVEvents through the leader AsyncLLM engine and that engine will take care of routing to the dp ranks.
+  - To address this we could create a concept of worker groups? IE components whose lease_ids are tied to a single leader worker?
+
 
 For more detailed explenations, refer to the main [LLM examples README](../llm/README.md).
-
-
-
-## Deepseek R1
-
-To run DSR1 model please first follow the Ray setup from the [multinode documentation](../../docs/examples/multinode.md).
-
-### Aggregated Deployment
-
-```bash
-cd examples/vllm_v1
-dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/agg.yaml
-```
-
-
-### Disaggregated Deployment
-
-To create frontend with a single decode worker:
-```bash
-cd examples/vllm_v1
-dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/disagg.yaml
-```
-
-To create a single decode worker:
-```bash
-cd examples/vllm_v1
-dynamo serve components.worker:VllmDecodeWorker -f configs/deepseek_r1/disagg.yaml
-```
-
-To create a single prefill worker:
-```bash
-cd examples/vllm_v1
-dynamo serve components.worker:VllmPrefillWorker -f configs/deepseek_r1/disagg.yaml
-```
-
-## Testing
-
-Send a test request using curl:
-```bash
-curl localhost:8000/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "deepseek-ai/DeepSeek-R1",
-    "prompt": "In the heart of Eldoria...",
-    "stream": false,
-    "max_tokens": 30
-  }'
-```

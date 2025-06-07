@@ -23,7 +23,7 @@ from typing import Optional
 
 import uvloop
 from vllm.config import VllmConfig
-from vllm.distributed.kv_events import KVEventsConfig
+from vllm.distributed.kv_events import KVEventsConfig, ZmqEventPublisher
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs import TokensPrompt
 from vllm.sampling_params import SamplingParams
@@ -68,7 +68,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
 
     def __init__(self, component: Component, dp_rank: int) -> None:
         self.inner = WorkerMetricsPublisher()
-        self.inner.create_endpoint(component)
+        self.inner.create_endpoint(component, dp_rank=dp_rank)
         self.dp_rank = dp_rank
 
     def record(
@@ -246,12 +246,33 @@ async def init(runtime: DistributedRuntime, config: Config):
     )
 
     logger.info("VllmWorker has been initialized")
+    base_zmq_endpoint = "tcp://127.0.0.1:5557"
+    dp_rank_size = vllm_config.parallel_config.data_parallel_size
 
-    zmq_config = ZmqKvEventPublisherConfig(
-        worker_id=endpoint.lease_id(), kv_block_size=engine_args.block_size
+    # Store references to prevent garbage collection
+    kv_publishers = []
+
+    for dp_rank in range(dp_rank_size):
+        zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
+            base_zmq_endpoint, data_parallel_rank=dp_rank
+        )
+        zmq_config = ZmqKvEventPublisherConfig(
+            worker_id=endpoint.lease_id(),
+            kv_block_size=engine_args.block_size,
+            zmq_endpoint=zmq_endpoint,
+        )
+
+        try:
+            publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
+            kv_publishers.append(publisher)
+        except Exception as e:
+            logger.error(
+                f"Failed to create ZmqKvEventPublisher for dp_rank {dp_rank}: {e}"
+            )
+
+    logger.debug(
+        f"Successfully created {len(kv_publishers)} ZmqKvEventPublishers out of {dp_rank_size} expected"
     )
-
-    _ = ZmqKvEventPublisher(component=component, config=zmq_config)
 
     handler = RequestHandler(component, engine_client, default_sampling_params)
 
@@ -313,7 +334,7 @@ def cmd_line_args():
     endpoint_str = args.endpoint.replace("dyn://", "", 1)
     endpoint_parts = endpoint_str.split(".")
     if len(endpoint_parts) != 3:
-        logging.error(
+        logger.error(
             f"Invalid endpoint format: '{args.endpoint}'. Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
         )
         sys.exit(1)

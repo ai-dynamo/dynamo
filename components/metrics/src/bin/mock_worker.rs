@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use dynamo_llm::kv_router::{
-    protocols::ForwardPassMetrics, scheduler::KVHitRateEvent, KV_HIT_RATE_SUBJECT,
+    protocols::ForwardPassMetrics, protocols::KVHitRateEvent, KV_HIT_RATE_SUBJECT,
 };
 use dynamo_runtime::{
     component::{service::EndpointStats, Namespace},
@@ -89,7 +89,7 @@ async fn mock_event_publisher(namespace: Namespace) {
         let overlap_blocks = rand::rng().random_range(0..=isl_blocks);
 
         let event = KVHitRateEvent {
-            worker_id,
+            worker: worker_id,
             isl_blocks,
             overlap_blocks,
         };

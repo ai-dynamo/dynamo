@@ -19,23 +19,103 @@ import logging
 import os
 import signal
 import socket
+import uuid
 from typing import Optional
 
 from utils.args import parse_vllm_args
-from utils.protocol import MyRequestOutput, vLLMGenerateRequest
-from vllm.entrypoints.openai.api_server import (
-    build_async_engine_client_from_engine_args,
-)
+from utils.protocol import PreprocessedRequest
+from vllm.config import VllmConfig
+from vllm.distributed.kv_events import KVEventsConfig, ZmqEventPublisher
+from vllm.inputs import TokensPrompt
+from vllm.sampling_params import SamplingParams
+from vllm.usage.usage_lib import UsageContext
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.metrics.loggers import StatLoggerBase
+from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
-from dynamo.sdk import async_on_start, endpoint, service
+from dynamo.llm import (
+    ModelType,
+    WorkerMetricsPublisher,
+    ZmqKvEventPublisher,
+    ZmqKvEventPublisherConfig,
+    register_llm,
+)
+from dynamo.runtime import Component
+from dynamo.sdk import async_on_start, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
+
+
+class DynamoStatLoggerPublisher(StatLoggerBase):
+    """Stat logger publisher. Wrapper for the WorkerMetricsPublisher to match the StatLoggerBase interface."""
+
+    def __init__(self, component: Component, dp_rank: int) -> None:
+        self.inner = WorkerMetricsPublisher()
+        self.inner.create_endpoint(component, dp_rank=dp_rank)
+        self.dp_rank = dp_rank
+
+    def record(
+        self, scheduler_stats: SchedulerStats, iteration_stats: Optional[IterationStats]
+    ):
+        # request_total_slots and kv_total_blocks are properties of model + gpu
+        # we should only publish them once, not every metric update
+        # they should be part of some runtime metadata tied to MDC or put in etcd ?
+        hit_rate = 0
+        if scheduler_stats.prefix_cache_stats.queries > 0:
+            hit_rate = (
+                scheduler_stats.prefix_cache_stats.hits
+                / scheduler_stats.prefix_cache_stats.queries
+            )
+
+        # TODO Manage DP Ranks in metrics aggregation.
+        self.inner.publish(
+            request_active_slots=scheduler_stats.num_running_reqs,
+            request_total_slots=0,  # TODO - remove from metrics
+            kv_active_blocks=0,  # TODO - need to calculate this
+            kv_total_blocks=0,  # TODO - remove from metrics
+            num_requests_waiting=scheduler_stats.num_waiting_reqs,  # used in current cost function
+            gpu_cache_usage_perc=scheduler_stats.gpu_cache_usage,  # used in current cost function
+            gpu_prefix_cache_hit_rate=hit_rate,
+            data_parallel_rank=self.dp_rank,
+        )
+
+    def log_engine_initialized(self) -> None:
+        pass
+
+
+class StatLoggerFactory:
+    """Factory for creating stat logger publishers. Required by vLLM."""
+
+    def __init__(self, component: Component) -> None:
+        self.component = component
+
+    def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
+        return DynamoStatLoggerPublisher(self.component, dp_rank)
+
+    def __call__(self, vllm_config: VllmConfig, dp_rank: int) -> StatLoggerBase:
+        return self.create_stat_logger(dp_rank=dp_rank)
+
+
+BLOCK_SIZE = 16
 
 
 class VllmBaseWorker:
     def __init__(self):
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
+        self.engine_args.kv_events_config = KVEventsConfig(
+            enable_kv_cache_events=True, publisher="zmq"
+        )
+        if not self.engine_args.block_size:
+            logger.info(f"block_size not set, default to {BLOCK_SIZE}")
+            self.engine_args.block_size = BLOCK_SIZE
+
+        os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
+
+        model_config = self.engine_args.create_model_config()
+        self.default_sampling_params = model_config.get_diff_sampling_param()
+
+        self.kv_publishers = []
 
         signal.signal(signal.SIGTERM, self.shutdown_vllm_engine)
         signal.signal(signal.SIGINT, self.shutdown_vllm_engine)
@@ -43,22 +123,67 @@ class VllmBaseWorker:
         self.set_side_channel_host_and_port()
 
     async def async_init(self):
-        self._engine_context = build_async_engine_client_from_engine_args(
-            self.engine_args
+        # Taken from build_async_engine_client_from_engine_args()
+        usage_context = UsageContext.OPENAI_API_SERVER
+        vllm_config = self.engine_args.create_engine_config(usage_context=usage_context)
+
+        await register_llm(
+            ModelType.Backend,
+            dynamo_context["endpoints"][0],
+            self.engine_args.model,
+            self.engine_args.served_model_name[0],
+            context_length=self.engine_args.max_model_len,
+            kv_cache_block_size=self.engine_args.block_size,
         )
-        if self._engine_context is not None:
-            self.engine_client = await self._engine_context.__aenter__()
-        else:
-            raise RuntimeError("Failed to initialize engine client")
+
+        # Explicitly pass our custom stat logger for metrics
+        self.engine_client = AsyncLLM.from_vllm_config(
+            vllm_config=vllm_config,
+            usage_context=usage_context,
+            stat_loggers=[StatLoggerFactory(dynamo_context["component"])],
+            disable_log_requests=self.engine_args.disable_log_requests,
+            disable_log_stats=self.engine_args.disable_log_stats,
+        )
 
         logger.info("VllmWorker has been initialized")
+
+        base_zmq_endpoint = "tcp://127.0.0.1:5557"
+        dp_rank_size = vllm_config.parallel_config.data_parallel_size
+
+        # Store references to prevent garbage collection
+
+        for dp_rank in range(dp_rank_size):
+            zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
+                base_zmq_endpoint, data_parallel_rank=dp_rank
+            )
+            zmq_config = ZmqKvEventPublisherConfig(
+                worker_id=dynamo_context["endpoints"][0].lease_id(),
+                kv_block_size=self.engine_args.block_size,
+                zmq_endpoint=zmq_endpoint,
+            )
+
+            try:
+                publisher = ZmqKvEventPublisher(
+                    component=dynamo_context["component"], config=zmq_config
+                )
+                self.kv_publishers.append(publisher)
+            except Exception as e:
+                logger.error(
+                    f"Failed to create ZmqKvEventPublisher for dp_rank {dp_rank}: {e}"
+                )
+
+        logger.debug(
+            f"Successfully created {len(self.kv_publishers)} ZmqKvEventPublishers out of {dp_rank_size} expected"
+        )
 
     def shutdown_vllm_engine(self, signum, frame):
         """Shutdown the background loop"""
         logger.info(f"Received signal {signum}, shutting down")
         loop = asyncio.get_event_loop()
         try:
-            self.engine_client.close()
+            self.engine_client.shutdown()
+            for publisher in self.kv_publishers:
+                publisher.shutdown()
             logger.info("VllmWorker shutdown complete")
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
@@ -66,25 +191,51 @@ class VllmBaseWorker:
             loop.stop()
 
     @endpoint()
-    async def generate(self, request: vLLMGenerateRequest):
-        gen = self.engine_client.generate(
-            prompt=request.prompt,
-            sampling_params=request.sampling_params,
-            request_id=request.request_id,
-        )
+    async def generate(self, request: PreprocessedRequest):
+        request_id = str(uuid.uuid4().hex)
 
-        async for response in gen:
-            logger.debug(f"Response kv_transfer_params: {response.kv_transfer_params}")
-            yield MyRequestOutput(
-                request_id=response.request_id,
-                prompt=response.prompt,
-                prompt_token_ids=response.prompt_token_ids,
-                prompt_logprobs=response.prompt_logprobs,
-                outputs=response.outputs,
-                finished=response.finished,
-                metrics=response.metrics,
-                kv_transfer_params=response.kv_transfer_params,
-            ).model_dump_json()
+        prompt = TokensPrompt(prompt_token_ids=request.token_ids)
+
+        sampling_params = SamplingParams(**self.default_sampling_params)
+        for key, value in request.sampling_options.model_dump().items():
+            if not value:
+                continue
+            if hasattr(sampling_params, key):
+                setattr(sampling_params, key, value)
+
+        max_tokens = request.stop_conditions.max_tokens
+        if max_tokens:
+            sampling_params.max_tokens = max_tokens
+
+        gen = self.engine_client.generate(
+            prompt=prompt,
+            sampling_params=sampling_params,
+            request_id=request_id,
+            data_parallel_rank=request.dp_rank,
+        )
+        num_output_tokens_so_far = 0
+        async for res in gen:
+            # res is vllm's RequestOutput
+
+            # This is the expected way for a request to end.
+            # The new token ID will be eos, don't forward it.
+            if res.finished:
+                yield {"finish_reason": "stop", "token_ids": []}
+                break
+
+            if not res.outputs:
+                yield {"finish_reason": "error", "token_ids": []}
+                break
+
+            output = res.outputs[0]
+            next_total_toks = len(output.token_ids)
+            out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+            if output.finish_reason:
+                out["finish_reason"] = output.finish_reason
+            if output.stop_reason:
+                out["stop_reason"] = output.stop_reason
+            yield out
+            num_output_tokens_so_far = next_total_toks
 
     def set_side_channel_host_and_port(
         self, hostname: Optional[str] = None, port: Optional[int] = None

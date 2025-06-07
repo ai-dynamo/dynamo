@@ -13,22 +13,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::kv_router::indexer::RouterEvent;
+use crate::kv_router::protocols::*;
 use crate::recorder::Recorder;
 
-// Type alias for backward compatibility
-pub type KvRecorder = Recorder<RouterEvent>;
+// Type alias for backward compatibility, now generic
+pub type KvRecorder<T> = Recorder<RouterEvent<T>>;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::kv_router::indexer::KvIndexer;
-    use crate::kv_router::indexer::WorkerId;
-    use crate::kv_router::protocols::*;
     use std::time::Duration;
     use tempfile::tempdir;
     use tokio::fs;
     use tokio_util::sync::CancellationToken;
+
+    // Use i64 for tests
+    type TestWorkerId = i64;
 
     fn make_blocks(hashes: Vec<u64>) -> Vec<KvCacheStoredBlockData> {
         hashes
@@ -51,11 +52,11 @@ mod tests {
     }
 
     fn create_store_event(
-        worker_id: WorkerId,
+        worker_id: TestWorkerId,
         event_id: u64,
         hashes: Vec<u64>,
         parent: Option<ExternalSequenceBlockHash>,
-    ) -> RouterEvent {
+    ) -> RouterEvent<TestWorkerId> {
         RouterEvent::new(
             worker_id,
             KvCacheEvent {
@@ -65,7 +66,11 @@ mod tests {
         )
     }
 
-    fn create_remove_event(worker_id: WorkerId, event_id: u64, hashes: Vec<u64>) -> RouterEvent {
+    fn create_remove_event(
+        worker_id: TestWorkerId,
+        event_id: u64,
+        hashes: Vec<u64>,
+    ) -> RouterEvent<TestWorkerId> {
         RouterEvent::new(
             worker_id,
             KvCacheEvent {
@@ -88,7 +93,7 @@ mod tests {
 
         // Part 1: Record events to a file
         let token = CancellationToken::new();
-        let recorder = KvRecorder::new(token.clone(), &file_path, None, None, None)
+        let recorder = KvRecorder::<TestWorkerId>::new(token.clone(), &file_path, None, None, None)
             .await
             .unwrap();
         let event_tx = recorder.event_sender();
@@ -128,13 +133,19 @@ mod tests {
         // Part 2: Now create a KvIndexer and load the events from the file
         let indexer_token = CancellationToken::new();
         let kv_block_size = 32; // Default block size for testing
-        let indexer = KvIndexer::new(indexer_token.clone(), kv_block_size);
+        let indexer = KvIndexer::<TestWorkerId>::new(indexer_token.clone(), kv_block_size);
         let indexer_event_tx = indexer.event_sender();
 
         // Use the send_events method to load events from file to indexer
-        let count = KvRecorder::send_events(&file_path, &indexer_event_tx, false, None, None)
-            .await
-            .unwrap();
+        let count = KvRecorder::<TestWorkerId>::send_events(
+            &file_path,
+            &indexer_event_tx,
+            false,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
         assert_eq!(count, 2, "Expected to send 2 events from file to indexer");
     }
 }

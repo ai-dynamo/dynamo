@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use async_once_cell::OnceCell as AsyncOnceCell;
+use dynamo_llm::kv_router::publisher::KvCacheEventWithDp;
 use libc::c_char;
 use once_cell::sync::OnceCell;
 use std::ffi::CStr;
@@ -284,7 +285,12 @@ pub unsafe extern "C" fn dynamo_kv_event_publish_stored(
     };
     let publisher = KV_PUB.get().unwrap();
     let event = kv_event_create_stored_from_parts(kv_params, publisher.kv_block_size());
-    match publisher.publish(event) {
+    // NOTE: dummy dp_rank for now
+    let event_with_dp = KvCacheEventWithDp {
+        kv_cache_event: event,
+        dp_rank: None,
+    };
+    match publisher.publish(event_with_dp) {
         Ok(_) => DynamoLlmResult::OK,
         Err(e) => {
             eprintln!("Error publishing stored kv event {:?}", e);
@@ -301,7 +307,12 @@ pub extern "C" fn dynamo_kv_event_publish_removed(
 ) -> DynamoLlmResult {
     let publisher = KV_PUB.get().unwrap();
     let event = kv_event_create_removed_from_parts(event_id, block_ids, num_blocks);
-    match publisher.publish(event) {
+    // NOTE: dummy dp_rank for now
+    let event_with_dp = KvCacheEventWithDp {
+        kv_cache_event: event,
+        dp_rank: None,
+    };
+    match publisher.publish(event_with_dp) {
         Ok(_) => DynamoLlmResult::OK,
         Err(e) => {
             eprintln!("Error publishing removed kv event {:?}", e);

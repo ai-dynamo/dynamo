@@ -14,8 +14,6 @@
 # limitations under the License.
 
 from components.frontend import Frontend
-from components.simple_load_balancer import SimpleLoadBalancer
 from components.worker import VllmDecodeWorker
 
-load_balancer = Frontend.link(SimpleLoadBalancer)
-load_balancer.link(VllmDecodeWorker)
+Frontend.link(VllmDecodeWorker)
