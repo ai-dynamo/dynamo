@@ -100,7 +100,7 @@ Edit `.devcontainer/devcontainer.json` to modify:
 
 To look at the docs run:
 ```
-cd /home/ubuntu/dynamo/.build/target/doc && python3 -m http.server 8000
+cd ~/dynamo/.build/target/doc && python3 -m http.server 8000
 ```
 
 vscode will automatically port-forward and you can check them out in your browser.
