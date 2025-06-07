@@ -25,6 +25,7 @@ import torch
 from components.encode_worker import VllmEncodeWorker
 from pydantic import BaseModel
 from utils.logging import check_required_workers
+from utils.model import construct_mm_data, get_vision_embeddings_size
 from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
 from utils.protocol import EncodeRequest, EncodeResponse
@@ -39,8 +40,7 @@ from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, servic
 
 logger = logging.getLogger(__name__)
 
-# Constants for the shape and dtype of the embeddings tensor.
-EMBEDDINGS_SHAPE = (1, 577, 4096)
+# Constants for the dtype and device of the embeddings tensor.
 EMBEDDINGS_DTYPE = torch.float16
 EMBEDDINGS_DEVICE = "cuda"
 
@@ -113,8 +113,11 @@ class VllmPrefillWorker:
         await self._connector.initialize()
 
         # Create a longer-lived buffer for receiving the image embeddings.
+        embeddings_shape = get_vision_embeddings_size(
+            self.engine_args.model, self.engine_args.num_patches
+        )
         embeddings = torch.empty(
-            EMBEDDINGS_SHAPE,
+            embeddings_shape,
             dtype=EMBEDDINGS_DTYPE,
             device=EMBEDDINGS_DEVICE,
         )
@@ -248,10 +251,11 @@ class VllmPrefillWorker:
             # To make sure the decode worker can pre-allocate the memory with the correct size for the prefill worker to transfer the kv cache,
             # some placeholder dummy tokens are inserted based on the embedding size in the worker.py.
             # TODO: make this more flexible/model-dependent
-            IMAGE_TOKEN_ID = 32000
             embedding_size = embeddings.shape[1]
             padding_size = embedding_size
-            image_token_index = request.prompt_token_ids.index(IMAGE_TOKEN_ID)
+            image_token_index = request.prompt_token_ids.index(
+                self.engine_args.image_token_id
+            )
             dummy_token_index = image_token_index + 1
             prompt_token_ids = (
                 request.prompt_token_ids[:dummy_token_index]
@@ -262,7 +266,9 @@ class VllmPrefillWorker:
                 request_id=request_id,
                 prompt=TokensPrompt(
                     prompt_token_ids=prompt_token_ids,
-                    multi_modal_data={"image": embeddings},
+                    multi_modal_data=construct_mm_data(
+                        self.engine_args.model, encode_output, embeddings
+                    ),
                 ),
                 sampling_params=sampling_params,
                 remote_prefill_params=remote_prefill_params,

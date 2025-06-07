@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from typing import Any, Dict
+
 import torch
-from transformers import AutoConfig, AutoImageProcessor
+from transformers import AutoConfig
+from utils.protocol import EncodeResponse
 from vllm import AsyncEngineArgs
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.worker.worker import Worker
@@ -41,43 +44,31 @@ def load_vision_model(model_id: str) -> torch.nn.Module:
     return worker.model_runner.model
 
 
-def get_vision_embedding_size(model_id: str) -> int:
-    """Calculate vision embedding size using model config and image processor"""
-    # 1. Get image dimensions from processor
-    image_processor = AutoImageProcessor.from_pretrained(model_id)
-
-    # Handle different processor formats (CLIP, Align, etc.)
-    if hasattr(image_processor, "size"):
-        size_info = image_processor.size
-        if isinstance(size_info, dict):
-            image_size = size_info.get("height", size_info["shortest_edge"])
-        else:
-            image_size = size_info  # Single integer value
-    else:
-        raise ValueError(f"Image size not found in processor for {model_id}")
-
-    # 2. Get patch dimensions from model config
+def get_vision_embeddings_size(model_id: str, num_patches: int) -> tuple[int, int, int]:
+    """Calculate vision embeddings size using model config and image processor
+    Returns a tuple of (batch_size, num_patches, hidden_dim).
+    """
     config = AutoConfig.from_pretrained(model_id)
+    return 1, num_patches, getattr(config, "hidden_size", 4096)
 
-    # Handle different config structures (LLaVA, Qwen-VL, Phi-3V)
-    vision_config = getattr(config, "vision_config", config)
-    patch_size = getattr(vision_config, "patch_size", None)
 
-    if not patch_size:
-        # Fallback for models using spatial/temporal patches (e.g., video)
-        patch_size = getattr(vision_config, "spatial_patch_size", 14)
-
-    # 3. Calculate grid dimensions
-    if isinstance(image_size, (list, tuple)):
-        h, w = image_size[:2]
+def construct_mm_data(
+    model: str, encode_output: EncodeResponse, image_embeds: torch.Tensor
+) -> Dict[str, torch.Tensor | Dict[str, Any]]:
+    """Construct multimodal data for a vLLM request for models that require additional parameters alongside the embeddings"""
+    if "Qwen2" in model:
+        return {
+            "image": {
+                "image_embeds": image_embeds.squeeze(0),
+                "image_grid_thw": torch.tensor(encode_output.image_grid_thw),
+            }
+        }
+    elif "MiniCPM-V" in model:
+        return {
+            "image": {
+                "image_embeds": image_embeds,
+                "image_sizes": encode_output.image_sizes,
+            }
+        }
     else:
-        h = w = image_size
-
-    if isinstance(patch_size, (list, tuple)):
-        ph, pw = patch_size[:2]
-    else:
-        ph = pw = patch_size
-
-    num_patches = (h // ph) * (w // pw)
-
-    return num_patches
+        return {"image": image_embeds}

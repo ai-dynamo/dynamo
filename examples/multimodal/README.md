@@ -51,7 +51,7 @@ flowchart LR
 
 ```bash
 cd $DYNAMO_HOME/examples/multimodal
-dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
+dynamo serve graphs.agg:Frontend -f ./configs/agg-llava.yaml
 ```
 
 ### Client
@@ -80,6 +80,7 @@ curl http://localhost:8000/v1/chat/completions \
         }
       ],
       "max_tokens": 300,
+      "temperature": 0.0,
       "stream": false
     }'
 ```
@@ -195,7 +196,7 @@ DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk
 # Deploy to Kubernetes
 export DEPLOYMENT_NAME=multimodal-agg
 # For aggregated serving:
-dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
+dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg-llava.yaml
 # For disaggregated serving:
 # export DEPLOYMENT_NAME=multimodal-disagg
 # dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/disagg.yaml

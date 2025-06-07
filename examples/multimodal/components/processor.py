@@ -211,6 +211,7 @@ class Processor(ProcessMixIn):
             messages=[msg],
             stream=raw_request.stream,
             max_tokens=raw_request.max_tokens,
+            temperature=raw_request.temperature,
             request_id=str(uuid.uuid4()),
         )
         image_url = None
