@@ -299,15 +299,18 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                         }
                     }
 
-                    let target_blocks = match target_pool.allocate_blocks(1).await {
-                        Ok(blocks) => blocks,
-                        Err(_) => {
-                        tracing::warn!("Target pool full. Skipping offload. This should only ever happen with very small pool sizes.");
-                            continue;
+                    let target_block = 'target_block: {
+                        if let Ok(blocks) = target_pool.allocate_blocks(1).await {
+                            if let Some(block) = blocks.into_iter().next() {
+                                break 'target_block Some(block);
+                            }
                         }
+
+                        tracing::warn!("Target pool full. Skipping offload. This should only ever happen with very small pool sizes.");
+                        None
                     };
 
-                    if let Some(target_block) = target_blocks.into_iter().next() {
+                    if let Some(target_block) = target_block {
                         transfer_manager
                             .enqueue_transfer(PendingTransfer::new(
                                 vec![block],
