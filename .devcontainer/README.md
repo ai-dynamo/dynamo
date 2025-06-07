@@ -53,6 +53,22 @@ Make sure HF_HOME is sourced in your .bashrc or .zshenv and your vscode default 
 
 If `post-create.sh` fails, you can try to debug or [submit](https://github.com/ai-dynamo/dynamo/issues) an issue on github.
 
+## Development Flow
+
+If you make changes to rust code and you want to compile, use [cargo build](https://doc.rust-lang.org/cargo/commands/cargo-build.html). This will update rust binaires such as dynamo-run.
+
+```
+cd /home/ubuntu/dynamo && cargo build --locked --profile dev
+```
+
+Before pushing code to github remember to run `cargo fmt` and `cargo clippy`
+
+If you make changes to rust code and want to propogate to python bindings then can use [maturin](https://www.maturin.rs/#usage) (pre-installed). This will update the python bindings with your new rust changes.
+
+```
+cd /home/ubuntu/dynamo/lib/bindings/python && maturin develop
+```
+
 ## What's Inside
 Development Environment:
 - Rust and Python toolchains
@@ -79,6 +95,15 @@ Edit `.devcontainer/devcontainer.json` to modify:
 - Environment variables
 - Container configuration
 - Custom Mounts
+
+## Documentation
+
+To look at the docs run:
+```
+cd /home/ubuntu/dynamo/.build/target/doc && python3 -m http.server 8000
+```
+
+vscode will automatically port-forward and you can check them out in your browser.
 
 ## FAQ
 
