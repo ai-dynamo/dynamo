@@ -66,23 +66,6 @@ cd $HOME/dynamo && retry env DYNAMO_BIN_PATH=$HOME/dynamo/.build/target/debug uv
 
 export PYTHONPATH=/home/ubuntu/dynamo/components/planner/src:$PYTHONPATH
 
-# Add to bashrc only if not already present
-if ! grep -q "Activate dynamo venv with proper prompt handling" ~/.bashrc; then
-    cat >> ~/.bashrc << 'EOF'
-# Activate dynamo venv with proper prompt handling
-if [[ "$VIRTUAL_ENV" == "/opt/dynamo/venv" ]] && [[ "$(type -t deactivate)" != "function" ]]; then
-    # VIRTUAL_ENV is set but activation script hasn't been sourced
-    source /opt/dynamo/venv/bin/activate
-elif [[ "$VIRTUAL_ENV" != "/opt/dynamo/venv" ]]; then
-    # Different or no virtual env, activate ours
-    if [[ -n "$VIRTUAL_ENV" ]] && [[ "$(type -t deactivate)" == "function" ]]; then
-        deactivate
-    fi
-    source /opt/dynamo/venv/bin/activate
-fi
-EOF
-fi
-
 # TODO: Deprecated except vLLM v0
 if ! grep -q "export VLLM_KV_CAPI_PATH=" ~/.bashrc; then
     echo "export VLLM_KV_CAPI_PATH=$HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so" >> ~/.bashrc
