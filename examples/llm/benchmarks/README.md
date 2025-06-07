@@ -174,6 +174,20 @@ Run the benchmarking script
 bash -x /workspace/examples/llm/benchmarks/perf.sh
 ```
 
+## Monitor Benchmark Startup Status
+
+When running dynamo deployment, you may have multiple instances of the same worker kind for a particular benchmark run.
+The deployment can process the workflow as long as at least one worker is ready, in the case where the benchmark is run
+as soon as dynamo is responsive to inference request, which may result in inaccurate benchmark result at the beginning of
+the benchmark. In such a case, you may additionally deploy benchmark watcher to provide signal on whether the full deployment
+is ready. For instance, if you expect the total number of prefill and decode workers to be 10, you can run the below to start
+the watcher, which will exit if the total number is less than 10 after timeout. In addition to that, the watcher will create
+a HTTP server on port 7001 by default, which you can use to send GET request for readiness to build external benchmarking workflow.
+
+```bash
+dynamo serve --service-name Watcher benchmark_watcher:Watcher --Watcher.total-workers="10"
+```
+
 ## Future Roadmap
 
 * Results Interpretation
