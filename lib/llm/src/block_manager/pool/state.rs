@@ -63,6 +63,13 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
                     tracing::error!("failed to send response to match sequence hashes");
                 }
             }
+            PriorityRequest::NumFreeBlocks(req) => {
+                let (_, resp_tx) = req.dissolve();
+                let num_free_blocks = self.num_free_blocks().await;
+                if resp_tx.send(num_free_blocks).is_err() {
+                    tracing::error!("failed to send response to num free blocks");
+                }
+            }
         }
     }
 
@@ -240,6 +247,10 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
         }
 
         immutable_blocks
+    }
+
+    async fn num_free_blocks(&self) -> usize {
+        self.inactive.available_blocks() as usize
     }
 
     /// Returns a block to the inactive pool
