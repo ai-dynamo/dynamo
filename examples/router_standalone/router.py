@@ -20,9 +20,9 @@ import logging
 
 import numpy as np
 import zmq
+from vllm.inputs.data import TokensPrompt
 
 from dynamo._core import RadixTree, ZmqKvEventListener, compute_block_hash_for_seq_py
-from vllm.inputs.data import TokensPrompt
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +55,10 @@ class KvRouter:
         self.kv_usages = [0.0] * num_workers
         self.waitings = [0] * num_workers
 
-        context = zmq.Context()
+        self.context = zmq.Context()  # Store context as instance variable
         self.load_listeners = [
             setup_zmq_subscriber(
-                context, f"tcp://localhost:{base_metrics_port + worker_id}"
+                self.context, f"tcp://localhost:{base_metrics_port + worker_id}"
             )
             for worker_id in range(num_workers)
         ]
@@ -113,6 +113,9 @@ class KvRouter:
     async def get_best_worker(self, prompt: TokensPrompt) -> int:
         # Run tokenization in a separate thread to avoid blocking the event loop
         tokens = prompt["prompt_token_ids"]
+        if not tokens:
+            raise ValueError("Tokens is invalid or empty.")
+
         local_hashes = compute_block_hash_for_seq_py(tokens, self.block_size)
         num_tokens = len(tokens)
 
@@ -153,3 +156,23 @@ class KvRouter:
             self.waitings[best_worker_id] += 1
 
         return best_worker_id
+
+    def shutdown(self):
+        """Shutdown ZMQ listeners and context"""
+        logger.info("Shutting down KvRouter...")
+
+        # Close load listeners (ZMQ sockets)
+        for listener in self.load_listeners:
+            try:
+                listener.close()
+            except Exception as e:
+                logger.error(f"Error closing load listener: {e}")
+
+        # Terminate ZMQ context
+        try:
+            self.context.term()
+            logger.info("ZMQ context terminated successfully")
+        except Exception as e:
+            logger.error(f"Error terminating ZMQ context: {e}")
+
+        logger.info("KvRouter shutdown completed")

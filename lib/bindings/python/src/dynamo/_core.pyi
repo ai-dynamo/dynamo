@@ -431,7 +431,26 @@ class OverlapScores:
     'scores' is a map of worker id to the score which is the number of matching blocks.
     """
 
-    ...
+    @property
+    def scores(self) -> Dict[int, int]:
+        """
+        Map of worker_id to the score which is the number of matching blocks.
+
+        Returns:
+            Dictionary mapping worker IDs to their overlap scores
+        """
+        ...
+
+    @property
+    def frequencies(self) -> List[int]:
+        """
+        List of frequencies that the blocks have been accessed.
+        Entries with value 0 are omitted.
+
+        Returns:
+            List of access frequencies for each block
+        """
+        ...
 
 class RadixTree:
     """

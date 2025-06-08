@@ -24,8 +24,6 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from router import KvRouter
-from worker import VllmWorkers
-
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
@@ -35,6 +33,7 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.transformers_utils.tokenizer import get_tokenizer
+from worker import VllmWorkers
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +59,8 @@ class RouterAPI:
         self.tokenizer = None
         self.openai_serving_chat = None
         self.model_config = None
+
+        self.background_tasks = []
 
         self.setup_routes()
 
@@ -172,8 +173,12 @@ class RouterAPI:
 
         # Start router background tasks
         logger.info("Starting router background tasks...")
-        asyncio.create_task(self.router.periodic_update_load())
-        asyncio.create_task(self.router.periodic_update_indexer())
+        self.background_tasks.append(
+            asyncio.create_task(self.router.periodic_update_load())
+        )
+        self.background_tasks.append(
+            asyncio.create_task(self.router.periodic_update_indexer())
+        )
 
         logger.info("Initializing OpenAI serving components...")
         # Initialize tokenizer and model config
@@ -226,6 +231,21 @@ class RouterAPI:
         server = uvicorn.Server(config)
         await server.serve()
 
+    async def shutdown(self):
+        """Proper shutdown handler"""
+        logger.info("Shutting down background tasks...")
+
+        if self.router is not None:
+            self.router.shutdown()
+
+        for task in self.background_tasks:
+            task.cancel()
+
+        await asyncio.gather(*self.background_tasks, return_exceptions=True)
+        logger.info("All background tasks shut down successfully")
+
+        logger.info("Router API shutdown completed")
+
 
 def main():
     parser = argparse.ArgumentParser(description="Router API Server")
@@ -272,10 +292,21 @@ def main():
 
     api = RouterAPI(init_params=init_params, port=args.http_port)
 
+    async def run_with_shutdown():
+        try:
+            await api.start()
+        except KeyboardInterrupt:
+            logger.info("Received KeyboardInterrupt, shutting down API server...")
+        except Exception as e:
+            logger.exception(f"Unhandled exception: {e}")
+        finally:
+            await api.shutdown()
+
     try:
-        asyncio.run(api.start())
+        asyncio.run(run_with_shutdown())
     except KeyboardInterrupt:
-        logger.info("Shutting down API server...")
+        # Just in case KeyboardInterrupt happens outside of the event loop
+        logger.info("Force shutdown via KeyboardInterrupt.")
 
 
 if __name__ == "__main__":
