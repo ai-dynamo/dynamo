@@ -44,7 +44,7 @@ These events keep the router's view of worker state up-to-date in real-time.
 
 ### Alternative: Pure Predictive Routing
 
-While not implemented in this example, the router can also operate in a pure predictive mode, estimating the radix tree state and loads based solely on the requests it receives, without relying on backend events.
+While not implemented in this example, the router can also operate in a pure predictive mode, estimating the radix tree state and loads based solely on the requests it receives, without relying on backend events. This requires simulating / mocking the block managing (e.g. eviction) and the scheduling policies of the backend engine. This is not recommended as there is no real-time feedback from the engines, and the router state may drift out of sync with the engine states. Nevertheless, this is WIP and can be supported in the future via our mocker engines.
 
 ## Components
 
