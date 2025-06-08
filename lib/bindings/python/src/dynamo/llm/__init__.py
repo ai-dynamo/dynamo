@@ -35,6 +35,7 @@ from dynamo._core import ModelType as ModelType
 from dynamo._core import OverlapScores as OverlapScores
 from dynamo._core import RadixTree as RadixTree
 from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher
+from dynamo._core import ZmqKvEventListener as ZmqKvEventListener
 from dynamo._core import ZmqKvEventPublisher as ZmqKvEventPublisher
 from dynamo._core import ZmqKvEventPublisherConfig as ZmqKvEventPublisherConfig
 from dynamo._core import register_llm as register_llm

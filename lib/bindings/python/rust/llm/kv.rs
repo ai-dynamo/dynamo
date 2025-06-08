@@ -191,6 +191,70 @@ impl ZmqKvEventPublisher {
     }
 }
 
+/// A ZMQ-based key-value cache event listener that operates independently
+/// of the dynamo runtime or event plane infrastructure.
+#[pyclass]
+pub(crate) struct ZmqKvEventListener {
+    event_receiver: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<KvCacheEvent>>>,
+    shutdown_token: tokio_util::sync::CancellationToken,
+}
+
+#[pymethods]
+impl ZmqKvEventListener {
+    #[new]
+    fn new(zmq_endpoint: String, zmq_topic: String, kv_block_size: usize) -> PyResult<Self> {
+        let runtime = pyo3_async_runtimes::tokio::get_runtime();
+        runtime.block_on(async {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<KvCacheEvent>();
+            let shutdown_token = tokio_util::sync::CancellationToken::new();
+
+            tokio::spawn(llm_rs::kv_router::publisher::start_zmq_listener(
+                zmq_endpoint,
+                zmq_topic,
+                tx,
+                shutdown_token.clone(),
+                kv_block_size,
+            ));
+
+            Ok(Self {
+                event_receiver: Arc::new(tokio::sync::Mutex::new(rx)),
+                shutdown_token,
+            })
+        })
+    }
+
+    fn get_events<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let receiver = self.event_receiver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut rx = receiver.lock().await;
+            let mut events = Vec::new();
+
+            // Drain all available events
+            while let Ok(event) = rx.try_recv() {
+                events.push(event);
+            }
+
+            // Convert events to JSON strings
+            let json_events: Result<Vec<String>, _> =
+                events.iter().map(serde_json::to_string).collect();
+
+            match json_events {
+                Ok(json_strings) => Ok(json_strings),
+                Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Failed to serialize events to JSON: {}",
+                    e
+                ))),
+            }
+        })
+    }
+}
+
+impl Drop for ZmqKvEventListener {
+    fn drop(&mut self) {
+        self.shutdown_token.cancel();
+    }
+}
+
 #[pyclass]
 pub(crate) struct KvEventPublisher {
     inner: Arc<llm_rs::kv_router::publisher::KvEventPublisher>,
