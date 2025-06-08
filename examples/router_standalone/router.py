@@ -32,8 +32,8 @@ def setup_zmq_subscriber(context: zmq.Context, endpoint: str) -> zmq.Socket[byte
     socket = context.socket(zmq.SUB)
     socket.connect(endpoint)
     socket.setsockopt(zmq.SUBSCRIBE, b"")  # Subscribe to all messages
-    socket.setsockopt(zmq.RCVTIMEO, 10)  # 10ms timeout for non-blocking
-
+    socket.setsockopt(zmq.CONFLATE, 1)  # Only keep latest message
+    socket.setsockopt(zmq.RCVTIMEO, 1)  # 1ms timeout (very short)
     return socket
 
 
