@@ -385,6 +385,7 @@ impl Endpoint {
     pub fn id(&self) -> EndpointId {
         EndpointId {
             namespace: self.component.namespace().name().to_string(),
+            group: self.component.group.name().to_string(),
             component: self.component.name().to_string(),
             name: self.name().to_string(),
         }

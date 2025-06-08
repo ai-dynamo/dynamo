@@ -25,6 +25,8 @@ pub type LeaseId = i64;
 /// Default namespace if user does not provide one
 const DEFAULT_NAMESPACE: &str = "NS";
 
+pub const DEFAULT_GROUP: &str = "primary";
+
 const DEFAULT_COMPONENT: &str = "C";
 
 const DEFAULT_ENDPOINT: &str = "E";
@@ -40,30 +42,32 @@ pub struct Component {
     pub namespace: String,
 }
 
-/// Represents an endpoint with a namespace, component, and name.
+/// Represents an endpoint with a namespace, group, component, and name.
 ///
-/// An `Endpoint` is defined by a three-part string separated by `/` or a '.':
+/// An `Endpoint` is defined by a four-part string separated by `/` or a '.':
 /// - **namespace**
+/// - **group**
 /// - **component**
 /// - **name**
 ///
-/// Example format: `"namespace/component/endpoint"`
+/// Example format: `"namespace/group/component/endpoint"`
 ///
 /// TODO: There is also an Endpoint in runtime/src/component.rs
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 pub struct Endpoint {
     pub namespace: String,
+    pub group: String,
     pub component: String,
     pub name: String,
 }
 
 impl PartialEq<Vec<&str>> for Endpoint {
     fn eq(&self, other: &Vec<&str>) -> bool {
-        if other.len() != 3 {
+        if other.len() != 4 {
             return false;
         }
 
-        self.namespace == other[0] && self.component == other[1] && self.name == other[2]
+        self.namespace == other[0] && self.group == other[1] && self.component == other[2] && self.name == other[3]
     }
 }
 
@@ -77,6 +81,7 @@ impl Default for Endpoint {
     fn default() -> Self {
         Endpoint {
             namespace: DEFAULT_NAMESPACE.to_string(),
+            group: DEFAULT_GROUP.to_string(),
             component: DEFAULT_COMPONENT.to_string(),
             name: DEFAULT_ENDPOINT.to_string(),
         }
@@ -87,25 +92,24 @@ impl From<&str> for Endpoint {
     /// Creates an `Endpoint` from a string.
     ///
     /// # Arguments
-    /// - `path`: A string in the format `"namespace/component/endpoint"`.
+    /// - `path`: A string in the format `"namespace/group/component/endpoint"`.
     ///
-    /// The first two parts become the first two elements of the vector.
-    /// The third and subsequent parts are joined with '_' and become the third element.
     /// Default values are used for missing parts.
     ///
     /// # Examples:
-    /// - "component" -> ["DEFAULT_NS", "component", "DEFAULT_E"]
-    /// - "namespace.component" -> ["namespace", "component", "DEFAULT_E"]
-    /// - "namespace.component.endpoint" -> ["namespace", "component", "endpoint"]
-    /// - "namespace/component" -> ["namespace", "component", "DEFAULT_E"]
-    /// - "namespace.component.endpoint.other.parts" -> ["namespace", "component", "endpoint_other_parts"]
+    /// - "component" -> ["DEFAULT_NS", "DEFAULT_GROUP", "component", "DEFAULT_E"]
+    /// - "namespace.group.component" -> ["namespace", "group", "component", "DEFAULT_E"]
+    /// - "namespace.group.component.endpoint" -> ["namespace", "group", "component", "endpoint"]
+    /// - "namespace/group/component" -> ["namespace", "group", "component", "DEFAULT_E"]
+    /// - "namespace.group.component.endpoint.other.parts" -> ["namespace", "group", "component", "endpoint_other_parts"]
     ///
     /// # Examples
     /// ```ignore
     /// use dynamo_runtime:protocols::Endpoint;
     ///
-    /// let endpoint = Endpoint::from("namespace/component/endpoint");
+    /// let endpoint = Endpoint::from("namespace/group/component/endpoint");
     /// assert_eq!(endpoint.namespace, "namespace");
+    /// assert_eq!(endpoint.group, "group");
     /// assert_eq!(endpoint.component, "component");
     /// assert_eq!(endpoint.name, "endpoint");
     /// ```
@@ -130,13 +134,20 @@ impl From<&str> for Endpoint {
             }
             3 => {
                 result.namespace = elements[0].to_string();
-                result.component = elements[1].to_string();
-                result.name = elements[2].to_string();
+                result.group = elements[1].to_string();
+                result.component = elements[2].to_string();
             }
-            x if x > 3 => {
+            4 => {
                 result.namespace = elements[0].to_string();
-                result.component = elements[1].to_string();
-                result.name = elements[2..].join("_");
+                result.group = elements[1].to_string();
+                result.component = elements[2].to_string();
+                result.name = elements[3].to_string();
+            }
+            x if x > 4 => {
+                result.namespace = elements[0].to_string();
+                result.group = elements[1].to_string();
+                result.component = elements[2].to_string();
+                result.name = elements[3..].join("_");
             }
             _ => unreachable!(),
         }
@@ -159,11 +170,12 @@ impl FromStr for Endpoint {
     /// use std::str::FromStr;
     /// use dynamo_runtime:protocols::Endpoint;
     ///
-    /// let endpoint: Endpoint = "namespace/component/endpoint".parse().unwrap();
+    /// let endpoint: Endpoint = "namespace/group/component/endpoint".parse().unwrap();
     /// assert_eq!(endpoint.namespace, "namespace");
+    /// assert_eq!(endpoint.group, "group");
     /// assert_eq!(endpoint.component, "component");
     /// assert_eq!(endpoint.name, "endpoint");
-    /// let endpoint: Endpoint = "dyn://namespace/component/endpoint".parse().unwrap();
+    /// let endpoint: Endpoint = "dyn://namespace/group/component/endpoint".parse().unwrap();
     /// // same as above
     /// assert_eq!(endpoint.name, "endpoint");
     /// ```
@@ -174,11 +186,11 @@ impl FromStr for Endpoint {
 }
 
 impl Endpoint {
-    /// As a String like dyn://dynamo.internal.worker
+    /// As a String like dyn://dynamo.internal.worker.endpoint
     pub fn as_url(&self) -> String {
         format!(
-            "{ENDPOINT_SCHEME}{}.{}.{}",
-            self.namespace, self.component, self.name
+            "{ENDPOINT_SCHEME}{}.{}.{}.{}",
+            self.namespace, self.group, self.component, self.name
         )
     }
 }
@@ -191,30 +203,33 @@ mod tests {
 
     #[test]
     fn test_valid_endpoint_from() {
-        let input = "namespace1/component1/endpoint1";
+        let input = "namespace1/group1/component1/endpoint1";
         let endpoint = Endpoint::from(input);
 
         assert_eq!(endpoint.namespace, "namespace1");
+        assert_eq!(endpoint.group, "group1");
         assert_eq!(endpoint.component, "component1");
         assert_eq!(endpoint.name, "endpoint1");
     }
 
     #[test]
     fn test_valid_endpoint_from_str() {
-        let input = "namespace2/component2/endpoint2";
+        let input = "namespace2/group2/component2/endpoint2";
         let endpoint = Endpoint::from_str(input).unwrap();
 
         assert_eq!(endpoint.namespace, "namespace2");
+        assert_eq!(endpoint.group, "group2");
         assert_eq!(endpoint.component, "component2");
         assert_eq!(endpoint.name, "endpoint2");
     }
 
     #[test]
     fn test_valid_endpoint_parse() {
-        let input = "namespace3/component3/endpoint3";
+        let input = "namespace3/group3/component3/endpoint3";
         let endpoint: Endpoint = input.parse().unwrap();
 
         assert_eq!(endpoint.namespace, "namespace3");
+        assert_eq!(endpoint.group, "group3");
         assert_eq!(endpoint.component, "component3");
         assert_eq!(endpoint.name, "endpoint3");
     }
@@ -224,36 +239,36 @@ mod tests {
         let result = Endpoint::from("component");
         assert_eq!(
             result,
-            vec![DEFAULT_NAMESPACE, "component", DEFAULT_ENDPOINT]
+            vec![DEFAULT_NAMESPACE, DEFAULT_GROUP, "component", DEFAULT_ENDPOINT]
         );
     }
 
     #[test]
-    fn test_namespace_component_endpoint() {
-        let result = Endpoint::from("namespace.component.endpoint");
-        assert_eq!(result, vec!["namespace", "component", "endpoint"]);
+    fn test_namespace_group_component_endpoint() {
+        let result = Endpoint::from("namespace.group.component.endpoint");
+        assert_eq!(result, vec!["namespace", "group", "component", "endpoint"]);
     }
 
     #[test]
     fn test_forward_slash_separator() {
-        let result = Endpoint::from("namespace/component");
-        assert_eq!(result, vec!["namespace", "component", DEFAULT_ENDPOINT]);
+        let result = Endpoint::from("namespace/group/component");
+        assert_eq!(result, vec!["namespace", "group", "component", DEFAULT_ENDPOINT]);
     }
 
     #[test]
     fn test_multiple_parts() {
-        let result = Endpoint::from("namespace.component.endpoint.other.parts");
+        let result = Endpoint::from("namespace.group.component.endpoint.other.parts");
         assert_eq!(
             result,
-            vec!["namespace", "component", "endpoint_other_parts"]
+            vec!["namespace", "group", "component", "endpoint_other_parts"]
         );
     }
 
     #[test]
     fn test_mixed_separators() {
         // Do it the .into way for variety and documentation
-        let result: Endpoint = "namespace/component.endpoint".into();
-        assert_eq!(result, vec!["namespace", "component", "endpoint"]);
+        let result: Endpoint = "namespace/group/component.endpoint".into();
+        assert_eq!(result, vec!["namespace", "group", "component", "endpoint"]);
     }
 
     #[test]
@@ -261,14 +276,14 @@ mod tests {
         let result = Endpoint::from("");
         assert_eq!(
             result,
-            vec![DEFAULT_NAMESPACE, DEFAULT_COMPONENT, DEFAULT_ENDPOINT]
+            vec![DEFAULT_NAMESPACE, DEFAULT_GROUP, DEFAULT_COMPONENT, DEFAULT_ENDPOINT]
         );
 
         // White space is equivalent to an empty string
         let result = Endpoint::from("   ");
         assert_eq!(
             result,
-            vec![DEFAULT_NAMESPACE, DEFAULT_COMPONENT, DEFAULT_ENDPOINT]
+            vec![DEFAULT_NAMESPACE, DEFAULT_GROUP, DEFAULT_COMPONENT, DEFAULT_ENDPOINT]
         );
     }
 }
