@@ -102,6 +102,9 @@ async fn create_barrier_key<T: Serialize>(
     let serialized_data =
         serde_json::to_vec(&data).map_err(LeaderWorkerBarrierError::SerdeError)?;
 
+    // TODO: This can fail for many reasons, the most common of which is that the key already exists.
+    // Currently, the ETCD client returns a very generic error, so we can't distinguish between the them.
+    // For now, just assume it's because the key already exists.
     client
         .kv_create(key, serialized_data, lease_id)
         .await
@@ -116,6 +119,7 @@ async fn create_worker_key(
     key: &str,
     lease_id: Option<i64>,
 ) -> Result<(), LeaderWorkerBarrierError> {
+    // TODO: Same as above. This can fail for many reasons.
     client
         .kv_create(key.to_owned(), serde_json::to_vec(&()).unwrap(), lease_id)
         .await
