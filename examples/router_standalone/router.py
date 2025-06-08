@@ -21,9 +21,8 @@ from typing import Any
 
 import numpy as np
 import zmq
-from vllm.inputs.data import TokensPrompt
 
-from dynamo._core import RadixTree, ZmqKvEventListener, compute_block_hash_for_seq_py
+from dynamo._core import RadixTree, ZmqKvEventListener
 
 logger = logging.getLogger(__name__)
 
@@ -117,15 +116,8 @@ class KvRouter:
         for worker_id in range(self.num_workers):
             asyncio.create_task(update_tree(worker_id))
 
-    async def get_best_worker(self, prompt: TokensPrompt) -> int:
+    async def get_best_worker(self, local_hashes: list[int], num_tokens: int) -> int:
         # Run tokenization in a separate thread to avoid blocking the event loop
-        tokens: list[int] = prompt["prompt_token_ids"]
-        if not tokens:
-            raise ValueError("Tokens is invalid or empty.")
-
-        local_hashes = compute_block_hash_for_seq_py(tokens, self.block_size)
-        num_tokens = len(tokens)
-
         async with self._radix_lock:
             raw_scores = self.radix_tree.find_matches(local_hashes).scores
         overlap_scores = {

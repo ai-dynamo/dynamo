@@ -35,6 +35,8 @@ from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingM
 from vllm.transformers_utils.tokenizer import get_tokenizer
 from worker import VllmWorkers
 
+from dynamo._core import compute_block_hash_for_seq_py
+
 logger = logging.getLogger(__name__)
 
 
@@ -120,8 +122,23 @@ class RouterAPI:
                 )
 
                 # Get best worker using router
-                worker_id = await self.router.get_best_worker(engine_prompt)
-                logger.info(f"Selected worker {worker_id} for request")
+                tokens: list[int] = engine_prompt["prompt_token_ids"]
+                num_tokens = len(tokens)
+                if num_tokens == 0:
+                    raise ValueError("Input is empty.")
+
+                # It is much preferred to communicate block hashes to the router instead of
+                # raw text prompts or tokens, especially when over network using pydantic validation,
+                # as block hashes can be orders of magnitude smaller.
+                # Note that the hashing function needs to be deterministic (across processes),
+                # and has to be consistent with the hashing function used to send KV Events to the Router.
+                local_hashes = compute_block_hash_for_seq_py(
+                    tokens, self.init_params.block_size
+                )
+                best_worker_id = await self.router.get_best_worker(
+                    local_hashes, num_tokens
+                )
+                logger.info(f"Selected worker {best_worker_id} for request")
 
                 # Generate request ID
                 request_id = f"chatcmpl-{uuid.uuid4()}"
@@ -129,7 +146,7 @@ class RouterAPI:
 
                 # Get the generator from the selected worker with sampling params
                 result_generator = self.workers.direct(
-                    engine_prompt, worker_id, sampling_params
+                    engine_prompt, best_worker_id, sampling_params
                 )
                 assert request.stream
 
