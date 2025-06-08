@@ -24,6 +24,7 @@ osl=100
 
 concurrency=25
 num_requests=100
+num_unique_prompts=10
 
 seed=42
 
@@ -44,7 +45,7 @@ genai-perf profile \
   --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
   --concurrency ${concurrency} \
   --request-count ${num_requests} \
-  --num-dataset-entries ${num_requests} \
+  --num-dataset-entries ${num_unique_prompts} \
   --random-seed ${seed} \
   -- \
   -v \

@@ -238,7 +238,7 @@ def main():
 
     # API-specific arguments
     parser.add_argument(
-        "--port", type=int, default=8000, help="Port to serve the API on"
+        "--http-port", type=int, default=8000, help="Port to serve the API on"
     )
 
     args = parser.parse_args()
@@ -254,7 +254,7 @@ def main():
         base_metrics_port=args.base_metrics_port,
     )
 
-    api = RouterAPI(init_params=init_params, port=args.port)
+    api = RouterAPI(init_params=init_params, port=args.http_port)
 
     try:
         asyncio.run(api.start())
