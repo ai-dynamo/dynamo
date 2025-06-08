@@ -258,6 +258,7 @@ async fn list_models(
         distributed.clone(),
         Arc::new(ModelManager::new()),
         RouterMode::Random,
+        None,
     );
 
     let mut models = Vec::new();
@@ -313,6 +314,7 @@ async fn remove_model(
         distributed.clone(),
         Arc::new(ModelManager::new()),
         RouterMode::Random,
+        None,
     );
     let Some(etcd_client) = distributed.etcd_client() else {
         anyhow::bail!("llmctl is only useful with dynamic workers");

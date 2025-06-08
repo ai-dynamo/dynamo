@@ -26,6 +26,7 @@ Frontend:
 Processor:
   router: round-robin
   common-configs: [model, block-size]
+  prompt-template: "USER: <image>\n<prompt> ASSISTANT:"
 
 VllmWorker:
   remote-prefill: true

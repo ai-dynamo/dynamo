@@ -46,3 +46,23 @@ def test_gpu_resources(setup_and_teardown):
     assert dyn_svc.config.resources.cpu == "2"
     assert dyn_svc.config.resources.gpu == "1"
     assert dyn_svc.config.resources.memory == "4Gi"
+
+
+def test_gpu_resources_coercing_from_integers(setup_and_teardown):
+    """Test resource configurations"""
+
+    from dynamo.sdk import service
+
+    @service(
+        resources={"cpu": 3, "gpu": 4, "memory": "4Gi"},
+        dynamo={"namespace": "test"},
+    )
+    class MockService:
+        def __init__(self) -> None:
+            pass
+
+    dyn_svc: ServiceInterface = MockService
+    assert dyn_svc.config is not None  # type: ignore
+    assert dyn_svc.config.resources.cpu == "3"
+    assert dyn_svc.config.resources.gpu == "4"
+    assert dyn_svc.config.resources.memory == "4Gi"

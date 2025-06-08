@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -13,4 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-nats-py
+# This is a sample config for TensorRT-LLM engine.
+# The config provides smaller free_gpu_memory_fraction to ensure that the engine
+# does not use all the GPU memory and both prefill and decode workers can fit in
+# the GPU memory when running in disaggregated mode.
+# You might have to tweak this config based on your model size and GPU memory.
+
+backend: pytorch
+kv_cache_config:
+  free_gpu_memory_fraction: 0.40

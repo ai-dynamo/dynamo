@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::input::common;
 use crate::{EngineConfig, Flags};
+use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_llm::{
     discovery::{ModelManager, ModelWatcher, MODEL_ROOT_PATH},
     engines::StreamingEngineAdapter,
@@ -14,7 +15,7 @@ use dynamo_llm::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
         },
-        openai::completions::{CompletionRequest, CompletionResponse},
+        openai::completions::{CompletionResponse, NvCreateCompletionRequest},
     },
 };
 use dynamo_runtime::pipeline::RouterMode;
@@ -32,6 +33,7 @@ pub async fn run(
         .port(flags.http_port)
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
+        .enable_embeddings_endpoints(true)
         .with_request_template(template)
         .build()?;
     match engine_config {
@@ -46,6 +48,7 @@ pub async fn run(
                         etcd_client.clone(),
                         MODEL_ROOT_PATH,
                         flags.router_mode.into(),
+                        Some(flags.kv_router_config()),
                     )
                     .await?;
                 }
@@ -73,10 +76,10 @@ pub async fn run(
             .await?;
             manager.add_chat_completions_model(model.service_name(), chat_pipeline)?;
 
-            let cmpl_pipeline = common::build_pipeline::<CompletionRequest, CompletionResponse>(
-                model.card(),
-                inner_engine,
-            )
+            let cmpl_pipeline = common::build_pipeline::<
+                NvCreateCompletionRequest,
+                CompletionResponse,
+            >(model.card(), inner_engine)
             .await?;
             manager.add_completions_model(model.service_name(), cmpl_pipeline)?;
         }
@@ -102,8 +105,9 @@ async fn run_watcher(
     etcd_client: etcd::Client,
     network_prefix: &str,
     router_mode: RouterMode,
+    kv_router_config: Option<KvRouterConfig>,
 ) -> anyhow::Result<()> {
-    let watch_obj = ModelWatcher::new(runtime, model_manager, router_mode);
+    let watch_obj = ModelWatcher::new(runtime, model_manager, router_mode, kv_router_config);
     tracing::info!("Watching for remote model at {network_prefix}");
     let models_watcher = etcd_client.kv_get_and_watch_prefix(network_prefix).await?;
     let (_prefix, _watcher, receiver) = models_watcher.dissolve();

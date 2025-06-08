@@ -19,7 +19,7 @@ use dynamo_llm::{
     backend::Backend,
     engines::StreamingEngineAdapter,
     model_type::ModelType,
-    preprocessor::{BackendInput, BackendOutput},
+    preprocessor::{BackendOutput, PreprocessedRequest},
     types::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -71,8 +71,10 @@ pub async fn run(
             mut model,
         } => {
             // Pre-processing is done ingress-side, so it should be already done.
-            let frontend =
-                SegmentSource::<SingleIn<BackendInput>, ManyOut<Annotated<BackendOutput>>>::new();
+            let frontend = SegmentSource::<
+                SingleIn<PreprocessedRequest>,
+                ManyOut<Annotated<BackendOutput>>,
+            >::new();
             let backend = Backend::from_mdc(model.card().clone())
                 .await?
                 .into_operator();

@@ -57,6 +57,7 @@ use tokio::sync::{
     mpsc::{self, error::TryRecvError},
     Mutex,
 };
+use tokio_util::sync::CancellationToken;
 
 use anyhow::Result;
 use std::any::Any;
@@ -70,6 +71,8 @@ use pending::{
     CudaTransferManager, DiskTransferManager, PendingTransfer, TransferBatcher, TransferManager,
 };
 use request::{BlockResult, OffloadRequest, OffloadRequestKey, OnboardRequest};
+
+use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
 const MAX_CONCURRENT_TRANSFERS: usize = 4;
 const MAX_TRANSFER_BATCH_SIZE: usize = 16;
@@ -101,6 +104,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         nixl_agent: Arc<Option<NixlAgent>>,
         async_rt_handle: Handle,
         metrics: Arc<BlockManagerMetrics>,
+        cancellation_token: CancellationToken,
     ) -> Result<Arc<Self>> {
         let (device_offload_tx, device_offload_rx) = mpsc::unbounded_channel();
         let (host_offload_tx, host_offload_rx) = mpsc::unbounded_channel();
@@ -128,23 +132,30 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         ));
 
         // Device -> Host offload
-        let device_clone = this.device.clone();
-        let host_clone = this.host.clone();
-        let device_offload_metrics = metrics.pool("device");
-        async_rt_handle.spawn(async move {
-            let res = OffloadManager::offload_worker(
-                device_clone,
-                host_clone,
-                device_offload_rx,
-                Arc::new(TransferBatcher::new(
-                    CudaTransferManager::new(device_offload_transfer_ctx, MAX_CONCURRENT_TRANSFERS),
-                    MAX_TRANSFER_BATCH_SIZE,
-                )),
-                device_offload_metrics,
-            )
-            .await;
-            tracing::warn!("Offload worker terminated: {:?}", res);
-        });
+        let device_to_host_task = OffloadManager::offload_worker(
+            this.device.clone(),
+            this.host.clone(),
+            device_offload_rx,
+            Arc::new(TransferBatcher::new(
+                CudaTransferManager::new(
+                    device_offload_transfer_ctx,
+                    MAX_CONCURRENT_TRANSFERS,
+                    cancellation_token.clone(),
+                ),
+                MAX_TRANSFER_BATCH_SIZE,
+                &async_rt_handle,
+                cancellation_token.clone(),
+            )),
+            metrics.pool("device"),
+            cancellation_token.clone(),
+        );
+        CriticalTaskExecutionHandle::new_with_runtime(
+            |_| device_to_host_task,
+            cancellation_token.clone(),
+            "Device -> Host offload worker",
+            &async_rt_handle,
+        )?
+        .detach();
 
         let transfer_ctx = Arc::new(TransferContext::new(
             nixl_agent.clone(),
@@ -152,64 +163,84 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         ));
 
         // Host -> Disk offload
-        let host_clone = this.host.clone();
-        let disk_clone = this.disk.clone();
-        let transfer_ctx_clone = transfer_ctx.clone();
-        let host_offload_metrics = metrics.pool("host");
-        async_rt_handle.spawn(async move {
-            let res = OffloadManager::offload_worker(
-                host_clone,
-                disk_clone,
-                host_offload_rx,
-                Arc::new(TransferBatcher::new(
-                    DiskTransferManager::new(transfer_ctx_clone, MAX_CONCURRENT_TRANSFERS),
-                    MAX_TRANSFER_BATCH_SIZE,
-                )),
-                host_offload_metrics,
-            )
-            .await;
-            tracing::warn!("Offload worker terminated: {:?}", res);
-        });
+        let host_to_disk_task = OffloadManager::offload_worker(
+            this.host.clone(),
+            this.disk.clone(),
+            host_offload_rx,
+            Arc::new(TransferBatcher::new(
+                DiskTransferManager::new(
+                    transfer_ctx.clone(),
+                    MAX_CONCURRENT_TRANSFERS,
+                    &async_rt_handle,
+                    cancellation_token.clone(),
+                ),
+                MAX_TRANSFER_BATCH_SIZE,
+                &async_rt_handle,
+                cancellation_token.clone(),
+            )),
+            metrics.pool("host"),
+            cancellation_token.clone(),
+        );
+        CriticalTaskExecutionHandle::new_with_runtime(
+            |_| host_to_disk_task,
+            cancellation_token.clone(),
+            "Host -> Disk offload worker",
+            &async_rt_handle,
+        )?
+        .detach();
 
         // Host -> Device onboarding
-        let host_clone = this.host.clone();
-        let device_clone = this.device.clone();
-        let transfer_ctx_clone = transfer_ctx.clone();
-        let host_onboard_metrics = metrics.pool("host");
-        async_rt_handle.spawn(async move {
-            let res = OffloadManager::onboard_worker(
-                host_clone,
-                device_clone,
-                host_onboard_rx,
-                Arc::new(TransferBatcher::new(
-                    CudaTransferManager::new(transfer_ctx_clone, MAX_CONCURRENT_TRANSFERS),
-                    MAX_TRANSFER_BATCH_SIZE,
-                )),
-                host_onboard_metrics,
-            )
-            .await;
-            tracing::warn!("Onboard worker terminated: {:?}", res);
-        });
+        let host_to_device_task = OffloadManager::onboard_worker(
+            this.host.clone(),
+            this.device.clone(),
+            host_onboard_rx,
+            Arc::new(TransferBatcher::new(
+                CudaTransferManager::new(
+                    transfer_ctx.clone(),
+                    MAX_CONCURRENT_TRANSFERS,
+                    cancellation_token.clone(),
+                ),
+                MAX_TRANSFER_BATCH_SIZE,
+                &async_rt_handle,
+                cancellation_token.clone(),
+            )),
+            metrics.pool("host"),
+            cancellation_token.clone(),
+        );
+        CriticalTaskExecutionHandle::new_with_runtime(
+            |_| host_to_device_task,
+            cancellation_token.clone(),
+            "Host -> Device onboarding worker",
+            &async_rt_handle,
+        )?
+        .detach();
 
         // Disk -> Device onboarding
-        let disk_clone = this.disk.clone();
-        let device_clone = this.device.clone();
-        let transfer_ctx_clone = transfer_ctx.clone();
-        let disk_onboard_metrics = metrics.pool("disk");
-        async_rt_handle.spawn(async move {
-            let res = OffloadManager::onboard_worker(
-                disk_clone,
-                device_clone,
-                disk_onboard_rx,
-                Arc::new(TransferBatcher::new(
-                    DiskTransferManager::new(transfer_ctx_clone, MAX_CONCURRENT_TRANSFERS),
-                    MAX_TRANSFER_BATCH_SIZE,
-                )),
-                disk_onboard_metrics,
-            )
-            .await;
-            tracing::warn!("Onboard worker terminated: {:?}", res);
-        });
+        let disk_to_device_task = OffloadManager::onboard_worker(
+            this.disk.clone(),
+            this.device.clone(),
+            disk_onboard_rx,
+            Arc::new(TransferBatcher::new(
+                DiskTransferManager::new(
+                    transfer_ctx.clone(),
+                    MAX_CONCURRENT_TRANSFERS,
+                    &async_rt_handle,
+                    cancellation_token.clone(),
+                ),
+                MAX_TRANSFER_BATCH_SIZE,
+                &async_rt_handle,
+                cancellation_token.clone(),
+            )),
+            metrics.pool("disk"),
+            cancellation_token.clone(),
+        );
+        CriticalTaskExecutionHandle::new_with_runtime(
+            |_| disk_to_device_task,
+            cancellation_token.clone(),
+            "Disk -> Device onboarding worker",
+            &async_rt_handle,
+        )?
+        .detach();
 
         Ok(this)
     }
@@ -220,6 +251,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         mut offload_rx: mpsc::UnboundedReceiver<OffloadRequest<Source, Metadata>>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Metadata>>,
         pool_metrics: Arc<PoolMetrics>,
+        cancellation_token: CancellationToken,
     ) -> Result<()> {
         if source_pool.is_none() || target_pool.is_none() {
             return Ok(());
@@ -231,6 +263,10 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let mut queue = BTreeSet::new();
 
         loop {
+            if cancellation_token.is_cancelled() {
+                return Ok(());
+            }
+
             // Try to check the offload queue.
             loop {
                 match offload_rx.try_recv() {
@@ -241,7 +277,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     Err(TryRecvError::Empty) => {
                         break;
                     }
-                    Err(_) => return Ok(()),
+                    Err(e) => return Err(e.into()),
                 }
             }
 
@@ -292,9 +328,12 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                 }
             } else {
                 // Await the next request.
-                if let Some(request) = offload_rx.recv().await {
-                    queue.insert(request);
-                    pool_metrics.gauge("offload_queue_size").inc();
+                tokio::select! {
+                    _ = cancellation_token.cancelled() => return Ok(()),
+                    Some(request) = offload_rx.recv() => {
+                        queue.insert(request);
+                        pool_metrics.gauge("offload_queue_size").inc();
+                    }
                 }
             }
         }
@@ -306,47 +345,54 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         mut onboard_rx: mpsc::UnboundedReceiver<OnboardRequest<Source, Target, Metadata>>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Metadata>>,
         pool_metrics: Arc<PoolMetrics>,
+        cancellation_token: CancellationToken,
     ) -> Result<()> {
         if source_pool.is_none() || target_pool.is_none() {
             return Ok(());
         }
 
         let target_pool = target_pool.as_ref().unwrap();
+        loop {
+            tokio::select! {
+                _ = cancellation_token.cancelled() => return Ok::<(), anyhow::Error>(()),
+                Some(request) = onboard_rx.recv() => {
 
-        // Loop on incoming requests
-        while let Some(request) = onboard_rx.recv().await {
-            pool_metrics
-                .gauge("onboard_queue_size")
-                .set(onboard_rx.len() as i64);
-            // Try to allocate blocks on the device.
-            let target_blocks = match target_pool.allocate_blocks(request.blocks.len()).await {
-                Ok(blocks) => blocks,
-                Err(err) => {
-                    request.response_tx.send(Err(err))?;
-                    continue;
+                    pool_metrics
+                        .gauge("onboard_queue_size")
+                        .set(onboard_rx.len() as i64);
+
+                    // Try to allocate blocks on the device.
+                    let target_blocks = match target_pool.allocate_blocks(request.blocks.len()).await {
+                        Ok(blocks) => blocks,
+                        Err(err) => {
+                            request.response_tx.send(Err(err))?;
+                            continue;
+                        }
+                    };
+
+                    pool_metrics
+                        .counter("onboard_processed")
+                        .inc_by(request.blocks.len() as u64);
+
+                    let sources = request
+                        .blocks
+                        .iter()
+                        .map(|b| b.mutable_block().clone())
+                        .collect();
+
+                    transfer_manager
+                        .enqueue_transfer(PendingTransfer::new(
+                            sources,
+                            target_blocks,
+                            Some(request.response_tx),
+                            target_pool.clone(),
+                        ))
+                        .await?;
+
+                    Ok::<(), anyhow::Error>(())
                 }
-            };
-
-            pool_metrics
-                .counter("onboard_processed")
-                .inc_by(request.blocks.len() as u64);
-
-            let sources = request
-                .blocks
-                .iter()
-                .map(|b| b.mutable_block().clone())
-                .collect();
-
-            transfer_manager
-                .enqueue_transfer(PendingTransfer::new(
-                    sources,
-                    target_blocks,
-                    Some(request.response_tx),
-                    target_pool.clone(),
-                ))
-                .await?;
+            }?;
         }
-        Ok(())
     }
 
     pub async fn offload<S: Storage>(
@@ -591,6 +637,7 @@ mod tests {
             agent_arc,
             async_rt_handle,
             BlockManagerMetrics::new(&Arc::new(Registry::new()))?,
+            CancellationToken::new(),
         )?;
 
         Ok((manager, device_pool, host_pool, disk_pool))

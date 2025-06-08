@@ -85,6 +85,9 @@ Generate docker config json for registry credentials
 */}}
 {{- define "dynamo-operator.dockerconfig" -}}
 {{- $server := .Values.dynamo.dockerRegistry.server -}}
+{{- if or (eq $server "docker.io") (hasPrefix "docker.io/" $server) -}}
+  {{- $server = "https://index.docker.io/v1/" -}}
+{{- end -}}
 {{- $username := .Values.dynamo.dockerRegistry.username -}}
 {{- $password := .Values.dynamo.dockerRegistry.password -}}
 {{- if .Values.dynamo.dockerRegistry.passwordExistingSecretName -}}

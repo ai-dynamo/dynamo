@@ -23,4 +23,3 @@
 
    guides/README.md
    runtime/README.md
-   examples/disagg_skeleton.md

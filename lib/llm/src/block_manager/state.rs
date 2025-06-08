@@ -19,6 +19,7 @@ use super::offload::OffloadManager;
 use super::{
     block::{Block, GlobalRegistry, ImmutableBlock},
     config::NixlOptions,
+    events::{EventManager, NullEventManager},
     metrics::{BlockManagerMetrics, PoolMetrics},
 };
 use cudarc::driver::CudaStream;
@@ -78,7 +79,13 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
         let mut nixl_backends: HashMap<String, Arc<nixl_sys::Backend>> = HashMap::new();
 
         let global_registry = GlobalRegistry::default();
+
         let metrics = BlockManagerMetrics::new(&config.runtime.metrics_registry)?;
+
+        let event_manager = config
+            .event_manager
+            .clone()
+            .unwrap_or_else(|| NullEventManager::new());
 
         // Create a NIXL agent if NIXL is enabled and instantiate requested backends
         // TODO: Build a map of NIXL backends to block pools/sets
@@ -153,6 +160,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                     global_registry.clone(),
                     async_rt_handle.clone(),
                     metrics.pool("disk"),
+                    Some(event_manager.clone()),
                 )?;
                 (Some(Arc::new(pool)), Some(blocks))
             }
@@ -176,6 +184,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 global_registry.clone(),
                 async_rt_handle.clone(),
                 metrics.pool("host"),
+                Some(event_manager.clone()),
             )?;
             (Some(Arc::new(pool)), Some(blocks))
         } else {
@@ -198,6 +207,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 global_registry.clone(),
                 async_rt_handle.clone(),
                 metrics.pool("device"),
+                Some(event_manager.clone()),
             )?;
             (Some(Arc::new(pool)), Some(blocks))
         } else {
@@ -218,6 +228,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
             nixl_agent.clone(),
             async_rt_handle,
             metrics.clone(),
+            cancellation_token.clone(),
         )?;
 
         let state = Arc::new(Self {
@@ -492,7 +503,7 @@ fn create_layout<S: Storage + NixlRegisterableStorage>(
     anyhow::bail!("failed to create layout");
 }
 
-#[expect(clippy::type_complexity)]
+#[expect(clippy::type_complexity, clippy::too_many_arguments)]
 fn create_block_pool<S: Storage + NixlRegisterableStorage, M: BlockMetadata>(
     layout: Arc<dyn NixlLayout<StorageType = S>>,
     block_set_idx: usize,
@@ -501,13 +512,16 @@ fn create_block_pool<S: Storage + NixlRegisterableStorage, M: BlockMetadata>(
     global_registry: GlobalRegistry,
     async_runtime: Handle,
     pool_metrics: Arc<PoolMetrics>,
+    event_manager: Option<Arc<dyn EventManager>>,
 ) -> Result<(BlockPool<S, M>, Vec<Block<S, M>>)> {
     let blocks = block::layout_to_blocks::<_, M>(layout, block_set_idx, worker_id)?;
+    let event_manager = event_manager.unwrap_or_else(|| NullEventManager::new());
     let pool = BlockPool::<S, M>::builder()
         .cancel_token(cancellation_token)
         .global_registry(global_registry)
         .async_runtime(async_runtime)
         .pool_metrics(pool_metrics)
+        .event_manager(event_manager)
         .build()?;
     Ok((pool, blocks))
 }
