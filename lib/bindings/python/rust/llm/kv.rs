@@ -256,6 +256,7 @@ impl ZmqKvEventListener {
     }
 }
 
+// manual shutdown needed as it's not tied to the dynamo DRT
 impl Drop for ZmqKvEventListener {
     fn drop(&mut self) {
         self.shutdown_token.cancel();
