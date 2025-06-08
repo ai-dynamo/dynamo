@@ -38,6 +38,7 @@ const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     logging::init();
+    m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
 

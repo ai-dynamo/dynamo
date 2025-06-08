@@ -344,6 +344,19 @@ class DisaggregatedRouter:
         """
         ...
 
+def compute_block_hash_for_seq_py(tokens: List[int], kv_block_size: int) -> List[int]:
+    """
+    Compute block hashes for a sequence of tokens
+
+    Args:
+        tokens: List of token IDs
+        kv_block_size: Size of each KV cache block
+
+    Returns:
+        List of block hashes as integers
+    """
+    ...
+
 class WorkerMetricsPublisher:
     """
     A metrics publisher will provide metrics to the router.

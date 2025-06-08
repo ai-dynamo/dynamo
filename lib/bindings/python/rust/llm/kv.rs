@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
 
 use super::*;
+use llm_rs::kv_router::indexer::compute_block_hash_for_seq;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
 use rs::traits::events::EventSubscriber;
 use tracing;
@@ -60,6 +61,12 @@ impl KvRouter {
             Ok(worker_id)
         })
     }
+}
+
+#[pyfunction]
+pub fn compute_block_hash_for_seq_py(tokens: Vec<u32>, kv_block_size: usize) -> Vec<u64> {
+    let hashes = compute_block_hash_for_seq(&tokens, kv_block_size);
+    hashes.into_iter().map(|h| h.0).collect()
 }
 
 #[pyclass]
