@@ -14,15 +14,12 @@
 # limitations under the License.
 
 
-import asyncio
-import json
 import logging
 import os
 import uuid
 from typing import AsyncGenerator, Optional
 
 import zmq
-
 from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.inputs.data import TokensPrompt
@@ -132,99 +129,3 @@ class VllmWorkers:
         )
         async for output in outputs:
             yield output
-
-
-# only for testing
-async def main():
-    from dynamo._core import RadixTree, ZmqKvEventListener
-
-    """Main routine to run VLLM workers and receive their messages."""
-    # Initialize workers to start publishing messages
-    workers = VllmWorkers(num_workers=2)
-
-    # Set up ZMQ subscribers
-    context = zmq.Context()
-
-    # Subscriber for kv_events (port 5557)
-    kv_events_socket = context.socket(zmq.SUB)
-    kv_events_socket.connect("tcp://localhost:5557")
-    kv_events_socket.setsockopt(zmq.SUBSCRIBE, b"")  # Subscribe to all messages
-    kv_events_socket.setsockopt(zmq.RCVTIMEO, 10)  # 10ms timeout for non-blocking
-
-    # Subscriber for metrics (port 5657)
-    metrics_socket = context.socket(zmq.SUB)
-    metrics_socket.connect("tcp://localhost:5657")
-    metrics_socket.setsockopt(zmq.SUBSCRIBE, b"")  # Subscribe to all messages
-    metrics_socket.setsockopt(zmq.RCVTIMEO, 10)  # 10ms timeout for non-blocking
-
-    logger.info(
-        "ZMQ subscribers connected to ports 5557 (kv_events) and 5657 (metrics)"
-    )
-
-    # Start a dummy generation to trigger message publishing
-    dummy_prompt = TokensPrompt(prompt_token_ids=[10, 11, 12, 13, 14, 15, 16])
-    dummy_sampling_params = SamplingParams(max_tokens=100, ignore_eos=True)
-    generation_task = asyncio.create_task(
-        consume_generation(workers, dummy_prompt, dummy_sampling_params)
-    )
-
-    zmq_listener = ZmqKvEventListener("tcp://localhost:5557", "", 64)
-    radix_tree = RadixTree()
-
-    # Main message receiving loop
-    try:
-        while True:
-            # Try to receive kv_events
-            try:
-                # Convert to JSON format
-                json_events = await zmq_listener.get_events()
-
-                for json_event in json_events:
-                    event = json.loads(json_event)
-                    print(f"[KV_EVENTS] {event}")
-                    radix_tree.apply_event(0, json.dumps(event).encode("utf-8"))
-
-            except zmq.Again:
-                # No message available
-                pass
-            except Exception as e:
-                logger.error(f"Error receiving kv_events: {e}")
-
-            # Try to receive metrics
-            try:
-                metrics_message = metrics_socket.recv_json(zmq.NOBLOCK)
-                print(f"[METRICS] {metrics_message}")
-            except zmq.Again:
-                # No message available
-                pass
-            except Exception as e:
-                logger.error(f"Error receiving metrics: {e}")
-
-            # Wait 0.1 seconds before next poll
-            await asyncio.sleep(0.1)
-
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
-    finally:
-        generation_task.cancel()
-        kv_events_socket.close()
-        metrics_socket.close()
-        context.term()
-
-
-async def consume_generation(
-    workers: VllmWorkers, prompt: TokensPrompt, sampling_params: SamplingParams
-):
-    """Helper function to consume generation output to trigger publishing."""
-    try:
-        async for output in workers.direct(
-            prompt, worker_id=0, sampling_params=sampling_params
-        ):
-            # Just consume the output to keep generation running
-            pass
-    except asyncio.CancelledError:
-        pass
-
-
-if __name__ == "__main__":
-    asyncio.run(main())

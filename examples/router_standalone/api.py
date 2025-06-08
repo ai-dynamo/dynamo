@@ -60,7 +60,7 @@ class RouterAPI:
         self.openai_serving_chat = None
         self.model_config = None
 
-        self.background_tasks = []
+        self.background_tasks: list[asyncio.Task] = []
 
         self.setup_routes()
 
@@ -242,8 +242,6 @@ class RouterAPI:
             task.cancel()
 
         await asyncio.gather(*self.background_tasks, return_exceptions=True)
-        logger.info("All background tasks shut down successfully")
-
         logger.info("Router API shutdown completed")
 
 

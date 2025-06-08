@@ -17,6 +17,7 @@
 import asyncio
 import json
 import logging
+from typing import Any
 
 import numpy as np
 import zmq
@@ -27,7 +28,7 @@ from dynamo._core import RadixTree, ZmqKvEventListener, compute_block_hash_for_s
 logger = logging.getLogger(__name__)
 
 
-def setup_zmq_subscriber(context: zmq.Context, endpoint: str):
+def setup_zmq_subscriber(context: zmq.Context, endpoint: str) -> zmq.Socket[bytes]:
     socket = context.socket(zmq.SUB)
     socket.connect(endpoint)
     socket.setsockopt(zmq.SUBSCRIBE, b"")  # Subscribe to all messages
@@ -49,7 +50,9 @@ class KvRouter:
 
         self.radix_tree = RadixTree()
 
-        self._load_locks = [asyncio.Lock() for _ in range(num_workers)]
+        self._load_locks: list[asyncio.Lock] = [
+            asyncio.Lock() for _ in range(num_workers)
+        ]
         self._radix_lock = asyncio.Lock()
 
         self.kv_usages = [0.0] * num_workers
@@ -72,10 +75,12 @@ class KvRouter:
         logger.info("Router initialized")
 
     async def periodic_update_load(self):
-        async def update_load(worker_id):
+        async def update_load(worker_id: int):
             while True:
                 try:
-                    metrics = self.load_listeners[worker_id].recv_json(zmq.NOBLOCK)
+                    metrics: dict[str, Any] = self.load_listeners[worker_id].recv_json(
+                        zmq.NOBLOCK
+                    )
                     async with self._load_locks[worker_id]:
                         self.kv_usages[worker_id] = metrics["gpu_cache_usage"]
                         self.waitings[worker_id] = int(metrics["num_waiting_reqs"])
@@ -90,12 +95,14 @@ class KvRouter:
             asyncio.create_task(update_load(worker_id))
 
     async def periodic_update_indexer(self):
-        async def update_tree(worker_id):
+        async def update_tree(worker_id: int):
             while True:
                 try:
-                    kv_events = await self.kv_listeners[worker_id].get_events()
+                    kv_events: list[str] = await self.kv_listeners[
+                        worker_id
+                    ].get_events()
                     for event in kv_events:
-                        event = json.loads(event)
+                        event: Any = json.loads(event)
                         async with self._radix_lock:
                             self.radix_tree.apply_event(
                                 worker_id, json.dumps(event).encode("utf-8")
@@ -112,7 +119,7 @@ class KvRouter:
 
     async def get_best_worker(self, prompt: TokensPrompt) -> int:
         # Run tokenization in a separate thread to avoid blocking the event loop
-        tokens = prompt["prompt_token_ids"]
+        tokens: list[int] = prompt["prompt_token_ids"]
         if not tokens:
             raise ValueError("Tokens is invalid or empty.")
 
