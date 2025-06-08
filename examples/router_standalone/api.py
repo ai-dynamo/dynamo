@@ -125,8 +125,11 @@ class RouterAPI:
                 tokens: list[int] = engine_prompt["prompt_token_ids"]
                 num_tokens = len(tokens)
                 if num_tokens == 0:
-                    raise ValueError("Input is empty.")
-
+                    return ErrorResponse(
+                        message="Input prompt is empty",
+                        type="invalid_request_error",
+                        code=400,
+                    )
                 # It is much preferred to communicate block hashes to the router instead of
                 # raw text prompts or tokens, especially when over network using pydantic validation,
                 # as block hashes can be orders of magnitude smaller.
