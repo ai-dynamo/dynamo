@@ -63,6 +63,9 @@ pub use client::{Client, InstanceSource};
 /// An instance is namespace+component+endpoint+lease_id and must be unique.
 pub const INSTANCE_ROOT_PATH: &str = "instances";
 
+/// The default group name used when no explicit group is provided
+pub const DEFAULT_GROUP_NAME: &str = "primary";
+
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum TransportType {
@@ -85,6 +88,7 @@ pub struct Instance {
     pub component: String,
     pub endpoint: String,
     pub namespace: String,
+    pub group: String,
     pub instance_id: i64,
     pub transport: TransportType,
 }
@@ -92,6 +96,90 @@ pub struct Instance {
 impl Instance {
     pub fn id(&self) -> i64 {
         self.instance_id
+    }
+}
+
+/// A [Group] consists of tightly coupled [Component] entities.
+/// Groups are useful when:
+/// Implementing a Leader-Follower Pattern
+/// Multiple components need to be scaled toghether
+/// If 1 component shuts down and the whole group needs to be removed from ETCD
+
+#[derive(Educe, Builder, Clone, Validate)]
+#[educe(Debug)]
+#[builder(pattern = "owned")]
+pub struct Group {
+    #[builder(private)]
+    #[educe(Debug(ignore))]
+    runtime: DistributedRuntime,
+
+    /// Namespace
+    #[builder(setter(into))]
+    namespace: Namespace,
+
+    #[builder(setter(into))]
+    name: String,
+
+    // A static component's endpoints cannot be discovered via etcd, they are
+    // fixed at startup time.
+    is_static: bool,
+}
+
+impl PartialEq for Group {
+    fn eq(&self, other: &Self) -> bool {
+        self.namespace.name() == other.namespace.name()
+            && self.name == other.name
+    }
+}
+
+impl Eq for Group {}
+
+impl DistributedRuntimeProvider for Group {
+    fn drt(&self) -> &DistributedRuntime {
+        &self.runtime
+    }
+}
+
+impl RuntimeProvider for Group {
+    fn rt(&self) -> &Runtime {
+        self.runtime.rt()
+    }
+}
+
+impl std::fmt::Display for Group {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.namespace.name(), self.name)
+    }
+}
+
+impl Hash for Group {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.namespace.name().hash(state);
+        self.name.hash(state);
+        self.is_static.hash(state);
+    }
+}
+
+impl Group {
+    pub(crate) fn new(runtime: DistributedRuntime, namespace: Namespace, name: String) -> Result<Self> {
+        Ok(GroupBuilder::default()
+            .runtime(runtime)
+            .name(name)
+            .namespace(namespace)
+            .build()?)
+    }
+
+    /// Create a [`Component`] in the namespace who's endpoints can be discovered with etcd
+    pub fn component(&self, name: impl Into<String>) -> Result<Component> {
+        Ok(ComponentBuilder::from_runtime(self.runtime.clone())
+            .name(name)
+            .group(self.clone())
+            .namespace(self.namespace.clone())
+            .is_static(self.is_static)
+            .build()?)
+    }
+    pub fn name(&self) -> &str {
+        &self.name
     }
 }
 
@@ -113,6 +201,10 @@ pub struct Component {
     #[builder(setter(into))]
     name: String,
 
+    /// Group
+    #[builder(setter(into))]
+    group: Group,
+
     // todo - restrict the namespace to a-z0-9-_A-Z
     /// Namespace
     #[builder(setter(into))]
@@ -128,6 +220,7 @@ impl Hash for Component {
         self.namespace.name().hash(state);
         self.name.hash(state);
         self.is_static.hash(state);
+        self.group.hash(state);
     }
 }
 
@@ -136,6 +229,7 @@ impl PartialEq for Component {
         self.namespace.name() == other.namespace.name()
             && self.name == other.name
             && self.is_static == other.is_static
+            && self.group == other.group
     }
 }
 
@@ -143,7 +237,7 @@ impl Eq for Component {}
 
 impl std::fmt::Display for Component {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}.{}", self.namespace.name(), self.name)
+        write!(f, "{}.{}.{}", self.namespace.name(), self.group.name(), self.name)
     }
 }
 
@@ -163,17 +257,18 @@ impl Component {
     /// The component part of an instance path in etcd.
     pub fn etcd_root(&self) -> String {
         let ns = self.namespace.name();
+        let grp = self.group.name();
         let cp = &self.name;
-        format!("{INSTANCE_ROOT_PATH}/{ns}/{cp}")
+        format!("{INSTANCE_ROOT_PATH}/{ns}/{grp}/{cp}")
     }
 
     pub fn service_name(&self) -> String {
-        let service_name = format!("{}_{}", self.namespace.name(), self.name);
+        let service_name = format!("{}_{}_{}", self.namespace.name(), self.group.name(), self.name);
         Slug::slugify(&service_name).to_string()
     }
 
     pub fn path(&self) -> String {
-        format!("{}/{}", self.namespace.name(), self.name)
+        format!("{}/{}/{}", self.namespace.name(), self.group.name(), self.name)
     }
 
     pub fn namespace(&self) -> &Namespace {
@@ -399,11 +494,31 @@ impl Namespace {
             .build()?)
     }
 
+    fn default_group(&self) -> Group {
+        Group {
+            runtime: self.runtime.clone(),
+            namespace: self.clone(),
+            name: DEFAULT_GROUP_NAME.to_string(),
+            is_static: self.is_static
+        }
+    }
+
     /// Create a [`Component`] in the namespace who's endpoints can be discovered with etcd
     pub fn component(&self, name: impl Into<String>) -> Result<Component> {
+        let default_group = self.default_group();
         Ok(ComponentBuilder::from_runtime(self.runtime.clone())
             .name(name)
             .namespace(self.clone())
+            .group(default_group)
+            .is_static(self.is_static)
+            .build()?)
+    }
+
+    pub fn group(&self, name: impl Into<String>) -> Result<Group> {
+        Ok(GroupBuilder::default()
+            .runtime(self.runtime.clone())
+            .namespace(self.clone())
+            .name(name)
             .is_static(self.is_static)
             .build()?)
     }
