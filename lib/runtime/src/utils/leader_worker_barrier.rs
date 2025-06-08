@@ -32,22 +32,22 @@ const BARRIER_WORKER: &str = "worker";
 const BARRIER_COMPLETE: &str = "complete";
 const BARRIER_ABORT: &str = "abort";
 
-async fn etcd_key_counter<T: DeserializeOwned>(
+/// Watches for a specific number of items to appear under a key prefix
+async fn wait_for_key_count<T: DeserializeOwned>(
     client: &Client,
     key: String,
-    num_items: usize,
+    expected_count: usize,
     timeout: Option<Duration>,
-) -> anyhow::Result<HashMap<String, T>, LeaderWorkerBarrierError> {
+) -> Result<HashMap<String, T>, LeaderWorkerBarrierError> {
     let (_key, _watcher, mut rx) = client
         .kv_get_and_watch_prefix(&key)
         .await
         .map_err(LeaderWorkerBarrierError::EtcdError)?
         .dissolve();
-    let timeout = timeout.unwrap_or(Duration::MAX);
-
-    let start = Instant::now();
 
     let mut data = HashMap::new();
+    let start = Instant::now();
+    let timeout = timeout.unwrap_or(Duration::MAX);
 
     loop {
         let elapsed = start.elapsed();
@@ -55,44 +55,78 @@ async fn etcd_key_counter<T: DeserializeOwned>(
             return Err(LeaderWorkerBarrierError::Timeout);
         }
 
-        let remaining_time = timeout - elapsed;
+        let remaining_time = timeout.saturating_sub(elapsed);
 
         tokio::select! {
             Some(watch_event) = rx.recv() => {
-                match watch_event {
-                    WatchEvent::Put(kv) => {
-                        data.insert(kv.key_str().unwrap().to_string(), serde_json::from_slice::<T>(kv.value()).map_err(LeaderWorkerBarrierError::SerdeError)?);
-                    }
-                    WatchEvent::Delete(kv) => {
-                        data.remove(kv.key_str().unwrap());
-                    }
-                }
+                handle_watch_event(watch_event, &mut data)?;
             }
-            _ = tokio::time::sleep(remaining_time) => {}
+            _ = tokio::time::sleep(remaining_time) => {
+                // Timeout occurred, continue to check count
+            }
         }
 
-        if data.len() == num_items {
+        if data.len() == expected_count {
             return Ok(data);
         }
     }
 }
 
-async fn etcd_kv_create<T: Serialize>(
+/// Handles a single watch event by updating the data map
+fn handle_watch_event<T: DeserializeOwned>(
+    event: WatchEvent,
+    data: &mut HashMap<String, T>,
+) -> Result<(), LeaderWorkerBarrierError> {
+    match event {
+        WatchEvent::Put(kv) => {
+            let key = kv.key_str().unwrap().to_string();
+            let value =
+                serde_json::from_slice(kv.value()).map_err(LeaderWorkerBarrierError::SerdeError)?;
+            data.insert(key, value);
+        }
+        WatchEvent::Delete(kv) => {
+            let key = kv.key_str().unwrap();
+            data.remove(key);
+        }
+    }
+    Ok(())
+}
+
+/// Creates a key-value pair in etcd, returning a specific error if the key already exists
+async fn create_barrier_key<T: Serialize>(
     client: &Client,
     key: String,
     data: T,
     lease_id: Option<i64>,
-    e: LeaderWorkerBarrierError,
+) -> Result<(), LeaderWorkerBarrierError> {
+    let serialized_data =
+        serde_json::to_vec(&data).map_err(LeaderWorkerBarrierError::SerdeError)?;
+
+    client
+        .kv_create(key, serialized_data, lease_id)
+        .await
+        .map_err(|_| LeaderWorkerBarrierError::BarrierIdNotUnique)?;
+
+    Ok(())
+}
+
+/// Creates a worker-specific key in etcd
+async fn create_worker_key(
+    client: &Client,
+    key: String,
+    lease_id: Option<i64>,
 ) -> Result<(), LeaderWorkerBarrierError> {
     client
-        .kv_create(
-            key,
-            serde_json::to_vec(&data).map_err(LeaderWorkerBarrierError::SerdeError)?,
-            lease_id,
-        )
+        .kv_create(key, serde_json::to_vec(&()).unwrap(), lease_id)
         .await
-        .map_err(|_| e)?;
+        .map_err(|_| LeaderWorkerBarrierError::BarrierWorkerIdNotUnique)?;
 
+    Ok(())
+}
+
+/// Waits for a single key to appear (used for completion/abort signals)
+async fn wait_for_signal(client: &Client, key: String) -> Result<(), LeaderWorkerBarrierError> {
+    wait_for_key_count::<()>(client, key, 1, None).await?;
     Ok(())
 }
 
@@ -135,49 +169,49 @@ impl<T: Serialize + DeserializeOwned> LeaderBarrier<T> {
 
         let lease_id = etcd_client.lease_id();
 
-        // Publish our barrier data.
-        let barrier_data_key = barrier_key(&self.barrier_id, BARRIER_DATA);
-        etcd_kv_create(
-            &etcd_client,
-            barrier_data_key,
-            data,
-            Some(lease_id),
-            LeaderWorkerBarrierError::BarrierIdNotUnique,
-        )
-        .await?;
+        // Publish barrier data
+        self.publish_barrier_data(&etcd_client, data, lease_id)
+            .await?;
 
-        // Create a watcher for workers.
-        let barrier_worker_key = barrier_key(&self.barrier_id, BARRIER_WORKER);
-        let worker_watcher = etcd_key_counter::<()>(
-            &etcd_client,
-            barrier_worker_key,
-            self.num_workers,
-            self.timeout,
-        );
+        // Wait for workers to join
+        let worker_result = self.wait_for_workers(&etcd_client).await;
 
-        // Wait for all workers to join, or for timeout.
-        let result = worker_watcher.await;
+        // Signal completion or abort
+        self.signal_completion(&etcd_client, worker_result.is_ok(), lease_id)
+            .await?;
 
-        // If there was an error, abort.
-        let suffix = if result.is_err() {
-            BARRIER_ABORT
-        } else {
+        worker_result.map(|_| ())
+    }
+
+    async fn publish_barrier_data(
+        &self,
+        client: &Client,
+        data: &T,
+        lease_id: i64,
+    ) -> Result<(), LeaderWorkerBarrierError> {
+        let key = barrier_key(&self.barrier_id, BARRIER_DATA);
+        create_barrier_key(client, key, data, Some(lease_id)).await
+    }
+
+    async fn wait_for_workers(&self, client: &Client) -> Result<(), LeaderWorkerBarrierError> {
+        let key = barrier_key(&self.barrier_id, BARRIER_WORKER);
+        wait_for_key_count::<()>(client, key, self.num_workers, self.timeout).await?;
+        Ok(())
+    }
+
+    async fn signal_completion(
+        &self,
+        client: &Client,
+        success: bool,
+        lease_id: i64,
+    ) -> Result<(), LeaderWorkerBarrierError> {
+        let suffix = if success {
             BARRIER_COMPLETE
+        } else {
+            BARRIER_ABORT
         };
-
         let key = barrier_key(&self.barrier_id, suffix);
-
-        // Publish the completion or abort signal.
-        etcd_kv_create(
-            &etcd_client,
-            key,
-            (),
-            Some(lease_id),
-            LeaderWorkerBarrierError::BarrierIdNotUnique,
-        )
-        .await?;
-
-        result.map(|_| ())
+        create_barrier_key(client, key, (), Some(lease_id)).await
     }
 }
 
@@ -206,48 +240,52 @@ impl<T: Serialize + DeserializeOwned> WorkerBarrier<T> {
 
         let lease_id = etcd_client.lease_id();
 
-        let barrier_abort_key = barrier_key(&self.barrier_id, BARRIER_ABORT);
-        let barrier_complete_key = barrier_key(&self.barrier_id, BARRIER_COMPLETE);
-        let barrier_data_key = barrier_key(&self.barrier_id, BARRIER_DATA);
-        let barrier_worker_key = barrier_key(
+        // Get barrier data while watching for abort signal
+        let barrier_data = self.get_barrier_data(&etcd_client).await?;
+
+        // Register as a worker
+        self.register_worker(&etcd_client, lease_id).await?;
+
+        // Wait for completion or abort signal
+        self.wait_for_completion(&etcd_client).await?;
+
+        Ok(barrier_data)
+    }
+
+    async fn get_barrier_data(&self, client: &Client) -> Result<T, LeaderWorkerBarrierError> {
+        let data_key = barrier_key(&self.barrier_id, BARRIER_DATA);
+        let abort_key = barrier_key(&self.barrier_id, BARRIER_ABORT);
+
+        tokio::select! {
+            result = wait_for_key_count::<T>(client, data_key, 1, None) => {
+                result?.into_values().next()
+                    .ok_or(LeaderWorkerBarrierError::EtcdError(anyhow::anyhow!("No data found")))
+            }
+            _ = wait_for_signal(client, abort_key) => {
+                Err(LeaderWorkerBarrierError::Aborted)
+            }
+        }
+    }
+
+    async fn register_worker(
+        &self,
+        client: &Client,
+        lease_id: i64,
+    ) -> Result<(), LeaderWorkerBarrierError> {
+        let key = barrier_key(
             &self.barrier_id,
             &format!("{}/{}", BARRIER_WORKER, self.worker_id),
         );
+        create_worker_key(client, key, Some(lease_id)).await
+    }
 
-        // First, try to get the barrier data.
-        let barrier_data = tokio::select! {
-            res = etcd_key_counter::<T>(&etcd_client, barrier_data_key, 1, None) => {
-                if let Ok(data) = res {
-                    data.into_values().next().unwrap()
-                } else {
-                    return Err(res.err().unwrap())
-                }
-            }
-            _ = etcd_key_counter::<()>(&etcd_client, barrier_abort_key.clone(), 1, None) => {
-                return Err(LeaderWorkerBarrierError::Aborted)
-            }
-        };
-
-        // Register our worker.
-        etcd_kv_create(
-            &etcd_client,
-            barrier_worker_key,
-            (),
-            Some(lease_id),
-            LeaderWorkerBarrierError::BarrierWorkerIdNotUnique,
-        )
-        .await?;
-
-        let complete_watcher = etcd_key_counter::<()>(&etcd_client, barrier_complete_key, 1, None);
-        let abort_watcher = etcd_key_counter::<()>(&etcd_client, barrier_abort_key, 1, None);
+    async fn wait_for_completion(&self, client: &Client) -> Result<(), LeaderWorkerBarrierError> {
+        let complete_key = barrier_key(&self.barrier_id, BARRIER_COMPLETE);
+        let abort_key = barrier_key(&self.barrier_id, BARRIER_ABORT);
 
         tokio::select! {
-            _ = complete_watcher => {
-                Ok(barrier_data)
-            }
-            _ = abort_watcher => {
-                Err(LeaderWorkerBarrierError::Aborted)
-            }
+            _ = wait_for_signal(client, complete_key) => Ok(()),
+            _ = wait_for_signal(client, abort_key) => Err(LeaderWorkerBarrierError::Aborted),
         }
     }
 }
