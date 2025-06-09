@@ -34,9 +34,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
-use dynamo_runtime::{
-    pipeline::PushRouter, stream::StreamExt,
-};
+use dynamo_runtime::{pipeline::PushRouter, stream::StreamExt};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClearKvBlocksRequest {

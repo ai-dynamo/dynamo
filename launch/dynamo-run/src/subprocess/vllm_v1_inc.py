@@ -22,15 +22,6 @@ import uuid
 from typing import Optional
 
 import uvloop
-
-from dynamo.llm import (
-    ModelType,
-    WorkerMetricsPublisher,
-    ZmqKvEventPublisher,
-    ZmqKvEventPublisherConfig,
-    register_llm,
-)
-from dynamo.runtime import Component, DistributedRuntime, dynamo_worker
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -40,6 +31,15 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
+
+from dynamo.llm import (
+    ModelType,
+    WorkerMetricsPublisher,
+    ZmqKvEventPublisher,
+    ZmqKvEventPublisherConfig,
+    register_llm,
+)
+from dynamo.runtime import Component, DistributedRuntime, dynamo_worker
 
 # Only used if you run it manually from the command line
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
