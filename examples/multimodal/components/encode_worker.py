@@ -182,7 +182,7 @@ class VllmEncodeWorker:
                 embeddings = self.vision_model.get_multimodal_embeddings(**image_embeds)
                 if isinstance(embeddings, tuple):
                     # The result multimodal_embeddings is tuple of tensors, with each
-                    # tensor correspoending to a multimodal data item (image or video).
+                    # tensor corresponding to a multimodal data item (image or video).
                     # TODO: for multi-image support, this result will contain multiple tensors.
                     embeddings = embeddings[0].unsqueeze(0)
 
@@ -195,9 +195,6 @@ class VllmEncodeWorker:
                         f"Request serialized_request is None for request: {{ id: {request_id} }}."
                     )
 
-                assert (
-                    embeddings.is_contiguous()
-                ), "Embeddings tensor must be contiguous!"
                 # Create a descriptor for the embeddings, this will register the memory with the connector (and the NIXL runtime).
                 descriptor = connect.Descriptor(embeddings)
                 # Create a write operation using the serialized request and the descriptor.

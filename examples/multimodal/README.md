@@ -18,7 +18,6 @@ limitations under the License.
 # Multimodal Deployment Examples
 
 This directory provides example workflows and reference implementations for deploying a multimodal model using Dynamo.
-The examples are based on the [llava-1.5-7b-hf](https://huggingface.co/llava-hf/llava-1.5-7b-hf) model.
 
 ## Multimodal Aggregated Serving
 
@@ -51,7 +50,10 @@ flowchart LR
 
 ```bash
 cd $DYNAMO_HOME/examples/multimodal
+# Serve a LLaVA 1.5 7B model:
 dynamo serve graphs.agg:Frontend -f ./configs/agg-llava.yaml
+# Serve a Qwen2 VL model:
+# dynamo serve graphs.agg:Frontend -f ./configs/agg-llava.yaml
 ```
 
 ### Client
@@ -84,6 +86,8 @@ curl http://localhost:8000/v1/chat/completions \
       "stream": false
     }'
 ```
+
+If serving the example Qwen model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"Qwen/Qwen2-VL-7B-Instruct"`.
 
 You should see a response similar to this:
 ```json
@@ -151,6 +155,7 @@ curl http://localhost:8000/v1/chat/completions \
         }
       ],
       "max_tokens": 300,
+      "temperature": 0.0,
       "stream": false
     }'
 ```
@@ -195,8 +200,10 @@ DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk
 
 # Deploy to Kubernetes
 export DEPLOYMENT_NAME=multimodal-agg
-# For aggregated serving:
+# For aggregated serving with LLaVA:
 dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg-llava.yaml
+# For aggregated serving with Qwen2-VL:
+# dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg-qwen.yaml
 # For disaggregated serving:
 # export DEPLOYMENT_NAME=multimodal-disagg
 # dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/disagg.yaml
@@ -233,8 +240,11 @@ curl localhost:8000/v1/chat/completions \
       }
     ],
     "max_tokens": 300,
+    "temperature": 0.0,
     "stream": false
   }'
 ```
+
+If serving the example Qwen model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"Qwen/Qwen2-VL-7B-Instruct"`.
 
 For more details on managing deployments, testing, and troubleshooting, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md).
