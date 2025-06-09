@@ -487,12 +487,14 @@ struct ProgressEngine<S: Storage, M: BlockMetadata> {
 #[cfg(test)]
 mod tests {
     use super::super::block::{BasicMetadata, Blocks};
-    use super::super::layout::tests::setup_layout;
+    use super::super::layout::{tests::setup_layout, FullyContiguous, LayoutConfig};
     use super::*;
 
     use crate::block_manager::block::BlockExt;
-    use crate::block_manager::offload::tests::build_pools;
+    use crate::block_manager::DType;
     use crate::tokens::{TokenBlockSequence, Tokens};
+
+    use crate::block_manager::storage::tests::{NullDeviceAllocator, NullDeviceStorage};
 
     /// Helper method to build a [`BlockPool`] with a [`ProgressEngine`] for unit testing
     impl<S: Storage, M: BlockMetadata> BlockPoolArgsBuilder<S, M> {
@@ -683,18 +685,42 @@ mod tests {
         Ok((immutable_blocks, sequence_hashes))
     }
 
+    async fn make_simple_pool(
+        num_blocks: usize,
+    ) -> anyhow::Result<BlockPool<NullDeviceStorage, BasicMetadata>> {
+        let config = LayoutConfig {
+            num_blocks,
+            num_layers: 1,
+            outer_dim: 1,
+            page_size: 4,
+            inner_dim: 1024,
+            alignment: 1,
+            dtype: DType::FP16,
+        };
+
+        let layout = FullyContiguous::<NullDeviceStorage>::allocate(config, &NullDeviceAllocator)?;
+
+        let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)?.into_blocks()?;
+
+        let pool = BlockPool::builder().blocks(blocks).build()?;
+
+        Ok(pool)
+    }
+
+    /// A test that ensures that we only ever evict leaves from the inactive pool.
     #[tokio::test]
     async fn test_block_pool_evict_leaves() -> anyhow::Result<()> {
-        let (_, device_pool, _, _) = build_pools(4, None, None, None)?;
-        let device_pool = device_pool.as_ref().unwrap();
+        let pool = make_simple_pool(4).await?;
 
-        let (_, sequence_hashes) = create_blocks(device_pool, 4).await?;
+        let (_, sequence_hashes) = create_blocks(&pool, 4).await?;
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        device_pool.allocate_blocks(1).await?;
+        // Allocate 1 block. This should evict the leaf of our allocated sequence.
+        pool.allocate_blocks(1).await?;
 
-        let matched = device_pool
+        // The leaf should be evicted, so we should have 3 matches.
+        let matched = pool
             .match_sequence_hashes(sequence_hashes.as_slice())
             .await?;
         assert_eq!(matched.len(), 3);
@@ -702,9 +728,11 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        device_pool.allocate_blocks(2).await.unwrap();
+        // Allocate 2 blocks. This should get the previously allocated block, as well as one more leaf.
+        pool.allocate_blocks(2).await.unwrap();
 
-        let matched = device_pool
+        // The next leaf should be evicted, so we should have 2 matches.
+        let matched = pool
             .match_sequence_hashes(sequence_hashes.as_slice())
             .await?;
         assert_eq!(matched.len(), 2);
@@ -713,24 +741,25 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let blocks = device_pool.allocate_blocks(4).await?;
+        // If we allocate all the blocks, the entire remaining sequence should be evicted.
+        let blocks = pool.allocate_blocks(4).await?;
         assert_eq!(blocks.len(), 4);
 
         Ok(())
     }
 
+    /// When a block has two children, we need to ensure that we evict both children before
+    /// adding the parent to the leaf set.
     #[tokio::test]
     async fn test_block_pool_parent_child() -> anyhow::Result<()> {
-        let (_, device_pool, _, _) = build_pools(3, None, None, None)?;
-        let device_pool = device_pool.as_ref().unwrap();
+        let pool = make_simple_pool(3).await?;
 
         let tokens = vec![1, 2, 3, 4, 5];
 
         let sequence = TokenBlockSequence::new(Tokens::from(tokens.clone()), 4, None);
 
         // Create a root block, with two child blocks.
-
-        let mut root_block = device_pool.allocate_blocks(1).await?.pop().unwrap();
+        let mut root_block = pool.allocate_blocks(1).await?.pop().unwrap();
         root_block.apply_token_block(sequence.blocks().first().unwrap().clone())?;
 
         let root_block_hash = root_block.sequence_hash().unwrap();
@@ -739,13 +768,15 @@ mod tests {
         let mut child_block_hashes = Vec::new();
 
         for i in 0..2 {
+            // Create a new token sequence using the common prefix.
             let mut tokens = tokens.clone();
             for _ in 0..4 {
                 tokens.push(i);
             }
             let seq = TokenBlockSequence::new(Tokens::from(tokens), 4, None);
 
-            let mut child_block = device_pool.allocate_blocks(1).await?.pop().unwrap();
+            // Allocate and apply the suffix to the child block.
+            let mut child_block = pool.allocate_blocks(1).await?.pop().unwrap();
             child_block.apply_token_block(seq.blocks()[1].clone())?;
 
             child_block_hashes.push(child_block.sequence_hash().unwrap());
@@ -753,10 +784,10 @@ mod tests {
         }
 
         // Register the children first. This can happen with offloading.
-        let child_blocks = device_pool.register_blocks(child_blocks).await?;
+        let child_blocks = pool.register_blocks(child_blocks).await?;
 
         // After the children are registered, we can register the root block.
-        let root_block = device_pool.register_blocks(vec![root_block]).await?;
+        let root_block = pool.register_blocks(vec![root_block]).await?;
 
         // Drop both of them.
         drop(root_block);
@@ -765,30 +796,33 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // Allocate two new blocks, which should evict both children.
-        device_pool.allocate_blocks(2).await?;
+        pool.allocate_blocks(2).await?;
 
         // Now, the root block should be the only block left.
-
         for child_block_hash in child_block_hashes {
-            let matched = device_pool
-                .match_sequence_hashes(&[child_block_hash])
-                .await?;
+            let matched = pool.match_sequence_hashes(&[child_block_hash]).await?;
             assert_eq!(matched.len(), 0);
         }
 
-        let matched = device_pool
-            .match_sequence_hashes(&[root_block_hash])
-            .await?;
+        // Check that the root block remains.
+        let matched = pool.match_sequence_hashes(&[root_block_hash]).await?;
         assert_eq!(matched.len(), 1);
 
         Ok(())
     }
 
+    /// When offloading, it's possible that the tail of a sequence in a pool is evicted before
+    /// the entire sequence can be offloaded. This can happen in the following case:
+    ///
+    /// Assume a sequence of 4 blocks: [0, 1, 2, 3]
+    /// 1. Blocks 0, 1, and 2 are offloaded to host memory.
+    /// 2. Block 2 is evicted from the host.
+    /// 3. Block 3 is offloaded to host memory.
+    /// Now, the contents of the cache are [0, 1] and [3].
+    /// We need to treat these as two separate sequences.
     #[tokio::test]
     async fn test_block_pool_fragmentation() -> anyhow::Result<()> {
-        let (_, device_pool, _, _) = build_pools(4, None, None, None)?;
-
-        let device_pool = device_pool.as_ref().unwrap();
+        let pool = make_simple_pool(4).await?;
 
         let tokens = vec![0; 16];
 
@@ -797,21 +831,23 @@ mod tests {
 
         let mut sequence_hashes = Vec::new();
 
+        // Allocate and register the first 3 blocks.
         for block in token_blocks.blocks()[..3].iter() {
-            let mut mutable_block = device_pool.allocate_blocks(1).await?.pop().unwrap();
+            let mut mutable_block = pool.allocate_blocks(1).await?.pop().unwrap();
             mutable_block.apply_token_block(block.clone())?;
 
             sequence_hashes.push(mutable_block.sequence_hash()?);
-            let _ = device_pool.register_blocks(vec![mutable_block]).await?;
+            let _ = pool.register_blocks(vec![mutable_block]).await?;
         }
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let _ = device_pool.allocate_blocks(2).await?;
+        // Allocate 2 blocks. This should take the remaining uninitialized block as well as the
+        // tail of the currently registered sequence.
+        let _ = pool.allocate_blocks(2).await?;
 
         assert_eq!(
-            device_pool
-                .match_sequence_hashes(sequence_hashes.as_slice())
+            pool.match_sequence_hashes(sequence_hashes.as_slice())
                 .await?
                 .len(),
             2
@@ -819,20 +855,16 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let mut mutable_block = device_pool
-            .allocate_blocks(1)
-            .await?
-            .into_iter()
-            .next()
-            .unwrap();
+        // Allocate 1 more block for the leaf of the sequence.
+        let mut mutable_block = pool.allocate_blocks(1).await?.into_iter().next().unwrap();
 
         mutable_block.apply_token_block(token_blocks.blocks()[3].clone())?;
 
-        let _ = device_pool.register_blocks(vec![mutable_block]).await?;
+        let _ = pool.register_blocks(vec![mutable_block]).await?;
 
+        // We should still only match the first 2 blocks, since the 3rd block has been evicted.
         assert_eq!(
-            device_pool
-                .match_sequence_hashes(sequence_hashes.as_slice())
+            pool.match_sequence_hashes(sequence_hashes.as_slice())
                 .await?
                 .len(),
             2
@@ -840,32 +872,34 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let _ = device_pool.allocate_blocks(4).await?;
+        // Now, we should be able to allocate all 4 blocks.
+        let _ = pool.allocate_blocks(4).await?;
 
         Ok(())
     }
 
+    /// Matching an entire sequence (moving it to the active pool), and returning it
+    /// should not affect the parent-child relationships of the blocks.
     #[tokio::test]
     async fn test_block_pool_match_return() -> anyhow::Result<()> {
-        let (_, device_pool, _, _) = build_pools(4, None, None, None)?;
+        let pool = make_simple_pool(4).await?;
 
-        let device_pool = device_pool.as_ref().unwrap();
+        let (_, sequence_hashes) = create_blocks(&pool, 4).await?;
 
-        let (_, sequence_hashes) = create_blocks(device_pool, 4).await?;
-
+        // We match the root of the sequence (moving it to the active pool), then
+        // immediately return it.
         assert_eq!(
-            device_pool
-                .match_sequence_hashes(vec![sequence_hashes[0]].as_slice())
+            pool.match_sequence_hashes(vec![sequence_hashes[0]].as_slice())
                 .await?
                 .len(),
             1
         );
 
-        let _alloc_blocks1 = device_pool.allocate_blocks(3).await?;
+        let _alloc_blocks1 = pool.allocate_blocks(3).await?;
 
+        // Allocating 3 blocks should evict all but the root of the sequence.
         assert_eq!(
-            device_pool
-                .match_sequence_hashes(sequence_hashes.as_slice())
+            pool.match_sequence_hashes(sequence_hashes.as_slice())
                 .await?
                 .len(),
             1
@@ -873,11 +907,11 @@ mod tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let _alloc_blocks2 = device_pool.allocate_blocks(1).await?;
+        let _alloc_blocks2 = pool.allocate_blocks(1).await?;
 
+        // Now, allocating one more block should evict the root.
         assert_eq!(
-            device_pool
-                .match_sequence_hashes(sequence_hashes.as_slice())
+            pool.match_sequence_hashes(sequence_hashes.as_slice())
                 .await?
                 .len(),
             0
@@ -886,35 +920,37 @@ mod tests {
         Ok(())
     }
 
+    /// When we move a suffix of a sequence to the active pool (like what happens when onboarding),
+    /// then return it to the inactive pool, we need to ensure that the parent-child relationships
+    /// are still correct, and that the temporary leaf in the inactive pool can't be evicted.
     #[tokio::test]
     async fn test_block_pool_match_partial() -> anyhow::Result<()> {
-        let (_, device_pool, _, _) = build_pools(4, None, None, None)?;
+        let pool = make_simple_pool(4).await?;
 
-        let device_pool = device_pool.as_ref().unwrap();
+        let (_, sequence_hashes) = create_blocks(&pool, 4).await?;
 
-        let (_, sequence_hashes) = create_blocks(device_pool, 4).await?;
-
+        // Assert that all 4 blocks are in the pool.
         assert_eq!(
-            device_pool
-                .match_sequence_hashes(sequence_hashes.as_slice())
+            pool.match_sequence_hashes(sequence_hashes.as_slice())
                 .await?
                 .len(),
             4
         );
 
-        let matched_suffix = device_pool
-            .match_sequence_hashes(&sequence_hashes[2..])
-            .await?;
+        // Now, we match only the last 2 blocks
+        let matched_suffix = pool.match_sequence_hashes(&sequence_hashes[2..]).await?;
         assert_eq!(matched_suffix.len(), 2);
 
-        let new_alloc_block = device_pool.allocate_blocks(1).await?;
+        // This allocation should fail. Although there are 2 inactive blocks, the leaf is in the active pool.
+        let new_alloc_block = pool.allocate_blocks(1).await?;
         assert_eq!(new_alloc_block.len(), 0);
 
+        // Now, drop the leaf, and return it to the inactive pool.
         drop(matched_suffix);
 
+        // All 4 blocks should still be in the pool.
         assert_eq!(
-            device_pool
-                .match_sequence_hashes(sequence_hashes.as_slice())
+            pool.match_sequence_hashes(sequence_hashes.as_slice())
                 .await?
                 .len(),
             4
