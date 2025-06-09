@@ -20,10 +20,14 @@ import logging
 import uuid
 from dataclasses import dataclass
 
+import httpx
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
-from router import KvRouter
+from router import RouterAPI, RouterRequest, RouterResponse  # Add this import
+from worker import VllmWorkers
+
+from dynamo._core import compute_block_hash_for_seq_py
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
@@ -33,9 +37,6 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.transformers_utils.tokenizer import get_tokenizer
-from worker import VllmWorkers
-
-from dynamo._core import compute_block_hash_for_seq_py
 
 logger = logging.getLogger(__name__)
 
@@ -47,22 +48,21 @@ class ServingParams:
     num_workers: int
     base_kv_events_port: int
     base_metrics_port: int
+    router_port: int
+    http_port: int
 
 
-class RouterAPI:
-    def __init__(self, init_params: ServingParams, port: int):
+class ServiceAPI:
+    def __init__(self, init_params: ServingParams):
         self.init_params = init_params
-        self.port = port
         self.app = FastAPI(title="Router API", version="0.0.1")
 
         # These will be initialized in start()
         self.workers = None
-        self.router = None
         self.tokenizer = None
         self.openai_serving_chat = None
         self.model_config = None
-
-        self.background_tasks: list[asyncio.Task] = []
+        self.http_client = None
 
         self.setup_routes()
 
@@ -71,8 +71,8 @@ class RouterAPI:
         async def chat_completions(request: ChatCompletionRequest):
             if (
                 self.workers is None
-                or self.router is None
                 or self.openai_serving_chat is None
+                or self.http_client is None
             ):
                 return ErrorResponse(
                     message="Service not ready",
@@ -121,7 +121,7 @@ class RouterAPI:
                     default_sampling_params=None,
                 )
 
-                # Get best worker using router
+                # Get best worker using HTTP request to router
                 tokens: list[int] = engine_prompt["prompt_token_ids"]
                 num_tokens = len(tokens)
                 if num_tokens == 0:
@@ -130,6 +130,7 @@ class RouterAPI:
                         type="invalid_request_error",
                         code=400,
                     )
+
                 # It is much preferred to communicate block hashes to the router instead of
                 # raw text prompts or tokens, especially when over network using pydantic validation,
                 # as block hashes can be orders of magnitude smaller.
@@ -138,9 +139,30 @@ class RouterAPI:
                 local_hashes = compute_block_hash_for_seq_py(
                     tokens, self.init_params.block_size
                 )
-                best_worker_id = await self.router.get_best_worker(
-                    local_hashes, num_tokens
-                )
+
+                # Call router via HTTP
+                try:
+                    router_request = RouterRequest(
+                        local_hashes=local_hashes, num_tokens=num_tokens
+                    )
+                    router_response = await self.http_client.post(
+                        f"http://localhost:{self.init_params.router_port}/find_best_worker",
+                        json=router_request.model_dump(),
+                        timeout=1,
+                    )
+
+                    router_response.raise_for_status()
+                    router_data = RouterResponse.model_validate(router_response.json())
+                    best_worker_id = router_data.worker_id
+
+                except (httpx.RequestError, httpx.HTTPStatusError) as e:
+                    logger.error(f"Router request failed: {e}")
+                    return ErrorResponse(
+                        message="Router service unavailable",
+                        type="service_unavailable",
+                        code=503,
+                    )
+
                 logger.info(f"Selected worker {best_worker_id} for request")
 
                 # Generate request ID
@@ -173,7 +195,7 @@ class RouterAPI:
                 return ErrorResponse(message=str(e), type="internal_error", code=500)
 
     async def initialize_services(self):
-        """Initialize workers, router, and OpenAI serving components"""
+        """Initialize workers, HTTP client, and OpenAI serving components"""
         logger.info("Initializing VllmWorkers...")
         self.workers = VllmWorkers(
             model=self.init_params.model,
@@ -183,29 +205,14 @@ class RouterAPI:
             num_workers=self.init_params.num_workers,
         )
 
-        logger.info("Initializing KvRouter...")
-        self.router = KvRouter(
-            block_size=self.init_params.block_size,
-            num_workers=self.init_params.num_workers,
-            base_kv_events_port=self.init_params.base_kv_events_port,
-            base_metrics_port=self.init_params.base_metrics_port,
-        )
-
-        # Start router background tasks
-        logger.info("Starting router background tasks...")
-        self.background_tasks.append(
-            asyncio.create_task(self.router.periodic_update_load())
-        )
-        self.background_tasks.append(
-            asyncio.create_task(self.router.periodic_update_indexer())
-        )
+        # Initialize HTTP client for router communication
+        self.http_client = httpx.AsyncClient()
 
         logger.info("Initializing OpenAI serving components...")
         # Initialize tokenizer and model config
         self.tokenizer = get_tokenizer(self.init_params.model)
 
-        # Create a mock model config - in a real implementation you might want to
-        # extract this from the workers
+        # Create a mock model config
         self.model_config = ModelConfig(
             model=self.init_params.model,
             enforce_eager=True,
@@ -244,25 +251,21 @@ class RouterAPI:
         await self.initialize_services()
 
         # Start the API server
-        logger.info(f"Starting API server on port {self.port}")
+        logger.info(f"Starting API server on port {self.init_params.http_port}")
         config = uvicorn.Config(
-            self.app, host="0.0.0.0", port=self.port, log_level="info"
+            self.app, host="0.0.0.0", port=self.init_params.http_port, log_level="info"
         )
         server = uvicorn.Server(config)
         await server.serve()
 
     async def shutdown(self):
         """Proper shutdown handler"""
-        logger.info("Shutting down background tasks...")
+        logger.info("Shutting down API...")
 
-        if self.router is not None:
-            self.router.shutdown()
+        if self.http_client:
+            await self.http_client.aclose()
 
-        for task in self.background_tasks:
-            task.cancel()
-
-        await asyncio.gather(*self.background_tasks, return_exceptions=True)
-        logger.info("Router API shutdown completed")
+        logger.info("API shutdown completed")
 
 
 def main():
@@ -289,8 +292,12 @@ def main():
     parser.add_argument(
         "--base-metrics-port", type=int, default=5657, help="Base port for metrics"
     )
-
-    # API-specific arguments
+    parser.add_argument(
+        "--router-port",
+        type=int,
+        default=7000,
+        help="Port for router service",
+    )
     parser.add_argument(
         "--http-port", type=int, default=8000, help="Port to serve the API on"
     )
@@ -306,15 +313,28 @@ def main():
         num_workers=args.num_workers,
         base_kv_events_port=args.base_kv_events_port,
         base_metrics_port=args.base_metrics_port,
+        router_port=args.router_port,
+        http_port=args.http_port,
     )
 
-    api = RouterAPI(init_params=init_params, port=args.http_port)
+    # Create both services
+    api = ServiceAPI(init_params=init_params)
+    router_api = RouterAPI(
+        block_size=args.block_size,
+        num_workers=args.num_workers,
+        base_kv_events_port=args.base_kv_events_port,
+        base_metrics_port=args.base_metrics_port,
+        port=args.router_port,
+    )
 
     async def run_with_shutdown():
         try:
-            await api.start()
+            # Start both services concurrently
+            await asyncio.gather(
+                api.start(), router_api.start(), return_exceptions=True
+            )
         except KeyboardInterrupt:
-            logger.info("Received KeyboardInterrupt, shutting down API server...")
+            logger.info("Received KeyboardInterrupt, shutting down services...")
         except Exception as e:
             logger.exception(f"Unhandled exception: {e}")
         finally:

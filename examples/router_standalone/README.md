@@ -23,6 +23,8 @@ A toy implementation of KvRouter that demonstrates standalone usage without depe
 
 This example shows how to use KvRouter in a standalone fashion to intelligently route requests across multiple vLLM workers based on KV cache overlap and load metrics. The router maintains a view of each worker's cached blocks and routes new requests to the worker with the best combination of cache overlap and available capacity.
 
+**Note**: The main focus should be put on `router.py` as it contains the bulk of the non-boilerplate code and core routing logic.
+
 ## How It Works
 
 ### Core Architecture
@@ -73,7 +75,14 @@ While not implemented in this example, the router can also operate in a pure pre
 
 ## Usage
 
-1. **Start the router API**:
+1. **Install latest vLLM**:
+   ```bash
+   uv pip uninstall ai-dynamo-vllm
+   uv pip install vllm
+   ```
+   *Note: This uninstalls the local vLLM patch (`ai-dynamo-vllm`) and replaces it with the latest standard vLLM package.*
+
+2. **Start the router API**:
    For example:
    ```bash
    python api.py \
@@ -82,23 +91,16 @@ While not implemented in this example, the router can also operate in a pure pre
      --block-size 64 \
      --base-kv-events-port 5557 \
      --base-metrics-port 5657 \
+     --router-port 7000
      --http-port 8000
     ```
 
-2. **Ping the endpoint (optional)**:
+3. **Ping the endpoint (optional)**:
    ```bash
-   curl -X POST http://localhost:8000/v1/chat/completions \
-     -H "Content-Type: application/json" \
-     -H "Accept: text/event-stream" \
-     -d '{
-       "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-       "messages": [{"role": "user", "content": "Hello!"}],
-       "stream": true,
-       "max_tokens": 100
-     }'
+  ./ping.sh
    ```
 
-3. **Run performance benchmark**:
+4. **Run performance benchmark**:
    ```bash
    ./perf.sh
    ```
@@ -106,3 +108,7 @@ While not implemented in this example, the router can also operate in a pure pre
 ## Notes
 
 This is a standalone toy implementation created for pedagogical purposes to demonstrate the core KvRouter concepts in isolation. Our default dynamo router is already very efficient and uses NATS for event communication and etcd for endpoint registration. This example intentionally avoids these production components to provide a simpler, self-contained demonstration of the routing logic and cache overlap mechanics.
+
+- **OpenAI Compatible Frontend** – FastAPI application serving OpenAI compatible HTTP API.
+- **Router** – Standalone FastAPI application for routing and load balancing traffic to workers.
+- **Workers** – Served in-process within the frontend application to reduce complexity and boilerplate, rather than as separate endpoints.
