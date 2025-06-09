@@ -162,6 +162,9 @@ pub enum StorageError {
 
     #[error("Out of bounds: {0}")]
     OutOfBounds(String),
+
+    #[error("Torch error: {0}")]
+    TorchError(#[from] pyo3::PyErr),
 }
 
 /// Core storage trait that provides access to memory regions

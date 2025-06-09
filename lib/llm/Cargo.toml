@@ -33,7 +33,7 @@ default = ["block-manager", "testing-full"]
 testing-full  = ["testing-cuda", "testing-nixl"]
 testing-cuda  = ["dep:cudarc"]
 testing-nixl  = ["dep:nixl-sys"]
-block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
+block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix", "dep:pyo3"]
 sentencepiece = ["dep:sentencepiece"]
 
 [dependencies]
@@ -85,6 +85,7 @@ nixl-sys = { version = "0.3.0-rc.2", optional = true }
 cudarc = { version = "0.16.2", features = ["cuda-12020"], optional = true }
 ndarray = { version = "0.16", optional = true }
 nix = { version = "0.26", optional = true }
+pyo3 = { version = "0.23.4", optional = true }
 
 # protocols
 unicode-segmentation = "1.12"
