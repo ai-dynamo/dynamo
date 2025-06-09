@@ -144,7 +144,8 @@ impl Client {
         let instances = self.instances();
         let mut inhibited = self.instance_inhibited.lock().await;
 
-        instances.into_iter()
+        instances
+            .into_iter()
             .filter_map(|instance| {
                 let id = instance.id();
                 if let Some(&timestamp) = inhibited.get(&id) {

@@ -124,7 +124,8 @@ where
 
             Ok(instance_id)
         };
-        self.generate_with_fault_tolerance(routing_algorithm, request).await
+        self.generate_with_fault_tolerance(routing_algorithm, request)
+            .await
     }
 
     /// Issue a request to a random endpoint
@@ -147,7 +148,8 @@ where
             tracing::trace!("random router selected {instance_id}");
             Ok(instance_id)
         };
-        self.generate_with_fault_tolerance(routing_algorithm, request).await
+        self.generate_with_fault_tolerance(routing_algorithm, request)
+            .await
     }
 
     /// Issue a request to a specific endpoint
@@ -171,7 +173,8 @@ where
             }
             Ok(instance_id)
         };
-        self.generate_with_fault_tolerance(routing_algorithm, request).await
+        self.generate_with_fault_tolerance(routing_algorithm, request)
+            .await
     }
 
     pub async fn r#static(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
@@ -182,7 +185,11 @@ where
         self.addressed.generate(request).await
     }
 
-    async fn generate_with_fault_tolerance<F, R>(&self, routing_algorithm: F, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>>
+    async fn generate_with_fault_tolerance<F, R>(
+        &self,
+        routing_algorithm: F,
+        request: SingleIn<T>,
+    ) -> anyhow::Result<ManyOut<U>>
     where
         F: Fn() -> R,
         R: Future<Output = anyhow::Result<i64>>,
@@ -194,7 +201,8 @@ where
             let instance_id = routing_algorithm().await?;
 
             let subject = self.client.endpoint.subject_to(instance_id);
-            let request = SingleIn::from(req_data.clone()).map(|req| AddressedRequest::new(req, subject));
+            let request =
+                SingleIn::from(req_data.clone()).map(|req| AddressedRequest::new(req, subject));
 
             let stream = self.addressed.generate(request).await;
             if stream.is_ok() {
