@@ -18,21 +18,23 @@ limitations under the License.
 # Planner
 
 The planner monitors the state of the system and adjusts workers to ensure that the system runs efficiently. Currently, the planner can scale the number of vllm workers up and down based on the kv cache load and prefill queue size:
-* Backend:
-  * local ✅
-  * kubernetes ✅
-* LLM framework:
-  * vllm ✅
-  * tensorrt-llm ❌
-  * SGLang ❌
-  * llama.cpp ❌
-* Serving type:
-  * Aggregated ✅
-  * Disaggregated ✅
-* Planner actions:
-  * Load-based scaling up/down prefill/decode workers ✅
-  * SLA-based scaling up/down prefill/decode workers ✅ (with some limitations)
-  * Adjusting engine knobs ❌
+
+|                     |    | Feature           |
+| :----------------   | :--| :-----------------|
+| **Backend**         | ✅ | Local              |
+|                     | ✅ | Kubernetes         |
+| **LLM Framework**   | ✅ | vLLM               |
+|                     | ❌ | TensorRT-LLM       |
+|                     | ❌ | SGLang             |
+|                     | ❌ | llama.cpp          |
+| **Serving Type**    | ✅ | Aggregated         |
+|                     | ✅ | Disaggregated      |
+| **Planner Actions** | ✅ | Load-based scaling up/down prefill/decode workers |
+|                     | ✅ | SLA-based scaling up/down prefill/decode workers **<sup>[1]</sup>** |
+|                     | ✅ | Adjusting engine knobs |
+
+**<sup>[1]</sup>** Supported with some limitations.
+
 
 ## Load-based Scaling Up/Down Prefill/Decode Workers
 
@@ -68,18 +70,19 @@ python -m utils.profile_sla \
   --itl <target-itl-(ms)>
 ```
 
-The script will first detect the number of available GPUs on the current nodes (multi-node engine not supported yet). Then, it will profile the prefill and decode performance with different TP sizes. For prefill, since there is no in-flight batching (assume isl is long enough to saturate the GPU), the script directly measures the TTFT for a request with given isl without kv-reusing. For decode, since the ITL (or iteration time) is relevant with how many requests are in-flight, the script will measure the ITL under different number of in-flight requests. The range of the number of in-flight requests is from 1 to the maximum number of requests that the kv cache of the engine can hold. To measure the ITL without being affected by piggy-backed prefill requests, the script will enable kv-reuse and warm up the engine by issuing the same prompts before measuring the ITL. Since the kv cache is sufficient for all the requests, it can hold the kv cache of the pre-computed prompts and skip the prefill phase when measuring the ITL.
+The script first detects the number of available GPUs on the current nodes (multi-node engine not supported yet). Then, it profiles the prefill and decode performance with different TP sizes. For prefill, since there is no in-flight batching (assume isl is long enough to saturate the GPU), the script directly measures the TTFT for a request with given isl without kv-reusing. For decode, since the ITL (or iteration time) is relevant with how many requests are in-flight, the script measures the ITL under different number of in-flight requests. The range of the number of in-flight requests is from 1 to the maximum number of requests that the kv cache of the engine can hold. To measure the ITL without being affected by piggy-backed prefill requests, the script enables kv-reuse and warm up the engine by issuing the same prompts before measuring the ITL. Since the kv cache is sufficient for all the requests, it can hold the kv cache of the pre-computed prompts and skip the prefill phase when measuring the ITL.
 
-After the profiling finishes, two plots will be generated in the `output-dir`. For example, here are the profiling results for `examples/llm/configs/disagg.yaml`:
+After the profiling finishes, two plots are generated in the `output-dir`. For example, here are the profiling results for `examples/llm/configs/disagg.yaml`:
 
 ![Prefill Performance](../images/h100_prefill_performance.png)
 ![Decode Performance](../images/h100_decode_performance.png)
 
-For the prefill performance, the script will plot the TTFT for different TP sizes and select the best TP size that meet the target TTFT SLA and delivers the best throughput per GPU. Based on how close the TTFT of the selected TP size is to the SLA, the script will also recommend the upper and lower bounds of the prefill queue size to be used in planner.
+For the prefill performance, the script plots the TTFT for different TP sizes and select the best TP size that meet the target TTFT SLA and delivers the best throughput per GPU. Based on how close the TTFT of the selected TP size is to the SLA, the script also recommends the upper and lower bounds of the prefill queue size to be used in planner.
 
-For the decode performance, the script will plot the ITL for different TP sizes and different in-flight requests. Similarly, it will select the best point that satisfies the ITL SLA and delivers the best throughput per GPU and recommend the upper and lower bounds of the kv cache utilization rate to be used in planner.
+For the decode performance, the script plots the ITL for different TP sizes and different in-flight requests. Similarly, it selects the best point that satisfies the ITL SLA and delivers the best throughput per GPU and recommend the upper and lower bounds of the kv cache utilization rate to be used in planner.
 
-The following information will be printed out in the terminal:
+The following information is printed out in the terminal:
+```
 2025-05-16 15:20:24 - __main__ - INFO - Analyzing results and generate recommendations...
 2025-05-16 15:20:24 - __main__ - INFO - Suggested prefill TP:4 (TTFT 48.37 ms, throughput 15505.23 tokens/s/GPU)
 2025-05-16 15:20:24 - __main__ - INFO - Suggested planner upper/lower bound for prefill queue size: 0.24/0.10
@@ -87,7 +90,7 @@ The following information will be printed out in the terminal:
 2025-05-16 15:20:24 - __main__ - INFO - Suggested planner upper/lower bound for decode kv cache utilization: 0.20/0.10
 ```
 
-After finding the best TP size for prefill and decode, the script will then interpolate the TTFT with ISL and ITL with active KV cache and decode context length. This is to provide a more accurate estimation of the performance when ISL and OSL changes. The results will be saved to `<output_dir>/<decode/prefill>_tp<best_tp>_interpolation`.
+After finding the best TP size for prefill and decode, the script interpolates the TTFT with ISL and ITL with active KV cache and decode context length. This is to provide a more accurate estimation of the performance when ISL and OSL changes. The results are saved to `<output_dir>/<decode/prefill>_tp<best_tp>_interpolation`.
 
 ## Usage
 

@@ -100,7 +100,6 @@ and is driven by a transparent development approach. Check out our repo at https
    Writing Python Workers in Dynamo <guides/backend.md>
    Disaggregation and Performance Tuning <guides/disagg_perf_tuning.md>
    KV Cache Router Performance Tuning <guides/kv_router_perf_tuning.md>
-   Planner Benchmark Example <guides/planner_benchmark/benchmark_planner.md>
    Working with Dynamo Kubernetes Operator <guides/dynamo_deploy/dynamo_operator.md>
 
 .. toctree::
@@ -112,6 +111,13 @@ and is driven by a transparent development approach. Check out our repo at https
    Manual Helm Deployment <guides/dynamo_deploy/manual_helm_deployment.md>
    Minikube Setup Guide <guides/dynamo_deploy/minikube.md>
    Model Caching with Fluid <guides/dynamo_deploy/model_caching_with_fluid.md>
+
+.. toctree::
+   :hidden:
+   :caption: Benchmarking
+
+   Planner Benchmark Example <guides/planner_benchmark/benchmark_planner.md>
+
 
 .. toctree::
    :hidden:
