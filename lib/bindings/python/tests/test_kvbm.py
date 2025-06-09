@@ -82,6 +82,7 @@ async def test_kvbm(block_manager: KvbmCacheManager):
     request_2 = new_request("2")
     request_3 = new_request("3")
 
+    # test get_computed_blocks
     (blocks, count) = block_manager.get_computed_blocks(request_1)
     assert len(blocks) == count
     assert count == 0
