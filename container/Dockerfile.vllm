@@ -236,8 +236,8 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
     uv pip install --requirement /tmp/requirements.txt
 
 # Install benchmarks package
-RUN --mount=type=bind,source=./benchmarks,target=/tmp/benchmarks \
-    cd /tmp/benchmarks && uv pip install .
+COPY ./benchmarks /tmp/benchmarks
+RUN cd /tmp/benchmarks && uv pip install .
 
 # ### MISC UTILITY SETUP ###
 
