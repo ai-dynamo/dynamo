@@ -25,9 +25,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from router import RouterAPI, RouterRequest, RouterResponse  # Add this import
-from router_standalone.worker import VllmWorkers
 
-from dynamo._core import compute_block_hash_for_seq_py
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
@@ -37,6 +35,9 @@ from vllm.entrypoints.openai.protocol import (
 from vllm.entrypoints.openai.serving_chat import OpenAIServingChat
 from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingModels
 from vllm.transformers_utils.tokenizer import get_tokenizer
+from worker import VllmWorkers
+
+from dynamo._core import compute_block_hash_for_seq_py
 
 logger = logging.getLogger(__name__)
 
