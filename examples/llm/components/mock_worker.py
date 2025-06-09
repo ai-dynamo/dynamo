@@ -18,19 +18,18 @@ import asyncio
 import logging
 import os
 import signal
+import time
 
 from components.disagg_router import PyDisaggregatedRouter
 from components.llm_interfaces import LLMWorker
 from components.prefill_worker import PrefillWorker
-from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
 from utils.protocol import MyRequestOutput, vLLMGenerateRequest
 from utils.vllm import RouterType, parse_vllm_args
-from vllm.entrypoints.openai.api_server import (
-    build_async_engine_client_from_engine_args,
-)
-from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
+from vllm.outputs import CompletionOutput
+from vllm.remote_prefill import RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
+from vllm.transformers_utils.tokenizer import get_tokenizer
 
 from dynamo.llm import WorkerMetricsPublisher
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
@@ -42,10 +41,10 @@ logger = logging.getLogger(__name__)
     dynamo={
         "namespace": "dynamo",
     },
-    resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
+    resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
 )
-class VllmWorker(LLMWorker):
+class MockVllmWorker(LLMWorker):
     prefill_worker = depends(PrefillWorker)
 
     def __init__(self):
@@ -57,7 +56,7 @@ class VllmWorker(LLMWorker):
         self._prefill_queue_nats_server = os.getenv(
             "NATS_SERVER", "nats://localhost:4222"
         )
-        self.namespace, _ = VllmWorker.dynamo_address()  # type: ignore
+        self.namespace, _ = MockVllmWorker.dynamo_address()  # type: ignore
         self._prefill_queue_stream_name = f"{self.namespace}_prefill_queue"
         logger.info(
             f"Prefill queue: {self._prefill_queue_nats_server}:{self._prefill_queue_stream_name}"
@@ -89,20 +88,16 @@ class VllmWorker(LLMWorker):
             os.environ["VLLM_KV_COMPONENT"] = class_name
 
         self.metrics_publisher = WorkerMetricsPublisher()
-
         signal.signal(signal.SIGTERM, self.shutdown_vllm_engine)
         signal.signal(signal.SIGINT, self.shutdown_vllm_engine)
+        self._tokenizer = get_tokenizer(
+            self.engine_args.model, tokenizer_mode="auto", trust_remote_code=False
+        )
+        self._prefill_latency = 0.2
+        self._decode_latency = 0.2
 
     @async_on_start
     async def async_init(self):
-        self._engine_context = build_async_engine_client_from_engine_args(
-            self.engine_args
-        )
-        if self._engine_context is not None:
-            self.engine_client = await self._engine_context.__aenter__()
-        else:
-            raise RuntimeError("Failed to initialize engine client")
-        self.engine_client.set_metrics_publisher(self.metrics_publisher)
         # Initially send dummy metrics to kick start,
         # vLLM will not update stat until forward pass is triggered
         self.metrics_publisher.publish(
@@ -122,9 +117,7 @@ class VllmWorker(LLMWorker):
         runtime = dynamo_context["runtime"]
 
         if self.engine_args.remote_prefill:
-            metadata = self.engine_client.nixl_metadata
-            metadata_store = NixlMetadataStore("dynamo", runtime)
-            await metadata_store.put(metadata.engine_id, metadata)
+            pass
 
         if self.engine_args.conditional_disagg:
             self.disaggregated_router = PyDisaggregatedRouter(
@@ -160,7 +153,7 @@ class VllmWorker(LLMWorker):
         logger.info(f"Received signal {signum}, shutting down")
         loop = asyncio.get_event_loop()
         try:
-            self.engine_client.close()
+            # self.engine_client.close()
             logger.info("VllmWorker shutdown complete")
         except Exception as e:
             logger.error(f"Error during shutdown: {e}")
@@ -204,33 +197,49 @@ class VllmWorker(LLMWorker):
             disagg_router_decision = True
 
         if self.do_remote_prefill and disagg_router_decision:
-            remote_prefill_params = RemotePrefillParams(
-                is_remote_prefill=True,
-                remote_prefill_request_callback=self.get_remote_prefill_request_callback(),
-            )
+            # TODO Support remote prefill
+            # Mock
+            # remote_prefill_params = RemotePrefillParams(
+            #  is_remote_prefill=True,
+            #  remote_prefill_request_callback=self.get_remote_prefill_request_callback(),
+            # )
             logger.info(
                 f"Prefilling remotely for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
             )
         else:
-            remote_prefill_params = None
+            #            remote_prefill_params = None
             logger.info(
                 f"Prefilling locally for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
             )
+            for index, token in enumerate(request.engine_prompt["prompt_token_ids"]):
+                time.sleep(self._prefill_latency)
 
         # rust HTTP requires Delta streaming
         request.sampling_params.output_kind = RequestOutputKind.DELTA
 
-        async for response in self.engine_client.generate(
-            prompt=request.engine_prompt,
-            sampling_params=request.sampling_params,
-            request_id=request.request_id,
-            remote_prefill_params=remote_prefill_params,
-        ):
+        length = len(request.engine_prompt["prompt_token_ids"])
+
+        for index, token in enumerate(request.engine_prompt["prompt_token_ids"]):
+            if index == length - 1:
+                finished = True
+            else:
+                finished = False
+
+            completion_output = CompletionOutput(
+                index=0,
+                text=self._tokenizer.decode([token]),
+                token_ids=[token],
+                cumulative_logprob=None,
+                logprobs=None,
+                finish_reason="length" if finished else None,
+            )
+
             yield MyRequestOutput(
-                request_id=response.request_id,
-                prompt=response.prompt,
-                prompt_token_ids=response.prompt_token_ids,
-                prompt_logprobs=response.prompt_logprobs,
-                outputs=response.outputs,
-                finished=response.finished,
+                request_id=request.request_id,
+                prompt=None,
+                prompt_token_ids=None,  # request.engine_prompt["prompt_token_ids"],
+                prompt_logprobs=None,
+                outputs=[completion_output],
+                finished=finished,
             ).model_dump_json()
+            time.sleep(self._decode_latency)

@@ -16,6 +16,7 @@
 
 import logging
 import time
+from multiprocessing import Process, Queue
 
 import psutil
 import pytest
@@ -51,8 +52,8 @@ text_payload = Payload(
 deployment_graphs = {
     "agg": (
         DeploymentGraph(
-            module="graphs.agg:Frontend",
-            config="configs/agg.yaml",
+            module="graphs.mock_agg:Frontend",
+            config="configs/mock_agg.yaml",
             directory="/workspace/examples/llm",
             endpoint="v1/chat/completions",
             response_handler=completions_response_handler,
@@ -93,10 +94,78 @@ def _terminate_process_tree(pid):
         parent = psutil.Process(pid)
         for child in parent.children(recursive=True):
             _terminate_process(child)
-            _terminate_process(parent)
+        _terminate_process(parent)
     except psutil.NoSuchProcess:
         # Process already terminated
         pass
+
+
+def client(
+    deployment_graph, server_process, payload, queue, index, logger=logging.getLogger()
+):
+    url = f"http://localhost:{server_process.port}/{deployment_graph.endpoint}"
+    start_time = time.time()
+    retry_delay = 5
+    elapsed = 0.0
+    while time.time() - start_time < deployment_graph.timeout:
+        elapsed = time.time() - start_time
+        try:
+            response = requests.post(
+                url,
+                json=payload.payload,
+                timeout=deployment_graph.timeout - elapsed,
+            )
+        except (requests.RequestException, requests.Timeout) as e:
+            logger.warning("Retrying due to Request failed: %s", e)
+            time.sleep(retry_delay)
+            continue
+        logger.info("Response%r", response)
+        if response.status_code == 500:
+            error = response.json().get("error", "")
+            if "no instances" in error:
+                logger.warning("Retrying due to no instances available")
+                time.sleep(retry_delay)
+                continue
+        if response.status_code == 404:
+            error = response.json().get("error", "")
+            if "Model not found" in error:
+                logger.warning("Retrying due to model not found")
+                time.sleep(retry_delay)
+                continue
+        # Process the response
+        if response.status_code != 200:
+            logger.error(
+                "Service returned status code %s: %s",
+                response.status_code,
+                response.text,
+            )
+            pytest.fail(
+                "Service returned status code %s: %s"
+                % (response.status_code, response.text)
+            )
+        else:
+            break
+    else:
+        logger.error(
+            "Service did not return a successful response within %s s",
+            deployment_graph.timeout,
+        )
+        pytest.fail(
+            "Service did not return a successful response within %s s"
+            % deployment_graph.timeout
+        )
+
+    content = deployment_graph.response_handler(response)
+
+    logger.info("Client:%s Received Content: %s", index, content)
+
+    # Check for expected responses
+    assert content, "Empty response content"
+
+    for expected in payload.expected_response:
+        assert expected in content, "Expected '%s' not found in response" % expected
+
+    queue.put((index, content))
 
 
 def _wait_until_ready(
@@ -180,8 +249,24 @@ async def test_worker_failure(deployment_graph_test, request, runtime_services):
 
     with DynamoServeProcess(deployment_graph, request) as server_process:
         _wait_until_ready(deployment_graph, server_process, payload)
-
         circus_controller = CircusController.from_state_file("dynamo")
+
+        procs = []
+        queue = Queue()
+        for i in range(10):
+            procs.append(
+                Process(
+                    target=client,
+                    args=(
+                        deployment_graph,
+                        server_process,
+                        payload,
+                        queue,
+                        i,
+                    ),
+                )
+            )
+            procs[-1].start()
 
         for x in await circus_controller._list_watchers():
             print(x)
@@ -191,9 +276,14 @@ async def test_worker_failure(deployment_graph_test, request, runtime_services):
 
             print(result["pids"])
 
-            if x == "dynamo_vllmworker":
+            if x == "dynamo_mockvllmworker":
                 _terminate_process_tree(result["pids"][0])
+                break
 
-        _wait_until_ready(deployment_graph, server_process, payload)
+        for proc in procs:
+            proc.join()
+
+        while not queue.empty():
+            print(queue.get())
 
         circus_controller.close()
