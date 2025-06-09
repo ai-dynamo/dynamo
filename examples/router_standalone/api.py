@@ -25,7 +25,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from router import RouterAPI, RouterRequest, RouterResponse  # Add this import
-from worker import VllmWorkers
+from router_standalone.worker import VllmWorkers
 
 from dynamo._core import compute_block_hash_for_seq_py
 from vllm.config import ModelConfig
