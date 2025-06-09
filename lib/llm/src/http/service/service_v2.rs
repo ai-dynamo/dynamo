@@ -265,7 +265,7 @@ impl HttpServiceConfigBuilder {
                 }
             },
         ));
-        routes.push((chat_docs.clone(), chat_route.clone()));
+        routes.push((chat_docs, chat_route));
 
         // Add completions route with conditional middleware
         let state_cmpl = state.clone();
@@ -292,7 +292,7 @@ impl HttpServiceConfigBuilder {
                 }
             },
         ));
-        routes.push((cmpl_docs.clone(), cmpl_route.clone()));
+        routes.push((cmpl_docs, cmpl_route));
 
         // Add embeddings route with conditional middleware
         let (embed_docs, embed_route) = super::openai::embeddings_router(state.clone(), None);
@@ -317,7 +317,7 @@ impl HttpServiceConfigBuilder {
                 }
             },
         ));
-        routes.push((embed_docs.clone(), embed_route.clone()));
+        routes.push((embed_docs, embed_route));
 
         for (route_docs, route) in routes {
             router = router.merge(route);

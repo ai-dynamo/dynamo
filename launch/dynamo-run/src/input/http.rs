@@ -120,12 +120,7 @@ async fn run_watcher(
     kv_router_config: Option<KvRouterConfig>,
     http_service: Arc<HttpService>,
 ) -> anyhow::Result<()> {
-    let mut watch_obj = ModelWatcher::new(
-        runtime.clone(),
-        model_manager.clone(),
-        router_mode,
-        kv_router_config,
-    );
+    let mut watch_obj = ModelWatcher::new(runtime, model_manager, router_mode, kv_router_config);
     tracing::info!("Watching for remote model at {network_prefix}");
     let models_watcher = etcd_client.kv_get_and_watch_prefix(network_prefix).await?;
     let (_prefix, _watcher, receiver) = models_watcher.dissolve();
