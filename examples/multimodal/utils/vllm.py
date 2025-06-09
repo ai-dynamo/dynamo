@@ -55,13 +55,13 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
         "--image-token-id",
         type=int,
         default=32000,
-        help="Image token id",
+        help="Image token ID used to represent image patches in the token sequence",
     )
     parser.add_argument(
         "--num-patches",
         type=int,
         default=576,
-        help="Number of patches for the image embeddings",
+        help="Number of patches the input image is divided into (must be positive)",
     )
     parser.add_argument(
         "--prompt-template",

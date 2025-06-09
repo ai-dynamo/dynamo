@@ -140,7 +140,7 @@ class VllmDecodeWorker:
                 self.disaggregated_router = None
         else:
             EMBEDDINGS_DTYPE = torch.float16
-            EMBEDDINGS_DEVICE = "cpu"
+            EMBEDDINGS_DEVICE = "cuda"
 
             enc_comp_ns, enc_comp_name = VllmEncodeWorker.dynamo_address()  # type: ignore
             self.encode_worker_client = (
