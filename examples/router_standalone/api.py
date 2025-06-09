@@ -19,12 +19,14 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass
+from typing import Optional
 
 import httpx
 import uvicorn
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from router import RouterAPI, RouterRequest, RouterResponse  # Add this import
+from transformers import PreTrainedTokenizerBase
 from vllm.config import ModelConfig
 from vllm.entrypoints.openai.protocol import (
     ChatCompletionRequest,
@@ -58,11 +60,11 @@ class ServiceAPI:
         self.app = FastAPI(title="Router API", version="0.0.1")
 
         # These will be initialized in start()
-        self.workers = None
-        self.tokenizer = None
-        self.openai_serving_chat = None
-        self.model_config = None
-        self.http_client = None
+        self.workers: Optional[VllmWorkers] = None
+        self.tokenizer: Optional[PreTrainedTokenizerBase] = None
+        self.openai_serving_chat: Optional[OpenAIServingChat] = None
+        self.model_config: Optional[ModelConfig] = None
+        self.http_client: Optional[httpx.AsyncClient] = None
 
         self.setup_routes()
 
@@ -71,6 +73,7 @@ class ServiceAPI:
         async def chat_completions(request: ChatCompletionRequest):
             if (
                 self.workers is None
+                or self.tokenizer is None
                 or self.openai_serving_chat is None
                 or self.http_client is None
             ):

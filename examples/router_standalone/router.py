@@ -18,7 +18,7 @@ import asyncio
 import json
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, List
+from typing import List
 
 import numpy as np
 import uvicorn
@@ -38,6 +38,11 @@ class RouterRequest(BaseModel):
 
 class RouterResponse(BaseModel):
     worker_id: int
+
+
+class LoadMetrics(BaseModel):
+    gpu_cache_usage: float
+    num_waiting_reqs: int
 
 
 def setup_zmq_subscriber(context: zmq.Context, endpoint: str) -> zmq.Socket[bytes]:
@@ -99,12 +104,11 @@ class KvRouter:
         async def update_load(worker_id: int):
             while True:
                 try:
-                    metrics: dict[str, Any] = self.load_listeners[worker_id].recv_json(
-                        zmq.NOBLOCK
-                    )
+                    metrics_dict = self.load_listeners[worker_id].recv_json(zmq.NOBLOCK)
+                    metrics = LoadMetrics.model_validate(metrics_dict)
                     async with self._load_locks[worker_id]:
-                        self.kv_usages[worker_id] = metrics["gpu_cache_usage"]
-                        self.waitings[worker_id] = int(metrics["num_waiting_reqs"])
+                        self.kv_usages[worker_id] = metrics.gpu_cache_usage
+                        self.waitings[worker_id] = metrics.num_waiting_reqs
                 except zmq.Again:
                     pass
                 except Exception as e:
@@ -125,7 +129,7 @@ class KvRouter:
                         worker_id
                     ].get_events()
                     for event in kv_events:
-                        event: Any = json.loads(event)
+                        event = json.loads(event)
                         async with self._radix_lock:
                             self.radix_tree.apply_event(
                                 worker_id, json.dumps(event).encode("utf-8")
@@ -175,9 +179,9 @@ class KvRouter:
                     f"worker_id: {worker_id}, logit = 2 * {overlap:.3f} - {usage:.3f} - {waiting:.3f} = {logit:.3f}"
                 )
 
-            logits = np.array(logits)
+            logits_array = np.array(logits)
             best_worker_id = int(
-                np.random.choice(np.flatnonzero(logits == logits.max()))
+                np.random.choice(np.flatnonzero(logits_array == logits_array.max()))
             )
 
             # this is a predictive update which will be reset as new metrics are polled
