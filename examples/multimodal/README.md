@@ -53,7 +53,7 @@ cd $DYNAMO_HOME/examples/multimodal
 # Serve a LLaVA 1.5 7B model:
 dynamo serve graphs.agg:Frontend -f ./configs/agg-llava.yaml
 # Serve a Qwen2 VL model:
-# dynamo serve graphs.agg:Frontend -f ./configs/agg-llava.yaml
+# dynamo serve graphs.agg:Frontend -f ./configs/agg-qwen.yaml
 ```
 
 ### Client
