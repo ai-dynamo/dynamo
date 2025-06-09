@@ -6,7 +6,7 @@ use std::{io::Read, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use dynamo_llm::{backend::ExecutionContext, engines::StreamingEngine, local_model::LocalModel};
-use dynamo_runtime::protocols::Endpoint as EndpointId;
+use dynamo_runtime::protocols::{Endpoint as EndpointId, DEFAULT_GROUP};
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::{CancellationToken, DistributedRuntime};
 
@@ -435,6 +435,7 @@ fn internal_endpoint(engine: &str) -> EndpointId {
     EndpointId {
         namespace: Slug::slugify(&uuid::Uuid::new_v4().to_string()).to_string(),
         component: engine.to_string(),
+        group: DEFAULT_GROUP.to_string(),
         name: "generate".to_string(),
     }
 }

@@ -196,6 +196,25 @@ class Namespace:
 
     ...
 
+    def group(self, name: str) -> Group:
+        """
+        Create a `Group` object
+        """
+        ...
+
+    def component(self, name: str) -> Component:
+        """
+        Create a `Component` object
+        """
+        ...
+
+class Group:
+    """
+    A group is a collection of components within a namespace
+    """
+
+    ...
+
     def component(self, name: str) -> Component:
         """
         Create a `Component` object

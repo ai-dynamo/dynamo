@@ -115,6 +115,7 @@ impl EndpointConfigBuilder {
         let info = Instance {
             component: endpoint.component.name.clone(),
             endpoint: endpoint.name.clone(),
+            group: endpoint.component.group.name.clone(),
             namespace: endpoint.component.namespace.name.clone(),
             instance_id: lease_id,
             transport: TransportType::NatsTcp(endpoint.subject_to(lease_id)),
