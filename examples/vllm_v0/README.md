@@ -20,7 +20,7 @@ limitations under the License.
 This directory contains examples for deploying vLLM (v0) models in both aggregated and disaggregated configurations.
 
 > [!NOTE]
-> Different than `/examples/llm`, this example uses `dynamo-run` to handle the (de)tokenization and routing. `dynamo-run` is a rust-based CLI designed for high-performance pre/post-processing and routing. Read more about `dynamo-run`: [dynamo_run.md](../docs/guides/dynamo_run.md).
+> Different than `/examples/llm`, this example uses `dynamo-run` to handle the (de)tokenization and routing. `dynamo-run` is a rust-based CLI designed for high-performance pre/post-processing and routing. Read more about `dynamo-run`: [dynamo_run.md](../../docs/guides/dynamo_run.md).
 
 ## Prerequisites
 

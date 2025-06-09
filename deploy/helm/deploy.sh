@@ -87,4 +87,4 @@ cd -
 # Install the Helm chart with the correct tag (SHA)
 echo "Installing Helm chart with image: $docker_tag_for_registry"
 HELM_RELEASE="${DYNAMO_MODULE//_/\-}"
-helm upgrade -i "$HELM_RELEASE" ./chart -f ~/bentoml/bentos/"$DYNAMO_NAME"/"$docker_sha"/bento.yaml --set image="$docker_tag_for_registry" --set dynamoIdentifier="$DYNAMO_IDENTIFIER" --set configFilePath="$DYNAMO_CONFIG_FILE" -n "$NAMESPACE"
+helm upgrade -i "$HELM_RELEASE" ./chart -f ~/.dynamo/packages/"$DYNAMO_MODULE"/"$DYNAMO_NAME"/dynamo.yaml --set image="$docker_tag_for_registry" --set dynamoIdentifier="$DYNAMO_IDENTIFIER" --set configFilePath="$DYNAMO_CONFIG_FILE" -n "$NAMESPACE"

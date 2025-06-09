@@ -33,7 +33,9 @@ use crate::protocols::openai::{
 };
 use crate::request_template::RequestTemplate;
 use crate::types::{
-    openai::{chat_completions::NvCreateChatCompletionRequest, completions::CompletionRequest},
+    openai::{
+        chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
+    },
     Annotated,
 };
 
@@ -120,7 +122,7 @@ impl From<HttpError> for ErrorResponse {
 #[tracing::instrument(skip_all)]
 async fn completions(
     State(state): State<Arc<service_v2::State>>,
-    Json(request): Json<CompletionRequest>,
+    Json(request): Json<NvCreateCompletionRequest>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -137,7 +139,7 @@ async fn completions(
         ..request.inner
     };
 
-    let request = CompletionRequest {
+    let request = NvCreateCompletionRequest {
         inner,
         nvext: request.nvext,
     };

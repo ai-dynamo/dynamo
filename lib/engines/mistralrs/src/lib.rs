@@ -25,7 +25,7 @@ use dynamo_runtime::protocols::annotated::Annotated;
 
 use dynamo_llm::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-    completions::{prompt_to_string, CompletionRequest, CompletionResponse},
+    completions::{prompt_to_string, CompletionResponse, NvCreateCompletionRequest},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
 };
 
@@ -470,12 +470,12 @@ fn to_logit_bias(lb: HashMap<String, serde_json::Value>) -> HashMap<u32, f32> {
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<CompletionRequest>, ManyOut<Annotated<CompletionResponse>>, Error>
+impl AsyncEngine<SingleIn<NvCreateCompletionRequest>, ManyOut<Annotated<CompletionResponse>>, Error>
     for MistralRsEngine
 {
     async fn generate(
         &self,
-        request: SingleIn<CompletionRequest>,
+        request: SingleIn<NvCreateCompletionRequest>,
     ) -> Result<ManyOut<Annotated<CompletionResponse>>, Error> {
         let (request, context) = request.transfer(());
         let ctx = context.context();
