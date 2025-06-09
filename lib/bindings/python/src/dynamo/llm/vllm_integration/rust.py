@@ -26,6 +26,9 @@ if TYPE_CHECKING:
     class BlockStates:
         ...
 
+    class SlotUpdate:
+        ...
+
 else:
     # Runtime - dynamically loaded classes from Rust extension
     KvbmCacheManager = getattr(_vllm_integration, "KvbmCacheManager")
@@ -33,6 +36,7 @@ else:
     KvbmBlockList = getattr(_vllm_integration, "KvbmBlockList")
     BlockState = getattr(_vllm_integration, "BlockState")
     BlockStates = getattr(_vllm_integration, "BlockStates")
+    SlotUpdate = getattr(_vllm_integration, "SlotUpdate")
 
 
 __all__ = [
@@ -41,4 +45,5 @@ __all__ = [
     "KvbmBlockList",
     "BlockState",
     "BlockStates",
+    "SlotUpdate",
 ]

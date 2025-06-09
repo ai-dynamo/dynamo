@@ -152,7 +152,7 @@ impl<S: Storage> Slot<S> {
             .blocks()
             .iter()
             .skip(self.immutable.len())
-            .zip(computed_blocks.into_iter());
+            .zip(computed_blocks);
 
         // validate the sequence hashes of the incoming immutable computed blocks
         // against the sequence hashes of blocks in the sequence.
@@ -178,10 +178,8 @@ impl<S: Storage> Slot<S> {
         num_new_tokens: usize,
         block_pool: &BlockPool<S, BasicMetadata>,
     ) -> Option<Vec<BlockId>> {
-        let total_num_blocks = div_ceil(
-            self.computed_position + num_new_tokens,
-            self.sequence.block_size(),
-        );
+        let total_num_blocks =
+            (self.computed_position + num_new_tokens).div_ceil(self.sequence.block_size());
 
         let num_new_blocks = total_num_blocks - (self.immutable.len() + self.mutable.len());
 
@@ -194,7 +192,7 @@ impl<S: Storage> Slot<S> {
         match new_blocks {
             Some(new_blocks) => {
                 let block_ids = new_blocks.iter().map(|b| b.block_id()).collect();
-                self.mutable.extend(new_blocks.into_iter());
+                self.mutable.extend(new_blocks);
                 Some(block_ids)
             }
             None => None,
@@ -260,23 +258,15 @@ impl<S: Storage> Drop for Slot<S> {
     }
 }
 
-fn div_ceil(a: usize, b: usize) -> usize {
-    (a + b - 1) / b
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use dynamo_llm::block_manager::{
-        block::{BasicMetadata, BlockExt, Blocks, ImmutableBlock, MutableBlock},
-        layout::FullyContiguous,
+        block::{BasicMetadata, Blocks},
         pool::BlockPool,
         storage::tests::{NullDeviceAllocator, NullDeviceStorage},
-        Storage,
     };
-    use dynamo_llm::tokens::{SaltHash, SequenceHash, Tokens};
-    use rstest::*;
-    use std::collections::VecDeque;
+    use dynamo_llm::tokens::{SaltHash, Tokens};
 
     const BLOCK_SIZE: usize = 4;
     const SALT_HASH: SaltHash = 12345;
@@ -318,11 +308,6 @@ mod tests {
                 pool,
                 _runtime: runtime,
             }
-        }
-
-        // Helper method for SlotManager tests that need a block manager interface
-        fn as_device_pool(&self) -> &BlockPool<NullDeviceStorage, BasicMetadata> {
-            &self.pool
         }
     }
 
@@ -535,7 +520,7 @@ mod tests {
         let mut slot = create_slot_with_tokens(initial_tokens.clone());
 
         // Allocate exactly what we need WITHOUT extra capacity
-        let total_needed_blocks = div_ceil(initial_tokens.len(), BLOCK_SIZE);
+        let total_needed_blocks = initial_tokens.len().div_ceil(BLOCK_SIZE);
         let exact_allocation = fixture
             .pool
             .allocate_blocks_blocking(total_needed_blocks)
@@ -1208,7 +1193,7 @@ mod tests {
         println!("=== Progressive Token Application Test ===");
 
         // Apply tokens progressively, allocating capacity as needed
-        let token_chunks = vec![vec![1, 2], vec![3, 4], vec![5, 6], vec![7, 8]];
+        let token_chunks = [vec![1, 2], vec![3, 4], vec![5, 6], vec![7, 8]];
 
         for (i, chunk) in token_chunks.iter().enumerate() {
             println!("Applying chunk {}: {:?}", i + 1, chunk);
@@ -1335,7 +1320,7 @@ mod tests {
 
         // Verify we still have unused mutable blocks (over-allocated)
         assert!(
-            slot.mutable.len() > 0,
+            !slot.mutable.is_empty(),
             "Should have unused mutable blocks from over-allocation"
         );
 

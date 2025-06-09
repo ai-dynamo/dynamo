@@ -76,6 +76,11 @@ impl KvbmCacheManager {
         })
     }
 
+    pub fn has_slot(&self, request_id: String) -> PyResult<bool> {
+        let slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
+        Ok(slot_manager.has_slot(&request_id))
+    }
+
     /// Create a new slot for the given request ID.
     /// This is used to create a new slot for the request.
     pub fn create_slot(
@@ -282,6 +287,11 @@ impl<R: RequestKey> SlotManager<R> {
             slots: HashMap::new(),
             block_size,
         }
+    }
+
+    /// Returns true if the slot manager has a slot for the given request ID.
+    pub fn has_slot(&self, request_id: &R) -> bool {
+        self.slots.contains_key(request_id)
     }
 
     /// Returns the number of tokens in the sequence for the given request ID.
