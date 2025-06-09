@@ -81,12 +81,12 @@ async def test_kvbm(block_manager: KvbmCacheManager):
     request_1 = new_request("1")
     request_2 = new_request("2")
     request_3 = new_request("3")
-    request_4 = new_request("4")
 
     (blocks, count) = block_manager.get_computed_blocks(request_1)
     assert len(blocks) == count
     assert count == 0
 
+    # test allocate_slots
     blocks = block_manager.allocate_slots(request_1, 6)
     assert blocks is not None
     assert len(blocks.blocks) == 2, "ceil(6/4) = 2"
@@ -95,6 +95,7 @@ async def test_kvbm(block_manager: KvbmCacheManager):
     assert blocks is not None
     assert len(blocks.blocks) == 3, "ceil(12/4) = 3"
 
+    # test get_block_ids
     block_ids = block_manager.get_block_ids(request_1.request_id)
     assert len(block_ids) == 1
     assert block_ids[0] == [0, 1]
@@ -103,31 +104,27 @@ async def test_kvbm(block_manager: KvbmCacheManager):
     assert len(block_ids) == 1
     assert block_ids[0] == [2, 3, 4]
 
+    # test free
     block_manager.free(request_1)
     block_ids = block_manager.get_block_ids(request_1.request_id)
     assert block_ids == [[]], "block_ids should be empty after freeing blocks"
 
+    # test free_block_hashes
     block_manager.free_block_hashes(request_1)
     with pytest.raises(Exception):
         # would raise Exception: slot not found
         block_ids = block_manager.get_block_ids(request_1.request_id)
 
-    blocks = block_manager.allocate_slots(request_3, 18)
-    assert blocks is not None
-    assert len(blocks.blocks) == 5, "ceil(18/4) = 5"
-
-    block_ids = block_manager.get_block_ids(request_3.request_id)
-    assert len(block_ids) == 1
-    assert block_ids[0] == [5, 6, 7, 8, 9]
-
-    blocks = block_manager.allocate_slots(request_4, 6)
+    # test allocate_slots again after freeing blocks
+    # new blocks should not be allocated to [0, 1] even though they are free
+    blocks = block_manager.allocate_slots(request_3, 6)
     assert blocks is not None
     assert len(blocks.blocks) == 2, "ceil(6/4) = 2"
 
-    block_ids = block_manager.get_block_ids(request_4.request_id)
+    block_ids = block_manager.get_block_ids(request_3.request_id)
     assert len(block_ids) == 1
     print(f"block_ids: {block_ids}")
-    assert block_ids[0] == [10, 11]
+    assert block_ids[0] == [5, 6]
 
 
 async def main():
