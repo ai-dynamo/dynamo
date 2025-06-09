@@ -20,7 +20,7 @@
 
 mod openai;
 
-pub mod clear_all_blocks;
+pub mod clear_kv_blocks;
 pub mod error;
 pub mod health;
 pub mod metrics;

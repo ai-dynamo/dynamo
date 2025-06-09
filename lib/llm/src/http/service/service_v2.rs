@@ -13,11 +13,13 @@ use anyhow::Result;
 use derive_builder::Builder;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use dynamo_runtime::DistributedRuntime;
 
 /// HTTP service shared state
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
+    runtime: Option<Arc<DistributedRuntime>>,
 }
 
 impl State {
@@ -25,6 +27,15 @@ impl State {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
+            runtime: None,
+        }
+    }
+
+    pub fn with_runtime(manager: Arc<ModelManager>, runtime: Arc<DistributedRuntime>) -> Self {
+        Self {
+            manager,
+            metrics: Arc::new(Metrics::default()),
+            runtime: Some(runtime),
         }
     }
 
@@ -39,6 +50,11 @@ impl State {
 
     pub fn manager_clone(&self) -> Arc<ModelManager> {
         self.manager.clone()
+    }
+
+    /// Get the DistributedRuntime if available
+    pub fn runtime(&self) -> Option<&DistributedRuntime> {
+        self.runtime.as_ref().map(|r| r.as_ref())
     }
 
     // TODO
@@ -80,6 +96,9 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
+
+    #[builder(default = "None")]
+    runtime: Option<Arc<DistributedRuntime>>,
 }
 
 impl HttpService {
@@ -134,7 +153,11 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let state = Arc::new(State::new(model_manager));
+        let state = if let Some(runtime) = config.runtime {
+            Arc::new(State::with_runtime(model_manager, runtime))
+        } else {
+            Arc::new(State::new(model_manager))
+        };
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -148,7 +171,7 @@ impl HttpServiceConfigBuilder {
             metrics::router(registry, None),
             super::openai::list_models_router(state.clone(), None),
             super::health::health_check_router(state.clone(), None),
-            super::clear_all_blocks::clear_all_blocks_router(state.clone(), None),
+            super::clear_kv_blocks::clear_kv_blocks_router(state.clone(), None),
         ];
 
         if config.enable_chat_endpoints {
@@ -188,6 +211,11 @@ impl HttpServiceConfigBuilder {
 
     pub fn with_request_template(mut self, request_template: Option<RequestTemplate>) -> Self {
         self.request_template = Some(request_template);
+        self
+    }
+
+    pub fn with_runtime(mut self, runtime: Arc<DistributedRuntime>) -> Self {
+        self.runtime = Some(Some(runtime));
         self
     }
 }
