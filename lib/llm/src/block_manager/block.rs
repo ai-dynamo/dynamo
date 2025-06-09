@@ -24,6 +24,7 @@ use nixl_sys::NixlDescriptor;
 
 pub use registry::{GlobalRegistry, RegistrationHandle};
 pub use state::{BlockState, BlockStateInvalid};
+pub use transfer::TransferContext;
 
 use crate::block_manager::{
     state::KvBlockManagerState as BlockManager,

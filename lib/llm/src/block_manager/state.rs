@@ -22,28 +22,8 @@ use super::{
     events::{EventManager, NullEventManager},
     metrics::{BlockManagerMetrics, PoolMetrics},
 };
-use cudarc::driver::CudaStream;
 use std::sync::Arc;
 use tokio::runtime::Handle;
-
-pub struct TransferContext {
-    nixl_agent: Arc<Option<NixlAgent>>,
-    stream: Arc<CudaStream>,
-}
-
-impl TransferContext {
-    pub fn new(nixl_agent: Arc<Option<NixlAgent>>, stream: Arc<CudaStream>) -> Self {
-        Self { nixl_agent, stream }
-    }
-
-    pub fn nixl_agent(&self) -> Arc<Option<NixlAgent>> {
-        self.nixl_agent.clone()
-    }
-
-    pub fn stream(&self) -> &Arc<CudaStream> {
-        &self.stream
-    }
-}
 
 #[allow(dead_code)]
 pub struct KvBlockManagerState<Metadata: BlockMetadata> {

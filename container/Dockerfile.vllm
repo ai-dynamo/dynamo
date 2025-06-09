@@ -308,7 +308,7 @@ RUN chown $USERNAME:$USERNAME /opt/dynamo/venv
 COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
 
 # so we can use maturin develop
-RUN uv pip install maturin
+RUN uv pip install maturin[patchelf]
 
 USER $USERNAME
 ENV HOME=/home/$USERNAME
@@ -437,6 +437,8 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
 
 RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/dist/ai_dynamo*any.whl
+
+RUN uv pip install /workspace/benchmarks
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \

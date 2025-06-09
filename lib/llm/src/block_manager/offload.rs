@@ -44,10 +44,9 @@
 //! The kind of offloads/onboards they perform is dictated by the source and target arguments
 //! of the [`OffloadManager::offload_worker`] and [`OffloadManager::onboard_worker`] methods.
 
-use super::block::{BlockError, BlockMetadata, BlockState, ImmutableBlock};
+use super::block::{BlockError, BlockMetadata, BlockState, ImmutableBlock, TransferContext};
 use super::metrics::{BlockManagerMetrics, PoolMetrics};
 use super::pool::BlockPoolError;
-use super::state::TransferContext;
 use super::storage::{Cuda, Storage};
 use super::{BlockPool, DeviceStorage, DiskStorage, PinnedStorage};
 use nixl_sys::Agent as NixlAgent;
@@ -129,6 +128,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let device_offload_transfer_ctx = Arc::new(TransferContext::new(
             nixl_agent.clone(),
             cuda_ctx.new_stream()?,
+            async_rt_handle.clone(),
         ));
 
         // Device -> Host offload
@@ -140,8 +140,9 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                 CudaTransferManager::new(
                     device_offload_transfer_ctx,
                     MAX_CONCURRENT_TRANSFERS,
+                    &async_rt_handle,
                     cancellation_token.clone(),
-                ),
+                )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &async_rt_handle,
                 cancellation_token.clone(),
@@ -160,6 +161,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
         let transfer_ctx = Arc::new(TransferContext::new(
             nixl_agent.clone(),
             cuda_ctx.new_stream()?,
+            async_rt_handle.clone(),
         ));
 
         // Host -> Disk offload
@@ -173,7 +175,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     MAX_CONCURRENT_TRANSFERS,
                     &async_rt_handle,
                     cancellation_token.clone(),
-                ),
+                )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &async_rt_handle,
                 cancellation_token.clone(),
@@ -198,8 +200,9 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                 CudaTransferManager::new(
                     transfer_ctx.clone(),
                     MAX_CONCURRENT_TRANSFERS,
+                    &async_rt_handle,
                     cancellation_token.clone(),
-                ),
+                )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &async_rt_handle,
                 cancellation_token.clone(),
@@ -226,7 +229,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                     MAX_CONCURRENT_TRANSFERS,
                     &async_rt_handle,
                     cancellation_token.clone(),
-                ),
+                )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &async_rt_handle,
                 cancellation_token.clone(),
@@ -569,8 +572,10 @@ mod tests {
             let agent = NixlAgent::new("offload-manager").unwrap();
             let (_, ucx_params) = agent.get_plugin_params("UCX").unwrap();
             let (_, gds_params) = agent.get_plugin_params("GDS").unwrap();
+            let (_, posix_params) = agent.get_plugin_params("POSIX").unwrap();
             agent.create_backend("UCX", &ucx_params).unwrap();
             agent.create_backend("GDS", &gds_params).unwrap();
+            agent.create_backend("POSIX", &posix_params).unwrap();
             Arc::new(Some(agent))
         };
     }
