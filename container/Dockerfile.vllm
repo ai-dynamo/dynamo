@@ -235,10 +235,6 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
     uv pip install --requirement /tmp/requirements.txt
 
-# Install benchmarks package
-RUN --mount=type=bind,source=./benchmarks,target=/tmp/benchmarks \
-    cd /tmp/benchmarks && uv pip install -e .
-
 # ### MISC UTILITY SETUP ###
 
 # Finish pyright install
