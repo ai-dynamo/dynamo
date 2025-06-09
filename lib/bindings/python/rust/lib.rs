@@ -44,6 +44,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<CancellationToken>()?;
     m.add_class::<Namespace>()?;
+    m.add_class::<Group>()?;
     m.add_class::<Component>()?;
     m.add_class::<Endpoint>()?;
     m.add_class::<Client>()?;
@@ -165,6 +166,13 @@ struct CancellationToken {
 #[derive(Clone)]
 struct Namespace {
     inner: rs::component::Namespace,
+    event_loop: PyObject,
+}
+
+#[pyclass]
+#[derive(Clone)]
+struct Group {
+    inner: rs::component::Group,
     event_loop: PyObject,
 }
 
@@ -414,6 +422,17 @@ impl CancellationToken {
 }
 
 #[pymethods]
+impl Group {
+    fn component(&self, name: String) -> PyResult<Component> {
+        let inner = self.inner.component(name).map_err(to_pyerr)?;
+        Ok(Component {
+            inner,
+            event_loop: self.event_loop.clone(),
+        })
+    }
+}
+
+#[pymethods]
 impl Component {
     fn endpoint(&self, name: String) -> PyResult<Endpoint> {
         let inner = self.inner.endpoint(name);
@@ -480,6 +499,14 @@ impl Endpoint {
 
 #[pymethods]
 impl Namespace {
+    fn group(&self, name: String) -> PyResult<Group> {
+        let inner = self.inner.group(name).map_err(to_pyerr)?;
+        Ok(Group {
+            inner,
+            event_loop: self.event_loop.clone(),
+        })
+    }
+
     fn component(&self, name: String) -> PyResult<Component> {
         let inner = self.inner.component(name).map_err(to_pyerr)?;
         Ok(Component {
