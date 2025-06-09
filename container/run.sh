@@ -299,7 +299,7 @@ show_help() {
     echo "  [-e add environment variable]"
     echo "  [--mount-workspace set up for local development]"
     echo "  [-- stop processing and pass remaining args as command to docker run]"
-    echo "  [--workdir relative_path_inside_workspace]"
+    echo "  [--workdir set the working directory inside the container]"
     echo "  [--runtime add runtime variables]"
     exit 0
 }
