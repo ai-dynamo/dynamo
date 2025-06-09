@@ -48,7 +48,7 @@ def get_vision_embeddings_size(model_id: str, num_patches: int) -> tuple[int, in
     """Calculate vision embeddings size using model config and image processor
     Returns a tuple of (batch_size, num_patches, hidden_dim).
     """
-    config = AutoConfig.from_pretrained(model_id)
+    config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
     assert num_patches > 0, "Number of patches must be positive"
     return 1, num_patches, getattr(config, "hidden_size", 4096)
 
