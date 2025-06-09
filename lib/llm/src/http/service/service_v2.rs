@@ -11,9 +11,9 @@ use crate::discovery::ModelManager;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
+use dynamo_runtime::DistributedRuntime;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use dynamo_runtime::DistributedRuntime;
 
 /// HTTP service shared state
 pub struct State {

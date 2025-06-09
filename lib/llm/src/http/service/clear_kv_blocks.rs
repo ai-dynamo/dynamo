@@ -30,13 +30,12 @@
 
 use super::{service_v2, RouteDoc};
 use axum::{http::Method, response::IntoResponse, routing::post, Json, Router};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
-use serde::{Deserialize, Serialize};
 
 use dynamo_runtime::{
-    logging, pipeline::PushRouter, protocols::annotated::Annotated, stream::StreamExt,
-    DistributedRuntime, Result, Runtime, Worker,
+    pipeline::PushRouter, stream::StreamExt,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,15 +67,18 @@ pub fn clear_kv_blocks_router(
 async fn clear_kv_blocks_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
-
     tracing::trace!("Received clear all KV blocks request");
 
     let model_entries = state.manager().get_model_entries();
 
     tracing::debug!("Found {} model entries:", model_entries.len());
     for entry in &model_entries {
-        tracing::debug!("Entry: name={}, namespace={}, component={}",
-                    entry.name, entry.endpoint.namespace, entry.endpoint.component);
+        tracing::debug!(
+            "Entry: name={}, namespace={}, component={}",
+            entry.name,
+            entry.endpoint.namespace,
+            entry.endpoint.component
+        );
     }
 
     // if there are no active workers
@@ -131,13 +133,11 @@ async fn clear_kv_blocks_handler(
             }
         };
 
-
-        let endpoint: dynamo_runtime::component::Endpoint = component_obj.endpoint("clear_kv_blocks");
+        let endpoint: dynamo_runtime::component::Endpoint =
+            component_obj.endpoint("clear_kv_blocks");
 
         let client = match endpoint.client().await {
-            Ok(c) => {
-                c
-            },
+            Ok(c) => c,
             Err(e) => {
                 failed_workers.push(json!({
                     "name": entry.name,
@@ -145,10 +145,16 @@ async fn clear_kv_blocks_handler(
                     "status": "failed to create client",
                     "error": e.to_string()
                 }));
-                continue; }
+                continue;
+            }
         };
 
-        let router = match PushRouter::<(), serde_json::Value>::from_client(client.clone(), Default::default()).await {
+        let router = match PushRouter::<(), serde_json::Value>::from_client(
+            client.clone(),
+            Default::default(),
+        )
+        .await
+        {
             Ok(r) => r,
             Err(e) => {
                 failed_workers.push(json!({
@@ -162,9 +168,7 @@ async fn clear_kv_blocks_handler(
         };
 
         let instances = match component_obj.list_instances().await {
-            Ok(instances) => {
-                instances
-            }
+            Ok(instances) => instances,
             Err(e) => {
                 failed_workers.push(json!({
                     "name": entry.name,
@@ -185,10 +189,17 @@ async fn clear_kv_blocks_handler(
             continue;
         }
 
-        let instances_filtered = instances.clone().into_iter().filter(|instance| instance.endpoint == "clear_kv_blocks").collect::<Vec<_>>();
+        let instances_filtered = instances
+            .clone()
+            .into_iter()
+            .filter(|instance| instance.endpoint == "clear_kv_blocks")
+            .collect::<Vec<_>>();
 
         if instances_filtered.is_empty() {
-            let found_endpoints: Vec<String> = instances.iter().map(|instance| instance.endpoint.clone()).collect();
+            let found_endpoints: Vec<String> = instances
+                .iter()
+                .map(|instance| instance.endpoint.clone())
+                .collect();
             failed_workers.push(json!({
                 "name": entry.name,
                 "endpoint": format!("{}/{}/clear_kv_blocks", namespace, component),
