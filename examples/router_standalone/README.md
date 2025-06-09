@@ -23,7 +23,8 @@ A toy implementation of KvRouter that demonstrates standalone usage without depe
 
 This example shows how to use KvRouter in a standalone fashion to intelligently route requests across multiple vLLM workers based on KV cache overlap and load metrics. The router maintains a view of each worker's cached blocks and routes new requests to the worker with the best combination of cache overlap and available capacity.
 
-**Note**: The main focus should be put on `router.py` as it contains the bulk of the non-boilerplate code and core routing logic.
+> [!Tip]
+> The main focus should be put on `router.py` as it contains the bulk of the non-boilerplate code and core routing logic.
 
 ## How It Works
 
@@ -49,6 +50,16 @@ These events keep the router's view of worker state up-to-date in real-time.
 While not implemented in this example, the router can also operate in a pure predictive mode, estimating the radix tree state and loads based solely on the requests it receives, without relying on backend events. This requires simulating / mocking the block managing (e.g. eviction) and the scheduling policies of the backend engine. This is not recommended as there is no real-time feedback from the engines, and the router state may drift out of sync with the engine states. Nevertheless, this is WIP and can be supported in the future via our mocker engines.
 
 ## Components
+
+> [!Note]
+> This is a standalone toy implementation created for pedagogical purposes to demonstrate the core KvRouter concepts in isolation.
+> Our default dynamo router is already very efficient and uses NATS for event communication and etcd for endpoint registration.
+> This example intentionally avoids these production components to provide a simpler, self-contained demonstration of the routing logic and cache overlap mechanics.
+>
+> The toy communication pattern is as follows:
+> - **OpenAI Compatible Frontend** – FastAPI application serving OpenAI compatible HTTP API.
+> - **Router** – Standalone FastAPI application for routing and load balancing traffic to workers.
+> - **Workers** – Served in-process within the frontend application to reduce complexity and boilerplate, rather than as separate endpoints.
 
 ### `router.py`
 - **KvRouter**: Core routing logic using RadixTree
@@ -97,18 +108,10 @@ While not implemented in this example, the router can also operate in a pure pre
 
 3. **Ping the endpoint (optional)**:
    ```bash
-  ./ping.sh
+   ./ping.sh
    ```
 
 4. **Run performance benchmark**:
    ```bash
    ./perf.sh
    ```
-
-## Notes
-
-This is a standalone toy implementation created for pedagogical purposes to demonstrate the core KvRouter concepts in isolation. Our default dynamo router is already very efficient and uses NATS for event communication and etcd for endpoint registration. This example intentionally avoids these production components to provide a simpler, self-contained demonstration of the routing logic and cache overlap mechanics.
-
-- **OpenAI Compatible Frontend** – FastAPI application serving OpenAI compatible HTTP API.
-- **Router** – Standalone FastAPI application for routing and load balancing traffic to workers.
-- **Workers** – Served in-process within the frontend application to reduce complexity and boilerplate, rather than as separate endpoints.
