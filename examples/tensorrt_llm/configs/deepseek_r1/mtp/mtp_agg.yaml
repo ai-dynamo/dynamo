@@ -13,14 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-replicaCount: 1
-# Explicitly remove authentication
-auth:
-  rbac:
-    create: false
+Frontend:
+  served_model_name: "nvidia/DeepSeek-R1-FP4"
+  endpoint: dynamo.TensorRTLLMWorker.generate
+  port: 8000
+  router: round-robin
 
-readinessProbe:
-  enabled: true
-
-livenessProbe:
-  enabled: true
+TensorRTLLMWorker:
+  served_model_name: "nvidia/DeepSeek-R1-FP4"
+  engine_args: "configs/deepseek_r1/mtp/mtp_agg_llm_api_config.yaml"
+  router: round-robin
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: 4
