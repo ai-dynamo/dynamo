@@ -26,6 +26,7 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
         return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, M>>,
         global_registry: GlobalRegistry,
         async_runtime: Handle,
+        metrics: Arc<PoolMetrics>,
     ) -> Self {
         Self {
             active: ActiveBlockPool::new(),
@@ -33,6 +34,7 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
             registry: BlockRegistry::new(event_manager.clone(), global_registry, async_runtime),
             return_tx,
             event_manager,
+            metrics,
         }
     }
 
@@ -126,6 +128,10 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
             }
         }
 
+        self.metrics
+            .counter("blocks_allocated")
+            .inc_by(count as u64);
+
         Ok(blocks)
     }
 
@@ -195,6 +201,10 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
 
         assert_eq!(immutable_blocks.len(), expected_len);
 
+        self.metrics
+            .counter("blocks_registered")
+            .inc_by(immutable_blocks.len() as u64);
+
         Ok(immutable_blocks)
     }
 
@@ -204,9 +214,9 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
         return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, M>>,
     ) -> Vec<ImmutableBlock<S, M>> {
         let mut immutable_blocks = Vec::new();
-        for sequence_hash in sequence_hashes {
-            if !self.registry.is_registered(sequence_hash) {
-                return immutable_blocks;
+        for sequence_hash in &sequence_hashes {
+            if !self.registry.is_registered(*sequence_hash) {
+                break;
             }
 
             // the block is registered, so to get it from either the:
@@ -214,16 +224,17 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
             // 2. inactive pool
             // 3. return channel
 
-            if let Some(immutable) = self.active.match_sequence_hash(sequence_hash) {
+            if let Some(immutable) = self.active.match_sequence_hash(*sequence_hash) {
                 immutable_blocks.push(immutable);
                 continue;
             }
 
             let raw_block =
-                if let Some(raw_block) = self.inactive.match_sequence_hash(sequence_hash) {
+                if let Some(raw_block) = self.inactive.match_sequence_hash(*sequence_hash) {
                     raw_block
                 } else {
-                    self.wait_for_returned_block(sequence_hash, return_rx).await
+                    self.wait_for_returned_block(*sequence_hash, return_rx)
+                        .await
                 };
 
             // this assert allows us to skip the error checking on the active pool registration step
@@ -238,6 +249,13 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
 
             immutable_blocks.push(immutable);
         }
+
+        self.metrics
+            .counter("cache_hits")
+            .inc_by(immutable_blocks.len() as u64);
+        self.metrics
+            .counter("cache_misses")
+            .inc_by(sequence_hashes.len() as u64 - immutable_blocks.len() as u64);
 
         immutable_blocks
     }
@@ -254,6 +272,7 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
 }
 
 impl<S: Storage, M: BlockMetadata> ProgressEngine<S, M> {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         event_manager: Arc<dyn EventManager>,
         priority_rx: tokio::sync::mpsc::UnboundedReceiver<PriorityRequest<S, M>>,
@@ -262,10 +281,16 @@ impl<S: Storage, M: BlockMetadata> ProgressEngine<S, M> {
         blocks: Vec<Block<S, M>>,
         global_registry: GlobalRegistry,
         async_runtime: Handle,
+        metrics: Arc<PoolMetrics>,
     ) -> Self {
         let (return_tx, return_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state =
-            State::<S, M>::new(event_manager, return_tx, global_registry, async_runtime);
+        let mut state = State::<S, M>::new(
+            event_manager,
+            return_tx,
+            global_registry,
+            async_runtime,
+            metrics.clone(),
+        );
 
         tracing::debug!(count = blocks.len(), "adding blocks to inactive pool");
         state.inactive.add_blocks(blocks);
@@ -276,6 +301,7 @@ impl<S: Storage, M: BlockMetadata> ProgressEngine<S, M> {
             cancel_token,
             state,
             return_rx,
+            metrics,
         }
     }
 
@@ -284,14 +310,17 @@ impl<S: Storage, M: BlockMetadata> ProgressEngine<S, M> {
             biased;
 
             Some(priority_req) = self.priority_rx.recv(), if !self.priority_rx.is_closed() => {
+                self.metrics.gauge("priority_request_queue_size").set(self.priority_rx.len() as i64);
                 self.state.handle_priority_request(priority_req, &mut self.return_rx).await;
             }
 
             Some(req) = self.ctrl_rx.recv(), if !self.ctrl_rx.is_closed() => {
+                self.metrics.gauge("control_request_queue_size").set(self.ctrl_rx.len() as i64);
                 self.state.handle_control_request(req);
             }
 
             Some(block) = self.return_rx.recv() => {
+                self.metrics.gauge("return_block_queue_size").set(self.return_rx.len() as i64);
                 self.state.handle_return_block(block);
             }
 

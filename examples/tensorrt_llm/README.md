@@ -137,6 +137,13 @@ deploy a single Decode worker on one node, and a single Prefill worker on the ot
 However, the instance counts, TP sizes, other configs, and responsibilities of each node
 can be customized and deployed in similar ways.
 
+For example, to deploy Deepseek R1, you could replace the referenced example
+configs (`configs/agg.yaml`, `configs/disagg.yaml`) with corresponding Deepseek R1
+example configs (`configs/deepseek_r1/agg.yaml`, `configs/deepseek_r1/disagg.yaml`).
+You can find the example Deepseek R1 configs for GB200
+[here](configs/deepseek_r1), but the config settings can be customized for testing
+other hardware configurations or parallelism strategies.
+
 ##### Head Node
 
 Start nats/etcd:
