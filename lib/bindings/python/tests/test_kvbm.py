@@ -28,9 +28,9 @@ DEVICE_NUM_BLOCKS = 16
 DEVICE_ID = 0
 
 
-def new_request():
+def new_request(request_id: str = "1"):
     return Request(
-        request_id="1",
+        request_id=request_id,
         prompt_token_ids=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
         multi_modal_inputs=[],
         multi_modal_hashes=[],
@@ -71,45 +71,70 @@ def new_kv_cache_manager():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-async def test_kvbm_get_computed_blocks(
-    block_manager: KvbmCacheManager,
-):
+async def test_kvbm(block_manager: KvbmCacheManager):
     """
-    Tests the KVBM cache manager's get_computed_blocks method.
+    Tests the KVBM kv_cache_manager APIs.
 
     Args:
         block_manager: The KVBM cache manager.
     """
+    request_1 = new_request("1")
+    request_2 = new_request("2")
+    request_3 = new_request("3")
+    request_4 = new_request("4")
 
-    request = new_request()
-    (blocks, count) = block_manager.get_computed_blocks(request)
-    print(f"number of matched blocks: {count}")
+    (blocks, count) = block_manager.get_computed_blocks(request_1)
     assert len(blocks) == count
     assert count == 0
 
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-async def test_kvbm_allocate_slots(
-    block_manager: KvbmCacheManager,
-):
-    """
-    Tests the KVBM cache manager's get_computed_blocks method.
-
-    Args:
-        block_manager: The KVBM cache manager.
-    """
-    request = new_request()
-    blocks = block_manager.allocate_slots(request, 18)
+    blocks = block_manager.allocate_slots(request_1, 6)
     assert blocks is not None
-    assert len(blocks.blocks) == 5
+    assert len(blocks.blocks) == 2, "ceil(6/4) = 2"
+
+    blocks = block_manager.allocate_slots(request_2, 12)
+    assert blocks is not None
+    assert len(blocks.blocks) == 3, "ceil(12/4) = 3"
+
+    block_ids = block_manager.get_block_ids(request_1.request_id)
+    assert len(block_ids) == 1
+    assert block_ids[0] == [0, 1]
+
+    block_ids = block_manager.get_block_ids(request_2.request_id)
+    assert len(block_ids) == 1
+    assert block_ids[0] == [2, 3, 4]
+
+    block_manager.free(request_1)
+    block_ids = block_manager.get_block_ids(request_1.request_id)
+    assert block_ids == [[]], "block_ids should be empty after freeing blocks"
+
+    block_manager.free_block_hashes(request_1)
+    with pytest.raises(Exception):
+        # would raise Exception: slot not found
+        block_ids = block_manager.get_block_ids(request_1.request_id)
+
+    blocks = block_manager.allocate_slots(request_3, 18)
+    assert blocks is not None
+    assert len(blocks.blocks) == 5, "ceil(18/4) = 5"
+
+    block_ids = block_manager.get_block_ids(request_3.request_id)
+    assert len(block_ids) == 1
+    assert block_ids[0] == [5, 6, 7, 8, 9]
+
+    blocks = block_manager.allocate_slots(request_4, 6)
+    assert blocks is not None
+    assert len(blocks.blocks) == 2, "ceil(6/4) = 2"
+
+    block_ids = block_manager.get_block_ids(request_4.request_id)
+    assert len(block_ids) == 1
+    print(f"block_ids: {block_ids}")
+    assert block_ids[0] == [10, 11]
 
 
 async def main():
     """
     Main function to run the test.
     """
-    await test_kvbm_get_computed_blocks(new_kv_cache_manager())
-    await test_kvbm_allocate_slots(new_kv_cache_manager())
+    await test_kvbm(new_kv_cache_manager())
 
 
 if __name__ == "__main__":
