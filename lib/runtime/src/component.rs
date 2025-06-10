@@ -317,7 +317,8 @@ impl Endpoint {
         &self.component
     }
 
-    fn path(&self) -> String {
+    // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers
+    pub fn path(&self) -> String {
         format!(
             "{}/{}/{}",
             self.component.path(),

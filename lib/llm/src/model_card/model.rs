@@ -22,7 +22,6 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned, transports::nats};
-use either::Either;
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 use url::Url;
