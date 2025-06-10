@@ -27,7 +27,6 @@ from dynamo.sdk.cli.containerize import containerize
 from dynamo.sdk.cli.deployment import app as deployment_app
 from dynamo.sdk.cli.deployment import deploy
 from dynamo.sdk.cli.env import env
-from dynamo.sdk.cli.pipeline import get
 from dynamo.sdk.cli.run import run
 from dynamo.sdk.cli.serve import serve
 
@@ -83,7 +82,6 @@ cli.add_typer(deployment_app, name="deployment")
 cli.command()(deploy)
 cli.command()(build)
 cli.command()(containerize)
-cli.command()(get)
 
 if __name__ == "__main__":
     cli()
