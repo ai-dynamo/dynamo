@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(missing_docs)]
+#![deny(missing_docs)]
 
 //! # Block Layout Management 🧱
 //!
@@ -166,7 +166,10 @@ pub enum LayoutType {
     /// If outer_contiguous is true, for each layer: [outer_dim, n_blocks, ...]
     /// If outer_contiguous is false, for each layer: [n_blocks, outer_dim, ...]
     /// When outer_dim is 1, these two modes are equivalent.
-    LayerSeparate { outer_contiguous: bool },
+    LayerSeparate {
+        /// If true, the outer dimension is contiguous. Otherwise, the block dimension is contiguous.
+        outer_contiguous: bool,
+    },
 }
 
 /// Local Memory Region
@@ -642,6 +645,7 @@ pub struct LayerSeparate<S: Storage> {
 }
 
 impl<S: Storage> LayerSeparate<S> {
+    /// Create a new LayerSeparate layout.
     #[instrument(level = "debug", skip(storages), fields(config = ?config))]
     pub fn new(
         config: LayoutConfig,
@@ -695,6 +699,9 @@ impl<S: Storage> LayerSeparate<S> {
         })
     }
 
+    /// Allocate a new LayerSeparate layout.
+    /// `is_outer_contiguous` determines whether the outer dimension or the block dimension is contiguous.
+    /// The amount of [`Storage`]s allocated is equal to the number of layers in the config.
     pub fn allocate(
         config: LayoutConfig,
         allocator: &dyn StorageAllocator<S>,

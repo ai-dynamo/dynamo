@@ -75,12 +75,6 @@ where
                         dst_desc.size(),
                         dst_desc.device_id(),
                     )?;
-
-                    dbg!(
-                        dst_desc.as_ptr() as usize,
-                        dst_desc.size(),
-                        dst_desc.device_id()
-                    );
                 }
             }
         }
@@ -130,9 +124,7 @@ where
         append_xfer_request(src, dst, &mut src_dl, &mut dst_dl)?;
     }
 
-    // debug_assert!(!src_dl.has_overlaps()? && !dst_dl.has_overlaps()?);
-    debug_assert!(!src_dl.has_overlaps()?);
-    debug_assert!(!dst_dl.has_overlaps()?);
+    debug_assert!(!src_dl.has_overlaps()? && !dst_dl.has_overlaps()?);
 
     let xfer_req = nixl_agent.create_xfer_req(
         transfer_type.as_xfer_op(),
