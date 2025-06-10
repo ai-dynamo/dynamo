@@ -79,10 +79,10 @@ To ensure compatibility, use the examples in the release branch or tag that matc
 
 ## Building the Dynamo Base Image
 
-Although not needed for local development, deploying your Dynamo pipelines to Kubernetes requires you to build and push a Dynamo base image to your container registry. You can use any container registry of your choice, such as:
-- Docker Hub (docker.io)
-- NVIDIA NGC Container Registry (nvcr.io)
-- Any private registry
+Deploying your Dynamo pipelines to Kubernetes requires you to build and push a Dynamo base image to your container registry. You can use any private container registry of your choice, including:
+- [Docker Hub](https://hub.docker.com/)
+- [NVIDIA NGC Container Registry](https://catalog.ngc.nvidia.com/)
+
 
 To build it:
 
@@ -165,7 +165,7 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ## Local Development
 
-If you use vscode or cursor, use the .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions, see the [ReadMe](https://github.com/ai-dynamo/dynamo/blob/main/.devcontainer/README.md).
+If you use vscode or cursor, use the .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions, see the Dynamo repository's [Main ReadMe](https://github.com/ai-dynamo/dynamo/blob/main/.devcontainer/README.md).
 
 Otherwise, to develop locally, we recommend working inside of the container:
 
