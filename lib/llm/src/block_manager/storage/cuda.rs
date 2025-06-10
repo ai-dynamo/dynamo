@@ -81,9 +81,6 @@
 
 use super::*;
 
-use pyo3::prelude::*;
-use pyo3::types::PyAny;
-
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, OnceLock},
@@ -313,8 +310,8 @@ impl StorageAllocator<PinnedStorage> for PinnedAllocator {
 /// Because of this, we need to store a reference to the torch tensor in the [`DeviceStorage`]
 #[derive(Debug)]
 enum DeviceStorageType {
-    Owned,                        // Memory that we allocated ourselves.
-    Torch { _tensor: Py<PyAny> }, // Memory that came from a torch tensor.
+    Owned,                                   // Memory that we allocated ourselves.
+    Torch { _tensor: Box<dyn TorchTensor> }, // Memory that came from a torch tensor.
 }
 
 /// CUDA device memory storage
@@ -345,34 +342,31 @@ impl DeviceStorage {
         })
     }
 
-    pub fn new_from_torch(ctx: &Arc<CudaContext>, tensor: Py<PyAny>) -> Result<Self, StorageError> {
-        Python::with_gil(|py| {
-            let bound_tensor = tensor.bind(py);
+    pub fn new_from_torch(
+        ctx: &Arc<CudaContext>,
+        tensor: Box<dyn TorchTensor>,
+    ) -> Result<Self, StorageError> {
+        let device = tensor.device();
 
-            let device = bound_tensor.getattr("device")?;
+        let TorchDevice::Cuda(device_id) = device else {
+            return Err(StorageError::InvalidConfig("Tensor is not CUDA!".into()));
+        };
 
-            let device_str = device.getattr("type")?.extract::<String>()?;
-            if device_str != "cuda" {
-                return Err(StorageError::InvalidConfig("Tensor is not CUDA!".into()));
-            }
+        if device_id != ctx.cu_device() as usize {
+            return Err(StorageError::InvalidConfig(
+                "Tensor is not on the same device as the context!".into(),
+            ));
+        }
 
-            let device_id = device.getattr("index")?.extract::<usize>()?;
-            if device_id != ctx.cu_device() as usize {
-                return Err(StorageError::InvalidConfig(
-                    "Tensor is not on the same device as the context!".into(),
-                ));
-            }
+        let data_ptr = tensor.data_ptr();
+        let size = tensor.size_bytes();
 
-            let data_ptr = bound_tensor.call_method0("data_ptr")?.extract::<u64>()?;
-            let size = bound_tensor.getattr("nbytes")?.extract::<usize>()?;
-
-            Ok(Self {
-                ptr: data_ptr,
-                size,
-                ctx: ctx.clone(),
-                handles: RegistrationHandles::new(),
-                _storage_type: DeviceStorageType::Torch { _tensor: tensor },
-            })
+        Ok(Self {
+            ptr: data_ptr,
+            size,
+            ctx: ctx.clone(),
+            handles: RegistrationHandles::new(),
+            _storage_type: DeviceStorageType::Torch { _tensor: tensor },
         })
     }
 
@@ -471,75 +465,87 @@ impl StorageAllocator<DeviceStorage> for DeviceAllocator {
 mod tests {
     use super::*;
 
-    /// Helper function to create a mock CUDA tensor in Python
-    fn create_mock_cuda_tensor(
-        py: Python,
-        device_id: usize,
+    #[derive(Debug)]
+    struct MockTensor {
+        device: TorchDevice,
+        data_ptr: u64,
         size_bytes: usize,
-    ) -> PyResult<Py<PyAny>> {
-        // This would require torch to be available in the test environment
-        let torch = py.import("torch")?;
-
-        // Create a tensor with the specified size
-        let num_elements = size_bytes / 4; // Assuming f32
-        let tensor = torch.call_method1("zeros", (num_elements,))?;
-        let tensor = tensor.call_method1("to", (format!("cuda:{}", device_id),))?;
-
-        Ok(tensor.into())
     }
 
-    /// Helper function to create a mock CPU tensor
-    fn create_mock_cpu_tensor(py: Python, size_bytes: usize) -> PyResult<Py<PyAny>> {
-        let torch = py.import("torch")?;
-        let num_elements = size_bytes / 4;
-        let tensor = torch.call_method1("zeros", (num_elements,))?;
-        Ok(tensor.into())
+    impl MockTensor {
+        pub fn new(device: TorchDevice, data_ptr: u64, size_bytes: usize) -> Self {
+            Self {
+                device,
+                data_ptr,
+                size_bytes,
+            }
+        }
+    }
+
+    impl TorchTensor for MockTensor {
+        fn device(&self) -> TorchDevice {
+            self.device.clone()
+        }
+
+        fn data_ptr(&self) -> u64 {
+            self.data_ptr
+        }
+
+        fn size_bytes(&self) -> usize {
+            self.size_bytes
+        }
     }
 
     #[test]
     fn test_device_storage_from_torch_valid_tensor() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            // Skip test if torch is not available
-            if py.import("torch").is_err() {
-                println!("Skipping test: PyTorch not available");
-                return;
-            }
+        let ctx = Cuda::device_or_create(0).expect("Failed to create CUDA context");
+        let size_bytes = 1024;
 
-            let ctx = Cuda::device_or_create(0).expect("Failed to create CUDA context");
-            let size_bytes = 1024;
+        let actual_storage =
+            std::mem::ManuallyDrop::new(DeviceStorage::new(&ctx, size_bytes).unwrap());
 
-            let tensor = create_mock_cuda_tensor(py, 0, size_bytes).unwrap();
-            let storage = DeviceStorage::new_from_torch(&ctx, tensor).unwrap();
+        let tensor = MockTensor::new(TorchDevice::Cuda(0), actual_storage.addr(), size_bytes);
 
-            // Verify properties
-            assert_eq!(storage.size(), size_bytes);
-            assert_eq!(storage.storage_type(), StorageType::Device(0));
-            assert!(storage.addr() != 0); // Should have a valid device pointer
-        });
+        let storage = DeviceStorage::new_from_torch(&ctx, Box::new(tensor)).unwrap();
+
+        assert_eq!(storage.size(), size_bytes);
+        assert_eq!(storage.storage_type(), StorageType::Device(0));
+        assert_eq!(storage.addr(), actual_storage.addr());
     }
 
     #[test]
     fn test_device_storage_from_torch_cpu_tensor_fails() {
-        pyo3::prepare_freethreaded_python();
-        Python::with_gil(|py| {
-            if py.import("torch").is_err() {
-                return;
-            }
+        let ctx = Cuda::device_or_create(0).expect("Failed to create CUDA context");
+        let size_bytes = 1024;
 
-            let ctx = Cuda::device_or_create(0).expect("Failed to create CUDA context");
-            let tensor = create_mock_cpu_tensor(py, 1024).unwrap();
+        let actual_storage = DeviceStorage::new(&ctx, size_bytes).unwrap();
 
-            let result = DeviceStorage::new_from_torch(&ctx, tensor);
-            assert!(result.is_err());
+        let tensor = MockTensor::new(
+            TorchDevice::Other("cpu".to_string()),
+            actual_storage.addr(),
+            size_bytes,
+        );
 
-            dbg!(&result);
+        let result = DeviceStorage::new_from_torch(&ctx, Box::new(tensor));
+        assert!(result.is_err());
 
-            if let Err(StorageError::InvalidConfig(msg)) = result {
-                assert!(msg.contains("Tensor is not CUDA"));
-            } else {
-                panic!("Expected InvalidConfig error for CPU tensor");
-            }
-        });
+        if let Err(StorageError::InvalidConfig(msg)) = result {
+            assert!(msg.contains("Tensor is not CUDA"));
+        } else {
+            panic!("Expected InvalidConfig error for CPU tensor");
+        }
+    }
+
+    #[test]
+    fn test_device_storage_wrong_device() {
+        let ctx = Cuda::device_or_create(0).expect("Failed to create CUDA context");
+        let size_bytes = 1024;
+
+        let actual_storage = DeviceStorage::new(&ctx, size_bytes).unwrap();
+
+        let tensor = MockTensor::new(TorchDevice::Cuda(1), actual_storage.addr(), size_bytes);
+
+        let result = DeviceStorage::new_from_torch(&ctx, Box::new(tensor));
+        assert!(result.is_err());
     }
 }
