@@ -107,6 +107,7 @@ class ServiceConfig(BaseModel):
     dynamo: t.Dict[str, t.Any] = Field(default_factory=dict)
     http_exposed: bool = False
     api_endpoints: t.List[str] = Field(default_factory=list)
+    kubernetes_overrides: t.Optional[t.Dict[str, t.Any]] = None
 
 
 class ServiceInfo(BaseModel):
@@ -116,7 +117,6 @@ class ServiceInfo(BaseModel):
     module_path: str
     class_name: str
     config: ServiceConfig
-    kubernetes_overrides: t.Optional[t.Dict[str, t.Any]] = None
 
     @classmethod
     def from_service(cls, service: ServiceInterface[T]) -> ServiceInfo:
@@ -135,6 +135,20 @@ class ServiceInfo(BaseModel):
             image is not None
         ), "Please set DYNAMO_IMAGE environment variable or image field in service config"
 
+        print(
+            f"!!! Creating ServiceConfig for {name}: hasattr(service.config, kubernetes_overrides) = {hasattr(service.config, 'kubernetes_overrides')}"
+        )
+        print(f"!!! service.config.model_dump() = {service.config.model_dump()}")
+        kubernetes_overrides = None
+        if (
+            hasattr(service, "kubernetes_overrides")
+            and service.kubernetes_overrides is not None
+        ):
+            print("!kubernetes_overrides exist")
+            kubernetes_overrides = service.kubernetes_overrides.model_dump()
+        else:
+            print("!kubernetes_overrides DOES NOT exist")
+
         # Create config
         config = ServiceConfig(
             name=name,
@@ -145,17 +159,15 @@ class ServiceInfo(BaseModel):
             dynamo=service.config.dynamo.model_dump(),
             http_exposed=len(api_endpoints) > 0,
             api_endpoints=api_endpoints,
+            kubernetes_overrides=kubernetes_overrides,
+            # service.config.model_dump().get("kubernetes_overrides")
         )
-        kubernetes_overrides = None
-        if hasattr(service, "kubernetes_overrides") and service.kubernetes_overrides:
-            kubernetes_overrides = service.kubernetes_overrides.model_dump()
 
         return cls(
             name=name,
             module_path=service.__module__,
             class_name=service_class.__name__,
             config=config,
-            kubernetes_overrides=kubernetes_overrides,
         )
 
 
@@ -221,6 +233,9 @@ class ManifestInfo(BaseModel):
                     "workers": service["config"]["workers"],
                     "image": service["config"]["image"],
                     "dynamo": service["config"]["dynamo"],
+                    "kubernetes_overrides": service["config"].get(
+                        "kubernetes_overrides"
+                    ),  # Add kubernetes_overrides.
                 },
             }
 
@@ -229,12 +244,6 @@ class ManifestInfo(BaseModel):
                 service_dict["config"]["http_exposed"] = True
                 service_dict["config"]["api_endpoints"] = service["config"][
                     "api_endpoints"
-                ]
-
-            # Add kubernetes overwrites if available
-            if service.get("kubernetes_overrides"):
-                service_dict["config"]["kubernetes_overrides"] = service[
-                    "kubernetes_overrides"
                 ]
 
             services_dict.append(service_dict)
@@ -306,6 +315,9 @@ class Package:
         from dynamo.sdk.lib.loader import find_and_load_service
 
         dyn_svc = find_and_load_service(build_config.service, working_dir=build_ctx)
+        print(f"!!! dyn_svc type = {type(dyn_svc)}")
+        print(f"!!! dyn_svc.inner type = {type(dyn_svc.inner)}")
+
         # Clean up unused edges
         LinkedServices.remove_unused_edges()
         dyn_svc.inject_config()
@@ -318,6 +330,7 @@ class Package:
         build_ctx: str,
         version: t.Optional[str] = None,
     ) -> Package:
+        """Create a package from a build config."""
         dyn_svc = cls.dynamo_service(build_config, build_ctx)
 
         # Get service name for package
@@ -332,7 +345,6 @@ class Package:
         tag = Tag(name=package_name, version=version)
         if version is None:
             tag = tag.make_new_version()
-
         logger.debug(
             f'Building Dynamo package "{tag}" from build context "{build_ctx}".'
         )

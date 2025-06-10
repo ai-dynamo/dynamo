@@ -74,7 +74,8 @@ def find_and_load_service(
         sys_path_modified = True
 
     try:
-        return _do_import(import_str, working_dir)
+        service_instance = _do_import(import_str, working_dir)
+        return service_instance
     finally:
         if sys_path_modified and working_dir:
             logger.debug(f"Removing {working_dir} from sys.path")
