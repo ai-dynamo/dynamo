@@ -6,6 +6,8 @@ use std::{io::Read, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use dynamo_llm::{backend::ExecutionContext, engines::StreamingEngine, local_model::LocalModel};
+use dynamo_runtime::protocols::Endpoint as EndpointId;
+use dynamo_runtime::slug::Slug;
 use dynamo_runtime::{CancellationToken, DistributedRuntime};
 
 mod flags;
@@ -17,9 +19,6 @@ pub use opt::{Input, Output};
 mod subprocess;
 
 const CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// Where we will attach the vllm/sglang subprocess. Invisible to users.
-pub const INTERNAL_ENDPOINT: &str = "dyn://dynamo.internal.worker";
 
 /// Default size of a KV cache block. Override with --kv-cache-block-size
 const DEFAULT_KV_CACHE_BLOCK_SIZE: usize = 16;
@@ -116,9 +115,9 @@ pub async fn run(
 
     let out_opt = out_opt.unwrap_or_else(|| {
         let default_engine = if card.is_gguf() {
-            Output::LlamaCpp
+            gguf_default()
         } else {
-            Output::MistralRs
+            safetensors_default()
         };
         tracing::info!(
             "Using default engine: {default_engine}. Use out=<engine> to specify one of {}",
@@ -171,7 +170,7 @@ pub async fn run(
             // If not, then the endpoint isn't exposed so we invent an internal one.
             let endpoint = match &in_opt {
                 Input::Endpoint(path) => path.parse()?,
-                _ => INTERNAL_ENDPOINT.parse()?,
+                _ => internal_endpoint("sglang"),
             };
 
             let multi_node_conf = dynamo_llm::engines::MultiNodeConfig {
@@ -214,7 +213,7 @@ pub async fn run(
             // If not, then the endpoint isn't exposed so we invent an internal one.
             let endpoint = match &in_opt {
                 Input::Endpoint(path) => path.parse()?,
-                _ => INTERNAL_ENDPOINT.parse()?,
+                _ => internal_endpoint("vllm"),
             };
 
             let (py_script, child) = match subprocess::start(
@@ -248,7 +247,7 @@ pub async fn run(
             // If not, then the endpoint isn't exposed so we invent an internal one.
             let endpoint = match &in_opt {
                 Input::Endpoint(path) => path.parse()?,
-                _ => INTERNAL_ENDPOINT.parse()?,
+                _ => internal_endpoint("trtllm"),
             };
 
             let (py_script, child) = match subprocess::start(
@@ -400,3 +399,42 @@ fn print_cuda(output: &Output) {
 
 #[cfg(not(any(feature = "mistralrs", feature = "llamacpp")))]
 fn print_cuda(_output: &Output) {}
+
+fn gguf_default() -> Output {
+    #[cfg(feature = "llamacpp")]
+    {
+        Output::LlamaCpp
+    }
+
+    #[cfg(all(feature = "mistralrs", not(feature = "llamacpp")))]
+    {
+        Output::MistralRs
+    }
+
+    #[cfg(not(any(feature = "mistralrs", feature = "llamacpp")))]
+    {
+        Output::EchoFull
+    }
+}
+
+fn safetensors_default() -> Output {
+    #[cfg(feature = "mistralrs")]
+    {
+        Output::MistralRs
+    }
+
+    #[cfg(not(feature = "mistralrs"))]
+    {
+        Output::EchoFull
+    }
+}
+
+/// A random endpoint to use for internal communication
+/// We can't hard code because we may be running several on the same machine (GPUs 0-3 and 4-7)
+fn internal_endpoint(engine: &str) -> EndpointId {
+    EndpointId {
+        namespace: Slug::slugify(&uuid::Uuid::new_v4().to_string()).to_string(),
+        component: engine.to_string(),
+        name: "generate".to_string(),
+    }
+}

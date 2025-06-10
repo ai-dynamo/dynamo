@@ -17,7 +17,6 @@ import logging
 import subprocess
 from pathlib import Path
 
-from components.processor import Processor
 from components.worker import TensorRTLLMWorker
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -30,88 +29,91 @@ from dynamo.sdk.lib.image import DYNAMO_IMAGE
 logger = logging.getLogger(__name__)
 
 
-def get_http_binary_path():
+def get_dynamo_run_binary():
+    """Find the dynamo-run binary path in SDK or fallback to 'dynamo-run' command."""
     sdk_path = Path(sdk.__file__)
-    binary_path = sdk_path.parent / "cli/bin/http"
+    binary_path = sdk_path.parent / "cli/bin/dynamo-run"
     if not binary_path.exists():
-        return "http"
+        return "dynamo-run"
     else:
         return str(binary_path)
 
 
 class FrontendConfig(BaseModel):
+    """Configuration for the Frontend service including model and HTTP server settings."""
+
     served_model_name: str
-    endpoint_chat: str
-    endpoint_completions: str
-    port: int = 8080
+    endpoint: str
+    port: int = 8000
+    router: str = "round-robin"
+    block_size: int = 32
 
 
+# todo this should be called ApiServer
 @service(
     dynamo={
         "namespace": "dynamo",
     },
-    resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
     image=DYNAMO_IMAGE,
-    app=FastAPI(title="TensorRT LLM Example"),
+    app=FastAPI(title="TensorRT-LLM Example"),
 )
-# todo this should be called ApiServer
 class Frontend:
     worker = depends(TensorRTLLMWorker)
-    processor = depends(Processor)
 
     def __init__(self):
-        frontend_config = FrontendConfig(**ServiceConfig.get_parsed_config("Frontend"))
+        """Initialize Frontend service with HTTP server and model configuration."""
+        self.frontend_config = FrontendConfig(
+            **ServiceConfig.get_parsed_config("Frontend")
+        )
+        self.process = None
 
-        # Chat/completions Endpoint
-        subprocess.run(
-            [
-                "llmctl",
-                "http",
-                "remove",
-                "chat-models",
-                frontend_config.served_model_name,
-            ]
-        )
-        subprocess.run(
-            [
-                "llmctl",
-                "http",
-                "add",
-                "chat-models",
-                frontend_config.served_model_name,
-                frontend_config.endpoint_chat,
-            ]
-        )
+        logger.warning(f"Frontend config: {self.frontend_config}")
 
-        # Completions Endpoint
-        subprocess.run(
-            [
-                "llmctl",
-                "http",
-                "remove",
-                "completions",
-                frontend_config.served_model_name,
-            ]
+        self.start_ingress_and_processor()
+
+    def start_ingress_and_processor(self):
+        """Starting dynamo-run based ingress and processor"""
+        logger.info(
+            f"Starting HTTP server and processor on port {self.frontend_config.port}"
         )
-        subprocess.run(
-            [
-                "llmctl",
-                "http",
-                "add",
-                "completions",
-                frontend_config.served_model_name,
-                frontend_config.endpoint_completions,
-            ]
+        dynamo_run_binary = get_dynamo_run_binary()
+
+        cmd = [
+            dynamo_run_binary,
+            "in=http",
+            "out=dyn",
+            "--http-port",
+            str(self.frontend_config.port),
+            "--router-mode",
+            self.frontend_config.router,
+        ]
+
+        logger.info(f"Frontend cmd: {cmd}")
+
+        self.process = subprocess.Popen(
+            cmd,
+            stdout=None,
+            stderr=None,
         )
 
-        logger.info("Starting HTTP server")
-        http_binary = get_http_binary_path()
-        process = subprocess.Popen(
-            [http_binary, "-p", str(frontend_config.port)], stdout=None, stderr=None
-        )
-        try:
-            process.wait()
-        except KeyboardInterrupt:
-            process.terminate()
-            process.wait()
+    def close(self):
+        """Clean up resources by terminating the subprocess."""
+        if self.process is not None:
+            try:
+                logger.info("Terminating subprocess...")
+                self.process.terminate()
+                # Wait for process to terminate with a timeout
+                self.process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                logger.warning("Subprocess did not terminate gracefully, forcing kill")
+                self.process.kill()
+                self.process.wait()
+            except Exception as e:
+                logger.error(f"Error while terminating subprocess: {e}")
+            finally:
+                self.process = None
+
+    def __del__(self):
+        """Destructor to ensure subprocess is cleaned up."""
+        self.close()

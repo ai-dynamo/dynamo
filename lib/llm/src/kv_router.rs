@@ -31,7 +31,7 @@ use crate::{
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
         scoring::ProcessedEndpoints,
     },
-    preprocessor::BackendInput,
+    preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
     tokens::TokenBlockSequence,
 };
@@ -52,6 +52,51 @@ pub trait WorkerSelector {
         request: &SchedulingRequest,
         block_size: usize,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
+}
+
+/// KV Router configuration parameters
+#[derive(Debug, Clone)]
+pub struct KvRouterConfig {
+    /// Weight for overlap score in worker selection.
+    /// Higher values prioritize KV cache reuse. Default: 2.0
+    pub overlap_score_weight: f64,
+
+    /// Weight for GPU cache usage in worker selection.
+    /// Higher values avoid workers with nearly full KV caches. Default: 1.0
+    pub gpu_cache_usage_weight: f64,
+
+    /// Weight for waiting requests in worker selection.
+    /// Higher values avoid workers with queued requests. Default: 1.0
+    pub waiting_requests_weight: f64,
+}
+
+impl Default for KvRouterConfig {
+    fn default() -> Self {
+        Self {
+            overlap_score_weight: 2.0,
+            gpu_cache_usage_weight: 1.0,
+            waiting_requests_weight: 1.0,
+        }
+    }
+}
+
+impl KvRouterConfig {
+    /// Create a new KvRouterConfig with optional weight values.
+    /// If a weight is None, the default value will be used.
+    pub fn new(
+        overlap_score_weight: Option<f64>,
+        gpu_cache_usage_weight: Option<f64>,
+        waiting_requests_weight: Option<f64>,
+    ) -> Self {
+        let default = Self::default();
+        Self {
+            overlap_score_weight: overlap_score_weight.unwrap_or(default.overlap_score_weight),
+            gpu_cache_usage_weight: gpu_cache_usage_weight
+                .unwrap_or(default.gpu_cache_usage_weight),
+            waiting_requests_weight: waiting_requests_weight
+                .unwrap_or(default.waiting_requests_weight),
+        }
+    }
 }
 
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
@@ -173,13 +218,13 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
 }
 
 pub struct KvPushRouter {
-    inner: PushRouter<BackendInput, Annotated<LLMEngineOutput>>,
+    inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     chooser: Arc<KvRouter>,
 }
 
 impl KvPushRouter {
     pub fn new(
-        inner: PushRouter<BackendInput, Annotated<LLMEngineOutput>>,
+        inner: PushRouter<PreprocessedRequest, Annotated<LLMEngineOutput>>,
         chooser: Arc<KvRouter>,
     ) -> Self {
         KvPushRouter { inner, chooser }
@@ -187,12 +232,12 @@ impl KvPushRouter {
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
     for KvPushRouter
 {
     async fn generate(
         &self,
-        request: SingleIn<BackendInput>,
+        request: SingleIn<PreprocessedRequest>,
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
         match self.inner.client.instance_source.as_ref() {
             InstanceSource::Static => self.inner.r#static(request).await,

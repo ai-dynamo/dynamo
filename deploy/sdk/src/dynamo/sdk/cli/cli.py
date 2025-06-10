@@ -62,7 +62,6 @@ def main(
 ):
     """
     The Dynamo CLI is a CLI for serving, containerizing, and deploying Dynamo applications.
-    It takes inspiration from and leverages core pieces of the BentoML deployment stack.
 
     At a high level, you use `serve` to run a set of dynamo services locally,
     `build` and `containerize` to package them up for deployment, and then `cloud`
@@ -82,6 +81,7 @@ cli.add_typer(deployment_app, name="deployment")
 cli.command()(deploy)
 cli.command()(build)
 cli.command()(containerize)
+
 
 if __name__ == "__main__":
     cli()

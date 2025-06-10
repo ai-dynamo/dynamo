@@ -17,7 +17,6 @@
 # Source of truth for planner defaults
 class PlannerDefaults:
     namespace = "dynamo"
-    served_model_name = "vllm"
     environment = "local"
     no_operation = False
     log_dir = None

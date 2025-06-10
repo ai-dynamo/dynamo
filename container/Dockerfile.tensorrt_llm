@@ -16,7 +16,6 @@
 ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
 ARG BASE_IMAGE_TAG="25.04-py3"
 ARG RELEASE_BUILD
-ARG GENAI_PERF_VERSION=0.0.13
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -162,11 +161,6 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
          --extra-index-url https://pypi.org/simple \
          "${TENSORRTLLM_PIP_WHEEL}" ; \
     fi
-
-ARG GENAI_PERF_VERSION
-
-# Install genai-perf for benchmarking
-RUN pip install genai-perf==$GENAI_PERF_VERSION
 
 # Install test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
@@ -322,10 +316,6 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
 RUN . /opt/dynamo/venv/bin/activate && \
     uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/dist/ai_dynamo*any.whl
-
-# TODO: remove kantoku as a transitive dependency
-RUN . /opt/dynamo/venv/bin/activate && \
-    uv pip uninstall kantoku circus && uv pip install circus==0.19.0
 
 # Install dynamo.runtime and dynamo.llm wheels globally in container for tests
 # TODO: In future, we may use a virtualenv for everything and remove this.

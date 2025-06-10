@@ -64,3 +64,50 @@ curl localhost:8000/v1/completions \
 
 For more detailed explenations, refer to the main [LLM examples README](../llm/README.md).
 
+
+
+## Deepseek R1
+
+To run DSR1 model please first follow the Ray setup from the [multinode documentation](../../docs/examples/multinode.md).
+
+### Aggregated Deployment
+
+```bash
+cd examples/vllm_v1
+dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/agg.yaml
+```
+
+
+### Disaggregated Deployment
+
+To create frontend with a single decode worker:
+```bash
+cd examples/vllm_v1
+dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/disagg.yaml
+```
+
+To create a single decode worker:
+```bash
+cd examples/vllm_v1
+dynamo serve components.worker:VllmDecodeWorker -f configs/deepseek_r1/disagg.yaml
+```
+
+To create a single prefill worker:
+```bash
+cd examples/vllm_v1
+dynamo serve components.worker:VllmPrefillWorker -f configs/deepseek_r1/disagg.yaml
+```
+
+## Testing
+
+Send a test request using curl:
+```bash
+curl localhost:8000/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-ai/DeepSeek-R1",
+    "prompt": "In the heart of Eldoria...",
+    "stream": false,
+    "max_tokens": 30
+  }'
+```
