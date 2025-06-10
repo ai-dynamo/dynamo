@@ -22,7 +22,7 @@ The examples are based on the [llava-1.5-7b-hf](https://huggingface.co/llava-hf/
 
 ## Use the Latest Release
 
-We recommend using the latest stable release of dynamo to avoid the breaking changes:
+We recommend using the latest stable release of dynamo to avoid breaking changes:
 
 [![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
 

@@ -21,7 +21,7 @@ This directory contains examples and reference implementations for deploying Lar
 
 ## Use the Latest Release
 
-We recommend using the latest stable release of dynamo to avoid the breaking changes:
+We recommend using the latest stable release of dynamo to avoid breaking changes:
 
 [![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
 
