@@ -15,6 +15,7 @@
 
 use super::events::EventManager;
 use super::*;
+use prometheus::Registry;
 
 #[derive(Debug, Clone)]
 pub enum NixlOptions {
@@ -41,6 +42,9 @@ pub struct KvManagerRuntimeConfig {
 
     #[builder(default)]
     pub async_runtime: Option<Arc<tokio::runtime::Runtime>>,
+
+    #[builder(default = "Arc::new(Registry::new())")]
+    pub metrics_registry: Arc<Registry>,
 }
 
 impl KvManagerRuntimeConfig {

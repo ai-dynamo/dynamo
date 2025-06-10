@@ -40,6 +40,8 @@ ENVIRONMENT_VARIABLES=
 REMAINING_ARGS=
 INTERACTIVE=
 USE_NIXL_GDS=
+RUNTIME=nvidia
+WORKDIR=/workspace
 
 get_options() {
     while :; do
@@ -97,6 +99,14 @@ get_options() {
 		missing_requirement "$1"
             fi
             ;;
+	--runtime)
+            if [ "$2" ]; then
+                RUNTIME=$2
+                shift
+            else
+		missing_requirement "$1"
+            fi
+            ;;
 	--entrypoint)
             if [ "$2" ]; then
                 ENTRYPOINT=$2
@@ -105,6 +115,14 @@ get_options() {
 		missing_requirement "$1"
             fi
             ;;
+	--workdir)
+	    if [ "$2" ]; then
+	        WORKDIR="$2"
+	        shift
+	    else
+	        missing_requirement "$1"
+	    fi
+	    ;;
 	--privileged)
             if [ "$2" ]; then
                 PRIVILEGED=$2
@@ -261,7 +279,9 @@ get_options() {
     else
         NIXL_GDS_CAPS=""
     fi
-
+    if [[ "$GPUS" == "none" || "$GPUS" == "NONE" ]]; then
+    	RUNTIME=""
+    fi
     REMAINING_ARGS=("$@")
 }
 
@@ -279,6 +299,8 @@ show_help() {
     echo "  [-e add environment variable]"
     echo "  [--mount-workspace set up for local development]"
     echo "  [-- stop processing and pass remaining args as command to docker run]"
+    echo "  [--workdir set the working directory inside the container]"
+    echo "  [--runtime add runtime variables]"
     exit 0
 }
 
@@ -304,13 +326,14 @@ ${RUN_PREFIX} docker run \
     ${INTERACTIVE} \
     ${RM_STRING} \
     --network host \
+    ${RUNTIME:+--runtime "$RUNTIME"} \
     --shm-size=10G \
     --ulimit memlock=-1 \
     --ulimit stack=67108864 \
     --ulimit nofile=65536:65536 \
     ${ENVIRONMENT_VARIABLES} \
     ${VOLUME_MOUNTS} \
-    -w /workspace \
+    -w "$WORKDIR" \
     --cap-add CAP_SYS_PTRACE \
     ${NIXL_GDS_CAPS} \
     --ipc host \
