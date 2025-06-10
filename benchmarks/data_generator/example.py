@@ -39,7 +39,7 @@ synthesizer = Synthesizer(
 )
 
 # generate requests
-requests = synthesizer.synthesize_requests(
+requests_synth = synthesizer.synthesize_requests(
     num_requests=100,
     input_len_filter=(
         16384 - 1000
@@ -50,18 +50,18 @@ requests = synthesizer.synthesize_requests(
 tokenizer = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
 input_texts = hashes_to_texts(
     tokenizer=tokenizer,
-    hash_ids_list=[req["hash_ids"] for req in requests],
-    input_lengths=[req["input_length"] for req in requests],
+    hash_ids_list=[req["hash_ids"] for req in requests_synth],
+    input_lengths=[req["input_length"] for req in requests_synth],
     block_size=512,
 )
 
-for i, req in enumerate(requests):
+for i, req in enumerate(requests_synth):
     req["input_text"] = input_texts[i]
     del req["hash_ids"]
 
 output_file = "synthesized_requests.jsonl"
 with open("synthesized_requests.jsonl", "w") as f:
-    for req in requests:
+    for req in requests_synth:
         f.write(json.dumps(req) + "\n")
 
-print(f"Saved {len(requests)} requests to {output_file}")
+print(f"Saved {len(requests_synth)} requests to {output_file}")
