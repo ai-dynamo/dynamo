@@ -566,6 +566,11 @@ def build(
         if next_steps:
             console.print(f"\n[blue]Next steps: {''.join(next_steps)}[/]")
 
+        if output_dir is None:
+            raise BuildError(
+                "output_dir must not be None when building docker_dir path"
+            )
+        output_path = Path(output_dir)
         docker_dir = output_path / "env" / "docker"
         docker_dir.mkdir(exist_ok=True, parents=True)
         docker_file = docker_dir / "Dockerfile"
