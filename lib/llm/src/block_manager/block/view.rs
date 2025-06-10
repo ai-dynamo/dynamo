@@ -43,6 +43,7 @@ pub struct MemoryView<'a, S: Storage, K: Kind> {
     _block_data: &'a BlockData<S>,
     addr: usize,
     size: usize,
+    storage_idx: usize,
     kind: std::marker::PhantomData<K>,
 }
 
@@ -61,11 +62,13 @@ where
         _block_data: &'a BlockData<S>,
         addr: usize,
         size: usize,
+        storage_idx: usize,
     ) -> Result<Self, BlockError> {
         Ok(Self {
             _block_data,
             addr,
             size,
+            storage_idx,
             kind: std::marker::PhantomData,
         })
     }
@@ -92,6 +95,7 @@ pub struct MemoryViewMut<'a, S: Storage, K: Kind> {
     _block_data: &'a mut BlockData<S>,
     addr: usize,
     size: usize,
+    storage_idx: usize,
     kind: std::marker::PhantomData<K>,
 }
 
@@ -107,11 +111,13 @@ impl<'a, S: Storage, K: Kind> MemoryViewMut<'a, S, K> {
         _block_data: &'a mut BlockData<S>,
         addr: usize,
         size: usize,
+        storage_idx: usize,
     ) -> Result<Self, BlockError> {
         Ok(Self {
             _block_data,
             addr,
             size,
+            storage_idx,
             kind: std::marker::PhantomData,
         })
     }
@@ -208,10 +214,10 @@ mod nixl {
         /// Creates an immutable NIXL memory descriptor from this view.
         pub fn as_nixl_descriptor(&self) -> NixlMemoryDescriptor<'a, K, IsImmutable> {
             NixlMemoryDescriptor::new(
-                self.addr as u64,                // Address from the view
-                self.size(),                     // Size from the view
-                NixlDescriptor::mem_type(self),  // Delegate to self's NixlDescriptor impl
-                NixlDescriptor::device_id(self), // Delegate to self's NixlDescriptor impl
+                self.addr as u64, // Address from the view
+                self.size(),      // Size from the view
+                self._block_data.layout.storage()[self.storage_idx].mem_type(), // Delegate to self's NixlDescriptor impl
+                self._block_data.layout.storage()[self.storage_idx].device_id(),
             )
         }
     }
@@ -228,8 +234,8 @@ mod nixl {
             NixlMemoryDescriptor::new(
                 self.addr as u64,
                 self.size(),
-                NixlDescriptor::mem_type(self), // Delegate to self's NixlDescriptor impl
-                NixlDescriptor::device_id(self), // Delegate to self's NixlDescriptor impl
+                self._block_data.layout.storage()[self.storage_idx].mem_type(), // Delegate to self's NixlDescriptor impl
+                self._block_data.layout.storage()[self.storage_idx].device_id(),
             )
         }
     }

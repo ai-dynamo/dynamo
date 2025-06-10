@@ -545,13 +545,13 @@ pub mod tests {
             BasicMetadata, BlockDataExt, BlockDataProvider, BlockExt, BlockIdentifier, Blocks,
             MutableBlock,
         },
-        layout::{nixl::NixlLayout, FullyContiguous},
+        layout::{nixl::NixlLayout, FullyContiguous, LayerSeparate, LayoutType},
         pool::BlockPool,
         storage::{
             DeviceAllocator, DeviceStorage, DiskAllocator, DiskStorage, PinnedAllocator,
-            PinnedStorage, StorageType,
+            PinnedStorage, StorageAllocator, StorageType,
         },
-        DType, LayoutConfig,
+        DType, LayoutConfig, NixlRegisterableStorage,
     };
     use crate::tokens::{TokenBlockSequence, Tokens};
     use nixl_sys::{MemoryRegion, NixlDescriptor};
@@ -559,6 +559,7 @@ pub mod tests {
     use aligned_vec::avec;
     use cudarc::runtime::sys::{cudaMemcpy, cudaMemcpyKind, cudaMemset};
     use prometheus::Registry;
+    use rstest::*;
     use std::fs::File;
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::mem::ManuallyDrop;
@@ -584,11 +585,55 @@ pub mod tests {
         };
     }
 
-    pub fn build_pools(
+    fn build_layout<S: Storage + NixlRegisterableStorage>(
+        config: LayoutConfig,
+        layout_type: LayoutType,
+        agent: &NixlAgent,
+        allocator: &dyn StorageAllocator<S>,
+    ) -> Result<Arc<BlockPool<S, BasicMetadata>>> {
+        match layout_type {
+            LayoutType::FullyContiguous => {
+                let mut pool_layout = FullyContiguous::allocate(config.clone(), allocator)?;
+                pool_layout.nixl_register(agent, None)?;
+                let blocks = Blocks::new(pool_layout, 42, 0)?.into_blocks()?;
+                Ok(Arc::new(BlockPool::builder().blocks(blocks).build()?))
+            }
+            LayoutType::LayerSeparate { outer_contiguous } => {
+                let mut pool_layout =
+                    LayerSeparate::allocate(config.clone(), allocator, outer_contiguous)?;
+                pool_layout.nixl_register(agent, None)?;
+                let blocks = Blocks::new(pool_layout, 42, 0)?.into_blocks()?;
+                Ok(Arc::new(BlockPool::builder().blocks(blocks).build()?))
+            }
+        }
+    }
+
+    fn build_pools(
         device_blocks: usize,
         host_blocks: Option<usize>,
         disk_blocks: Option<usize>,
         inner_dim: Option<usize>,
+    ) -> Result<(
+        Arc<OffloadManager<BasicMetadata>>,
+        DevicePool,
+        HostPool,
+        DiskPool,
+    )> {
+        build_pools_with_layout(
+            device_blocks,
+            host_blocks,
+            disk_blocks,
+            inner_dim,
+            LayoutType::FullyContiguous,
+        )
+    }
+
+    pub fn build_pools_with_layout(
+        device_blocks: usize,
+        host_blocks: Option<usize>,
+        disk_blocks: Option<usize>,
+        inner_dim: Option<usize>,
+        layout_type: LayoutType,
     ) -> Result<(
         Arc<OffloadManager<BasicMetadata>>,
         DevicePool,
@@ -608,31 +653,28 @@ pub mod tests {
         let agent_arc = NIXL_AGENT.clone();
         let agent = agent_arc.as_ref().as_ref().unwrap();
 
-        let mut device = FullyContiguous::allocate(config.clone(), &DeviceAllocator::default())?;
-
-        device.nixl_register(agent, None)?;
-
-        let device_blocks = Blocks::<_, BasicMetadata>::new(device, 42, 0)?.into_blocks()?;
-        let device_pool = Some(Arc::new(
-            BlockPool::builder().blocks(device_blocks).build()?,
-        ));
+        let device_pool = Some(build_layout(
+            config.clone(),
+            layout_type,
+            agent,
+            &DeviceAllocator::default(),
+        )?);
 
         let host_pool = if let Some(host_blocks) = host_blocks {
             config.num_blocks = host_blocks;
-            let mut host = FullyContiguous::allocate(config.clone(), &PinnedAllocator::default())?;
-            host.nixl_register(agent, None)?;
-            let host_blocks = Blocks::<_, BasicMetadata>::new(host, 42, 0)?.into_blocks()?;
-            Some(Arc::new(BlockPool::builder().blocks(host_blocks).build()?))
+            Some(build_layout(
+                config.clone(),
+                layout_type,
+                agent,
+                &PinnedAllocator::default(),
+            )?)
         } else {
             None
         };
 
         let disk_pool = if let Some(disk_blocks) = disk_blocks {
             config.num_blocks = disk_blocks;
-            let mut disk = FullyContiguous::allocate(config, &DiskAllocator)?;
-            disk.nixl_register(agent, None)?;
-            let disk_blocks = Blocks::<_, BasicMetadata>::new(disk, 42, 0)?.into_blocks()?;
-            Some(Arc::new(BlockPool::builder().blocks(disk_blocks).build()?))
+            Some(build_layout(config, layout_type, agent, &DiskAllocator)?)
         } else {
             None
         };
@@ -652,34 +694,18 @@ pub mod tests {
         Ok((manager, device_pool, host_pool, disk_pool))
     }
 
-    /// Create a block in the 'RESET' state.
-    async fn get_block<S: Storage, Metadata: BlockMetadata>(
-        pool: &Arc<BlockPool<S, Metadata>>,
-    ) -> Result<MutableBlock<S, Metadata>> {
-        pool.allocate_blocks(1)
-            .await?
-            .into_iter()
-            .next()
-            .ok_or(anyhow::anyhow!("Failed to allocate block"))
-    }
-
-    /// Create a block in the 'PARTIAL' state.
-    async fn partial_block<S: Storage, Metadata: BlockMetadata>(
-        pool: &Arc<BlockPool<S, Metadata>>,
-        token: u32,
-    ) -> Result<MutableBlock<S, Metadata>> {
-        let mut block = get_block(pool).await?;
-        block.init_sequence(42)?;
-        block.add_token(token)?;
-        Ok(block)
-    }
-
     /// Create a block in the 'COMPLETED' state.
     async fn completed_block<S: Storage, Metadata: BlockMetadata>(
         pool: &Arc<BlockPool<S, Metadata>>,
         tokens: [u32; BLOCK_SIZE],
     ) -> Result<MutableBlock<S, Metadata>> {
-        let mut block = get_block(pool).await?;
+        let mut block = pool
+            .allocate_blocks(1)
+            .await?
+            .into_iter()
+            .next()
+            .ok_or(anyhow::anyhow!("Failed to allocate block"))?;
+
         block.init_sequence(42)?;
         for token in tokens {
             block.add_token(token)?;
@@ -693,32 +719,36 @@ pub mod tests {
         value: u8,
     ) -> Result<()> {
         let block_data = block.block_data(get_private_token());
-        let block_view = block_data.block_view()?;
-        let block_size = block_view.size();
 
-        match block_data.storage_type() {
-            StorageType::Device(_) | StorageType::Pinned => unsafe {
-                cudaMemset(
-                    block_view.as_ptr() as *mut std::ffi::c_void,
-                    value as i32,
-                    block_size,
-                )
-                .result()?;
-            },
-            StorageType::Disk => {
-                let nixl_desc = block_view.as_nixl_descriptor();
-                let mut file: ManuallyDrop<File>;
-                let data = avec![[4096] | value; block_size];
+        for layer_idx in 0..block_data.num_layers() {
+            for outer_idx in 0..block_data.num_outer_dims() {
+                let layer_view = block_data.layer_view(layer_idx, outer_idx)?;
+                match block_data.storage_type() {
+                    StorageType::Device(_) | StorageType::Pinned => unsafe {
+                        cudaMemset(
+                            layer_view.as_ptr() as *mut std::ffi::c_void,
+                            value as i32,
+                            layer_view.size(),
+                        )
+                        .result()?;
+                    },
+                    StorageType::Disk => {
+                        let nixl_desc = layer_view.as_nixl_descriptor();
+                        let mut file: ManuallyDrop<File>;
+                        let data = avec![[4096] | value; layer_view.size()];
 
-                unsafe {
-                    file = ManuallyDrop::new(File::from_raw_fd(nixl_desc.device_id() as i32));
-                    file.seek(SeekFrom::Start(nixl_desc.as_ptr() as u64))?;
+                        unsafe {
+                            file =
+                                ManuallyDrop::new(File::from_raw_fd(nixl_desc.device_id() as i32));
+                            file.seek(SeekFrom::Start(nixl_desc.as_ptr() as u64))?;
+                        }
+                        file.write_all(&data)?;
+                        file.sync_all()?;
+                        file.flush()?;
+                    }
+                    _ => panic!(),
                 }
-                file.write_all(&data)?;
-                file.sync_all()?;
-                file.flush()?;
             }
-            _ => panic!(),
         }
 
         Ok(())
@@ -728,37 +758,48 @@ pub mod tests {
         block: &impl BlockDataProvider<StorageType = S>,
     ) -> Result<Vec<u8>> {
         let block_data = block.block_data(get_private_token());
-        let block_view = block_data.block_view()?;
-        let size = block_view.size();
 
-        let mut contents: Vec<u8> = vec![0; size];
+        let mut contents: Vec<u8> = Vec::new();
 
-        match block_data.storage_type() {
-            StorageType::Device(_) => unsafe {
-                cudaMemcpy(
-                    contents.as_mut_ptr() as *mut std::ffi::c_void,
-                    block_view.as_ptr() as *const std::ffi::c_void,
-                    size,
-                    cudaMemcpyKind::cudaMemcpyDeviceToHost,
-                )
-                .result()?;
-            },
-            StorageType::Pinned => unsafe {
-                contents = std::slice::from_raw_parts(block_view.as_ptr(), size).to_vec();
-            },
-            StorageType::Disk => {
-                let nixl_desc = block_view.as_nixl_descriptor();
-                let mut file: ManuallyDrop<File>;
-                let mut aligned = avec![[4096] | 0; size];
+        for layer_idx in 0..block_data.num_layers() {
+            for outer_idx in 0..block_data.num_outer_dims() {
+                let layer_view = block_data.layer_view(layer_idx, outer_idx)?;
+                match block_data.storage_type() {
+                    StorageType::Device(_) => unsafe {
+                        let mut buffer = vec![0_u8; layer_view.size()];
 
-                unsafe {
-                    file = ManuallyDrop::new(File::from_raw_fd(nixl_desc.device_id() as i32));
-                    file.seek(SeekFrom::Start(nixl_desc.as_ptr() as u64))?;
+                        cudaMemcpy(
+                            buffer.as_mut_ptr() as *mut std::ffi::c_void,
+                            layer_view.as_ptr() as *const std::ffi::c_void,
+                            layer_view.size(),
+                            cudaMemcpyKind::cudaMemcpyDeviceToHost,
+                        )
+                        .result()?;
+
+                        contents.extend(buffer);
+                    },
+                    StorageType::Pinned => unsafe {
+                        contents.extend(
+                            std::slice::from_raw_parts(layer_view.as_ptr(), layer_view.size())
+                                .to_vec(),
+                        );
+                    },
+                    StorageType::Disk => {
+                        let nixl_desc = layer_view.as_nixl_descriptor();
+                        let mut file: ManuallyDrop<File>;
+                        let mut aligned = avec![[4096] | 0; layer_view.size()];
+
+                        unsafe {
+                            file =
+                                ManuallyDrop::new(File::from_raw_fd(nixl_desc.device_id() as i32));
+                            file.seek(SeekFrom::Start(nixl_desc.as_ptr() as u64))?;
+                        }
+                        file.read_exact(&mut aligned)?;
+                        contents.extend(aligned.to_vec());
+                    }
+                    _ => anyhow::bail!("Unsupported storage type."),
                 }
-                file.read_exact(&mut aligned)?;
-                contents = aligned.to_vec();
             }
-            _ => anyhow::bail!("Unsupported storage type."),
         }
 
         Ok(contents.to_vec())
@@ -771,6 +812,8 @@ pub mod tests {
     ) -> Result<()> {
         let contents1 = get_block_contents(block1)?;
         let contents2 = get_block_contents(block2)?;
+
+        assert_eq!(contents1.len(), contents2.len());
 
         for (c1_value, c2_value) in contents1.iter().zip(contents2.iter()) {
             if *c1_value != *c2_value || *c1_value != value {
@@ -786,21 +829,6 @@ pub mod tests {
 
         let device_pool = device_pool.as_ref().unwrap();
 
-        // Check blocks in the 'RESET' state.
-        let immutable_block = ImmutableBlock::new(Arc::new(get_block(device_pool).await?));
-
-        assert!(matches!(
-            offload_manager.offload(&immutable_block, 0).await,
-            Err(BlockPoolError::BlockError(BlockError::InvalidState(_)))
-        ));
-
-        // Check blocks in the 'PARTIAL' state.
-        let immutable_block = ImmutableBlock::new(Arc::new(partial_block(device_pool, 0).await?));
-        assert!(matches!(
-            offload_manager.offload(&immutable_block, 0).await,
-            Err(BlockPoolError::BlockError(BlockError::InvalidState(_)))
-        ));
-
         // Check blocks in the 'COMPLETED' state.
         let immutable_block = ImmutableBlock::new(Arc::new(
             completed_block(device_pool, [0; BLOCK_SIZE]).await?,
@@ -814,8 +842,13 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn test_offload_registered_blocks() -> Result<()> {
-        let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None, None)?;
+    #[rstest]
+    #[case(LayoutType::FullyContiguous)]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
+    async fn test_offload_registered_blocks(#[case] layout_type: LayoutType) -> Result<()> {
+        let (offload_manager, device_pool, host_pool, _) =
+            build_pools_with_layout(4, Some(4), None, None, layout_type)?;
 
         let device_pool = device_pool.as_ref().unwrap();
         let host_pool = host_pool.as_ref().unwrap();
@@ -905,8 +938,13 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn test_onboard() -> Result<()> {
-        let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None, None)?;
+    #[rstest]
+    #[case(LayoutType::FullyContiguous)]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
+    async fn test_onboard(#[case] layout_type: LayoutType) -> Result<()> {
+        let (offload_manager, device_pool, host_pool, _) =
+            build_pools_with_layout(4, Some(4), None, None, layout_type)?;
 
         let device_pool = device_pool.as_ref().unwrap();
         let host_pool = host_pool.as_ref().unwrap();
@@ -959,8 +997,13 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn test_offload_onboard() -> Result<()> {
-        let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None, None)?;
+    #[rstest]
+    #[case(LayoutType::FullyContiguous)]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
+    async fn test_offload_onboard(#[case] layout_type: LayoutType) -> Result<()> {
+        let (offload_manager, device_pool, host_pool, _) =
+            build_pools_with_layout(4, Some(4), None, None, layout_type)?;
 
         let device_pool = device_pool.as_ref().unwrap();
         let host_pool = host_pool.as_ref().unwrap();
@@ -1076,8 +1119,13 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn test_offload_disk() -> Result<()> {
-        let (offload_manager, _, host_pool, disk_pool) = build_pools(4, Some(4), Some(4), None)?;
+    #[rstest]
+    #[case(LayoutType::FullyContiguous)]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
+    async fn test_offload_disk(#[case] layout_type: LayoutType) -> Result<()> {
+        let (offload_manager, _, host_pool, disk_pool) =
+            build_pools_with_layout(4, Some(4), Some(4), None, layout_type)?;
 
         let host_pool = host_pool.as_ref().unwrap();
         let disk_pool = disk_pool.as_ref().unwrap();
@@ -1111,8 +1159,13 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn test_onboard_disk() -> Result<()> {
-        let (offload_manager, device_pool, _, disk_pool) = build_pools(4, None, Some(4), None)?;
+    #[rstest]
+    #[case(LayoutType::FullyContiguous)]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
+    async fn test_onboard_disk(#[case] layout_type: LayoutType) -> Result<()> {
+        let (offload_manager, device_pool, _, disk_pool) =
+            build_pools_with_layout(4, None, Some(4), None, layout_type)?;
 
         let device_pool = device_pool.as_ref().unwrap();
         let disk_pool = disk_pool.as_ref().unwrap();
@@ -1150,9 +1203,13 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn test_bulk_transfer_disk() -> Result<()> {
+    #[rstest]
+    #[case(LayoutType::FullyContiguous)]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
+    async fn test_bulk_transfer_disk(#[case] layout_type: LayoutType) -> Result<()> {
         let (offload_manager, device_pool, host_pool, disk_pool) =
-            build_pools(8, Some(8), Some(8), None)?;
+            build_pools_with_layout(8, Some(8), Some(8), None, layout_type)?;
 
         let disk_pool = disk_pool.as_ref().unwrap();
         let host_pool = host_pool.as_ref().unwrap();

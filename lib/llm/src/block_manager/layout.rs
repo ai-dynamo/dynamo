@@ -177,6 +177,9 @@ pub struct LocalMemoryRegion {
 
     #[getter(copy)]
     size: usize,
+
+    #[getter(copy)]
+    storage_idx: usize,
 }
 
 /// Core trait for block layouts
@@ -529,6 +532,7 @@ impl<S: Storage> GenericBlockLayout for FullyContiguous<S> {
         Ok(LocalMemoryRegion {
             addr: final_addr,
             size: self.config.memory_region_size,
+            storage_idx: 0,
         })
     }
 }
@@ -706,37 +710,27 @@ impl<S: Storage> LayerSeparate<S> {
             "Calculated storage size for allocation (with alignment padding)"
         );
 
-        let storage = allocator.allocate(bytes_to_allocate).map_err(|e| {
-            LayoutError::OperationFailed(format!("Storage allocation failed: {}", e))
-        })?;
+        let mut storages = Vec::new();
+
+        for _ in 0..config.inner.num_layers {
+            let storage = allocator.allocate(bytes_to_allocate).map_err(|e| {
+                LayoutError::OperationFailed(format!("Storage allocation failed: {}", e))
+            })?;
+            storages.push(storage);
+        }
+
         tracing::debug!(
-            allocated_size = storage.size(),
-            allocated_addr = storage.addr(),
+            allocated_size = storages[0].size(),
+            allocated_addr = storages[0].addr(),
             "Storage allocated successfully"
         );
 
         // Pass the config by value as Self::new takes ownership
-        Self::new(config.inner, vec![storage], is_outer_contiguous)
+        Self::new(config.inner, storages, is_outer_contiguous)
     }
 }
 
-impl<S: Storage> BlockLayout for LayerSeparate<S> {
-    type StorageType = S;
-
-    fn layout_type(&self) -> LayoutType {
-        LayoutType::LayerSeparate {
-            outer_contiguous: self.config.is_outer_contiguous,
-        }
-    }
-
-    fn storage(&self) -> Vec<&Self::StorageType> {
-        self.storages.iter().collect()
-    }
-
-    fn storage_mut(&mut self) -> Vec<&mut Self::StorageType> {
-        self.storages.iter_mut().collect()
-    }
-
+impl<S: Storage> GenericBlockLayout for LayerSeparate<S> {
     fn storage_type(&self) -> StorageType {
         self.storage_type.clone()
     }
@@ -761,7 +755,26 @@ impl<S: Storage> BlockLayout for LayerSeparate<S> {
         Ok(LocalMemoryRegion {
             addr: final_addr,
             size: self.config.memory_region_size,
+            storage_idx: layer_idx,
         })
+    }
+}
+
+impl<S: Storage> BlockLayout for LayerSeparate<S> {
+    type StorageType = S;
+
+    fn layout_type(&self) -> LayoutType {
+        LayoutType::LayerSeparate {
+            outer_contiguous: self.config.is_outer_contiguous,
+        }
+    }
+
+    fn storage(&self) -> Vec<&Self::StorageType> {
+        self.storages.iter().collect()
+    }
+
+    fn storage_mut(&mut self) -> Vec<&mut Self::StorageType> {
+        self.storages.iter_mut().collect()
     }
 }
 
@@ -1450,5 +1463,21 @@ pub mod tests {
         // For block_contiguous: layout_data_bytes = block_stride * num_blocks
         let expected_block = layout_block.config.block_stride_in_bytes * NUM_BLOCKS;
         assert_eq!(layout_block.layout_data_bytes(), expected_block);
+    }
+
+    #[test]
+    fn test_ls_allocate() {
+        let config = LayoutConfig {
+            num_blocks: NUM_BLOCKS,
+            num_layers: NUM_LAYERS,
+            outer_dim: OUTER_DIM,
+            page_size: PAGE_SIZE,
+            inner_dim: INNER_DIM,
+            alignment: 1,
+            dtype: DTYPE,
+        };
+
+        LayerSeparate::allocate(config, &NullDeviceAllocator, true)
+            .expect("Layout allocation failed");
     }
 }

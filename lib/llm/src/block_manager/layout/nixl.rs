@@ -389,7 +389,7 @@ mod tests {
 
         assert_eq!(local_storage_type, remote_storage_type);
 
-        let type_erased_layout: Arc<dyn GenericBlockLayout> = remote_layout;
+        let _: Arc<dyn GenericBlockLayout> = remote_layout;
 
         drop(layout);
         tracing::info!("Layout dropped");
