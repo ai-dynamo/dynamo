@@ -60,7 +60,7 @@ To ensure dynamo serve complies with the SLA, we provide a pre-deployment script
 ```{note}
 The script considers a fixed ISL/OSL without KV cache reuse. If the real ISL/OSL has a large variance or a significant amount of KV cache can be reused, the result might be inaccurate.
 
-We assume there is no piggybacked prefill requests in the decode engine. Even if there are some short piggybacked prefill requests in the decode engine, it should not affect the ITL too much in most conditions. However, if the piggybacked prefill requests are too much, the ITL might be inaccurate.
+We assume there are no piggybacked prefill requests in the decode engine. Even if there are some short piggybacked prefill requests in the decode engine, it should not affect the ITL in most cases. However, if the piggybacked prefill requests are too much, the ITL might be inaccurate.
 ```
 
 ```bash
@@ -85,7 +85,7 @@ For the prefill performance, the script plots the TTFT for different TP sizes an
 For the decode performance, the script plots the ITL for different TP sizes and different in-flight requests. Similarly, it selects the best point that satisfies the ITL SLA and delivers the best throughput per GPU and recommends the upper and lower bounds of the kv cache utilization rate to be used in planner.
 
 The following information is printed out in the terminal:
-```
+```none
 2025-05-16 15:20:24 - __main__ - INFO - Analyzing results and generate recommendations...
 2025-05-16 15:20:24 - __main__ - INFO - Suggested prefill TP:4 (TTFT 48.37 ms, throughput 15505.23 tokens/s/GPU)
 2025-05-16 15:20:24 - __main__ - INFO - Suggested planner upper/lower bound for prefill queue size: 0.24/0.10
