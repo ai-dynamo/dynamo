@@ -502,6 +502,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
     uv pip install --requirement /tmp/requirements.txt
 
 # Install test dependencies
+#TODO: This is a temporary fix to install test dependencies until we have a functional ci_minimum image
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
     uv pip install --requirement /tmp/requirements.txt
 
