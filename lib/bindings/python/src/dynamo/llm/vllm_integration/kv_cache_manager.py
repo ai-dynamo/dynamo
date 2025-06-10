@@ -76,9 +76,12 @@ class KvbmCacheManager:
             self.prefix_cache_stats.requests += 1
 
         sequence_hashes = self._create_slot(request)
+        print(f"sequence_hashes: {sequence_hashes}")
 
         owned_blocks = self.cache_manager.get_computed_blocks(sequence_hashes)
+        print(f"owned_blocks: {owned_blocks}")
         block_count = owned_blocks.block_count()
+<<<<<<< HEAD
 
         num_computed_tokens = block_count * self.block_size
 
@@ -89,7 +92,7 @@ class KvbmCacheManager:
 
         print(f"owned_blocks_count: {block_count}")
 
-        return KvbmCacheBlocks(owned_blocks), num_computed_tokens
+        return KvbmCacheBlocks(owned_blocks), block_count * self.block_size
 
     def _create_slot(self, request: Request) -> list[int]:
         """Create a slot for the request."""
@@ -193,8 +196,20 @@ class KvbmCacheManager:
             delay_cache_blocks=delay_cache_blocks,
         )
 
-        new_blocks = self.cache_manager.alloctate_slots(slot_update)
+        # Debug prints for SlotUpdate
+        print("=== SlotUpdate Debug Info ===")
+        print(f"SlotUpdate type: {type(slot_update)}")
+        print(f"SlotUpdate dir: {dir(slot_update)}")
+        print(f"SlotUpdate repr: {repr(slot_update)}")
+        print(f"SlotUpdate str: {str(slot_update)}")
+        print(
+            f"SlotUpdate dict: {slot_update.__dict__ if hasattr(slot_update, '__dict__') else 'No __dict__'}"
+        )
 
+        print("=== End SlotUpdate Debug Info ===")
+
+        new_blocks = self.cache_manager.alloctate_slots(slot_update)
+        print(f"new_blocks: {new_blocks}")
         if new_blocks is None:
             return None
 

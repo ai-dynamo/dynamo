@@ -108,23 +108,53 @@ impl KvbmCacheManager {
         &self,
         sequence_hashes: Vec<SequenceHash>,
     ) -> PyResult<KvbmBlockList> {
-        let blocks = self
-            .block_manager()
-            .device()
-            .unwrap()
-            .match_sequence_hashes_blocking(&sequence_hashes)
-            .map_err(to_pyerr)?;
+        tracing::debug!("=== Starting get_computed_blocks ===");
+        tracing::debug!("Number of sequence hashes to match: {}", sequence_hashes.len());
+        tracing::debug!("Sequence hashes: {:?}", sequence_hashes);
 
-        Ok(KvbmBlockList::new(BlockListType::Immutable(blocks)))
+        let device = self.block_manager().device().unwrap();
+
+        let blocks = device
+            .match_sequence_hashes_blocking(&sequence_hashes)
+            .map_err(|e| {
+                tracing::error!("Error matching sequence hashes: {:?}", e);
+                to_pyerr(e)
+            })?;
+
+        tracing::debug!("Matched blocks:");
+        tracing::debug!("  Number of blocks: {}", blocks.len());
+
+        let result = KvbmBlockList::new(BlockListType::Immutable(blocks));
+        tracing::debug!("=== Finished get_computed_blocks ===");
+
+        Ok(result)
     }
 
     /// Updates the slot manager with the current request state and allocates new blocks if needed.
     pub fn alloctate_slots(&self, update: SlotUpdate) -> PyResult<Option<BlockStates>> {
-        self.slot_manager
-            .lock()
-            .map_err(to_pyerr)?
-            .update_slot(update.dissolve(), self.block_manager())
-            .map_err(to_pyerr)
+        tracing::debug!("=== Starting alloctate_slots ===");
+        tracing::debug!("SlotUpdate before dissolve: {:?}", update);
+
+        let dissolved = update.dissolve();
+        tracing::debug!("SlotUpdate after dissolve: {:?}", dissolved);
+        tracing::debug!("Dissolved fields:");
+        tracing::debug!("  request_id: {:?}", dissolved.request_id);
+        tracing::debug!("  request_num_tokens: {}", dissolved.request_num_tokens);
+        tracing::debug!("  request_num_computed_tokens: {}", dissolved.request_num_computed_tokens);
+        tracing::debug!("  tokens_to_append len: {}", dissolved.tokens_to_append.len());
+        tracing::debug!("  num_new_tokens: {}", dissolved.num_new_tokens);
+        tracing::debug!("  num_new_computed_tokens: {:?}", dissolved.num_new_computed_tokens);
+        tracing::debug!("  new_computed_blocks: {:?}", dissolved.new_computed_blocks);
+        tracing::debug!("  num_lookahead_blocks: {:?}", dissolved.num_lookahead_blocks);
+        tracing::debug!("  delay_cache_blocks: {:?}", dissolved.delay_cache_blocks);
+
+        let mut slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
+        tracing::debug!("Successfully locked slot_manager");
+
+        let result = slot_manager.update_slot(dissolved, self.block_manager());
+        tracing::debug!("update_slot result: {:?}", result);
+
+        result.map_err(to_pyerr)
     }
 
     pub fn free(&self, request_id: String) -> PyResult<()> {
