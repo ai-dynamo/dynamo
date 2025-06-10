@@ -334,8 +334,7 @@ def main():
     import argparse
     from pathlib import Path
 
-    from benchmarks.data_generator.logging_utils import calculate_and_print_statistics
-
+    from data_generator.logging_utils import calculate_and_print_statistics
     parser = argparse.ArgumentParser(description="Synthesize Mooncake-Esque dataset")
     parser.add_argument(
         "--input-file",
