@@ -168,6 +168,7 @@ impl LayoutConfig {
     ) -> Result<impl NixlLayout<StorageType = S>, LayoutError> {
         match layout_type {
             LayoutType::FullyContiguous => FullyContiguous::new(self.clone(), storage),
+            _ => todo!(),
         }
     }
 
@@ -181,6 +182,7 @@ impl LayoutConfig {
             LayoutType::FullyContiguous => {
                 FullyContiguous::allocate(self.clone(), allocator.as_ref())
             }
+            _ => todo!(),
         }
     }
 }
