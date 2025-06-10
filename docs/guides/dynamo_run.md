@@ -349,7 +349,7 @@ Pass `--tensor-parallel-size <NUM-GPUS>` to `dynamo-run`.
 dynamo-run out=sglang ~/llms/Llama-4-Scout-17B-16E-Instruct/ --tensor-parallel-size 8
 ```
 
-To specify which GPU to start from pass `--base-gpu-id <num>`, for example on a shared eight GPU machine where GPUs 0-3 are already in use:
+To specify which GPU to start from pass `--base-gpu-id <num>`, for example on a shared eight GPU machine where GPUs 0–3 are already in use:
 ```
 dynamo-run out=sglang <model> --tensor-parallel-size 4 --base-gpu-id 4
 ```

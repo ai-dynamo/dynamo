@@ -124,9 +124,9 @@ Hmm, I need to come up with a suitable reply. ...
 
 Dynamo provides a simple way to spin up a local set of inference components including:
 
-- **OpenAI Compatible Frontend**–High performance OpenAI compatible http api server written in Rust.
-- **Basic and Kv Aware Router**–Route and load balance traffic to a set of workers.
-- **Workers**–Set of pre-configured LLM serving engines.
+- **OpenAI Compatible Frontend**—High performance OpenAI compatible http api server written in Rust.
+- **Basic and Kv Aware Router**—Route and load balance traffic to a set of workers.
+- **Workers**—Set of pre-configured LLM serving engines.
 
 To run a minimal configuration, use a pre-configured example.
 
