@@ -75,7 +75,6 @@ def containerize(
         package = build_package(service, output_dir, force, tag)
         output_path = Path(package.path)
 
-        # Create Docker directory and Dockerfile
         docker_dir = output_path / "env" / "docker"
         docker_dir.mkdir(exist_ok=True, parents=True)
         docker_file = docker_dir / "Dockerfile"
