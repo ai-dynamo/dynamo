@@ -25,7 +25,7 @@ import torch
 from components.encode_worker import VllmEncodeWorker
 from pydantic import BaseModel
 from utils.logging import check_required_workers
-from utils.model import construct_mm_data, get_vision_embeddings_size
+from utils.model import construct_mm_data, get_vision_embeddings_info
 from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
 from utils.protocol import EncodeRequest, EncodeResponse
@@ -40,8 +40,6 @@ from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, servic
 
 logger = logging.getLogger(__name__)
 
-# Constants for the dtype and device of the embeddings tensor.
-EMBEDDINGS_DTYPE = torch.float16
 EMBEDDINGS_DEVICE = "cuda"
 
 
@@ -113,12 +111,12 @@ class VllmPrefillWorker:
         await self._connector.initialize()
 
         # Create a longer-lived buffer for receiving the image embeddings.
-        embeddings_shape = get_vision_embeddings_size(
+        embeddings_shape, embeddings_dtype = get_vision_embeddings_info(
             self.engine_args.model, self.engine_args.num_patches
         )
         embeddings = torch.empty(
             embeddings_shape,
-            dtype=EMBEDDINGS_DTYPE,
+            dtype=embeddings_dtype,
             device=EMBEDDINGS_DEVICE,
         )
         descriptor = connect.Descriptor(embeddings)

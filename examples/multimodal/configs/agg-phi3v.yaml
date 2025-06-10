@@ -13,39 +13,38 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 Common:
-  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  model: microsoft/Phi-3.5-vision-instruct
   block-size: 64
-  max-model-len: 16384
-  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
-
-Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  endpoint: dynamo.Processor.chat/completions
-  port: 8000
+  max-model-len: 4096
+  trust-remote-code: true
 
 Processor:
   router: round-robin
-  common-configs: [model, block-size]
+  prompt-template: "<|user|>\n<|image_1|>\n<prompt><|end|>\n<|assistant|>\n"
+  common-configs: [model, block-size, max-model-len, trust-remote-code]
 
-VllmWorker:
-  remote-prefill: true
-  conditional-disagg: true
-  max-local-prefill-length: 10
-  max-prefill-queue-size: 2
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: '1'
-  common-configs: [model, block-size, max-model-len, kv-transfer-config]
-
-PrefillWorker:
+VllmDecodeWorker:
+  enforce-eager: true
   max-num-batched-tokens: 16384
+  max-num-seqs: 2
+  mm-processor-kwargs:
+    num_crops: 16
+  enable-prefix-caching: true
+  image-token-id: 32000
+  num-patches: 757
+  router: random
+  tensor-parallel-size: 1
   ServiceArgs:
     workers: 1
     resources:
       gpu: '1'
-  common-configs: [model, block-size, max-model-len, kv-transfer-config]
+  common-configs: [model, block-size, max-model-len, trust-remote-code]
 
-Planner:
-  environment: local
-  no-operation: true
+VllmEncodeWorker:
+  tensor-parallel-size: 1
+  router: random
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: '1'
+  common-configs: [model]

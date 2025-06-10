@@ -25,7 +25,7 @@ from components.disagg_router import PyDisaggregatedRouter
 from components.encode_worker import VllmEncodeWorker
 from components.prefill_worker import VllmPrefillWorker
 from utils.logging import check_required_workers
-from utils.model import construct_mm_data, get_vision_embeddings_size
+from utils.model import construct_mm_data, get_vision_embeddings_info
 from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
 from utils.protocol import (
@@ -117,7 +117,7 @@ class VllmDecodeWorker:
             )
 
         runtime = dynamo_context["runtime"]
-        embeddings_shape = get_vision_embeddings_size(
+        embeddings_shape, embeddings_dtype = get_vision_embeddings_info(
             self.engine_args.model, self.engine_args.num_patches
         )
         logger.debug(f"Embeddings shape: {embeddings_shape}")
@@ -139,7 +139,6 @@ class VllmDecodeWorker:
             else:
                 self.disaggregated_router = None
         else:
-            EMBEDDINGS_DTYPE = torch.float16
             EMBEDDINGS_DEVICE = "cuda"
 
             enc_comp_ns, enc_comp_name = VllmEncodeWorker.dynamo_address()  # type: ignore
@@ -155,7 +154,7 @@ class VllmDecodeWorker:
 
             # Create a longer-lived buffer for receiving the image embeddings.
             embeddings = torch.empty(
-                embeddings_shape, dtype=EMBEDDINGS_DTYPE, device=EMBEDDINGS_DEVICE
+                embeddings_shape, dtype=embeddings_dtype, device=EMBEDDINGS_DEVICE
             )
             descriptor = connect.Descriptor(embeddings)
             # Register the descriptor w/ NIXL (this is optional, if not done here the connect subsytem will take care of this automatically).

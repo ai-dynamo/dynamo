@@ -15,7 +15,7 @@
 
 
 import json
-from typing import Any, List, Literal, Optional, Tuple, Union
+from typing import Any, List, Literal, Optional, Union
 
 import connect
 import msgspec
@@ -143,7 +143,7 @@ class EncodeResponse(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     request_id: str
     image_grid_thw: Optional[List[Any]] = None
-    image_sizes: Optional[List[Tuple[int, int]]] = None
+    image_sizes: Optional[List[Any]] = None
 
 
 class MyRequestOutput(BaseModel):

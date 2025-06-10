@@ -13,7 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Any, Dict
+import logging
+from typing import Any, Dict, Tuple
 
 import torch
 from transformers import AutoConfig
@@ -21,6 +22,8 @@ from utils.protocol import EncodeResponse
 from vllm import AsyncEngineArgs
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.worker.worker import Worker
+
+logger = logging.getLogger(__name__)
 
 
 def load_vision_model(model_id: str) -> torch.nn.Module:
@@ -44,13 +47,24 @@ def load_vision_model(model_id: str) -> torch.nn.Module:
     return worker.model_runner.model
 
 
-def get_vision_embeddings_size(model_id: str, num_patches: int) -> tuple[int, int, int]:
-    """Calculate vision embeddings size using model config and image processor
-    Returns a tuple of (batch_size, num_patches, hidden_dim).
+def get_vision_embeddings_info(
+    model_id: str, num_patches: int
+) -> Tuple[Tuple[int, int, int], torch.dtype]:
+    """Calculate vision embeddings size and dtype using model config
+    Returns a tuple of (batch_size, num_patches, hidden_dim), dtype.
     """
     config = AutoConfig.from_pretrained(model_id, trust_remote_code=True)
     assert num_patches > 0, "Number of patches must be positive"
-    return 1, num_patches, getattr(config, "hidden_size", 4096)
+    if not hasattr(config, "torch_dtype"):
+        raise ValueError("Model config missing required 'torch_dtype' attribute")
+    if not hasattr(config, "hidden_size"):
+        logger.warning(
+            "Model config missing required 'hidden_size' attribute, using 4096"
+        )
+        hidden_size = 4096
+    else:
+        hidden_size = config.hidden_size
+    return (1, num_patches, hidden_size), config.torch_dtype
 
 
 def construct_mm_data(
@@ -60,8 +74,8 @@ def construct_mm_data(
     if "Qwen2" in model:
         return {
             "image": {
-                "image_embeds": image_embeds.squeeze(0),
-                "image_grid_thw": torch.tensor(encode_output.image_grid_thw),
+                "image_embeds": image_embeds.squeeze(0).to(torch.float16),
+                "image_grid_thw": torch.tensor(encode_output.image_grid_thw).squeeze(0),
             }
         }
     elif "MiniCPM-V" in model:

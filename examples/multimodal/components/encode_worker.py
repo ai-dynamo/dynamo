@@ -165,27 +165,32 @@ class VllmEncodeWorker:
 
             logger.debug(f"Processing image for request: {{ id: {request_id} }}")
             image_embeds = self.image_processor(images=image, return_tensors="pt")
-            # Add a batch dimension to the pixel values
-            image_embeds["pixel_values"] = (
-                image_embeds["pixel_values"].unsqueeze(0).to(DEVICE)
-            )
+            # Add a batch dimension to everything
+            for item in image_embeds:
+                image_embeds[item] = image_embeds[item].unsqueeze(0).to(DEVICE)
             logger.debug(f"Image embeds: {image_embeds}")
-            image_grid_thw = None
-            if "image_grid_thw" in image_embeds:
-                image_grid_thw = image_embeds["image_grid_thw"].tolist()
-            image_sizes = [image.size]
+
+            image_grid_thw = (
+                image_embeds["image_grid_thw"].tolist()
+                if "image_grid_thw" in image_embeds
+                else None
+            )
+            image_sizes = (
+                image_embeds["image_sizes"].tolist()
+                if "image_sizes" in image_embeds
+                else [image.size]
+            )
             logger.debug(
                 f"Pixel values stats: mean={image_embeds['pixel_values'].mean().item()}, std={image_embeds['pixel_values'].std().item()}, min={image_embeds['pixel_values'].min().item()}, max={image_embeds['pixel_values'].max().item()}"
             )
 
             with torch.no_grad():
                 embeddings = self.vision_model.get_multimodal_embeddings(**image_embeds)
-                if isinstance(embeddings, tuple):
-                    # The result multimodal_embeddings is tuple of tensors, with each
+                if isinstance(embeddings, tuple) or isinstance(embeddings, list):
+                    # The result multimodal_embeddings may be a list or tuple of tensors, with each
                     # tensor corresponding to a multimodal data item (image or video).
                     # TODO: for multi-image support, this result will contain multiple tensors.
                     embeddings = embeddings[0].unsqueeze(0)
-
                 logger.debug(
                     f"Embeddings: {{ shape: {embeddings.shape}, dtype: {embeddings.dtype}, device: {embeddings.device}, ptr: {embeddings.data_ptr()}, elements: {{ count: {embeddings.numel()}, size: {embeddings.element_size()} }} }}."
                 )
