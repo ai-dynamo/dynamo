@@ -18,7 +18,7 @@ limitations under the License.
 
 # About the Dynamo Command Line Interface
 
-The Dynamo CLI serves, containerizes, and deploys Dynamo applications efficiently. It leverages core pieces of the BentoML deployment stack and provides intuitive commands to manage your Dynamo services.
+The Dynamo CLI serves, containerizes, and deploys Dynamo applications efficiently. It provides intuitive commands to manage your Dynamo services.
 
 ## CLI Capabilities
 
@@ -26,7 +26,7 @@ With the Dynamo CLI, you can:
 
 * Chat with models quickly using `run`
 * Serve multiple services locally using `serve`
-* Package your services into archives (called `bentos`) using `build`
+* Package your services into archive (called `dynamo artifact`) using `build`
 * Deploy pipelines to Dynamo Cloud using `deploy`
 
 ## Commands
@@ -83,7 +83,7 @@ dynamo build [SERVICE]
 
 #### Flags
 * `--working-dir`: Specify the directory for finding the Service instance
-* `--containerize`: Choose whether to create a container from the Bento after building
+* `--containerize`: Choose whether to create a container from the dynamo artifact after building
 
 #### Example
 ```bash
