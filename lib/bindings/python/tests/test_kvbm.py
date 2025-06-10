@@ -6,6 +6,7 @@ Test the KVBM cache manager with vLLM.
 """
 
 import asyncio
+import uuid
 
 import pytest
 import torch
@@ -28,9 +29,9 @@ DEVICE_NUM_BLOCKS = 16
 DEVICE_ID = 0
 
 
-def new_request(request_id: str = "1"):
+def new_request():
     return Request(
-        request_id=request_id,
+        request_id=str(uuid.uuid4()),
         prompt_token_ids=[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
         multi_modal_inputs=[],
         multi_modal_hashes=[],
@@ -78,9 +79,9 @@ async def test_kvbm(block_manager: KvbmCacheManager):
     Args:
         block_manager: The KVBM cache manager.
     """
-    request_1 = new_request("1")
-    request_2 = new_request("2")
-    request_3 = new_request("3")
+    request_1 = new_request()
+    request_2 = new_request()
+    request_3 = new_request()
 
     # test get_computed_blocks
     (blocks, count) = block_manager.get_computed_blocks(request_1)
