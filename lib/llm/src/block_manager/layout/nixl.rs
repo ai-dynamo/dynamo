@@ -26,9 +26,6 @@
 //! - [`NixlLayout`]: An umbrella trait that augments a [`BlockLayout`]. It requires the layout's
 //!   associated `StorageType` to implement [`NixlRegisterableStorage`]. This trait provides the
 //!   `nixl_register` method to register all underlying storage regions of the layout with a NIXL agent.
-//! - [`BlockLayoutNixlStorage`]: A trait implemented by layouts to provide NIXL-specific memory
-//!   information like `mem_type` and `device_id` directly from the layout structure, typically
-//!   derived from its underlying storage.
 //! - [`ToSerializedNixlBlockLayout`]: Implemented by layouts that can be converted into a
 //!   [`SerializedNixlBlockLayout`]. This involves capturing the layout configuration and the NIXL
 //!   descriptors of its storage.
@@ -113,15 +110,15 @@ use super::{
 };
 
 use super::super::storage::{
-    nixl::{MemType, NixlAgent, NixlRegisterableStorage, NixlStorage, OptArgs},
+    nixl::{NixlAgent, NixlRegisterableStorage, NixlStorage, OptArgs},
     Storage, StorageAllocator,
 };
-use super::{FullyContiguous, FullyContiguousConfig};
+use super::{FullyContiguous, FullyContiguousConfig, LayerSeparate, LayerSeparateConfig};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Extends [BlockLayout] with NIXL-specific methods for registering with an NIXL agent.
-pub trait NixlLayout: BlockLayout + BlockLayoutNixlStorage + ToSerializedNixlBlockLayout {
+pub trait NixlLayout: BlockLayout + ToSerializedNixlBlockLayout {
     /// Register the layout with an NIXL agent
     ///
     /// This will register all the individual memory regions associated with the [BlockLayout].
@@ -132,19 +129,10 @@ pub trait NixlLayout: BlockLayout + BlockLayoutNixlStorage + ToSerializedNixlBlo
     ) -> anyhow::Result<()>;
 }
 
-/// Trait for providing NIXL-specific memory information
-pub trait BlockLayoutNixlStorage {
-    /// Returns the memory type of the storage
-    fn mem_type(&self) -> MemType;
-
-    /// Returns the device ID of the storage
-    fn device_id(&self) -> u64;
-}
-
 // Umbrella impl for all BlockLayout types that are NixlRegisterableStorage
 impl<T> NixlLayout for T
 where
-    T: BlockLayout + BlockLayoutNixlStorage + ToSerializedNixlBlockLayout + ?Sized, // Implement for any T that is BlockLayout (potentially unsized)
+    T: BlockLayout + ToSerializedNixlBlockLayout + ?Sized, // Implement for any T that is BlockLayout (potentially unsized)
     T::StorageType: NixlRegisterableStorage, // T's associated StorageType must be NixlStorage
 {
     fn nixl_register(
@@ -165,11 +153,13 @@ impl LayoutConfig {
         &self,
         layout_type: LayoutType,
         storage: Vec<S>,
-    ) -> Result<impl NixlLayout<StorageType = S>, LayoutError> {
-        match layout_type {
-            LayoutType::FullyContiguous => FullyContiguous::new(self.clone(), storage),
-            _ => todo!(),
-        }
+    ) -> Result<Box<dyn NixlLayout<StorageType = S>>, LayoutError> {
+        Ok(match layout_type {
+            LayoutType::FullyContiguous => Box::new(FullyContiguous::new(self.clone(), storage)?),
+            LayoutType::LayerSeparate { outer_contiguous } => {
+                Box::new(LayerSeparate::new(self.clone(), storage, outer_contiguous)?)
+            }
+        })
     }
 
     /// Allocate a new NIXL-aware layout using a NIXL-registerable storage allocator.
@@ -177,13 +167,17 @@ impl LayoutConfig {
         &self,
         layout_type: LayoutType,
         allocator: Arc<dyn StorageAllocator<S>>,
-    ) -> Result<impl NixlLayout<StorageType = S>, LayoutError> {
-        match layout_type {
+    ) -> Result<Box<dyn NixlLayout<StorageType = S>>, LayoutError> {
+        Ok(match layout_type {
             LayoutType::FullyContiguous => {
-                FullyContiguous::allocate(self.clone(), allocator.as_ref())
+                Box::new(FullyContiguous::allocate(self.clone(), allocator.as_ref())?)
             }
-            _ => todo!(),
-        }
+            LayoutType::LayerSeparate { outer_contiguous } => Box::new(LayerSeparate::allocate(
+                self.clone(),
+                allocator.as_ref(),
+                outer_contiguous,
+            )?),
+        })
     }
 }
 
@@ -203,14 +197,14 @@ pub struct SerializedNixlBlockLayout(Vec<u8>);
 #[derive(Serialize, Deserialize, Debug, Clone)]
 enum NixlBlockLayoutKinds {
     FullyContiguous(SerializableNixlLayout<FullyContiguousConfig>),
-    // Add variants for other layout types here
+    LayerSeparate(SerializableNixlLayout<LayerSeparateConfig>),
 }
 
 /// Serializable representation of FullyContiguous layout backed by NIXL storage.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct SerializableNixlLayout<C: BlockLayoutConfig> {
     config: C,
-    base_offset: usize,
+    base_offsets: Vec<usize>,
     storage_descriptors: Vec<NixlStorage>,
     storage_type: StorageType,
 }
@@ -222,17 +216,34 @@ where
     /// Create a new SerializableNixlLayout
     fn new(
         config: C,
-        base_offset: usize,
+        base_offsets: Vec<usize>,
         storage_descriptors: Vec<NixlStorage>,
         storage_type: StorageType,
     ) -> Self {
         Self {
             config,
-            base_offset,
+            base_offsets,
             storage_descriptors,
             storage_type,
         }
     }
+}
+
+fn serialize_storages<S: NixlRegisterableStorage>(
+    storages: Vec<&S>,
+) -> Result<Vec<NixlStorage>, LayoutError> {
+    let mut storage_descriptors = Vec::new();
+
+    for storage in storages {
+        let descriptor = unsafe { storage.as_nixl_descriptor() }.ok_or_else(|| {
+            LayoutError::OperationFailed(
+                "Storage does not provide NIXL descriptors for serialization".to_string(),
+            )
+        })?;
+        storage_descriptors.push(descriptor);
+    }
+
+    Ok(storage_descriptors)
 }
 
 impl<S: NixlRegisterableStorage> ToSerializedNixlBlockLayout for FullyContiguous<S> {
@@ -250,26 +261,40 @@ impl<S: NixlRegisterableStorage> ToSerializedNixlBlockLayout for FullyContiguous
             ));
         }
 
-        // FullyContiguous uses a Vec<Storage>, but should only contain one element.
-        let storage_instance = storages.first().ok_or_else(|| {
-            LayoutError::OperationFailed("FullyContiguous requires one storage element".to_string())
-        })?;
-
-        let storage_descriptors =
-            unsafe { storage_instance.as_nixl_descriptor() }.ok_or_else(|| {
-                LayoutError::OperationFailed(
-                    "Storage does not provide NIXL descriptors for serialization".to_string(),
-                )
-            })?;
+        let storage_descriptors = serialize_storages(storages)?;
 
         let serializable_data = SerializableNixlLayout::new(
             config,
-            base_offset,
-            vec![storage_descriptors],
+            vec![base_offset],
+            storage_descriptors,
             self.storage_type(),
         );
 
         let nixl_block_layout = NixlBlockLayoutKinds::FullyContiguous(serializable_data);
+
+        Ok(SerializedNixlBlockLayout(serde_json::to_vec(
+            &nixl_block_layout,
+        )?))
+    }
+}
+
+impl<S: NixlRegisterableStorage> ToSerializedNixlBlockLayout for LayerSeparate<S> {
+    fn serialize(&self) -> Result<SerializedNixlBlockLayout, LayoutError> {
+        let config = self.config.clone();
+        let base_offsets = self.base_offsets.clone();
+
+        let storages = self.storage();
+
+        let storage_descriptors = serialize_storages(storages)?;
+
+        let serializable_data = SerializableNixlLayout::new(
+            config,
+            base_offsets,
+            storage_descriptors,
+            self.storage_type(),
+        );
+
+        let nixl_block_layout = NixlBlockLayoutKinds::LayerSeparate(serializable_data);
 
         Ok(SerializedNixlBlockLayout(serde_json::to_vec(
             &nixl_block_layout,
@@ -300,25 +325,29 @@ impl SerializedNixlBlockLayout {
                 let layout = FullyContiguous::new_internal(
                     config.config.clone(),
                     storage, // Pass the NixlStorage instance
-                    config.base_offset,
                     config.storage_type,
+                    config.base_offsets[0],
                 )?;
                 Ok(Arc::new(layout))
-            } // Handle other variants when added...
+            }
+            NixlBlockLayoutKinds::LayerSeparate(config) => {
+                if config.storage_descriptors.len() != config.config.num_layers() {
+                    return Err(LayoutError::InvalidConfig(
+                        "LayerSeparate reconstruction expects exactly one NixlStorage descriptor per layer"
+                            .to_string(),
+                    ));
+                }
+
+                let storages = config.storage_descriptors.to_vec();
+                let layout = LayerSeparate::new_internal(
+                    config.config.clone(),
+                    storages,
+                    config.storage_type,
+                    config.base_offsets,
+                )?;
+                Ok(Arc::new(layout))
+            }
         }
-    }
-}
-
-impl<S> BlockLayoutNixlStorage for FullyContiguous<S>
-where
-    S: Storage + NixlRegisterableStorage,
-{
-    fn mem_type(&self) -> MemType {
-        self.storage.mem_type()
-    }
-
-    fn device_id(&self) -> u64 {
-        self.storage.device_id()
     }
 }
 

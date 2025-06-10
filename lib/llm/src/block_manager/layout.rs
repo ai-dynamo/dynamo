@@ -162,13 +162,11 @@ pub enum LayoutType {
     /// All layers are contiguous in memory [n_blocks, n_layers, outer_dim, ...]
     FullyContiguous,
 
-    /// All layers are stored separately, but the outer dimension is contiguous
-    /// For each layer: [outer_dim, n_blocks, ...]
-    LayerSeparateOuterContiguous,
-
-    /// All layers are stored separately, but the blocks are contiguous
-    /// For each layer: [n_blocks, outer_dim, ...]
-    LayerSeparateBlockContiguous,
+    /// All layers are stored separately.
+    /// If outer_contiguous is true, for each layer: [outer_dim, n_blocks, ...]
+    /// If outer_contiguous is false, for each layer: [n_blocks, outer_dim, ...]
+    /// When outer_dim is 1, these two modes are equivalent.
+    LayerSeparate { outer_contiguous: bool },
 }
 
 /// Local Memory Region
@@ -185,6 +183,9 @@ pub struct LocalMemoryRegion {
 pub trait BlockLayout: GenericBlockLayout {
     /// The type of storage this layout uses
     type StorageType: Storage;
+
+    /// Returns the layout type
+    fn layout_type(&self) -> LayoutType;
 
     /// Get the memory regions for all blocks and layers
     fn storage(&self) -> Vec<&Self::StorageType>;
@@ -218,9 +219,6 @@ pub trait GenericBlockLayout: BlockLayoutConfig + Send + Sync {
 pub trait BlockLayoutConfig: std::fmt::Debug {
     /// Returns the layout config
     fn layout_config(&self) -> LayoutConfig;
-
-    /// Returns the layout type
-    fn layout_type(&self) -> LayoutType;
 
     /// Returns the total number of blocks this layout manages
     fn num_blocks(&self) -> usize {
@@ -366,10 +364,6 @@ impl BlockLayoutConfig for FullyContiguousConfig {
         self.inner.clone()
     }
 
-    fn layout_type(&self) -> LayoutType {
-        LayoutType::FullyContiguous
-    }
-
     fn layout_data_bytes(&self) -> usize {
         self.layout_data_bytes
     }
@@ -433,8 +427,8 @@ impl<S: Storage> FullyContiguous<S> {
     pub(crate) fn new_internal(
         config: FullyContiguousConfig,
         storage: S,
-        base_offset: usize,
         storage_type: StorageType,
+        base_offset: usize,
     ) -> Result<Self, LayoutError> {
         // Basic check: Ensure the storage address matches expectations based on offset if possible?
         // Maybe not strictly necessary if we trust the serialized data.
@@ -497,6 +491,10 @@ impl<S: Storage> FullyContiguous<S> {
 impl<S: Storage> BlockLayout for FullyContiguous<S> {
     type StorageType = S;
 
+    fn layout_type(&self) -> LayoutType {
+        LayoutType::FullyContiguous
+    }
+
     fn storage(&self) -> Vec<&Self::StorageType> {
         vec![&self.storage]
     }
@@ -538,10 +536,6 @@ impl<S: Storage> GenericBlockLayout for FullyContiguous<S> {
 impl<S: Storage> BlockLayoutConfig for FullyContiguous<S> {
     fn layout_config(&self) -> LayoutConfig {
         self.config.inner.clone()
-    }
-
-    fn layout_type(&self) -> LayoutType {
-        LayoutType::FullyContiguous
     }
 
     fn layout_data_bytes(&self) -> usize {
@@ -622,14 +616,6 @@ impl BlockLayoutConfig for LayerSeparateConfig {
         self.inner.clone()
     }
 
-    fn layout_type(&self) -> LayoutType {
-        if self.is_outer_contiguous {
-            LayoutType::LayerSeparateOuterContiguous
-        } else {
-            LayoutType::LayerSeparateBlockContiguous
-        }
-    }
-
     fn layout_data_bytes(&self) -> usize {
         self.layout_data_bytes
     }
@@ -658,9 +644,9 @@ impl<S: Storage> LayerSeparate<S> {
         storages: Vec<S>,
         is_outer_contiguous: bool,
     ) -> Result<Self, LayoutError> {
-        if storages.is_empty() {
+        if storages.len() != config.num_layers {
             return Err(LayoutError::InvalidConfig(
-                "LayerSeparate layout requires at least one storage region".to_string(),
+                "LayerSeparate layout requires exactly one storage region per layer".to_string(),
             ));
         }
 
@@ -683,6 +669,20 @@ impl<S: Storage> LayerSeparate<S> {
             base_offsets.push(base_offset);
         }
 
+        Ok(Self {
+            config,
+            storages,
+            storage_type,
+            base_offsets,
+        })
+    }
+
+    pub(crate) fn new_internal(
+        config: LayerSeparateConfig,
+        storages: Vec<S>,
+        storage_type: StorageType,
+        base_offsets: Vec<usize>,
+    ) -> Result<Self, LayoutError> {
         Ok(Self {
             config,
             storages,
@@ -723,6 +723,12 @@ impl<S: Storage> LayerSeparate<S> {
 impl<S: Storage> BlockLayout for LayerSeparate<S> {
     type StorageType = S;
 
+    fn layout_type(&self) -> LayoutType {
+        LayoutType::LayerSeparate {
+            outer_contiguous: self.config.is_outer_contiguous,
+        }
+    }
+
     fn storage(&self) -> Vec<&Self::StorageType> {
         self.storages.iter().collect()
     }
@@ -762,10 +768,6 @@ impl<S: Storage> BlockLayout for LayerSeparate<S> {
 impl<S: Storage> BlockLayoutConfig for LayerSeparate<S> {
     fn layout_config(&self) -> LayoutConfig {
         self.config.inner.clone()
-    }
-
-    fn layout_type(&self) -> LayoutType {
-        self.config.layout_type()
     }
 
     fn layout_data_bytes(&self) -> usize {
