@@ -40,7 +40,6 @@ classifiers = [
 ]
 
 dependencies = [
-    "lorem_text",
     "networkx",
     "pandas",
     "tabulate",

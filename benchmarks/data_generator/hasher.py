@@ -17,11 +17,16 @@ import re
 from typing import Dict, List, Union, cast
 
 import numpy as np
-from lorem_text import lorem
 from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
-# Generate 20 paragraphs of Lorem Ipsum
-lorem_text = lorem.paragraphs(20)
+lorem_text = (
+    "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor "
+    "incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis "
+    "nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. "
+    "Duis aute irure dolor in reprehenderit in voluptate velit esse cillum dolore "
+    "eu fugiat nulla pariatur. Excepteur sint occaecat cupidatat non proident, sunt "
+    "in culpa qui officia deserunt mollit anim id est laborum."
+)
 words = np.array(list(set(re.findall(r"\b[a-zA-Z]+\b", lorem_text))))
 
 
