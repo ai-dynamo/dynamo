@@ -146,7 +146,8 @@ def hashes_to_texts(
                 sampled_text = " ".join(sampled_words)
                 tokens = tokenizer.encode(sampled_text, add_special_tokens=False)
                 token_array = np.array(tokens[:current_block_size], dtype=np.int32)
-                token_array[0] = tokenizer.bos_token_id
+                if getattr(tokenizer, "bos_token_id", None) is not None:
+                    token_array[0] = tokenizer.bos_token_id
                 _hash_id_to_tokens[hash_id] = token_array
 
             token_arrays.append(token_array)
