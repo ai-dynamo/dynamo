@@ -526,7 +526,6 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
 
 # Copy examples and tests
 COPY ./examples examples/
-COPY ./tests tests/
 
-ENTRYPOINT [ "/usr/bin/bash" ]
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
