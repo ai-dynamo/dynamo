@@ -72,13 +72,20 @@ class KvbmCacheManager:
         Get the computed blocks for the request.
         """
         sequence_hashes = self._create_slot(request)
+        print(f"sequence_hashes: {sequence_hashes}")
 
         owned_blocks = self.cache_manager.get_computed_blocks(sequence_hashes)
+        print(f"owned_blocks: {owned_blocks}")
         block_count = owned_blocks.block_count()
+<<<<<<< HEAD
 
         print(f"owned_blocks_count: {block_count}")
 
         return KvbmCacheBlocks(owned_blocks), block_count * self.block_size
+=======
+        print(f"block_count: {block_count}")
+        return KvbmCacheBlocks(owned_blocks), block_count
+>>>>>>> 0741a901 (Fixes)
 
     def _create_slot(self, request: Request) -> list[int]:
         """Create a slot for the request."""
@@ -175,15 +182,40 @@ class KvbmCacheManager:
             tokens_to_append=tokens_to_append,
             num_new_tokens=num_new_tokens,
             num_new_computed_tokens=num_new_computed_tokens,
+<<<<<<< HEAD
             new_computed_blocks=owned_blocks,
+=======
+            # TODO(oandreeva): need owned blocks here
+            # otherwise blocks = manager.allocate_slots(req0, 55,
+            #                            len(computed_blocks.blocks) * 16,
+            #                            computed_blocks)
+            # gives error:
+            # TypeError: argument 'new_computed_blocks': 'KvbmCacheBlocks' object cannot be converted to '
+            # KvbmBlockList'
+            new_computed_blocks=new_computed_blocks._owned_blocks
+            if new_computed_blocks is not None
+            else None,
+>>>>>>> 0741a901 (Fixes)
             # TODO(ryan): add support for lookahead blocks
             # comment out for now, otherwise would error out
             # num_lookahead_blocks=num_lookahead_tokens,
             delay_cache_blocks=delay_cache_blocks,
         )
 
-        new_blocks = self.cache_manager.alloctate_slots(slot_update)
+        # Debug prints for SlotUpdate
+        print("=== SlotUpdate Debug Info ===")
+        print(f"SlotUpdate type: {type(slot_update)}")
+        print(f"SlotUpdate dir: {dir(slot_update)}")
+        print(f"SlotUpdate repr: {repr(slot_update)}")
+        print(f"SlotUpdate str: {str(slot_update)}")
+        print(
+            f"SlotUpdate dict: {slot_update.__dict__ if hasattr(slot_update, '__dict__') else 'No __dict__'}"
+        )
 
+        print("=== End SlotUpdate Debug Info ===")
+
+        new_blocks = self.cache_manager.alloctate_slots(slot_update)
+        print(f"new_blocks: {new_blocks}")
         if new_blocks is None:
             return None
 
