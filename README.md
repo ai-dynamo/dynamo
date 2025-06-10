@@ -22,7 +22,20 @@ limitations under the License.
 
 | **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[User Guides](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Support Matrix](docs/support_matrix.md)** | **[Architecture and Features](docs/architecture/architecture.md)** | **[APIs](lib/bindings/python/README.md)** | **[SDK](deploy/dynamo/sdk/README.md)** |
 
-### 📢 **Please join us for our** [ **first Dynamo in-person meetup with vLLM and SGLang leads**](https://events.nvidia.com/nvidiadynamousermeetups) **on 6/5 (Thu) in SF!** ###
+## 🗓️ Bi-Weekly Learning Series (Summer & Fall 2025)
+
+Join us every other Sunday at **7 PM Pacific Time** starting **June 8**.
+
+| Date (Sun 7 PM PT) | Title | Live/Recording |
+|--------------------|-------|----------------|
+| Jun 8 | Overview | [Recording](https://youtu.be/hxWqUgTk4Rw) |
+| Jun 22 | Disaggregated Serving | [Google Meet](https://meet.google.com/eck-xyfd-hxp) |
+| Jul 6 | Smart Routing | [Google Meet](https://meet.google.com/eck-xyfd-hxp) |
+| Jul 20 | KV Cache Manager | [Google Meet](https://meet.google.com/eck-xyfd-hxp) |
+| Aug 3 | Planner | [Google Meet](https://meet.google.com/eck-xyfd-hxp) |
+| Aug 17 | NIXL | [Google Meet](https://meet.google.com/eck-xyfd-hxp) |
+
+
 
 
 ### The Era of Multi-Node, Multi-GPU
