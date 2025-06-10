@@ -13,6 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License. -->
 
+## Quickstart
+
+`example.py` contains an example workflow guiding through synthesizing new requests based on the mooncake trace file. It touches on the core components of this directory.
+
 ## Trace File Format
 
 The following tools help analyze and synthesize new data based on the [mooncake trace file format](https://github.com/kvcache-ai/Mooncake/blob/d21da178bae8db9651cf18a76824c084145fc725/mooncake_trace.jsonl). In this format, the first few lines would look like this, for example:
