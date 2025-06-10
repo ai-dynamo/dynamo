@@ -524,8 +524,9 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
-# Copy examples
+# Copy examples and tests
 COPY ./examples examples/
+COPY ./tests tests/
 
 ENTRYPOINT [ "/usr/bin/bash" ]
 CMD []
