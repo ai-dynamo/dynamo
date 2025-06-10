@@ -626,7 +626,8 @@ def build_package(
         home_dir = Path.home()
         packages_dir = home_dir / ".dynamo" / "packages"
         service_dir = packages_dir / package.tag.name.lower()
-        output_path = service_dir / package.tag.version
+        version = package.tag.version if package.tag.version else "default"
+        output_path = service_dir / version
 
     output_path.mkdir(parents=True, exist_ok=True)
 
