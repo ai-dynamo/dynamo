@@ -592,7 +592,7 @@ def build(
                         image_name,
                         "-f",
                         str(docker_file),
-                        output_path,
+                        str(output_path),
                     ],
                     check=True,
                 )

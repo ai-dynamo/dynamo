@@ -46,7 +46,7 @@ use crate::protocols::{
     common::{SamplingOptionsProvider, StopConditionsProvider},
     openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-        completions::{CompletionRequest, CompletionResponse},
+        completions::{CompletionResponse, NvCreateCompletionRequest},
         nvext::NvExtProvider,
         DeltaGeneratorExt,
     },
@@ -55,7 +55,7 @@ use crate::tokenizers::{traits::Tokenizer, HuggingFaceTokenizer};
 
 use crate::preprocessor::prompt::PromptFormatter;
 
-pub use crate::protocols::common::llm_backend::{BackendInput, BackendOutput};
+pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
 
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
 pub const ANNOTATION_TOKEN_IDS: &str = "token_ids";
@@ -121,9 +121,9 @@ impl OpenAIPreprocessor {
     >(
         &self,
         request: &R,
-    ) -> Result<(BackendInput, HashMap<String, String>)> {
+    ) -> Result<(PreprocessedRequest, HashMap<String, String>)> {
         let mut annotations = HashMap::new();
-        let mut builder = BackendInput::builder();
+        let mut builder = PreprocessedRequest::builder();
 
         let use_raw_prompt = request
             .nvext()
@@ -193,6 +193,7 @@ impl OpenAIPreprocessor {
             response_generator: Box<dyn DeltaGeneratorExt<Resp>>,
             context: Arc<dyn AsyncEngineContext>,
             cancelled: bool,
+            cumulative_output_tokens: usize,
         }
 
         let state = State {
@@ -200,6 +201,7 @@ impl OpenAIPreprocessor {
             response_generator: generator,
             context: context.clone(),
             cancelled: false,
+            cumulative_output_tokens: 0,
         };
 
         // transform the common response stream into a chat response stream
@@ -220,7 +222,20 @@ impl OpenAIPreprocessor {
                         response
                     );
 
-                    let response = response.map_data(|data| {
+                    let (chunk_tokens, isl) = if let Some(ref backend_output) = response.data {
+                        let chunk_tokens = backend_output.token_ids.len();
+                        inner.cumulative_output_tokens += chunk_tokens;
+
+                        let isl = inner.response_generator.get_isl().unwrap_or(0) as usize;
+
+                        (chunk_tokens, isl)
+                    } else {
+                        (0, 0)
+                    };
+
+                    let current_osl = inner.cumulative_output_tokens;
+
+                    let mut response = response.map_data(|data| {
                         inner
                             .response_generator
                             .choice_from_postprocessor(data)
@@ -235,6 +250,10 @@ impl OpenAIPreprocessor {
                             })
                             .map_err(|e| e.to_string())
                     });
+
+                    response.chunk_tokens = Some(chunk_tokens);
+                    response.input_tokens = Some(isl);
+                    response.output_tokens = Some(current_osl);
 
                     tracing::trace!(
                         request_id = inner.context.id(),
@@ -266,7 +285,7 @@ impl
     Operator<
         SingleIn<NvCreateChatCompletionRequest>,
         ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-        SingleIn<BackendInput>,
+        SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<BackendOutput>>,
     > for OpenAIPreprocessor
 {
@@ -274,7 +293,11 @@ impl
         &self,
         request: SingleIn<NvCreateChatCompletionRequest>,
         next: Arc<
-            dyn AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<BackendOutput>>, Error>,
+            dyn AsyncEngine<
+                SingleIn<PreprocessedRequest>,
+                ManyOut<Annotated<BackendOutput>>,
+                Error,
+            >,
         >,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         // unpack the request
@@ -318,17 +341,21 @@ impl
 #[async_trait]
 impl
     Operator<
-        SingleIn<CompletionRequest>,
+        SingleIn<NvCreateCompletionRequest>,
         ManyOut<Annotated<CompletionResponse>>,
-        SingleIn<BackendInput>,
+        SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<BackendOutput>>,
     > for OpenAIPreprocessor
 {
     async fn generate(
         &self,
-        request: SingleIn<CompletionRequest>,
+        request: SingleIn<NvCreateCompletionRequest>,
         next: Arc<
-            dyn AsyncEngine<SingleIn<BackendInput>, ManyOut<Annotated<BackendOutput>>, Error>,
+            dyn AsyncEngine<
+                SingleIn<PreprocessedRequest>,
+                ManyOut<Annotated<BackendOutput>>,
+                Error,
+            >,
         >,
     ) -> Result<ManyOut<Annotated<CompletionResponse>>, Error> {
         // unpack the request

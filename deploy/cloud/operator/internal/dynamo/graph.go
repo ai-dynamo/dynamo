@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 
+	"dario.cat/mergo"
 	"emperror.dev/errors"
 	apiStoreClient "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/api_store_client"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
@@ -367,6 +368,32 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			deployment.Spec.Autoscaling.MinReplicas = service.Config.Autoscaling.MinReplicas
 			deployment.Spec.Autoscaling.MaxReplicas = service.Config.Autoscaling.MaxReplicas
 		}
+		// override the component config with the component config that is in the parent deployment
+		if configOverride, ok := parentDynamoGraphDeployment.Spec.Services[service.Name]; ok {
+			err := mergo.Merge(&deployment.Spec.DynamoComponentDeploymentSharedSpec, configOverride.DynamoComponentDeploymentSharedSpec, mergo.WithOverride)
+			if err != nil {
+				return nil, err
+			}
+		}
+		// merge the envs from the parent deployment with the envs from the service
+		if len(parentDynamoGraphDeployment.Spec.Envs) > 0 {
+			deployment.Spec.Envs = mergeEnvs(parentDynamoGraphDeployment.Spec.Envs, deployment.Spec.Envs)
+		}
+		err := updateDynDeploymentConfig(deployment, commonconsts.DynamoServicePort)
+		if err != nil {
+			return nil, err
+		}
+		err = overrideWithDynDeploymentConfig(ctx, deployment)
+		if err != nil {
+			return nil, err
+		}
+		// we only override the replicas if it is not set in the CRD.
+		// replicas, if set in the CRD must always be the source of truth.
+		if parentSpec, ok := parentDynamoGraphDeployment.Spec.Services[service.Name]; ok {
+			if parentSpec.DynamoComponentDeploymentSharedSpec.Replicas != nil {
+				deployment.Spec.Replicas = parentSpec.DynamoComponentDeploymentSharedSpec.Replicas
+			}
+		}
 		deployments[service.Name] = deployment
 	}
 	for _, service := range config.Services {
@@ -395,4 +422,108 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		}
 	}
 	return deployments, nil
+}
+
+// updateDynDeploymentConfig updates the runtime config object for the given dynamoDeploymentComponent
+// It updates the port for the given service (if it is the main component)
+func updateDynDeploymentConfig(dynamoDeploymentComponent *v1alpha1.DynamoComponentDeployment, newPort int) error {
+	if dynamoDeploymentComponent.IsMainComponent() {
+		dynamoDeploymentConfig := dynamoDeploymentComponent.GetDynamoDeploymentConfig()
+		if dynamoDeploymentConfig != nil {
+			var config map[string]any
+			if err := json.Unmarshal(dynamoDeploymentConfig, &config); err != nil {
+				return fmt.Errorf("failed to unmarshal %v: %w", commonconsts.DynamoDeploymentConfigEnvVar, err)
+			}
+			// Safely navigate and update the config
+			if serviceConfig, ok := config[dynamoDeploymentComponent.Spec.ServiceName].(map[string]any); ok {
+				serviceConfig["port"] = newPort
+			}
+			// Marshal back to JSON string
+			updated, err := json.Marshal(config)
+			if err != nil {
+				return fmt.Errorf("failed to marshal updated config: %w", err)
+			}
+			dynamoDeploymentComponent.SetDynamoDeploymentConfig(updated)
+		}
+	}
+	return nil
+}
+
+func overrideWithDynDeploymentConfig(ctx context.Context, dynamoDeploymentComponent *v1alpha1.DynamoComponentDeployment) error {
+	dynamoDeploymentConfig := dynamoDeploymentComponent.GetDynamoDeploymentConfig()
+	if dynamoDeploymentConfig == nil {
+		return nil
+	}
+	dynDeploymentConfig, err := ParseDynDeploymentConfig(ctx, dynamoDeploymentConfig)
+	if err != nil {
+		return fmt.Errorf("failed to parse %v: %w", commonconsts.DynamoDeploymentConfigEnvVar, err)
+	}
+	componentDynConfig := dynDeploymentConfig[dynamoDeploymentComponent.Spec.ServiceName]
+	if componentDynConfig != nil {
+		if componentDynConfig.ServiceArgs != nil && componentDynConfig.ServiceArgs.Workers != nil {
+			dynamoDeploymentComponent.Spec.Replicas = componentDynConfig.ServiceArgs.Workers
+		}
+		if componentDynConfig.ServiceArgs != nil && componentDynConfig.ServiceArgs.Resources != nil {
+			requests := &common.ResourceItem{}
+			limits := &common.ResourceItem{}
+			if dynamoDeploymentComponent.Spec.Resources == nil {
+				dynamoDeploymentComponent.Spec.Resources = &common.Resources{
+					Requests: requests,
+					Limits:   limits,
+				}
+			} else {
+				if dynamoDeploymentComponent.Spec.Resources.Requests != nil {
+					requests = dynamoDeploymentComponent.Spec.Resources.Requests
+				} else {
+					dynamoDeploymentComponent.Spec.Resources.Requests = requests
+				}
+				if dynamoDeploymentComponent.Spec.Resources.Limits != nil {
+					limits = dynamoDeploymentComponent.Spec.Resources.Limits
+				} else {
+					dynamoDeploymentComponent.Spec.Resources.Limits = limits
+				}
+			}
+			if componentDynConfig.ServiceArgs.Resources.GPU != nil {
+				requests.GPU = *componentDynConfig.ServiceArgs.Resources.GPU
+				limits.GPU = *componentDynConfig.ServiceArgs.Resources.GPU
+			}
+			if componentDynConfig.ServiceArgs.Resources.CPU != nil {
+				requests.CPU = *componentDynConfig.ServiceArgs.Resources.CPU
+				limits.CPU = *componentDynConfig.ServiceArgs.Resources.CPU
+			}
+			if componentDynConfig.ServiceArgs.Resources.Memory != nil {
+				requests.Memory = *componentDynConfig.ServiceArgs.Resources.Memory
+				limits.Memory = *componentDynConfig.ServiceArgs.Resources.Memory
+			}
+			if componentDynConfig.ServiceArgs.Resources.Custom != nil {
+				requests.Custom = componentDynConfig.ServiceArgs.Resources.Custom
+				limits.Custom = componentDynConfig.ServiceArgs.Resources.Custom
+			}
+			if err := SetLwsAnnotations(componentDynConfig.ServiceArgs, dynamoDeploymentComponent); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
+	envMap := make(map[string]corev1.EnvVar)
+
+	// Add all common environment variables.
+	for _, env := range common {
+		envMap[env.Name] = env
+	}
+
+	// Override or add with service-specific environment variables.
+	for _, env := range specific {
+		envMap[env.Name] = env
+	}
+
+	// Convert the map back to a slice.
+	merged := make([]corev1.EnvVar, 0, len(envMap))
+	for _, env := range envMap {
+		merged = append(merged, env)
+	}
+	return merged
 }

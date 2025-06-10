@@ -10,7 +10,6 @@ ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
-ARG GENAI_PERF_VERSION=0.0.13
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -136,8 +135,8 @@ RUN if [ "$ARCH" = "arm64" ]; then \
 
 # Install sglang
 # Once either 0.4.6post6 or 0.4.7 is released, we can switch back to using the published version
-# This commit references a fix for DP attention and NIXL https://github.com/sgl-project/sglang/pull/6473
-ARG SGLANG_COMMIT="e806f708c954020bda7d1cc98035a44fd6a4eb96"
+# This commit references a fix to add DP attention based routing along with other perf fixes https://github.com/sgl-project/sglang/pull/6884
+ARG SGLANG_COMMIT="f1569876d54dd3b6601f5280f12652e9fbb1375c"
 RUN --mount=type=cache,target=/root/.cache/uv \
     git clone https://github.com/sgl-project/sglang.git && \
     cd sglang && \
@@ -346,9 +345,6 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
 RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/dist/ai_dynamo*any.whl
 
-# TODO: remove kantoku as a transitive dependency
-RUN uv pip uninstall kantoku circus && uv pip install circus==0.19.0
-
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
@@ -362,11 +358,6 @@ ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/
 ########## Development Image ###########
 ########################################
 FROM ci_minimum AS dev
-
-ARG GENAI_PERF_VERSION
-
-# Install genai-perf for benchmarking
-RUN uv pip install genai-perf==$GENAI_PERF_VERSION
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
@@ -397,9 +388,6 @@ COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
     ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
     rm -r wheelhouse
-
-# TODO: remove kantoku as a transitive dependency
-RUN uv pip uninstall kantoku circus && uv pip install circus==0.19.0
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"

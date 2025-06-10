@@ -9,7 +9,7 @@ use dynamo_llm::{
     engines::StreamingEngineAdapter,
     model_card::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
-    protocols::common::llm_backend::{BackendInput, BackendOutput},
+    protocols::common::llm_backend::{BackendOutput, PreprocessedRequest},
     types::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -50,6 +50,7 @@ pub async fn prepare_engine(
                 distributed_runtime,
                 model_manager.clone(),
                 dynamo_runtime::pipeline::RouterMode::RoundRobin,
+                None,
             ));
             let models_watcher = etcd_client.kv_get_and_watch_prefix(MODEL_ROOT_PATH).await?;
             let (_prefix, _watcher, receiver) = models_watcher.dissolve();
@@ -113,7 +114,7 @@ where
     OpenAIPreprocessor: Operator<
         Context<Req>,
         Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
-        Context<BackendInput>,
+        Context<PreprocessedRequest>,
         Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
     >,
 {
@@ -138,7 +139,7 @@ mod tests {
     use super::*;
     use dynamo_llm::types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-        completions::{CompletionRequest, CompletionResponse},
+        completions::{CompletionResponse, NvCreateCompletionRequest},
     };
 
     const HF_PATH: &str = concat!(
@@ -173,7 +174,7 @@ mod tests {
 
         // Build pipeline for completions
         let pipeline =
-            build_pipeline::<CompletionRequest, CompletionResponse>(&card, engine).await?;
+            build_pipeline::<NvCreateCompletionRequest, CompletionResponse>(&card, engine).await?;
 
         // Verify pipeline was created
         assert!(Arc::strong_count(&pipeline) >= 1);

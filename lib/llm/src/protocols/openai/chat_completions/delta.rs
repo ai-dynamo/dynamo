@@ -212,4 +212,8 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             inner: stream_response,
         })
     }
+
+    fn get_isl(&self) -> Option<u32> {
+        Some(self.usage.prompt_tokens)
+    }
 }

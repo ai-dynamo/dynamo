@@ -14,15 +14,9 @@
 # limitations under the License.
 # Used to generate top-level secrets (overridden by custom-values.yaml)
 
-imagePullSecrets:
-
 # Subcharts
 dynamo-operator:
   enabled: true
-  imagePullSecrets:
-    - name: gitlab-imagepull
-    - name: nvcrimagepullsecret
-    - name: docker-imagepullsecret
   natsAddr: ""
   etcdAddr: ""
   namespaceRestriction:
@@ -49,8 +43,8 @@ dynamo-operator:
       debugger: python:3.12-slim
     enableRestrictedSecurityContext: false
     dockerRegistry:
+      useKubernetesSecret: false
       server: ""
-      inClusterServer: ""
       username: ""
       password: ""
       secure: true
@@ -79,7 +73,6 @@ dynamo-api-store:
     repository: ""
     tag: "latest"
     pullPolicy: IfNotPresent
-  imagePullSecrets:
   ingress:
     enabled: false
     className: nginx
