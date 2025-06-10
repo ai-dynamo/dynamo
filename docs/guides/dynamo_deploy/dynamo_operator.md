@@ -353,9 +353,9 @@ kubectl get dynamocomponentdeployment -n $KUBE_NS
 
 The operator is built using Kubebuilder and the operator-sdk, with the following structure:
 
-  - `controllers/`: Reconciliation logic
-  - `api/v1alpha1/`: CRD types
-  - `config/`: Manifests and Helm charts
+- `controllers/`: Reconciliation logic
+- `api/v1alpha1/`: CRD types
+- `config/`: Manifests and Helm charts
 
 
 ## References
