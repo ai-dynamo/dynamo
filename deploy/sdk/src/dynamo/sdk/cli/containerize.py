@@ -17,8 +17,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import shutil
 import subprocess
 import typing as t
 from pathlib import Path
@@ -27,7 +25,7 @@ import typer
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
-from dynamo.sdk import DYNAMO_IMAGE
+from dynamo.sdk.cli.build import DYNAMO_IMAGE, BuildError, Package, build_package
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -63,72 +61,29 @@ def containerize(
     Dynamo package and immediately building it into a Docker container.
     """
     try:
-        from dynamo.sdk.cli.build import BuildConfig, Package
-
         if ":" not in service:
             console.print(
                 "[red]Error: Service specification must be in format 'module:ServiceClass'[/]"
             )
             raise typer.Exit(1)
 
-        module_name, service_class = service.split(":", 1)
-
         console.print(DYNAMO_FIGLET)
         console.print("[bold green]Building and containerizing Dynamo service...[/]")
         console.print(f"[blue]Service:[/] {service}")
 
-        # Build the package using the BuildConfig API
-        build_config = BuildConfig(service=service, version=tag)
-        package = Package.create(build_config, os.getcwd())
-
-        # Determine output path
-        if output_dir:
-            if Path(output_dir).exists() and not force:
-                console.print(
-                    f"[red]Error: Output directory {output_dir} already exists. "
-                    "Use --force to overwrite.[/]"
-                )
-                raise typer.Exit(1)
-            output_path = Path(output_dir)
-        else:
-            # Use default package location
-            home_dir = Path.home()
-            packages_dir = home_dir / ".dynamo" / "packages"
-            service_dir = packages_dir / package.tag.name.lower()
-            output_path = service_dir / package.tag.version
-
-        output_path.mkdir(parents=True, exist_ok=True)
-
-        # Copy package to output path if needed
-        if str(package.path) != str(output_path):
-            if output_path.exists():
-                shutil.rmtree(output_path)
-            output_path.mkdir(parents=True)
-
-            # Copy all files from package path to output path
-            for item in os.listdir(package.path):
-                s = os.path.join(package.path, item)
-                d = os.path.join(str(output_path), item)
-                if os.path.isdir(s):
-                    shutil.copytree(s, d, dirs_exist_ok=True)
-                else:
-                    shutil.copy2(s, d)
-
-        # Update package path and generate manifests
-        package.path = str(output_path)
-        package.generate_manifests()
+        # Calling shared build_package
+        package = build_package(service, output_dir, force, tag)
+        output_path = Path(package.path)
 
         # Create Docker directory and Dockerfile
         docker_dir = output_path / "env" / "docker"
         docker_dir.mkdir(exist_ok=True, parents=True)
         docker_file = docker_dir / "Dockerfile"
 
-        # Generate Dockerfile using template from Package class
-        dockerfile_content = Package._get_dockerfile_template(DYNAMO_IMAGE)
+        dockerfile_content = Package.get_dockerfile_template(DYNAMO_IMAGE)
         with open(docker_file, "w", encoding="utf-8") as f:
             f.write(dockerfile_content)
 
-        # Build Docker image
         image_tag = tag or f"{package.tag.name}:{package.tag.version}"
 
         console.print(f"[blue]Building Docker image:[/] {image_tag}")
@@ -159,6 +114,9 @@ def containerize(
         )
         console.print(f"  • Push to registry: [cyan]docker push {image_tag}[/]")
 
+    except BuildError as e:
+        console.print(f"[red]Build error: {e}[/]")
+        raise typer.Exit(1)
     except subprocess.CalledProcessError as e:
         console.print(f"[red]Error building Docker image: {e}[/]")
         raise typer.Exit(1)
