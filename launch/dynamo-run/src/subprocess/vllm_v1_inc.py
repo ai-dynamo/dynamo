@@ -124,13 +124,10 @@ class RequestHandler:
         self.default_sampling_params = default_sampling_params
 
     async def clear_kv_blocks(self, request=None):
-        logger.info("clear_kv_blocks endpoint called")
         try:
             self.engine_client.reset_prefix_cache()
-            logger.info("Successfully reset prefix cache")
             yield {"status": "success", "message": "KV cache cleared"}
         except Exception as e:
-            logger.error(f"Error clearing KV cache: {e}")
             yield {"status": "error", "message": str(e)}
 
     async def generate(self, request):

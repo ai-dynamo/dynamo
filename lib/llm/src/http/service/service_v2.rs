@@ -213,9 +213,4 @@ impl HttpServiceConfigBuilder {
         self.request_template = Some(request_template);
         self
     }
-
-    pub fn with_runtime(mut self, runtime: Arc<DistributedRuntime>) -> Self {
-        self.runtime = Some(Some(runtime));
-        self
-    }
 }

@@ -13,39 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-// SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
 use super::{service_v2, RouteDoc};
 use axum::{http::Method, response::IntoResponse, routing::post, Json, Router};
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
 use dynamo_runtime::{pipeline::PushRouter, stream::StreamExt};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClearKvBlocksRequest {
-    pub message: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ClearKvBlocksResponse {
-    pub success: bool,
-    pub message: String,
-}
 
 pub fn clear_kv_blocks_router(
     state: Arc<service_v2::State>,
@@ -65,19 +38,7 @@ pub fn clear_kv_blocks_router(
 async fn clear_kv_blocks_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
-    tracing::trace!("Received clear all KV blocks request");
-
     let model_entries = state.manager().get_model_entries();
-
-    tracing::debug!("Found {} model entries:", model_entries.len());
-    for entry in &model_entries {
-        tracing::debug!(
-            "Entry: name={}, namespace={}, component={}",
-            entry.name,
-            entry.endpoint.namespace,
-            entry.endpoint.component
-        );
-    }
 
     // if there are no active workers
     if model_entries.is_empty() {
@@ -85,9 +46,6 @@ async fn clear_kv_blocks_handler(
             "message": "No active worker groups found"
         }));
     }
-
-    let mut cleared_workers = Vec::new();
-    let mut failed_workers = Vec::new();
 
     let distributed = match state.runtime() {
         Some(runtime) => runtime,
@@ -98,22 +56,53 @@ async fn clear_kv_blocks_handler(
         }
     };
 
+    let mut cleared_workers = Vec::new();
+    let mut failed_workers = Vec::new();
+
+    // update cleared and failed workers
+    let mut add_worker_result = |success: bool,
+                                 name: String,
+                                 status: &str,
+                                 ns: &str,
+                                 comp: &str,
+                                 message: Option<String>| {
+        let mut result = json!({
+            "name": name,
+            "endpoint": format!("{}/{}/clear_kv_blocks", ns, comp),
+            "status": status,
+        });
+        if success {
+            if let Some(m) = message {
+                result["response"] = json!(m);
+            }
+            cleared_workers.push(result);
+        } else {
+            if let Some(m) = message {
+                result["error"] = json!(m);
+            }
+            failed_workers.push(result);
+        }
+    };
+
     // create client for each model entry
     for entry in &model_entries {
         let namespace = &entry.endpoint.namespace;
         let component = &entry.endpoint.component;
+        let entry_name = entry.name.to_string();
 
         tracing::debug!("Processing worker group: {}/{}", namespace, component);
 
         let namespace_obj = match distributed.namespace(namespace) {
             Ok(ns) => ns,
             Err(e) => {
-                failed_workers.push(json!({
-                    "name": entry.name,
-                    "endpoint": format!("{}/{}/clear_kv_blocks", namespace, component),
-                    "status": "failed to get namespace",
-                    "error": e.to_string()
-                }));
+                add_worker_result(
+                    false,
+                    entry_name,
+                    "Failed to get namespace",
+                    namespace,
+                    component,
+                    Some(e.to_string()),
+                );
                 continue;
             }
         };
@@ -121,12 +110,14 @@ async fn clear_kv_blocks_handler(
         let component_obj = match namespace_obj.component(component) {
             Ok(comp) => comp,
             Err(e) => {
-                failed_workers.push(json!({
-                    "name": entry.name,
-                    "endpoint": format!("{}/{}/clear_kv_blocks", namespace, component),
-                    "status": "failed to get component",
-                    "error": e.to_string()
-                }));
+                add_worker_result(
+                    false,
+                    entry_name,
+                    "Failed to get component",
+                    namespace,
+                    component,
+                    Some(e.to_string()),
+                );
                 continue;
             }
         };
@@ -137,12 +128,14 @@ async fn clear_kv_blocks_handler(
         let client = match endpoint.client().await {
             Ok(c) => c,
             Err(e) => {
-                failed_workers.push(json!({
-                    "name": entry.name,
-                    "endpoint": format!("{}/{}/clear_kv_blocks", namespace, component),
-                    "status": "failed to create client",
-                    "error": e.to_string()
-                }));
+                add_worker_result(
+                    false,
+                    entry_name,
+                    "Failed to get client",
+                    namespace,
+                    component,
+                    Some(e.to_string()),
+                );
                 continue;
             }
         };
@@ -155,12 +148,14 @@ async fn clear_kv_blocks_handler(
         {
             Ok(r) => r,
             Err(e) => {
-                failed_workers.push(json!({
-                    "name": entry.name,
-                    "endpoint": format!("{}/{}/clear_kv_blocks", namespace, component),
-                    "status": "failed to create router",
-                    "error": e.to_string()
-                }));
+                add_worker_result(
+                    false,
+                    entry_name,
+                    "Failed to create router",
+                    namespace,
+                    component,
+                    Some(e.to_string()),
+                );
                 continue;
             }
         };
@@ -168,22 +163,27 @@ async fn clear_kv_blocks_handler(
         let instances = match component_obj.list_instances().await {
             Ok(instances) => instances,
             Err(e) => {
-                failed_workers.push(json!({
-                    "name": entry.name,
-                    "endpoint": format!("{}/{}/clear_kv_blocks", namespace, component),
-                    "status": "Failed to get instances for worker group",
-                    "error": e.to_string()
-                }));
+                add_worker_result(
+                    false,
+                    entry_name,
+                    "Failed to get instances for worker group",
+                    namespace,
+                    component,
+                    Some(e.to_string()),
+                );
                 continue;
             }
         };
 
         if instances.is_empty() {
-            failed_workers.push(json!({
-                "name": entry.name,
-                "endpoint": format!("{}/{}/clear_kv_blocks", namespace, component),
-                "status": "No instances found for worker group",
-            }));
+            add_worker_result(
+                false,
+                entry_name,
+                "No instances found for worker group",
+                namespace,
+                component,
+                None,
+            );
             continue;
         }
 
@@ -198,54 +198,60 @@ async fn clear_kv_blocks_handler(
                 .iter()
                 .map(|instance| instance.endpoint.clone())
                 .collect();
-            failed_workers.push(json!({
-                "name": entry.name,
-                "endpoint": format!("{}/{}/clear_kv_blocks", namespace, component),
-                "status": format!("Worker group doesn't support clear_kv_blocks. Supported endpoints: {}", found_endpoints.join(", ")),
-            }));
+            add_worker_result(
+                false,
+                entry_name,
+                &format!(
+                    "Worker group doesn't support clear_kv_blocks. Supported endpoints: {}",
+                    found_endpoints.join(", ")
+                ),
+                namespace,
+                component,
+                None,
+            );
             continue;
         }
 
         for instance in &instances_filtered {
+            let instance_name = format!("{}-instance-{}", entry.name, instance.id());
             match router.round_robin(().into()).await {
-                Ok(mut stream) => {
-                    // Successfully sent request, now process the response
-                    match stream.next().await {
-                        Some(response) => {
-                            // Instance successfully cleared its KV blocks
-                            cleared_workers.push(json!({
-                                "name": format!("{}-instance-{}", entry.name, instance.id()),
-                                "endpoint": format!("{}/{}/clear_kv_blocks", entry.endpoint.namespace, entry.endpoint.component),
-                                "status": "successfully cleared kv blocks for instance",
-                                "response": response.to_string()
-                            }));
-                        }
-                        None => {
-                            // No response from instance
-                            failed_workers.push(json!({
-                                "name": format!("{}-instance-{}", entry.name, instance.id()),
-                                "endpoint": format!("{}/{}/clear_kv_blocks", entry.endpoint.namespace, entry.endpoint.component),
-                                "status": "no response from instance",
-                            }));
-                        }
+                Ok(mut stream) => match stream.next().await {
+                    Some(response) => {
+                        add_worker_result(
+                            true,
+                            instance_name,
+                            "Successfully cleared kv blocks for instance",
+                            namespace,
+                            component,
+                            Some(response.to_string()),
+                        );
                     }
-                }
+                    None => {
+                        add_worker_result(
+                            false,
+                            instance_name,
+                            "No response from instance",
+                            namespace,
+                            component,
+                            None,
+                        );
+                    }
+                },
                 Err(e) => {
-                    // Failed to send request to this instance
-                    failed_workers.push(json!({
-                        "name": format!("{}-instance-{}", entry.name, instance.id()),
-                        "endpoint": format!("{}/{}/clear_kv_blocks", entry.endpoint.namespace, entry.endpoint.component),
-                        "status": "failed to send request for instance",
-                        "error": e.to_string()
-                    }));
+                    add_worker_result(
+                        false,
+                        instance_name,
+                        "Failed to send request for instance",
+                        namespace,
+                        component,
+                        Some(e.to_string()),
+                    );
                 }
             }
         }
     }
 
     Json(serde_json::json!({
-        "message": format!("Cleared prefix cache on {} out of {} worker groups",
-                          cleared_workers.len(), model_entries.len()),
         "cleared_workers": cleared_workers,
         "failed_workers": failed_workers
     }))
