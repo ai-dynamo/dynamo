@@ -3,6 +3,7 @@
 
 //! EtcdPath - Parsing and validation for hierarchical etcd paths
 
+use once_cell::sync::Lazy;
 use std::str::FromStr;
 use validator::ValidationError;
 
@@ -14,6 +15,9 @@ pub const COMPONENT_KEYWORD: &str = "_component_";
 
 /// Reserved keyword for endpoint paths (with underscores to prevent user conflicts)
 pub const ENDPOINT_KEYWORD: &str = "_endpoint_";
+
+static ALLOWED_CHARS_REGEX: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r"^[a-z0-9-_]+$").unwrap());
 
 /// Represents a parsed etcd path with hierarchical namespaces, components, endpoints, and extra paths
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,10 +352,7 @@ fn validate_extra_path_segment(segment: &str) -> Result<(), EtcdPathError> {
 
 /// Custom validator function (same as in component.rs)
 fn validate_allowed_chars(input: &str) -> Result<(), ValidationError> {
-    // Define the allowed character set using a regex
-    let regex = regex::Regex::new(r"^[a-z0-9-_]+$").unwrap();
-
-    if regex.is_match(input) {
+    if ALLOWED_CHARS_REGEX.is_match(input) {
         Ok(())
     } else {
         Err(ValidationError::new("invalid_characters"))
