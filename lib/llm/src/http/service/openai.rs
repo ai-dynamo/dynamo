@@ -27,6 +27,7 @@ use super::{
     service_v2, RouteDoc,
 };
 
+use crate::preprocessor::LLMMetricAnnotation;
 use crate::protocols::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse};
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionResponse, completions::CompletionResponse,
@@ -500,6 +501,12 @@ fn process_event_converter<T: Serialize>(
 ) -> Result<Event, axum::Error> {
     let annotated = annotated.0;
 
+    // update metrics
+    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&annotated) {
+        response_collector.observe_current_osl(metrics.output_tokens);
+        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
+    }
+
     let mut event = Event::default();
 
     if let Some(data) = annotated.data {
@@ -514,16 +521,6 @@ fn process_event_converter<T: Serialize>(
             return Err(axum::Error::new(msgs.join(" -- ")));
         }
         event = event.event(msg);
-    }
-
-    if let Some(osl) = annotated.output_tokens {
-        response_collector.observe_current_osl(osl);
-    }
-
-    if let Some(isl) = annotated.input_tokens {
-        if let Some(chunk_tokens) = annotated.chunk_tokens {
-            response_collector.observe_response(isl, chunk_tokens);
-        }
     }
 
     if let Some(comments) = annotated.comment {
