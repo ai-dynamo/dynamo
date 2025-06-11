@@ -16,7 +16,7 @@
 import json
 from collections import Counter
 
-from data_generator.logging import calculate_and_print_statistics
+from data_generator.logging_utils import calculate_and_print_statistics
 
 
 class PrefixAnalyzer:

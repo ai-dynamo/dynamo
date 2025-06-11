@@ -13,10 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import math
+import random
+
 import pytest
-from data_generator.hasher import texts_to_hashes
+from data_generator.hasher import hashes_to_texts, texts_to_hashes
 from tokenizers import Tokenizer, decoders, models, normalizers, pre_tokenizers
-from transformers import PreTrainedTokenizerFast
+from transformers import AutoTokenizer, PreTrainedTokenizerFast
 
 
 @pytest.fixture(scope="module")
@@ -42,6 +45,11 @@ def dummy_tokenizer():
     )
 
 
+@pytest.fixture(scope="module")
+def deepseek_tokenizer():
+    return AutoTokenizer.from_pretrained("deepseek-ai/deepseek-coder-1.3b-base")
+
+
 def test_texts_to_hashes_blocks(dummy_tokenizer):
     dum1 = "a b c d"
     dum2 = "e f g h"
@@ -52,3 +60,40 @@ def test_texts_to_hashes_blocks(dummy_tokenizer):
 
     result = texts_to_hashes(dummy_tokenizer, texts, block_size=4)
     assert result == expected, f"Expected {expected}, got {result}"
+
+
+def test_hashes_to_texts_with_deepseek(deepseek_tokenizer):
+    """Test hashes_to_texts with deepseek tokenizer using increasing hash IDs globally."""
+    # Test parameters
+    block_size = 64
+    num_entries = 100
+
+    # Generate test data
+    hash_ids_list = []
+    input_lengths = []
+    global_hash_id = 0
+
+    for _ in range(num_entries):
+        # Random input length between 1 and 20 times block_size
+        input_length = random.randint(block_size, 20 * block_size)
+        input_lengths.append(input_length)
+
+        # Calculate number of hash_ids needed (ceil div)
+        num_hash_ids = math.ceil(input_length / block_size)
+        hash_ids = list(range(global_hash_id, global_hash_id + num_hash_ids))
+        hash_ids_list.append(hash_ids)
+
+        global_hash_id += num_hash_ids
+
+    # Call hashes_to_texts
+    texts = hashes_to_texts(
+        deepseek_tokenizer, hash_ids_list, input_lengths, block_size
+    )
+
+    # Retokenize and verify input lengths are preserved
+    for i, (text, expected_length) in enumerate(zip(texts, input_lengths)):
+        tokens = deepseek_tokenizer(text, add_special_tokens=False)["input_ids"]
+        actual_length = len(tokens)
+        assert (
+            actual_length == expected_length
+        ), f"Entry {i}: expected length {expected_length}, got {actual_length}"
