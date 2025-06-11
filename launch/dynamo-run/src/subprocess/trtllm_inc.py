@@ -352,6 +352,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     arg_map = {
         "model": model_path,
         "tensor_parallel_size": config.tensor_parallel_size,
+        "backend": "pytorch",
         "skip_tokenizer_init": True,
         "disable_log_requests": True,
         "enable_prefix_caching": True,

@@ -29,7 +29,7 @@ limitations under the License.
 
 Dynamo is a flexible and performant distributed inferencing solution for large-scale deployments. It is an ecosystem of tools, frameworks, and abstractions that makes the design, customization, and deployment of frontier-level models onto datacenter-scale infrastructure easy to reason about and optimized for your specific inferencing workloads. Dynamo's core is written in Rust and contains a set of well-defined Python bindings. See Python Bindings](./python_bindings.md).
 
-Dynamo SDK is a layer on top of the core. It is a Python framework that makes it easy to create inference graphs and deploy them locally and onto a target K8s cluster. The SDK was heavily inspired by [BentoML's](https://github.com/bentoml/BentoML) open source deployment patterns and leverages many of its core primitives. The Dynamo CLI is a companion tool that allows you to spin up an inference pipeline locally, containerize it, and deploy it. You can find a toy hello-world example and instructions for deploying it [here](../examples/hello_world.md).
+Dynamo SDK is a layer on top of the core. It is a Python framework that makes it easy to create inference graphs and deploy them locally and onto a target K8s cluster. The SDK was heavily inspired by [BentoML's](https://github.com/bentoml/BentoML) open source deployment patterns. The Dynamo CLI is a companion tool that allows you to spin up an inference pipeline locally, containerize it, and deploy it. You can find a toy hello-world example and instructions for deploying it [here](../examples/hello_world.md).
 
 ## Installation
 
@@ -112,7 +112,7 @@ Dynamo follows a class-based architecture similar to BentoML making it intuitive
 This approach provides a clean separation of concerns and makes the service structure easy to understand.
 
 #### Service Dependencies with `depends()`
-The `depends()` function is a powerful BentoML feature that lets you create a dependency between services. When you use `depends(ServiceB)`, several things happen:
+The `depends()` function is a powerful feature that lets you create a dependency between services. When you use `depends(ServiceB)`, several things happen:
 1. It ensures that `ServiceB` is deployed when `ServiceA` is deployed by adding it to an internal service dependency graph
 2. It creates a client to the endpoints of `ServiceB` that is being served under the hood.
 3. You are able to access `ServiceB` endpoints as if it were a local function!
@@ -149,10 +149,8 @@ self.worker_client = (
 
 This is used in some of our prebuilt examples and is a powerful way to leverage the benefits of the SDK while being able to access Dynamo's core primitives.
 
-You can find more docs on depends [here](https://docs.bentoml.com/en/latest/build-with-bentoml/distributed-services.html#interservice-communication)
-
 #### Lifecycle Hooks
-Dynamo supports key lifecycle hooks to manage service initialization and cleanup. We currently only support a subset of BentoML's lifecycle hooks but are working on adding support for the rest.
+Dynamo supports key lifecycle hooks to manage service initialization and cleanup.
 
 ##### `@async_on_start`
 
