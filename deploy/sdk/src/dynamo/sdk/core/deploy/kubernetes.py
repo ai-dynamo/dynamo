@@ -42,9 +42,13 @@ class KubernetesDeploymentManager(DeploymentManager):
     def create_deployment(self, deployment: Deployment, **kwargs) -> DeploymentResponse:
         """Create a new deployment. Ensures all components and versions are registered/uploaded before creating the deployment."""
         # For each service/component in the deployment, upload it to the API store
+        if not deployment.graph:
+            raise ValueError(
+                "Deployment graph must be provided in the format <name>:<version>"
+            )
         upload_graph(
             endpoint=self.endpoint,
-            graph=deployment.graph or deployment.namespace,
+            graph=deployment.graph,
             entry_service=deployment.entry_service,
             session=self.session,
             **kwargs,
@@ -78,7 +82,6 @@ class KubernetesDeploymentManager(DeploymentManager):
         access_authorization = kwargs.get("access_authorization", False)
         payload = {
             "name": deployment.name,
-            "component": deployment.graph or deployment.namespace,
             "envs": deployment.envs,
             "services": deployment.services,
             "access_authorization": access_authorization,

@@ -63,7 +63,6 @@ def upload_graph(
         }
         resp = session.post(comp_url, json=comp_payload)
         if resp.status_code not in (200, 201, 409):
-            print(resp.status_code)
             raise RuntimeError(f"Failed to create component: {resp.text}")
 
     # Check if version exists before POST

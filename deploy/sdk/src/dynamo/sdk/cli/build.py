@@ -107,7 +107,7 @@ class ServiceConfig(BaseModel):
     resources: t.Dict[str, t.Any] = Field(default_factory=dict)
     workers: t.Optional[int] = None
     image: str = "dynamo:latest"
-    dynamo: DynamoConfig = Field(default_factory=dict)
+    dynamo: DynamoConfig = Field(default_factory=DynamoConfig)
     http_exposed: bool = False
     api_endpoints: t.List[str] = Field(default_factory=list)
 
