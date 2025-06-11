@@ -43,8 +43,8 @@
 use crate::kv_router::protocols::ForwardPassMetrics;
 use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::kv_manager::KvManager;
-use crate::mocker::protocols::DirectRequest;
-use crate::mocker::protocols::{MoveBlock, PrefillCost, UniqueBlock};
+use crate::mocker::protocols::{DirectRequest, MockEngineArgs};
+use crate::mocker::protocols::{MoveBlock, OutputSignal, PrefillCost, UniqueBlock};
 use crate::mocker::sequence::ActiveSequence;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -195,29 +195,22 @@ pub struct Scheduler {
 impl Scheduler {
     /// Create a new Scheduler with the given parameters
     pub fn new(
-        num_gpu_blocks: usize,
-        block_size: usize,
-        max_num_batched_tokens: Option<usize>,
-        watermark: Option<f64>,
-        speedup_ratio: Option<f64>,
-        output_tx: Option<mpsc::Sender<Uuid>>,
+        args: MockEngineArgs,
+        output_tx: Option<mpsc::Sender<OutputSignal>>,
         cancellation_token: Option<CancellationToken>,
     ) -> Self {
-        let max_num_batched_tokens = max_num_batched_tokens.unwrap_or(8192);
-        let watermark = watermark.unwrap_or(0.01);
-
         let state = Arc::new(Mutex::new(SchedulerState::default()));
-        let kv_manager = Arc::new(Mutex::new(KvManager::new(num_gpu_blocks, block_size)));
+        let kv_manager = Arc::new(Mutex::new(KvManager::new(
+            args.num_gpu_blocks,
+            args.block_size,
+        )));
 
-        // Assert speedup_ratio is greater than 0 if provided
-        if let Some(ratio) = speedup_ratio {
-            assert!(
-                ratio > 0.0,
-                "speedup_ratio must be greater than 0, got: {}",
-                ratio
-            );
-        }
-        let speedup_ratio = speedup_ratio.unwrap_or(1.0);
+        // Assert speedup_ratio is greater than 0
+        assert!(
+            args.speedup_ratio > 0.0,
+            "speedup_ratio must be greater than 0, got: {}",
+            args.speedup_ratio
+        );
 
         // Create channel for request handling
         let (request_tx, mut request_rx) = mpsc::channel::<DirectRequest>(1024);
@@ -259,7 +252,7 @@ impl Scheduler {
                         let mut current_blocks = kv_manager_guard.num_active_blocks();
                         let mut current_tokens = state_guard.num_batched_tokens();
                         while let Some((uuid, request)) = state_guard.next() {
-                            let active_sequence = get_active_sequence(request, block_size);
+                            let active_sequence = get_active_sequence(request, args.block_size);
 
                             // Update predictive budgets
                             let prefill_cost = kv_manager_guard.get_prefill_cost(&active_sequence);
@@ -269,8 +262,8 @@ impl Scheduler {
                             current_tokens += new_tokens;
 
                             // Check if it can be scheduled
-                            let under_block_budget = current_blocks as f64 <= (1. - watermark) * kv_manager_guard.max_capacity() as f64;
-                            let under_token_budget = current_tokens <= max_num_batched_tokens;
+                            let under_block_budget = current_blocks as f64 <= (1. - args.watermark) * kv_manager_guard.max_capacity() as f64;
+                            let under_token_budget = args.max_num_batched_tokens.is_none_or(|limit| current_tokens <= limit);
                             if under_block_budget && under_token_budget {
                                 state_guard.start_prefill(uuid, active_sequence, Some(prefill_cost));
                                 should_schedule = false;
@@ -328,18 +321,29 @@ impl Scheduler {
 
                             // Send UUID notification for each generated token
                             if let Some(tx) = &output_tx_clone {
-                                let _ = tx.try_send(uuid);
+                                let signal = OutputSignal {
+                                    uuid,
+                                    completed: false,
+                                };
+                                let _ = tx.try_send(signal);
                             }
 
                             // Check if we're done after generating
                             if sequence.generated_tokens() >= sequence.max_output_tokens() {
+                                if let Some(tx) = &output_tx_clone {
+                                    let signal = OutputSignal {
+                                        uuid,
+                                        completed: true,
+                                    };
+                                    let _ = tx.try_send(signal);
+                                }
                                 state_guard.complete(&uuid);
                                 continue;
                             }
                         }
 
                         // Sleep once for the adjusted duration
-                        let adjusted_time = Duration::from_secs_f64(total_time.as_secs_f64() / speedup_ratio);
+                        let adjusted_time = Duration::from_secs_f64(total_time.as_secs_f64() / args.speedup_ratio);
                         if adjusted_time.as_millis() > 0 {
                             tokio::time::sleep(adjusted_time).await;
                         }
@@ -481,18 +485,18 @@ mod tests {
         let max_output_tokens: usize = 100;
 
         // Create channel for token output
-        let (output_tx, mut output_rx) = mpsc::channel::<Uuid>(1024);
+        let (output_tx, mut output_rx) = mpsc::channel::<OutputSignal>(1024);
 
-        // Create scheduler with internal KvManager
-        let scheduler = Scheduler::new(
-            kv_capacity,
-            block_size,
-            None,
-            None,
-            Some(10.0), // speedup_ratio
-            Some(output_tx),
-            None,
-        );
+        // Create scheduler args using builder
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(kv_capacity)
+            .block_size(block_size)
+            .speedup_ratio(10.0)
+            .build()
+            .unwrap();
+
+        // Create scheduler with new args struct
+        let scheduler = Scheduler::new(args, Some(output_tx), None);
 
         // Create shared tokens for caching case
         let shared_tokens = if use_shared_tokens {
@@ -523,6 +527,7 @@ mod tests {
                 tokens: input_tokens,
                 max_output_tokens,
                 uuid: None,
+                dp_rank: None,
             };
             scheduler.receive(request).await;
         }

@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -52,6 +53,7 @@ pub struct DirectRequest {
     pub tokens: Vec<Token>,
     pub max_output_tokens: usize,
     pub uuid: Option<Uuid>,
+    pub dp_rank: Option<u32>,
 }
 
 /// Represents the cost of prefilling content in the cache
@@ -60,6 +62,42 @@ pub struct PrefillCost {
     pub new_blocks: usize,
     pub new_tokens: usize,
     pub prefill_compute: f64,
+}
+
+/// Signal for output token generation with completion status
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputSignal {
+    pub uuid: Uuid,
+    pub completed: bool,
+}
+
+/// Configuration arguments for MockVllmEngine
+#[derive(Debug, Clone, Serialize, Deserialize, Builder)]
+#[builder(pattern = "owned", build_fn(public))]
+pub struct MockEngineArgs {
+    #[builder(default = "16384")]
+    pub num_gpu_blocks: usize,
+
+    #[builder(default = "64")]
+    pub block_size: usize,
+
+    #[builder(default)]
+    pub max_num_batched_tokens: Option<usize>,
+
+    #[builder(default = "0.01")]
+    pub watermark: f64,
+
+    #[builder(default = "1.0")]
+    pub speedup_ratio: f64,
+
+    #[builder(default = "1")]
+    pub dp_size: u32,
+}
+
+impl MockEngineArgs {
+    pub fn builder() -> MockEngineArgsBuilder {
+        MockEngineArgsBuilder::default()
+    }
 }
 
 #[cfg(test)]
