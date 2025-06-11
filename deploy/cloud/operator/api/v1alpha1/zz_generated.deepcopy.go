@@ -263,19 +263,8 @@ func (in *DynamoComponentDeploymentSharedSpec) DeepCopyInto(out *DynamoComponent
 	}
 	if in.PVC != nil {
 		in, out := &in.PVC, &out.PVC
-		*out = make(map[string]*PVC, len(*in))
-		for key, val := range *in {
-			var outVal *PVC
-			if val == nil {
-				(*out)[key] = nil
-			} else {
-				inVal := (*in)[key]
-				in, out := &inVal, &outVal
-				*out = new(PVC)
-				(*in).DeepCopyInto(*out)
-			}
-			(*out)[key] = outVal
-		}
+		*out = new(PVC)
+		(*in).DeepCopyInto(*out)
 	}
 	if in.RunMode != nil {
 		in, out := &in.RunMode, &out.RunMode
@@ -313,11 +302,6 @@ func (in *DynamoComponentDeploymentSharedSpec) DeepCopyInto(out *DynamoComponent
 	if in.Replicas != nil {
 		in, out := &in.Replicas, &out.Replicas
 		*out = new(int32)
-		**out = **in
-	}
-	if in.Entrypoint != nil {
-		in, out := &in.Entrypoint, &out.Entrypoint
-		*out = new(string)
 		**out = **in
 	}
 }

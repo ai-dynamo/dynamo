@@ -151,26 +151,10 @@ func (in *ExtraPodSpec) DeepCopyInto(out *ExtraPodSpec) {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
 	}
-	if in.Volumes != nil {
-		in, out := &in.Volumes, &out.Volumes
-		*out = make([]v1.Volume, len(*in))
-		for i := range *in {
-			(*in)[i].DeepCopyInto(&(*out)[i])
-		}
-	}
-	if in.VolumeMounts != nil {
-		in, out := &in.VolumeMounts, &out.VolumeMounts
-		*out = make([]v1.VolumeMount, len(*in))
-		for i := range *in {
-			(*in)[i].DeepCopyInto(&(*out)[i])
-		}
-	}
-	if in.PVCClaims != nil {
-		in, out := &in.PVCClaims, &out.PVCClaims
-		*out = make([]v1.PersistentVolumeClaim, len(*in))
-		for i := range *in {
-			(*in)[i].DeepCopyInto(&(*out)[i])
-		}
+	if in.MainContainer != nil {
+		in, out := &in.MainContainer, &out.MainContainer
+		*out = new(v1.Container)
+		(*in).DeepCopyInto(*out)
 	}
 }
 
