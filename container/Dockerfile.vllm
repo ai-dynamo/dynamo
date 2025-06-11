@@ -483,6 +483,7 @@ COPY --from=ci_minimum /opt/dynamo/bindings /opt/dynamo/bindings
 # Copy nats and etcd from base image
 COPY --from=base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+ENV PATH=/usr/local/bin/etcd/:$PATH
 
 # Copy UCX from base image as plugin for NIXL
 # Copy NIXL source from base image (required for NIXL plugins)
@@ -500,6 +501,15 @@ RUN uv venv $VIRTUAL_ENV --python 3.12 && \
 # Common dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     uv pip install --requirement /tmp/requirements.txt
+
+# Install test dependencies
+#TODO: Remove this once we have a functional ci_minimum image built on top of the runtime image
+RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
+
+#TODO: Remove this once we have a functional ci_minimum image built on top of the runtime image
+COPY . /workspace
+RUN uv pip install /workspace/benchmarks
 
 # Install the wheels and symlink executables to /usr/local/bin so dynamo components can use them
 # Dynamo components currently do not have the VIRTUAL_ENV in their PATH, so we need to symlink the executables
@@ -519,8 +529,6 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
-# Copy examples
-COPY ./examples examples/
 
-ENTRYPOINT [ "/usr/bin/bash" ]
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
