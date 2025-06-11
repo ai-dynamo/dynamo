@@ -125,8 +125,6 @@ dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/mtp/mtp_agg.yaml
 ```
 Notes:
 - There is a noticeable latency for the first two inference requests. Please send warm-up requests before starting the benchmark.
-- Please keep the `cuda_graph_padding_enabled` setting as `false` in the model engine's configuration. There is a known bug, and the fix will be included in the next release of TensorRT-LLM.
-- MTP support for Disaggregation in Dynamo + TensorRT-LLM is coming soon.
 - MTP performance may vary depending on the acceptance rate of predicted tokens, which is dependent on the dataset or queries used while benchmarking
 
 #### Multi-Node Disaggregated Serving
@@ -158,7 +156,7 @@ etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0
 #       helps to guarantee a clean and reproducible results.
 ```
 
-Launch graph of Frontend, Processor, and TensorRTLLMWorker (decode) on head node:
+Launch graph of Frontend and TensorRTLLMWorker (decode) on head node:
 
 ```bash
 cd /workspace/examples/tensorrt_llm
@@ -191,7 +189,7 @@ export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
 ```
 
 Deploy a Prefill worker:
-```
+```bash
 cd /workspace/examples/tensorrt_llm
 dynamo serve components.prefill_worker:TensorRTLLMPrefillWorker -f ./configs/disagg.yaml --service-name TensorRTLLMPrefillWorker &
 ```
@@ -223,6 +221,44 @@ Notes:
   # Workaround for error: `mpi4py.MPI.Exception: MPI_ERR_SPAWN: could not spawn processes`
   unset SLURM_JOBID SLURM_JOB_ID SLURM_NODELIST
   ```
+
+#### Multi-Node Disaggregated Serving with Multi-Token Prediction(MTP) and DeepSeek R1
+
+Most of the steps remain the same as the above example, but this time we will have `dynamo serve` point to different config files that contains the MTP configurations
+
+##### Head Node
+
+Start nats/etcd
+```bash
+nats-server -js &
+etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd &
+```
+
+Launch graph of Frontend and TensorRTLLMWorker (decode) on head node:
+
+```bash
+cd /workspace/examples/tensorrt_llm
+dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/mtp/mtp_disagg.yaml  &
+```
+
+##### Worker Node(s)
+
+Set environment variables pointing at the etcd/nats endpoints on the head node.
+```bash
+export HEAD_NODE_IP="<head-node-ip>"
+export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
+export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
+```
+
+Deploy a Prefill worker:
+```bash
+cd /workspace/examples/tensorrt_llm
+dynamo serve components.prefill_worker:TensorRTLLMPrefillWorker -f configs/deepseek_r1/mtp/mtp_disagg.yaml --service-name TensorRTLLMPrefillWorker &
+```
+
+Notes:
+- There is a noticeable latency for the first four inference requests. Please send warm-up requests before starting the benchmark.
+- MTP performance may vary depending on the acceptance rate of predicted tokens, which is dependent on the dataset or queries used while benchmarking
 
 ### Client
 
