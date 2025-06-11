@@ -117,7 +117,7 @@ class VllmDecodeWorker:
             )
 
         runtime = dynamo_context["runtime"]
-        embeddings_shape, embeddings_dtype = get_vision_embeddings_info(
+        embeddings_shape, self.embeddings_dtype = get_vision_embeddings_info(
             self.engine_args.model, self.engine_args.num_patches
         )
         logger.debug(f"Embeddings shape: {embeddings_shape}")
@@ -139,6 +139,7 @@ class VllmDecodeWorker:
             else:
                 self.disaggregated_router = None
         else:
+            EMBEDDINGS_DTYPE = torch.float16
             EMBEDDINGS_DEVICE = "cuda"
 
             enc_comp_ns, enc_comp_name = VllmEncodeWorker.dynamo_address()  # type: ignore
@@ -154,7 +155,7 @@ class VllmDecodeWorker:
 
             # Create a longer-lived buffer for receiving the image embeddings.
             embeddings = torch.empty(
-                embeddings_shape, dtype=embeddings_dtype, device=EMBEDDINGS_DEVICE
+                embeddings_shape, dtype=EMBEDDINGS_DTYPE, device=EMBEDDINGS_DEVICE
             )
             descriptor = connect.Descriptor(embeddings)
             # Register the descriptor w/ NIXL (this is optional, if not done here the connect subsytem will take care of this automatically).
@@ -290,7 +291,7 @@ class VllmDecodeWorker:
         )
         # When using disaggregated serving, the encode worker will have provided the key-value cache updates via the encode worker.
         multi_modal_data = construct_mm_data(
-            self.engine_args.model, encode_output, embeddings
+            self.engine_args.model, encode_output, embeddings, self.embeddings_dtype
         )
 
         return prompt_ids, multi_modal_data, remote_prefill_params

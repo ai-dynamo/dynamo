@@ -111,12 +111,12 @@ class VllmPrefillWorker:
         await self._connector.initialize()
 
         # Create a longer-lived buffer for receiving the image embeddings.
-        embeddings_shape, embeddings_dtype = get_vision_embeddings_info(
+        embeddings_shape, self.embeddings_dtype = get_vision_embeddings_info(
             self.engine_args.model, self.engine_args.num_patches
         )
         embeddings = torch.empty(
             embeddings_shape,
-            dtype=embeddings_dtype,
+            dtype=self.embeddings_dtype,
             device=EMBEDDINGS_DEVICE,
         )
         descriptor = connect.Descriptor(embeddings)
@@ -265,7 +265,10 @@ class VllmPrefillWorker:
                 prompt=TokensPrompt(
                     prompt_token_ids=prompt_token_ids,
                     multi_modal_data=construct_mm_data(
-                        self.engine_args.model, encode_output, embeddings
+                        self.engine_args.model,
+                        encode_output,
+                        embeddings,
+                        self.embeddings_dtype,
                     ),
                 ),
                 sampling_params=sampling_params,

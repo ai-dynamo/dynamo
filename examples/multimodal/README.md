@@ -52,7 +52,7 @@ flowchart LR
 cd $DYNAMO_HOME/examples/multimodal
 # Serve a LLaVA 1.5 7B model:
 dynamo serve graphs.agg:Frontend -f ./configs/agg-llava.yaml
-# Serve a Qwen2 VL model:
+# Serve a Qwen2.5-VL model:
 # dynamo serve graphs.agg:Frontend -f ./configs/agg-qwen.yaml
 # Serve a Phi3V model:
 # dynamo serve graphs.agg:Frontend -f ./configs/agg-phi3v.yaml
@@ -89,7 +89,7 @@ curl http://localhost:8000/v1/chat/completions \
     }'
 ```
 
-If serving the example Qwen model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"Qwen/Qwen2-VL-7B-Instruct"`. If serving the example Phi3V model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"microsoft/Phi-3.5-vision-instruct"`.
+If serving the example Qwen model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"Qwen/Qwen2.5-VL-7B-Instruct"`. If serving the example Phi3V model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"microsoft/Phi-3.5-vision-instruct"`.
 
 You should see a response similar to this:
 ```json
@@ -204,7 +204,7 @@ DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk
 export DEPLOYMENT_NAME=multimodal-agg
 # For aggregated serving with LLaVA:
 dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg-llava.yaml
-# For aggregated serving with Qwen2-VL:
+# For aggregated serving with Qwen2.5-VL:
 # dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg-qwen.yaml
 # For aggregated serving with Phi3V:
 # dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg-phi3v.yaml
@@ -249,6 +249,6 @@ curl localhost:8000/v1/chat/completions \
   }'
 ```
 
-If serving the example Qwen model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"Qwen/Qwen2-VL-7B-Instruct"`. If serving the example Phi3V model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"microsoft/Phi-3.5-vision-instruct"`.
+If serving the example Qwen model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"Qwen/Qwen2.5-VL-7B-Instruct"`. If serving the example Phi3V model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"microsoft/Phi-3.5-vision-instruct"`.
 
 For more details on managing deployments, testing, and troubleshooting, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md).

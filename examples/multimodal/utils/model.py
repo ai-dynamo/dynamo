@@ -68,13 +68,17 @@ def get_vision_embeddings_info(
 
 
 def construct_mm_data(
-    model: str, encode_output: EncodeResponse, image_embeds: torch.Tensor
+    model: str,
+    encode_output: EncodeResponse,
+    image_embeds: torch.Tensor,
+    embeddings_dtype: torch.dtype,
 ) -> Dict[str, torch.Tensor | Dict[str, Any]]:
     """Construct multimodal data for a vLLM request for models that require additional parameters alongside the embeddings"""
+    image_embeds = image_embeds.to(embeddings_dtype)
     if "Qwen2" in model:
         return {
             "image": {
-                "image_embeds": image_embeds.squeeze(0).to(torch.float16),
+                "image_embeds": image_embeds.squeeze(0),
                 "image_grid_thw": torch.tensor(encode_output.image_grid_thw).squeeze(0),
             }
         }
