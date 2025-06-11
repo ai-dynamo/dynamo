@@ -149,6 +149,7 @@ filterwarnings = [
     "ignore:.*pkg_resources.*:DeprecationWarning",
     "ignore:.*pkg_resources.*:UserWarning",
     "ignore:.*multipart.*:PendingDeprecationWarning",
+    "ignore:.*PyType_Spec.*custom tp_new.*:DeprecationWarning", # Ignore protobuf deprecation warning
 ]
 
 
