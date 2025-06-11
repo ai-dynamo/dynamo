@@ -124,6 +124,7 @@ Dive in: Examples
 
    SDK Reference <API/sdk.md>
    Python API <API/python_bindings.md>
+   NIXL Connect API <API/nixl_connect/README.md>
 
 .. toctree::
    :hidden:
