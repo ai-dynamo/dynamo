@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 pub async fn watch_etcd(state: SharedState) -> anyhow::Result<()> {
-    let mut client = Client::connect(["http://localhost:2379"], None).await?;
+    let mut client = Client::connect(["http://127.0.0.1:2379"], None).await?;
     let (_watcher, mut stream) = client
         .watch("/dynamo/", Some(WatchOptions::new().with_prefix()))
         .await?;
