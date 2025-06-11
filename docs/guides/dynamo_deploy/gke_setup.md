@@ -26,9 +26,8 @@ export CLUSTER_WIN=$(gcloud container clusters describe ${CLUSTER_NAME} \
   --format="value(workloadIdentityConfig.workloadPool)")
 ```
 
-```important
-Make sure Workload Identity is enabled in your cluster !
-```
++ !!! important
++ Make sure Workload Identity is enabled in your cluster!
 
 
 ## Service Account Creation and Configuration
@@ -39,7 +38,7 @@ Go to the GCP console and create a new service account (or reuse an existing one
 
 ```bash
 gcloud iam service-accounts create workload-identity-sa\
-    --display-name="workload identity serice account" \
+    --display-name="workload identity service account" \
     --description="Service account to use for Workload Identity in GKE"
 export SA=workload-identity-sa@${PROJECT}.iam.gserviceaccount.com
 ```
