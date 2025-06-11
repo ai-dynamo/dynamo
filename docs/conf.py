@@ -143,8 +143,8 @@ html_theme_options = {
     "github_url": "https://github.com/ai-dynamo/dynamo",
     "switcher": {
         # use for local testing
-        "json_url": "http://localhost:8000/_static/switcher.json",
-        # "json_url": "https://docs.nvidia.com/dynamo/latest/_static/switcher.json",
+        # "json_url": "http://localhost:8000/_static/switcher.json",
+        "json_url": "https://docs.nvidia.com/dynamo/latest/_static/switcher.json",
         "version_match": one_before if "dev" in version_long else version_short,
     },
     "navbar_start": ["navbar-logo"],
