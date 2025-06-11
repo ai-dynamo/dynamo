@@ -1272,6 +1272,13 @@ echo 'Docker config.json created successfully'`, consts.DockerConfigVolumeMountP
 		Stdin:           true,
 	}
 
+	if buildEngine == DynamoComponentImageBuildEngineKaniko {
+		// we need to run as root when using kaniko
+		container.SecurityContext = &corev1.SecurityContext{
+			RunAsUser: ptr.To(int64(0)),
+		}
+	}
+
 	if globalDefaultImageBuilderContainerResources != nil {
 		container.Resources = *globalDefaultImageBuilderContainerResources
 	}
