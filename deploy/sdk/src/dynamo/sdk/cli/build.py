@@ -22,6 +22,7 @@ import importlib.util
 import inspect
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -225,9 +226,25 @@ class ManifestInfo(BaseModel):
                 "kubernetes_overrides" in service["config"]
                 and service["config"]["kubernetes_overrides"]
             ):
-                service_dict["config"]["kubernetes_overrides"] = service["config"][
-                    "kubernetes_overrides"
-                ]
+                # Map kubernetes_overrides fields to mainContainer if present.
+                kube_overrides = service["config"]["kubernetes_overrides"]
+                main_container = {}
+
+                entrypoint = kube_overrides.get("entrypoint")
+                if entrypoint:
+                    main_container["command"] = shlex.split(entrypoint)
+
+                cmd = kube_overrides.get("cmd")
+                if cmd:
+                    if isinstance(cmd, str):
+                        main_container["args"] = shlex.split(cmd)
+                    else:
+                        main_container["args"] = cmd
+
+                if main_container:
+                    service_dict["config"]["extraPodSpec"] = {
+                        "mainContainer": main_container
+                    }
 
             # Add HTTP configuration if exposed
             if service["config"]["http_exposed"]:
@@ -235,7 +252,6 @@ class ManifestInfo(BaseModel):
                 service_dict["config"]["api_endpoints"] = service["config"][
                     "api_endpoints"
                 ]
-
             services_dict.append(service_dict)
         result["services"] = services_dict
         return result
@@ -305,7 +321,6 @@ class Package:
         from dynamo.sdk.lib.loader import find_and_load_service
 
         dyn_svc = find_and_load_service(build_config.service, working_dir=build_ctx)
-
         # Clean up unused edges
         LinkedServices.remove_unused_edges()
         dyn_svc.inject_config()
