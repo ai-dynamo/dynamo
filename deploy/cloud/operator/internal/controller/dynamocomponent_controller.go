@@ -70,7 +70,6 @@ import (
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
-	"dario.cat/mergo"
 )
 
 // DynamoComponentReconciler reconciles a DynamoComponent object
@@ -1316,15 +1315,6 @@ echo "Done"
 		pod.Spec.Tolerations = globalExtraPodSpec.Tolerations
 		pod.Spec.TopologySpreadConstraints = globalExtraPodSpec.TopologySpreadConstraints
 		pod.Spec.ServiceAccountName = globalExtraPodSpec.ServiceAccountName
-
-		// Apply MainContainer override if specified
-		if globalExtraPodSpec.MainContainer != nil && len(pod.Spec.Containers) > 0 {
-			// Merge the main container configuration
-			mainContainer := &pod.Spec.Containers[0]
-			if err := mergo.Merge(mainContainer, globalExtraPodSpec.MainContainer, mergo.WithOverride); err != nil {
-				return nil, fmt.Errorf("failed to merge main container configuration: %v", err)
-			}
-		}
 	}
 
 	if opt.DynamoComponent.Spec.ImageBuilderExtraPodSpec != nil {

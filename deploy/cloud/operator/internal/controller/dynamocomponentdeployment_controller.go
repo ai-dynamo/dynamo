@@ -1654,13 +1654,15 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	}
 
 	// For now only overwrite the command and args.
-	extraPodSpecMainContainer := opt.dynamoComponentDeployment.Spec.ExtraPodSpec.MainContainer
-	if extraPodSpecMainContainer != nil {
-		if len(extraPodSpecMainContainer.Command) > 0 {
-			container.Command = extraPodSpecMainContainer.Command
-		}
-		if len(extraPodSpecMainContainer.Args) > 0 {
-			container.Args = extraPodSpecMainContainer.Args
+	if opt.dynamoComponentDeployment.Spec.ExtraPodSpec != nil {
+		extraPodSpecMainContainer := opt.dynamoComponentDeployment.Spec.ExtraPodSpec.MainContainer
+		if extraPodSpecMainContainer != nil {
+			if len(extraPodSpecMainContainer.Command) > 0 {
+				container.Command = extraPodSpecMainContainer.Command
+			}
+			if len(extraPodSpecMainContainer.Args) > 0 {
+				container.Args = extraPodSpecMainContainer.Args
+			}
 		}
 	}
 

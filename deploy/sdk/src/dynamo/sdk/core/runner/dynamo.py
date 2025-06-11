@@ -252,7 +252,7 @@ class LocalDeploymentTarget(DeploymentTarget):
         )
         self._watchers.append(watcher)
 
-        # Create and return the se rvice interface
+        # Create and return the service interface
         return LocalService(
             inner_cls=service_cls,
             config=config,

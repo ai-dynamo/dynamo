@@ -66,7 +66,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	Autoscaling      *Autoscaling               `json:"autoscaling,omitempty"`
 	Envs             []corev1.EnvVar            `json:"envs,omitempty"`
 	EnvFromSecret    *string                    `json:"envFromSecret,omitempty"`
-	PVC              map[string]*PVC            `json:"pvcSettings,omitempty"`
+	PVC              *PVC                       `json:"pvc,omitempty"`
 	RunMode          *RunMode                   `json:"runMode,omitempty"`
 	ExternalServices map[string]ExternalService `json:"externalServices,omitempty"`
 
