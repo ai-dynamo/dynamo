@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Test file for recursive namespace etcd_path functionality
+#[allow(unused_imports)]
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
 #[cfg(feature = "integration")]
