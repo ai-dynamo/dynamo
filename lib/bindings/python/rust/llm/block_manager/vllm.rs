@@ -152,7 +152,7 @@ impl KvbmCacheManager {
         tracing::debug!("Successfully locked slot_manager");
 
         let result = slot_manager.update_slot(dissolved, self.block_manager());
-        tracing::debug!("update_slot result: {:?}", result);
+        tracing::debug!("update_slot ++++++++++ result: {:?}", result);
 
         result.map_err(to_pyerr)
     }

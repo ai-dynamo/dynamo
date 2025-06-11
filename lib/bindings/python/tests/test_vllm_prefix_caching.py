@@ -84,6 +84,7 @@ def test_prefill(hash_algo):
     blocks = manager.allocate_slots(
         req0, 55, len(computed_blocks.blocks) * 16, computed_blocks
     )
+    print(f"blocks: {blocks}")
     assert blocks.get_block_ids() == [[1, 2, 3, 4]]
 
     # Check full block metadata
@@ -105,7 +106,6 @@ def test_prefill(hash_algo):
     unique_token_ids = [3] * 5
     req1 = make_request("1", common_token_ids + unique_token_ids)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
-    print(f"computed_blocks: {computed_blocks}")
     assert len(manager.req_to_block_hashes[req1.request_id]) == 3
     assert computed_blocks.get_block_ids() == [[1, 2, 3]]
     assert num_computed_tokens == 3 * 16
@@ -221,11 +221,11 @@ def test_kvbm_prefill():
     manager = new_kv_cache_manager()
 
     # Complete 3 blocks (48 tokens)
-    common_token_ids = [i for i in range(3) for _ in range(16)]
+    common_token_ids = [i for i in range(16 * 3)]
 
     # Fully cache miss
     # Incomplete 1 block (7 tokens)
-    unique_token_ids = [3] * 7
+    unique_token_ids = [88] * 7
     all_token_ids = common_token_ids + unique_token_ids
     req0 = make_request("0", all_token_ids)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
@@ -261,7 +261,7 @@ def test_kvbm_prefill():
     for block_id in (4, ):
         assert manager.block_pool.blocks[block_id].block_hash is None
         assert manager.block_pool.blocks[block_id].ref_cnt == 1
-    """
+
     # Cache hit in the common prefix when the original block is still in use.
     # Incomplete 1 block (5 tokens)
     unique_token_ids = [3] * 5
@@ -279,7 +279,6 @@ def test_kvbm_prefill():
     for block in computed_blocks.blocks:
         assert block.ref_cnt == 2
 
-    """
 
 
     # Cache hit in the common prefix when the original block is still in use.
