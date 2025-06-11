@@ -23,7 +23,7 @@
 
 # -- Path setup --------------------------------------------------------------
 
-import json
+# import json
 import os
 from datetime import date
 
@@ -31,8 +31,6 @@ from datetime import date
 # add these directories to sys.path here. If the directory is relative to the
 # documentation root, use os.path.abspath to make it absolute, like shown here.
 #
-import httplib2
-from packaging.version import Version
 
 # import sys
 # sys.path.insert(0, os.path.abspath('.'))
@@ -54,7 +52,7 @@ copyright = "2025-{}, NVIDIA Corporation".format(date.today().year)
 author = "NVIDIA"
 
 # Get the version of dynamo this is building.
-version_long = "0.1.0"
+version_long = "0.2.1"
 
 version_short = version_long
 version_short_split = version_short.split(".")
@@ -144,13 +142,13 @@ html_static_path = ["_static"]
 html_theme_options = {
     "collapse_navigation": False,
     "github_url": "https://github.com/ai-dynamo/dynamo",
-    # "switcher": {
+    "switcher": {
     # use for local testing
-    # "json_url": "http://localhost:8000/_static/switcher.json",
+    "json_url": "http://localhost:8000/_static/switcher.json",
     # "json_url": "https://docs.nvidia.com/dynamo/latest/_static/switcher.json",
-    # "version_match": one_before if "dev" in version_long else version_short,
-    # },
-    "navbar_start": ["navbar-logo", "version-switcher"],
+    "version_match": one_before if "dev" in version_long else version_short,
+    },
+    "navbar_start": ["navbar-logo"],
     "primary_sidebar_end": [],
 }
 
@@ -198,71 +196,3 @@ ultimate_replacements = {
 ### We currently use Myst: https://myst-nb.readthedocs.io/en/latest/use/execute.html
 nb_execution_mode = "off"  # Global execution disable
 # execution_excludepatterns = ['tutorials/tts-python-basics.ipynb']  # Individual notebook disable
-
-###############################
-# SETUP SWITCHER
-###############################
-switcher_path = os.path.join(html_static_path[0], "switcher.json")
-versions = []
-# Triton 2 releases
-correction = -1 if "dev" in version_long else 0
-upper_bound = version_short.split(".")[1]
-for i in range(2, int(version_short.split(".")[1]) + correction):
-    versions.append((f"2.{i}.0", f"dynamo{i}0"))
-
-# Patch releases
-# Add here.
-
-versions = sorted(versions, key=lambda v: Version(v[0]), reverse=True)
-
-# Build switcher data
-json_data = []
-for v in versions:
-    json_data.append(
-        {
-            "name": v[0],
-            "version": v[0],
-            "url": f"https://docs.nvidia.com/dynamo/archives/{v[1]}/user-guide/docs",
-        }
-    )
-if "dev" in version_long:
-    json_data.insert(
-        0,
-        {
-            "name": f"{one_before} (current_release)",
-            "version": f"{one_before}",
-            "url": "https://docs.nvidia.com/dynamo/latest/index.html",
-        },
-    )
-else:
-    json_data.insert(
-        0,
-        {
-            "name": f"{version_short} (current release)",
-            "version": f"{version_short}",
-            "url": "https://docs.nvidia.com/dynamo/latest/index.html",
-        },
-    )
-
-# Trim to last N releases.
-json_data = json_data[0:12]
-
-json_data.append(
-    {
-        "name": "older releases",
-        "version": "archives",
-        "url": "https://docs.nvidia.com/dynamo/archives/",
-    }
-)
-
-# validate the links
-for i, d in enumerate(json_data):
-    h = httplib2.Http()
-    resp = h.request(d["url"], "HEAD")
-    if int(resp[0]["status"]) >= 400:
-        print(d["url"], "NOK", resp[0]["status"])
-        # exit(1)
-
-# Write switcher data to file
-with open(switcher_path, "w") as f:
-    json.dump(json_data, f, ensure_ascii=False, indent=4)
