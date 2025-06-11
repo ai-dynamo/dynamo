@@ -22,6 +22,8 @@ class KvbmCacheBlocks:
     """
 
     def __init__(self, blocks: KvbmBlockList):
+        print(f"blocks from __init__: {blocks}")
+        print(f"blocks.block_count(): {blocks.block_count()}")
         for i in range(blocks.block_count()):
             print(
                 f"+++++++++++++++++++++++++++++++++++block {i}: {blocks.get_block_hash(i)}"

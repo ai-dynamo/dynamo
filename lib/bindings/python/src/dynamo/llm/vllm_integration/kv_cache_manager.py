@@ -84,8 +84,14 @@ class KvbmCacheManager:
         return KvbmCacheBlocks(owned_blocks), block_count * self.block_size
 =======
         print(f"block_count: {block_count}")
+<<<<<<< HEAD
         return KvbmCacheBlocks(owned_blocks), block_count
 >>>>>>> 0741a901 (Fixes)
+=======
+        returning_blocks = KvbmCacheBlocks(owned_blocks)
+        print(f"returning_blocks: {returning_blocks}")
+        return returning_blocks, block_count
+>>>>>>> c833e193 (iterative)
 
     def _create_slot(self, request: Request) -> list[int]:
         """Create a slot for the request."""
@@ -165,6 +171,10 @@ class KvbmCacheManager:
         tokens_to_append = request.all_token_ids[
             prev_computed_tokens:num_computed_tokens
         ]
+        print(f"tokens_to_append: {tokens_to_append}")
+        print(f"//////////////////request.all_token_ids: {request.all_token_ids}")
+        print(f"//////////////////num_computed_tokens: {num_computed_tokens}")
+        print(f"//////////////////prev_computed_tokens: {prev_computed_tokens}")
 
         print(
             f"request_id: {request.request_id}, num_new_tokens: {num_new_tokens}, num_new_computed_tokens: {num_new_computed_tokens}, tokens_to_append: {len(tokens_to_append)}"
@@ -182,20 +192,7 @@ class KvbmCacheManager:
             tokens_to_append=tokens_to_append,
             num_new_tokens=num_new_tokens,
             num_new_computed_tokens=num_new_computed_tokens,
-<<<<<<< HEAD
             new_computed_blocks=owned_blocks,
-=======
-            # TODO(oandreeva): need owned blocks here
-            # otherwise blocks = manager.allocate_slots(req0, 55,
-            #                            len(computed_blocks.blocks) * 16,
-            #                            computed_blocks)
-            # gives error:
-            # TypeError: argument 'new_computed_blocks': 'KvbmCacheBlocks' object cannot be converted to '
-            # KvbmBlockList'
-            new_computed_blocks=new_computed_blocks.owned_blocks
-            if new_computed_blocks is not None
-            else None,
->>>>>>> 0741a901 (Fixes)
             # TODO(ryan): add support for lookahead blocks
             # comment out for now, otherwise would error out
             # num_lookahead_blocks=num_lookahead_tokens,
@@ -219,11 +216,27 @@ class KvbmCacheManager:
         if new_blocks is None:
             return None
 
-        new_blocks = [
-            KVCacheBlock(block_id=block_id) for block_id in new_blocks.block_ids()
-        ]
+        # Get block IDs and compute sequence hashes
+        block_ids = new_blocks.block_ids()
+        print(f"new block_ids: {block_ids}")
 
-        return KVCacheBlocks(blocks=new_blocks)
+        # Create KVCacheBlocks with sequence hashes
+        new_blocks = [KVCacheBlock(block_id=block_id) for block_id in block_ids]
+        returning_blocks = KVCacheBlocks(blocks=new_blocks)
+
+        # Get sequence hashes for the new blocks
+        # Noop - we already have the sequence hashes
+        # TODO(oandreeva): replace with proper method created in vllm.rs
+        sequence_hashes = self._create_slot(request)
+        print(f"Computed sequence hashes for new blocks: {sequence_hashes}")
+        print(f"tokens_to_append: {tokens_to_append}")
+
+        for block, seq_hash in zip(new_blocks, sequence_hashes):
+            block_hash = BlockHashType(hash_value=seq_hash, token_ids=tokens_to_append)
+            print(f"=>>>>>>>>>>>block_hash: {block_hash}")
+
+        print(f"returning_blocks from allocate_slots: {returning_blocks}")
+        return returning_blocks
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
