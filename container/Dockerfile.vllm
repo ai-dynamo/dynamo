@@ -524,8 +524,10 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
-# Copy examples and tests
+# Copy examples and tests, need pyproject.toml for mypy configuration (TODO: Remove this once we have a functional ci_minimum image built on top of the runtime image)
 COPY ./examples examples/
+COPY ./tests tests/
+COPY pyproject.toml pyproject.toml
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
