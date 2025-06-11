@@ -494,6 +494,10 @@ mod tests {
         fn size_bytes(&self) -> usize {
             self.size_bytes
         }
+
+        fn shape(&self) -> Vec<usize> {
+            vec![self.size_bytes]
+        }
     }
 
     #[test]
