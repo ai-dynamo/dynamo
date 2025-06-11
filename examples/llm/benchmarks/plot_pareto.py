@@ -25,14 +25,24 @@ import seaborn as sns
 from matplotlib.ticker import MultipleLocator
 
 
-def get_genai_perf_profile_export_json_paths(search_paths):
-    paths = []
+def get_json_paths(search_paths):
+    genai_perf_profile_export_json_paths = []
+    deployment_config_json_paths = []
     for search_path in search_paths:
+        deployment_config_json_path = os.path.join(
+            search_path, "deployment_config.json"
+        )
+        if not os.path.exists(deployment_config_json_path):
+            raise Exception(f"deployment_config.json not found in {search_path}")
         for root, dirs, files in os.walk(search_path):
             for file in files:
                 if file == "profile_export_genai_perf.json":
-                    paths.append(os.path.join(root, file))
-    return paths
+                    genai_perf_profile_export_json_paths.append(
+                        os.path.join(root, file)
+                    )
+                    deployment_config_json_paths.append(deployment_config_json_path)
+
+    return genai_perf_profile_export_json_paths, deployment_config_json_paths
 
 
 # search for -concurrency<number> in the name
@@ -46,21 +56,38 @@ def parse_concurrency(name):
     return concurrency
 
 
-# serach for _tp<number>dp<number> in the name
-def parse_gpus(name):
-    matches = re.findall(r"_tp(\d+)dp(\d+)", name)
-    if len(matches) <= 0 or len(matches) > 2:
-        raise Exception(f"invalid matches: {matches}")
-    total_gpus = 0
-    for tp, dp in matches:
-        total_gpus += int(tp) * int(dp)
-    return total_gpus
+# Get the number of GPUs from the deployment config
+def parse_gpus(deployment_config_json_path):
+    with open(deployment_config_json_path, "r") as f:
+        deployment_config = json.load(f)
+    if deployment_config.get("mode") == "aggregated":
+        return deployment_config.get("tensor_parallelism") * deployment_config.get(
+            "data_parallelism"
+        )
+    else:
+        return deployment_config.get(
+            "prefill_tensor_parallelism"
+        ) * deployment_config.get("prefill_data_parallelism") + deployment_config.get(
+            "decode_tensor_parallelism"
+        ) * deployment_config.get(
+            "decode_data_parallelism"
+        )
 
 
-def extract_val_and_concurrency(genai_perf_profile_export_json_paths, stat_value="avg"):
+def parse_kind_and_mode(deployment_config_json_path):
+    with open(deployment_config_json_path, "r") as f:
+        deployment_config = json.load(f)
+    return deployment_config.get("kind"), deployment_config.get("mode")
+
+
+def extract_val_and_concurrency(
+    genai_perf_profile_export_json_paths, deployment_config_json_paths, stat_value="avg"
+):
     results = []
-    for json_path in genai_perf_profile_export_json_paths:
-        with open(json_path, "r") as f:
+    for genai_perf_profile_export_json_path, deployment_config_json_path in zip(
+        genai_perf_profile_export_json_paths, deployment_config_json_paths
+    ):
+        with open(genai_perf_profile_export_json_path, "r") as f:
             data = json.load(f)
             # output_token_throughput contains only avg
             output_token_throughput = data.get("output_token_throughput", {}).get("avg")
@@ -72,8 +99,9 @@ def extract_val_and_concurrency(genai_perf_profile_export_json_paths, stat_value
             # request_throughput contains only avg
             request_throughput = data.get("request_throughput", {}).get("avg")
 
-        concurrency = parse_concurrency(json_path)
-        num_gpus = parse_gpus(json_path)
+        concurrency = parse_concurrency(genai_perf_profile_export_json_path)
+        num_gpus = parse_gpus(deployment_config_json_path)
+        kind, mode = parse_kind_and_mode(deployment_config_json_path)
 
         # Handle the case of num_gpus=0 to avoid division by zero
         if num_gpus > 0 and output_token_throughput is not None:
@@ -88,7 +116,9 @@ def extract_val_and_concurrency(genai_perf_profile_export_json_paths, stat_value
 
         results.append(
             {
-                "configuration": json_path,
+                "configuration": genai_perf_profile_export_json_path,
+                "kind": kind,
+                "mode": mode,
                 "num_gpus": num_gpus,
                 "concurrency": float(concurrency),
                 "output_token_throughput_avg": output_token_throughput,
@@ -105,7 +135,7 @@ def extract_val_and_concurrency(genai_perf_profile_export_json_paths, stat_value
 def create_pareto_graph(results, title="", stat_value="avg"):
     data_points = [
         {
-            "label": result["configuration"].split("/")[0],
+            "label": f"{result['kind']}_{result['mode']}",
             "configuration": result["configuration"],
             "concurrency": float(result["concurrency"]),
             f"output_token_throughput_per_user_{stat_value}": result[
@@ -206,11 +236,40 @@ def create_pareto_graph(results, title="", stat_value="avg"):
 
 
 if __name__ == "__main__":
-    genai_perf_profile_export_json_paths = get_genai_perf_profile_export_json_paths(
-        [
-            "artifacts_vllm_serve_tp4dp2",
-            "artifacts_disagg_prefill_tp1dp4_decode_tp4dp1",
-        ]
+    import argparse
+    import glob
+    import os
+
+    parser = argparse.ArgumentParser(
+        description="Plot Pareto graph from GenAI-Perf artifacts"
     )
-    extracted_values = extract_val_and_concurrency(genai_perf_profile_export_json_paths)
-    create_pareto_graph(extracted_values, title="Single Node")
+    parser.add_argument(
+        "--artifacts-root-dir",
+        required=True,
+        help="Root directory containing artifact directories to search for profile_export_genai_perf.json files",
+    )
+    parser.add_argument(
+        "--title",
+        default="Single Node",
+        help="Title for the Pareto graph",
+    )
+    args = parser.parse_args()
+
+    # Find all artifacts directories under the root
+    artifacts_dirs = glob.glob(os.path.join(args.artifacts_root_dir, "artifacts_*"))
+    if not artifacts_dirs:
+        raise ValueError(f"No artifacts directories found in {args.artifacts_root_dir}")
+
+    genai_perf_profile_export_json_paths, deployment_config_json_paths = get_json_paths(
+        artifacts_dirs
+    )
+
+    if len(genai_perf_profile_export_json_paths) != len(deployment_config_json_paths):
+        raise ValueError(
+            f"Number of genai_perf_profile_export_json_paths ({len(genai_perf_profile_export_json_paths)}) does not match number of deployment_config_json_paths ({len(deployment_config_json_paths)})"
+        )
+
+    extracted_values = extract_val_and_concurrency(
+        genai_perf_profile_export_json_paths, deployment_config_json_paths
+    )
+    create_pareto_graph(extracted_values, title=args.title)
