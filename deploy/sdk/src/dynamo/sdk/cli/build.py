@@ -504,8 +504,8 @@ def build(
     service: str = typer.Argument(
         ..., help="Service specification in the format module:ServiceClass"
     ),
-    endpoint: str = typer.Option(
-        ..., "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD"
+    endpoint: t.Optional[str] = typer.Option(
+        None, "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD"
     ),
     output_dir: t.Optional[str] = typer.Option(
         None, "--output-dir", "-o", help="Output directory for the build"
@@ -528,7 +528,13 @@ def build(
     from dynamo.sdk.cli.utils import configure_target_environment
 
     configure_target_environment(TargetEnum.DYNAMO)
-    containerize = containerize or push
+    if push:
+        containerize = True
+        if endpoint is None:
+            console.print(
+                "[bold red]Error: --push requires --endpoint, -e, or DYNAMO_CLOUD environment variable to be set.[/]"
+            )
+            raise typer.Exit(1)
 
     # Determine output directory
     if output_dir is None:
