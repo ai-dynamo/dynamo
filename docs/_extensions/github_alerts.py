@@ -41,14 +41,14 @@ class GitHubAlertsTransformer:
 
     # Mapping of GitHub alert types to MyST admonition types
     ALERT_MAPPING = {
-        "note": nodes.note(),
-        "tip": nodes.tip(),
-        "important": nodes.important(),
-        "warning": nodes.warning(),
-        "caution": nodes.caution(),
-        "danger": nodes.danger(),
-        "info": nodes.note(),  # Map info to note
-        "hint": nodes.tip(),  # Map hint to tip
+        "note": nodes.note,
+        "tip": nodes.tip,
+        "important": nodes.important,
+        "warning": nodes.warning,
+        "caution": nodes.caution,
+        "danger": nodes.danger,
+        "info": nodes.note,  # Map info to note
+        "hint": nodes.tip,  # Map hint to tip
     }
 
     def __init__(self):
@@ -120,7 +120,8 @@ class GitHubAlertsTransformer:
         content_nodes.extend(blockquote.children[1:])
 
         # Map to MyST admonition type
-        admonition = self.ALERT_MAPPING.get(alert_type, nodes.note())
+        admonition_class = self.ALERT_MAPPING.get(alert_type, nodes.note)
+        admonition = admonition_class()
 
         # Add title if present
         if title:
@@ -231,7 +232,6 @@ def setup(app: Sphinx) -> Dict[str, Any]:
 
         # Add configuration values
         app.add_config_value("github_alerts_enabled", True, "env")
-        app.add_config_value("github_alerts_mapping", {}, "env")
 
         logger.info("GitHub alerts extension setup completed")
 
