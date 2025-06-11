@@ -192,7 +192,7 @@ class KvbmCacheManager:
             # gives error:
             # TypeError: argument 'new_computed_blocks': 'KvbmCacheBlocks' object cannot be converted to '
             # KvbmBlockList'
-            new_computed_blocks=new_computed_blocks._owned_blocks
+            new_computed_blocks=new_computed_blocks.owned_blocks
             if new_computed_blocks is not None
             else None,
 >>>>>>> 0741a901 (Fixes)
