@@ -129,14 +129,15 @@ cd /workspace/examples/tensorrt_llm
 dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
 ```
 
-#### Aggregated serving with Multi-Token Prediction(MTP) and DeepSeek R1
+#### Aggregated serving with Multi-Token Prediction (MTP) and DeepSeek R1
 ```bash
 cd /workspace/examples/tensorrt_llm
 dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/mtp/mtp_agg.yaml
 ```
+
 Notes:
 - There is a noticeable latency for the first two inference requests. Please send warm-up requests before starting the benchmark.
-- MTP performance may vary depending on the acceptance rate of predicted tokens, which is dependent on the dataset or queries used while benchmarking
+- MTP performance may vary depending on the acceptance rate of predicted tokens, which is dependent on the dataset or queries used while benchmarking. Additionally, `ignore_eos` should generally be omitted or set to `false` when using MTP to avoid speculating garbage outputs and getting unrealistic acceptance rates.
 
 #### Multi-Node Disaggregated Serving
 
@@ -233,7 +234,7 @@ Notes:
   unset SLURM_JOBID SLURM_JOB_ID SLURM_NODELIST
   ```
 
-#### Multi-Node Disaggregated Serving with Multi-Token Prediction(MTP) and DeepSeek R1
+#### Multi-Node Disaggregated Serving with Multi-Token Prediction (MTP) and DeepSeek R1
 
 Most of the steps remain the same as the above example, but this time we will have `dynamo serve` point to different config files that contains the MTP configurations
 
@@ -268,8 +269,9 @@ dynamo serve components.prefill_worker:TensorRTLLMPrefillWorker -f configs/deeps
 ```
 
 Notes:
-- There is a noticeable latency for the first four inference requests. Please send warm-up requests before starting the benchmark.
-- MTP performance may vary depending on the acceptance rate of predicted tokens, which is dependent on the dataset or queries used while benchmarking
+- There is a noticeable latency for the first two inference requests. Please send warm-up requests before starting the benchmark.
+- MTP performance may vary depending on the acceptance rate of predicted tokens, which is dependent on the dataset or queries used while benchmarking. Additionally, `ignore_eos` should generally be omitted or set to `false` when using MTP to avoid speculating garbage outputs and getting unrealistic acceptance rates.
+
 
 ### Client
 
