@@ -15,7 +15,7 @@
 Common:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   block-size: 64
-  max-model-len: 10
+  max-model-len: 16384
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
 
 Frontend:
@@ -26,26 +26,25 @@ Frontend:
 Processor:
   router: round-robin
   common-configs: [model, block-size]
-  prompt-template: "USER: <image>\n<prompt> ASSISTANT:"
+#  prompt-template: "USER: <image>\n<prompt> ASSISTANT:"
 
-VllmWorker:
+MockVllmWorker:
   remote-prefill: true
   conditional-disagg: true
   max-local-prefill-length: 10
   max-prefill-queue-size: 2
-  gpu-memory-utilization: 0.1
   ServiceArgs:
     workers: 1
-    resources:
-      gpu: '1'
+    #resources:
+     # gpu: '1'
   common-configs: [model, block-size, max-model-len, kv-transfer-config]
 
-PrefillWorker:
+MockPrefillWorker:
   max-num-batched-tokens: 16384
   ServiceArgs:
     workers: 1
-    resources:
-      gpu: '1'
+    #resources:
+     # gpu: '1'
   common-configs: [model, block-size, max-model-len, kv-transfer-config]
 
 Planner:

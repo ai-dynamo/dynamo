@@ -14,6 +14,7 @@
 # limitations under the License.
 
 from utils.protocol import vLLMGenerateRequest
+from vllm.remote_prefill import RemotePrefillRequest
 
 from dynamo.sdk import AbstractService, abstract_endpoint
 
@@ -23,4 +24,12 @@ class LLMWorker(AbstractService):
 
     @abstract_endpoint  # enforces that the service implements the method, but also that it is properly decorated
     async def generate(self, request: vLLMGenerateRequest):
+        pass
+
+
+class LLMPrefillWorker(AbstractService):
+    """Interface for LLM workers."""
+
+    @abstract_endpoint  # enforces that the service implements the method, but also that it is properly decorated
+    async def generate(self, request: RemotePrefillRequest):
         pass

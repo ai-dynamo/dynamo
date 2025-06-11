@@ -18,7 +18,6 @@ import asyncio
 import logging
 import random
 import time
-from multiprocessing import Process, Queue
 
 import psutil
 import pytest
@@ -26,7 +25,6 @@ import requests
 
 from dynamo.llm import KvMetricsAggregator
 from dynamo.runtime import dynamo_worker
-from tests.fault_tolerance.utils.circus_controller import CircusController
 from tests.serve.test_dynamo_serve import DynamoServeProcess
 from tests.utils.deployment_graph import (
     DeploymentGraph,
@@ -50,7 +48,6 @@ text_payload = Payload(
         "seed": 0,
         "ignore_eos": "1",
         "min_tokens": 150,
-        "stream": False,
     },
     expected_log=[],
     expected_response=["AI"],
@@ -59,8 +56,8 @@ text_payload = Payload(
 deployment_graphs = {
     "disagg": (
         DeploymentGraph(
-            module="graphs.disagg:Frontend",
-            config="configs/disagg.yaml",
+            module="graphs.mock_disagg:Frontend",
+            config="configs/mock_disagg.yaml",
             directory="/workspace/examples/llm",
             endpoint="v1/chat/completions",
             response_handler=completions_response_handler,
@@ -330,50 +327,3 @@ async def test_worker_failure(
         deployment_graph, request, args={"--MockVllmWorker.max_num_seqs": "2"}
     ) as server_process:
         _wait_until_ready(deployment_graph, server_process, payload)
-
-        circus_controller = CircusController.from_state_file("dynamo")
-
-        procs = []
-        queue = Queue()
-
-        #        procs.append(Process(target=run_metrics_process))
-        #       procs[-1].start()
-
-        for i in range(5):
-            procs.append(
-                Process(
-                    target=client,
-                    args=(
-                        deployment_graph,
-                        server_process,
-                        payload,
-                        queue,
-                        i,
-                    ),
-                )
-            )
-            procs[-1].start()
-
-        for x in await circus_controller._list_watchers():
-            print(x)
-            result = circus_controller.client.call(
-                {"command": "list", "properties": {"name": f"{x}"}}
-            )
-
-            print(result["pids"])
-
-            if x == "dynamo_vllmworker":
-                # _terminate_process_tree(result["pids"][0])
-                break
-
-        time.sleep(30)
-
-        for proc in procs:
-            #          proc.terminate()
-            #         proc.kill()
-            proc.join()
-
-        while not queue.empty():
-            print(queue.get())
-
-        circus_controller.close()

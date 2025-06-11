@@ -21,13 +21,12 @@ import signal
 import time
 
 from components.disagg_router import PyDisaggregatedRouter
-from components.llm_interfaces import LLMWorker
-from components.prefill_worker import PrefillWorker
+from components.llm_interfaces import LLMPrefillWorker, LLMWorker
 from utils.prefill_queue import PrefillQueue
 from utils.protocol import MyRequestOutput, vLLMGenerateRequest
 from utils.vllm import RouterType, parse_vllm_args
 from vllm.outputs import CompletionOutput
-from vllm.remote_prefill import RemotePrefillRequest
+from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -45,7 +44,7 @@ logger = logging.getLogger(__name__)
     workers=1,
 )
 class MockVllmWorker(LLMWorker):
-    prefill_worker = depends(PrefillWorker)
+    prefill_worker = depends(LLMPrefillWorker)
 
     def __init__(self):
         self.client = None
@@ -95,9 +94,12 @@ class MockVllmWorker(LLMWorker):
         )
         self._prefill_latency = 0.2
         self._decode_latency = 0.2
+        self._start_latency = 0.2
 
     @async_on_start
     async def async_init(self):
+        time.sleep(self._start_latency)
+
         # Initially send dummy metrics to kick start,
         # vLLM will not update stat until forward pass is triggered
         self.metrics_publisher.publish(
@@ -199,10 +201,11 @@ class MockVllmWorker(LLMWorker):
         if self.do_remote_prefill and disagg_router_decision:
             # TODO Support remote prefill
             # Mock
-            # remote_prefill_params = RemotePrefillParams(
-            #  is_remote_prefill=True,
-            #  remote_prefill_request_callback=self.get_remote_prefill_request_callback(),
-            # )
+
+            remote_prefill_params = RemotePrefillParams(
+                is_remote_prefill=True,
+                remote_prefill_request_callback=self.get_remote_prefill_request_callback(),
+            )
             logger.info(
                 f"Prefilling remotely for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
             )
@@ -218,6 +221,8 @@ class MockVllmWorker(LLMWorker):
         request.sampling_params.output_kind = RequestOutputKind.DELTA
 
         length = len(request.engine_prompt["prompt_token_ids"])
+
+        logger.info(request.sampling_params)
 
         for index, token in enumerate(request.engine_prompt["prompt_token_ids"]):
             if index == length - 1:

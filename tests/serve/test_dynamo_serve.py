@@ -153,13 +153,19 @@ deployment_graphs = {
 
 
 class DynamoServeProcess(ManagedProcess):
-    def __init__(self, graph: DeploymentGraph, request, port=8000, timeout=900):
+    def __init__(
+        self, graph: DeploymentGraph, request, port=8000, timeout=900, args=None
+    ):
         command = ["dynamo", "serve", graph.module]
 
         if graph.config:
             command.extend(["-f", os.path.join(graph.directory, graph.config)])
 
         command.extend(["--Frontend.port", str(port)])
+
+        if args:
+            for k, v in args.items():
+                command.extend([f"{k}", f"{v}"])
 
         health_check_urls = [(f"http://localhost:{port}/v1/models", self._check_model)]
 
