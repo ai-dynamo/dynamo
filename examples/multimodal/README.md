@@ -46,7 +46,6 @@ flowchart LR
   decode_worker --image_url--> encode_worker
   encode_worker --embeddings--> decode_worker
 ```
-```
 
 ```bash
 cd $DYNAMO_HOME/examples/multimodal
