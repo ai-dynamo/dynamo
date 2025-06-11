@@ -1015,19 +1015,19 @@ echo "Done"
 				Command: []string{
 					"/bin/bash",
 					"-c",
-					fmt.Sprintf(`
-				TOKEN=$(gcloud auth print-access-token)
-				cat > %s/config.json <<EOL
-				{
-					"auths": {
-						"%s": {
-							"auth": "$(echo -n "oauth2accesstoken:${TOKEN}" | base64 -w 0)"
-						}
-					}
-				}
-				EOL
-				echo 'Docker config.json created successfully'
-				`, consts.DockerConfigVolumeMountPath, dockerRegistry),
+					fmt.Sprintf(`set -e
+gcloud config get-value account
+TOKEN=$(gcloud auth print-access-token)
+cat > %s/config.json <<EOL
+{
+	"auths": {
+		"%s": {
+			"auth": "$(echo -n "oauth2accesstoken:${TOKEN}" | base64 -w 0)"
+		}
+	}
+}
+EOL
+echo 'Docker config.json created successfully'`, consts.DockerConfigVolumeMountPath, dockerRegistry),
 				},
 				Resources:    downloaderContainerResources,
 				EnvFrom:      downloaderContainerEnvFrom,
