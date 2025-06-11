@@ -30,7 +30,6 @@ pip==25.0.1
 pre-commit
 protobuf==5.27.3
 pydantic==2.7.1
-pynvml
 pyright
 PyYAML
 scikit-learn
