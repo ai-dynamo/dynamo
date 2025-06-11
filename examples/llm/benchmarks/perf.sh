@@ -158,7 +158,7 @@ if [ $index -gt 0 ]; then
 fi
 
 # Concurrency levels to test
-for concurrency in 1 2 4; do
+for concurrency in 1 2 4 8 16 32 64 128 256; do
 
   # NOTE: For Dynamo HTTP OpenAI frontend, use `nvext` for fields like
   # `ignore_eos` since they are not in the official OpenAI spec.
