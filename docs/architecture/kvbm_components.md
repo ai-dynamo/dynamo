@@ -177,7 +177,7 @@ The left side of the figure in [Understanding KVBM Components](#understanding-kv
 
 You can integrate KVBM with a storage backend by extending or wrapping `NixlEnabledStorage` to support cross-node RDMA registration. All layouts and block pools are generic over these backends, allowing for fine-grained control over memory tiers. We defer detailed integration guidance, since we collaborate with storage partners to simplify and standardize these integration paths.
 
-```{mermaid}
+```mermaid
 ---
 title: Example KVBM System Architecture
 ---
