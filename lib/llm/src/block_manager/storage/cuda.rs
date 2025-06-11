@@ -498,6 +498,10 @@ mod tests {
         fn shape(&self) -> Vec<usize> {
             vec![self.size_bytes]
         }
+
+        fn stride(&self) -> Vec<usize> {
+            vec![1]
+        }
     }
 
     #[test]

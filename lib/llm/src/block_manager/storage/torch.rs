@@ -24,4 +24,5 @@ pub trait TorchTensor: std::fmt::Debug + Send + Sync {
     fn data_ptr(&self) -> u64;
     fn size_bytes(&self) -> usize;
     fn shape(&self) -> Vec<usize>;
+    fn stride(&self) -> Vec<usize>;
 }
