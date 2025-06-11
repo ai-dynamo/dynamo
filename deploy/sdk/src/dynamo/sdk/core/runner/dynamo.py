@@ -252,19 +252,6 @@ class LocalDeploymentTarget(DeploymentTarget):
         )
         self._watchers.append(watcher)
 
-        # I should not need the below. It is already in the config=ServiceConfig.
-        # # Inject kubernetes_overrides into config if present on service_cls
-        # kubernetes_overrides = getattr(service_cls, "_kubernetes_overrides", None)
-        # if kubernetes_overrides is not None:
-        #     logger.debug(
-        #         f"Injecting kubernetes_overrides into ServiceConfig for {service_cls.__name__}: {kubernetes_overrides}"
-        #     )
-        #     config.kubernetes_overrides = (
-        #         kubernetes_overrides.model_dump()
-        #         if hasattr(kubernetes_overrides, "model_dump")
-        #         else kubernetes_overrides
-        #     )
-
         # Create and return the se rvice interface
         return LocalService(
             inner_cls=service_cls,

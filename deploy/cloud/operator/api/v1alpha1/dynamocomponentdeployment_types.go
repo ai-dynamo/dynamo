@@ -80,9 +80,6 @@ type DynamoComponentDeploymentSharedSpec struct {
 	LivenessProbe  *corev1.Probe `json:"livenessProbe,omitempty"`
 	ReadinessProbe *corev1.Probe `json:"readinessProbe,omitempty"`
 	Replicas       *int32        `json:"replicas,omitempty"`
-
-	// +optional
-	Entrypoint *string `json:"entrypoint,omitempty"`
 }
 
 type RunMode struct {

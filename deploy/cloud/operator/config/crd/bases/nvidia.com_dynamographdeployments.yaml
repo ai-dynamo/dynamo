@@ -2954,6 +2954,79 @@ spec:
                       type: object
                     serviceName:
                       type: string
+                    mainContainer:
+                      type: object
+                      properties:
+                        name:
+                          type: string
+                        image:
+                          type: string
+                        command:
+                          type: array
+                          items:
+                            type: string
+                        args:
+                          type: array
+                          items:
+                            type: string
+                        workingDir:
+                          type: string
+                        ports:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              name:
+                                type: string
+                              containerPort:
+                                type: integer
+                              protocol:
+                                type: string
+                        envFrom:
+                          type: array
+                          items:
+                            type: object
+                        env:
+                          type: array
+                          items:
+                            type: object
+                        resources:
+                          type: object
+                        volumeMounts:
+                          type: array
+                          items:
+                            type: object
+                            properties:
+                              mountPath:
+                                type: string
+                              mountPropagation:
+                                type: string
+                              name:
+                                type: string
+                              readOnly:
+                                type: boolean
+                              recursiveReadOnly:
+                                type: string
+                              subPath:
+                                type: string
+                              subPathExpr:
+                                type: string
+                        livenessProbe:
+                          type: object
+                        readinessProbe:
+                          type: object
+                        startupProbe:
+                          type: object
+                        lifecycle:
+                          type: object
+                        terminationMessagePath:
+                          type: string
+                        terminationMessagePolicy:
+                          type: string
+                        imagePullPolicy:
+                          type: string
+                        securityContext:
+                          type: object
                   type: object
                 type: object
             required:

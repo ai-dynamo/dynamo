@@ -333,6 +333,7 @@ class Package:
         tag = Tag(name=package_name, version=version)
         if version is None:
             tag = tag.make_new_version()
+
         logger.debug(
             f'Building Dynamo package "{tag}" from build context "{build_ctx}".'
         )
