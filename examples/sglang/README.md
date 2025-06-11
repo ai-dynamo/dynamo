@@ -19,6 +19,18 @@ limitations under the License.
 
 This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations using SGLang. SGLang internally uses ZMQ to communicate between the ingress and the engine processes. For Dynamo, we leverage the runtime to communicate directly with the engine processes and handle ingress and pre/post processing on our end.
 
+## Use the Latest Release
+
+We recommend using the latest stable release of dynamo to avoid breaking changes:
+
+[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
+
+You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
+
+```bash
+git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
+```
+
 ## Deployment Architectures
 
 See [deployment architectures](../llm/README.md#deployment-architectures) to learn about the general idea of the architecture. SGLang currently supports aggregated and disaggregated serving. KV routing support is coming soon!

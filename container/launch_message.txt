@@ -50,8 +50,14 @@ Try the following to begin interacting with a model:
 > dynamo --help
 > dynamo run Qwen/Qwen2.5-3B-Instruct
 
-For more complete deployment configurations, check out the examples folder.
-To run the examples instances of etcd and nats are needed from the host system.
+To run more complete deployment examples, instances of etcd and nats need to be
+accessible within the container. This is generally done by connecting to
+existing etcd/nats services from the host or other containers. For simple
+cases, you can start them in the container as well:
+> nats-server -js &
+> etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd &
+
+With etcd/nats accessible, run the examples:
 > cd examples/hello_world
 > dynamo serve hello_world:Frontend
 

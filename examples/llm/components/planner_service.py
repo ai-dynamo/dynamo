@@ -57,9 +57,6 @@ class Planner:
         self.args = argparse.Namespace(
             namespace=self.namespace,
             environment=config_instance.get("environment", PlannerDefaults.environment),
-            served_model_name=config_instance.get(
-                "served-model-name", PlannerDefaults.served_model_name
-            ),
             no_operation=config_instance.get(
                 "no-operation", PlannerDefaults.no_operation
             ),

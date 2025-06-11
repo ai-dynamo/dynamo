@@ -76,8 +76,8 @@ def test_build_latest_revision_from_cr_minimal():
     rev = build_latest_revision_from_cr(cr)
     assert rev["uid"] == "u1"
     assert rev["name"] == "n1"
-    assert rev["targets"][0]["bento"]["repository"]["name"] == "repo"
-    assert rev["targets"][0]["bento"]["name"] == "ver"
+    assert rev["targets"][0]["dynamo"]["repository"]["name"] == "repo"
+    assert rev["targets"][0]["dynamo"]["name"] == "ver"
     assert rev["targets"][0]["config"]["services"] == {"svc": {}}
     assert rev["targets"][0]["config"]["envs"] == [{"name": "A", "value": "B"}]
 
@@ -87,14 +87,14 @@ def test_build_latest_revision_from_cr_missing_fields():
     rev = build_latest_revision_from_cr(cr)
     assert rev["uid"] == "dummy-uid"
     assert rev["name"] == "dummy-revision"
-    assert rev["targets"][0]["bento"]["repository"]["name"] == "unknown"
-    assert rev["targets"][0]["bento"]["name"] == "unknown"
+    assert rev["targets"][0]["dynamo"]["repository"]["name"] == "unknown"
+    assert rev["targets"][0]["dynamo"]["name"] == "unknown"
     assert rev["targets"][0]["config"]["services"] == {}
     assert rev["targets"][0]["config"]["envs"] == []
 
 
-def test_build_latest_revision_from_cr_bento_colonless():
+def test_build_latest_revision_from_cr_dynamo_colonless():
     cr = {"spec": {"dynamoGraph": "justrepo"}}
     rev = build_latest_revision_from_cr(cr)
-    assert rev["targets"][0]["bento"]["repository"]["name"] == "unknown"
-    assert rev["targets"][0]["bento"]["name"] == "unknown"
+    assert rev["targets"][0]["dynamo"]["repository"]["name"] == "unknown"
+    assert rev["targets"][0]["dynamo"]["name"] == "unknown"

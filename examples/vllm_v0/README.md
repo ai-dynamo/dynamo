@@ -19,8 +19,20 @@ limitations under the License.
 
 This directory contains examples for deploying vLLM (v0) models in both aggregated and disaggregated configurations.
 
+## Use the Latest Release
+
+We recommend using the latest stable release of dynamo to avoid breaking changes:
+
+[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
+
+You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
+
+```bash
+git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
+```
+
 > [!NOTE]
-> Different than `/examples/llm`, this example uses `dynamo-run` to handle the (de)tokenization and routing. `dynamo-run` is a rust-based CLI designed for high-performance pre/post-processing and routing. Read more about `dynamo-run`: [dynamo_run.md](../docs/guides/dynamo_run.md).
+> Different than `/examples/llm`, this example uses `dynamo-run` to handle the (de)tokenization and routing. `dynamo-run` is a rust-based CLI designed for high-performance pre/post-processing and routing. Read more about `dynamo-run`: [dynamo_run.md](../../docs/guides/dynamo_run.md).
 
 ## Prerequisites
 

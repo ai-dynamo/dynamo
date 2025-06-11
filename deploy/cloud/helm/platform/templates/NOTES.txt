@@ -17,7 +17,7 @@
   {{- if (index .Values "dynamo-api-store").ingress.enabled }}
 Your service is available at:
 
-  http{{ if .Values.ingress.tls }}s{{ end }}://{{ (index .Values.ingress.hosts 0).host }}
+  http{{ if (index .Values "dynamo-api-store").ingress.tls }}s{{ end }}://{{ (index (index .Values "dynamo-api-store").ingress.hosts 0).host }}
 
   {{- else if (index .Values "dynamo-api-store").istio.enabled }}
 Your service is available at:
@@ -30,7 +30,7 @@ No ingress configured.
 
 To access your service via port-forwarding, run:
 
-  kubectl port-forward svc/dynamo-store <local-port>:{{ (index .Values "dynamo-api-store").service.port }}
+  kubectl port-forward svc/{{ include "helm.fullname" (index .Subcharts "dynamo-api-store") }} <local-port>:{{ (index .Values "dynamo-api-store").service.port }}
 
 Then access it locally at:
 

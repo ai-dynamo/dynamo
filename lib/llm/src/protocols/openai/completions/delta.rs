@@ -13,11 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{CompletionChoice, CompletionRequest, CompletionResponse};
+use super::{CompletionChoice, CompletionResponse, NvCreateCompletionRequest};
 use crate::protocols::common;
 use crate::protocols::openai::CompletionUsage;
 
-impl CompletionRequest {
+impl NvCreateCompletionRequest {
     // put this method on the request
     // inspect the request to extract options
     pub fn response_generator(&self) -> DeltaGenerator {
@@ -125,5 +125,10 @@ impl crate::protocols::openai::DeltaGeneratorExt<CompletionResponse> for DeltaGe
         // create choice
         let index = 0;
         Ok(self.create_choice(index, delta.text, finish_reason))
+    }
+
+    // TODO: This is a hack. Change `prompt_tokens` to u32
+    fn get_isl(&self) -> Option<u32> {
+        Some(self.usage.prompt_tokens as u32)
     }
 }

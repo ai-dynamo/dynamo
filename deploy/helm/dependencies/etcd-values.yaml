@@ -20,7 +20,7 @@ auth:
     create: false
 
 readinessProbe:
-  enabled: false
+  enabled: true
 
 livenessProbe:
-  enabled: false
+  enabled: true

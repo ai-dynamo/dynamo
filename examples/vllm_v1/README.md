@@ -19,6 +19,18 @@ limitations under the License.
 
 This directory contains examples for deploying vLLM models in both aggregated and disaggregated configurations.
 
+## Use the Latest Release
+
+We recommend using the latest stable release of dynamo to avoid breaking changes:
+
+[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
+
+You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
+
+```bash
+git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
+```
+
 ## Prerequisites
 
 1. Install vLLM:
@@ -64,3 +76,50 @@ curl localhost:8000/v1/completions \
 
 For more detailed explenations, refer to the main [LLM examples README](../llm/README.md).
 
+
+
+## Deepseek R1
+
+To run DSR1 model please first follow the Ray setup from the [multinode documentation](../../docs/examples/multinode.md).
+
+### Aggregated Deployment
+
+```bash
+cd examples/vllm_v1
+dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/agg.yaml
+```
+
+
+### Disaggregated Deployment
+
+To create frontend with a single decode worker:
+```bash
+cd examples/vllm_v1
+dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/disagg.yaml
+```
+
+To create a single decode worker:
+```bash
+cd examples/vllm_v1
+dynamo serve components.worker:VllmDecodeWorker -f configs/deepseek_r1/disagg.yaml
+```
+
+To create a single prefill worker:
+```bash
+cd examples/vllm_v1
+dynamo serve components.worker:VllmPrefillWorker -f configs/deepseek_r1/disagg.yaml
+```
+
+## Testing
+
+Send a test request using curl:
+```bash
+curl localhost:8000/v1/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-ai/DeepSeek-R1",
+    "prompt": "In the heart of Eldoria...",
+    "stream": false,
+    "max_tokens": 30
+  }'
+```

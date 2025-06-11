@@ -20,6 +20,7 @@ Common:
 
 Processor:
   router: round-robin
+  prompt-template: "USER: <image>\n<prompt> ASSISTANT:"
   common-configs: [model, block-size]
 
 VllmDecodeWorker:
@@ -30,7 +31,7 @@ VllmDecodeWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 1
+      gpu: '1'
   common-configs: [model, block-size, max-model-len, kv-transfer-config]
 
 VllmPrefillWorker:
@@ -38,7 +39,7 @@ VllmPrefillWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 1
+      gpu: '1'
   common-configs: [model, block-size, max-model-len, kv-transfer-config]
 
 VllmEncodeWorker:
@@ -47,5 +48,5 @@ VllmEncodeWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 1
+      gpu: '1'
   common-configs: [model]

@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
+	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -165,4 +166,26 @@ func (s *DynamoComponentDeployment) SetSpec(spec any) {
 
 func (s *DynamoComponentDeployment) IsMainComponent() bool {
 	return strings.HasSuffix(s.Spec.DynamoTag, s.Spec.ServiceName)
+}
+
+func (s *DynamoComponentDeployment) GetDynamoDeploymentConfig() []byte {
+	for _, env := range s.Spec.Envs {
+		if env.Name == commonconsts.DynamoDeploymentConfigEnvVar {
+			return []byte(env.Value)
+		}
+	}
+	return nil
+}
+
+func (s *DynamoComponentDeployment) SetDynamoDeploymentConfig(config []byte) {
+	for i, env := range s.Spec.Envs {
+		if env.Name == commonconsts.DynamoDeploymentConfigEnvVar {
+			s.Spec.Envs[i].Value = string(config)
+			return
+		}
+	}
+	s.Spec.Envs = append(s.Spec.Envs, corev1.EnvVar{
+		Name:  commonconsts.DynamoDeploymentConfigEnvVar,
+		Value: string(config),
+	})
 }

@@ -19,6 +19,18 @@ limitations under the License.
 
 This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations.
 
+## Use the Latest Release
+
+We recommend using the latest stable release of dynamo to avoid breaking changes:
+
+[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
+
+You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
+
+```bash
+git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
+```
+
 ## Components
 
 - workers: Prefill and decode worker handles actual LLM inference
@@ -225,17 +237,18 @@ dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
 
 ### Testing the Deployment
 
-Once the deployment is complete, you can test it using:
+Once the deployment is complete, you can test it. If you have ingress available for your deployment, you can directly call the url returned
+in `dynamo deployment get ${DEPLOYMENT_NAME}` and skip the steps to find and forward the frontend pod.
 
 ```bash
 # Find your frontend pod
 export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
 
 # Forward the pod's port to localhost
-kubectl port-forward pod/$FRONTEND_POD 8000:8000 -n ${KUBE_NS}
+kubectl port-forward pod/$FRONTEND_POD 3000:3000 -n ${KUBE_NS}
 
 # Test the API endpoint
-curl localhost:8000/v1/chat/completions \
+curl localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",

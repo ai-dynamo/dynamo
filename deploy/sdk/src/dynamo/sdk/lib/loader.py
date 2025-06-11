@@ -26,7 +26,7 @@ from typing import Optional, TypeVar
 import yaml
 
 from dynamo.sdk.core.protocol.deployment import Service
-from dynamo.sdk.lib.service import DynamoService
+from dynamo.sdk.core.protocol.interface import ServiceInterface
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=object)
@@ -35,7 +35,7 @@ T = TypeVar("T", bound=object)
 def find_and_load_service(
     import_str: str,
     working_dir: Optional[str] = None,
-) -> DynamoService:
+) -> ServiceInterface:
     """Load a DynamoService instance from source code by providing an import string.
 
     Args:
@@ -84,7 +84,7 @@ def find_and_load_service(
             os.chdir(prev_cwd)
 
 
-def _do_import(import_str: str, working_dir: str) -> DynamoService:
+def _do_import(import_str: str, working_dir: str) -> ServiceInterface:
     """Internal function to handle the actual import logic"""
     import_path, _, attrs_str = import_str.partition(":")
     logger.debug(f"Parsed import string - path: {import_path}, attributes: {attrs_str}")
@@ -139,7 +139,7 @@ def _do_import(import_str: str, working_dir: str) -> DynamoService:
         services = [
             (name, obj)
             for name, obj in module.__dict__.items()
-            if isinstance(obj, DynamoService)
+            if isinstance(obj, ServiceInterface)
         ]
         logger.debug(f"Found {len(services)} DynamoService instances")
 
@@ -178,7 +178,7 @@ def _do_import(import_str: str, working_dir: str) -> DynamoService:
         instance = module
         for attr in attrs_str.split("."):
             try:
-                if isinstance(instance, DynamoService):
+                if isinstance(instance, ServiceInterface):
                     logger.debug(f"Following dependency link: {attr}")
                     instance = instance.dependencies[attr].on
                 else:
@@ -209,7 +209,7 @@ def _get_dir_size(path: str) -> int:
 
 def load_entry_service(
     pipeline_tag: str, build_dir: str = "~/.dynamo/packages"
-) -> Service:
+) -> ServiceInterface:
     """
     Given a built pipeline tag (e.g. frontend:2uk2fwzvqsswvs7t), load the entry service as a deployment Service instance.
     """
@@ -223,7 +223,7 @@ def load_entry_service(
     config_path = os.path.join(graph_dir, "dynamo.yaml")
     if not os.path.isfile(config_path):
         raise FileNotFoundError(
-            f"Pipeline config (bento.yaml) not found in {graph_dir}"
+            f"Pipeline config (dynamo.yaml) not found in {graph_dir}"
         )
     with open(config_path, encoding="utf-8") as f:
         graph_cfg = yaml.safe_load(f)
@@ -233,7 +233,7 @@ def load_entry_service(
     if src_dir not in sys.path:
         sys.path.insert(0, src_dir)
 
-    # Compute size_bytes as the total size of the bento directory
+    # Compute size_bytes as the total size of the dynamo directory
     size_bytes = _get_dir_size(graph_dir)
 
     service_name = graph_cfg.get("service")

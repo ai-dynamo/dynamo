@@ -14,12 +14,12 @@
 // limitations under the License.
 
 use async_openai::types::CreateCompletionRequestArgs;
-use dynamo_llm::protocols::openai::{self, completions::CompletionRequest};
+use dynamo_llm::protocols::openai::{self, completions::NvCreateCompletionRequest};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct CompletionSample {
-    request: CompletionRequest,
+    request: NvCreateCompletionRequest,
     description: String,
 }
 
@@ -36,7 +36,7 @@ impl CompletionSample {
 
         let inner = builder.build().unwrap();
 
-        let request = CompletionRequest { inner, nvext: None };
+        let request = NvCreateCompletionRequest { inner, nvext: None };
 
         Ok(Self {
             request,
