@@ -33,7 +33,6 @@ def start_server(server):
     server.serve_forever()
 
 
-# From Richard's code, should merged together
 class HealthServer(HTTPServer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -80,7 +79,7 @@ def parse_args(service_name, prefix) -> Namespace:
         "--timeout",
         type=int,
         default=600,
-        help="Timeout for waiting for workers to be ready",
+        help="Timeout (seconds) for waiting for workers to be ready",
     )
     parser.add_argument(
         "--port",
