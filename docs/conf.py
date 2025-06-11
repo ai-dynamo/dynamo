@@ -24,7 +24,6 @@
 # -- Path setup --------------------------------------------------------------
 
 # import json
-import os
 from datetime import date
 
 # If extensions (or modules to document with autodoc) are in another directory,
@@ -143,10 +142,10 @@ html_theme_options = {
     "collapse_navigation": False,
     "github_url": "https://github.com/ai-dynamo/dynamo",
     "switcher": {
-    # use for local testing
-    "json_url": "http://localhost:8000/_static/switcher.json",
-    # "json_url": "https://docs.nvidia.com/dynamo/latest/_static/switcher.json",
-    "version_match": one_before if "dev" in version_long else version_short,
+        # use for local testing
+        "json_url": "http://localhost:8000/_static/switcher.json",
+        # "json_url": "https://docs.nvidia.com/dynamo/latest/_static/switcher.json",
+        "version_match": one_before if "dev" in version_long else version_short,
     },
     "navbar_start": ["navbar-logo"],
     "primary_sidebar_end": [],
