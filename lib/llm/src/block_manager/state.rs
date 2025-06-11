@@ -20,29 +20,10 @@ use super::{
     block::{Block, GlobalRegistry, ImmutableBlock},
     config::NixlOptions,
     events::{EventManager, NullEventManager},
+    metrics::{BlockManagerMetrics, PoolMetrics},
 };
-use cudarc::driver::CudaStream;
 use std::sync::Arc;
 use tokio::runtime::Handle;
-
-pub struct TransferContext {
-    nixl_agent: Arc<Option<NixlAgent>>,
-    stream: Arc<CudaStream>,
-}
-
-impl TransferContext {
-    pub fn new(nixl_agent: Arc<Option<NixlAgent>>, stream: Arc<CudaStream>) -> Self {
-        Self { nixl_agent, stream }
-    }
-
-    pub fn nixl_agent(&self) -> Arc<Option<NixlAgent>> {
-        self.nixl_agent.clone()
-    }
-
-    pub fn stream(&self) -> &Arc<CudaStream> {
-        &self.stream
-    }
-}
 
 #[allow(dead_code)]
 pub struct KvBlockManagerState<Metadata: BlockMetadata> {
@@ -78,6 +59,9 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
         let mut nixl_backends: HashMap<String, Arc<nixl_sys::Backend>> = HashMap::new();
 
         let global_registry = GlobalRegistry::default();
+
+        let metrics = BlockManagerMetrics::new(&config.runtime.metrics_registry)?;
+
         let event_manager = config
             .event_manager
             .clone()
@@ -155,6 +139,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                     worker_id,
                     global_registry.clone(),
                     async_rt_handle.clone(),
+                    metrics.pool("disk"),
                     Some(event_manager.clone()),
                 )?;
                 (Some(Arc::new(pool)), Some(blocks))
@@ -178,6 +163,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 worker_id,
                 global_registry.clone(),
                 async_rt_handle.clone(),
+                metrics.pool("host"),
                 Some(event_manager.clone()),
             )?;
             (Some(Arc::new(pool)), Some(blocks))
@@ -200,6 +186,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
                 worker_id,
                 global_registry.clone(),
                 async_rt_handle.clone(),
+                metrics.pool("device"),
                 Some(event_manager.clone()),
             )?;
             (Some(Arc::new(pool)), Some(blocks))
@@ -220,6 +207,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<Metadata> {
             device_pool.clone(),
             nixl_agent.clone(),
             async_rt_handle,
+            metrics.clone(),
             cancellation_token.clone(),
         )?;
 
@@ -495,7 +483,7 @@ fn create_layout<S: Storage + NixlRegisterableStorage>(
     anyhow::bail!("failed to create layout");
 }
 
-#[expect(clippy::type_complexity)]
+#[expect(clippy::type_complexity, clippy::too_many_arguments)]
 fn create_block_pool<S: Storage + NixlRegisterableStorage, M: BlockMetadata>(
     layout: Arc<dyn NixlLayout<StorageType = S>>,
     block_set_idx: usize,
@@ -503,6 +491,7 @@ fn create_block_pool<S: Storage + NixlRegisterableStorage, M: BlockMetadata>(
     worker_id: WorkerID,
     global_registry: GlobalRegistry,
     async_runtime: Handle,
+    pool_metrics: Arc<PoolMetrics>,
     event_manager: Option<Arc<dyn EventManager>>,
 ) -> Result<(BlockPool<S, M>, Vec<Block<S, M>>)> {
     let blocks = block::layout_to_blocks::<_, M>(layout, block_set_idx, worker_id)?;
@@ -511,6 +500,7 @@ fn create_block_pool<S: Storage + NixlRegisterableStorage, M: BlockMetadata>(
         .cancel_token(cancellation_token)
         .global_registry(global_registry)
         .async_runtime(async_runtime)
+        .pool_metrics(pool_metrics)
         .event_manager(event_manager)
         .build()?;
     Ok((pool, blocks))

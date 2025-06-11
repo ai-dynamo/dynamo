@@ -52,6 +52,18 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
         help="Maximum queue size for remote prefill. If the prefill queue size is greater than this value, prefill phase of the incoming request will be executed locally.",
     )
     parser.add_argument(
+        "--image-token-id",
+        type=int,
+        default=32000,
+        help="Image token ID used to represent image patches in the token sequence",
+    )
+    parser.add_argument(
+        "--num-patches",
+        type=int,
+        default=576,
+        help="Number of patches the input image is divided into (must be positive)",
+    )
+    parser.add_argument(
         "--prompt-template",
         type=str,
         default="<prompt>",
@@ -66,4 +78,6 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     engine_args.max_local_prefill_length = args.max_local_prefill_length
     engine_args.max_prefill_queue_size = args.max_prefill_queue_size
     engine_args.prompt_template = args.prompt_template
+    engine_args.num_patches = args.num_patches
+    engine_args.image_token_id = args.image_token_id
     return engine_args
