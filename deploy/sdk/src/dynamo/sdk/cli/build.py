@@ -107,7 +107,7 @@ class ServiceConfig(BaseModel):
     dynamo: t.Dict[str, t.Any] = Field(default_factory=dict)
     http_exposed: bool = False
     api_endpoints: t.List[str] = Field(default_factory=list)
-    kubernetes_overrides: t.Optional[t.Dict[str, t.Any]] = None
+    kubernetes_overrides: t.Optional[t.Dict[str, t.Any]] = Field(default_factory=dict)
 
 
 class ServiceInfo(BaseModel):
@@ -135,20 +135,6 @@ class ServiceInfo(BaseModel):
             image is not None
         ), "Please set DYNAMO_IMAGE environment variable or image field in service config"
 
-        print(
-            f"!!! Creating ServiceConfig for {name}: hasattr(service.config, kubernetes_overrides) = {hasattr(service.config, 'kubernetes_overrides')}"
-        )
-        print(f"!!! service.config.model_dump() = {service.config.model_dump()}")
-        kubernetes_overrides = None
-        if (
-            hasattr(service, "kubernetes_overrides")
-            and service.kubernetes_overrides is not None
-        ):
-            print("!kubernetes_overrides exist")
-            kubernetes_overrides = service.kubernetes_overrides.model_dump()
-        else:
-            print("!kubernetes_overrides DOES NOT exist")
-
         # Create config
         config = ServiceConfig(
             name=name,
@@ -159,8 +145,7 @@ class ServiceInfo(BaseModel):
             dynamo=service.config.dynamo.model_dump(),
             http_exposed=len(api_endpoints) > 0,
             api_endpoints=api_endpoints,
-            kubernetes_overrides=kubernetes_overrides,
-            # service.config.model_dump().get("kubernetes_overrides")
+            kubernetes_overrides=service.config.kubernetes_overrides,
         )
 
         return cls(
@@ -233,11 +218,16 @@ class ManifestInfo(BaseModel):
                     "workers": service["config"]["workers"],
                     "image": service["config"]["image"],
                     "dynamo": service["config"]["dynamo"],
-                    "kubernetes_overrides": service["config"].get(
-                        "kubernetes_overrides"
-                    ),  # Add kubernetes_overrides.
                 },
             }
+            # Add kubernetes_overrides if present.
+            if (
+                "kubernetes_overrides" in service["config"]
+                and service["config"]["kubernetes_overrides"]
+            ):
+                service_dict["config"]["kubernetes_overrides"] = service["config"][
+                    "kubernetes_overrides"
+                ]
 
             # Add HTTP configuration if exposed
             if service["config"]["http_exposed"]:
@@ -315,8 +305,6 @@ class Package:
         from dynamo.sdk.lib.loader import find_and_load_service
 
         dyn_svc = find_and_load_service(build_config.service, working_dir=build_ctx)
-        print(f"!!! dyn_svc type = {type(dyn_svc)}")
-        print(f"!!! dyn_svc.inner type = {type(dyn_svc.inner)}")
 
         # Clean up unused edges
         LinkedServices.remove_unused_edges()

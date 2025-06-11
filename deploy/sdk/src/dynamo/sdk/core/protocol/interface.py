@@ -83,6 +83,7 @@ class ServiceConfig(BaseModel):
     image: str | None = None
     envs: List[Env] | None = None
     labels: Dict[str, str] | None = None
+    kubernetes_overrides: Dict[str, Any] | None = None
 
 
 class DynamoEndpointInterface(ABC):
