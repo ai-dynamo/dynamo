@@ -1023,7 +1023,7 @@ echo "Done"
 					"-c",
 					fmt.Sprintf(`set -e
 gcloud --quiet config get-value account
-TOKEN=$(gcloud --quietauth print-access-token)
+TOKEN=$(gcloud --quiet auth print-access-token)
 cat > %s/config.json <<EOL
 {
 	"auths": {
