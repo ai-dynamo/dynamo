@@ -19,6 +19,14 @@ pub const ENDPOINT_KEYWORD: &str = "_endpoint_";
 static ALLOWED_CHARS_REGEX: Lazy<regex::Regex> =
     Lazy::new(|| regex::Regex::new(r"^[a-z0-9-_]+$").unwrap());
 
+// TODO(ryan): this was an initial implementation that inspired the DEP; we'll keep it asis for now
+// and update this impl with respect to the DEP.
+//
+// Notes:
+// - follow up on this comment: https://github.com/ai-dynamo/dynamo/pull/1459#discussion_r2140616397
+//   - we will be decoupling the "identifer" from the "extra path" bits as two separate objects
+//   - this issue above is a problem, but will be solved by the DEP
+
 /// Represents a parsed etcd path with hierarchical namespaces, components, endpoints, and extra paths
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EtcdPath {
