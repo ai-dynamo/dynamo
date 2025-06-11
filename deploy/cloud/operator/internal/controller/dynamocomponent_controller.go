@@ -1006,7 +1006,13 @@ echo "Done"
 
 	if dockerConfigJSONSecretName == "" {
 		// if no explicit docker config is provided, we need to provide the docker config to the image builder
-		dockerRegistry := strings.Split(imageName, "/")[0]
+		var ref name.Reference
+		ref, err = name.ParseReference(imageName)
+		if err != nil {
+			err = errors.Wrap(err, "failed to parse reference")
+			return
+		}
+		dockerRegistry := ref.Context().RegistryStr()
 		if isGoogleRegistry(dockerRegistry) {
 			// for GCP, we use the google cloud sdk to get the docker config.
 			initContainers = append(initContainers, corev1.Container{
@@ -1016,8 +1022,8 @@ echo "Done"
 					"/bin/bash",
 					"-c",
 					fmt.Sprintf(`set -e
-gcloud config get-value account
-TOKEN=$(gcloud auth print-access-token)
+gcloud --quiet config get-value account
+TOKEN=$(gcloud --quietauth print-access-token)
 cat > %s/config.json <<EOL
 {
 	"auths": {
