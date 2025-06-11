@@ -290,7 +290,7 @@ impl OpenAIPreprocessor {
                     let llm_metrics = LLMMetricAnnotation {
                         input_tokens: isl,
                         output_tokens: current_osl,
-                        chunk_tokens: chunk_tokens,
+                        chunk_tokens,
                     };
 
                     if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
