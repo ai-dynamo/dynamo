@@ -25,24 +25,25 @@ import seaborn as sns
 from matplotlib.ticker import MultipleLocator
 
 
-def get_genai_perf_profile_export_json_paths(search_paths):
-    paths = []
+def get_json_paths(search_paths):
+    genai_perf_profile_export_json_paths = []
+    deployment_config_json_paths = []
     for search_path in search_paths:
+        deployment_config_json_path = os.path.join(
+            search_path, "deployment_config.json"
+        )
+        if not os.path.exists(deployment_config_json_path):
+            raise Exception(f"deployment_config.json not found in {search_path}")
         for root, dirs, files in os.walk(search_path):
             for file in files:
                 if file == "profile_export_genai_perf.json":
-                    paths.append(os.path.join(root, file))
-    return paths
+                    genai_perf_profile_export_json_paths.append(
+                        os.path.join(root, file)
+                    )
+                    deployment_config_json_paths.append(deployment_config_json_path)
 
-# search for deployment_config.json in the search paths
-def get_deployment_config_json_paths(search_paths):
-    paths = []
-    for search_path in search_paths:
-        for root, dirs, files in os.walk(search_path):
-            for file in files:
-                if file == "deployment_config.json":
-                    paths.append(os.path.join(root, file))
-    return paths
+    return genai_perf_profile_export_json_paths, deployment_config_json_paths
+
 
 # search for -concurrency<number> in the name
 def parse_concurrency(name):
@@ -54,23 +55,38 @@ def parse_concurrency(name):
         concurrency += int(c)
     return concurrency
 
+
 # Get the number of GPUs from the deployment config
 def parse_gpus(deployment_config_json_path):
     with open(deployment_config_json_path, "r") as f:
         deployment_config = json.load(f)
     if deployment_config.get("mode") == "aggregated":
-        return deployment_config.get("tensor_parallelism") * deployment_config.get("data_parallelism")
+        return deployment_config.get("tensor_parallelism") * deployment_config.get(
+            "data_parallelism"
+        )
     else:
-        return deployment_config.get("prefill_tensor_parallelism") * deployment_config.get("prefill_data_parallelism") + deployment_config.get("decode_tensor_parallelism") * deployment_config.get("decode_data_parallelism")
-    
+        return deployment_config.get(
+            "prefill_tensor_parallelism"
+        ) * deployment_config.get("prefill_data_parallelism") + deployment_config.get(
+            "decode_tensor_parallelism"
+        ) * deployment_config.get(
+            "decode_data_parallelism"
+        )
+
+
 def parse_kind_and_mode(deployment_config_json_path):
     with open(deployment_config_json_path, "r") as f:
         deployment_config = json.load(f)
     return deployment_config.get("kind"), deployment_config.get("mode")
 
-def extract_val_and_concurrency(genai_perf_profile_export_json_paths, deployment_config_json_paths, stat_value="avg"):
+
+def extract_val_and_concurrency(
+    genai_perf_profile_export_json_paths, deployment_config_json_paths, stat_value="avg"
+):
     results = []
-    for genai_perf_profile_export_json_path, deployment_config_json_path in zip(genai_perf_profile_export_json_paths, deployment_config_json_paths):
+    for genai_perf_profile_export_json_path, deployment_config_json_path in zip(
+        genai_perf_profile_export_json_paths, deployment_config_json_paths
+    ):
         with open(genai_perf_profile_export_json_path, "r") as f:
             data = json.load(f)
             # output_token_throughput contains only avg
@@ -224,7 +240,9 @@ if __name__ == "__main__":
     import glob
     import os
 
-    parser = argparse.ArgumentParser(description="Plot Pareto graph from GenAI-Perf artifacts")
+    parser = argparse.ArgumentParser(
+        description="Plot Pareto graph from GenAI-Perf artifacts"
+    )
     parser.add_argument(
         "--artifacts-root-dir",
         required=True,
@@ -242,11 +260,16 @@ if __name__ == "__main__":
     if not artifacts_dirs:
         raise ValueError(f"No artifacts directories found in {args.artifacts_root_dir}")
 
-    genai_perf_profile_export_json_paths = get_genai_perf_profile_export_json_paths(artifacts_dirs)
-    deployment_config_json_paths = get_deployment_config_json_paths(artifacts_dirs)
+    genai_perf_profile_export_json_paths, deployment_config_json_paths = get_json_paths(
+        artifacts_dirs
+    )
 
     if len(genai_perf_profile_export_json_paths) != len(deployment_config_json_paths):
-        raise ValueError(f"Number of genai_perf_profile_export_json_paths ({len(genai_perf_profile_export_json_paths)}) does not match number of deployment_config_json_paths ({len(deployment_config_json_paths)})")
+        raise ValueError(
+            f"Number of genai_perf_profile_export_json_paths ({len(genai_perf_profile_export_json_paths)}) does not match number of deployment_config_json_paths ({len(deployment_config_json_paths)})"
+        )
 
-    extracted_values = extract_val_and_concurrency(genai_perf_profile_export_json_paths, deployment_config_json_paths)
+    extracted_values = extract_val_and_concurrency(
+        genai_perf_profile_export_json_paths, deployment_config_json_paths
+    )
     create_pareto_graph(extracted_values, title=args.title)

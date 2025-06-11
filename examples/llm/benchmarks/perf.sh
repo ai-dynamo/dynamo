@@ -53,7 +53,7 @@ while [[ $# -gt 0 ]]; do
     --prefill-data-parallelism)
       prefill_dp="$2"
       shift 2
-      ;;  
+      ;;
     --decode-tensor-parallelism)
       decode_tp="$2"
       shift 2
@@ -97,16 +97,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [${mode} == "aggregated"]; then
-  if [${tp} == 0] && [${dp} == 0]; then
+if [ "${mode}" == "aggregated" ]; then
+  if [ "${tp}" == "0" ] && [ "${dp}" == "0" ]; then
     echo "--tensor-parallelism and --data-parallelism must be set for aggregated mode."
     exit 1
   fi
   echo "Starting benchmark for the deployment service with the following configuration:"
   echo "  - Tensor Parallelism: ${tp}"
   echo "  - Data Parallelism: ${dp}"
-elif [${mode} == "disaggregated"]; then
-  if [${prefill_tp} == 0] && [${prefill_dp} == 0] && [${decode_tp} == 0] && [${decode_dp} == 0]; then
+elif [ "${mode}" == "disaggregated" ]; then
+  if [ "${prefill_tp}" == "0" ] && [ "${prefill_dp}" == "0" ] && [ "${decode_tp}" == "0" ] && [ "${decode_dp}" == "0" ]; then
     echo "--prefill-tensor-parallelism, --prefill-data-parallelism, --decode-tensor-parallelism and --decode-data-parallelism must be set for disaggregated mode."
     exit 1
   fi
@@ -121,7 +121,7 @@ else
 fi
 
 echo "--------------------------------"
-echo "WARNING: This script does not validate tensor_parallelism=${tensor_parallelism} and data_parallelism=${data_parallelism} settings."
+echo "WARNING: This script does not validate tensor_parallelism=${tp} and data_parallelism=${dp} settings."
 echo "         The user is responsible for ensuring these match the deployment configuration being benchmarked."
 echo "         Incorrect settings may lead to misleading benchmark results."
 echo "--------------------------------"
@@ -139,8 +139,8 @@ while [ -d "${artifacts_root_dir}/artifacts_${index}" ]; do
 done
 
 # Create the new artifacts directory
-artifacts_dir="${artifacts_root_dir}/artifacts_${index}"
-mkdir -p "${artifacts_dir}"
+artifact_dir="${artifacts_root_dir}/artifacts_${index}"
+mkdir -p "${artifact_dir}"
 
 # Print warning about existing artifacts directories
 if [ $index -gt 0 ]; then
@@ -157,9 +157,8 @@ if [ $index -gt 0 ]; then
     echo "--------------------------------"
 fi
 
-
 # Concurrency levels to test
-for concurrency in 1 2 4 8 16 32 64 128 256; do
+for concurrency in 1 2 4; do
 
   # NOTE: For Dynamo HTTP OpenAI frontend, use `nvext` for fields like
   # `ignore_eos` since they are not in the official OpenAI spec.
@@ -183,7 +182,7 @@ for concurrency in 1 2 4 8 16 32 64 128 256; do
     --warmup-request-count $(($concurrency*2)) \
     --num-dataset-entries $(($concurrency*12)) \
     --random-seed 100 \
-    --artifacts-dir ${artifacts_dir} \
+    --artifact-dir ${artifact_dir} \
     -- \
     -v \
     --max-threads 256 \
@@ -205,17 +204,17 @@ deployment_config=$(cat << EOF
   "prefill_tensor_parallelism": ${prefill_tp},
   "prefill_data_parallelism": ${prefill_dp},
   "decode_tensor_parallelism": ${decode_tp},
-  "decode_data_parallelism": ${decode_dp},  
+  "decode_data_parallelism": ${decode_dp},
   "mode": "${mode}"
 }
 EOF
 )
 
-mkdir -p "${artifacts_dir}"
-if [ -f "${artifacts_dir}/deployment_config.json" ]; then
+mkdir -p "${artifact_dir}"
+if [ -f "${artifact_dir}/deployment_config.json" ]; then
   echo "Deployment configuration already exists. Overwriting..."
-  rm -f "${artifacts_dir}/deployment_config.json"
+  rm -f "${artifact_dir}/deployment_config.json"
 fi
-echo "${deployment_config}" > "${artifacts_dir}/deployment_config.json"
+echo "${deployment_config}" > "${artifact_dir}/deployment_config.json"
 
 echo "Benchmarking Successful!!!"
