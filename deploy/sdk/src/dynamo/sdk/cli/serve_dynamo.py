@@ -18,14 +18,16 @@
 from __future__ import annotations
 
 import asyncio
+import atexit
 import inspect
 import json
 import logging
 import os
+import signal
 import typing as t
 from typing import Any
 
-import click
+import typer
 import uvicorn
 import uvloop
 from fastapi.responses import StreamingResponse
@@ -87,54 +89,33 @@ def add_fastapi_routes(app, service, class_instance):
     return added_routes
 
 
-@click.command()
-@click.argument("bento_identifier", type=click.STRING, required=False, default=".")
-@click.option("--service-name", type=click.STRING, required=False, default="")
-@click.option(
-    "--runner-map",
-    type=click.STRING,
-    envvar="BENTOML_RUNNER_MAP",
-    help="JSON string of runners map, default sets to envars `BENTOML_RUNNER_MAP`",
-)
-@click.option(
-    "--worker-env", type=click.STRING, default=None, help="Environment variables"
-)
-@click.option(
-    "--worker-id",
-    required=False,
-    type=click.INT,
-    default=None,
-    help="If set, start the server as a bare worker with the given worker ID. Otherwise start a standalone server with a supervisor process.",
-)
-@click.option(
-    "--custom-component-name",
-    required=False,
-    type=click.STRING,
-    default=None,
-    help="If set, use this custom component name instead of the default service name",
-)
-@click.option(
-    "--target",
-    type=click.STRING,
-    default="dynamo",
-    help="Specify the target: 'dynamo' or 'bento'.",
-)
+app = typer.Typer(pretty_exceptions_enable=False)
+
+
+@app.command()
 def main(
-    bento_identifier: str,
-    service_name: str,
-    runner_map: str | None,
-    worker_env: str | None,
-    worker_id: int | None,
-    custom_component_name: str | None,
-    target: str,
+    dynamo_identifier: str = typer.Argument(".", help="The dynamo identifier"),
+    service_name: str = typer.Option("", help="Service name"),
+    runner_map: str = typer.Option(
+        None,
+        envvar="DYNAMO_RUNNER_MAP",
+        help="JSON string of runners map, default sets to envars `DYNAMO_RUNNER_MAP`",
+    ),
+    worker_env: str = typer.Option(None, help="Environment variables"),
+    worker_id: int = typer.Option(
+        None,
+        help="If set, start the server as a bare worker with the given worker ID. Otherwise start a standalone server with a supervisor process.",
+    ),
+    custom_component_name: str = typer.Option(
+        None,
+        help="If set, use this custom component name instead of the default service name",
+    ),
+    target: str = typer.Option(
+        "dynamo",
+        help="Specify the target: 'dynamo' or 'dynamo'.",
+    ),
 ) -> None:
-    # hack to avoid bentoml from respawning the workers after their leases are revoked
-    os.environ["BENTOML_CONTAINERIZED"] = "true"
-
     """Start a worker for the given service - either Dynamo or regular service"""
-    from bentoml._internal.container import BentoMLContainer
-    from bentoml._internal.context import server_context
-
     from dynamo.runtime.logging import configure_dynamo_logging
     from dynamo.sdk.cli.utils import configure_target_environment
     from dynamo.sdk.core.runner import TargetEnum
@@ -156,7 +137,7 @@ def main(
                     f"the maximum worker ID is {len(env_list)}"
                 )
             os.environ.update(env_list[worker_key])
-    service = find_and_load_service(bento_identifier)
+    service = find_and_load_service(dynamo_identifier)
     if service_name and service_name != service.name:
         service = service.find_dependent_by_name(service_name)
 
@@ -165,17 +146,8 @@ def main(
     dynamo_context["namespace"] = namespace
 
     configure_dynamo_logging(service_name=service_name, worker_id=worker_id)
-    if runner_map:
-        BentoMLContainer.remote_runner_mapping.set(
-            t.cast(t.Dict[str, str], json.loads(runner_map))
-        )
-
     # TODO: test this with a deep chain of services
     LinkedServices.remove_unused_edges()
-    # Check if Dynamo is enabled for this service
-    if worker_id is not None:
-        server_context.worker_index = worker_id
-
     # Instance of the inner class of the service should be the same across the dynamo_worker, web_worker, and system_app_worker
     class_instance: Any = None
     # will be set once dyn_worker has created class_instance
@@ -186,12 +158,6 @@ def main(
         nonlocal class_instance
         global dynamo_context
         dynamo_context["runtime"] = runtime
-        if service_name and service_name != service.name:
-            server_context.service_type = "service"
-        else:
-            server_context.service_type = "entry_service"
-
-        server_context.service_name = service.name
         # Get Dynamo configuration and create component
         namespace, component_name = service.dynamo_address()
         logger.info(f"Registering component {namespace}/{component_name}")
@@ -222,6 +188,8 @@ def main(
             dynamo_context["component"] = component
             dynamo_context["endpoints"] = endpoints
             class_instance = service.inner()
+            # signal that class_instance (and its setup) is done
+            instanceReady.set()
             dynamo_handlers = []
             for name, endpoint in dynamo_endpoints.items():
                 if DynamoTransport.DEFAULT in endpoint.transports:
@@ -249,8 +217,6 @@ def main(
             logger.info(
                 f"Starting {service.name} instance with all registered endpoints"
             )
-            # signal that class_instance (and its setup) is done
-            instanceReady.set()
             # Launch serve_endpoint for all endpoints concurrently
             tasks = [
                 endpoint.serve_endpoint(handler)
@@ -345,6 +311,31 @@ def main(
     async def run_concurrent_workers(tasks):
         await asyncio.gather(*tasks)
 
+    def exit_handler():
+        """Exit handler that runs shutdown hooks before process termination."""
+        if class_instance is not None:
+            logger.info("Running shutdown hooks on exit")
+            try:
+                run_shutdown_hooks(class_instance)
+                logger.info("Shutdown hooks completed successfully")
+            except Exception as e:
+                logger.error(f"Error running shutdown hooks: {e}")
+        else:
+            logger.debug("No class instance available for shutdown hooks")
+
+    # Register the exit handler
+    atexit.register(exit_handler)
+
+    # Also handle signals for graceful shutdown
+    def signal_handler(signum, frame):
+        logger.info(f"Received signal {signum}, initiating graceful shutdown")
+        exit_handler()
+        # Exit the process after running shutdown hooks
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
     worker_tasks = []
 
     uvloop.install()
@@ -366,5 +357,13 @@ def main(
     asyncio.run(run_concurrent_workers(worker_tasks))
 
 
+def run_shutdown_hooks(class_instance):
+    """Run all shutdown hooks on the class instance."""
+    for name, member in vars(class_instance.__class__).items():
+        if callable(member) and getattr(member, "__dynamo_shutdown_hook__", False):
+            shutdown_func = getattr(class_instance, name)
+            shutdown_func()
+
+
 if __name__ == "__main__":
-    main()
+    app()

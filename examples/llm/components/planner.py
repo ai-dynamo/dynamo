@@ -64,7 +64,7 @@ class Planner:
         self._prefill_queue_nats_server = os.getenv(
             "NATS_SERVER", "nats://localhost:4222"
         )
-        self._prefill_queue_stream_name = self.args.served_model_name
+        self._prefill_queue_stream_name = f"{self.namespace}_prefill_queue"
 
         self.prefill_client: Any | None = None
         self.workers_client: Any | None = None
@@ -410,12 +410,6 @@ if __name__ == "__main__":
         type=str,
         default=PlannerDefaults.namespace,
         help="Namespace planner will look at",
-    )
-    parser.add_argument(
-        "--served-model-name",
-        type=str,
-        default=PlannerDefaults.served_model_name,
-        help="Model name that is being served (used for prefill queue name)",
     )
     parser.add_argument(
         "--no-operation",

@@ -373,6 +373,9 @@ impl RadixTree {
                     worker_lookup.remove(&block);
                 }
             }
+            KvCacheEventData::Cleared => {
+                self.clear_all_blocks(worker_id);
+            }
         }
     }
 
@@ -381,6 +384,23 @@ impl RadixTree {
             blocks.iter().for_each(|(_, block)| {
                 block.borrow_mut().workers.remove(&worker);
             });
+        }
+    }
+
+    pub fn clear_all_blocks(&mut self, worker: WorkerId) {
+        // Check if the worker has any blocks to clear
+        if let Some(blocks) = self.lookup.get(&worker) {
+            let blocks_to_clear: Vec<_> = blocks.values().collect();
+
+            // Remove the worker from each block's workers set
+            blocks_to_clear.iter().for_each(|block| {
+                block.borrow_mut().workers.remove(&worker);
+            });
+
+            // Clear the worker's blocks
+            if let Some(worker_blocks) = self.lookup.get_mut(&worker) {
+                worker_blocks.clear();
+            }
         }
     }
 }
@@ -1178,6 +1198,88 @@ mod tests {
 
         let result = trie.find_matches(vec![LocalBlockHash(0)], false).scores;
         assert!(result.len() == 1 && result[&worker_1] == 1);
+    }
+
+    #[test]
+    fn test_clear_all_blocks() {
+        let mut trie = RadixTree::new();
+
+        let worker_0 = 0;
+        let worker_1 = 1;
+
+        assert!(trie
+            .find_matches(vec![LocalBlockHash(0)], false)
+            .scores
+            .is_empty());
+
+        // Test clearing an empty worker
+        trie.clear_all_blocks(worker_0);
+        assert!(!trie.lookup.contains_key(&worker_0));
+
+        // Test clearing a worker with shared blocks
+        trie.apply_event(create_store_event(worker_0, 0, vec![0, 1, 3], None));
+        trie.apply_event(create_store_event(worker_1, 0, vec![0, 2, 3], None));
+
+        let result = trie.find_matches(vec![LocalBlockHash(0)], false).scores;
+        assert!(result.len() == 2 && result[&worker_0] == 1 && result[&worker_1] == 1);
+
+        trie.clear_all_blocks(worker_0);
+
+        assert!(trie.lookup.contains_key(&worker_0));
+        assert!(trie.lookup.get(&worker_0).unwrap().is_empty());
+        let result = trie
+            .find_matches(vec![LocalBlockHash(0), LocalBlockHash(2)], false)
+            .scores;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[&worker_1], 2);
+        let result = trie
+            .find_matches(
+                vec![LocalBlockHash(0), LocalBlockHash(1), LocalBlockHash(3)],
+                false,
+            )
+            .scores;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[&worker_1], 1);
+
+        // Test re-adding blocks after clearing worker
+        trie.apply_event(create_store_event(worker_0, 0, vec![4, 5], None));
+        let result = trie
+            .find_matches(vec![LocalBlockHash(4), LocalBlockHash(5)], false)
+            .scores;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[&worker_0], 2);
+
+        // Test multiple clears
+        trie.clear_all_blocks(worker_0);
+        trie.clear_all_blocks(worker_0);
+        assert!(trie.lookup.contains_key(&worker_0));
+
+        // Test clearing all workers
+        trie.clear_all_blocks(worker_0);
+        trie.clear_all_blocks(worker_1);
+        assert!(!trie.lookup.is_empty());
+        assert!(trie.lookup.get(&worker_0).unwrap().is_empty());
+        assert!(trie.lookup.get(&worker_1).unwrap().is_empty());
+
+        // Test clearing a worker that has been removed
+        trie.apply_event(create_store_event(worker_0, 0, vec![6], None));
+        trie.apply_event(create_store_event(worker_1, 0, vec![6], None));
+        trie.remove_worker(worker_0);
+        trie.clear_all_blocks(worker_0);
+        assert!(!trie.lookup.contains_key(&worker_0));
+        let result = trie.find_matches(vec![LocalBlockHash(6)], false).scores;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[&worker_1], 1);
+
+        // Test clearing a worker that doesn't exist
+        let worker_fake = 2;
+        assert!(!trie.lookup.contains_key(&worker_fake));
+        trie.clear_all_blocks(worker_fake);
+        assert!(!trie.lookup.contains_key(&worker_fake));
+        assert!(trie.lookup.contains_key(&worker_1));
+        let result = trie.find_matches(vec![LocalBlockHash(6)], false).scores;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[&worker_1], 1);
     }
 
     #[test]

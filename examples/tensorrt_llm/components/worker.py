@@ -21,6 +21,7 @@ from common.protocol import TRTLLMWorkerRequest
 from common.utils import ServerType
 from components.prefill_worker import TensorRTLLMPrefillWorker
 
+from dynamo.llm import ModelType, register_llm
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
@@ -43,10 +44,12 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
         config = ServiceConfig.get_instance()
         config_args = config.as_args(class_name, prefix="")
         args, engine_config = parse_tensorrt_llm_args(config_args)
+        self.served_model_name = args.served_model_name
         worker_id = dynamo_context["endpoints"][0].lease_id()
+        namespace, _ = TensorRTLLMWorker.dynamo_address()  # type: ignore
         self._min_prefill_workers = args.min_prefill_workers
         super().__init__(
-            namespace_str="dynamo",
+            namespace_str=namespace,
             component_str=class_name,
             worker_id=worker_id,
             engine_config=engine_config,
@@ -61,6 +64,24 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
     @async_on_start
     async def async_init(self):
         self._init_engine()
+
+        runtime = dynamo_context["runtime"]
+        logger.info("Registering LLM for discovery")
+        comp_ns, comp_name = TensorRTLLMWorker.dynamo_address()  # type: ignore
+        endpoint = runtime.namespace(comp_ns).component(comp_name).endpoint("generate")
+
+        try:
+            await register_llm(
+                ModelType.Backend,
+                endpoint,
+                self._engine_config.model_name,
+                self.served_model_name,
+                kv_cache_block_size=self._kv_block_size,
+            )
+            logger.info("Successfully registered LLM for discovery")
+        except Exception as e:
+            logger.error(f"Failed to register LLM for discovery: {e}")
+            raise
 
         if self._remote_prefill:
             runtime = dynamo_context["runtime"]

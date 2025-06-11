@@ -25,6 +25,7 @@ from dynamo.sdk import (
     depends,
     endpoint,
     liveness,
+    on_shutdown,
     readiness,
     service,
 )
@@ -67,7 +68,7 @@ class ResponseType(BaseModel):
     dynamo={
         "namespace": "inference",
     },
-    resource={"cpu": 1, "memory": "500Mi"},
+    resources={"cpu": 1, "memory": "500Mi"},
     workers=2,
     image=DYNAMO_IMAGE,
 )
@@ -86,6 +87,10 @@ class Backend:
         text = f"{req_text}-{self.message}"
         for token in text.split():
             yield f"Backend: {token}"
+
+    @on_shutdown
+    def shutdown(self):
+        logger.info("Shutting down backend")
 
 
 @service(
@@ -111,6 +116,10 @@ class Middle:
         async for response in self.backend.generate(next_request):
             logger.info(f"Middle received response: {response}")
             yield f"Middle: {response}"
+
+    @on_shutdown
+    def shutdown(self):
+        logger.info("Shutting down middle")
 
 
 @service(
@@ -152,3 +161,7 @@ class Frontend:
     @readiness
     def is_ready(self):
         return True
+
+    @on_shutdown
+    def shutdown(self):
+        logger.info("Shutting down frontend")

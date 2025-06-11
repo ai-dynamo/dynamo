@@ -395,6 +395,7 @@ impl Scheduler {
         };
 
         ForwardPassMetrics {
+            data_parallel_rank: None, // Default for backwards compatibility
             request_active_slots: state.decode.len() as u64,
             request_total_slots: 420, // Dummy value as specified
             kv_active_blocks: active_blocks_count,

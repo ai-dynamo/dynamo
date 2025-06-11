@@ -6,6 +6,7 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import sys
 from typing import Optional
@@ -76,6 +77,42 @@ class RequestHandler:
             num_output_tokens_so_far = next_total_toks
 
 
+class EmbeddingRequestHandler(RequestHandler):
+    """
+    Request handler for the embedding endpoint
+    """
+
+    def __init__(self, engine: sglang.Engine, model_name: str):
+        super().__init__(engine)
+        self._model_name = model_name
+
+    async def generate(self, request):
+        gen = await self.engine_client.async_encode(prompt=request["input"])
+        tokens = 0
+        embeddings = []
+        for idx, res in enumerate(gen):
+            embeddings.append(
+                {
+                    "index": idx,
+                    "object": "embedding",
+                    "embedding": res["embedding"],
+                }
+            )
+            tokens += res["meta_info"]["prompt_tokens"]
+
+        out = {
+            "object": "list",
+            "model": self._model_name,
+            "data": embeddings,
+            "usage": {
+                "prompt_tokens": tokens,
+                "total_tokens": tokens,
+            },
+        }
+
+        yield out
+
+
 @dynamo_worker(static=False)
 async def worker(runtime: DistributedRuntime):
     await init(runtime, cmd_line_args())
@@ -128,13 +165,20 @@ async def init(runtime: DistributedRuntime, config: Config):
     await component.create_service()
 
     endpoint = component.endpoint(config.endpoint)
-    await register_llm(
-        ModelType.Backend, endpoint, config.model_path, config.model_name
+    model_type = (
+        ModelType.Backend if not engine_args.is_embedding else ModelType.Embedding
     )
+    await register_llm(model_type, endpoint, config.model_path, config.model_name)
 
     # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
     # after the lease is revoked
-    await endpoint.serve_endpoint(RequestHandler(engine_client).generate)
+    await endpoint.serve_endpoint(
+        RequestHandler(engine_client).generate
+        if not engine_args.is_embedding
+        else EmbeddingRequestHandler(
+            engine_client, model_name=config.model_name or config.model_path
+        ).generate
+    )
 
 
 def cmd_line_args():
@@ -229,7 +273,6 @@ def cmd_line_args():
     config.node_rank = args.node_rank
     config.dist_init_addr = args.dist_init_addr
     config.extra_engine_args = args.extra_engine_args
-
     return config
 
 

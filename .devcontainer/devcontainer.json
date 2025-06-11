@@ -32,7 +32,6 @@
         "vscode": {
             "extensions": [
                 "ms-python.python",
-                "ms-python.pylint",
                 "ms-python.vscode-pylance",
                 "rust-lang.rust-analyzer"
             ],
@@ -42,10 +41,24 @@
 
                 "python.defaultInterpreterPath": "/opt/dynamo/venv/bin/python",
                 "python.linting.enabled": true,
-                "python.linting.pylintEnabled": true,
 
+                "rust-analyzer.memoryLimit": 4096, // larger memory limit to reduce latency
                 "rust-analyzer.checkOnSave.command": "clippy",
                 "rust-analyzer.checkOnSave.enable": true,
+                "rust-analyzer.cargo.buildScripts.enable": true,
+                "rust-analyzer.cargo.targetDir": "/home/ubuntu/dynamo/.build/target",
+                "rust-analyzer.procMacro.enable": true,
+                "rust-analyzer.completion.autoimport.enable": true,
+
+                // Enhanced rust-analyzer configuration
+                "rust-analyzer.linkedProjects": [
+                    "dynamo/Cargo.toml",
+                    "dynamo/lib/runtime/Cargo.toml",
+                    "dynamo/lib/llm/Cargo.toml",
+                    "dynamo/lib/tokens/Cargo.toml",
+                    "dynamo/lib/bindings/python/Cargo.toml",
+                    "dynamo/launch/dynamo-run/Cargo.toml"
+                ],
 
                 "files.trimTrailingWhitespace": true,
                 "files.insertFinalNewline": true

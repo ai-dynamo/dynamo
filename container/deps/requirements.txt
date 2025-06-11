@@ -16,6 +16,7 @@
 accelerate==1.6.0
 fastapi==0.115.6
 ftfy
+genai-perf==0.0.13
 grpcio-tools==1.66.0
 httpx
 kubernetes==32.0.1
@@ -36,6 +37,5 @@ sentencepiece
 tensorboard==2.19.0
 tensorboardX==2.6.2.2
 transformers
-tritonclient==2.53.0
 types-PyYAML
 uvicorn

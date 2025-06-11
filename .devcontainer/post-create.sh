@@ -49,7 +49,7 @@ mkdir -p $HOME/dynamo/.build/target
 export CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 
 # build project, it will be saved at $HOME/dynamo/.build/target
-cargo build --locked --profile dev --features mistralrs,python
+cargo build --locked --profile dev --features mistralrs
 cargo doc --no-deps
 
 # create symlinks for the binaries in the deploy directory
@@ -58,17 +58,15 @@ ln -sf $HOME/dynamo/.build/target/debug/dynamo-run $HOME/dynamo/deploy/sdk/src/d
 ln -sf $HOME/dynamo/.build/target/debug/http $HOME/dynamo/deploy/sdk/src/dynamo/sdk/cli/bin/http
 ln -sf $HOME/dynamo/.build/target/debug/llmctl $HOME/dynamo/deploy/sdk/src/dynamo/sdk/cli/bin/llmctl
 
-# install the python bindings in editable mode
-cd $HOME/dynamo/lib/bindings/python && retry uv pip install -e .
+# install the python bindings
+cd $HOME/dynamo/lib/bindings/python && retry maturin develop
+
+# installs overall python packages, grabs binaries from .build/target/debug
 cd $HOME/dynamo && retry env DYNAMO_BIN_PATH=$HOME/dynamo/.build/target/debug uv pip install -e .
 
 export PYTHONPATH=/home/ubuntu/dynamo/components/planner/src:$PYTHONPATH
 
-# Add to bashrc only if not already present
-if ! grep -q "source /opt/dynamo/venv/bin/activate" ~/.bashrc; then
-    echo "source /opt/dynamo/venv/bin/activate" >> ~/.bashrc
-fi
-
+# TODO: Deprecated except vLLM v0
 if ! grep -q "export VLLM_KV_CAPI_PATH=" ~/.bashrc; then
     echo "export VLLM_KV_CAPI_PATH=$HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so" >> ~/.bashrc
 fi

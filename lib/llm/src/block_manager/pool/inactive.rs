@@ -16,15 +16,20 @@
 use crate::block_manager::block::BlockState;
 
 use super::*;
+use std::collections::HashSet;
 use tracing::instrument;
 
 #[derive(Default)]
 pub struct InactiveBlockPool<S: Storage, M: BlockMetadata> {
-    // Direct lookup by sequence_hash
+    // Direct lookup by sequence_hash.
     lookup_map: HashMap<SequenceHash, Block<S, M>>,
 
-    // Ordered by timestamp (oldest first)
-    priority_set: BTreeSet<PriorityKey<M>>,
+    // A priority ordering for the leaf nodes.
+    // Leaf nodes are defined as blocks that have no children in the inactive pool.
+    leaf_set: BTreeSet<PriorityKey<M>>,
+
+    // Mapping from parents to their children.
+    parent_children: HashMap<SequenceHash, HashSet<SequenceHash>>,
 
     // Fully Uninitialized
     uninitialized_set: VecDeque<Block<S, M>>,
@@ -45,7 +50,8 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     pub(crate) fn new() -> Self {
         Self {
             lookup_map: HashMap::new(),
-            priority_set: BTreeSet::new(),
+            leaf_set: BTreeSet::new(),
+            parent_children: HashMap::new(),
             uninitialized_set: VecDeque::new(),
             return_tick: 0,
             total_blocks: 0,
@@ -75,12 +81,11 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
 
     /// Inserts a block into the pool using its sequence hash for potential reuse.
     ///
-    /// If an entry with the same priority key already exists in the [`priority_set`],
-    /// the block is reset and moved to the [`uninitialized_set`].
     /// If an entry with the same sequence hash already exists in the [`lookup_map`]
-    /// (but not the priority set - indicating an inconsistency), the block is reset
-    /// and moved to the [`uninitialized_set`].
-    /// Otherwise, the block is added to both the [`lookup_map`] and the [`priority_set`].
+    /// the block is reset and moved to the [`uninitialized_set`].
+    /// Otherwise, the block is added to the [`lookup_map`].
+    /// If there are no children of the block, it is added to the [`leaf_set`].
+    /// If the parent of the block is in the [`leaf_set`], it is removed from the [`leaf_set`].
     ///
     /// # Arguments
     ///
@@ -89,22 +94,35 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     #[instrument(level = "trace", skip(self, block), fields(sequence_hash = ?sequence_hash))]
     fn insert_with_sequence_hash(&mut self, block: Block<S, M>, sequence_hash: SequenceHash) {
         let priority_key = PriorityKey::new(block.metadata().clone(), sequence_hash);
-        if self.priority_set.contains(&priority_key) {
-            tracing::trace!("multiple entries with the same priority key, resetting block and inserting into uninitialized set");
+        if self.lookup_map.contains_key(&sequence_hash) {
+            tracing::trace!("multiple entries with the same sequence hash, resetting block and inserting into uninitialized set");
             let mut block = block;
             block.reset();
             self.uninitialized_set.push_back(block);
-        } else if let std::collections::hash_map::Entry::Vacant(e) =
-            self.lookup_map.entry(sequence_hash)
-        {
-            tracing::trace!("inserting block to map and priority set");
-            self.priority_set.insert(priority_key);
-            e.insert(block);
         } else {
-            tracing::trace!("multiple entries in lookup map with the same sequence hash, inserting into uninitialized set");
-            let mut block = block;
-            block.reset();
-            self.uninitialized_set.push_back(block);
+            tracing::trace!("inserting block to map and priority set");
+
+            if let Ok(Some(parent)) = block.parent_sequence_hash() {
+                // Add the entry for the parent->child link.
+                self.parent_children
+                    .entry(parent)
+                    .or_default()
+                    .insert(sequence_hash);
+
+                // If the parent is currently in the inactive pool, remove it from the leaf set.
+                if let Some(parent_block) = self.lookup_map.get_mut(&parent) {
+                    self.leaf_set
+                        .remove(&PriorityKey::new(parent_block.metadata().clone(), parent));
+                }
+            }
+
+            // Create the entry for the block in the lookup map.
+            self.lookup_map.insert(sequence_hash, block);
+
+            // If the block has no children, it is a leaf.
+            if !self.parent_children.contains_key(&sequence_hash) {
+                self.leaf_set.insert(priority_key);
+            }
         }
     }
 
@@ -138,7 +156,7 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
                 block.reset();
                 self.uninitialized_set.push_back(block);
             }
-            BlockState::Registered(state) => {
+            BlockState::Registered(state, _) => {
                 let sequence_hash = state.sequence_hash();
                 self.insert_with_sequence_hash(block, sequence_hash);
             }
@@ -206,7 +224,7 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
 
     /// Returns multiple blocks to the pool.
     ///
-    /// Iterates through the blocks in reverse order (tail to head) and calls
+    /// Iterates through the blocks in order and calls
     /// `return_block` for each one.
     ///
     /// # Arguments
@@ -217,7 +235,7 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
         let count = blocks.len();
         tracing::debug!(count, "Returning blocks to pool");
         // return the block to the pool from tail to head
-        for (i, block) in blocks.into_iter().rev().enumerate() {
+        for (i, block) in blocks.into_iter().enumerate() {
             tracing::trace!(current = i + 1, total = count, "Returning block");
             // Note: return_block has its own instrumentation
             self.return_block(block);
@@ -225,7 +243,7 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     }
 
     /// Attempts to remove and return a block associated with the given sequence hash
-    /// from the [`lookup_map`] and [`priority_set`].
+    /// from the [`lookup_map`] and [`leaf_set`].
     ///
     /// # Arguments
     ///
@@ -238,9 +256,10 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     fn take_with_sequence_hash(&mut self, sequence_hash: SequenceHash) -> Option<Block<S, M>> {
         match self.lookup_map.remove(&sequence_hash) {
             Some(block) => {
-                // Remove from priority set
-                let priority_key = PriorityKey::new(block.metadata().clone(), sequence_hash);
-                self.priority_set.remove(&priority_key);
+                // Remove from leaf set, if it exists.
+                self.leaf_set
+                    .remove(&PriorityKey::new(block.metadata().clone(), sequence_hash));
+
                 Some(block)
             }
             None => None,
@@ -366,12 +385,39 @@ impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
             return Some(block);
         }
 
-        // if we have blocks in the priority set, pop the first (it's sorted by priority)
+        // if we have blocks in the leaf set, pop the first (it's sorted by priority)
         // a fatal error will occur if the block is not found in the lookup map
-        if let Some(key) = self.priority_set.pop_first() {
+        if let Some(key) = self.leaf_set.pop_first() {
             tracing::trace!("Acquired priority/registered block map; resetting block");
             match self.lookup_map.remove(&key.sequence_hash()) {
                 Some(mut block) => {
+                    if let Some(children) = self.parent_children.get(&key.sequence_hash()) {
+                        panic!(
+                            "Block has {} inactive children, but should have none.",
+                            children.len()
+                        );
+                    }
+
+                    if let Ok(Some(parent)) = block.parent_sequence_hash() {
+                        let is_leaf = match self.parent_children.get_mut(&parent) {
+                            Some(children) => {
+                                children.remove(&key.sequence_hash());
+                                children.is_empty()
+                            }
+                            None => true,
+                        };
+
+                        if is_leaf {
+                            self.parent_children.remove(&parent);
+                            if let Some(parent_block) = self.lookup_map.get(&parent) {
+                                self.leaf_set.insert(PriorityKey::new(
+                                    parent_block.metadata().clone(),
+                                    parent,
+                                ));
+                            }
+                        }
+                    }
+
                     block.reset();
                     self.return_tick += 1;
                     block.metadata_on_acquired(self.return_tick);
@@ -603,6 +649,7 @@ pub(crate) mod tests {
     pub fn create_blocks(
         tokens: Tokens,
         block_size: usize,
+        async_runtime: Handle,
     ) -> Vec<Block<NullDeviceStorage, TestMetadata>> {
         let (token_blocks, _partial_token_block) =
             tokens.into_sequence(block_size, None).into_parts();
@@ -615,7 +662,8 @@ pub(crate) mod tests {
         let mut blocks = create_block_collection(num_blocks).into_blocks().unwrap();
 
         let event_manager = NullEventManager::new();
-        let mut registry = BlockRegistry::new(event_manager);
+        let mut registry =
+            BlockRegistry::new(event_manager, GlobalRegistry::default(), async_runtime);
 
         // Iterate through the generated TokenBlocks and the template Blocks,
         // setting the state and registering each one.
@@ -645,6 +693,7 @@ pub(crate) mod tests {
         tokens: Tokens,
         block_size: usize,
         pool: &mut InactiveBlockPool<NullDeviceStorage, TestMetadata>,
+        async_runtime: Handle,
     ) -> (Vec<Block<NullDeviceStorage, TestMetadata>>, usize) {
         let (mut token_blocks, _partial_token_block) =
             tokens.into_sequence(block_size, None).into_parts();
@@ -657,7 +706,8 @@ pub(crate) mod tests {
         let matched_block_count = matched_blocks.len();
 
         let event_manager = NullEventManager::new();
-        let mut registry = BlockRegistry::new(event_manager);
+        let mut registry =
+            BlockRegistry::new(event_manager, GlobalRegistry::default(), async_runtime);
 
         // all matched blocks should be in the complete or registered state
         for block in &mut matched_blocks {
@@ -697,6 +747,8 @@ pub(crate) mod tests {
     fn test_block_pool_lifecycle() {
         dynamo_runtime::logging::init();
 
+        let async_runtime = tokio::runtime::Runtime::new().unwrap();
+
         const PAGE_SIZE: usize = 2;
 
         let mut pool = create_block_pool(10);
@@ -715,7 +767,12 @@ pub(crate) mod tests {
 
         let tokens = create_token_sequence(&[1, 2, 3, 4]);
 
-        let (blocks, matched_block_count) = acquire_blocks(tokens.clone(), PAGE_SIZE, &mut pool);
+        let (blocks, matched_block_count) = acquire_blocks(
+            tokens.clone(),
+            PAGE_SIZE,
+            &mut pool,
+            async_runtime.handle().clone(),
+        );
         assert_eq!(blocks.len(), 2);
         assert_eq!(matched_block_count, 0);
         assert_eq!(pool.available_blocks(), 8);
@@ -725,7 +782,12 @@ pub(crate) mod tests {
         assert_eq!(pool.total_blocks(), 10);
         assert_eq!(pool.available_blocks(), 10);
 
-        let (blocks, matched_block_count) = acquire_blocks(tokens.clone(), PAGE_SIZE, &mut pool);
+        let (blocks, matched_block_count) = acquire_blocks(
+            tokens.clone(),
+            PAGE_SIZE,
+            &mut pool,
+            async_runtime.handle().clone(),
+        );
         assert_eq!(blocks.len(), 2);
         assert_eq!(matched_block_count, 2);
         assert_eq!(pool.available_blocks(), 8);
@@ -745,9 +807,11 @@ pub(crate) mod tests {
     fn test_basic_sequence_matching() {
         let mut pool = InactiveBlockPool::new();
 
+        let async_runtime = tokio::runtime::Runtime::new().unwrap();
+
         // Create a sequence of 4 tokens split into blocks of 2
         let sequence = create_token_sequence(&[1, 2, 3, 4]);
-        let blocks = create_blocks(sequence, 2);
+        let blocks = create_blocks(sequence, 2, async_runtime.handle().clone());
         assert_eq!(blocks.len(), 2);
 
         // Match the blocks in sequence

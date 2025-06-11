@@ -344,16 +344,16 @@ class DisaggregatedRouter:
         """
         ...
 
-class KvMetricsPublisher:
+class WorkerMetricsPublisher:
     """
-    A metrics publisher will provide KV metrics to the router.
+    A metrics publisher will provide metrics to the router.
     """
 
     ...
 
     def __init__(self) -> None:
         """
-        Create a `KvMetricsPublisher` object
+        Create a `WorkerMetricsPublisher` object
         """
 
     def create_service(self, component: Component) -> None:
@@ -368,6 +368,10 @@ class KvMetricsPublisher:
         request_total_slots: int,
         kv_active_blocks: int,
         kv_total_blocks: int,
+        num_requests_waiting: int,
+        gpu_cache_usage_perc: float,
+        gpu_prefix_cache_hit_rate: float,
+        data_parallel_rank: int = 0,
     ) -> None:
         """
         Update the KV metrics being reported.
@@ -575,6 +579,40 @@ class KvEventPublisher:
         """
         ...
 
+class ZmqKvEventPublisherConfig:
+    def __init__(
+        self,
+        worker_id: int,
+        kv_block_size: int,
+        zmq_endpoint: str = "tcp://127.0.0.1:5557",
+        zmq_topic: str = ""
+    ) -> None:
+        """
+        Configuration for the ZmqKvEventPublisher.
+
+        :param worker_id: The worker ID.
+        :param kv_block_size: The block size for the key-value store.
+        :param zmq_endpoint: The ZeroMQ endpoint. Defaults to "tcp://127.0.0.1:5557".
+        :param zmq_topic: The ZeroMQ topic to subscribe to. Defaults to an empty string.
+        """
+        ...
+
+class ZmqKvEventPublisher:
+    def __init__(self, component: Component, config: ZmqKvEventPublisherConfig) -> None:
+        """
+        Initializes a new ZmqKvEventPublisher instance.
+
+        :param component: The component to be used.
+        :param config: Configuration for the event publisher.
+        """
+        ...
+
+    def shutdown(self) -> None:
+        """
+        Shuts down the event publisher, stopping any background tasks.
+        """
+        ...
+
 class HttpService:
     """
     A HTTP service for dynamo applications.
@@ -603,7 +641,7 @@ class ModelType:
     """What type of request this model needs: Chat, Component or Backend (pre-processed)"""
     ...
 
-async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str]) -> None:
+async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str] = None, context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None) -> None:
     """Attach the model at path to the given endpoint, and advertise it as model_type"""
     ...
 
@@ -672,6 +710,25 @@ class NatsQueue:
         """
         ...
 
+class Layer:
+    """
+    A KV cache block layer
+    """
+
+    ...
+
+    def __dlpack__(self, stream: Optional[Any] = None, max_version: Optional[Any] = None, dl_device: Optional[Any] = None, copy: Optional[bool] = None) -> Any:
+        """
+        Get a dlpack capsule of the layer
+        """
+        ...
+
+    def __dlpack_device__(self) -> Any:
+        """
+        Get the dlpack device of the layer
+        """
+        ...
+
 class Block:
     """
     A KV cache block
@@ -679,9 +736,40 @@ class Block:
 
     ...
 
+    def __len__(self) -> int:
+        """
+        Get the number of layers in the list
+        """
+        ...
+
+    def __getitem__(self, index: int) -> Layer:
+        """
+        Get a layer by index
+        """
+        ...
+
+    def __iter__(self) -> 'Block':
+        """
+        Get an iterator over the layers
+        """
+        ...
+
+    def __next__(self) -> Block:
+        """
+        Get the next layer in the iterator
+        """
+        ...
+
+    def to_list(self) -> List[Layer]:
+        """
+        Get a list of layers
+        """
+        ...
+
     def __dlpack__(self, stream: Optional[Any] = None, max_version: Optional[Any] = None, dl_device: Optional[Any] = None, copy: Optional[bool] = None) -> Any:
         """
-        Get a dlpack capsule from the block
+        Get a dlpack capsule of the block
+        Exception raised if the block is not contiguous
         """
         ...
 
@@ -784,9 +872,41 @@ class BlockManager:
         """
         ...
 
+    async def allocate_host_blocks(self, count: int) -> BlockList:
+        """
+        Allocate a list of host blocks
+
+        Parameters:
+        -----------
+        count: int
+            Number of blocks to allocate
+
+        Returns:
+        --------
+        BlockList
+            List of allocated blocks
+        """
+        ...
+
     def allocate_device_blocks_blocking(self, count: int) -> BlockList:
         """
         Allocate a list of device blocks (blocking call)
+
+        Parameters:
+        -----------
+        count: int
+            Number of blocks to allocate
+
+        Returns:
+        --------
+        BlockList
+            List of allocated blocks
+        """
+        ...
+
+    async def allocate_device_blocks(self, count: int) -> BlockList:
+        """
+        Allocate a list of device blocks
 
         Parameters:
         -----------

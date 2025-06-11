@@ -6,6 +6,8 @@ use std::{io::Read, sync::Arc, time::Duration};
 
 use anyhow::Context;
 use dynamo_llm::{backend::ExecutionContext, engines::StreamingEngine, local_model::LocalModel};
+use dynamo_runtime::protocols::Endpoint as EndpointId;
+use dynamo_runtime::slug::Slug;
 use dynamo_runtime::{CancellationToken, DistributedRuntime};
 
 mod flags;
@@ -17,13 +19,6 @@ pub use opt::{Input, Output};
 mod subprocess;
 
 const CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(2);
-
-/// How we identify a python string endpoint
-#[cfg(feature = "python")]
-const PYTHON_STR_SCHEME: &str = "pystr:";
-
-/// Where we will attach the vllm/sglang subprocess. Invisible to users.
-pub const INTERNAL_ENDPOINT: &str = "dyn://dynamo.internal.worker";
 
 /// Default size of a KV cache block. Override with --kv-cache-block-size
 const DEFAULT_KV_CACHE_BLOCK_SIZE: usize = 16;
@@ -45,13 +40,21 @@ pub enum EngineConfig {
     },
 }
 
+fn is_in_dynamic(in_opt: &Input) -> bool {
+    matches!(in_opt, Input::Endpoint(_))
+}
+
+fn is_out_dynamic(out_opt: &Option<Output>) -> bool {
+    matches!(out_opt, Some(Output::Dynamic))
+}
+
 pub async fn run(
     runtime: dynamo_runtime::Runtime,
     in_opt: Input,
-    out_opt: Output,
+    out_opt: Option<Output>,
     flags: Flags,
 ) -> anyhow::Result<()> {
-    if matches!(&in_opt, Input::Endpoint(_)) && matches!(&out_opt, Output::Dynamic) {
+    if is_in_dynamic(&in_opt) && is_out_dynamic(&out_opt) {
         anyhow::bail!("Cannot use endpoint for both in and out");
     }
 
@@ -61,28 +64,26 @@ pub async fn run(
         .clone()
         .or(flags.model_path_flag.clone());
 
-    let mut local_model: LocalModel = match out_opt {
+    let mut local_model: LocalModel = if is_out_dynamic(&out_opt) {
         // If output is dynamic we are ingress and don't have a local model, but making an
         // empty one cleans up the code.
-        Output::Dynamic => Default::default(),
-
+        Default::default()
+    } else {
         // All other output types have a local model
-        _ => {
-            match &maybe_path {
-                Some(model_path) => {
-                    LocalModel::prepare(
-                        model_path.to_str().context("Invalid UTF-8 in model path")?,
-                        flags.model_config.as_deref(),
-                        flags.model_name.clone(),
-                    )
-                    .await?
-                }
-                None => {
-                    // echo_full engine doesn't need a path
-                    match &flags.model_name {
-                        Some(name) => LocalModel::with_name_only(name),
-                        None => Default::default(),
-                    }
+        match &maybe_path {
+            Some(model_path) => {
+                LocalModel::prepare(
+                    model_path.to_str().context("Invalid UTF-8 in model path")?,
+                    flags.model_config.as_deref(),
+                    flags.model_name.clone(),
+                )
+                .await?
+            }
+            None => {
+                // echo_full engine doesn't need a path
+                match &flags.model_name {
+                    Some(name) => LocalModel::with_name_only(name),
+                    None => Default::default(),
                 }
             }
         }
@@ -111,6 +112,20 @@ pub async fn run(
 
     // We may need it later
     let card = local_model.card().clone();
+
+    let out_opt = out_opt.unwrap_or_else(|| {
+        let default_engine = if card.is_gguf() {
+            gguf_default()
+        } else {
+            safetensors_default()
+        };
+        tracing::info!(
+            "Using default engine: {default_engine}. Use out=<engine> to specify one of {}",
+            Output::available_engines().join(", ")
+        );
+        default_engine
+    });
+    print_cuda(&out_opt);
 
     // Create the engine matching `out`
     let engine_config = match out_opt {
@@ -155,7 +170,7 @@ pub async fn run(
             // If not, then the endpoint isn't exposed so we invent an internal one.
             let endpoint = match &in_opt {
                 Input::Endpoint(path) => path.parse()?,
-                _ => INTERNAL_ENDPOINT.parse()?,
+                _ => internal_endpoint("sglang"),
             };
 
             let multi_node_conf = dynamo_llm::engines::MultiNodeConfig {
@@ -198,7 +213,7 @@ pub async fn run(
             // If not, then the endpoint isn't exposed so we invent an internal one.
             let endpoint = match &in_opt {
                 Input::Endpoint(path) => path.parse()?,
-                _ => INTERNAL_ENDPOINT.parse()?,
+                _ => internal_endpoint("vllm"),
             };
 
             let (py_script, child) = match subprocess::start(
@@ -223,6 +238,40 @@ pub async fn run(
             }));
             EngineConfig::Dynamic
         }
+        Output::Trtllm => {
+            if flags.base_gpu_id != 0 {
+                anyhow::bail!("TRTLLM does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
+            }
+
+            // If `in=dyn` we want the trtllm subprocess to listen on that endpoint.
+            // If not, then the endpoint isn't exposed so we invent an internal one.
+            let endpoint = match &in_opt {
+                Input::Endpoint(path) => path.parse()?,
+                _ => internal_endpoint("trtllm"),
+            };
+
+            let (py_script, child) = match subprocess::start(
+                subprocess::trtllm::PY,
+                &local_model,
+                &endpoint,
+                flags.clone(),
+                None, // multi-node config. trtlllm uses `mpi`, see guide
+            )
+            .await
+            {
+                Ok(x) => x,
+                Err(err) => {
+                    anyhow::bail!("Failed starting trtllm sub-process: {err}");
+                }
+            };
+            let cancel_token = cancel_token.clone();
+
+            // Sub-process cleanup
+            extra = Some(Box::pin(async move {
+                stopper(cancel_token, child, py_script).await;
+            }));
+            EngineConfig::Dynamic
+        }
 
         #[cfg(feature = "llamacpp")]
         Output::LlamaCpp => {
@@ -232,18 +281,6 @@ pub async fn run(
             let engine =
                 dynamo_engine_llamacpp::make_engine(cancel_token.clone(), &local_model).await?;
             EngineConfig::StaticCore {
-                engine,
-                model: Box::new(local_model),
-            }
-        }
-        #[cfg(feature = "python")]
-        Output::PythonStr(path_str) => {
-            let card = local_model.card();
-            let py_args = flags.as_vec(&path_str, &card.service_name);
-            let p = std::path::PathBuf::from(path_str);
-            let engine =
-                dynamo_engine_python::make_string_engine(cancel_token.clone(), &p, py_args).await?;
-            EngineConfig::StaticFull {
                 engine,
                 model: Box::new(local_model),
             }
@@ -325,4 +362,79 @@ async fn stopper(
     // This temporary file contains the python script running the engine. It deletes on drop.
     // Keep it alive until the engine has stopped.
     drop(py_script);
+}
+
+/// If the user will benefit from CUDA/Metal/Vulkan, remind them to build with it.
+/// If they have it, celebrate!
+// Only mistralrs and llamacpp need to be built with CUDA.
+// The Python engines only need it at runtime.
+#[cfg(any(feature = "mistralrs", feature = "llamacpp"))]
+fn print_cuda(output: &Output) {
+    // These engines maybe be compiled in, but are they the chosen one?
+    match output {
+        #[cfg(feature = "mistralrs")]
+        Output::MistralRs => {}
+        #[cfg(feature = "llamacpp")]
+        Output::LlamaCpp => {}
+        _ => {
+            return;
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    {
+        tracing::info!("CUDA on");
+    }
+    #[cfg(feature = "metal")]
+    {
+        tracing::info!("Metal on");
+    }
+    #[cfg(feature = "vulkan")]
+    {
+        tracing::info!("Vulkan on");
+    }
+    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+    tracing::info!("CPU mode. Rebuild with `--features cuda|metal|vulkan` for better performance");
+}
+
+#[cfg(not(any(feature = "mistralrs", feature = "llamacpp")))]
+fn print_cuda(_output: &Output) {}
+
+fn gguf_default() -> Output {
+    #[cfg(feature = "llamacpp")]
+    {
+        Output::LlamaCpp
+    }
+
+    #[cfg(all(feature = "mistralrs", not(feature = "llamacpp")))]
+    {
+        Output::MistralRs
+    }
+
+    #[cfg(not(any(feature = "mistralrs", feature = "llamacpp")))]
+    {
+        Output::EchoFull
+    }
+}
+
+fn safetensors_default() -> Output {
+    #[cfg(feature = "mistralrs")]
+    {
+        Output::MistralRs
+    }
+
+    #[cfg(not(feature = "mistralrs"))]
+    {
+        Output::EchoFull
+    }
+}
+
+/// A random endpoint to use for internal communication
+/// We can't hard code because we may be running several on the same machine (GPUs 0-3 and 4-7)
+fn internal_endpoint(engine: &str) -> EndpointId {
+    EndpointId {
+        namespace: Slug::slugify(&uuid::Uuid::new_v4().to_string()).to_string(),
+        component: engine.to_string(),
+        name: "generate".to_string(),
+    }
 }
