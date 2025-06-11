@@ -105,6 +105,7 @@ def test_prefill(hash_algo):
     unique_token_ids = [3] * 5
     req1 = make_request("1", common_token_ids + unique_token_ids)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    print(f"computed_blocks: {computed_blocks}")
     assert len(manager.req_to_block_hashes[req1.request_id]) == 3
     assert computed_blocks.get_block_ids() == [[1, 2, 3]]
     assert num_computed_tokens == 3 * 16

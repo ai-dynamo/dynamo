@@ -22,6 +22,10 @@ class KvbmCacheBlocks:
     """
 
     def __init__(self, blocks: KvbmBlockList):
+        for i in range(blocks.block_count()):
+            print(
+                f"+++++++++++++++++++++++++++++++++++block {i}: {blocks.get_block_hash(i)}"
+            )
         self._blocks = [
             KVCacheBlock(
                 block_id=blocks.get_block_id(i), _block_hash=blocks.get_block_hash(i)
@@ -36,6 +40,13 @@ class KvbmCacheBlocks:
         Returns the list of KVCacheBlock objects.
         """
         return self._blocks
+
+    @property
+    def owned_blocks(self) -> KvbmBlockList:
+        """
+        Returns the list of KVCacheBlock objects.
+        """
+        return self._owned_blocks
 
     def get_block_ids(self) -> list[list[int]]:
         """
