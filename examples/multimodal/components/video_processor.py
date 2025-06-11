@@ -193,7 +193,7 @@ class Processor(ProcessMixIn):
     async def generate(self, raw_request: MultiModalRequest):
         msg = {
             "role": "user",
-            "content": "USER: <image>\nQuestion:"
+            "content": "USER: <video>\nQuestion:"
             + raw_request.messages[0].content[0].text
             + " Answer:",
         }

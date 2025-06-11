@@ -302,30 +302,6 @@ class VllmDecodeWorker:
             f"Received multimodal request {{ id: {request_id} }} with user text: '{user_text_prompt}'."
         )
 
-        # 1. Construct conversation and get text_prompt_string from hf_processor
-        conversation = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": user_text_prompt},
-                    {"type": "video"},
-                ],
-            },
-        ]
-        if (
-            not hasattr(self, "hf_processor")
-            or self.hf_processor is None
-            or not hasattr(self.hf_processor, "tokenizer")
-        ):
-            logger.error(
-                "VllmDecodeWorker: hf_processor or its tokenizer not initialized!"
-            )
-            raise RuntimeError("hf_processor or tokenizer not initialized.")
-
-        text_prompt_string = self.hf_processor.apply_chat_template(
-            conversation, tokenize=False, add_generation_prompt=True
-        )
-
         # Constants for token manipulation
         # For LLaVA-NeXT-Video models, the video token ID is 32000, not 32001
         # 32001 is for image tokens in LLaVA-NeXT-Video, 32000 is for video tokens
@@ -341,10 +317,7 @@ class VllmDecodeWorker:
         if self.do_remote_prefill:
             logger.info(f"Disaggregated mode: request {{ id: {request_id} }}.")
             # Tokenize the prompt string to get base IDs for router length check and potential remote prefill manipulation
-            tokenized_output_for_router = self.hf_processor.tokenizer(
-                text_prompt_string, add_special_tokens=True
-            )
-            base_prompt_ids_for_router = tokenized_output_for_router.input_ids
+            base_prompt_ids_for_router = request.engine_prompt["prompt_token_ids"]
             if (
                 isinstance(base_prompt_ids_for_router, list)
                 and len(base_prompt_ids_for_router) > 0
@@ -414,7 +387,9 @@ class VllmDecodeWorker:
                 current_received_multimodal_data_tensor = raw_frames_tensor_from_nixl
                 video_numpy = current_received_multimodal_data_tensor.cpu().numpy()
                 multi_modal_data_for_engine = {"video": video_numpy}
-                prompt_argument_for_vllm = text_prompt_string  # Pass raw string to vLLM
+                prompt_argument_for_vllm = request.engine_prompt[
+                    "prompt_token_ids"
+                ]  # Pass raw string to vLLM
                 current_remote_prefill_params = None
         else:  # AGGREGATED MODE
             logger.info(
@@ -439,7 +414,9 @@ class VllmDecodeWorker:
             current_received_multimodal_data_tensor = raw_frames_tensor_from_nixl
             video_numpy = current_received_multimodal_data_tensor.cpu().numpy()
             multi_modal_data_for_engine = {"video": video_numpy}
-            prompt_argument_for_vllm = text_prompt_string  # Pass raw string to vLLM
+            prompt_argument_for_vllm = request.engine_prompt[
+                "prompt_token_ids"
+            ]  # Pass raw string to vLLM
             current_remote_prefill_params = None
 
         request.sampling_params.output_kind = RequestOutputKind.DELTA
@@ -449,7 +426,7 @@ class VllmDecodeWorker:
         if isinstance(prompt_argument_for_vllm, str):
             if multi_modal_data_for_engine:
                 final_vllm_input = {
-                    "prompt": prompt_argument_for_vllm,
+                    "prompt_token_ids": prompt_argument_for_vllm,
                     "multi_modal_data": multi_modal_data_for_engine,
                 }
             else:
