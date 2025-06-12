@@ -116,9 +116,6 @@ impl KvbmCacheManager {
         &self,
         sequence_hashes: Vec<SequenceHash>,
     ) -> PyResult<KvbmBlockList> {
-        tracing::debug!("=== Starting get_computed_blocks ===");
-        tracing::debug!("Sequence hashes: {:?}", sequence_hashes);
-
         let blocks = self
             .block_manager()
             .device()
@@ -126,26 +123,16 @@ impl KvbmCacheManager {
             .match_sequence_hashes_blocking(&sequence_hashes)
             .map_err(to_pyerr)?;
 
-        tracing::debug!("Found {} matching blocks", blocks.len());
-        tracing::debug!("=== Finished get_computed_blocks ===");
-
         Ok(KvbmBlockList::new(BlockListType::Immutable(blocks)))
     }
 
     /// Updates the slot manager with the current request state and allocates new blocks if needed.
     pub fn alloctate_slots(&self, update: SlotUpdate) -> PyResult<Option<BlockStates>> {
-        tracing::debug!("=== Starting alloctate_slots ===");
-        tracing::debug!("SlotUpdate before dissolve: {:?}", update);
-
-        let dissolved = update.dissolve();
-
-        let mut slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
-        tracing::debug!("Successfully locked slot_manager");
-
-        let result = slot_manager.update_slot(dissolved, self.block_manager());
-        tracing::debug!("update_slot ++++++++++ result: {:?}", result);
-
-        result.map_err(to_pyerr)
+        self.slot_manager
+            .lock()
+            .map_err(to_pyerr)?
+            .update_slot(update.dissolve(), self.block_manager())
+            .map_err(to_pyerr)
     }
 
     pub fn free(&self, request_id: String) -> PyResult<()> {

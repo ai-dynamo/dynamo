@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Compare the with and without prefix caching."""
 
+import time
 from typing import Optional
 
 import pytest
@@ -279,3 +280,5 @@ def test_kvbm_prefill():
 
     # Clean up
     manager.free(req1)
+
+    time.sleep(1000)
