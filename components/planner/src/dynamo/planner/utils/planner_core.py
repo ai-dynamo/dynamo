@@ -24,7 +24,7 @@ from utils.perf_interpolation import DecodeInterpolator, PrefillInterpolator
 from utils.prometheus import PrometheusAPIClient
 
 from dynamo.planner import KubernetesConnector, LocalConnector
-from dynamo.planner.defaults import PlannerDefaults
+from defaults import PlannerDefaults
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 

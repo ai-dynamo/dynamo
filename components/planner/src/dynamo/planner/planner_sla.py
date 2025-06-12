@@ -19,7 +19,7 @@ import logging
 from pydantic import BaseModel
 from utils.planner_core import start_sla_planner
 
-from dynamo.planner.defaults import PlannerDefaults
+from defaults import PlannerDefaults
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sdk import async_on_start, dynamo_context, endpoint, service
 from dynamo.sdk.core.protocol.interface import ComponentType
