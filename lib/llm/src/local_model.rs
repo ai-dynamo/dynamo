@@ -5,11 +5,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use dynamo_runtime::component::{Component, Endpoint};
 use dynamo_runtime::traits::DistributedRuntimeProvider;
+use dynamo_runtime::{
+    component::{Component, Endpoint},
+    storage::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager},
+};
 
 use crate::discovery::ModelEntry;
-use crate::key_value_store::{EtcdStorage, KeyValueStore, KeyValueStoreManager};
 use crate::model_card::{self, ModelDeploymentCard};
 use crate::model_type::ModelType;
 

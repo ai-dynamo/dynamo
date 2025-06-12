@@ -15,8 +15,8 @@
 
 use std::{collections::HashMap, pin::Pin, time::Duration};
 
+use crate::{protocols::Endpoint, slug::Slug, transports::nats::Client};
 use async_trait::async_trait;
-use dynamo_runtime::{protocols::Endpoint, slug::Slug, transports::nats::Client};
 use futures::StreamExt;
 
 use super::{KeyValueBucket, KeyValueStore, StorageError, StorageOutcome};
