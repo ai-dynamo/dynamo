@@ -15,6 +15,8 @@ use llm_rs::block_manager::{
 
 use nixl_sys::Agent as NixlAgent;
 
+use dynamo_runtime::{DistributedRuntime, Runtime, utils::leader_worker_barrier::WorkerBarrier};
+
 #[derive(Clone, Debug)]
 struct VllmTensor {
     _py_tensor: Py<PyAny>,
@@ -121,15 +123,35 @@ fn load_and_validate_tensors(
     Ok((device_tensors, shape.unwrap()))
 }
 
+fn build_drt(barrier_id: String, worker_id: usize) -> anyhow::Result<DistributedRuntime> {
+    let rt = tokio::runtime::Runtime::new()?;
+
+    let runtime = Runtime::from_handle(rt.handle().clone())?;
+
+    rt.handle().block_on(async move {
+        let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
+
+        tracing::info!("Worker id {} waiting for barrier {}", worker_id, barrier_id);
+
+        let _barrier = WorkerBarrier::<()>::new(barrier_id, worker_id.to_string());
+        
+        // TODO: Enable only after we have the leader side.
+        // barrier.wait(&drt).await?;
+
+        Ok(drt)
+    })
+}
+
 #[pyclass]
 pub struct KvbmWorker {
     _device_blocks: Vec<Block<DeviceStorage, BasicMetadata>>,
+    _drt: DistributedRuntime
 }
 
 #[pymethods]
 impl KvbmWorker {
     #[new]
-    #[pyo3(signature = (num_layers, num_blocks, outer_dim, page_size, inner_dim, tensors, device_id=0, worker_id=0, dtype=None))]
+    #[pyo3(signature = (num_layers, num_blocks, outer_dim, page_size, inner_dim, tensors, device_id=0, worker_id=0, dtype=None, barrier_id="kvbm".to_string()))]
     fn new(
         num_layers: usize,
         num_blocks: usize,
@@ -140,6 +162,7 @@ impl KvbmWorker {
         device_id: usize,
         worker_id: usize,
         dtype: Option<String>,
+        barrier_id: String
     ) -> PyResult<Self> {
         if num_layers == 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -186,11 +209,16 @@ impl KvbmWorker {
 
         let layout: Arc<dyn NixlLayout<StorageType = DeviceStorage>> = Arc::from(layout);
 
+        // let serialized = layout.serialize().map_err(to_pyerr)?;
+
         let device_blocks =
             layout_to_blocks::<_, BasicMetadata>(layout, 0, worker_id as u64).map_err(to_pyerr)?;
+        
+        let drt = build_drt(barrier_id, worker_id).map_err(to_pyerr)?;
 
         Ok(Self {
             _device_blocks: device_blocks,
+            _drt: drt
         })
     }
 }
