@@ -212,16 +212,16 @@ when the script is invoked, it will:
   - print the command with `HEAD_NODE_IP` and `RAY_LEADER_NODE_IP` set, which can be used in
   another node to setup connectivity with the current node.
 
-  ```
+  ```bash
   # On node 0
-  source vllm_mutinode_setup.sh
+  source vllm_multinode_setup.sh
   ... # starting nats server, etcd and ray cluster
 
   # script print command
-  HEAD_NODE_IP=NODE_0_IP RAY_LEADER_NODE_IP=NODE_0_IP source vllm_mutinode_setup.sh
+  HEAD_NODE_IP=NODE_0_IP RAY_LEADER_NODE_IP=NODE_0_IP source vllm_multinode_setup.sh
 
   # On node 1
-  HEAD_NODE_IP=NODE_0_IP RAY_LEADER_NODE_IP=NODE_0_IP source vllm_mutinode_setup.sh
+  HEAD_NODE_IP=NODE_0_IP RAY_LEADER_NODE_IP=NODE_0_IP source vllm_multinode_setup.sh
   ... # connecting to Ray cluster
   ```
 

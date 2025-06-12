@@ -95,7 +95,6 @@ def parse_args(service_name, prefix) -> Namespace:
             "--worker-components and --component-endpoints must have the same number "
             f"of items, but got {args.worker_components} and {args.component_endpoints}"
         )
-        exit(1)
     return args
 
 
