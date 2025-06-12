@@ -230,13 +230,13 @@ With the Dynamo repository and the benchmarking image available, perform the fol
 
  4. Collect the performance numbers:
 
-### Single-Node
+Single-Node
 
  ```bash
  bash -x /workspace/benchmarks/llm/perf.sh --mode aggregated --deployment-kind vllm_serve --tensor-parallelism 4 --data-parallelism 2
  ```
 
- ### Two Nodes
+ Two Nodes
 
  ```bash
  bash -x /workspace/benchmarks/llm/perf.sh --mode aggregated --deployment-kind vllm_serve --tensor-parallelism 8 --data-parallelism 2
