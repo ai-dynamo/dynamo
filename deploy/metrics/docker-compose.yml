@@ -108,13 +108,13 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all  # Make all GPUs visible to the container
     runtime: nvidia  # Specify the NVIDIA runtime
     networks:
-     - monitoring
+      - monitoring
     profiles: [metrics]
 
   prometheus:
     image: prom/prometheus:v3.4.1
     container_name: prometheus
-    volumes:  
+    volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -127,9 +127,9 @@ services:
     # Example to pull from the /query endpoint:
     # {__name__=~"DCGM.*", job="dcgm-exporter"}
     ports:
-     - "9090:9090"
+      - "9090:9090"
     networks:
-     - monitoring
+      - monitoring
     profiles: [metrics]
     depends_on:
       - dcgm-exporter
@@ -155,11 +155,10 @@ services:
       # Default min interval is 5s, but can be configured lower
       - GF_DASHBOARDS_MIN_REFRESH_INTERVAL=2s
     restart: unless-stopped
-    # TODO: Use more explicit networking setup when metrics is containerized
     ports:
-     - "3001:3001"
+      - "3001:3001"
     networks:
-     - monitoring
+      - monitoring
     profiles: [metrics]
     depends_on:
       - prometheus
