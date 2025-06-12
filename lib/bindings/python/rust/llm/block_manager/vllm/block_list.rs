@@ -84,7 +84,6 @@ impl KvbmBlockList {
                 .ok(),
             None => None,
         };
-        tracing::debug!("+++++++++++++++++++++++++++++++++++sequence_hash: {:?}", sequence_hash);
 
         Ok(sequence_hash)
     }
