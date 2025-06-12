@@ -638,7 +638,7 @@ impl<L: BlockLayout + 'static, M: BlockMetadata> Blocks<L, M> {
     }
 }
 
-pub(crate) fn layout_to_blocks<S: Storage, M: BlockMetadata>(
+pub fn layout_to_blocks<S: Storage, M: BlockMetadata>(
     layout: Arc<dyn BlockLayout<StorageType = S>>,
     block_set_idx: usize,
     worker_id: WorkerID,

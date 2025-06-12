@@ -1166,6 +1166,7 @@ dependencies = [
  "dynamo-llm",
  "dynamo-runtime",
  "futures",
+ "nixl-sys",
  "once_cell",
  "pyo3",
  "pyo3-async-runtimes",
