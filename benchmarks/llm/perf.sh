@@ -39,21 +39,21 @@ print_help() {
   echo "Usage: $0 [OPTIONS]"
   echo
   echo "Options:"
-  echo "  --tensor-parallelism <int>           Set tensor parallelism (default: $tp)"
-  echo "  --data-parallelism <int>             Set data parallelism (default: $dp)"
-  echo "  --prefill-tensor-parallelism <int>   Set prefill tensor parallelism (default: $prefill_tp)"
-  echo "  --prefill-data-parallelism <int>     Set prefill data parallelism (default: $prefill_dp)"
-  echo "  --decode-tensor-parallelism <int>    Set decode tensor parallelism (default: $decode_tp)"
-  echo "  --decode-data-parallelism <int>      Set decode data parallelism (default: $decode_dp)"
-  echo "  --model <model_id>                   Model Id to benchmark from HuggingFace (default: $model)"
-  echo "  --input-sequence-length <int>        Input sequence length (default: $isl)"
-  echo "  --output-sequence-length <int>       Output sequence length (default: $osl)"
-  echo "  --url <http://host:port>             Target URL for inference requests (default: $url)"
-  echo "  --concurrency <list>                 Comma-separated list (default: $concurrency_list)"
-  echo "  --mode <aggregated|...>              serving mode: aggregated/disaggregated (default: $mode)"
-  echo "  --artifacts-root-dir <path>          Root directory to save benchmarking results (default: $artifacts_root_dir)"
-  echo "  --deployment-kind <type>             special tag for the pareto graph to distingish the plots (default: $deployment_kind)"
-  echo "  --help                               Show this help message and exit"
+  echo "  --tensor-parallelism, --tp <int>           Tensor parallelism (default: $tp)"
+  echo "  --data-parallelism, --dp <int>             Data parallelism (default: $dp)"
+  echo "  --prefill-tensor-parallelism, --prefill-tp <int>   Prefill tensor parallelism (default: $prefill_tp)"
+  echo "  --prefill-data-parallelism, --prefill-dp <int>     Prefill data parallelism (default: $prefill_dp)"
+  echo "  --decode-tensor-parallelism, --decode-tp <int>     Decode tensor parallelism (default: $decode_tp)"
+  echo "  --decode-data-parallelism, --decode-dp <int>       Decode data parallelism (default: $decode_dp)"
+  echo "  --model <model_id>                         Hugging Face model ID to benchmark (default: $model)"
+  echo "  --input-sequence-length, --isl <int>       Input sequence length (default: $isl)"
+  echo "  --output-sequence-length, --osl <int>      Output sequence length (default: $osl)"
+  echo "  --url <http://host:port>                   Target URL for inference requests (default: $url)"
+  echo "  --concurrency <list>                       Comma-separated concurrency levels (default: $concurrency_list)"
+  echo "  --mode <aggregated|disaggregated>          Serving mode (default: $mode)"
+  echo "  --artifacts-root-dir <path>                Root directory to store benchmark results (default: $artifacts_root_dir)"
+  echo "  --deployment-kind <type>                   Deployment tag used for pareto chart labels (default: $deployment_kind)"
+  echo "  --help                                     Show this help message and exit"
   echo
   exit 0
 }
@@ -62,27 +62,27 @@ print_help() {
 # The defaults can be overridden by command line arguments.
 while [[ $# -gt 0 ]]; do
   case $1 in
-    --tensor-parallelism)
+    --tensor-parallelism|--tp)
       tp="$2"
       shift 2
       ;;
-    --data-parallelism)
+    --data-parallelism|--dp)
       dp="$2"
       shift 2
       ;;
-    --prefill-tensor-parallelism)
+    --prefill-tensor-parallelism|--prefill-tp)
       prefill_tp="$2"
       shift 2
       ;;
-    --prefill-data-parallelism)
+    --prefill-data-parallelism|--prefill-dp)
       prefill_dp="$2"
       shift 2
       ;;
-    --decode-tensor-parallelism)
+    --decode-tensor-parallelism|--decode-tp)
       decode_tp="$2"
       shift 2
       ;;
-    --decode-data-parallelism)
+    --decode-data-parallelism|--decode-dp)
       decode_dp="$2"
       shift 2
       ;;
@@ -90,11 +90,11 @@ while [[ $# -gt 0 ]]; do
       model="$2"
       shift 2
       ;;
-    --input-sequence-length)
+    --input-sequence-length|--isl)
       isl="$2"
       shift 2
       ;;
-    --output-sequence-length)
+    --output-sequence-length|--osl)
       osl="$2"
       shift 2
       ;;

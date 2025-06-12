@@ -246,6 +246,8 @@ Single-Node
 
  ```bash
  bash -x /workspace/benchmarks/llm/perf.sh \
+  --mode aggregated \
+  --deployment-kind vllm_serve \
   --tensor-parallelism 1 \
   --data-parallelism 1 \
   --model neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
