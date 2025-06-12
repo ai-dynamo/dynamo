@@ -24,9 +24,9 @@ To ensure dynamo serve complies with the SLA, we provide a pre-deployment script
 > The script considers a fixed ISL/OSL without KV cache reuse. If the real ISL/OSL has a large variance or a significant amount of KV cache can be reused, the result might be inaccurate.
 
 We assume there is no piggy-backed prefill requests in the decode engine. Even if there are some short piggy-backed prefill requests in the decode engine, it should not affect the ITL too much in most conditions. However, if the piggy-backed prefill requests are too much, the ITL might be inaccurate.
-```
 
 ```bash
+cd $DYNAMO_HOME/components/planner/src/dynamo/planner/
 python -m utils.profile_sla \
   --config <path-to-dynamo-config-file> \
   --output-dir <path-to-profile-results-dir> \

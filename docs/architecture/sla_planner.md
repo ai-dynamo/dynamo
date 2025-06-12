@@ -28,6 +28,7 @@ The SLA planner consists of several key components:
 Before using the SLA planner, you must profile the performance of the selected model and GPU to generate interpolation data:
 
 ```bash
+cd $DYNAMO_HOME/components/planner/src/dynamo/planner/
 python -m utils.profile_sla \
   --config <path-to-dynamo-config-file> \
   --output-dir <path-to-profile-results-dir> \
@@ -128,3 +129,18 @@ Finally, SLA planner applies the change by scaling up/down the number of prefill
 
 > [!NOTE]
 > SLA-planner scales up/down the P/D engines non-blockingly. If `adjustment-interval` is too short, the previous scaling operations may not finish before the new scaling operations are issued. Make sure to set a large enough `adjustment-interval`.
+
+## Deploying
+
+To deploy SLA-planner, use the rust frontend (`dynamo-run`) that reports metrics at `/metrics` HTTP endpoint. You can also use your own frontend, but it must report number of requests, ISL, OSL, TTFT, ITL in the same format.
+
+SLA-planner and prometheus server are provided as common components that can be directly imported from `dynamo` package. The following changes are needed:
+- Add `Planner` and `Prometheus` components' dependency in `Frontend`.
+- Link `Planner` and `Prometheus` in the graph.
+- Add `Planner` and `Prometheus` configurations in the config file.
+
+A `vllm_v0` example is available for reference:
+```bash
+cd $DYNAMO_HOME/examples/vllm_v0
+dynamo serve graphs.disagg_planner:Frontend -f ./configs/disagg_planner.yaml 
+```
