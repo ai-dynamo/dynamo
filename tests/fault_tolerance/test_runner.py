@@ -429,6 +429,8 @@ async def test_worker_failure(
                     {"command": "list", "properties": {"name": f"{component_name}"}}
                 )
                 num_processes = len(result["pids"])
+                if number is None:
+                    number = num_processes
                 for x in range(number):
                     pid = result["pids"][x%num_processes]
                     logger.info(f"Terminating {component_name} Pid {pid}")
