@@ -58,6 +58,11 @@
 #   - monitoring: nats-prom-exp, etcd-server, dcgm-exporter, prometheus, grafana
 #   - default: nats-server (accessible via host network)
 #
+networks:
+  server:
+    driver: bridge
+  monitoring:
+    driver: bridge
 
 # Note that the images are pinned to specific versions to avoid breaking changes.
 services:
@@ -68,6 +73,9 @@ services:
       - 4222:4222
       - 6222:6222
       - 8222:8222  # the endpoints include /varz, /healthz, ...
+    networks:
+      - server
+      - monitoring
 
   etcd-server:
     image: bitnami/etcd:3.6.1
@@ -77,6 +85,7 @@ services:
       - 2379:2379  # this port exposes the /metrics endpoint
       - 2380:2380
     networks:
+      - server
       - monitoring
 
   # All the services below are part of the metrics profile and monitoring network.
@@ -162,7 +171,3 @@ services:
     profiles: [metrics]
     depends_on:
       - prometheus
-
-networks:
-  monitoring:
-    driver: bridge
