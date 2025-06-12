@@ -50,7 +50,7 @@ There are two additional rules set by planner to prevent over-compensation:
 1. After a new decode worker is added, since it needs time to populate the kv cache, planner doesn't scale down the number of decode workers in the next `NEW_DECODE_WORKER_GRACE_PERIOD=3` adjustment intervals.
 1. We do not scale up prefill worker if the prefill queue size is estimated to reduce below the `--prefill-queue-scale-up-threshold` within the next `NEW_PREFILL_WORKER_QUEUE_BUFFER_PERIOD=3` adjustment intervals following the trend observed in the current adjustment interval.
 
-For benchmarking recommendations, see the [Planner benchmark example](../../guides/planner_benchmark/benchmark_planner.md).
+For benchmarking recommendations, see the [Planner benchmark example](../../docs/guides/planner_benchmark/benchmark_planner.md).
 
 
 ## Comply with SLA
