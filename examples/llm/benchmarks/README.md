@@ -392,3 +392,24 @@ when the script is invoked, it will:
 
 For instructions on how to acquire per worker metrics and visualize them using Grafana,
 please see the provided [Visualization with Prometheus and Grafana](../../../deploy/metrics/README.md).
+
+## Trouble Shooting
+
+When benchmarking disaggregation performance, there can be cases where the latency and
+throughput number don't match the expectation within some margin. Below is a list of scenarios
+that have been encountered, and the detail on observation and resolution.
+
+### Interconnect Configuration
+
+Even if the ndoes has faster interconnect hardware, there can be misconfiguration such that
+the fastest route may not be selected by NIXL ([example regression](https://github.com/ai-dynamo/dynamo/pull/1314)). NIXL simplifies the interconnect but also hides
+selection detail. Therefore this can be the cause if you observe abnormal TTFT increase when
+splitting prefill workers and decode workers to different nodes, in the particular instance
+linked above, ~ 2 seconds overhead is added to TTFT.
+
+Currently NIXL doesn't provide utility for reporting which transport is selected. Therefore
+you will need to verify if that is the cause by using backend specific debug options.
+In the case of UCX backend, you can use `ucx_info -d` to check if the desired interconnect
+devices are being recognized. At runtime, `UCX_LOG_LEVEL=debug` and `UCX_PROTO_INFO=y`
+can be set as environment variable to provide detail log on UCX activites. Which will
+reveal whether the desired transport is being used.
