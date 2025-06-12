@@ -327,6 +327,9 @@ ENV DYNAMO_HOME=/workspace
 # Use UCX for TRTLLM KV Cache Transfer
 ENV TRTLLM_USE_UCX_KVCACHE=1
 
+# Set environment variables for NIXL to find the right plugin
+ENV LD_LIBRARY_PATH="/usr/local/nixl/lib/x86_64-linux-gnu:/usr/local/nixl/lib/x86_64-linux-gnu/plugins:/usr/local/ucx/lib:$LD_LIBRARY_PATH"
+ENV NIXL_PLUGIN_DIR="/usr/local/nixl/lib/x86_64-linux-gnu/plugins"
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
