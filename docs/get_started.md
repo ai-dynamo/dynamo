@@ -54,21 +54,29 @@ If you don't want to use the dev container, you can set the environment up manua
    * Python 3.x
    * Git
 
-See [Support Matrix](support_matrix.md) for more information.
+   See [Support Matrix](support_matrix.md) for more information.
 
-2. Install required system packages:
+2. **If you plan to use vLLM or SGLang**, you must also install:
+      * etcd
+      * NATS.io
+
+   Before starting dyanmo, run both etcd and NATS.io in seperate processes.
+
+
+
+3. Install required system packages:
    ```bash
    apt-get update
    DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0
    ```
 
-3. Set up the Python environment:
+4. Set up the Python environment:
    ```bash
    python3 -m venv venv
    source venv/bin/activate
    ```
 
-4. Install Dynamo:
+5. Install Dynamo:
    ```bash
    pip install "ai-dynamo[all]"
    ```
