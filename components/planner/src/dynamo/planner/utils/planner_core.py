@@ -19,12 +19,12 @@ import logging
 import math
 import time
 
-from utils.load_predictor import LOAD_PREDICTORS
-from utils.perf_interpolation import DecodeInterpolator, PrefillInterpolator
-from utils.prometheus import PrometheusAPIClient
+from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
+from dynamo.planner.utils.perf_interpolation import DecodeInterpolator, PrefillInterpolator
+from dynamo.planner.utils.prometheus import PrometheusAPIClient
 
 from dynamo.planner import KubernetesConnector, LocalConnector
-from defaults import PlannerDefaults
+from dynamo.planner.defaults import PlannerDefaults
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 

@@ -26,6 +26,10 @@ from dynamo.sdk import depends, service
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
 
+from dynamo.planner.planner_sla import Planner
+from dynamo.planner.prometheus import Prometheus
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -60,6 +64,8 @@ class FrontendConfig(BaseModel):
 )
 class Frontend:
     worker = depends(VllmWorker)
+    planner = depends(Planner)
+    prometheus = depends(Prometheus)
 
     def __init__(self):
         """Initialize Frontend service with HTTP server and model configuration."""

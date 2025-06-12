@@ -57,10 +57,11 @@ Prometheus:
         - targets: ['localhost:8000']
 
 Planner:
-  adjustment_interval: 180
+  adjustment-interval: 180
+  profile-results-dir: "/workspace/examples/profiling_results"
   isl: 3000
   osl: 150
   ttft: 0.5
   itl: 0.05
-  load_predictor: "arima"
+  load-predictor: "arima"
   

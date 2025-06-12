@@ -35,7 +35,7 @@ class PlannerDefaults:
 
     # sla-planner
     prometheus_endpoint = "http://localhost:9090"
-    profile_dir = "profiling_results"
+    profile_results_dir = "profiling_results"
     isl = 3000  # in number of tokens
     osl = 150  # in number of tokens
     ttft = 0.5  # in seconds

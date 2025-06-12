@@ -17,9 +17,9 @@ import argparse
 import logging
 
 from pydantic import BaseModel
-from utils.planner_core import start_sla_planner
+from dynamo.planner.utils.planner_core import start_sla_planner
 
-from defaults import PlannerDefaults
+from dynamo.planner.defaults import PlannerDefaults
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sdk import async_on_start, dynamo_context, endpoint, service
 from dynamo.sdk.core.protocol.interface import ComponentType
@@ -79,10 +79,15 @@ class Planner:
             prometheus_endpoint=config_instance.get(
                 "prometheus-endpoint", PlannerDefaults.prometheus_endpoint
             ),
+            profile_results_dir=config_instance.get("profile-results-dir", PlannerDefaults.profile_results_dir),
             isl=config_instance.get("isl", PlannerDefaults.isl),
             osl=config_instance.get("osl", PlannerDefaults.osl),
             ttft=config_instance.get("ttft", PlannerDefaults.ttft),
             itl=config_instance.get("itl", PlannerDefaults.itl),
+            load_predictor=config_instance.get("load-predictor", PlannerDefaults.load_predictor),
+            load_prediction_window_size=config_instance.get(
+                "load-prediction-window-size", PlannerDefaults.load_prediction_window_size
+            ),
         )
 
     @async_on_start
