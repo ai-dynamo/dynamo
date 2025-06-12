@@ -380,7 +380,7 @@ class VllmEncodeWorker:
 
             # Ensure the tensor is contiguous, on CUDA and uint8 for the NIXL buffer.
             tensor_for_descriptor: torch.Tensor = resized_frames_tensor_hwc.to(
-                device="cuda", dtype=torch.uint8
+                device="cpu", dtype=torch.uint8
             ).contiguous()
 
             logger.info(

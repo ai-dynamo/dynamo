@@ -42,7 +42,7 @@ logger = logging.getLogger(__name__)
 # Constants for the shape and dtype of the INCOMING FRAMES tensor.
 # Other constants taken from yaml as they are model dependent.
 INCOMING_FRAMES_DTYPE = torch.uint8
-INCOMING_FRAMES_DEVICE = "cuda"
+INCOMING_FRAMES_DEVICE = "cpu"
 
 
 class RequestType(BaseModel):
@@ -141,7 +141,7 @@ class VllmPrefillWorker:
             self.frame_channels,
         )
 
-        # Pre-allocate a tensor on the GPU to receive frame data.
+        # Pre-allocate a tensor on the CPU to receive frame data.
         frames_tensor = torch.empty(
             incoming_frames_shape,
             dtype=INCOMING_FRAMES_DTYPE,
@@ -356,7 +356,7 @@ class VllmPrefillWorker:
 
         prefill_vllm_input = TokensPrompt(
             prompt_token_ids=filtered_prompt_token_ids,
-            multi_modal_data={"video": raw_frames_tensor.cpu().numpy()},
+            multi_modal_data={"video": raw_frames_tensor.numpy()},
         )
         logger.info(
             f"PrefillWorker {request_id}: Constructed TokensPrompt input with {len(filtered_prompt_token_ids)} tokens."

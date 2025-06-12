@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 # Constants for the shape and dtype of the INCOMING FRAMES tensor from EncodeWorker.
 # IMPORTANT ASSUMPTION: EncodeWorker must provide frames of this fixed shape and dtype.
 INCOMING_FRAMES_DTYPE = torch.uint8
-INCOMING_FRAMES_DEVICE = "cuda"
+INCOMING_FRAMES_DEVICE = "cpu"
 
 
 @service(
@@ -392,7 +392,7 @@ class VllmDecodeWorker:
                 # Therefore, we must first move the tensor from the GPU to the CPU memory
                 # before converting it to a NumPy array.
                 # See vLLM's official example for raw image inputs: https://github.com/vllm-project/vllm/blob/main/examples/llava_example.py
-                video_numpy = current_received_multimodal_data_tensor.cpu().numpy()
+                video_numpy = current_received_multimodal_data_tensor.numpy()
                 multi_modal_data_for_engine = {"video": video_numpy}
                 prompt_argument_for_vllm = request.engine_prompt[
                     "prompt_token_ids"
@@ -423,7 +423,7 @@ class VllmDecodeWorker:
             # Therefore, we must first move the tensor from the GPU to the CPU memory
             # before converting it to a NumPy array.
             # See vLLM's official example for raw image inputs: https://github.com/vllm-project/vllm/blob/main/examples/llava_example.py
-            video_numpy = current_received_multimodal_data_tensor.cpu().numpy()
+            video_numpy = current_received_multimodal_data_tensor.numpy()
             multi_modal_data_for_engine = {"video": video_numpy}
             prompt_argument_for_vllm = request.engine_prompt[
                 "prompt_token_ids"
