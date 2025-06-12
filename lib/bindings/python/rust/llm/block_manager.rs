@@ -30,6 +30,7 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<block::Block>()?;
     m.add_class::<block_list::BlockList>()?;
     m.add_class::<BlockManager>()?;
+    m.add_class::<worker::KvbmWorker>()?;
 
     vllm::add_to_module(m)?;
 

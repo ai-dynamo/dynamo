@@ -39,7 +39,7 @@ impl VllmTensor {
 
             let data_ptr = py_tensor.call_method0(py, "data_ptr")?.extract::<u64>(py)?;
             let size_bytes = py_tensor
-                .call_method0(py, "size_bytes")?
+                .getattr(py, "nbytes")?
                 .extract::<usize>(py)?;
             let shape = py_tensor.getattr(py, "shape")?.extract::<Vec<usize>>(py)?;
             let stride = py_tensor
@@ -122,7 +122,7 @@ fn load_and_validate_tensors(
 }
 
 #[pyclass]
-struct KvbmWorker {
+pub struct KvbmWorker {
     _device_blocks: Vec<Block<DeviceStorage, BasicMetadata>>,
 }
 
@@ -153,6 +153,10 @@ impl KvbmWorker {
             ));
         }
 
+        let dtype = dtype.unwrap_or("fp16".to_string());
+
+        tracing::info!("Initializing KvbmWorker with params: num_layers={}, num_blocks={}, outer_dim={}, page_size={}, inner_dim={}, dtype={}", num_layers, num_blocks, outer_dim, page_size, inner_dim, dtype);
+
         let (device_tensors, shape) =
             load_and_validate_tensors(tensors, device_id).map_err(to_pyerr)?;
 
@@ -166,7 +170,7 @@ impl KvbmWorker {
             .outer_dim(outer_dim)
             .page_size(page_size)
             .inner_dim(inner_dim)
-            .dtype(map_dtype(&dtype.unwrap_or("fp16".to_string())).map_err(to_pyerr)?)
+            .dtype(map_dtype(&dtype).map_err(to_pyerr)?)
             .build()
             .map_err(to_pyerr)?;
 
