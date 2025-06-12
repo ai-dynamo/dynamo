@@ -288,11 +288,10 @@ class VllmEncodeWorker:
             stream_info = container.streams.video[0]
             total_frames = stream_info.frames
             # Duration can be useful for streams where total_frames is 0
-            duration_sec = (
-                stream_info.duration * float(stream_info.time_base)
-                if stream_info.duration
-                else 0
-            )
+            if stream_info.duration:
+                duration_sec = stream_info.duration * float(stream_info.time_base)
+            else:
+                duration_sec = 0
 
             if total_frames == 0 and duration_sec == 0:
                 logger.error(f"Video file '{video_url}' has 0 frames and 0 duration.")
@@ -351,11 +350,6 @@ class VllmEncodeWorker:
                 f"Successfully extracted {len(clip_np) if clip_np.ndim > 1 and clip_np.shape[0] > 0 else 0} frames for {video_url} with original shape {clip_np.shape}."
             )
 
-            # Define target dimensions (should match VllmDecodeWorker's INCOMING_FRAMES_SHAPE)
-            TARGET_FRAME_HEIGHT = 336
-            TARGET_FRAME_WIDTH = 336
-            # self.num_frames_to_sample is already the target number of frames
-
             # Convert the NumPy array from the video decoder into a PyTorch tensor.
             # This is a required step to use PyTorch functions for GPU-accelerated image processing.
             frames_tensor_orig_res = torch.from_numpy(clip_np)  # Shape: (T, H, W, C)
@@ -368,7 +362,7 @@ class VllmEncodeWorker:
             # Resize
             resized_frames_tensor_chw = F.interpolate(
                 frames_tensor_chw,
-                size=(TARGET_FRAME_HEIGHT, TARGET_FRAME_WIDTH),
+                size=(self.frame_height, self.frame_width),
                 mode="bilinear",
                 align_corners=False,
             )

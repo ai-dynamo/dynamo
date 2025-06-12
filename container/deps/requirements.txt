@@ -14,6 +14,7 @@
 # limitations under the License.
 
 accelerate==1.6.0
+av
 fastapi==0.115.6
 ftfy
 genai-perf==0.0.13
