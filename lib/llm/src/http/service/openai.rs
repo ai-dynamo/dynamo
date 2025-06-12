@@ -507,6 +507,7 @@ fn process_event_converter<T: Serialize>(
         response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
 
         // Chomp the LLMMetricAnnotation so it's not returned in the response stream
+        // TODO: add a flag to control what is returned in the SSE stream
         if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_LLM_METRICS) {
             annotated.event = None;
             annotated.comment = None;
