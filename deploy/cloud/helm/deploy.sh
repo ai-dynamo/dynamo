@@ -172,5 +172,6 @@ $HELM_CMD upgrade --install $RELEASE_NAME platform/ \
   -f generated-values.yaml \
   --create-namespace \
   --namespace ${NAMESPACE}
+  --timeout 10m0s
 
 echo "Helm chart deployment complete"
