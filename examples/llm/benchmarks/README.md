@@ -242,6 +242,21 @@ Single-Node
  bash -x /workspace/benchmarks/llm/perf.sh --mode aggregated --deployment-kind vllm_serve --tensor-parallelism 8 --data-parallelism 2
  ```
 
+ We could also run the benchmarking script and specify the model, input sequence length, output sequence length, and concurrency levels to target for benchmarking:
+
+ ```bash
+ bash -x /workspace/benchmarks/llm/perf.sh \
+  --tensor-parallelism 1
+  --data-parallelism 1
+  --model neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
+  --input-sequence-length 3000 \
+  --output-sequence-length 150 \
+  --url http://localhost:8000 \
+  --concurrency 1,2,4,8,16,32,64,128,256 \
+
+  # The `--concurrency` option accepts either a single value (e.g., 64) or a comma-separated list (e.g., 1,2,4,8) to specify multiple concurrency levels for benchmarking.
+ ```
+
  > [!Important]
  > We should be careful in specifying these options in `perf.sh` script. They should closely reflect the deployment config that is being benchmarked. See `perf.sh --help` to learn more about these option. In the above command, we described that our deployment is using aggregated serving in `vllm serve`. We have also accurately described that we have 2 workers with TP=4(or TP=8 for two nodes).
 

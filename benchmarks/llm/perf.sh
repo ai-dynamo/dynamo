@@ -14,13 +14,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-# Parse command line arguments
+# Default Values
 model="neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic"
 url="http://localhost:8000"
 mode="aggregated"
 artifacts_root_dir="artifacts_root"
 deployment_kind="dynamo"
+concurrency_list="1,2,4,8,16,32,64,128,256"
 
 # Input Sequence Length (isl) 3000 and Output Sequence Length (osl) 150 are
 # selected for chat use case. Note that for other use cases, the results and
@@ -35,6 +35,30 @@ prefill_dp=0
 decode_tp=0
 decode_dp=0
 
+print_help() {
+  echo "Usage: $0 [OPTIONS]"
+  echo
+  echo "Options:"
+  echo "  --tensor-parallelism <int>           Set tensor parallelism (default: $tp)"
+  echo "  --data-parallelism <int>             Set data parallelism (default: $dp)"
+  echo "  --prefill-tensor-parallelism <int>   Set prefill tensor parallelism (default: $prefill_tp)"
+  echo "  --prefill-data-parallelism <int>     Set prefill data parallelism (default: $prefill_dp)"
+  echo "  --decode-tensor-parallelism <int>    Set decode tensor parallelism (default: $decode_tp)"
+  echo "  --decode-data-parallelism <int>      Set decode data parallelism (default: $decode_dp)"
+  echo "  --model <model_id>                   Model Id to benchmark from HuggingFace (default: $model)"
+  echo "  --input-sequence-length <int>        Input sequence length (default: $isl)"
+  echo "  --output-sequence-length <int>       Output sequence length (default: $osl)"
+  echo "  --url <http://host:port>             Target URL for inference requests (default: $url)"
+  echo "  --concurrency <list>                 Comma-separated list (default: $concurrency_list)"
+  echo "  --mode <aggregated|...>              serving mode: aggregated/disaggregated (default: $mode)"
+  echo "  --artifacts-root-dir <path>          Root directory to save benchmarking results (default: $artifacts_root_dir)"
+  echo "  --deployment-kind <type>             special tag for the pareto graph to distingish the plots (default: $deployment_kind)"
+  echo "  --help                               Show this help message and exit"
+  echo
+  exit 0
+}
+
+# Parse command line arguments
 # The defaults can be overridden by command line arguments.
 while [[ $# -gt 0 ]]; do
   case $1 in
@@ -62,7 +86,7 @@ while [[ $# -gt 0 ]]; do
       decode_dp="$2"
       shift 2
       ;;
-      --model)
+    --model)
       model="$2"
       shift 2
       ;;
@@ -78,6 +102,10 @@ while [[ $# -gt 0 ]]; do
       url="$2"
       shift 2
       ;;
+    --concurrency)
+      concurrency_list="$2"
+      shift 2
+      ;;
     --mode)
       mode="$2"
       shift 2
@@ -90,12 +118,29 @@ while [[ $# -gt 0 ]]; do
       deployment_kind="$2"
       shift 2
       ;;
+    --help)
+      print_help
+      ;;
     *)
       echo "Unknown option: $1"
       exit 1
       ;;
   esac
 done
+
+# Function to validate if concurrency values are positive integers
+validate_concurrency() {
+  for val in "${concurrency_array[@]}"; do
+    if ! [[ "$val" =~ ^[0-9]+$ ]] || [ "$val" -le 0 ]; then
+      echo "Error: Invalid concurrency value '$val'. Must be a positive integer." >&2
+      exit 1
+    fi
+  done
+}
+
+IFS=',' read -r -a concurrency_array <<< "$concurrency_list"
+# Validate concurrency values
+validate_concurrency
 
 if [ "${mode}" == "aggregated" ]; then
   if [ "${tp}" == "0" ] && [ "${dp}" == "0" ]; then
@@ -157,8 +202,15 @@ if [ $index -gt 0 ]; then
     echo "--------------------------------"
 fi
 
+echo "Running genai-perf with:"
+echo "Model: $model"
+echo "ISL: $isl"
+echo "OSL: $osl"
+echo "Concurrency levels: ${concurrency_array[@]}"
+
 # Concurrency levels to test
-for concurrency in 1 2 4 8 16 32 64 128 256; do
+for concurrency in "${concurrency_array[@]}"; do
+  echo "Run concurrency: $concurrency"
 
   # NOTE: For Dynamo HTTP OpenAI frontend, use `nvext` for fields like
   # `ignore_eos` since they are not in the official OpenAI spec.
@@ -185,7 +237,7 @@ for concurrency in 1 2 4 8 16 32 64 128 256; do
     --artifact-dir ${artifact_dir} \
     -- \
     -v \
-    --max-threads 256 \
+    --max-threads ${concurrency} \
     -H 'Authorization: Bearer NOT USED' \
     -H 'Accept: text/event-stream'
 
