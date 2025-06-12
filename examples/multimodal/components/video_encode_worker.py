@@ -51,7 +51,15 @@ class VllmEncodeWorker:
     def __init__(self) -> None:
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
-
+        self.num_frames_to_sample = getattr(self.engine_args, "num_sampled_frames", 8)
+        self.frame_height = getattr(self.engine_args, "frame_height", 336)
+        self.frame_width = getattr(self.engine_args, "frame_width", 336)
+        self.frame_channels = getattr(self.engine_args, "frame_channels", 3)
+        self.dummy_token_id = getattr(self.engine_args, "dummy_token_id", 0)
+        self.video_token_id = getattr(self.engine_args, "video_token_id", 32000)
+        self.dummy_tokens_per_frame = getattr(
+            self.engine_args, "dummy_tokens_per_frame", 144
+        )
         self._video_content_cache: dict[str, BytesIO] = {}
         self._cache_queue: Queue[str] = Queue(maxsize=CACHE_SIZE_MAXIMUM)
 
@@ -155,7 +163,9 @@ class VllmEncodeWorker:
                     video_bytes = base64.b64decode(data_segment)
                     video_data = BytesIO(video_bytes)
                 except binascii.Error as e:
-                    raise ValueError(f"Invalid base64 encoding for video data: {e}")
+                    raise ValueError(
+                        f"Invalid base64 encoding for video data: {e}"
+                    ) from e
 
             elif parsed_url.scheme in ("http", "https"):
                 if not self._http_client:
@@ -228,7 +238,7 @@ class VllmEncodeWorker:
             logger.error(
                 f"Error loading video content from {video_url}: {type(e).__name__} - {e}"
             )
-            raise ValueError(f"Failed to load video content: {e}")
+            raise ValueError(f"Failed to load video content: {e}") from e
 
     @endpoint()
     async def encode(self, request: EncodeRequest) -> AsyncIterator[str]:
@@ -237,6 +247,11 @@ class VllmEncodeWorker:
         if not video_url:
             logger.error(f"Request {request_id}: 'video_url' not provided.")
             raise ValueError("'video_url' is required for encoding.")
+        if request.serialized_request is None:
+            logger.error(
+                f"Request serialized_request is None for request: {{ id: {request_id} }}."
+            )
+            raise ValueError("'serialized_request' is required for encoding.")
 
         logger.info(
             f"Received encode request: {{ id: {request_id}, video_url: '{video_url[:100]}...' }}"
@@ -377,10 +392,6 @@ class VllmEncodeWorker:
             # Create a descriptor for the tensor to be sent via the connector.
             descriptor = connect.Descriptor(tensor_for_descriptor)
             logger.info(f"Req {request_id}: Beginning connector write operation.")
-            if request.serialized_request is None:
-                logger.error(
-                    f"Request serialized_request is None for request: {{ id: {request_id} }}."
-                )
             # Pass the remote worker's SerializedRequest (representing its WritableOperation) to begin_write.
             # This initiates the data transfer to the memory buffer on the other worker.
             write_op = await self._connector.begin_write(

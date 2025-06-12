@@ -17,6 +17,13 @@ Common:
   block-size: 64
   max-model-len: 8192
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
+  num-sampled-frames: 8
+  frame-height: 336
+  frame-width: 336
+  frame-channels: 3
+  dummy-token-id: 0
+  video-token-id: 32000
+  dummy-tokens-per-frame: 144
 
 Processor:
   router: round-robin
@@ -31,7 +38,7 @@ VllmDecodeWorker:
     workers: 1
     resources:
       gpu: 1
-  common-configs: [model, block-size, max-model-len, kv-transfer-config]
+  common-configs: [model, block-size, max-model-len, kv-transfer-config, num-sampled-frames, frame-height, frame-width, frame-channels, dummy-token-id, video-token-id, dummy-tokens-per-frame]
 
 VllmPrefillWorker:
   max-num-batched-tokens: 16384
@@ -39,7 +46,7 @@ VllmPrefillWorker:
     workers: 1
     resources:
       gpu: 1
-  common-configs: [model, block-size, max-model-len, kv-transfer-config]
+  common-configs: [model, block-size, max-model-len, kv-transfer-config, num-sampled-frames, frame-height, frame-width, frame-channels, dummy-token-id, video-token-id, dummy-tokens-per-frame]
 
 VllmEncodeWorker:
   tensor-parallel-size: 1
@@ -48,4 +55,5 @@ VllmEncodeWorker:
     workers: 1
     resources:
       gpu: 1
-  common-configs: [model]
+  common-configs: [model, num-sampled-frames, frame-height, frame-width, frame-channels, dummy-token-id, video-token-id, dummy-tokens-per-frame]
+

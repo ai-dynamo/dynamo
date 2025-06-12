@@ -16,6 +16,13 @@ Common:
   model: llava-hf/LLaVA-NeXT-Video-7B-hf
   block-size: 64
   max-model-len: 4096
+  num-sampled-frames: 8
+  frame-height: 336
+  frame-width: 336
+  frame-channels: 3
+  dummy-token-id: 0
+  video-token-id: 32000
+  dummy-tokens-per-frame: 144
 
 Processor:
   router: round-robin
@@ -31,7 +38,7 @@ VllmDecodeWorker:
     workers: 1
     resources:
       gpu: 1
-  common-configs: [model, block-size, max-model-len]
+  common-configs: [model, block-size, max-model-len, num-sampled-frames, frame-height, frame-width, frame-channels, dummy-token-id, video-token-id, dummy-tokens-per-frame]
 
 VllmEncodeWorker:
   tensor-parallel-size: 1
@@ -40,4 +47,4 @@ VllmEncodeWorker:
     workers: 1
     resources:
       gpu: 1
-  common-configs: [model]
+  common-configs: [model, num-sampled-frames, frame-height, frame-width, frame-channels, dummy-token-id, video-token-id, dummy-tokens-per-frame]

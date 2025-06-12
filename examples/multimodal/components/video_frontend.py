@@ -46,6 +46,6 @@ class Frontend:
                     s = json.loads(response)
                     yield s
                 except json.JSONDecodeError as e:
-                    raise RuntimeError(f"Failed to parse JSON response: {e}")
+                    raise RuntimeError(f"Failed to parse JSON response: {e}") from e
 
         return StreamingResponse(content_generator(), media_type="text/event-stream")

@@ -40,18 +40,7 @@ from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, servic
 logger = logging.getLogger(__name__)
 
 # Constants for the shape and dtype of the INCOMING FRAMES tensor.
-# IMPORTANT ASSUMPTION: EncodeWorker must provide frames of this fixed shape and dtype.
-# Example: 8 frames, each 224x224 RGB.
-NUM_SAMPLED_FRAMES = 8  # Should match VllmEncodeWorker's num_frames_to_sample
-FRAME_HEIGHT = 336
-FRAME_WIDTH = 336
-FRAME_CHANNELS = 3
-INCOMING_FRAMES_SHAPE = (
-    NUM_SAMPLED_FRAMES,
-    FRAME_HEIGHT,
-    FRAME_WIDTH,
-    FRAME_CHANNELS,
-)
+# Other constants taken from yaml as they are model dependent.
 INCOMING_FRAMES_DTYPE = torch.uint8
 INCOMING_FRAMES_DEVICE = "cuda"
 
@@ -74,6 +63,15 @@ class VllmPrefillWorker:
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
         self.model_path = self.engine_args.model  # Store model path for AutoProcessor
+        self.num_sampled_frames = getattr(self.engine_args, "num_sampled_frames", 8)
+        self.frame_height = getattr(self.engine_args, "frame_height", 336)
+        self.frame_width = getattr(self.engine_args, "frame_width", 336)
+        self.frame_channels = getattr(self.engine_args, "frame_channels", 3)
+        self.dummy_token_id = getattr(self.engine_args, "dummy_token_id", 0)
+        self.video_token_id = getattr(self.engine_args, "video_token_id", 32000)
+        self.dummy_tokens_per_frame = getattr(
+            self.engine_args, "dummy_tokens_per_frame", 144
+        )
         self._loaded_metadata = set()
         self.initialized = False
         self.min_workers = 1
@@ -136,9 +134,16 @@ class VllmPrefillWorker:
         self._connector = connect.Connector(runtime=runtime, namespace=enc_comp_ns)
         await self._connector.initialize()
 
+        incoming_frames_shape = (
+            self.num_sampled_frames,
+            self.frame_height,
+            self.frame_width,
+            self.frame_channels,
+        )
+
         # Pre-allocate a tensor on the GPU to receive frame data.
         frames_tensor = torch.empty(
-            INCOMING_FRAMES_SHAPE,
+            incoming_frames_shape,
             dtype=INCOMING_FRAMES_DTYPE,
             device=INCOMING_FRAMES_DEVICE,
         )
@@ -288,8 +293,8 @@ class VllmPrefillWorker:
             )
 
         # Remove dummy tokens that were added after each video token.
-        DUMMY_TOKEN_ID = 0
-        VIDEO_TOKEN_ID = 32000
+        DUMMY_TOKEN_ID = self.dummy_token_id
+        VIDEO_TOKEN_ID = self.video_token_id
         DUMMY_TOKENS_PER_FRAME = 144  # From DecodeWorker: embedding_size
 
         video_count_before = sum(

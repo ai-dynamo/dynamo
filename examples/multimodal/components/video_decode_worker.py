@@ -43,17 +43,6 @@ logger = logging.getLogger(__name__)
 
 # Constants for the shape and dtype of the INCOMING FRAMES tensor from EncodeWorker.
 # IMPORTANT ASSUMPTION: EncodeWorker must provide frames of this fixed shape and dtype.
-# Example: 8 frames, each 224x224 RGB.
-NUM_SAMPLED_FRAMES = 8  # Should match VllmEncodeWorker's num_frames_to_sample
-FRAME_HEIGHT = 336
-FRAME_WIDTH = 336
-FRAME_CHANNELS = 3
-INCOMING_FRAMES_SHAPE = (
-    NUM_SAMPLED_FRAMES,
-    FRAME_HEIGHT,
-    FRAME_WIDTH,
-    FRAME_CHANNELS,
-)
 INCOMING_FRAMES_DTYPE = torch.uint8
 INCOMING_FRAMES_DEVICE = "cuda"
 
@@ -118,6 +107,15 @@ class VllmDecodeWorker:
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
         self.model_path = self.engine_args.model
+        self.num_sampled_frames = getattr(self.engine_args, "num_sampled_frames", 8)
+        self.frame_height = getattr(self.engine_args, "frame_height", 336)
+        self.frame_width = getattr(self.engine_args, "frame_width", 336)
+        self.frame_channels = getattr(self.engine_args, "frame_channels", 3)
+        self.dummy_token_id = getattr(self.engine_args, "dummy_token_id", 0)
+        self.video_token_id = getattr(self.engine_args, "video_token_id", 32000)
+        self.dummy_tokens_per_frame = getattr(
+            self.engine_args, "dummy_tokens_per_frame", 144
+        )
         self.do_remote_prefill = self.engine_args.remote_prefill
         self.model_name = (
             self.engine_args.served_model_name
@@ -189,7 +187,7 @@ class VllmDecodeWorker:
             # Depending on the desired behavior, you might want to raise the error
             # or allow the worker to start without a processor if it's optional for some paths.
             # For this change, processor is critical.
-            raise RuntimeError(f"Failed to initialize AutoProcessor: {e}")
+            raise RuntimeError(f"Failed to initialize AutoProcessor: {e}") from e
 
         runtime = dynamo_context["runtime"]
 
@@ -207,9 +205,14 @@ class VllmDecodeWorker:
         await self._connector.initialize()
 
         # NIXL buffer for receiving raw video frames.
-        # Uses INCOMING_FRAMES_SHAPE, INCOMING_FRAMES_DTYPE, INCOMING_FRAMES_DEVICE constants.
+        incoming_frames_shape = (
+            self.num_sampled_frames,
+            self.frame_height,
+            self.frame_width,
+            self.frame_channels,
+        )
         raw_frames_tensor = torch.empty(
-            INCOMING_FRAMES_SHAPE,
+            incoming_frames_shape,
             dtype=INCOMING_FRAMES_DTYPE,
             device=INCOMING_FRAMES_DEVICE,
         )
@@ -354,7 +357,7 @@ class VllmDecodeWorker:
                 # For remote prefill, expand the *single* video token from base_prompt_ids and add dummies
                 expanded_and_dummied_ids = self._expand_video_tokens_in_prompt(
                     base_prompt_ids_for_router,  # Use the tokenized output of chat_template
-                    NUM_SAMPLED_FRAMES,
+                    self.num_sampled_frames,
                     VIDEO_TOKEN_ID_FOR_EXPANSION,
                     add_dummy_tokens=True,
                     dummy_token_id=DUMMY_TOKEN_ID,
@@ -385,6 +388,10 @@ class VllmDecodeWorker:
                     # Wait for the remote write from the EncodeWorker to complete.
                     await writable.wait_for_completion()
                 current_received_multimodal_data_tensor = raw_frames_tensor_from_nixl
+                # The vLLM engine's processor for raw visual data expects a CPU-based NumPy array.
+                # Therefore, we must first move the tensor from the GPU to the CPU memory
+                # before converting it to a NumPy array.
+                # See vLLM's official example for raw image inputs: https://github.com/vllm-project/vllm/blob/main/examples/llava_example.py
                 video_numpy = current_received_multimodal_data_tensor.cpu().numpy()
                 multi_modal_data_for_engine = {"video": video_numpy}
                 prompt_argument_for_vllm = request.engine_prompt[
@@ -412,6 +419,10 @@ class VllmDecodeWorker:
                 # Wait for the remote write from the EncodeWorker to complete.
                 await writable.wait_for_completion()
             current_received_multimodal_data_tensor = raw_frames_tensor_from_nixl
+            # The vLLM engine's processor for raw visual data expects a CPU-based NumPy array.
+            # Therefore, we must first move the tensor from the GPU to the CPU memory
+            # before converting it to a NumPy array.
+            # See vLLM's official example for raw image inputs: https://github.com/vllm-project/vllm/blob/main/examples/llava_example.py
             video_numpy = current_received_multimodal_data_tensor.cpu().numpy()
             multi_modal_data_for_engine = {"video": video_numpy}
             prompt_argument_for_vllm = request.engine_prompt[
@@ -423,21 +434,17 @@ class VllmDecodeWorker:
 
         # Prepare the first argument for vLLM engine's generate call
         final_vllm_input: Union[str, dict]
-        if isinstance(prompt_argument_for_vllm, str):
-            if multi_modal_data_for_engine:
-                final_vllm_input = {
-                    "prompt_token_ids": prompt_argument_for_vllm,
-                    "multi_modal_data": multi_modal_data_for_engine,
-                }
-            else:
-                final_vllm_input = prompt_argument_for_vllm
-                logger.warning(
-                    "Passing raw string to vLLM generate without multi_modal_data, though data was expected for local/aggregated path."
-                )
-        elif isinstance(
-            prompt_argument_for_vllm, dict
-        ):  # This handles the TokensPrompt case
+        if isinstance(prompt_argument_for_vllm, dict):
+            # This handles the remote prefill path where we have a TokensPrompt,
+            # which is a dict-like object.
             final_vllm_input = prompt_argument_for_vllm
+        elif isinstance(prompt_argument_for_vllm, list):
+            # This handles the local prefill (aggregated or disaggregated) path
+            # where we have a list of token IDs and raw video data.
+            final_vllm_input = {
+                "prompt_token_ids": prompt_argument_for_vllm,
+                "multi_modal_data": multi_modal_data_for_engine,
+            }
         else:
             logger.error(
                 f"Unexpected type for prompt_argument_for_vllm: {type(prompt_argument_for_vllm)}"
@@ -445,11 +452,10 @@ class VllmDecodeWorker:
             raise TypeError("Invalid type for vLLM prompt argument.")
 
         async for response in self.engine_client.generate(
-            final_vllm_input,  # This is now the prompts argument (str, dict, or TokensPrompt)
+            final_vllm_input,  # This is now the prompts argument (dict)
             sampling_params=request.sampling_params,
             request_id=request.request_id,
             remote_prefill_params=current_remote_prefill_params,
-            # multi_modal_data kwarg is removed as it's part of final_vllm_input if needed
         ):
             yield MyRequestOutput(
                 request_id=response.request_id,
