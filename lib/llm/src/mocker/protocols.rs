@@ -81,7 +81,8 @@ pub struct MockEngineArgs {
     #[builder(default = "64")]
     pub block_size: usize,
 
-    #[builder(default)]
+    // default for open api server, for llm class it's 16384
+    #[builder(default = Some(8192))]
     pub max_num_batched_tokens: Option<usize>,
 
     #[builder(default = "0.01")]

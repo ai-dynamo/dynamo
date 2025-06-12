@@ -62,12 +62,13 @@ impl MockVllmEngine {
         ));
 
         // Create multiple schedulers and their background tasks
-        for _ in 0..args.dp_size {
+        for dp_rank in 0..args.dp_size {
             // Create a shared output channel that this scheduler will use
             let (output_tx, output_rx) = mpsc::channel::<OutputSignal>(1024);
 
             let scheduler = Scheduler::new(
                 args.clone(),
+                Some(dp_rank),
                 Some(output_tx),
                 None, // No global cancellation token
             );

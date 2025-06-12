@@ -178,7 +178,8 @@ impl KvManager {
     pub fn probe_new_blocks(&self, blocks: &[UniqueBlock]) -> usize {
         blocks
             .iter()
-            .filter(|&block| !self.active_blocks.contains_key(block))
+            // .filter(|&block| !self.active_blocks.contains_key(block))
+            .filter(|&block| !self.all_blocks.contains(block))
             .count()
     }
 
