@@ -106,9 +106,9 @@ impl DistributedRuntime {
     }
 
     /// Create a [`Namespace`]
-    pub fn namespace(&self, name: impl Into<String>) -> Result<Namespace> {
-        Namespace::new(self.clone(), name.into(), self.is_static)
-    }
+    // pub fn namespace(&self, name: impl Into<String>) -> Result<Namespace> {
+    //     Namespace::new(self.clone(), name.into(), self.is_static)
+    // }
 
     // /// Create a [`Component`]
     // pub fn component(
