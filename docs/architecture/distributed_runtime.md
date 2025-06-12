@@ -77,7 +77,7 @@ We provide native rust and python (through binding) examples for basic usage of 
 - Python: `/lib/bindings/python/examples/`. We also provide a complete example of using `DistributedRuntime` for communication and Dynamo's LLM library for prompt templates and (de)tokenization to deploy a vllm-based service. Please refer to `lib/bindings/python/examples/hello_world/server_vllm.py` for details.
 
 ```{note}
-Building a vLLM docker image for ARM machines currently involves building vLLM from source, which is known to have performance issues require extensive system RAM; see [vLLM Issue 8878](https://github.com/vllm-project/vllm/issues/8878).
+Building a vLLM docker image for ARM machines currently involves building vLLM from source, which is known to be slow and requires extensive system RAM; see [vLLM Issue 8878](https://github.com/vllm-project/vllm/issues/8878).
 
 You can tune the number of parallel build jobs for building VLLM from source
 on ARM based on your available cores and system RAM with `VLLM_MAX_JOBS`.
