@@ -96,18 +96,10 @@ impl KvbmCacheManager {
 
     /// Returns the number of tokens that have been computed/accepted for the given request.
     pub fn num_computed_tokens(&self, request_id: String) -> PyResult<usize> {
-        let slot_manager = self.slot_manager.lock().map_err(|e| {
-            tracing::error!("Failed to lock slot manager: {:?}", e);
-            to_pyerr(e)
-        })?;
-
-        let result = slot_manager
+        let slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
+        slot_manager
             .num_tokens(&request_id, SlotPosition::Computed)
-            .map_err(|e| {
-                tracing::error!("Failed to get num tokens: {:?}", e);
-                to_pyerr(e)
-            })?;
-        Ok(result)
+            .map_err(to_pyerr)
     }
 
     /// Get the computed blocks for the given sequence hashes.
@@ -383,7 +375,7 @@ impl<R: RequestKey> SlotManager<R> {
                 Some(BlockListType::Immutable(blocks)) => {
                     tracing::debug!(
                         request_id,
-                        "1 applying {} cache-hit tokens",
+                        "applying {} cache-hit tokens",
                         blocks.len() * self.block_size
                     );
                     slot.apply_computed_blocks(blocks)?;
@@ -398,13 +390,15 @@ impl<R: RequestKey> SlotManager<R> {
                 }
             }
         } else {
-            tracing::debug!(request_id, "2 applying {} tokens", tokens_to_append.len());
+            tracing::debug!(request_id, "applying {} tokens", tokens_to_append.len());
             slot.apply_computed_tokens(tokens_to_append, bm.device().unwrap())?;
         }
+
         debug_assert_eq!(
             slot.num_tokens(SlotPosition::Computed),
             request_num_computed_tokens + num_new_computed_tokens.unwrap_or(0)
         );
+
         // 3. allocate new blocks if needed
         let new_blocks = slot
             .allocate_blocks(num_new_tokens, bm.device().unwrap())

@@ -37,13 +37,6 @@ class KvbmCacheBlocks:
         """
         return self._blocks
 
-    @property
-    def owned_blocks(self) -> KvbmBlockList:
-        """
-        Returns the list of KVCacheBlock objects.
-        """
-        return self._owned_blocks
-
     def get_block_ids(self) -> list[list[int]]:
         """
         Returns the list of block IDs.

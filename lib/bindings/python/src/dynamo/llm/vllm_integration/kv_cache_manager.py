@@ -76,6 +76,7 @@ class KvbmCacheManager:
             self.prefix_cache_stats.requests += 1
 
         sequence_hashes = self._create_slot(request)
+
         owned_blocks = self.cache_manager.get_computed_blocks(sequence_hashes)
         block_count = owned_blocks.block_count()
         num_computed_tokens = block_count * self.block_size
