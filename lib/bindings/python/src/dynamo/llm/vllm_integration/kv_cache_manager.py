@@ -76,10 +76,7 @@ class KvbmCacheManager:
             self.prefix_cache_stats.requests += 1
 
         sequence_hashes = self._create_slot(request)
-        print(f"sequence_hashes: {sequence_hashes}")
-
         owned_blocks = self.cache_manager.get_computed_blocks(sequence_hashes)
-        print(f"owned_blocks: {owned_blocks}")
         block_count = owned_blocks.block_count()
         num_computed_tokens = block_count * self.block_size
 
@@ -170,10 +167,6 @@ class KvbmCacheManager:
         tokens_to_append = request.all_token_ids[
             prev_computed_tokens:num_computed_tokens
         ]
-        print(f"tokens_to_append: {tokens_to_append}")
-        print(f"//////////////////request.all_token_ids: {request.all_token_ids}")
-        print(f"//////////////////num_computed_tokens: {num_computed_tokens}")
-        print(f"//////////////////prev_computed_tokens: {prev_computed_tokens}")
 
         print(
             f"request_id: {request.request_id}, num_new_tokens: {num_new_tokens}, num_new_computed_tokens: {num_new_computed_tokens}, tokens_to_append: {len(tokens_to_append)}"
@@ -198,44 +191,16 @@ class KvbmCacheManager:
             delay_cache_blocks=delay_cache_blocks,
         )
 
-        # Debug prints for SlotUpdate
-        print("=== SlotUpdate Debug Info ===")
-        print(f"SlotUpdate type: {type(slot_update)}")
-        print(f"SlotUpdate dir: {dir(slot_update)}")
-        print(f"SlotUpdate repr: {repr(slot_update)}")
-        print(f"SlotUpdate str: {str(slot_update)}")
-        print(
-            f"SlotUpdate dict: {slot_update.__dict__ if hasattr(slot_update, '__dict__') else 'No __dict__'}"
-        )
-
-        print("=== End SlotUpdate Debug Info ===")
-
         new_blocks = self.cache_manager.alloctate_slots(slot_update)
-        print(f"new_blocks: {new_blocks}")
+
         if new_blocks is None:
             return None
 
-        # Get block IDs and compute sequence hashes
-        block_ids = new_blocks.block_ids()
-        print(f"new block_ids: {block_ids}")
+        new_blocks = [
+            KVCacheBlock(block_id=block_id) for block_id in new_blocks.block_ids()
+        ]
 
-        # Create KVCacheBlocks with sequence hashes
-        new_blocks = [KVCacheBlock(block_id=block_id) for block_id in block_ids]
-        returning_blocks = KVCacheBlocks(blocks=new_blocks)
-
-        # Get sequence hashes for the new blocks
-        # Noop - we already have the sequence hashes
-        # TODO(oandreeva): replace with proper method created in vllm.rs
-        sequence_hashes = self._create_slot(request)
-        print(f"Computed sequence hashes for new blocks: {sequence_hashes}")
-        print(f"tokens_to_append: {tokens_to_append}")
-
-        for block, seq_hash in zip(new_blocks, sequence_hashes):
-            block_hash = BlockHashType(hash_value=seq_hash, token_ids=tokens_to_append)
-            print(f"=>>>>>>>>>>>block_hash: {block_hash}")
-
-        print(f"returning_blocks from allocate_slots: {returning_blocks}")
-        return returning_blocks
+        return KVCacheBlocks(blocks=new_blocks)
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.

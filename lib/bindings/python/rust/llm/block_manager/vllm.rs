@@ -96,10 +96,18 @@ impl KvbmCacheManager {
 
     /// Returns the number of tokens that have been computed/accepted for the given request.
     pub fn num_computed_tokens(&self, request_id: String) -> PyResult<usize> {
-        let slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
-        slot_manager
+        let slot_manager = self.slot_manager.lock().map_err(|e| {
+            tracing::error!("Failed to lock slot manager: {:?}", e);
+            to_pyerr(e)
+        })?;
+
+        let result = slot_manager
             .num_tokens(&request_id, SlotPosition::Computed)
-            .map_err(to_pyerr)
+            .map_err(|e| {
+                tracing::error!("Failed to get num tokens: {:?}", e);
+                to_pyerr(e)
+            })?;
+        Ok(result)
     }
 
     /// Get the computed blocks for the given sequence hashes.
@@ -109,25 +117,19 @@ impl KvbmCacheManager {
         sequence_hashes: Vec<SequenceHash>,
     ) -> PyResult<KvbmBlockList> {
         tracing::debug!("=== Starting get_computed_blocks ===");
-        tracing::debug!("Number of sequence hashes to match: {}", sequence_hashes.len());
         tracing::debug!("Sequence hashes: {:?}", sequence_hashes);
 
-        let device = self.block_manager().device().unwrap();
-
-        let blocks = device
+        let blocks = self
+            .block_manager()
+            .device()
+            .unwrap()
             .match_sequence_hashes_blocking(&sequence_hashes)
-            .map_err(|e| {
-                tracing::error!("Error matching sequence hashes: {:?}", e);
-                to_pyerr(e)
-            })?;
+            .map_err(to_pyerr)?;
 
-        tracing::debug!("Matched blocks:");
-        tracing::debug!("  Number of blocks: {}", blocks.len());
-
-        let result = KvbmBlockList::new(BlockListType::Immutable(blocks));
+        tracing::debug!("Found {} matching blocks", blocks.len());
         tracing::debug!("=== Finished get_computed_blocks ===");
 
-        Ok(result)
+        Ok(KvbmBlockList::new(BlockListType::Immutable(blocks)))
     }
 
     /// Updates the slot manager with the current request state and allocates new blocks if needed.
@@ -136,17 +138,6 @@ impl KvbmCacheManager {
         tracing::debug!("SlotUpdate before dissolve: {:?}", update);
 
         let dissolved = update.dissolve();
-        tracing::debug!("SlotUpdate after dissolve: {:?}", dissolved);
-        tracing::debug!("Dissolved fields:");
-        tracing::debug!("  request_id: {:?}", dissolved.request_id);
-        tracing::debug!("  request_num_tokens: {}", dissolved.request_num_tokens);
-        tracing::debug!("  request_num_computed_tokens: {}", dissolved.request_num_computed_tokens);
-        tracing::debug!("  tokens_to_append len: {}", dissolved.tokens_to_append.len());
-        tracing::debug!("  num_new_tokens: {}", dissolved.num_new_tokens);
-        tracing::debug!("  num_new_computed_tokens: {:?}", dissolved.num_new_computed_tokens);
-        tracing::debug!("  new_computed_blocks: {:?}", dissolved.new_computed_blocks);
-        tracing::debug!("  num_lookahead_blocks: {:?}", dissolved.num_lookahead_blocks);
-        tracing::debug!("  delay_cache_blocks: {:?}", dissolved.delay_cache_blocks);
 
         let mut slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
         tracing::debug!("Successfully locked slot_manager");
@@ -405,7 +396,7 @@ impl<R: RequestKey> SlotManager<R> {
                 Some(BlockListType::Immutable(blocks)) => {
                     tracing::debug!(
                         request_id,
-                        "applying {} cache-hit tokens",
+                        "1 applying {} cache-hit tokens",
                         blocks.len() * self.block_size
                     );
                     slot.apply_computed_blocks(blocks)?;
@@ -420,15 +411,13 @@ impl<R: RequestKey> SlotManager<R> {
                 }
             }
         } else {
-            tracing::debug!(request_id, "applying {} tokens", tokens_to_append.len());
+            tracing::debug!(request_id, "2 applying {} tokens", tokens_to_append.len());
             slot.apply_computed_tokens(tokens_to_append, bm.device().unwrap())?;
         }
-
         debug_assert_eq!(
             slot.num_tokens(SlotPosition::Computed),
             request_num_computed_tokens + num_new_computed_tokens.unwrap_or(0)
         );
-
         // 3. allocate new blocks if needed
         let new_blocks = slot
             .allocate_blocks(num_new_tokens, bm.device().unwrap())
