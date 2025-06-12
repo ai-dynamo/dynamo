@@ -144,7 +144,7 @@ class ServiceInfo(BaseModel):
             resources=service.config.resources.model_dump(),
             workers=service.config.workers,
             image=image,
-            dynamo=service.config.dynamo.model_dump(),
+            dynamo=DynamoConfig(**service.config.dynamo.model_dump()),
             http_exposed=len(api_endpoints) > 0,
             api_endpoints=api_endpoints,
         )

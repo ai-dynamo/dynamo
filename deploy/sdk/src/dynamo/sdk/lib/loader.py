@@ -25,8 +25,8 @@ from typing import Optional, TypeVar
 
 import yaml
 
-from deploy.sdk.src.dynamo.sdk.core.protocol.interface import ServiceInterface
 from dynamo.sdk.core.protocol.deployment import Service
+from dynamo.sdk.core.protocol.interface import ServiceInterface
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T", bound=object)

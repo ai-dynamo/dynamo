@@ -23,6 +23,8 @@ import requests
 
 from dynamo.sdk.core.protocol.deployment import Service
 
+REQUEST_TIMEOUT = 20
+
 
 def get_host_port():
     """Gets host and port from environment variables. Defaults to 0.0.0.0:8000."""
@@ -47,15 +49,27 @@ def upload_graph(
 ) -> None:
     """Upload the entire graph as a single component/version, with a manifest of all services."""
     session = session or requests.Session()
-    graph_name, graph_version = graph.split(":")
+    parts = graph.split(":")
+    if len(parts) != 2:
+        raise ValueError(
+            f"`graph` must be in '<name>:<version>' format, got '{graph}'."
+        )
+    graph_name, graph_version = parts
 
     # Check if component exists before POST
     comp_url = f"{endpoint}/api/v1/dynamo_components"
     comp_get_url = f"{endpoint}/api/v1/dynamo_components/{graph_name}"
     comp_exists = False
-    comp_resp = session.get(comp_get_url)
+    comp_resp = session.get(comp_get_url, timeout=REQUEST_TIMEOUT)
     if comp_resp.status_code == 200:
         comp_exists = True
+    elif comp_resp.status_code == 404:
+        comp_exists = False
+    else:
+        raise RuntimeError(
+            f"Failed to verify component '{graph_name}': "
+            f"{comp_resp.status_code}: {comp_resp.text}"
+        )
     if not comp_exists:
         comp_payload = {
             "name": graph_name,
@@ -71,7 +85,7 @@ def upload_graph(
         f"{endpoint}/api/v1/dynamo_components/{graph_name}/versions/{graph_version}"
     )
     ver_exists = False
-    ver_resp = session.get(ver_get_url)
+    ver_resp = session.get(ver_get_url, timeout=REQUEST_TIMEOUT)
     if ver_resp.status_code == 200:
         ver_exists = True
     if not ver_exists:
