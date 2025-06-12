@@ -165,7 +165,7 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ## Local Development
 
-If you use vscode or cursor, use the .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions, see the Dynamo repository's [Main ReadMe](https://github.com/ai-dynamo/dynamo/blob/main/.devcontainer/README.md).
+If you use vscode or cursor, use the .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions, see the Dynamo repository's [devcontainer README](https://github.com/ai-dynamo/dynamo/blob/main/.devcontainer/README.md).
 
 Otherwise, to develop locally, we recommend working inside of the container:
 
