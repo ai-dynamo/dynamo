@@ -20,12 +20,12 @@ This extension works on the parsed document AST, making it more robust than text
 It finds blockquote nodes that match GitHub alert patterns and replaces them with admonition nodes.
 """
 
-import logging
 import re
 from typing import Any, Dict
 
 from docutils import nodes
 from sphinx.application import Sphinx
+from sphinx.util import logging
 
 __version__ = "0.2.0"
 
@@ -108,16 +108,24 @@ class GitHubAlertsTransformer:
         if title and len(first_para.children) > 1:
             # Create new paragraph with remaining content
             remaining_para = nodes.paragraph()
-            remaining_para.extend(first_para.children[1:])
+            # Properly detach and add child nodes
+            for child in first_para.children[1:]:
+                child.parent = None  # Detach from current parent
+                remaining_para.append(child)
             content_nodes.append(remaining_para)
         elif not title and len(first_para.children) > 1:
             # No title, but there's content after [!TYPE] - treat as content
             content_para = nodes.paragraph()
-            content_para.extend(first_para.children[1:])
+            # Properly detach and add child nodes
+            for child in first_para.children[1:]:
+                child.parent = None  # Detach from current parent
+                content_para.append(child)
             content_nodes.append(content_para)
 
         # Add any additional paragraphs/content
-        content_nodes.extend(blockquote.children[1:])
+        for child in blockquote.children[1:]:
+            child.parent = None  # Detach from current parent
+            content_nodes.append(child)
 
         # Map to MyST admonition type
         admonition_class = self.ALERT_MAPPING.get(alert_type, nodes.note)
@@ -130,6 +138,7 @@ class GitHubAlertsTransformer:
 
         # Add content nodes
         for content_node in content_nodes:
+            content_node.parent = None  # Ensure node is properly detached
             admonition.append(content_node)
 
         return admonition
@@ -184,6 +193,7 @@ def transform_github_alerts(app: Sphinx, doctree: nodes.document, docname: str) 
 
         # Count blockquotes before transformation
         initial_blockquotes = list(doctree.traverse(nodes.block_quote))
+        initial_admonitions = list(doctree.traverse(nodes.Admonition))
         alert_blockquotes = [
             bq
             for bq in initial_blockquotes
@@ -200,10 +210,10 @@ def transform_github_alerts(app: Sphinx, doctree: nodes.document, docname: str) 
 
             # Count remaining blockquotes and new admonitions for verification
             remaining_blockquotes = list(doctree.traverse(nodes.block_quote))
-            admonitions = list(doctree.traverse(nodes.Admonition))
+            remaining_admonitions = list(doctree.traverse(nodes.Admonition))
 
             logger.debug(
-                f"GitHub alerts: {docname} - {len(initial_blockquotes)} → {len(remaining_blockquotes)} blockquotes, {len(admonitions)} admonitions created"
+                f"GitHub alerts: {docname} - {len(initial_blockquotes)} → {len(remaining_blockquotes)} blockquotes, {len(remaining_admonitions) - len(initial_admonitions)} admonitions created"
             )
         else:
             logger.debug(f"GitHub alerts: No alerts found in {docname}")
