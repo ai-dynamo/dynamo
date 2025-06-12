@@ -323,8 +323,3 @@ Regardless of the deployment mechanism, the GenAI-Perf tool will report the same
 
 For instructions on how to acquire per worker metrics and visualize them using Grafana,
 please see the provided [Visualization with Prometheus and Grafana](../../../deploy/metrics/README.md).
-## Interpreting Results
-
-In this section, we are comparing the [Disaggregated Single Node Benchmarking](#disaggregated-single-node-benchmarking)
-result to the [vLLM Aggregated Baseline Benchmarking](#vllm-aggregated-baseline-benchmarking) as an example. The multi-node
-results can also be compared in similar steps.
