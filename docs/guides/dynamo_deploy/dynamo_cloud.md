@@ -67,9 +67,10 @@ Where:
 
 ```{important}
 Make sure you're logged in to your container registry before pushing images:
-```bash
-docker login <CONTAINER_REGISTRY>
-```
+
+   ```bash
+   docker login <CONTAINER_REGISTRY>
+   ```
 
 ### Building Components
 
