@@ -80,7 +80,8 @@ echo "Updated version:"
 grep "__version__" "$VERSION_FILE"
 
 
-make -C docker wheel_build
+make -C docker tritondevel_build
+make -C docker wheel_build DEVEL_IMAGE=tritondevel_build BUILD_WHEEL_OPTS='--extra-cmake-vars NIXL_ROOT=/opt/nvidia/nvda_nixl'
 
 # Copy the wheel to the host
 mkdir -p $OUTPUT_DIR
