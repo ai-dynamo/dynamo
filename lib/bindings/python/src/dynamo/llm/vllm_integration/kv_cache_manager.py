@@ -72,8 +72,10 @@ class KvbmCacheManager:
         Get the computed blocks for the request.
         """
         sequence_hashes = self._create_slot(request)
+
         owned_blocks = self.cache_manager.get_computed_blocks(sequence_hashes)
         block_count = owned_blocks.block_count()
+
         print(f"owned_blocks_count: {block_count}")
 
         return KvbmCacheBlocks(owned_blocks), block_count * self.block_size
