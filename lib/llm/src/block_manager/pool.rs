@@ -953,6 +953,8 @@ mod tests {
             4
         );
 
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
         // Now, we match only the last 2 blocks
         let matched_suffix = pool.match_sequence_hashes(&sequence_hashes[2..]).await?;
         assert_eq!(matched_suffix.len(), 2);
