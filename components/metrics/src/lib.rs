@@ -84,8 +84,7 @@ use std::net::SocketAddr;
 use std::time::Duration as StdDuration;
 
 use dynamo_llm::kv_router::protocols::ForwardPassMetrics;
-use dynamo_llm::kv_router::scheduler::Endpoint;
-use dynamo_llm::kv_router::scoring::ProcessedEndpoints;
+use dynamo_llm::kv_router::scoring::{Endpoint, ProcessedEndpoints};
 
 use dynamo_runtime::{
     distributed::Component, error, service::EndpointInfo, utils::Duration, Result,
@@ -451,6 +450,8 @@ impl PrometheusMetrics {
             let worker_id = worker_id.to_string();
             let metrics = endpoint.data.clone();
 
+            // NOTE: using metrics[0] just to get the first dp_rank for now
+            // to not change the existing behavior
             self.set_worker_gauge(
                 &self.kv_blocks_active,
                 config,

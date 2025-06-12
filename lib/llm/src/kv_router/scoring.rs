@@ -18,11 +18,46 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::kv_router::scheduler::Endpoint;
+use crate::kv_router::protocols::{DpRank, ForwardPassMetrics, WorkerDp};
+
+/// [gluo FIXME] exactly the same as EndpointInfo except that 'data'
+/// is cleaned (not optional)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Endpoint {
+    pub name: String,
+    // contains dp
+    pub subject: String,
+    // one set of metrics for each dp worker
+    pub data: ForwardPassMetrics,
+}
+
+impl Endpoint {
+    pub fn worker_id(&self) -> i64 {
+        i64::from_str_radix(
+            self.subject
+                .split("-")
+                .last()
+                .expect("invalid subject")
+                .to_string()
+                .as_str(),
+            16,
+        )
+        .expect("invalid worker id")
+    }
+
+    pub fn dp_rank(&self) -> Option<DpRank> {
+        let parts: Vec<&str> = self.subject.split("-").collect();
+        if parts.len() < 3 {
+            return None;
+        }
+        let second_to_last = parts[parts.len() - 2];
+        second_to_last.parse::<DpRank>().ok()
+    }
+}
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct ProcessedEndpoints {
-    pub endpoints: HashMap<i64, Endpoint>,
+    pub endpoints: HashMap<WorkerDp, Endpoint>,
     pub load_avg: f64,
     pub load_std: f64,
 }
@@ -32,8 +67,12 @@ impl ProcessedEndpoints {
         // compute some basic statistics
         let load_values: Vec<f64> = endpoints
             .iter()
-            .map(|x| x.data.kv_active_blocks as f64)
+            .map(|endpoint| endpoint.data.kv_active_blocks as f64)
             .collect();
+        if load_values.is_empty() {
+            // TODO we hit this panic while vLLM is starting the ranks up. Need to avoid this
+            panic!("No endpoints to process!")
+        };
         let load_avg = load_values.iter().copied().sum::<f64>() / load_values.len() as f64;
         let variance = load_values
             .iter()
@@ -42,7 +81,19 @@ impl ProcessedEndpoints {
             / load_values.len() as f64;
         let load_std = variance.sqrt();
 
-        let endpoints = endpoints.into_iter().map(|e| (e.worker_id(), e)).collect();
+        // pass in (worker_id, dp_rank) tuple
+        let endpoints = endpoints
+            .into_iter()
+            .map(|e| {
+                (
+                    WorkerDp {
+                        worker_id: e.worker_id(),
+                        dp_rank: e.dp_rank(),
+                    },
+                    e,
+                )
+            })
+            .collect();
 
         ProcessedEndpoints {
             endpoints,
