@@ -66,11 +66,12 @@ Where:
 - `<TAG>`: The version tag for your images (e.g., `latest`, `0.0.1`, `v1.0.0`)
 
 ```{important}
-Make sure you're logged in to your container registry before pushing images:
+Make sure you're logged in to your container registry before pushing images. For example:
+```
 
-   ```bash
-   docker login <CONTAINER_REGISTRY>
-   ```
+```bash
+docker login <CONTAINER_REGISTRY>
+```
 
 ### Building Components
 
