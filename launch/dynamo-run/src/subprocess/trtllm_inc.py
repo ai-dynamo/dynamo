@@ -39,6 +39,7 @@ from dynamo.llm import (
     register_llm,
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime.logging import configure_dynamo_logging
 
 # Only used if you run it manually from the command line
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
@@ -50,7 +51,7 @@ DEFAULT_PREFILL_ENDPOINT = "dyn://dynamo.prefill.generate"
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
-logging.basicConfig(level=logging.DEBUG)
+configure_dynamo_logging()
 
 
 def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
@@ -352,6 +353,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     arg_map = {
         "model": model_path,
         "tensor_parallel_size": config.tensor_parallel_size,
+        "backend": "pytorch",
         "skip_tokenizer_init": True,
         "disable_log_requests": True,
         "enable_prefix_caching": True,

@@ -54,21 +54,29 @@ If you don't want to use the dev container, you can set the environment up manua
    * Python 3.x
    * Git
 
-See [Support Matrix](support_matrix.md) for more information.
+   See [Support Matrix](support_matrix.md) for more information.
 
-2. Install required system packages:
+2. **If you plan to use vLLM or SGLang**, you must also install:
+      * etcd
+      * NATS.io
+
+   Before starting dyanmo, run both etcd and NATS.io in seperate processes.
+
+
+
+3. Install required system packages:
    ```bash
    apt-get update
    DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0
    ```
 
-3. Set up Python environment:
+4. Set up the Python environment:
    ```bash
    python3 -m venv venv
    source venv/bin/activate
    ```
 
-4. Install Dynamo:
+5. Install Dynamo:
    ```bash
    pip install "ai-dynamo[all]"
    ```
@@ -79,10 +87,10 @@ To ensure compatibility, use the examples in the release branch or tag that matc
 
 ## Building the Dynamo Base Image
 
-Although not needed for local development, deploying your Dynamo pipelines to Kubernetes requires you to build and push a Dynamo base image to your container registry. You can use any container registry of your choice, such as:
-- Docker Hub (docker.io)
-- NVIDIA NGC Container Registry (nvcr.io)
-- Any private registry
+Deploying your Dynamo pipelines to Kubernetes requires you to build and push a Dynamo base image to your container registry. You can use any private container registry of your choice, including:
+- [Docker Hub](https://hub.docker.com/)
+- [NVIDIA NGC Container Registry](https://catalog.ngc.nvidia.com/)
+
 
 To build it:
 
@@ -104,7 +112,7 @@ export DYNAMO_IMAGE=<your-registry>/dynamo-base:latest-vllm
 
 ## Running and Interacting with an LLM Locally
 
-To run a model and interact with it locally, call `dynamo run` with a Hugging Face model. `dynamo run` supports several backends, including: `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
+To run a model and interact with it locally, call `dynamo run` with a Hugging Face model. `dynamo run` supports several backends, including `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
 
 ### Example Command
 
@@ -124,9 +132,9 @@ Hmm, I need to come up with a suitable reply. ...
 
 Dynamo provides a simple way to spin up a local set of inference components including:
 
-- **OpenAI Compatible Frontend**–High performance OpenAI compatible http api server written in Rust.
-- **Basic and Kv Aware Router**–Route and load balance traffic to a set of workers.
-- **Workers**–Set of pre-configured LLM serving engines.
+- **OpenAI-compatible Frontend**—High-performance OpenAI compatible http api server written in Rust.
+- **Basic and Kv Aware Router**—Route and load balance traffic to a set of workers.
+- **Workers**—Set of pre-configured LLM serving engines.
 
 To run a minimal configuration, use a pre-configured example.
 
@@ -165,7 +173,7 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ## Local Development
 
-If you use vscode or cursor, use the .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions, see the [ReadMe](https://github.com/ai-dynamo/dynamo/blob/main/.devcontainer/README.md).
+If you use vscode or cursor, use the .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions, see the Dynamo repository's [devcontainer README](https://github.com/ai-dynamo/dynamo/blob/main/.devcontainer/README.md).
 
 Otherwise, to develop locally, we recommend working inside of the container:
 

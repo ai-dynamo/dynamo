@@ -36,10 +36,7 @@ speculative_config:
   num_nextn_predict_layers: 1
 
 use_cuda_graph: true
-# Please keep cuda_graph_padding_enabled setting as 'false' when MTP is turned on.
-# There is known bug with MTP and cuda_graph_padding_enabled.
-# Tensorrt LLM team is working on a fix in the next release.
-cuda_graph_padding_enabled: false
+cuda_graph_padding_enabled: true
 cuda_graph_batch_sizes:
 - 1
 - 2

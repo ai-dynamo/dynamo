@@ -17,9 +17,9 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::time::Duration;
 
+use crate::{slug::Slug, transports::etcd::Client};
 use async_stream::stream;
 use async_trait::async_trait;
-use dynamo_runtime::{slug::Slug, transports::etcd::Client};
 use etcd_client::{EventType, PutOptions, WatchOptions};
 
 use super::{KeyValueBucket, KeyValueStore, StorageError, StorageOutcome};
