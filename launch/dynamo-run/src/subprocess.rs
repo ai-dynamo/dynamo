@@ -98,7 +98,7 @@ pub async fn start(
     tokio::spawn(async move {
         let mut lines = stderr.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            tracing::info!("{}", strip_log_prefix(&line));
+            tracing::error!("{}", strip_log_prefix(&line));
         }
     });
 
