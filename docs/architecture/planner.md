@@ -34,8 +34,8 @@ The planner monitors the state of the system and adjusts workers to ensure that 
   * SLA-based scaling up/down prefill/decode workers ✅
   * Adjusting engine knobs ❌
 
-We currently provide two reference planner design:
-1. load-based planner: [docs](load_planner.md)
+We currently provide two reference planner designs:
+1. Load-based planner: [docs](load_planner.md)
 2. SLA-based planner: [docs](sla_planner.md)
 
 ## Backends
