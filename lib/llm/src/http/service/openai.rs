@@ -499,7 +499,7 @@ fn process_event_converter<T: Serialize>(
     mut annotated: EventConverter<T>,
     response_collector: &mut ResponseMetricCollector,
 ) -> Result<Event, axum::Error> {
-    let mut annotated = annotated.0;
+    let annotated = annotated.0;
 
     // update metrics
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&annotated) {
