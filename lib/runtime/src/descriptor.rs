@@ -27,6 +27,7 @@ pub const COMPONENT_KEYWORD: &str = "_component_";
 pub const ENDPOINT_KEYWORD: &str = "_endpoint_";
 pub const PATH_KEYWORD: &str = "_path_";
 pub const BARRIER_KEYWORD: &str = "_barrier_";
+pub const STATIC_KEYWORD: &str = "_static_";
 
 /// Errors that can occur during descriptor operations
 #[derive(Debug, thiserror::Error)]
@@ -64,6 +65,7 @@ struct DynamoPath {
     component: Option<String>,
     endpoint: Option<String>,
     instance_id: Option<i64>,
+    is_static: bool,
     extra_segments: Vec<String>,
 }
 
@@ -89,6 +91,7 @@ impl DynamoPath {
         let mut component: Option<String> = None;
         let mut endpoint: Option<String> = None;
         let mut instance_id: Option<i64> = None;
+        let mut is_static = false;
         let mut extra_segments = Vec::new();
 
         let mut i = 1;
@@ -137,11 +140,18 @@ impl DynamoPath {
 
                         validate_endpoint(endpoint_name)?;
                         endpoint = Some(endpoint_name.to_string());
+                        i += 2;
                     } else {
                         validate_endpoint(endpoint_segment)?;
                         endpoint = Some(endpoint_segment.to_string());
+                        // Check for /_static_ after endpoint
+                        if i + 2 < segments.len() && segments[i + 2] == STATIC_KEYWORD {
+                            is_static = true;
+                            i += 3;
+                        } else {
+                            i += 2;
+                        }
                     }
-                    i += 2;
                 }
                 PATH_KEYWORD => {
                     // Valid _path_ extension at any level
@@ -167,6 +177,7 @@ impl DynamoPath {
             component,
             endpoint,
             instance_id,
+            is_static,
             extra_segments,
         })
     }
@@ -185,51 +196,53 @@ impl DynamoPath {
 
     /// Convert to Instance (drops extra segments if present)
     fn try_into_instance(self) -> Result<Instance, DescriptorError> {
-        // Must have instance_id to be an Instance
-        if self.instance_id.is_none() {
-            return Err(DescriptorError::MissingInstanceId);
-        }
-
-        // Must have endpoint for an Instance
         let component = self.component.ok_or(DescriptorError::EmptyComponent)?;
         let endpoint = self.endpoint.ok_or(DescriptorError::EmptyEndpoint)?;
-        let instance_id = self.instance_id.unwrap();
-
-        // Note: We allow extra segments but drop them
         let identifier = Identifier {
             namespace: self.namespace,
             component: Some(component),
             endpoint: Some(endpoint),
         };
-
-        Ok(Instance { identifier, instance_id })
+        if self.is_static {
+            Ok(Instance {
+                identifier,
+                instance_id: None,
+                is_static: true,
+            })
+        } else if let Some(instance_id) = self.instance_id {
+            Ok(Instance {
+                identifier,
+                instance_id: Some(instance_id),
+                is_static: false,
+            })
+        } else {
+            Err(DescriptorError::MissingInstanceId)
+        }
     }
 
     /// Convert to Keys (with validation)
     fn try_into_keys(self) -> Result<Keys, DescriptorError> {
-        let base = if let Some(instance_id) = self.instance_id {
-            // Has instance ID - create Instance base
+        let base = if self.is_static || self.instance_id.is_some() {
             let component = self.component.ok_or(DescriptorError::EmptyComponent)?;
             let endpoint = self.endpoint.ok_or(DescriptorError::EmptyEndpoint)?;
-
             let identifier = Identifier {
                 namespace: self.namespace,
                 component: Some(component),
                 endpoint: Some(endpoint),
             };
-
-            KeysBase::Instance(Instance { identifier, instance_id })
+            KeysBase::Instance(Instance {
+                identifier,
+                instance_id: self.instance_id,
+                is_static: self.is_static,
+            })
         } else {
-            // No instance ID - create Identifier base
             let identifier = Identifier {
                 namespace: self.namespace,
                 component: self.component,
                 endpoint: self.endpoint,
             };
-
             KeysBase::Identifier(identifier)
         };
-
         Ok(Keys {
             base,
             keys: self.extra_segments,
@@ -286,17 +299,17 @@ impl Identifier {
     }
 
     /// Get the namespace
-    pub fn namespace(&self) -> &str {
+    pub fn namespace_name(&self) -> &str {
         &self.namespace
     }
 
     /// Get the component if present
-    pub fn component(&self) -> Option<&str> {
+    pub fn component_name(&self) -> Option<&str> {
         self.component.as_deref()
     }
 
     /// Get the endpoint if present
-    pub fn endpoint(&self) -> Option<&str> {
+    pub fn endpoint_name(&self) -> Option<&str> {
         self.endpoint.as_deref()
     }
 
@@ -355,26 +368,43 @@ impl TryFrom<&str> for Identifier {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Instance {
     identifier: Identifier,  // Private to enforce immutability
-    instance_id: i64,
+    instance_id: Option<i64>,
+    is_static: bool // We can have static instances which don't have an instance_id. In this case its guaranteed there will only be one instance
 }
 
 impl Instance {
     /// Create from identifier, takes ownership to enforce immutability
     pub fn new(identifier: Identifier, instance_id: i64) -> Result<Self, DescriptorError> {
         identifier.validate()?;
-        if identifier.endpoint().is_none() {
+        if identifier.endpoint_name().is_none() {
             return Err(DescriptorError::InvalidEndpoint(
                 "Instance ID can only be attached to endpoints".to_string()
             ));
         }
         Ok(Self {
             identifier,
-            instance_id,
+            instance_id: Some(instance_id),
+            is_static: false
         })
     }
 
-    /// Create directly with endpoint details
-    pub fn new_endpoint_with_id(
+    pub fn new_static(identifier: Identifier) -> Result<Self, DescriptorError> {
+        identifier.validate()?;
+        if identifier.endpoint_name().is_none() {
+            return Err(DescriptorError::InvalidEndpoint(
+                "Instance ID can only be attached to endpoints".to_string()
+            ));
+        }
+        Ok(Self {
+            identifier,
+            instance_id: None,
+            is_static: true
+        })
+    }
+
+    /// Create instance from individual path components
+    /// This is a convenience constructor that builds the full identifier from parts
+    pub fn from_parts(
         namespace: &str,
         component: &str,
         endpoint: &str,
@@ -384,18 +414,15 @@ impl Instance {
         Self::new(identifier, instance_id)
     }
 
-    /// Parse from canonical string representation
     pub fn parse(input: &str) -> Result<Self, DescriptorError> {
         input.try_into()
     }
 
-    /// Get reference to underlying identifier
-    pub fn identifier(&self) -> &Identifier {
-        &self.identifier
+    pub fn identifier(&self) -> Identifier {
+        self.identifier.clone()
     }
 
-    /// Get instance ID
-    pub fn instance_id(&self) -> i64 {
+    pub fn instance_id(&self) -> Option<i64> {
         self.instance_id
     }
 }
@@ -411,8 +438,13 @@ impl std::fmt::Display for Instance {
             write!(f, "/{}/{}", COMPONENT_KEYWORD, component)?;
 
             if let Some(ref endpoint) = self.identifier.endpoint {
-                write!(f, "/{}/{}:{:x}", ENDPOINT_KEYWORD, endpoint, self.instance_id)?;
+                write!(f, "/{}/{}", ENDPOINT_KEYWORD, endpoint)?;
             }
+                if let Some(instance_id) = self.instance_id{
+                    write!(f, ":{:x}", instance_id)?;
+                } else {
+                    write!(f, "/{}", STATIC_KEYWORD)?;
+                }
         }
 
         Ok(())
@@ -491,11 +523,6 @@ impl Keys {
         &self.keys
     }
 
-    /// Check if this path contains a specific reserved keyword
-    /// Always returns false since user segments cannot start with underscore
-    pub fn has_reserved_keyword(&self, _keyword: &str) -> bool {
-        false
-    }
 }
 
 impl std::fmt::Display for Keys {
@@ -650,27 +677,27 @@ mod tests {
     #[test]
     fn test_identifier_namespace_only() {
         let id = Identifier::new_namespace("production.api.v1").unwrap();
-        assert_eq!(id.namespace(), "production.api.v1");
-        assert_eq!(id.component(), None);
-        assert_eq!(id.endpoint(), None);
+        assert_eq!(id.namespace_name(), "production.api.v1");
+        assert_eq!(id.component_name(), None);
+        assert_eq!(id.endpoint_name(), None);
         assert_eq!(id.to_string(), "dynamo://production.api.v1");
     }
 
     #[test]
     fn test_identifier_with_component() {
         let id = Identifier::new_component("production.api.v1", "gateway").unwrap();
-        assert_eq!(id.namespace(), "production.api.v1");
-        assert_eq!(id.component(), Some("gateway"));
-        assert_eq!(id.endpoint(), None);
+        assert_eq!(id.namespace_name(), "production.api.v1");
+        assert_eq!(id.component_name(), Some("gateway"));
+        assert_eq!(id.endpoint_name(), None);
         assert_eq!(id.to_string(), "dynamo://production.api.v1/_component_/gateway");
     }
 
     #[test]
     fn test_identifier_with_endpoint() {
         let id = Identifier::new_endpoint("production.api.v1", "gateway", "http").unwrap();
-        assert_eq!(id.namespace(), "production.api.v1");
-        assert_eq!(id.component(), Some("gateway"));
-        assert_eq!(id.endpoint(), Some("http"));
+        assert_eq!(id.namespace_name(), "production.api.v1");
+        assert_eq!(id.component_name(), Some("gateway"));
+        assert_eq!(id.endpoint_name(), Some("http"));
         assert_eq!(
             id.to_string(),
             "dynamo://production.api.v1/_component_/gateway/_endpoint_/http"
@@ -680,34 +707,47 @@ mod tests {
     #[test]
     fn test_identifier_parse() {
         let id: Identifier = "dynamo://production.api.v1".parse().unwrap();
-        assert_eq!(id.namespace(), "production.api.v1");
+        assert_eq!(id.namespace_name(), "production.api.v1");
 
         let id: Identifier = "dynamo://production.api.v1/_component_/gateway".parse().unwrap();
-        assert_eq!(id.component(), Some("gateway"));
+        assert_eq!(id.component_name(), Some("gateway"));
 
         let id: Identifier = "dynamo://production.api.v1/_component_/gateway/_endpoint_/http"
             .parse()
             .unwrap();
-        assert_eq!(id.endpoint(), Some("http"));
+        assert_eq!(id.endpoint_name(), Some("http"));
     }
 
     #[test]
-    fn test_instance_creation() {
+    fn test_instance_dynamic_and_static_creation_and_parsing() {
+        // Dynamic instance creation
         let identifier = Identifier::new_endpoint("ns1", "comp1", "ep1").unwrap();
-        let instance = Instance::new(identifier, 0x1234).unwrap();
-        assert_eq!(instance.instance_id(), 0x1234);
+        let instance = Instance::new(identifier.clone(), 0x1234).unwrap();
+        assert_eq!(instance.instance_id(), Some(0x1234));
+        assert!(!instance.is_static);
         assert_eq!(instance.to_string(), "dynamo://ns1/_component_/comp1/_endpoint_/ep1:1234");
-    }
 
-    #[test]
-    fn test_instance_parse() {
-        let inst: Instance = "dynamo://ns1/_component_/comp1/_endpoint_/ep1:1234"
-            .parse()
-            .unwrap();
-        assert_eq!(inst.instance_id(), 0x1234);
-        assert_eq!(inst.identifier().namespace(), "ns1");
-        assert_eq!(inst.identifier().component(), Some("comp1"));
-        assert_eq!(inst.identifier().endpoint(), Some("ep1"));
+        // Static instance creation
+        let static_instance = Instance::new_static(identifier.clone()).unwrap();
+        assert_eq!(static_instance.instance_id(), None);
+        assert!(static_instance.is_static);
+        assert_eq!(static_instance.to_string(), "dynamo://ns1/_component_/comp1/_endpoint_/ep1/_static_");
+
+        // Parsing dynamic instance from string
+        let parsed: Instance = "dynamo://ns1/_component_/comp1/_endpoint_/ep1:1234".parse().unwrap();
+        assert_eq!(parsed.instance_id(), Some(0x1234));
+        assert!(!parsed.is_static);
+        assert_eq!(parsed.identifier().namespace_name(), "ns1");
+        assert_eq!(parsed.identifier().component_name(), Some("comp1"));
+        assert_eq!(parsed.identifier().endpoint_name(), Some("ep1"));
+
+        // Parsing static instance from string
+        let parsed_static: Instance = "dynamo://ns1/_component_/comp1/_endpoint_/ep1/_static_".parse().unwrap();
+        assert_eq!(parsed_static.instance_id(), None);
+        assert!(parsed_static.is_static);
+        assert_eq!(parsed_static.identifier().namespace_name(), "ns1");
+        assert_eq!(parsed_static.identifier().component_name(), Some("comp1"));
+        assert_eq!(parsed_static.identifier().endpoint_name(), Some("ep1"));
     }
 
     #[test]
@@ -716,7 +756,6 @@ mod tests {
         // _path_ is always auto-inserted
         let keys = Keys::from_identifier(id.clone(), vec!["config".to_string()]).unwrap();
         assert_eq!(keys.to_string(), "dynamo://ns1/_component_/comp1/_path_/config");
-        assert!(!keys.has_reserved_keyword("_path_")); // Always false now
 
         // Multiple segments
         let keys2 = Keys::from_identifier(id, vec!["config".to_string(), "v1".to_string()]).unwrap();
