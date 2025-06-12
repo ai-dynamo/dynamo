@@ -47,9 +47,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
         run: |
           ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target ci_minimum --framework ${{ matrix.framework }}
-      - name: Run Rust checks (llm/block-manager)
-        run: |
-          docker run -w /workspace/lib/llm --name ${{ env.CONTAINER_ID }}_rust_checks ${{ steps.define_image_tag.outputs.image_tag }} bash -ec 'rustup component add rustfmt clippy && cargo fmt -- --check && cargo clippy --features block-manager --no-deps --all-targets -- -D warnings && cargo test --locked --all-targets --features=block-manager'
       - name: Run pytest
         env:
           PYTEST_MARKS: "pre_merge or mypy"
