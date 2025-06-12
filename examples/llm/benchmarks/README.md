@@ -246,8 +246,8 @@ Single-Node
 
  ```bash
  bash -x /workspace/benchmarks/llm/perf.sh \
-  --tensor-parallelism 1
-  --data-parallelism 1
+  --tensor-parallelism 1 \
+  --data-parallelism 1 \
   --model neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
   --input-sequence-length 3000 \
   --output-sequence-length 150 \
