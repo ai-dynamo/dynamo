@@ -101,7 +101,7 @@ With the Dynamo repository, benchmarking image and model available, and **NATS a
  3. Collect the performance numbers:
 
  ```bash
- bash -x /workspace/examples/llm/benchmarks/perf.sh --mode disaggregated --deployment-kind dynamo_vllm --prefill-tensor-parallelism 1 --prefill-data-parallelism 4 --decode-tensor-parallelism 4 --decode-data-parallelism 1
+ bash -x /workspace/benchmarks/llm/perf.sh --mode disaggregated --deployment-kind dynamo_vllm --prefill-tensor-parallelism 1 --prefill-data-parallelism 4 --decode-tensor-parallelism 4 --decode-data-parallelism 1
  ```
 
  > [!Important]
@@ -166,7 +166,7 @@ With the Dynamo repository, benchmarking image and model available, and **NATS a
  5. Collect the performance numbers:
 
  ```bash
- bash -x /workspace/examples/llm/benchmarks/perf.sh --mode disaggregated --deployment-kind dynamo_vllm --prefill-tensor-parallelism 1 --prefill-data-parallelism 8 --decode-tensor-parallelism 8 --decode-data-parallelism 1
+ bash -x /workspace/benchmarks/llm/perf.sh --mode disaggregated --deployment-kind dynamo_vllm --prefill-tensor-parallelism 1 --prefill-data-parallelism 8 --decode-tensor-parallelism 8 --decode-data-parallelism 1
  ```
 
  > [!Important]
@@ -233,17 +233,17 @@ With the Dynamo repository and the benchmarking image available, perform the fol
 ### Single-Node
 
  ```bash
- bash -x /workspace/examples/llm/benchmarks/perf.sh --mode aggregated --deployment-kind vllm_serve --tensor-parallelism 4 --data-parallelism 2
+ bash -x /workspace/benchmarks/llm/perf.sh --mode aggregated --deployment-kind vllm_serve --tensor-parallelism 4 --data-parallelism 2
  ```
 
  ### Two Nodes
 
  ```bash
- bash -x /workspace/examples/llm/benchmarks/perf.sh --mode aggregated --deployment-kind vllm_serve --tensor-parallelism 4 --data-parallelism 4
+ bash -x /workspace/benchmarks/llm/perf.sh --mode aggregated --deployment-kind vllm_serve --tensor-parallelism 8 --data-parallelism 2
  ```
 
  > [!Important]
- > We should be careful in specifying these options in `perf.sh` script. They should closely reflect the deployment config that is being benchmarked. See `perf.sh --help` to learn more about these option. In the above command, we described that our deployment is using aggregated serving in `vllm serve`. We have also accurately described that we have 2 workers(or 4 workers for two nodes) with TP=4.
+ > We should be careful in specifying these options in `perf.sh` script. They should closely reflect the deployment config that is being benchmarked. See `perf.sh --help` to learn more about these option. In the above command, we described that our deployment is using aggregated serving in `vllm serve`. We have also accurately described that we have 2 workers with TP=4(or TP=8 for two nodes).
 
 For more information see [Collecting Performance Numbers](#collecting-performance-numbers) section below.
 
@@ -269,8 +269,17 @@ Using the benchmarking image, install the dependencies for plotting Pareto graph
 pip3 install matplotlib seaborn
 ```
 At the directory where the artifacts are located, plot the Pareto graph
+
+Single-Node:
+
 ```bash
-python3 /workspace/examples/llm/benchmarks/plot_pareto.py
+python3 /workspace/benchmarks/llm/plot_pareto.py --artifacts-root-dir artifacts_root
+```
+
+Two Nodes:
+
+```bash
+python3 /workspace/benchmarks/llm/plot_pareto.py --artifacts-root-dir artifacts_root --title "Two Nodes"
 ```
 The graph will be saved to the current directory and named `pareto_plot.png`.
 
@@ -290,7 +299,7 @@ over different latencies (along the x-axis).
 
 For example, at <x_value> tokens/s/user, the increase in tokens/s/gpu is `<y_new> - <y_old> = <y_diff>`, from the blue baseline to the
 orange disaggregated line, so the improvement is around <y_diff>/<y_old>x speed up:
-![Example Pareto Plot](example_pareto_plot.png)
+![Example Pareto Plot](./example_plots/single_node_pareto_plot.png)
 Note: The above example was collected over a single benchmarking run, the actual number may vary between runs, configurations and hardware.
 
 ## Supporting Additional Models
