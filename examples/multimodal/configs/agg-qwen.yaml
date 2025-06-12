@@ -13,19 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 Common:
-  model: llava-hf/llava-1.5-7b-hf
+  model: Qwen/Qwen2.5-VL-7B-Instruct
   block-size: 64
   max-model-len: 4096
 
 Processor:
   router: round-robin
-  prompt-template: "USER: <image>\n<prompt> ASSISTANT:"
+  prompt-template: "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><prompt><|im_end|>\n<|im_start|>assistant\n"
   common-configs: [model, block-size, max-model-len]
 
 VllmDecodeWorker:
   enforce-eager: true
   max-num-batched-tokens: 16384
+  max-num-seqs: 5
+  mm-processor-kwargs:
+    min_pixels: 784
+    max_pixels: 1003520
+    fps: 1
   enable-prefix-caching: true
+  image-token-id: 151655
+  num-patches: 345
   router: random
   tensor-parallel-size: 1
   ServiceArgs:

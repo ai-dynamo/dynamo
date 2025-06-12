@@ -21,14 +21,12 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use derive_builder::Builder;
-use dynamo_runtime::slug::Slug;
-use dynamo_runtime::transports::nats;
+use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned, transports::nats};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 use url::Url;
 
 use crate::gguf::{Content, ContentConfig, ModelConfigLike};
-use crate::key_value_store::Versioned;
 use crate::protocols::TokenIdType;
 
 /// If a model deployment card hasn't been refreshed in this much time the worker is likely gone
