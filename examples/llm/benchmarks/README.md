@@ -185,8 +185,45 @@ the watcher, which will exit if the total number is less than 10 after timeout. 
 a HTTP server on port 7001 by default, which you can use to send GET request for readiness to build external benchmarking workflow.
 
 ```bash
-dynamo serve --service-name Watcher benchmark_watcher:Watcher --Watcher.total-workers="10"
+# start your benchmark deployment
+...
+
+# start monitor separately, or it can be part of the deployment above
+dynamo serve --service-name Watcher benchmark_watcher:Watcher --Watcher.total-workers=10 --Watcher.timeout=10
+
+# Send curl request to check liveness
+curl localhost:7001
+127.0.0.1 - - [12/Jun/2025 23:31:52] "GET / HTTP/1.1" 400 -
+...
+curl localhost:7001
+127.0.0.1 - - [12/Jun/2025 23:32:46] "GET / HTTP/1.1" 200 -
 ```
+
+## Utility for Setting Up Environment
+
+### vLLM
+- `vllm_multinode_setup.sh` is a helper script to configure the node for dynamo deployment for
+vLLM. Depending on whether environment variable `HEAD_NODE_IP` and `RAY_LEADER_NODE_IP` are set
+when the script is invoked, it will:
+  - start nats server and etcd on the current node if `HEAD_NODE_IP` is not set, otherwise
+  set the environment variables as expected by dynamo.
+  - run Ray and connect to the Ray cluster started by `RAY_LEADER_NODE_IP`, otherwise start
+  the Ray cluster with current node as the head node.
+  - print the command with `HEAD_NODE_IP` and `RAY_LEADER_NODE_IP` set, which can be used in
+  another node to setup connectivity with the current node.
+
+  ```
+  # On node 0
+  source vllm_mutinode_setup.sh
+  ... # starting nats server, etcd and ray cluster
+
+  # script print command
+  HEAD_NODE_IP=NODE_0_IP RAY_LEADER_NODE_IP=NODE_0_IP source vllm_mutinode_setup.sh
+
+  # On node 1
+  HEAD_NODE_IP=NODE_0_IP RAY_LEADER_NODE_IP=NODE_0_IP source vllm_mutinode_setup.sh
+  ... # connecting to Ray cluster
+  ```
 
 ## Future Roadmap
 

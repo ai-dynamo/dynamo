@@ -90,6 +90,12 @@ def parse_args(service_name, prefix) -> Namespace:
     config = ServiceConfig.get_instance()
     config_args = config.as_args(service_name, prefix=prefix)
     args = parser.parse_args(config_args)
+    if len(args.worker_components) != len(args.component_endpoints):
+        parser.error(
+            "--worker-components and --component-endpoints must have the same number "
+            f"of items, but got {args.worker_components} and {args.component_endpoints}"
+        )
+        exit(1)
     return args
 
 
