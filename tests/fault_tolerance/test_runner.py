@@ -23,6 +23,10 @@ from multiprocessing import Process, Queue
 import psutil
 import pytest
 import requests
+import sys
+import os
+import json
+from datetime import datetime
 
 from dynamo.llm import KvMetricsAggregator
 from dynamo.runtime import dynamo_worker
@@ -57,10 +61,21 @@ text_payload = Payload(
 )
 
 deployment_graphs = {
-    "disagg": (
+    "agg": (
         DeploymentGraph(
-            module="graphs.disagg:Frontend",
-            config="configs/disagg.yaml",
+            module="graphs.agg:Frontend",
+            config="configs/agg.yaml",
+            directory="/workspace/examples/llm",
+            endpoint="v1/chat/completions",
+            response_handler=completions_response_handler,
+            marks=[pytest.mark.gpu_1, pytest.mark.vllm],
+        ),
+        text_payload,
+    ),
+    "mock_agg": (
+        DeploymentGraph(
+            module="graphs.mock_agg:Frontend",
+            config="configs/mock_agg.yaml",
             directory="/workspace/examples/llm",
             endpoint="v1/chat/completions",
             response_handler=completions_response_handler,
@@ -70,10 +85,28 @@ deployment_graphs = {
     ),
 }
 
+failure_scenarios = {
+    "decode_worker": [[10,[("dynamo_vllmworker",1)]]],
+    "mock_decode_worker": [[10,[("dynamo_mockvllmworker",1)]]],
+    "none":[],
+    "mock_none":[]
+}
+@pytest.fixture(
+    params=["none", "decode_worker"]
+)
+def failures(request):
+    scenario = failure_scenarios[request.param]
+    if "mock" in request.node.name:
+        param = "mock_" + request.param
+    else:
+        param = request.param
+    return failure_scenarios[param]
 
 @pytest.fixture(
     params=[
-        pytest.param("disagg", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
+        pytest.param("agg", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
+        pytest.param("mock_agg", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
+
     ]
 )
 def deployment_graph_test(request):
@@ -119,7 +152,7 @@ def _single_request(
     retry_attempts=1,
     input_token_length=100,
     output_token_length=100,
-    timeout=60,
+    timeout=30,
 ):
     prompt = _get_random_prompt(input_token_length)
     payload["messages"][0]["content"] = prompt
@@ -127,7 +160,6 @@ def _single_request(
     retry_delay = 1
     response = None
     end_time = None
-    print(prompt)
     start_time = time.time()
 
     # How many attempts it took
@@ -138,6 +170,7 @@ def _single_request(
 
     while retry_attempts:
         start_request_time = time.time()
+        
         try:
             response = requests.post(
                 url,
@@ -146,7 +179,14 @@ def _single_request(
             )
             end_time = time.time()
 
-            results.append((response, end_time - start_request_time))
+            content = None
+
+            try:
+                content = response.json()
+            except:
+                pass
+
+            results.append({"status":response.status_code, "result": content, "request_elapsed_time":end_time - start_request_time})
 
             if response.status_code != 200:
                 time.sleep(retry_delay)
@@ -156,32 +196,35 @@ def _single_request(
                 break
 
         except (requests.RequestException, requests.Timeout) as e:
-            results.append((e, end_time - start_request_time))
+            results.append({"status":str(e), "result":None, "request_elapsed_time":time.time()- start_request_time})
             logger.warning("Retrying due to Request failed: %s", e)
             time.sleep(retry_delay)
             retry_attempts -= 1
             continue
 
-    return results, time.time() - start_time
+    return {"time": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),"results":results, "total_time": time.time() - start_time}
 
 
 def client(
-    deployment_graph, server_process, payload, queue, index, requests_per_client=5
-):
-    logger = logging.getLogger(f"CLIENT: {index}")
+        deployment_graph, server_process, payload, log_dir, index, requests_per_client,input_token_length,output_token_length, max_retries):
+    try:
+        log_path = os.path.join(log_dir,f"client_{index}.log.txt")
+        with open(log_path,"w") as log:
+            logger = logging.getLogger(f"CLIENT: {index}")
+            url = f"http://localhost:{server_process.port}/{deployment_graph.endpoint}"
+            start_time = time.time()
+            retry_delay = 5
+            elapsed = 0.0
 
-    url = f"http://localhost:{server_process.port}/{deployment_graph.endpoint}"
-    start_time = time.time()
-    retry_delay = 5
-    elapsed = 0.0
-    results = []
-
-    for _ in range(requests_per_client):
-        results.append(_single_request(url, payload.payload, logger))
-
-    queue.put((index, results))
-
-
+            for i in range(requests_per_client):
+                logger.info(f"Request: {i}")
+                result=_single_request(url, payload.payload, logger,max_retries,input_token_length=input_token_length,output_token_length=output_token_length)
+                log.write(json.dumps(result)+"\n")
+                log.flush()
+    except Exception as e:
+        print(e)
+    logger.info("Exiting")
+    
 def _wait_until_ready(
     deployment_graph, server_process, payload, logger=logging.getLogger()
 ):
@@ -248,73 +291,86 @@ def _wait_until_ready(
         assert expected in content, "Expected '%s' not found in response" % expected
 
 
-def run_metrics_process():
-    asyncio.run(get_metrics())
+def run_metrics_process(log_dir):
+    asyncio.run(get_metrics(log_dir))
 
 
 @dynamo_worker()
-async def get_metrics(runtime):
+async def get_metrics(runtime,log_dir):
     # Log # processes
     # Log # metrics per vllm worker
+    circus_controller = None
+    pipeline = None
+    log_path = os.path.join(log_dir,"watcher.log.txt")
+    with open(log_path,"w") as log:
+        while True:
+            try:
+                await asyncio.sleep(0.5)
 
-    kv_listener = runtime.namespace("dynamo").component("VllmWorker")
-    await kv_listener.create_service()
+                if not circus_controller:
+                    circus_controller = CircusController.from_state_file("dynamo")
+                if not pipeline:
+                        pipeline = (
+                            await runtime.namespace("dynamo")
+                            .component("VllmWorker")
+                            .endpoint("load_metrics")
+                            .client()
+                        )
 
-    logging.info("HERE!")
-
-    pipeline = (
-        await runtime.namespace("dynamo")
-        .component("VllmWorker")
-        .endpoint("load_metrics")
-        .client()
-    )
-
-    while True:
-        try:
-            await asyncio.sleep(1)
-
-            logging.info("HERE 22222!")
-
-            print(pipeline.instance_ids(), flush=True)
-
-            logging.info("HERE eeeee!")
-            async for char in await pipeline.generate(None):
-                print("got value!!!!!")
-                print(char)
-
-            metrics_aggregator = KvMetricsAggregator(kv_listener)
-
-            logging.info("HERE!")
-
-            endpoints = await metrics_aggregator.get_metrics()
-            logging.info("HERE!")
-
-            print(endpoints.endpoints)
-
-            for endpoint in endpoints.endpoints:
-                logging.info("Worker ID: %s", endpoint.worker_id)
-                logging.info("GPU Cache Usage: %s", endpoint.gpu_cache_usage_perc)
-                print("Number of Requests Waiting: ", endpoint.num_requests_waiting)
-                print("GPU Prefix Cache Hit Rate: ", endpoint.gpu_prefix_cache_hit_rate)
-                print("***")
-        except:
-            pass
+                watchers = []
+                for x in await circus_controller._list_watchers():
+                    result = circus_controller.client.call(
+                        {"command": "list", "properties": {"name": f"{x}"}}
+                    )
+                    watchers.append((x, result))
+           
+                metrics = []
+                for x in pipeline.instance_ids():
+                    async for worker_metric in await pipeline.direct(None,x):
+                        metrics.append((x,worker_metric.data()))
+                record = {"time": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                          "watchers":watchers,
+                          "metrics":metrics}
+                log.write(json.dumps(record)+"\n")
+                log.flush()
+            except Exception as e:
+                pass
 
 
 @pytest.fixture
-def num_clients(request):
-    return request.config.getoption("--clients")
+def worker_metrics(request):
+    print(request.node.name)
+    process = Process(target=run_metrics_process,
+                      args=(request.node.name,))
+    process.start()
+    yield
+    process.kill()
+    
 
+def _set_deployment_args(request,
+                         decode_workers,
+                         prefill_workers,
+                         max_num_seqs):
 
-@pytest.fixture
-def requests_per_client(request):
-    return request.config.getoption("--requests-per-client")
+    decode_worker_name = "VllmWorker"
+    if "mock" in request.node.name:
+        decode_worker_name = "MockVllmWorker"
+    args = {}
 
+    if decode_workers is not None:
+        args[f"--{decode_worker_name}.ServiceArgs.workers"] = decode_workers
 
+    if max_num_seqs is not None:
+        args[f"--{decode_worker_name}.max_num_seqs"] = max_num_seqs
+    
+    return args
+
+    
 @pytest.mark.e2e
 @pytest.mark.slow
 async def test_worker_failure(
-    deployment_graph_test, request, runtime_services, num_clients, requests_per_client
+        deployment_graph_test, request, runtime_services, num_clients, requests_per_client, worker_metrics,respawn, failures,
+        input_token_length,output_token_length, decode_workers, prefill_workers, max_num_seqs, max_retries
 ):
     """
     Test dynamo serve deployments with different graph configurations.
@@ -325,21 +381,25 @@ async def test_worker_failure(
     logger = logging.getLogger(request.node.name)
     logger.info("Starting test_deployment")
     deployment_graph, payload = deployment_graph_test
+    
+    if respawn:
+        os.environ["DYN_CIRCUS_RESPAWN"]="1"
+    else:
+        if "DYN_CIRCUS_RESPAWN" in os.environ:
+            del os.environ["DYN_CIRCUS_RESPAWN"]
 
+    deployment_args = _set_deployment_args(request,
+                                           decode_workers,
+                                           prefill_workers,
+                                           max_num_seqs)
+    
     with DynamoServeProcess(
-        deployment_graph, request, args={"--MockVllmWorker.max_num_seqs": "2"}
+        deployment_graph, request, args=deployment_args
     ) as server_process:
+
         _wait_until_ready(deployment_graph, server_process, payload)
-
-        circus_controller = CircusController.from_state_file("dynamo")
-
         procs = []
-        queue = Queue()
-
-        #        procs.append(Process(target=run_metrics_process))
-        #       procs[-1].start()
-
-        for i in range(5):
+        for i in range(num_clients):
             procs.append(
                 Process(
                     target=client,
@@ -347,33 +407,37 @@ async def test_worker_failure(
                         deployment_graph,
                         server_process,
                         payload,
-                        queue,
+                        request.node.name,
                         i,
+                        requests_per_client,
+                        input_token_length,
+                        output_token_length,
+                        max_retries
                     ),
                 )
             )
             procs[-1].start()
 
-        for x in await circus_controller._list_watchers():
-            print(x)
-            result = circus_controller.client.call(
-                {"command": "list", "properties": {"name": f"{x}"}}
-            )
+        circus_controller = CircusController.from_state_file("dynamo")
 
-            print(result["pids"])
-
-            if x == "dynamo_vllmworker":
-                # _terminate_process_tree(result["pids"][0])
-                break
-
-        time.sleep(30)
-
+        for (failure_time,component) in failures:
+            time.sleep(failure_time)
+            watcher_list = await circus_controller._list_watchers()
+            for component_name, number in component:
+                logger.info(f"Injecting failure for: {component_name}")
+                result = circus_controller.client.call(
+                    {"command": "list", "properties": {"name": f"{component_name}"}}
+                )
+                num_processes = len(result["pids"])
+                for x in range(number):
+                    pid = result["pids"][x%num_processes]
+                    logger.info(f"Terminating {component_name} Pid {pid}")
+                    _terminate_process_tree(pid)
+                    
         for proc in procs:
-            #          proc.terminate()
-            #         proc.kill()
+            logger.info(f"{proc} waiting for join")
             proc.join()
+            logger.info(f"{proc} joined")
 
-        while not queue.empty():
-            print(queue.get())
 
         circus_controller.close()

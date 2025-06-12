@@ -36,7 +36,6 @@ class CircusController:
             endpoint: The circus endpoint (e.g., tcp://127.0.0.1:54927)
         """
         self.endpoint = endpoint
-        print(endpoint)
         self.client = CircusClient(endpoint=endpoint, timeout=15.0)
 
     @classmethod
@@ -343,7 +342,6 @@ class CircusController:
         """
         try:
             response = self.client.send_message("list")
-            print(response)
             return response.get("watchers", [])
         except (CallError, Exception) as e:
             logger.error(f"Failed to list watchers: {e}")

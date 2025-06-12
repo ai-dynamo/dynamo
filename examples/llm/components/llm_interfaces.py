@@ -25,11 +25,3 @@ class LLMWorker(AbstractService):
     @abstract_endpoint  # enforces that the service implements the method, but also that it is properly decorated
     async def generate(self, request: vLLMGenerateRequest):
         pass
-
-
-class LLMPrefillWorker(AbstractService):
-    """Interface for LLM workers."""
-
-    @abstract_endpoint  # enforces that the service implements the method, but also that it is properly decorated
-    async def generate(self, request: RemotePrefillRequest):
-        pass
