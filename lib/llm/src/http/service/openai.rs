@@ -27,13 +27,16 @@ use super::{
     service_v2, RouteDoc,
 };
 
-use crate::protocols::openai::embeddings::NvCreateEmbeddingRequest;
+use crate::preprocessor::LLMMetricAnnotation;
+use crate::protocols::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse};
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionResponse, completions::CompletionResponse,
 };
 use crate::request_template::RequestTemplate;
 use crate::types::{
-    openai::{chat_completions::NvCreateChatCompletionRequest, completions::CompletionRequest},
+    openai::{
+        chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
+    },
     Annotated,
 };
 
@@ -120,7 +123,7 @@ impl From<HttpError> for ErrorResponse {
 #[tracing::instrument(skip_all)]
 async fn completions(
     State(state): State<Arc<service_v2::State>>,
-    Json(request): Json<CompletionRequest>,
+    Json(request): Json<NvCreateCompletionRequest>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -137,7 +140,7 @@ async fn completions(
         ..request.inner
     };
 
-    let request = CompletionRequest {
+    let request = NvCreateCompletionRequest {
         inner,
         nvext: request.nvext,
     };
@@ -208,10 +211,59 @@ async fn completions(
 
 #[tracing::instrument(skip_all)]
 async fn embeddings(
-    State(_state): State<Arc<service_v2::State>>,
-    Json(_request): Json<NvCreateEmbeddingRequest>,
+    State(state): State<Arc<service_v2::State>>,
+    Json(request): Json<NvCreateEmbeddingRequest>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
-    unimplemented!("embeddings are not supported yet");
+    // return a 503 if the service is not ready
+    check_ready(&state)?;
+
+    // todo - extract distributed tracing id and context id from headers
+    let request_id = uuid::Uuid::new_v4().to_string();
+
+    // Embeddings are typically not streamed, so we default to non-streaming
+    let streaming = false;
+
+    // todo - make the protocols be optional for model name
+    // todo - when optional, if none, apply a default
+    let model = &request.inner.model;
+
+    // todo - error handling should be more robust
+    let engine = state
+        .manager()
+        .get_embeddings_engine(model)
+        .map_err(|_| ErrorResponse::model_not_found())?;
+
+    // this will increment the inflight gauge for the model
+    let mut inflight =
+        state
+            .metrics_clone()
+            .create_inflight_guard(model, Endpoint::Embeddings, streaming);
+
+    // setup context
+    // todo - inherit request_id from distributed trace details
+    let request = Context::with_id(request, request_id.clone());
+
+    // issue the generate call on the engine
+    let stream = engine
+        .generate(request)
+        .await
+        .map_err(|e| ErrorResponse::from_anyhow(e, "Failed to generate embeddings"))?;
+
+    // Embeddings are typically returned as a single response (non-streaming)
+    // so we fold the stream into a single response
+    let response = NvCreateEmbeddingResponse::from_annotated_stream(stream.into())
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                "Failed to fold embeddings stream for {}: {:?}",
+                request_id,
+                e
+            );
+            ErrorResponse::internal_server_error("Failed to fold embeddings stream")
+        })?;
+
+    inflight.mark_ok();
+    Ok(Json(response).into_response())
 }
 
 /// OpenAI Chat Completions Request Handler
@@ -449,6 +501,12 @@ fn process_event_converter<T: Serialize>(
 ) -> Result<Event, axum::Error> {
     let annotated = annotated.0;
 
+    // update metrics
+    if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&annotated) {
+        response_collector.observe_current_osl(metrics.output_tokens);
+        response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
+    }
+
     let mut event = Event::default();
 
     if let Some(data) = annotated.data {
@@ -463,16 +521,6 @@ fn process_event_converter<T: Serialize>(
             return Err(axum::Error::new(msgs.join(" -- ")));
         }
         event = event.event(msg);
-    }
-
-    if let Some(osl) = annotated.output_tokens {
-        response_collector.observe_current_osl(osl);
-    }
-
-    if let Some(isl) = annotated.input_tokens {
-        if let Some(chunk_tokens) = annotated.chunk_tokens {
-            response_collector.observe_response(isl, chunk_tokens);
-        }
     }
 
     if let Some(comments) = annotated.comment {

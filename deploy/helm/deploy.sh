@@ -51,11 +51,11 @@ docker login "$DOCKER_REGISTRY"
 # Change to the specified directory
 cd "$DYNAMO_DIRECTORY"
 
-# Build the Bento container
-echo "Building Bento image for $DYNAMO_IDENTIFIER..."
+# Build the Dynamo application container
+echo "Building Dynamo application image for $DYNAMO_IDENTIFIER..."
 DOCKER_DEFAULT_PLATFORM=linux/amd64 uv run dynamo build --containerize $DYNAMO_IDENTIFIER
 
-# Extract the module and the bento name
+# Extract the module and the dynamo name
 DYNAMO_MODULE=$(echo "$DYNAMO_IDENTIFIER" | awk -F':' '{print $1}' | tr '[:upper:]' '[:lower:]')
 DYNAMO_NAME=$(echo "$DYNAMO_IDENTIFIER" | awk -F':' '{print $2}' | tr '[:upper:]' '[:lower:]')
 
@@ -87,4 +87,4 @@ cd -
 # Install the Helm chart with the correct tag (SHA)
 echo "Installing Helm chart with image: $docker_tag_for_registry"
 HELM_RELEASE="${DYNAMO_MODULE//_/\-}"
-helm upgrade -i "$HELM_RELEASE" ./chart -f ~/bentoml/bentos/"$DYNAMO_NAME"/"$docker_sha"/bento.yaml --set image="$docker_tag_for_registry" --set dynamoIdentifier="$DYNAMO_IDENTIFIER" --set configFilePath="$DYNAMO_CONFIG_FILE" -n "$NAMESPACE"
+helm upgrade -i "$HELM_RELEASE" ./chart -f ~/.dynamo/packages/"$DYNAMO_MODULE"/"$DYNAMO_NAME"/dynamo.yaml --set image="$docker_tag_for_registry" --set dynamoIdentifier="$DYNAMO_IDENTIFIER" --set configFilePath="$DYNAMO_CONFIG_FILE" -n "$NAMESPACE"

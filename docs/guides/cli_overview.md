@@ -17,71 +17,75 @@ limitations under the License.
 -->
 
 # About the Dynamo Command Line Interface
-The Dynamo CLI is a powerful tool for serving, containerizing, and deploying Dynamo applications. It leverages core pieces of the BentoML deployment stack and provides a range of commands to manage your Dynamo services.
 
-The Dynamo CLI lets you:
-- [`run`](#run) - quickly chat with a model
-- [`serve`](#serve) - run a set of services locally (via `depends()` or `.link()`)
-- [`build`](#build) - create an archive of your services (called a `bento`)
-- [`deploy`](#deploy) - create a pipeline on Dynamo Cloud
+The Dynamo CLI serves, containerizes, and deploys Dynamo applications efficiently. It provides intuitive commands to manage your Dynamo services.
+
+## CLI Capabilities
+
+With the Dynamo CLI, you can:
+
+* Chat with models quickly using `run`
+* Serve multiple services locally using `serve`
+* Package your services into archive (called `dynamo artifact`) using `build`
+* Deploy pipelines to Dynamo Cloud using `deploy`
 
 ## Commands
 
 ### `run`
 
-The `run` command allows you to quickly chat with a model. Under the hood - it is running the `dynamo-run` Rust binary. For details, see [Running Dynamo](dynamo_run.md).
+Use `run` to start an interactive chat session with a model. This command executes the `dynamo-run` Rust binary under the hood. For more details, see [Running Dynamo](dynamo_run.md).
 
-**Example**
+#### Example
 ```bash
 dynamo run deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
 ```
 
 ### `serve`
 
-The `serve` command lets you run a defined inference graph locally. You must point toward your file and intended class using file:Class syntax. For details, see [Serving Inference Graphs](dynamo_serve.md).
+Use `serve` to run your defined inference graph locally. You'll need to specify your file and intended class using the file:Class syntax. For more details, see [Serving Inference Graphs](dynamo_serve.md).
 
-**Usage**
+#### Usage
 ```bash
 dynamo serve [SERVICE]
 ```
 
-**Arguments**
-- `SERVICE` - The service to start. You use file:Class syntax to specify the service.
+#### Arguments
+* `SERVICE`: Specify the service to start using file:Class syntax
 
-**Flags**
-- `--file`/`-f` - Path to optional YAML configuration file. An example of the YAML file can be found in the configuration section of the [SDK docs](../API/sdk.md)
-- `--dry-run` - Print out the dependency graph and values without starting any services.
-- `--service-name` - Only serve the specified service name. The rest of the discoverable components in the graph are not started.
-- `--working-dir` - Specify the directory to find the Service instance
-- Any additional flags that follow Class.key=value are passed to the service constructor for the target service and parsed. See the configuration section of the [SDK docs](../API/sdk.md) for more details.
+#### Flags
+* `--file`/`-f`: Path to optional YAML configuration file. For configuration examples, see the [SDK docs](../API/sdk.md)
+* `--dry-run`: Print the dependency graph and values without starting services
+* `--service-name`: Start only the specified service name
+* `--working-dir`: Set the directory for finding the Service instance
+* Additional flags following Class.key=value pattern are passed to the service constructor. For details, see the configuration section of the [SDK docs](../API/sdk.md)
 
-**Example**
+#### Example
 ```bash
 cd examples
-# Spin up Frontend, Middle, and Backend components
+# Start the Frontend, Middle, and Backend components
 dynamo serve hello_world:Frontend
 
-# Spin up only the Middle component in the graph that is discoverable from the Frontend service
-dynamo serve  --service-name Middle hello_world:Frontend
+# Start only the Middle component in the graph that is discoverable from the Frontend service
+dynamo serve --service-name Middle hello_world:Frontend
 ```
 
 ### `build`
 
-The `build` command allows you to package up your inference graph and its dependencies and create an archive of it. This is commonly paired with the `--containerize` flag to create a single docker container that runs your inference graph. As with `serve`, you point toward the first service in your dependency graph. For details about `dynamo build`, see [Serving Inference Graphs](dynamo_serve.md).
+Use `build` to package your inference graph and its dependencies into an archive. Combine this with the `--containerize` flag to create a single Docker container for your inference graph. As with `serve`, you point toward the first service in your dependency graph. For more details, see [Serving Inference Graphs](dynamo_serve.md).
 
-**Usage**
+#### Usage
 ```bash
 dynamo build [SERVICE]
 ```
 
-**Arguments**
-- `SERVICE` - The service to build. You use file:Class syntax to specify the service.
+#### Arguments
+* `SERVICE`: Specify the service to build using file:Class syntax
 
-**Flags**
-- `--working-dir` - Specify the directory to find the Service instance
-- `--containerize` - Whether to containerize the Bento after building
+#### Flags
+* `--working-dir`: Specify the directory for finding the Service instance
+* `--containerize`: Choose whether to create a container from the dynamo artifact after building
 
-**Example**
+#### Example
 ```bash
 cd examples/hello_world
 dynamo build hello_world:Frontend
@@ -89,26 +93,22 @@ dynamo build hello_world:Frontend
 
 ### `deploy`
 
-The `deploy` command creates a pipeline on Dynamo Cloud using parameters at the prompt or using a YAML configuration file. For details, see [Deploying Inference Graphs to Kubernetes](dynamo_deploy/README.md).
+Use `deploy` to create a pipeline on Dynamo Cloud using either interactive prompts or a YAML configuration file. For more details, see [Deploying Inference Graphs to Kubernetes](dynamo_deploy/README.md).
 
-**Usage**
+#### Usage
 ```bash
 dynamo deploy [PIPELINE]
 ```
 
-**Arguments**
-- `pipeline` - The pipeline to deploy. Defaults to *None*; required.
+#### Arguments
+* `PIPELINE`: The pipeline to deploy; defaults to *None*; required
 
-**Flags**
-- `--name` or `-n` - Deployment name. Defaults to *None*; required.
-- `--config-file` or `-f` - Configuration file path. Defaults to *None*; required.
-- `--wait` - Whether or not to wait for deployment to be ready. Defaults to wait.
-  `--no-wait`
-- `--timeout` - The number of seconds that can elapse before deployment times out; measured in seconds. Defaults to 3600.
-- `--endpoint` or `-e` - The Dynamo Cloud endpoint where the pipeline should be deployed. Defaults to *None*; required.
-- `--help` or `-h` - Display in-line help for `dynamo deploy`.
+#### Flags
+* `--name`/`-n`: Set the deployment name. Defaults to *None*; required
+* `--config-file`/`-f`: Specify the configuration file path. Defaults to *None*; required
+* `--wait`/`--no-wait`: Choose whether to wait for deployment readiness. Defaults to wait
+* `--timeout`: Set maximum deployment time in seconds. Defaults to 3600
+* `--endpoint`/`-e`: Specify the Dynamo Cloud deployment endpoint. Defaults to *None*; required
+* `--help`/`-h`: Display command help
 
-
-**Example**
-
-For a detailed example, see [Operator Deployment](dynamo_deploy/operator_deployment.md).
+For a detailed deployment example, see [Operator Deployment](dynamo_deploy/operator_deployment.md).

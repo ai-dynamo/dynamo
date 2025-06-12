@@ -50,7 +50,7 @@ class ServiceProtocol(Protocol):
     name: str
     inner: Any
     models: list[Any]
-    bento: Any
+    dynamo: Any
 
     def is_dynamo_component(self) -> bool:
         ...

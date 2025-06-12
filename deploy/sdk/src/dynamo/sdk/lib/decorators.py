@@ -23,6 +23,8 @@ from pydantic import BaseModel
 
 from dynamo.sdk.core.protocol.interface import DynamoTransport
 
+F = t.TypeVar("F", bound=t.Callable[..., t.Any])
+
 
 class DynamoEndpoint:
     """Decorator class for Dynamo endpoints"""
@@ -90,8 +92,15 @@ def endpoint(
     return decorator
 
 
-def async_on_start(func: t.Callable) -> t.Callable:
+def async_on_start(func: F) -> F:
     """Decorator for async onstart functions."""
     # Mark the function as a startup hook
     setattr(func, "__dynamo_startup_hook__", True)
+    return func
+
+
+def on_shutdown(func: F) -> F:
+    """Decorator for shutdown hook."""
+    # Mark the function as a shutdown hook
+    setattr(func, "__dynamo_shutdown_hook__", True)
     return func

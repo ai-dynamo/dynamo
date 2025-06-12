@@ -1,25 +1,8 @@
-# Dynamo Kubernetes Operator Documentation
+# Working with Dynamo Kubernetes Operator
 
 ## Overview
 
 Dynamo operator is a Kubernetes operator that simplifies the deployment, configuration, and lifecycle management of DynamoGraphs. It automates the reconciliation of custom resources to ensure your desired state is always achieved. This operator is ideal for users who want to manage complex deployments using declarative YAML definitions and Kubernetes-native tooling.
-
----
-
-## Table of Contents
-
-- [Overview](#overview)
-- [Architecture](#architecture)
-- [Custom Resource Definitions (CRDs)](#custom-resource-definitions-crds)
-- [Installation](#installation)
-- [GitOps Deployment with FluxCD](#gitops-deployment-with-fluxcd)
-- [Reconciliation Logic](#reconciliation-logic)
-- [Configuration](#configuration)
-- [Troubleshooting](#troubleshooting)
-- [Development](#development)
-- [References](#references)
-
----
 
 ## Architecture
 
@@ -37,7 +20,7 @@ Dynamo operator is a Kubernetes operator that simplifies the deployment, configu
   3. Kubernetes resources (Deployments, Services, etc.) are created or updated to match the CR spec.
   4. Status fields are updated to reflect the current state.
 
----
+
 
 ## Custom Resource Definitions (CRDs)
 
@@ -91,8 +74,6 @@ spec:
       - name: SPECIFIC_ENV_VAR
         value: some_specific_value
 ```
-
----
 
 ### CRD: `DynamoComponentDeployment`
 
@@ -149,8 +130,6 @@ spec:
   serviceName: Frontend
 ```
 
----
-
 ### CRD: `DynamoComponent`
 
 | Field                           | Type                     | Description                                                                          | Required | Default |
@@ -180,25 +159,21 @@ spec:
   dynamoComponent: frontend:jh2o6dqzpsgfued4
 ```
 
-
----
-
 ## Installation
 
-[See installation steps](dynamo_cloud.md#deployment-steps)
+[See installation steps](dynamo_cloud.md#overview)
 
----
 
 ## GitOps Deployment with FluxCD
 
-This section describes how to use FluxCD for GitOps-based deployment of Dynamo inference graphs. GitOps enables you to manage your Dynamo deployments declaratively using Git as the source of truth. We'll use the [aggregated vLLM example](../../examples/llm/README.md) to demonstrate the workflow.
+This section describes how to use FluxCD for GitOps-based deployment of Dynamo inference graphs. GitOps enables you to manage your Dynamo deployments declaratively using Git as the source of truth. We'll use the [aggregated vLLM example](https://github.com/ai-dynamo/dynamo/blob/main/examples/llm/README.md) to demonstrate the workflow.
 
 ### Prerequisites
 
 - A Kubernetes cluster with [Dynamo Cloud](dynamo_cloud.md) installed
 - [FluxCD](https://fluxcd.io/flux/installation/) installed in your cluster
 - A Git repository to store your deployment configurations
-- [Dynamo CLI](../../get_started.md#installation) installed locally
+- [Dynamo CLI](../../get_started.md#alternative-setup-manual-installation) installed locally
 
 ### Workflow Overview
 
@@ -308,7 +283,6 @@ kubectl get dynamocomponentdeployment -n $KUBE_NS
 
 [See deployment steps](operator_deployment.md)
 
----
 
 ## Reconciliation Logic
 
@@ -334,8 +308,6 @@ kubectl get dynamocomponentdeployment -n $KUBE_NS
   - Create a job to build the docker image
 - **Status Management:**
   - `.status.conditions`: Reflects readiness, failure, progress states
-
----
 
 ## Configuration
 
@@ -365,7 +337,6 @@ kubectl get dynamocomponentdeployment -n $KUBE_NS
   | `--etcdAddr`          | Address of etcd server                     | ""      |
 
 
----
 
 ## Troubleshooting
 
@@ -375,7 +346,6 @@ kubectl get dynamocomponentdeployment -n $KUBE_NS
 | Status not updated     | CRD schema mismatch           | Regenerate CRDs with kubebuilder  |
 | Image build hangs      | Misconfigured DynamoComponent | Check image build logs            |
 
----
 
 ## Development
 
@@ -383,11 +353,10 @@ kubectl get dynamocomponentdeployment -n $KUBE_NS
 
 The operator is built using Kubebuilder and the operator-sdk, with the following structure:
 
-  - `controllers/` – Reconciliation logic
-  - `api/v1alpha1/` – CRD types
-  - `config/` – Manifests and Helm charts
+- `controllers/`: Reconciliation logic
+- `api/v1alpha1/`: CRD types
+- `config/`: Manifests and Helm charts
 
----
 
 ## References
 

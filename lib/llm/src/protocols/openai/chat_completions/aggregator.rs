@@ -284,9 +284,6 @@ mod tests {
             data: Some(data),
             id: Some("test_id".to_string()),
             event: None,
-            chunk_tokens: None,
-            input_tokens: None,
-            output_tokens: None,
             comment: None,
         }
     }
@@ -430,9 +427,6 @@ mod tests {
             data: Some(data),
             id: Some("test_id".to_string()),
             event: None,
-            chunk_tokens: None,
-            input_tokens: None,
-            output_tokens: None,
             comment: None,
         };
         let stream = Box::pin(stream::iter(vec![annotated_delta]));

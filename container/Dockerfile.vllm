@@ -10,7 +10,6 @@ ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
-ARG GENAI_PERF_VERSION=0.0.13
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -72,31 +71,41 @@ RUN apt-get update -y && \
     autoconf \
     libtool
 
+# These headers are missing with the hpcx installer, required
+# by UCX to find RDMA devices
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    --reinstall libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
+    libnuma-dev librdmacm-dev ibverbs-providers
+
+ARG NIXL_UCX_REF=v1.19.x
+
 WORKDIR /workspace
 
 ### UCX EFA Setup ###
 RUN rm -rf /opt/hpcx/ucx
 RUN rm -rf /usr/local/ucx
-RUN cd /usr/local/src && \
+RUN echo "Building UCX with reference $NIXL_UCX_REF"
+RUN cd /usr/local/src &&                            \
     git clone https://github.com/openucx/ucx.git && \
-    cd ucx &&                   \
-    git checkout v1.19.x &&     \
-    ./autogen.sh && ./configure \
-    --prefix=/usr/local/ucx     \
-    --enable-shared             \
-    --disable-static            \
-    --disable-doxygen-doc       \
-    --enable-optimizations      \
-    --enable-cma                \
-    --enable-devel-headers      \
-    --with-cuda=/usr/local/cuda \
-    --with-verbs                \
-    --with-efa                  \
-    --with-dm                   \
-    --with-gdrcopy=/usr/local   \
-    --enable-mt &&              \
-    make -j &&                  \
-    make -j install-strip &&    \
+    cd ucx &&                                       \
+    git checkout $NIXL_UCX_REF &&                   \
+    ./autogen.sh && ./configure                     \
+    --prefix=/usr/local/ucx                         \
+    --enable-shared                                 \
+    --disable-static                                \
+    --disable-doxygen-doc                           \
+    --enable-optimizations                          \
+    --enable-cma                                    \
+    --enable-devel-headers                          \
+    --with-cuda=/usr/local/cuda                     \
+    --with-verbs                                    \
+    --with-efa                                      \
+    --with-dm                                       \
+    --with-gdrcopy=/usr/local                       \
+    --enable-mt &&                                  \
+    make -j &&                                      \
+    make -j install-strip &&                        \
     ldconfig
 
 ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
@@ -114,14 +123,14 @@ COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
 RUN if [ "$ARCH" = "arm64" ]; then \
         cd /opt/nixl && \
         mkdir build && \
-        meson setup build/ --prefix=/usr/local/nixl -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
+        meson setup build/ --buildtype=release --prefix=/usr/local/nixl -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
         cd build/ && \
         ninja && \
         ninja install; \
     else \
         cd /opt/nixl && \
         mkdir build && \
-        meson setup build/ --prefix=/usr/local/nixl && \
+        meson setup build/ --buildtype=release --prefix=/usr/local/nixl && \
         cd build/ && \
         ninja && \
         ninja install; \
@@ -299,7 +308,7 @@ RUN chown $USERNAME:$USERNAME /opt/dynamo/venv
 COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
 
 # so we can use maturin develop
-RUN uv pip install maturin
+RUN uv pip install maturin[patchelf]
 
 USER $USERNAME
 ENV HOME=/home/$USERNAME
@@ -384,8 +393,9 @@ RUN uv build --wheel --out-dir /workspace/dist && \
     uv pip install maturin[patchelf] && \
     maturin build --release --features block-manager --out /workspace/dist && \
     if [ "$RELEASE_BUILD" = "true" ]; then \
-        uv run --python 3.11 maturin build --release --features block-manager --out /workspace/dist && \
-        uv run --python 3.10 maturin build --release --features block-manager --out /workspace/dist; \
+        # do not enable KVBM feature, ensure compatibility with lower glibc
+        uv run --python 3.11 maturin build --release --out /workspace/dist && \
+        uv run --python 3.10 maturin build --release --out /workspace/dist; \
     fi
 
 #######################################
@@ -428,8 +438,7 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
 RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/dist/ai_dynamo*any.whl
 
-# TODO: remove kantoku as a transitive dependency
-RUN uv pip uninstall kantoku circus && uv pip install circus==0.19.0
+RUN uv pip install /workspace/benchmarks
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
@@ -444,11 +453,6 @@ ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/
 ########## Development Image ###########
 ########################################
 FROM ci_minimum AS dev
-
-ARG GENAI_PERF_VERSION
-
-# Install genai-perf for benchmarking
-RUN uv pip install genai-perf==$GENAI_PERF_VERSION
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
@@ -479,6 +483,7 @@ COPY --from=ci_minimum /opt/dynamo/bindings /opt/dynamo/bindings
 # Copy nats and etcd from base image
 COPY --from=base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+ENV PATH=/usr/local/bin/etcd/:$PATH
 
 # Copy UCX from base image as plugin for NIXL
 # Copy NIXL source from base image (required for NIXL plugins)
@@ -497,6 +502,15 @@ RUN uv venv $VIRTUAL_ENV --python 3.12 && \
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     uv pip install --requirement /tmp/requirements.txt
 
+# Install test dependencies
+#TODO: Remove this once we have a functional ci_minimum image built on top of the runtime image
+RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
+
+#TODO: Remove this once we have a functional ci_minimum image built on top of the runtime image
+COPY . /workspace
+RUN uv pip install /workspace/benchmarks
+
 # Install the wheels and symlink executables to /usr/local/bin so dynamo components can use them
 # Dynamo components currently do not have the VIRTUAL_ENV in their PATH, so we need to symlink the executables
 #Copy NIXL and Dynamo wheels into wheelhouse
@@ -507,9 +521,6 @@ RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
     ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
     rm -r wheelhouse
 
-# TODO: remove kantoku as a transitive dependency
-RUN uv pip uninstall kantoku circus && uv pip install circus==0.19.0
-
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
 
@@ -518,8 +529,6 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
-# Copy examples
-COPY ./examples examples/
 
-ENTRYPOINT [ "/usr/bin/bash" ]
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

@@ -19,10 +19,21 @@ limitations under the License.
 
 This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations using TensorRT-LLM.
 
+## Use the Latest Release
+
+We recommend using the latest stable release of dynamo to avoid breaking changes:
+
+[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
+
+You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
+
+```bash
+git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
+```
 
 ## Deployment Architectures
 
-See [deployment architectures](llm_deployment.md#Deployment Architectures) to learn about the general idea of the architecture.
+See [Deployment Architectures](llm_deployment.md#deployment-architectures) to learn about the general idea of the architecture.
 Note that this TensorRT-LLM version does not support all the options yet.
 
 ```{note}
@@ -37,9 +48,9 @@ TensorRT-LLM disaggregation does not support conditional disaggregation yet. You
 
 ### Prerequisites
 
-Start required services (etcd and NATS) using [Docker Compose](../../deploy/docker-compose.yml)
+Start required services (etcd and NATS) using [Docker Compose](../../deploy/metrics/docker-compose.yml)
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
 ### Build docker
@@ -91,8 +102,6 @@ This build script internally points to the base container image built with step 
 ## Run Deployment
 
 This figure shows an overview of the major components to deploy:
-
-
 
 ```
 

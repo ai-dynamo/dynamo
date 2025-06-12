@@ -20,33 +20,66 @@ limitations under the License.
 
 ## Development Environment
 
-For a consistent development environment, use the provided devcontainer configuration. This requires:
-- [Docker](https://www.docker.com/products/docker-desktop)
-- [VS Code](https://code.visualstudio.com/) with the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
+This section describes how to set up your development environment.
 
-To use the devcontainer:
-1. Open the project in VS Code.
-2. Click the button in the bottom-left corner.
-3. Select **Reopen in Container**.
+### Recommended Setup: Using Dev Container
 
-This builds and starts a container with all the necessary dependencies for Dynamo development.
+We recommend using our pre-configured development container:
+
+1. Install prerequisites:
+   * [Docker](https://www.docker.com/products/docker-desktop)
+   * [Visual Studio Code](https://code.visualstudio.com/)
+   * [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers)
+
+2. Get the code:
+   ```bash
+   git clone https://github.com/ai-dynamo/dynamo.git
+   cd dynamo
+   ```
+
+3. Open in Visual Studio Code:
+   * Launch Visual Studio Code
+   * Click the button in the bottom-left corner
+   * Select **Reopen in Container**
+
+Visual Studio Code builds and starts a container with all necessary dependencies for Dynamo development.
+
+### Alternative Setup: Manual Installation
+
+If you don't want to use the dev container, you can set the environment up manually:
+
+1. Ensure you have:
+   * Ubuntu 24.04 (recommended)
+   * x86_64 CPU
+   * Python 3.x
+   * Git
+
+   See [Support Matrix](support_matrix.md) for more information.
+
+2. **If you plan to use vLLM or SGLang**, you must also install:
+      * etcd
+      * NATS.io
+
+   Before starting dyanmo, run both etcd and NATS.io in seperate processes.
 
 
-## Installation
 
- ```{note}
-- The following examples require system level packages.
-- We recommend Ubuntu 24.04 with a x86_64 CPU. See the [Support Matrix](support_matrix.md).
-```
+3. Install required system packages:
+   ```bash
+   apt-get update
+   DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0
+   ```
 
-```
-apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0
-python3 -m venv venv
-source venv/bin/activate
+4. Set up the Python environment:
+   ```bash
+   python3 -m venv venv
+   source venv/bin/activate
+   ```
 
-pip install ai-dynamo[all]
-```
+5. Install Dynamo:
+   ```bash
+   pip install "ai-dynamo[all]"
+   ```
 
 ```{note}
 To ensure compatibility, use the examples in the release branch or tag that matches the version you installed.
@@ -54,10 +87,10 @@ To ensure compatibility, use the examples in the release branch or tag that matc
 
 ## Building the Dynamo Base Image
 
-Although not needed for local development, deploying your Dynamo pipelines to Kubernetes requires you to build and push a Dynamo base image to your container registry. You can use any container registry of your choice, such as:
-- Docker Hub (docker.io)
-- NVIDIA NGC Container Registry (nvcr.io)
-- Any private registry
+Deploying your Dynamo pipelines to Kubernetes requires you to build and push a Dynamo base image to your container registry. You can use any private container registry of your choice, including:
+- [Docker Hub](https://hub.docker.com/)
+- [NVIDIA NGC Container Registry](https://catalog.ngc.nvidia.com/)
+
 
 To build it:
 
@@ -79,7 +112,7 @@ export DYNAMO_IMAGE=<your-registry>/dynamo-base:latest-vllm
 
 ## Running and Interacting with an LLM Locally
 
-To run a model and interact with it locally,  call `dynamo run` with a hugging face model. `dynamo run` supports several backends including: `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
+To run a model and interact with it locally, call `dynamo run` with a Hugging Face model. `dynamo run` supports several backends, including `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
 
 ### Example Command
 
@@ -99,11 +132,11 @@ Hmm, I need to come up with a suitable reply. ...
 
 Dynamo provides a simple way to spin up a local set of inference components including:
 
-- **OpenAI Compatible Frontend**–High performance OpenAI compatible http api server written in Rust.
-- **Basic and Kv Aware Router**–Route and load balance traffic to a set of workers.
-- **Workers**–Set of pre-configured LLM serving engines.
+- **OpenAI-compatible Frontend**—High-performance OpenAI compatible http api server written in Rust.
+- **Basic and Kv Aware Router**—Route and load balance traffic to a set of workers.
+- **Workers**—Set of pre-configured LLM serving engines.
 
-To run a minimal configuration you can use a pre-configured example.
+To run a minimal configuration, use a pre-configured example.
 
 ### Start Dynamo Distributed Runtime Services
 
@@ -140,7 +173,7 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
 
 ## Local Development
 
-If you use vscode or cursor, use the .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions, see the [ReadMe](https://github.com/ai-dynamo/dynamo/blob/main/.devcontainer/README.md).
+If you use vscode or cursor, use the .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions, see the Dynamo repository's [devcontainer README](https://github.com/ai-dynamo/dynamo/blob/main/.devcontainer/README.md).
 
 Otherwise, to develop locally, we recommend working inside of the container:
 
@@ -158,10 +191,9 @@ uv pip install -e .
 export PYTHONPATH=$PYTHONPATH:/workspace/deploy/dynamo/sdk/src:/workspace/components/planner/src
 ```
 
-
 ### Conda Environment
 
-Alternately, you can use a Conda environment:
+Alternatively, use a Conda environment:
 
 ```bash
 conda activate <ENV_NAME>
