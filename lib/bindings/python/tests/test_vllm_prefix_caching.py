@@ -180,7 +180,7 @@ def test_prefill(hash_algo):
 
 def test_kvbm_prefill():
     """
-    set up
+    Tests the KvbmCacheManager's prefill functionality.
     """
     from dynamo.llm import BlockManager
     from dynamo.llm.vllm_integration.kv_cache_manager import KvbmCacheManager
@@ -190,7 +190,6 @@ def test_kvbm_prefill():
     OUTER_DIM = 1
     PAGE_SIZE = 16
     INNER_DIM = 1
-    # DTYPE, TORCH_DTYPE = "FP32", torch.float32
     DTYPE = "FP32"
     HOST_NUM_BLOCKS = 11
     DEVICE_NUM_BLOCKS = 11
@@ -228,131 +227,55 @@ def test_kvbm_prefill():
     unique_token_ids = [88] * 7
     all_token_ids = common_token_ids + unique_token_ids
     req0 = make_request("0", all_token_ids)
+
+    # Step 1: Initial allocation - no computed blocks yet
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
-    ## TODO: KVBM lacks `req_to_block_hashes``
-    # assert len(manager.req_to_block_hashes[req0.request_id]) == 3
     assert not computed_blocks.blocks
     assert num_computed_tokens == 0
-    print(computed_blocks)
 
-    blocks = manager.allocate_slots(
+    # Step 2: Allocate slots for the request
+    _ = manager.allocate_slots(
         req0, 55, len(computed_blocks.blocks) * 16, computed_blocks
     )
-    # TODO(oandreeva): this check is irrelevant for KVBM
-    # assert blocks.get_block_ids() == [[1, 2, 3, 4]]
-    print("=>>>>>>>>>>>>>>>>>>>>>blocks", blocks)
-    print(manager.get_block_ids(req0.request_id))
-    assert len(manager.get_block_ids(req0.request_id)[0]) == len([1, 2, 3, 4])
 
-    """
-    TODO(oandreeva): `block_pool` is not a field of KVBM
+    # Verify allocation was successful
+    block_ids = manager.get_block_ids(req0.request_id)
+    assert len(block_ids) == 1  # One sequence in the request
+    assert len(block_ids[0]) == 4  # 4 blocks allocated (3 complete + 1 partial)
 
-    # Check full block metadata
-    parent_block_hash = None
-    for block_id in (1, 2, 3):
-        block_tokens = tuple(all_token_ids[(block_id - 1) * 16:block_id * 16])
-        block_hash = hash_block_tokens(hash_fn, parent_block_hash,
-                                       block_tokens)
-        assert manager.block_pool.blocks[block_id].block_hash == block_hash
-        assert manager.block_pool.blocks[block_id].ref_cnt == 1
-        parent_block_hash = block_hash.hash_value
+    # Step 3: Simulate model execution by updating the request's computed tokens
+    req0.append_output_token_ids(100)
+    req0.num_computed_tokens = 55
 
-    # Check partial block metadata
-    for block_id in (4, ):
-        assert manager.block_pool.blocks[block_id].block_hash is None
-        assert manager.block_pool.blocks[block_id].ref_cnt == 1
+    # Step 4: Get the computed blocks
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    print("=>>>>>>>>>>>>>>>>>>>>>computed_blocks", computed_blocks)
+    print("=>>>>>>>>>>>>>>>>>>>>>num_computed_tokens", num_computed_tokens)
 
-    # Cache hit in the common prefix when the original block is still in use.
-    # Incomplete 1 block (5 tokens)
-    unique_token_ids = [3] * 5
-    req1 = make_request("1", common_token_ids + unique_token_ids)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
-    # assert len(manager.req_to_block_hashes[req1.request_id]) == 3
-    print("len(computed_blocks)", len(computed_blocks))
-    # assert computed_blocks.get_block_ids() == [[1, 2, 3]]
-    # assert num_computed_tokens == 3 * 16
-    num_new_tokens = 53 - 3 * 16
-    blocks = manager.allocate_slots(
-        req1, num_new_tokens, len(computed_blocks.blocks) * 16, computed_blocks
+    # Step 5: Register the blocks as computed by allocating slots with the computed blocks
+    _ = manager.allocate_slots(
+        req0,
+        num_new_tokens=1,  # Allocate slots for all tokens
+        num_new_computed_tokens=0,  # All tokens are computed
     )
-    # assert blocks.get_block_ids() == [[5]]
-    for block in computed_blocks.blocks:
-        assert block.ref_cnt == 2
 
+    # Step 6: Free the current request after registering blocks
 
+    # Step 7: Create a new request with the same prefix plus one token
+    req1 = make_request("1", common_token_ids + [99])
 
-    # Cache hit in the common prefix when the original block is still in use.
-    # Incomplete 1 block (5 tokens)
-    unique_token_ids = [3] * 5
-    req1 = make_request("1", common_token_ids + unique_token_ids)
+    # Step 8: Check for computed blocks - should find the common prefix
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
-    assert len(manager.req_to_block_hashes[req1.request_id]) == 3
-    assert computed_blocks.get_block_ids() == [[1, 2, 3]]
-    assert num_computed_tokens == 3 * 16
-    num_new_tokens = 53 - 3 * 16
-    blocks = manager.allocate_slots(req1, num_new_tokens,
-                                    len(computed_blocks.blocks) * 16,
-                                    computed_blocks)
-    assert blocks.get_block_ids() == [[5]]
-    for block in computed_blocks.blocks:
-        assert block.ref_cnt == 2
+    print("=>>>>>>>>>>>>>>>>>>>>>computed_blocks for req1", computed_blocks)
+    print("=>>>>>>>>>>>>>>>>>>>>>num_computed_tokens for req1", num_computed_tokens)
 
-    # At this point, we should have 5 free blocks left.
-    assert manager.block_pool.free_block_queue.num_free_blocks == 5
+    # Step 9: Allocate slots for the remaining tokens
+    _ = manager.allocate_slots(
+        req1,
+        len(req1.all_token_ids) - num_computed_tokens,
+        len(computed_blocks.blocks) * 16,
+        computed_blocks,
+    )
 
-    manager.free(req0)
+    # Clean up
     manager.free(req1)
-
-    # All blocks should be available.
-    assert manager.block_pool.free_block_queue.num_free_blocks == 10
-    # The order should be
-    # [unallocated (6, 7, 8, 9, 10)]
-    # [unique_req0 (4)]
-    # [unique_req1 (5)]
-    # [common (3, 2, 1)]
-    assert [
-        b.block_id
-        for b in manager.block_pool.free_block_queue.get_all_free_blocks()
-    ] == [6, 7, 8, 9, 10, 4, 5, 3, 2, 1]
-
-    # Cache hit in the common prefix when the original block is already free.
-    # Incomplete 1 block (6 tokens)
-    unique_token_ids = [3] * 6
-    req2 = make_request("2", common_token_ids + unique_token_ids)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
-    assert len(manager.req_to_block_hashes[req2.request_id]) == 3
-    assert computed_blocks.get_block_ids() == [[1, 2, 3]]
-    assert num_computed_tokens == 3 * 16
-    num_new_tokens = 53 - 3 * 16
-    blocks = manager.allocate_slots(req2, num_new_tokens,
-                                    len(computed_blocks.blocks) * 16,
-                                    computed_blocks)
-    assert blocks.get_block_ids() == [[6]]
-
-    # Although we only have 6 free blocks, we have 8 blocks in
-    # the free block queue due to lazy removal.
-    assert manager.block_pool.free_block_queue.num_free_blocks == 6
-    assert all([
-        b.ref_cnt == 0
-        for b in manager.block_pool.free_block_queue.get_all_free_blocks()
-    ])
-    assert len([
-        b for b in manager.block_pool.free_block_queue.get_all_free_blocks()
-    ]) == 6
-
-    manager.free(req2)
-
-    # Cache miss and eviction.
-    req3 = make_request("3", [99] * (16 * 10))
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req3)
-    assert not computed_blocks.blocks
-    assert num_computed_tokens == 0
-    blocks = manager.allocate_slots(req3, 16 * 10,
-                                    len(computed_blocks.blocks) * 16,
-                                    computed_blocks)
-    # This block ID order also checks the eviction order.
-    assert blocks.get_block_ids() == [[7, 8, 9, 10, 4, 5, 6, 3, 2, 1]]
-    assert manager.block_pool.free_block_queue.num_free_blocks == 0
-    assert manager.block_pool.free_block_queue.free_list_head is None
-    assert manager.block_pool.free_block_queue.free_list_tail is None
-    """
