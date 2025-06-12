@@ -8,7 +8,7 @@ mod model_entry;
 pub use model_entry::ModelEntry;
 
 mod watcher;
-pub use watcher::ModelWatcher;
+pub use watcher::{ModelUpdate, ModelWatcher};
 
 /// The root etcd path for ModelEntry
 pub const MODEL_ROOT_PATH: &str = "models";
