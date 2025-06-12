@@ -496,15 +496,21 @@ impl<T> From<Annotated<T>> for EventConverter<T> {
 }
 
 fn process_event_converter<T: Serialize>(
-    annotated: EventConverter<T>,
+    mut annotated: EventConverter<T>,
     response_collector: &mut ResponseMetricCollector,
 ) -> Result<Event, axum::Error> {
-    let annotated = annotated.0;
+    let mut annotated = annotated.0;
 
     // update metrics
     if let Ok(Some(metrics)) = LLMMetricAnnotation::from_annotation(&annotated) {
         response_collector.observe_current_osl(metrics.output_tokens);
         response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
+
+        // Chomp the LLMMetricAnnotation so it's not returned in the response stream
+        if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_LLM_METRICS) {
+            annotated.event = None;
+            annotated.comment = None;
+        }
     }
 
     let mut event = Event::default();
