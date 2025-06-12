@@ -254,7 +254,7 @@ Single-Node
   --input-sequence-length 3000 \
   --output-sequence-length 150 \
   --url http://localhost:8000 \
-  --concurrency 1,2,4,8,16,32,64,128,256 \
+  --concurrency 1,2,4,8,16,32,64,128,256
 
   # The `--concurrency` option accepts either a single value (e.g., 64) or a comma-separated list (e.g., 1,2,4,8) to specify multiple concurrency levels for benchmarking.
  ```
