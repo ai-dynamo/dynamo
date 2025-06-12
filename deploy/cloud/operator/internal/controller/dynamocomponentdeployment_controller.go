@@ -1560,7 +1560,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		Name:           "main",
 		Image:          imageName,
 		Command:        []string{"sh", "-c"},
-		Args:           []string{strings.Join(args, " ")},
+		Args:           args,
 		LivenessProbe:  livenessProbe,
 		ReadinessProbe: readinessProbe,
 		Resources:      resources,
@@ -1661,7 +1661,12 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 				container.Command = extraPodSpecMainContainer.Command
 			}
 			if len(extraPodSpecMainContainer.Args) > 0 {
-				container.Args = extraPodSpecMainContainer.Args
+				// Special case: if command is "sh -c", we must collapse args into a single string
+				if len(container.Command) == 2 && container.Command[0] == "sh" && container.Command[1] == "-c" {
+					container.Args = []string{strings.Join(extraPodSpecMainContainer.Args, " ")}
+				} else {
+					container.Args = extraPodSpecMainContainer.Args
+				}
 			}
 		}
 	}

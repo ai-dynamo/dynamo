@@ -71,7 +71,6 @@ class ResponseType(BaseModel):
     resources={"cpu": 1, "memory": "500Mi"},
     workers=2,
     image=DYNAMO_IMAGE,
-    kubernetes_overrides={"entrypoint": "sh -c", "cmd": "echo hello from Backend!"},
 )
 class Backend:
     def __init__(self) -> None:
@@ -126,7 +125,10 @@ class Middle:
 @service(
     dynamo={"namespace": "inference"},
     image=DYNAMO_IMAGE,
-    kubernetes_overrides={"entrypoint": "sh -c 'echo hello from FrontEnd!'"},
+    kubernetes_overrides={
+        "entrypoint": "sh -c",
+        "cmd": "echo hello from FrontEnd!; sleep 99999",
+    },
 )
 class Frontend:
     """A simple frontend HTTP API that forwards requests to the dynamo graph."""
