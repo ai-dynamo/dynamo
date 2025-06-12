@@ -401,7 +401,7 @@ that have been encountered, and the detail on observation and resolution.
 
 ### Interconnect Configuration
 
-Even if the ndoes has faster interconnect hardware, there can be misconfiguration such that
+Even if the nodes has faster interconnect hardware, there can be misconfiguration such that
 the fastest route may not be selected by NIXL ([example regression](https://github.com/ai-dynamo/dynamo/pull/1314)). NIXL simplifies the interconnect but also hides
 selection detail. Therefore this can be the cause if you observe abnormal TTFT increase when
 splitting prefill workers and decode workers to different nodes, in the particular instance
