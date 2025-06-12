@@ -529,6 +529,9 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
+# Set environment variables for NIXL to find the right plugin
+ENV LD_LIBRARY_PATH="/usr/local/nixl/lib/x86_64-linux-gnu:/usr/local/nixl/lib/x86_64-linux-gnu/plugins:/usr/local/ucx/lib:$LD_LIBRARY_PATH"
+ENV NIXL_PLUGIN_DIR="/usr/local/nixl/lib/x86_64-linux-gnu/plugins"
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
