@@ -282,9 +282,7 @@ impl Scheduler {
                             }
 
                             // Compute and store hit rate
-                            let hit_rate = (!active_sequence.is_empty())
-                                .then(|| 1.0 - (new_tokens as f32 / active_sequence.len() as f32))
-                                .unwrap_or(0.0);
+                            let hit_rate = if !active_sequence.is_empty() { 1.0 - (new_tokens as f32 / active_sequence.len() as f32) } else { 0.0 };
                             {
                                 let mut hit_rates_guard = hit_rates_clone.lock().await;
                                 hit_rates_guard.push_back(hit_rate);
@@ -644,7 +642,7 @@ mod tests {
 
         // Create scheduler args
         let args = MockEngineArgs::builder()
-            .num_gpu_blocks(1000) // Large enough to not be a constraint
+            .num_gpu_blocks(100) // Large enough to not be a constraint
             .block_size(block_size)
             .speedup_ratio(speedup_ratio)
             .build()

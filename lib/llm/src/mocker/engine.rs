@@ -18,19 +18,24 @@
 //! This module provides an AsyncEngine implementation that wraps the Scheduler
 //! to provide streaming token generation with realistic timing simulation.
 
+use crate::kv_router::publisher::WorkerMetricsPublisher;
 use crate::mocker::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
 use crate::mocker::scheduler::Scheduler;
+use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
+    component::Component,
     engine::AsyncEngineContextProvider,
     pipeline::{async_trait, AsyncEngine, Error, ManyOut, ResponseStream, SingleIn},
     protocols::annotated::Annotated,
+    Result,
 };
 
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
+use tokio::time::{interval, Duration};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
@@ -51,15 +56,46 @@ pub struct MockVllmEngine {
     schedulers: Vec<Scheduler>,
     active_requests: Arc<Mutex<HashMap<Uuid, mpsc::Sender<OutputSignal>>>>,
     dp_size: u32,
+    cancel_token: CancellationToken,
 }
 
 impl MockVllmEngine {
     /// Create a new MockVllmEngine with the given parameters
-    pub fn new(args: MockEngineArgs) -> Self {
-        let mut schedulers = Vec::new();
+    pub async fn new(
+        args: MockEngineArgs,
+        component: Option<Component>,
+        cancel_token: Option<CancellationToken>,
+    ) -> Result<Self> {
         let active_requests = Arc::new(Mutex::new(
             HashMap::<Uuid, mpsc::Sender<OutputSignal>>::new(),
         ));
+
+        let cancel_token = cancel_token.unwrap_or_default();
+
+        // Create schedulers and start their background tasks
+        let schedulers =
+            Self::start_schedulers(args.clone(), active_requests.clone(), cancel_token.clone());
+
+        // Start metrics publishing tasks
+        Self::start_metrics_publishing(&schedulers, component, cancel_token.clone()).await?;
+
+        let engine = Self {
+            schedulers,
+            active_requests,
+            dp_size: args.dp_size,
+            cancel_token,
+        };
+
+        Ok(engine)
+    }
+
+    /// Create schedulers and spawn their background tasks for distributing token notifications
+    fn start_schedulers(
+        args: MockEngineArgs,
+        active_requests: Arc<Mutex<HashMap<Uuid, mpsc::Sender<OutputSignal>>>>,
+        cancel_token: CancellationToken,
+    ) -> Vec<Scheduler> {
+        let mut schedulers = Vec::new();
 
         // Create multiple schedulers and their background tasks
         for dp_rank in 0..args.dp_size {
@@ -70,7 +106,7 @@ impl MockVllmEngine {
                 args.clone(),
                 Some(dp_rank),
                 Some(output_tx),
-                None, // No global cancellation token
+                Some(cancel_token.clone()),
             );
 
             schedulers.push(scheduler);
@@ -78,31 +114,80 @@ impl MockVllmEngine {
             // Spawn a background task for this scheduler to distribute token notifications to active requests
             let output_rx = Arc::new(Mutex::new(output_rx));
             let active_requests_clone = active_requests.clone();
+            let cancel_token_cloned = cancel_token.clone();
 
             tokio::spawn(async move {
                 loop {
-                    let signal = {
-                        let mut rx = output_rx.lock().await;
-                        match rx.recv().await {
-                            Some(signal) => signal,
-                            None => break, // Channel closed
-                        }
-                    };
+                    tokio::select! {
+                        signal_result = async {
+                            let mut rx = output_rx.lock().await;
+                            rx.recv().await
+                        } => {
+                            let Some(signal) = signal_result else {
+                                break; // Channel closed
+                            };
 
-                    // Notify the specific request that a token was generated
-                    let active = active_requests_clone.lock().await;
-                    if let Some(request_tx) = active.get(&signal.uuid) {
-                        let _ = request_tx.send(signal).await;
+                            // Notify the specific request that a token was generated
+                            let active = active_requests_clone.lock().await;
+                            if let Some(request_tx) = active.get(&signal.uuid) {
+                                let _ = request_tx.send(signal).await;
+                            }
+                        }
+                        _ = cancel_token_cloned.cancelled() => {
+                            break;
+                        }
                     }
                 }
             });
         }
 
-        Self {
-            schedulers,
-            active_requests,
-            dp_size: args.dp_size,
+        schedulers
+    }
+
+    /// Start background tasks to poll and publish metrics every second
+    async fn start_metrics_publishing(
+        schedulers: &[Scheduler],
+        component: Option<Component>,
+        cancel_token: CancellationToken,
+    ) -> Result<()> {
+        let metrics_publisher = Arc::new(WorkerMetricsPublisher::new()?);
+
+        if let Some(comp) = component {
+            metrics_publisher.create_endpoint(comp).await?;
         }
+
+        for (dp_rank, scheduler) in schedulers.iter().enumerate() {
+            let scheduler = scheduler.clone();
+            let publisher = metrics_publisher.clone();
+            let dp_rank = dp_rank as u32;
+            let cancel_token = cancel_token.clone();
+
+            tokio::spawn(async move {
+                let mut interval = interval(Duration::from_secs(1));
+
+                loop {
+                    tokio::select! {
+                        _ = interval.tick() => {
+                            // Get metrics from scheduler
+                            let metrics = scheduler.get_forward_pass_metrics().await;
+
+                            // Publish metrics
+                            if let Err(e) = publisher.publish(Arc::new(metrics)) {
+                                tracing::warn!("Failed to publish metrics for DP rank {}: {}", dp_rank, e);
+                            } else {
+                                tracing::trace!("Published metrics for DP rank {}", dp_rank);
+                            }
+                        }
+                        _ = cancel_token.cancelled() => {
+                            tracing::info!("Metrics publishing cancelled for DP rank {}", dp_rank);
+                            break;
+                        }
+                    }
+                }
+            });
+        }
+
+        Ok(())
     }
 }
 
@@ -143,6 +228,7 @@ impl AsyncEngine<SingleIn<DirectRequest>, ManyOut<Annotated<String>>, Error> for
 
         let active_requests = self.active_requests.clone();
         let async_context = ctx.context();
+        let cancel_token = self.cancel_token.clone();
 
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
@@ -159,6 +245,10 @@ impl AsyncEngine<SingleIn<DirectRequest>, ManyOut<Annotated<String>>, Error> for
                     }
 
                     _ = async_context.stopped() => {
+                        break;
+                    }
+
+                    _ = cancel_token.cancelled() => {
                         break;
                     }
                 }
@@ -193,7 +283,7 @@ mod tests {
             .build()
             .unwrap();
 
-        let engine = MockVllmEngine::new(args);
+        let engine = MockVllmEngine::new(args, None, None).await.unwrap();
 
         // Create 4 DirectRequests: 2 for worker 0, 2 for worker 1
         let requests = vec![
