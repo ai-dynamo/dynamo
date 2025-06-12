@@ -297,8 +297,8 @@ With the Pareto Frontiers of the baseline and the disaggregated results plotted 
 greatest increase in throughput (along the y-axis) between the baseline and the disaggregated result Pareto Frontier,
 over different latencies (along the x-axis).
 
-For example, at <x_value> tokens/s/user, the increase in tokens/s/gpu is `<y_new> - <y_old> = <y_diff>`, from the blue baseline to the
-orange disaggregated line, so the improvement is around <y_diff>/<y_old>x speed up:
+For example, at 45 tokens/s/user, the increase in tokens/s/gpu is `145 - 80 = 65`, from the orange baseline to the
+blue disaggregated line, so the improvement is around 1.44x speed up:
 ![Example Pareto Plot](./example_plots/single_node_pareto_plot.png)
 Note: The above example was collected over a single benchmarking run, the actual number may vary between runs, configurations and hardware.
 
