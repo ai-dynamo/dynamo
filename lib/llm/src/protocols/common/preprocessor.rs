@@ -51,6 +51,10 @@ pub struct PreprocessedRequest {
     /// Estimated number of prefix hit tokens (only used in kv aware routing)
     #[builder(default)]
     pub estimated_prefix_hit_num_blocks: Option<u32>,
+
+    // The dp_rank to route to
+    #[builder(default)]
+    pub dp_rank: Option<u32>,
 }
 
 impl PreprocessedRequest {

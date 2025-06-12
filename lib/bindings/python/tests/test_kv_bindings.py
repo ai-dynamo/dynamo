@@ -89,13 +89,19 @@ async def test_event_handler(distributed_runtime):
     await asyncio.sleep(1)
     scores = await indexer.find_matches_for_request(test_token, lora_id)
     assert scores.scores
-    assert worker_id in scores.scores
-    assert scores.scores[worker_id] == 1
+
+    assert len(scores.scores) == 1  # should only be one worker_dp
+    worker_dp = list(scores.scores.keys())[0]
+    assert worker_dp.worker_id == worker_id
+    assert worker_dp.dp_rank is None
+    # should overlap perfectly
+    assert list(scores.scores.values())[0] == 1
 
     # remove event
     event_publisher.remove_event()
     await asyncio.sleep(1)
     scores = await indexer.find_matches_for_request(test_token, lora_id)
+    # indexer is empty, no scores expected
     assert not scores.scores
 
 

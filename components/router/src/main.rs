@@ -25,7 +25,7 @@ use std::sync::Arc;
 use clap::Parser;
 
 use dynamo_llm::kv_router::{
-    protocols::WorkerSelectionResult,
+    protocols::{WorkerDp, WorkerSelectionResult},
     scheduler::{DefaultWorkerSelector, KvSchedulerError, SchedulingRequest},
     scoring::ProcessedEndpoints,
     KvRouter, WorkerSelector,
@@ -89,7 +89,7 @@ impl WorkerSelector for CustomWorkerSelector {
         workers: &ProcessedEndpoints,
         request: &SchedulingRequest,
         block_size: usize,
-    ) -> Result<WorkerSelectionResult, KvSchedulerError> {
+    ) -> Result<WorkerSelectionResult<WorkerDp>, KvSchedulerError> {
         // customize logic here
         // F12 into [DefaultWorkerSelector] to see the original logic
         self.0.select_worker(workers, request, block_size)
