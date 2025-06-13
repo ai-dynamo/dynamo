@@ -50,7 +50,7 @@ TensorRT-LLM disaggregation does not support conditional disaggregation yet. You
 
 Start required services (etcd and NATS) using [Docker Compose](../../deploy/metrics/docker-compose.yml)
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
 ### Build docker
@@ -103,8 +103,6 @@ This build script internally points to the base container image built with step 
 
 This figure shows an overview of the major components to deploy:
 
-
-
 ```
 
 +------+      +-----------+      +------------------+             +---------------+
@@ -121,8 +119,9 @@ This figure shows an overview of the major components to deploy:
 
 ```
 
-Note: The above architecture illustrates all the components. The final components
-that get spawned depend upon the chosen graph.
+```{note}
+The above architecture illustrates all the components. The final components that get spawned depend upon the chosen graph.
+```
 
 ### Example architectures
 

@@ -35,7 +35,7 @@ With the Dynamo CLI, you can:
 
 Use `run` to start an interactive chat session with a model. This command executes the `dynamo-run` Rust binary under the hood. For more details, see [Running Dynamo](dynamo_run.md).
 
-**Example**
+#### Example
 ```bash
 dynamo run deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
 ```
@@ -44,22 +44,22 @@ dynamo run deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
 
 Use `serve` to run your defined inference graph locally. You'll need to specify your file and intended class using the file:Class syntax. For more details, see [Serving Inference Graphs](dynamo_serve.md).
 
-**Usage**
+#### Usage
 ```bash
 dynamo serve [SERVICE]
 ```
 
-**Arguments**
+#### Arguments
 * `SERVICE`: Specify the service to start using file:Class syntax
 
-**Flags**
+#### Flags
 * `--file`/`-f`: Path to optional YAML configuration file. For configuration examples, see the [SDK docs](../API/sdk.md)
 * `--dry-run`: Print the dependency graph and values without starting services
 * `--service-name`: Start only the specified service name
 * `--working-dir`: Set the directory for finding the Service instance
 * Additional flags following Class.key=value pattern are passed to the service constructor. For details, see the configuration section of the [SDK docs](../API/sdk.md)
 
-**Example**
+#### Example
 ```bash
 cd examples
 # Start the Frontend, Middle, and Backend components
@@ -73,19 +73,19 @@ dynamo serve --service-name Middle hello_world:Frontend
 
 Use `build` to package your inference graph and its dependencies into an archive. Combine this with the `--containerize` flag to create a single Docker container for your inference graph. As with `serve`, you point toward the first service in your dependency graph. For more details, see [Serving Inference Graphs](dynamo_serve.md).
 
-**Usage**
+#### Usage
 ```bash
 dynamo build [SERVICE]
 ```
 
-**Arguments**
+#### Arguments
 * `SERVICE`: Specify the service to build using file:Class syntax
 
-**Flags**
+#### Flags
 * `--working-dir`: Specify the directory for finding the Service instance
 * `--containerize`: Choose whether to create a container from the dynamo artifact after building
 
-**Example**
+#### Example
 ```bash
 cd examples/hello_world
 dynamo build hello_world:Frontend
@@ -95,15 +95,15 @@ dynamo build hello_world:Frontend
 
 Use `deploy` to create a pipeline on Dynamo Cloud using either interactive prompts or a YAML configuration file. For more details, see [Deploying Inference Graphs to Kubernetes](dynamo_deploy/README.md).
 
-**Usage**
+#### Usage
 ```bash
 dynamo deploy [PIPELINE]
 ```
 
-**Arguments**
+#### Arguments
 * `PIPELINE`: The pipeline to deploy; defaults to *None*; required
 
-**Flags**
+#### Flags
 * `--name`/`-n`: Set the deployment name. Defaults to *None*; required
 * `--config-file`/`-f`: Specify the configuration file path. Defaults to *None*; required
 * `--wait`/`--no-wait`: Choose whether to wait for deployment readiness. Defaults to wait

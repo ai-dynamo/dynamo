@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
 
 Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,21 +18,22 @@ limitations under the License.
 # Planner
 
 The planner monitors the state of the system and adjusts workers to ensure that the system runs efficiently. Currently, the planner can scale the number of vllm workers up and down based on the kv cache load and prefill queue size:
-* Backend:
-  * local ✅
-  * kubernetes ✅
-* LLM framework:
-  * vllm ✅
-  * tensorrt-llm ❌
-  * SGLang ❌
-  * llama.cpp ❌
-* Serving type:
-  * Aggregated ✅
-  * Disaggregated ✅
-* Planner actions:
-  * Load-based scaling up/down prefill/decode workers ✅
-  * SLA-based scaling up/down prefill/decode workers ✅
-  * Adjusting engine knobs ❌
+
+|                     |    | Feature           |
+| :----------------   | :--| :-----------------|
+| **Backend**         | ✅ | Local              |
+|                     | ✅ | Kubernetes         |
+| **LLM Framework**   | ✅ | vLLM               |
+|                     | ❌ | TensorRT-LLM       |
+|                     | ❌ | SGLang             |
+|                     | ❌ | llama.cpp          |
+| **Serving Type**    | ✅ | Aggregated         |
+|                     | ✅ | Disaggregated      |
+| **Planner Actions** | ✅ | Load-based scaling up/down prefill/decode workers |
+|                     | ✅ | SLA-based scaling up/down prefill/decode workers **<sup>[1]</sup>** |
+|                     | ✅ | Adjusting engine knobs |
+
+**<sup>[1]</sup>** Supported with some limitations.
 
 We currently provide two reference planner designs:
 1. Load-based planner: [docs](load_planner.md)
