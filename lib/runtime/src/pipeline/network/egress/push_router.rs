@@ -28,7 +28,9 @@ use std::{
 use crate::{
     component::{Client, Endpoint, InstanceSource},
     engine::{AsyncEngine, Data},
-    pipeline::{AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn},
+    pipeline::{
+        error::PipelineErrorExt, AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
+    },
     traits::DistributedRuntimeProvider,
 };
 
@@ -200,8 +202,10 @@ where
         let request = request.map(|req| AddressedRequest::new(req, subject));
 
         let stream = self.addressed.generate(request).await;
-        if stream.is_err() {
-            self.client.report_instance_down(instance_id).await;
+        if let Some(error) = stream.as_ref().err() {
+            if error.to_string() == "no responders: no responders" {
+                self.client.report_instance_down(instance_id).await;
+            }
         }
         stream
     }
