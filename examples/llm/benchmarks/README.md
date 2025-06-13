@@ -397,19 +397,18 @@ please see the provided [Visualization with Prometheus and Grafana](../../../dep
 
 When benchmarking disaggregation performance, there can be cases where the latency and
 throughput number don't match the expectation within some margin. Below is a list of scenarios
-that have been encountered, and the detail on observation and resolution.
+that have been encountered, and details on observations and resolutions.
 
 ### Interconnect Configuration
 
-Even if the nodes has faster interconnect hardware, there can be misconfiguration such that
+Even if the nodes have faster interconnect hardware available, there can be misconfiguration such that
 the fastest route may not be selected by NIXL ([example regression](https://github.com/ai-dynamo/dynamo/pull/1314)). NIXL simplifies the interconnect but also hides
 selection detail. Therefore this can be the cause if you observe abnormal TTFT increase when
-splitting prefill workers and decode workers to different nodes, in the particular instance
-linked above, ~ 2 seconds overhead is added to TTFT.
+splitting prefill workers and decode workers to different nodes. For example, we have seen instances of ~2 second overhead added to TTFT when TCP is selected over RDMA for KV Cache transfer due to a misconfigured environment.
 
 Currently NIXL doesn't provide utility for reporting which transport is selected. Therefore
 you will need to verify if that is the cause by using backend specific debug options.
 In the case of UCX backend, you can use `ucx_info -d` to check if the desired interconnect
 devices are being recognized. At runtime, `UCX_LOG_LEVEL=debug` and `UCX_PROTO_INFO=y`
-can be set as environment variable to provide detail log on UCX activites. Which will
+can be set as environment variables to provide detailed logs on UCX activities. This will
 reveal whether the desired transport is being used.
