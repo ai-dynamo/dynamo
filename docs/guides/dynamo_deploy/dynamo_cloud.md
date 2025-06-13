@@ -65,8 +65,8 @@ Where:
 - `<CONTAINER_REGISTRY>`: Your container registry (e.g., `nvcr.io`, `docker.io/<your-username>`, etc.)
 - `<TAG>`: The version tag for your images (e.g., `latest`, `0.0.1`, `v1.0.0`)
 
-```{important}
-Make sure you're logged in to your container registry before pushing images:
+**Important** Make sure you're logged in to your container registry before pushing images. For example:
+
 ```bash
 docker login <CONTAINER_REGISTRY>
 ```

@@ -92,13 +92,13 @@ pub async fn start(
     tokio::spawn(async move {
         let mut lines = stdout.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!("{}", strip_log_prefix(&line));
+            tracing::info!("{}", strip_log_prefix(&line));
         }
     });
     tokio::spawn(async move {
         let mut lines = stderr.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!("{}", strip_log_prefix(&line));
+            tracing::error!("{}", strip_log_prefix(&line));
         }
     });
 

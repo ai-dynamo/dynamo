@@ -12,33 +12,30 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-Common:
-  model: llava-hf/llava-1.5-7b-hf
-  block-size: 64
-  max-model-len: 4096
 
-Processor:
+Frontend:
+  served_model_name: "nvidia/DeepSeek-R1-FP4"
+  endpoint: dynamo.TensorRTLLMWorker.generate
+  port: 8000
   router: round-robin
-  prompt-template: "USER: <image>\n<prompt> ASSISTANT:"
-  common-configs: [model, block-size, max-model-len]
 
-VllmDecodeWorker:
-  enforce-eager: true
-  max-num-batched-tokens: 16384
-  enable-prefix-caching: true
-  router: random
-  tensor-parallel-size: 1
+TensorRTLLMWorker:
+  served_model_name: "nvidia/DeepSeek-R1-FP4"
+  engine_args: "configs/deepseek_r1/agg_llm_api_config.yaml"
+  llmapi-disaggregated-config: "configs/deepseek_r1/mtp/mtp_disagg_llm_api_config.yaml"
+  router: round-robin
+  remote-prefill: true
+  min-prefill-workers: 1
   ServiceArgs:
     workers: 1
     resources:
-      gpu: '1'
-  common-configs: [model, block-size, max-model-len]
+      gpu: 4
 
-VllmEncodeWorker:
-  tensor-parallel-size: 1
-  router: random
+TensorRTLLMPrefillWorker:
+  engine_args: "configs/deepseek_r1/agg_llm_api_config.yaml"
+  llmapi-disaggregated-config: "configs/deepseek_r1/mtp/mtp_disagg_llm_api_config.yaml"
+  router: round-robin
   ServiceArgs:
     workers: 1
     resources:
-      gpu: '1'
-  common-configs: [model]
+      gpu: 4

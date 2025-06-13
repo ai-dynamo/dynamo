@@ -19,6 +19,18 @@ limitations under the License.
 
 This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations.
 
+## Use the Latest Release
+
+We recommend using the latest stable release of dynamo to avoid breaking changes:
+
+[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
+
+You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
+
+```bash
+git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
+```
+
 ## Components
 
 - workers: Prefill and decode worker handles actual LLM inference
@@ -202,7 +214,7 @@ These examples can be deployed to a Kubernetes cluster using [Dynamo Cloud](../g
 
 ### Prerequisites
 
-You must first follow the instructions in [deploy/cloud/helm/README.md](../../deploy/cloud/helm/README.md) to install Dynamo Cloud on your Kubernetes cluster.
+You must first follow the instructions in [deploy/cloud/helm/README.md](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/helm/README.md) to install Dynamo Cloud on your Kubernetes cluster.
 
 ```{note}
 The `KUBE_NS` variable in the following steps must match the Kubernetes namespace where you installed Dynamo Cloud. You must also expose the `dynamo-store` service externally. This will be the endpoint the CLI uses to interface with Dynamo Cloud.

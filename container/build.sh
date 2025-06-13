@@ -88,7 +88,7 @@ TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-TRTLLM_COMMIT="8cb6163a57226e69d8a85788eff542a440ed9c89"
+TRTLLM_COMMIT="137fe35539ea182f1495f5021bfda97c729e50c3"
 
 # TensorRT-LLM PyPI index URL
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
@@ -109,7 +109,7 @@ NONE_BASE_IMAGE_TAG="24.04"
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-NIXL_COMMIT=f531404be4866d85ed618b3baf4008c636798d63
+NIXL_COMMIT=16348080f5bdeb9fe6058a23be140cec020ef3f3
 NIXL_REPO=ai-dynamo/nixl.git
 
 NIXL_UCX_EFA_REF=7ec95b95e524a87e81cac92f5ca8523e3966b16b
