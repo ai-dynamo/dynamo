@@ -81,7 +81,8 @@ regex = "1"
 rayon = "1"
 
 # block_manager
-nixl-sys = { version = "0.3.0-rc.2", optional = true }
+# ToDo - switch to 0.3.1 after crates.io publish
+nixl-sys = {git = "https://github.com/ai-dynamo/nixl", rev = "16348080f5bdeb9fe6058a23be140cec020ef3f3", optional = true }
 cudarc = { version = "0.16.2", features = ["cuda-12020"], optional = true }
 ndarray = { version = "0.16", optional = true }
 nix = { version = "0.26", optional = true }

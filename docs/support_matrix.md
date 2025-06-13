@@ -64,21 +64,22 @@ For **Linux**, the **ARM64** support is experimental and may have limitations. W
 ### Runtime Dependency
 | **Python Package** | **Version**   | glibc version        | CUDA Version |
 |--------------------|---------------|----------------------|--------------|
-| ai-dynamo          |    0.3.0      |     >=2.28           |              |
-| ai-dynamo-runtime  |    0.3.0      |     >=2.28           |              |
-| ai-dynamo-vllm     |  0.8.4.post2* | >=2.28 (recommended) |                    |
-| NIXL               |    0.3.0      |     >=2.27           | >=11.8      |
+| ai-dynamo          |    0.3.1      |     >=2.28           |              |
+| ai-dynamo-runtime  |    0.3.1      |     >=2.28 (Python 3.12 has known issues)          |              |
+| ai-dynamo-vllm     |  0.8.4.post3* | >=2.28 (recommended) |                    |
+| NIXL               |    0.3.1      |     >=2.27           | >=11.8      |
+
 
 ### Build Dependency
 | **Build Dependency** | **Version** |
 |----------------------|-------------|
 | **Base Container**   |    [25.03](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/cuda-dl-base/tags)    |
-| **ai-dynamo-vllm**   |0.8.4.post2* |
-| **TensorRT-LLM**     |    0.19.0** |
-| **NIXL**             |    0.3.0    |
+| **ai-dynamo-vllm**   |0.8.4.post3* |
+| **TensorRT-LLM**     |    0.21.0rc** |
+| **NIXL**             |    0.3.1    |
 
 ```{note}
-*ai-dynamo-vllm v0.8.4.post2 is a customized patch of v0.8.4 from vLLM.
+*ai-dynamo-vllm v0.8.4.post3 is a customized patch of v0.8.4 from vLLM.
 
 **Specific versions of TensorRT-LLM supported by Dynamo are subject to change.
 ```
