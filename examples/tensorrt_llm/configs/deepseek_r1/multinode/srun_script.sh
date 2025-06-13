@@ -10,7 +10,8 @@ IMAGE="${IMAGE:-""}"
 # but you may freely customize the mounts based on your cluster. A common practice
 # is to mount paths to NFS storage for common scripts, model weights, etc.
 # NOTE: This can be a comma separated list of multiple mounts as well.
-MOUNTS="$PWD:/mnt"
+DEFAULT_MOUNT="${PWD}:/mnt"
+MOUNTS="${MOUNTS:-${DEFAULT_MOUNT}}"
 
 # Example values, assuming 4 nodes with 4 GPUs on each node, such as 4xGB200 nodes.
 # For 8xH100 nodes as an example, you may set this to 2 nodes x 16 gpus, or 4 nodes x 32 gpus instead.
@@ -23,7 +24,7 @@ ACCOUNT="$(sacctmgr -nP show assoc where user=$(whoami) format=account)"
 export HEAD_NODE="${SLURMD_NODENAME}"
 export HEAD_NODE_IP="$(hostname -i)"
 export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
-export NATS_SERVER="${HEAD_NODE_IP}:4222"
+export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
 
 if [[ -z ${IMAGE} ]]; then
   echo "ERROR: You need to set the IMAGE environment variable to the " \

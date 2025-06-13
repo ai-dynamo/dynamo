@@ -68,24 +68,24 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 ### Runtime Dependency
 
-| **Python Package** | **Version**   | glibc version        | CUDA Version |
-| :----------------- | :------------ | :------------------- | :----------- |
-| ai-dynamo          | 0.3.0         | >=2.28               |              |
-| ai-dynamo-runtime  | 0.3.0         | >=2.28               |              |
-| ai-dynamo-vllm     | 0.8.4.post2¹  | >=2.28 (recommended) |              |
-| NIXL               | 0.3.0         | >=2.27               | >=11.8       |
+| **Python Package** | **Version**   | glibc version                        | CUDA Version |
+| :----------------- | :------------ | :----------------------------------- | :----------- |
+| ai-dynamo          | 0.3.1         | >=2.28                               |              |
+| ai-dynamo-runtime  | 0.3.1         | >=2.28 (Python 3.12 has known issues)|              |
+| ai-dynamo-vllm     | 0.8.4.post3¹  | >=2.28 (recommended)                 |              |
+| NIXL               | 0.3.1         | >=2.27                               | >=11.8       |
 
 ### Build Dependency
 
 | **Build Dependency** | **Version**                                                                      |
 | :------------------- | :------------------------------------------------------------------------------- |
 | **Base Container**   | [25.03](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/cuda-dl-base/tags) |
-| **ai-dynamo-vllm**   | 0.8.4.post2¹                                                                     |
-| **TensorRT-LLM**     | 0.19.0²                                                                          |
-| **NIXL**             | 0.3.0                                                                            |
+| **ai-dynamo-vllm**   | 0.8.4.post3¹                                                                     |
+| **TensorRT-LLM**     | 0.21.0rc²                                                                        |
+| **NIXL**             | 0.3.1                                                                            |
 
 > [!Important]
-> ¹ ai-dynamo-vllm `v0.8.4.post2` is a customized patch of `v0.8.4` from vLLM.
+> ¹ ai-dynamo-vllm `v0.8.4.post3` is a customized patch of `v0.8.4` from vLLM.
 >
 > ² Specific versions of TensorRT-LLM supported by Dynamo are subject to change.
 
