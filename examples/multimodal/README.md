@@ -270,6 +270,13 @@ For more details on managing deployments, testing, and troubleshooting, please r
 
 This example demonstrates deploying an aggregated multimodal model that can process video inputs.
 
+### Dependency
+
+Video example relies on `av` package for video preprocessing inside the encode_worker.
+Please install `av` inside the dynamo container to enable video example.
+
+`pip install av`
+
 ### Components
 
 - workers: For video serving, we have two workers, [video_encode_worker](components/video_encode_worker.py) for decoding video into frames, and [video_decode_worker](components/video_decode_worker.py) for prefilling and decoding.
