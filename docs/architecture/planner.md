@@ -37,8 +37,8 @@ Currently, the planner can scale the number of vllm workers up and down based on
 **<sup>[1]</sup>** Supported with some limitations.
 
 We currently provide two reference planner designs:
-1. Load-based planner: [docs](load_planner.md)
-2. SLA-based planner: [docs](sla_planner.md)
+1. Load-based planner: [Load-based planner docs](load_planner.md)
+2. SLA-based planner: [SLA-based planner docs](sla_planner.md)
 
 
 ## Backends
