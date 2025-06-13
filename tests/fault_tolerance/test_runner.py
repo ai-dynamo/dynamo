@@ -72,6 +72,17 @@ deployment_graphs = {
         ),
         text_payload,
     ),
+    "disagg": (
+        DeploymentGraph(
+            module="graphs.disagg:Frontend",
+            config="configs/disagg.yaml",
+            directory="/workspace/examples/llm",
+            endpoint="v1/chat/completions",
+            response_handler=completions_response_handler,
+            marks=[pytest.mark.gpu_1, pytest.mark.vllm],
+        ),
+        text_payload,
+    ),
     "mock_agg": (
         DeploymentGraph(
             module="graphs.mock_agg:Frontend",
@@ -87,12 +98,15 @@ deployment_graphs = {
 
 failure_scenarios = {
     "decode_worker": [[10,[("dynamo_vllmworker",1)]]],
+    "prefill_worker": [[10,[("dynamo_prefillworker",1)]]],
+    "frontend": [[10,[("dynamo_frontend",1)]]],
+    "processor": [[10,[("dynamo_processor",1)]]],
     "mock_decode_worker": [[10,[("dynamo_mockvllmworker",1)]]],
     "none":[],
     "mock_none":[]
 }
 @pytest.fixture(
-    params=["none", "decode_worker"]
+    params=["none", "decode_worker","prefill_worker","frontend","processor"]
 )
 def failures(request):
     scenario = failure_scenarios[request.param]
@@ -105,6 +119,7 @@ def failures(request):
 @pytest.fixture(
     params=[
         pytest.param("agg", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
+        pytest.param("disagg", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
         pytest.param("mock_agg", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
 
     ]
