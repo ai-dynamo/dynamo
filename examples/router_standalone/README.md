@@ -89,7 +89,7 @@ While not implemented in this example, the router can also operate in a pure pre
 1. **Install latest vLLM**:
    ```bash
    uv pip uninstall ai-dynamo-vllm
-   uv pip install vllm
+   uv pip install vllm==0.9.0
    ```
    *Note: This uninstalls the local vLLM patch (`ai-dynamo-vllm`) and replaces it with the latest standard vLLM package.*
 
