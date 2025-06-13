@@ -202,9 +202,10 @@ class ManagedProcess:
 
     def _terminate_existing(self):
         if self.terminate_existing:
-            self._logger.info("Terminating Existing %s", self._command_name)
             for proc in psutil.process_iter(["name", "cmdline"]):
                 if proc.name() == self._command_name or proc.name() in self.stragglers:
+                    self._logger.info("Terminating Existing %s %s", proc.name(), proc.pid)
+
                     self._terminate_process_tree(proc.pid)
 
     def _terminate_process(self, process):

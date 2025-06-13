@@ -169,11 +169,11 @@ def _single_request(
     input_token_length=100,
     output_token_length=100,
     timeout=30,
+    retry_delay=1
 ):
     prompt = _get_random_prompt(input_token_length)
     payload["messages"][0]["content"] = prompt
     payload["max_tokens"] = output_token_length
-    retry_delay = 1
     response = None
     end_time = None
     start_time = time.time()
@@ -217,91 +217,38 @@ def _single_request(
 
 
 def client(
-        deployment_graph, server_process, payload, log_dir, index, requests_per_client,input_token_length,output_token_length, max_retries):
+        deployment_graph,
+        server_process,
+        payload,
+        log_dir,
+        index,
+        requests_per_client,
+        input_token_length,
+        output_token_length,
+        max_retries,
+        retry_delay=1):
     try:
         log_path = os.path.join(log_dir,f"client_{index}.log.txt")
         with open(log_path,"w") as log:
             logger = logging.getLogger(f"CLIENT: {index}")
             url = f"http://localhost:{server_process.port}/{deployment_graph.endpoints[0]}"
             start_time = time.time()
-            retry_delay = 5
             elapsed = 0.0
 
             for i in range(requests_per_client):
-                logger.info(f"Request: {i}")
-                result=_single_request(url, payload.payload_chat, logger,max_retries,input_token_length=input_token_length,output_token_length=output_token_length)
+                result=_single_request(url, payload.payload_chat, logger,
+                                       max_retries,
+                                       input_token_length=input_token_length,
+                                       output_token_length=output_token_length,
+                                       retry_delay=retry_delay)
+                logger.info(f"Request: {i} Status: {result['results'][-1]['status']}")
+          
                 log.write(json.dumps(result)+"\n")
                 log.flush()
     except Exception as e:
         print(e)
     logger.info("Exiting")
     
-def _wait_until_ready(
-    deployment_graph, server_process, payload, logger=logging.getLogger()
-):
-    url = f"http://localhost:{server_process.port}/{deployment_graph.endpoints[0]}"
-    start_time = time.time()
-    retry_delay = 5
-    elapsed = 0.0
-    
-    while time.time() - start_time < deployment_graph.timeout:
-        elapsed = time.time() - start_time
-        try:
-            response = requests.post(
-                url,
-                json=payload.payload_chat,
-                timeout=deployment_graph.timeout - elapsed,
-            )
-        except (requests.RequestException, requests.Timeout) as e:
-            logger.warning("Retrying due to Request failed: %s", e)
-            time.sleep(retry_delay)
-            continue
-        logger.info("Response%r", response)
-        if response.status_code == 500:
-            error = response.json().get("error", "")
-            if "no instances" in error:
-                logger.warning("Retrying due to no instances available")
-                time.sleep(retry_delay)
-                continue
-        if response.status_code == 404:
-            error = response.json().get("error", "")
-            if "Model not found" in error:
-                logger.warning("Retrying due to model not found")
-                time.sleep(retry_delay)
-                continue
-        # Process the response
-        if response.status_code != 200:
-            logger.error(
-                "Service returned status code %s: %s",
-                response.status_code,
-                response.text,
-            )
-            pytest.fail(
-                "Service returned status code %s: %s"
-                % (response.status_code, response.text)
-            )
-        else:
-            break
-    else:
-        logger.error(
-            "Service did not return a successful response within %s s",
-            deployment_graph.timeout,
-        )
-        pytest.fail(
-            "Service did not return a successful response within %s s"
-            % deployment_graph.timeout
-        )
-
-    content = deployment_graph.response_handlers[0](response)
-
-    logger.info("Received Content: %s", content)
-
-    # Check for expected responses
-    assert content, "Empty response content"
-
-    for expected in payload.expected_response:
-        assert expected in content, "Expected '%s' not found in response" % expected
-
 
 def run_metrics_process(log_dir):
     asyncio.run(get_metrics(log_dir))
@@ -376,7 +323,7 @@ def _set_deployment_args(request,
 @pytest.mark.slow
 async def test_worker_failure(
         deployment_graph_test, request, runtime_services, num_clients, requests_per_client, worker_metrics,respawn, failures,
-        input_token_length,output_token_length, max_num_seqs, max_retries
+        input_token_length,output_token_length, max_num_seqs, max_retries,display_dynamo_output
 ):
     """
     Test dynamo serve deployments with different graph configurations.
@@ -398,10 +345,8 @@ async def test_worker_failure(
                                            max_num_seqs)
     
     with DynamoServeProcess(
-        deployment_graph, request, args=deployment_args
+            deployment_graph, request, display_output=display_dynamo_output,args=deployment_args
     ) as server_process:
-        #time.sleep(300)
-        #_wait_until_ready(deployment_graph, server_process, payload)
 
         server_process.wait_for_ready(payload)
         

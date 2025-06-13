@@ -257,7 +257,9 @@ deployment_graphs = {
 
 class DynamoServeProcess(ManagedProcess):
     def __init__(
-        self, graph: DeploymentGraph, request, port=8000, timeout=900, args=None
+            self, graph: DeploymentGraph, request, port=8000, timeout=900,
+            display_output=True,
+            args=None
     ):
         command = ["dynamo", "serve", graph.module]
 
@@ -281,7 +283,7 @@ class DynamoServeProcess(ManagedProcess):
         super().__init__(
             command=command,
             timeout=timeout,
-            display_output=True,
+            display_output=display_output,
             working_dir=graph.directory,
             health_check_ports=[port],
             health_check_urls=health_check_urls,
@@ -299,12 +301,12 @@ class DynamoServeProcess(ManagedProcess):
             return True
         return False
 
-    def wait_for_ready(self, payload, logger=logging.getLogger):
-        url = f"http://localhost:{self.port}/{self.endpoints[0]}"
+    def wait_for_ready(self, payload, logger=logging.getLogger()):
+        url = f"http://localhost:{self.port}/{self.graph.endpoints[0]}"
         start_time = time.time()
         retry_delay = 5
         elapsed = 0.0
-        
+        logger.info("Waiting for Deployment Ready")
         while time.time() - start_time < self.graph.timeout:
             elapsed = time.time() - start_time
             try:
@@ -313,17 +315,17 @@ class DynamoServeProcess(ManagedProcess):
                     json=payload.payload_chat,
                     timeout=self.graph.timeout - elapsed,
                 )
-           except (requests.RequestException, requests.Timeout) as e:
-               logger.warning("Retrying due to Request failed: %s", e)
-               time.sleep(retry_delay)
-               continue
-           logger.info("Response%r", response)
-           if response.status_code == 500:
-               error = response.json().get("error", "")
-               if "no instances" in error:
-                   logger.warning("Retrying due to no instances available")
-                   time.sleep(retry_delay)
-                   continue
+            except (requests.RequestException, requests.Timeout) as e:
+                logger.warning("Retrying due to Request failed: %s", e)
+                time.sleep(retry_delay)
+                continue
+            logger.info("Response%r", response)
+            if response.status_code == 500:
+                error = response.json().get("error", "")
+                if "no instances" in error:
+                    logger.warning("Retrying due to no instances available")
+                    time.sleep(retry_delay)
+                    continue
             if response.status_code == 404:
                 error = response.json().get("error", "")
                 if "Model not found" in error:
@@ -346,14 +348,14 @@ class DynamoServeProcess(ManagedProcess):
         else:
             logger.error(
                 "Service did not return a successful response within %s s",
-                deployment_graph.timeout,
-        )
+                self.graph.timeout,
+            )
             pytest.fail(
                 "Service did not return a successful response within %s s"
-                % deployment_graph.timeout
+                % self.graph.timeout
             )
 
-        content = deployment_graph.response_handlers[0](response)
+        content = self.graph.response_handlers[0](response)
 
         logger.info("Received Content: %s", content)
 
@@ -363,6 +365,7 @@ class DynamoServeProcess(ManagedProcess):
         for expected in payload.expected_response:
             assert expected in content, "Expected '%s' not found in response" % expected
 
+        logger.info("Deployment Ready")
 
 
 @pytest.fixture(

@@ -8,6 +8,11 @@ def pytest_addoption(parser):
     parser.addoption("--output-token-length", type=int, default=100)
     parser.addoption("--max-num-seqs", type=int, default=None)
     parser.addoption("--max-retries", type=int, default=1)
+    parser.addoption("--display-dynamo-output", action="store_true", default=False)
+
+@pytest.fixture
+def display_dynamo_output(request):
+    return request.config.getoption("--display-dynamo-output")
 
 @pytest.fixture
 def max_retries(request):
