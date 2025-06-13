@@ -260,7 +260,7 @@ class VllmEncodeWorker:
             def open_video_container_sync():
                 try:
                     return av.open(video_content_stream, mode="r")
-                except av.error.AVError as ave:
+                except av.AVError as ave:
                     logger.error(
                         f"PyAV error opening video stream from {video_url}: {ave}"
                     )
@@ -403,7 +403,7 @@ class VllmEncodeWorker:
 
         except (
             FileNotFoundError,
-            av.error.AVError,
+            av.AVError,
             ValueError,
         ) as e:  # av.AVError might need to be av.error.AVError
             logger.error(
