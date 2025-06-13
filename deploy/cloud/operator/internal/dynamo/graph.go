@@ -363,6 +363,15 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			}
 		}
 
+		deployment.Spec.Autoscaling = &v1alpha1.Autoscaling{
+			Enabled: false,
+		}
+		if service.Config.Autoscaling != nil {
+			deployment.Spec.Autoscaling.Enabled = true
+			deployment.Spec.Autoscaling.MinReplicas = service.Config.Autoscaling.MinReplicas
+			deployment.Spec.Autoscaling.MaxReplicas = service.Config.Autoscaling.MaxReplicas
+		}
+
 		// override the component config with the component config that is in the parent deployment
 		if configOverride, ok := parentDynamoGraphDeployment.Spec.Services[service.Name]; ok {
 			err := mergo.Merge(&deployment.Spec.DynamoComponentDeploymentSharedSpec, configOverride.DynamoComponentDeploymentSharedSpec, mergo.WithOverride)
@@ -402,14 +411,6 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			}
 		}
 
-		deployment.Spec.Autoscaling = &v1alpha1.Autoscaling{
-			Enabled: false,
-		}
-		if service.Config.Autoscaling != nil {
-			deployment.Spec.Autoscaling.Enabled = true
-			deployment.Spec.Autoscaling.MinReplicas = service.Config.Autoscaling.MinReplicas
-			deployment.Spec.Autoscaling.MaxReplicas = service.Config.Autoscaling.MaxReplicas
-		}
 		// merge the envs from the parent deployment with the envs from the service
 		if len(parentDynamoGraphDeployment.Spec.Envs) > 0 {
 			deployment.Spec.Envs = mergeEnvs(parentDynamoGraphDeployment.Spec.Envs, deployment.Spec.Envs)
