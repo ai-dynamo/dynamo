@@ -278,11 +278,11 @@ class VllmPrefillWorker:
             )
             async for _ in encode_generator:
                 pass
-        # Wait for the remote write from the EncodeWorker to complete.
-        await writable.wait_for_completion()
-        logger.debug(
-            f"PrefillWorker {request_id}: Frames received from EncodeWorker, shape: {raw_frames_tensor.shape}"
-        )
+            # Wait for the remote write from the EncodeWorker to complete.
+            await writable.wait_for_completion()
+            logger.debug(
+                f"PrefillWorker {request_id}: Frames received from EncodeWorker, shape: {raw_frames_tensor.shape}"
+            )
 
         if not request.prompt_token_ids:
             logger.error(
