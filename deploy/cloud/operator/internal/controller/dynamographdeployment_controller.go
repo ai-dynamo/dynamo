@@ -19,6 +19,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -123,6 +124,19 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		logger.Error(err, "failed to get the DynamoGraphConfig")
 		reason = "failed_to_get_the_DynamoGraphConfig"
 		return ctrl.Result{}, err
+	}
+
+	for _, service := range dynamoGraphConfig.Services {
+		if service.Config.ExtraPodSpec != nil {
+			extraPodSpecBytes, err := json.MarshalIndent(service.Config.ExtraPodSpec, "", "  ")
+			if err != nil {
+				logger.Error(err, "failed to marshal ExtraPodSpec for logging", "service", service.Name)
+			} else {
+				logger.Info("Parsed ExtraPodSpec for service", "service", service.Name, "ExtraPodSpec", string(extraPodSpecBytes))
+			}
+		} else {
+			logger.Info("No ExtraPodSpec found for service", "service", service.Name)
+		}
 	}
 
 	// generate the dynamoComponentsDeployments from the config
