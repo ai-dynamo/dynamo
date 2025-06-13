@@ -373,27 +373,27 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 
 		// Override command and args if provided.
 		if service.Config.ExtraPodSpec != nil && service.Config.ExtraPodSpec.MainContainer != nil {
-			if deployment.Spec.ExtraPodSpec == nil {
-				deployment.Spec.ExtraPodSpec = new(common.ExtraPodSpec)
+			if deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec == nil {
+				deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec = new(common.ExtraPodSpec)
 			}
 
 			commandIsSet := len(service.Config.ExtraPodSpec.MainContainer.Command) > 0
 			argsIsSet := len(service.Config.ExtraPodSpec.MainContainer.Args) > 0
 
 			if commandIsSet || argsIsSet {
-				deployment.Spec.ExtraPodSpec.MainContainer = &corev1.Container{}
+				deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec.MainContainer = &corev1.Container{}
 
 				if commandIsSet {
-					deployment.Spec.ExtraPodSpec.MainContainer.Command = service.Config.ExtraPodSpec.MainContainer.Command
+					deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec.MainContainer.Command = service.Config.ExtraPodSpec.MainContainer.Command
 				}
 
 				if argsIsSet {
-					deployment.Spec.ExtraPodSpec.MainContainer.Args = service.Config.ExtraPodSpec.MainContainer.Args
+					deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec.MainContainer.Args = service.Config.ExtraPodSpec.MainContainer.Args
 				}
 
-				extraPodSpecBytes, err := json.MarshalIndent(deployment.Spec.ExtraPodSpec.MainContainer, "", "  ")
+				extraPodSpecBytes, err := json.MarshalIndent(deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec.MainContainer, "", "  ")
 				if err != nil {
-					logger.Error(err, "failed to marshal deployment.Spec.ExtraPodSpec.MainContainer for logging", "service", service.Name)
+					logger.Error(err, "failed to marshal deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec.MainContainer for logging", "service", service.Name)
 				} else {
 					logger.Info("Copied MainContainer Command/Args", "service", service.Name, "MainContainer", string(extraPodSpecBytes))
 				}
