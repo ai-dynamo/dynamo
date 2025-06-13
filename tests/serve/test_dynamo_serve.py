@@ -313,7 +313,7 @@ class DynamoServeProcess(ManagedProcess):
                     json=payload.payload_chat,
                     timeout=self.graph.timeout - elapsed,
                 )
-           except (requests.RequestException, requests.Timeout) as e:
+            except (requests.RequestException, requests.Timeout) as e:
                logger.warning("Retrying due to Request failed: %s", e)
                time.sleep(retry_delay)
                continue
