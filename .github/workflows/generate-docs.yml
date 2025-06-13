@@ -84,7 +84,7 @@ jobs:
           # Use a personal access token or deploy key stored in secrets
           personal_token: ${{ secrets.CI_TOKEN }}
           # Target repository
-          external_repository: ai-dynamo/dynamo.github.io
+          external_repository: ai-dynamo/ai-dynamo.github.io
           # Always deploy to main branch but in version-specific directory
           publish_branch: main
           # Directory containing the built documentation
