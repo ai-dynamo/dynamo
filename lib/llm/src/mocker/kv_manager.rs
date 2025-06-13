@@ -122,11 +122,13 @@ impl KvManager {
             MoveBlock::Use(hashes) => {
                 let mut blocks_stored = Vec::<u64>::new();
 
+                let mut parent_block: Option<&UniqueBlock> = None;
                 for hash in hashes {
                     // First check if it already exists in active blocks
                     if let Some(ref_count) = self.active_blocks.get_mut(hash) {
                         // Block already active, just increment reference count
                         *ref_count += 1;
+                        parent_block = Some(hash);
                         continue;
                     }
 
@@ -134,6 +136,7 @@ impl KvManager {
                     if self.inactive_blocks.remove(hash) {
                         // Insert into active with reference count 1
                         self.active_blocks.insert(hash.clone(), 1);
+                        parent_block = Some(hash);
                         continue;
                     }
 
@@ -161,7 +164,13 @@ impl KvManager {
                         }
                     }
                 }
-                self.send_block_response(blocks_stored, false, true, None);
+
+                let parent_hash = match parent_block {
+                    None => None,
+                    Some(UniqueBlock::FullBlock(block)) => Some(*block),
+                    Some(UniqueBlock::PartialBlock(_)) => panic!("parent block cannot be partial"),
+                };
+                self.send_block_response(blocks_stored, false, true, parent_hash);
             }
 
             MoveBlock::Destroy(hashes) => {
@@ -299,6 +308,7 @@ impl KvManager {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::mpsc;
 
     #[test]
     fn test_failure_on_max_capacity() {
@@ -327,10 +337,12 @@ mod tests {
     }
 
     #[test]
-    // This is taken directly from the example in the vllm v1 prefix caching docs
     fn test_block_lifecycle_stringent() {
-        // Create a KvManager with 10 blocks capacity
-        let mut manager = KvManager::new(10, 16);
+        // Create a channel to listen to block responses
+        let (tx, mut rx) = mpsc::unbounded_channel::<MoveBlockResponse>();
+
+        // Create a KvManager with 10 blocks capacity and the response sender
+        let mut manager = KvManager::new_with_sender(10, 16, Some(tx));
 
         // Helper function to use multiple blocks
         fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) {
@@ -348,6 +360,65 @@ mod tests {
         fn deref_blocks(manager: &mut KvManager, ids: Vec<u64>) {
             let blocks = ids.into_iter().map(UniqueBlock::FullBlock).collect();
             manager.process(&MoveBlock::Deref(blocks));
+        }
+
+        // Helper function to assert block responses
+        fn assert_block_response(
+            rx: &mut mpsc::UnboundedReceiver<MoveBlockResponse>,
+            expected_type: &str,
+            expected_blocks: Vec<u64>,
+            description: &str,
+        ) {
+            let response = rx
+                .try_recv()
+                .unwrap_or_else(|_| panic!("Expected {} response {}", expected_type, description));
+
+            match (&response, expected_type) {
+                (MoveBlockResponse::Store(blocks, _parent_hash), "Store") => {
+                    assert_eq!(
+                        blocks.len(),
+                        expected_blocks.len(),
+                        "Expected {} blocks in Store response {}",
+                        expected_blocks.len(),
+                        description
+                    );
+                    assert_eq!(
+                        *blocks, expected_blocks,
+                        "Store blocks don't match expected {}",
+                        description
+                    );
+                }
+                (MoveBlockResponse::Remove(blocks), "Remove") => {
+                    assert_eq!(
+                        blocks.len(),
+                        expected_blocks.len(),
+                        "Expected {} blocks in Remove response {}",
+                        expected_blocks.len(),
+                        description
+                    );
+                    assert_eq!(
+                        *blocks, expected_blocks,
+                        "Remove blocks don't match expected {}",
+                        description
+                    );
+                }
+                _ => panic!(
+                    "Expected {} response, got {:?} {}",
+                    expected_type, response, description
+                ),
+            }
+        }
+
+        // Helper function to assert no response is received
+        fn assert_no_response(
+            rx: &mut mpsc::UnboundedReceiver<MoveBlockResponse>,
+            description: &str,
+        ) {
+            assert!(
+                rx.try_recv().is_err(),
+                "Expected no response {}",
+                description
+            );
         }
 
         // Helper function to check if active blocks contain expected blocks with expected ref counts
@@ -400,9 +471,11 @@ mod tests {
 
         // First use blocks 0, 1, 2, 3, 4 in a batch
         use_blocks(&mut manager, (0..5).collect());
+        assert_block_response(&mut rx, "Store", vec![0, 1, 2, 3, 4], "after first use");
 
         // Then use blocks 0, 1, 5, 6 in a batch
         use_blocks(&mut manager, vec![0, 1, 5, 6]);
+        assert_block_response(&mut rx, "Store", vec![5, 6], "after second use");
 
         // Check that the blocks 0 and 1 are in active blocks, both with reference counts of 2
         assert_active_blocks(
@@ -412,9 +485,11 @@ mod tests {
 
         // Now destroy block 4
         destroy_blocks(&mut manager, vec![4]);
+        assert_block_response(&mut rx, "Remove", vec![4], "after destroy block 4");
 
         // And deref blocks 3, 2, 1, 0 in this order as a batch
         deref_blocks(&mut manager, vec![0, 1, 2, 3]);
+        assert_no_response(&mut rx, "after deref operation");
 
         // Check that the inactive_blocks is size 2 (via num_objects) and contains 3 and 2
         assert_inactive_blocks(&manager, 2, &[3, 2]);
@@ -422,6 +497,7 @@ mod tests {
 
         // Now destroy block 6
         destroy_blocks(&mut manager, vec![6]);
+        assert_block_response(&mut rx, "Remove", vec![6], "after block 6 eviction");
 
         // And deref blocks 5, 1, 0 as a batch
         deref_blocks(&mut manager, vec![0, 1, 5]);
@@ -432,6 +508,7 @@ mod tests {
 
         // Now use 0, 1, 2, 7, 8, 9 as a batch
         use_blocks(&mut manager, vec![0, 1, 2, 7, 8, 9]);
+        assert_block_response(&mut rx, "Store", vec![7, 8, 9], "after [7, 8, 9] use");
 
         // Check that the inactive_blocks is size 2, and contains 3 and 5
         assert_inactive_blocks(&manager, 2, &[3, 5]);
@@ -446,8 +523,14 @@ mod tests {
 
         // Now use blocks 10, 11, 12 as a batch
         use_blocks(&mut manager, vec![10, 11, 12]);
+        assert_block_response(&mut rx, "Remove", vec![3], "after block 5 eviction");
+        assert_block_response(&mut rx, "Store", vec![10, 11, 12], "after [10, 11, 12] use");
 
         // Check that the inactive_blocks is size 1 and contains only 5
         assert_inactive_blocks(&manager, 1, &[5]);
+
+        use_blocks(&mut manager, vec![13]);
+        assert_block_response(&mut rx, "Remove", vec![5], "after block 5 eviction");
+        assert_block_response(&mut rx, "Store", vec![13], "after block 13 use");
     }
 }
