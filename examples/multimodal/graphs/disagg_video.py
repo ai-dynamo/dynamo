@@ -13,22 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-[workspace]
-members = [
-    "hello_world",
-    "service_metrics",
-]
-resolver = "3"
+from components.video_decode_worker import VllmDecodeWorker
+from components.video_encode_worker import VllmEncodeWorker
+from components.video_frontend import Frontend
+from components.video_prefill_worker import VllmPrefillWorker
+from components.video_processor import Processor
 
-[workspace.package]
-version = "0.3.1"
-edition = "2021"
-authors = ["NVIDIA"]
-license = "Apache-2.0"
-homepage = "https://github.com/ai-dynamo/dynamo"
-repository = "https://github.com/ai-dynamo/dynamo.git"
-
-
-[workspace.dependencies]
-# local or crates.io
-dynamo-runtime = { path = "../" }
+Frontend.link(Processor).link(VllmDecodeWorker).link(VllmPrefillWorker).link(
+    VllmEncodeWorker
+)

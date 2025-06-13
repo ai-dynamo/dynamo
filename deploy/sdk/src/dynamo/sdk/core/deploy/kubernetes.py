@@ -13,12 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import io
-import os
-import tarfile
 import time
 import typing as t
-from datetime import datetime
 
 import requests
 
@@ -27,8 +23,8 @@ from dynamo.sdk.core.protocol.deployment import (
     DeploymentManager,
     DeploymentResponse,
     DeploymentStatus,
-    Service,
 )
+from dynamo.sdk.lib.utils import upload_graph
 
 
 class KubernetesDeploymentManager(DeploymentManager):
@@ -42,84 +38,19 @@ class KubernetesDeploymentManager(DeploymentManager):
     def __init__(self, endpoint: str):
         self.endpoint = endpoint.rstrip("/")
         self.session = requests.Session()
-        self.namespace = "default"
-
-    def _upload_pipeline(self, pipeline: str, entry_service: Service, **kwargs) -> None:
-        """Upload the entire pipeline as a single component/version, with a manifest of all services."""
-        session = self.session
-        endpoint = self.endpoint
-        pipeline_name, pipeline_version = pipeline.split(":")
-
-        # Check if component exists before POST
-        comp_url = f"{endpoint}/api/v1/dynamo_components"
-        comp_get_url = f"{endpoint}/api/v1/dynamo_components/{pipeline_name}"
-        comp_exists = False
-        comp_resp = session.get(comp_get_url)
-        if comp_resp.status_code == 200:
-            comp_exists = True
-        if not comp_exists:
-            comp_payload = {
-                "name": pipeline_name,
-                "description": "Registered by Dynamo's KubernetesDeploymentManager",
-            }
-            resp = session.post(comp_url, json=comp_payload)
-            if resp.status_code not in (200, 201, 409):
-                print(resp.status_code)
-                raise RuntimeError(f"Failed to create component: {resp.text}")
-
-        # Check if version exists before POST
-        ver_url = f"{endpoint}/api/v1/dynamo_components/{pipeline_name}/versions"
-        ver_get_url = f"{endpoint}/api/v1/dynamo_components/{pipeline_name}/versions/{pipeline_version}"
-        ver_exists = False
-        ver_resp = session.get(ver_get_url)
-        if ver_resp.status_code == 200:
-            ver_exists = True
-        if not ver_exists:
-            build_at = kwargs.get("build_at")
-            if not build_at:
-                build_at = datetime.utcnow()
-            if isinstance(build_at, str):
-                try:
-                    build_at = datetime.fromisoformat(build_at)
-                except Exception:
-                    build_at = datetime.utcnow()
-            manifest = {
-                "service": entry_service.service_name,
-                "apis": entry_service.apis,
-                "size_bytes": entry_service.size_bytes,
-            }
-            ver_payload = {
-                "name": entry_service.name,
-                "description": f"Auto-registered version for {pipeline}",
-                "resource_type": "dynamo_component_version",
-                "version": entry_service.version,
-                "manifest": manifest,
-                "build_at": build_at.isoformat(),
-            }
-            resp = session.post(ver_url, json=ver_payload)
-            if resp.status_code not in (200, 201, 409):
-                raise RuntimeError(f"Failed to create component version: {resp.text}")
-
-        # Upload the graph
-        build_dir = entry_service.path
-        if not build_dir or not os.path.isdir(build_dir):
-            raise FileNotFoundError(f"Built pipeline directory not found: {build_dir}")
-        tar_stream = io.BytesIO()
-        with tarfile.open(fileobj=tar_stream, mode="w") as tar:
-            tar.add(build_dir, arcname=".")
-        tar_stream.seek(0)
-        upload_url = f"{endpoint}/api/v1/dynamo_components/{pipeline_name}/versions/{pipeline_version}/upload"
-        upload_headers = {"Content-Type": "application/x-tar"}
-        resp = session.put(upload_url, data=tar_stream, headers=upload_headers)
-        if resp.status_code not in (200, 201, 204):
-            raise RuntimeError(f"Failed to upload pipeline artifact: {resp.text}")
 
     def create_deployment(self, deployment: Deployment, **kwargs) -> DeploymentResponse:
         """Create a new deployment. Ensures all components and versions are registered/uploaded before creating the deployment."""
         # For each service/component in the deployment, upload it to the API store
-        self._upload_pipeline(
-            pipeline=deployment.pipeline or deployment.namespace,
+        if not deployment.graph:
+            raise ValueError(
+                "Deployment graph must be provided in the format <name>:<version>"
+            )
+        upload_graph(
+            endpoint=self.endpoint,
+            graph=deployment.graph,
             entry_service=deployment.entry_service,
+            session=self.session,
             **kwargs,
         )
 
@@ -127,7 +58,7 @@ class KubernetesDeploymentManager(DeploymentManager):
         dev = kwargs.get("dev", False)
         payload = {
             "name": deployment.name,
-            "component": deployment.pipeline or deployment.namespace,
+            "component": deployment.graph or deployment.namespace,
             "dev": dev,
             "envs": deployment.envs,
         }
@@ -151,7 +82,6 @@ class KubernetesDeploymentManager(DeploymentManager):
         access_authorization = kwargs.get("access_authorization", False)
         payload = {
             "name": deployment.name,
-            "component": deployment.pipeline or deployment.namespace,
             "envs": deployment.envs,
             "services": deployment.services,
             "access_authorization": access_authorization,

@@ -68,6 +68,25 @@ inside an interactive shell on one of the allocated nodes:
 # https://github.com/ai-dynamo/dynamo/tree/main/examples/tensorrt_llm#build-docker
 export IMAGE="<dynamo_trtllm_image>"
 
+# MOUNTS are the host:container path pairs that are mounted into the containers
+# launched by each `srun` command.
+#
+# If you want to reference files, such as $MODEL_PATH below, in a
+# different location, you can customize MOUNTS or specify additional
+# comma-separated mount pairs here.
+#
+# NOTE: Currently, this example assumes that the local bash scripts and configs
+# referenced are mounted into into /mnt inside the container. If you want to
+# customize the location of the scripts, make sure to modify `srun_script.sh`
+# accordingly for the new locations of `start_frontend_services.sh` and
+# `start_trtllm_worker.sh`.
+#
+# For example, assuming your cluster had a `/lustre` directory on the host, you
+# could add that as a mount like so:
+#
+# export MOUNTS="${PWD}:/mnt,/lustre:/lustre"
+export MOUNTS="${PWD}:/mnt"
+
 # NOTE: In general, Deepseek R1 is very large, so it is recommended to
 # pre-download the model weights and save them in some shared location,
 # NFS storage, HF_CACHE, etc. and modify the `--model-path` below
