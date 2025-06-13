@@ -7,6 +7,7 @@ use dynamo_runtime::{utils::leader_worker_barrier::LeaderBarrier, DistributedRun
 
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KvbmLeaderData {
@@ -51,7 +52,9 @@ impl KvbmLeader {
             .primary()
             .block_on(async move {
                 // TODO: Hardcode for now.
-                leader_barrier.sync(&drt_clone, zmq_data_clone.as_ref()).await
+                leader_barrier
+                    .sync(&drt_clone, zmq_data_clone.as_ref())
+                    .await
             })
             .map_err(|e| {
                 to_pyerr(anyhow::anyhow!(format!(
@@ -62,16 +65,20 @@ impl KvbmLeader {
 
         tracing::info!("Leader barrier synced with {} workers", world_size);
 
-        let zmq_leader = drt.runtime()
+        let zmq_leader = drt
+            .runtime()
             .primary()
             .block_on(async move {
+                let cancel_token = CancellationToken::new();
                 ZmqActiveMessageLeader::new(
                     &zmq_data.zmq_url,
                     zmq_data.broadcast_port,
                     zmq_data.ack_port,
                     world_size,
                     Duration::from_secs(30),
-                ).await
+                    cancel_token.clone(),
+                )
+                .await
             })
             .map_err(|e| {
                 to_pyerr(anyhow::anyhow!(format!(

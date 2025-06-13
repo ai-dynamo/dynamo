@@ -688,7 +688,7 @@ impl<S: Storage + NixlDescriptor, M: BlockMetadata> Mutable for MutableBlock<S, 
 impl<S: Storage + NixlDescriptor, M: BlockMetadata> Local for MutableBlock<S, M> {}
 
 impl<S: Storage, M: BlockMetadata> MutableBlock<S, M> {
-    pub(crate) fn new(
+    pub fn new(
         block: Block<S, M>,
         return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, M>>,
     ) -> Self {

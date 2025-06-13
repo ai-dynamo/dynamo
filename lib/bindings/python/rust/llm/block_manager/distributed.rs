@@ -4,6 +4,7 @@
 use super::*;
 
 mod leader;
+mod transfer;
 mod utils;
 mod worker;
 mod zmq;

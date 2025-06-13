@@ -4,6 +4,9 @@ use dynamo_runtime::{DistributedRuntime, Runtime};
 
 use llm_rs::block_manager::storage::torch::{TorchDevice, TorchTensor};
 
+use derive_getters::Getters;
+use serde::{Deserialize, Serialize};
+
 #[derive(Clone, Debug)]
 pub struct VllmTensor {
     _py_tensor: Py<PyAny>,
@@ -77,4 +80,32 @@ pub fn build_drt() -> anyhow::Result<(DistributedRuntime, tokio::runtime::Runtim
         .block_on(async move { DistributedRuntime::from_settings(runtime.clone()).await })?;
 
     Ok((drt, rt))
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub enum BlockTransferPool {
+    Device,
+    Host,
+    Disk,
+}
+
+#[derive(Serialize, Deserialize, Debug, Getters, Clone)]
+pub struct BlockTransferRequest {
+    from_pool: BlockTransferPool,
+    to_pool: BlockTransferPool,
+    blocks: Vec<(usize, usize)>,
+}
+
+impl BlockTransferRequest {
+    pub fn new(
+        from_pool: BlockTransferPool,
+        to_pool: BlockTransferPool,
+        blocks: Vec<(usize, usize)>,
+    ) -> anyhow::Result<Self> {
+        Ok(Self {
+            from_pool,
+            to_pool,
+            blocks,
+        })
+    }
 }

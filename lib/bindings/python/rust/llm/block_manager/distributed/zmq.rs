@@ -1,3 +1,8 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use std::collections::{HashMap, VecDeque};
@@ -8,10 +13,10 @@ use tmq::{
     pull::{pull, Pull},
     push::{push, Push},
     subscribe::{subscribe, Subscribe},
-    Context, Message, Multipart
+    Context, Message, Multipart,
 };
-use tokio::sync::{Mutex, oneshot};
-use tokio::task::JoinHandle;
+use tokio::sync::{oneshot, Mutex};
+use tokio_util::sync::CancellationToken;
 
 use futures_util::{SinkExt, StreamExt};
 
@@ -35,8 +40,6 @@ pub struct ZmqActiveMessageLeader {
     pending_messages: Arc<Mutex<HashMap<usize, PendingMessage>>>,
     // Number of workers we're waiting for.
     num_workers: Arc<usize>,
-    // Handle to the worker pull thread.
-    pull_worker: JoinHandle<Result<()>>
 }
 
 impl ZmqActiveMessageLeader {
@@ -45,7 +48,8 @@ impl ZmqActiveMessageLeader {
         pub_port: usize,
         pull_port: usize,
         num_workers: usize,
-        timeout: Duration
+        timeout: Duration,
+        cancel_token: CancellationToken,
     ) -> Result<Self> {
         let context = Context::new();
 
@@ -55,19 +59,27 @@ impl ZmqActiveMessageLeader {
         let pub_socket = Arc::new(Mutex::new(publish(&context).bind(pub_url.as_str())?));
         let pull_socket = pull(&context).bind(pull_url.as_str())?;
 
-        tracing::info!("ZmqActiveMessageLeader: Bound to pub: {} and pull: {}", pub_url, pull_url);
+        tracing::info!(
+            "ZmqActiveMessageLeader: Bound to pub: {} and pull: {}",
+            pub_url,
+            pull_url
+        );
 
         let pending_messages = Arc::new(Mutex::new(HashMap::new()));
 
         let pending_messages_clone = pending_messages.clone();
-        let pull_worker = tokio::spawn(async move { Self::pull_worker(pull_socket, pending_messages_clone).await });
+        CriticalTaskExecutionHandle::new(
+            |cancel_token| Self::pull_worker(pull_socket, pending_messages_clone, cancel_token),
+            cancel_token,
+            "ZmqActiveMessageLeader: Pull worker",
+        )?
+        .detach();
 
         let self_ = Self {
             pub_socket,
             message_id: Arc::new(Mutex::new(0)),
             pending_messages,
             num_workers: Arc::new(num_workers),
-            pull_worker,
         };
 
         // Ping our workers.
@@ -84,7 +96,7 @@ impl ZmqActiveMessageLeader {
             tokio::select! {
                 // If we receive an ACK from every worker, we're done.
                 _ = ping_receiver => {
-                    tracing::info!("ZmqActiveMessageLeader: Startup complete.");
+                    tracing::info!("ZmqActiveMessageLeader: Worker ping successful. Startup complete.");
                     break;
                 }
                 // Wait for 1 second before pinging again.
@@ -134,40 +146,66 @@ impl ZmqActiveMessageLeader {
             message.push_back(data.into());
         }
 
-        tracing::debug!("ZmqActiveMessageLeader: Broadcasting message with id: {}", id);
-        self.pub_socket.lock().await.send(Multipart(message)).await?;
+        tracing::debug!(
+            "ZmqActiveMessageLeader: Broadcasting message with id: {}",
+            id
+        );
+        self.pub_socket
+            .lock()
+            .await
+            .send(Multipart(message))
+            .await?;
 
         Ok(completion_receiver)
     }
 
-    async fn pull_worker(mut pull_socket: Pull, pending_messages: Arc<Mutex<HashMap<usize, PendingMessage>>>) -> Result<()> {
-        while let Some(Ok(message)) = pull_socket.next().await {
-            // The leader should only ever receive ACKs.
-            // ACKs have no data.
-            if message.len() != 1 {
-                tracing::error!("Received message with unexpected length: {:?}", message.len());
-                continue;
-            }
-
-            // TODO: This looks ugly.
-            let arr: [u8; std::mem::size_of::<usize>()] = (*message[0]).try_into()?;
-            let id = usize::from_be_bytes(arr);
-
-            tracing::debug!("ZmqActiveMessageLeader: Received ACK for message with id: {}", id);
-
-            {
-                let mut pending_messages = pending_messages.lock().await;
-                // TODO: Should we error if we can't find the pending message?
-                if let std::collections::hash_map::Entry::Occupied(mut entry) = pending_messages.entry(id) {
-                    entry.get_mut().remaining_workers -= 1;
-                    // If all workers have ACKed, notify the completion indicator.
-                    if entry.get().remaining_workers == 0 {
-                        let e = entry.remove();
-                        tracing::debug!("ZmqActiveMessageLeader: Message with id: {} completed.", id);
-                        // It's possible that the receiver has already been dropped,
-                        // so ignore any send error here.
-                        let _ = e.completion_indicator.send(());
+    async fn pull_worker(
+        mut pull_socket: Pull,
+        pending_messages: Arc<Mutex<HashMap<usize, PendingMessage>>>,
+        cancel_token: CancellationToken,
+    ) -> Result<()> {
+        loop {
+            tokio::select! {
+                Some(Ok(message)) = pull_socket.next() => {
+                    // The leader should only ever receive ACKs.
+                    // ACKs have no data.
+                    if message.len() != 1 {
+                        tracing::error!(
+                            "Received message with unexpected length: {:?}",
+                            message.len()
+                        );
+                        continue;
                     }
+
+                    // TODO: This looks ugly.
+                    let arr: [u8; std::mem::size_of::<usize>()] = (*message[0]).try_into()?;
+                    let id = usize::from_be_bytes(arr);
+
+                    tracing::debug!(
+                        "ZmqActiveMessageLeader: Received ACK for message with id: {}",
+                        id
+                    );
+                    let mut pending_messages = pending_messages.lock().await;
+                    // TODO: Should we error if we can't find the pending message?
+                    if let std::collections::hash_map::Entry::Occupied(mut entry) =
+                        pending_messages.entry(id)
+                    {
+                        entry.get_mut().remaining_workers -= 1;
+                        // If all workers have ACKed, notify the completion indicator.
+                        if entry.get().remaining_workers == 0 {
+                            let e = entry.remove();
+                            tracing::debug!(
+                                "ZmqActiveMessageLeader: Message with id: {} completed.",
+                                id
+                            );
+                            // It's possible that the receiver has already been dropped,
+                            // so ignore any send error here.
+                            let _ = e.completion_indicator.send(());
+                        }
+                    }
+                }
+                _ = cancel_token.cancelled() => {
+                    break;
                 }
             }
         }
@@ -189,11 +227,17 @@ impl MessageHandle {
     pub fn new(message: Multipart, push_handle: Arc<Mutex<Push>>) -> Result<Self> {
         // We always need at least the message id and the function name.
         if message.len() < 2 {
-            return Err(anyhow::anyhow!("Received message with unexpected length: {:?}", message.len()));
+            return Err(anyhow::anyhow!(
+                "Received message with unexpected length: {:?}",
+                message.len()
+            ));
         }
         let arr: [u8; std::mem::size_of::<usize>()] = (*message[0]).try_into()?;
         let id = usize::from_be_bytes(arr);
-        let function = message[1].as_str().ok_or(anyhow::anyhow!("Unable to parse function name."))?.to_string();
+        let function = message[1]
+            .as_str()
+            .ok_or(anyhow::anyhow!("Unable to parse function name."))?
+            .to_string();
 
         // Skip the message id and function name: Everything else is data.
         let data = message.into_iter().skip(2).map(|m| (*m).to_vec()).collect();
@@ -261,55 +305,92 @@ impl Handler for Ping {
 type MessageHandlers = HashMap<String, Arc<dyn Handler>>;
 
 /// The ActiveMessageWorker receives commands from the leader, and ACKs them.
-pub struct ZmqActiveMessageWorker {
-    sub_worker: JoinHandle<Result<()>>,
-}
+pub struct ZmqActiveMessageWorker {}
 
 impl ZmqActiveMessageWorker {
-    pub fn new(url: &str, sub_port: usize, push_port: usize, mut message_handlers: MessageHandlers) -> Result<Self> {
+    pub fn new(
+        url: &str,
+        sub_port: usize,
+        push_port: usize,
+        mut message_handlers: MessageHandlers,
+        cancel_token: CancellationToken,
+    ) -> Result<Self> {
         let context = Context::new();
 
         let sub_url = format!("tcp://{}:{}", url, sub_port);
         let push_url = format!("tcp://{}:{}", url, push_port);
 
-        let sub_socket = subscribe(&context).connect(sub_url.as_str())?.subscribe("".as_bytes())?;
-        let push_socket =
-            Arc::new(Mutex::new(push(&context).connect(push_url.as_str())?));
+        let sub_socket = subscribe(&context)
+            .connect(sub_url.as_str())?
+            .subscribe("".as_bytes())?;
+        let push_socket = Arc::new(Mutex::new(push(&context).connect(push_url.as_str())?));
 
-        tracing::info!("ZmqActiveMessageWorker: Bound to sub: {} and push: {}", sub_url, push_url);
+        tracing::info!(
+            "ZmqActiveMessageWorker: Bound to sub: {} and push: {}",
+            sub_url,
+            push_url
+        );
 
         // Add our ping handler.
         message_handlers.insert(PING_MESSAGE.to_string(), Arc::new(Ping));
         let message_handlers = Arc::new(message_handlers);
-        
-        let sub_worker = tokio::spawn(async move { Self::sub_worker(sub_socket, push_socket, message_handlers).await });
 
-        Ok(Self {
-            sub_worker,
-        })
+        let _sub_worker = CriticalTaskExecutionHandle::new(
+            |cancel_token| {
+                Self::sub_worker(sub_socket, push_socket, message_handlers, cancel_token)
+            },
+            cancel_token,
+            "ZmqActiveMessageWorker: Sub worker",
+        )?
+        .detach();
+
+        Ok(Self {})
     }
 
-    async fn sub_worker(mut sub_socket: Subscribe, push_socket: Arc<Mutex<Push>>, message_handlers: Arc<MessageHandlers>) -> Result<()> {
-        while let Some(Ok(message)) = sub_socket.next().await {
-            if message.len() < 2 {
-                tracing::error!("Received message with unexpected length: {:?}", message.len());
-                continue;
-            }
+    async fn sub_worker(
+        mut sub_socket: Subscribe,
+        push_socket: Arc<Mutex<Push>>,
+        message_handlers: Arc<MessageHandlers>,
+        cancel_token: CancellationToken,
+    ) -> Result<()> {
+        loop {
+            tokio::select! {
+                Some(Ok(message)) = sub_socket.next() => {
+                    if message.len() < 2 {
+                        tracing::error!(
+                            "Received message with unexpected length: {:?}",
+                            message.len()
+                        );
+                        continue;
+                    }
 
-            // Try to parse our message.
-            let message_handle = MessageHandle::new(message, push_socket.clone())?;
+                    // Try to parse our message.
+                    let message_handle = MessageHandle::new(message, push_socket.clone())?;
 
-            // Check if the function name is registered.
-            // TODO: We may want to make this dynamic, and expose a function 
-            // to dynamically add/remove handlers.
-            if let Some(handler) = message_handlers.get(&message_handle.function) {
-                tracing::debug!("ZmqActiveMessageWorker: Handling message with id: {} for function: {}", message_handle.message_id, message_handle.function);
-                let handler_clone = handler.clone();
-                tokio::spawn(async move {
-                    let _ = handler_clone.handle(message_handle).await;
-                });
-            } else {
-                tracing::error!("No handler found for function: {}", message_handle.function);
+                    // Check if the function name is registered.
+                    // TODO: We may want to make this dynamic, and expose a function
+                    // to dynamically add/remove handlers.
+                    if let Some(handler) = message_handlers.get(&message_handle.function) {
+                        tracing::debug!(
+                            "ZmqActiveMessageWorker: Handling message with id: {} for function: {}",
+                            message_handle.message_id,
+                            message_handle.function
+                        );
+                        let handler_clone = handler.clone();
+                        let handle_text = format!("ZmqActiveMessageWorker: Handler for function: {}", message_handle.function);
+                        CriticalTaskExecutionHandle::new(
+                            move |_| async move { handler_clone.handle(message_handle).await },
+                            cancel_token.clone(),
+                            handle_text.as_str(),
+                        )?
+                        .detach();
+                    } else {
+                        tracing::error!("No handler found for function: {}", message_handle.function);
+                    }
+                }
+                _ = cancel_token.cancelled() => {
+                    break;
+                }
             }
         }
 

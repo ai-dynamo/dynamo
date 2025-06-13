@@ -4,14 +4,19 @@
 use super::*;
 
 use leader::KvbmLeaderData;
+
+use transfer::*;
 use utils::*;
 use zmq::*;
 
 use llm_rs::block_manager::{
-    block::layout_to_blocks,
+    block::{layout_to_blocks, transfer::TransferContext, Block},
     layout::LayoutType,
-    storage::{torch::TorchTensor, DeviceAllocator, DeviceStorage},
-    BasicMetadata, LayoutConfig, NixlLayout,
+    storage::{
+        torch::TorchTensor, DeviceAllocator, DeviceStorage, DiskAllocator, DiskStorage,
+        PinnedAllocator, PinnedStorage,
+    },
+    BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage,
 };
 
 use nixl_sys::Agent as NixlAgent;
@@ -65,26 +70,59 @@ fn load_and_validate_tensors(
 pub struct KvbmWorker {
     cancel_token: CancellationToken,
     task: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
-    // The DistributedRuntime only stores a handle, so we need to keep the runtime around.
-    _runtime: tokio::runtime::Runtime,
 }
 
 impl KvbmWorker {
+    fn register_layout<S: Storage, M: BlockMetadata>(
+        mut layout: Box<dyn NixlLayout<StorageType = S>>,
+        agent: &Option<NixlAgent>,
+        block_set_idx: usize,
+        worker_id: usize,
+    ) -> anyhow::Result<Vec<Block<S, M>>> {
+        if let Some(agent) = agent {
+            layout.nixl_register(agent, None)?;
+        }
+
+        let layout: Arc<dyn NixlLayout<StorageType = S>> = Arc::from(layout);
+        let blocks = layout_to_blocks::<_, M>(layout, block_set_idx, worker_id as u64)?;
+        Ok(blocks)
+    }
+
     async fn worker_task(
-        mut device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage>>,
+        device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage>>,
+        host_layout: Option<Box<dyn NixlLayout<StorageType = PinnedStorage>>>,
+        disk_layout: Option<Box<dyn NixlLayout<StorageType = DiskStorage>>>,
         barrier_id: String,
         worker_id: usize,
+        transfer_context: Arc<TransferContext>,
         cancel_token: CancellationToken,
     ) -> anyhow::Result<()> {
-        let agent = NixlAgent::new(&format!("kvbm-worker-{}", worker_id)).map_err(to_pyerr)?;
-
-        device_layout
-            .nixl_register(&agent, None)
-            .map_err(to_pyerr)?;
-        let device_layout: Arc<dyn NixlLayout<StorageType = DeviceStorage>> =
-            Arc::from(device_layout);
-        let _device_blocks =
-            layout_to_blocks::<_, BasicMetadata>(device_layout, 0, worker_id as u64)?;
+        let device_blocks = Some(Self::register_layout::<_, BasicMetadata>(
+            device_layout,
+            &transfer_context.nixl_agent().as_ref(),
+            0,
+            worker_id,
+        )?);
+        let host_blocks = host_layout
+            .map(|layout| {
+                Self::register_layout::<_, BasicMetadata>(
+                    layout,
+                    &transfer_context.nixl_agent().as_ref(),
+                    1,
+                    worker_id,
+                )
+            })
+            .transpose()?;
+        let disk_blocks = disk_layout
+            .map(|layout| {
+                Self::register_layout::<_, BasicMetadata>(
+                    layout,
+                    &transfer_context.nixl_agent().as_ref(),
+                    2,
+                    worker_id,
+                )
+            })
+            .transpose()?;
 
         let runtime = Runtime::from_current()?;
         let drt = DistributedRuntime::from_settings(runtime).await?;
@@ -101,7 +139,8 @@ impl KvbmWorker {
             leader_data = worker_barrier.sync(&drt) => {
                 leader_data
             }
-        }.map_err(|e| {
+        }
+        .map_err(|e| {
             to_pyerr(anyhow::anyhow!(format!(
                 "Failed to sync worker barrier: {:?}",
                 e
@@ -114,11 +153,25 @@ impl KvbmWorker {
             leader_data
         );
 
+        let block_transfer_handler = BlockTransferHandler::new(
+            device_blocks,
+            host_blocks,
+            disk_blocks,
+            transfer_context,
+            cancel_token.clone(),
+        )?;
+
+        let handlers = HashMap::from([(
+            "transfer_blocks".to_string(),
+            Arc::new(block_transfer_handler) as Arc<dyn Handler>,
+        )]);
+
         let _zmq_worker = ZmqActiveMessageWorker::new(
             &leader_data.zmq_url,
             leader_data.broadcast_port,
             leader_data.ack_port,
-            HashMap::new(),
+            handlers,
+            cancel_token,
         )?;
 
         // TODO: Some sort of fancy loop here.
@@ -131,10 +184,12 @@ impl KvbmWorker {
 #[pymethods]
 impl KvbmWorker {
     #[new]
-    #[pyo3(signature = (num_layers, num_blocks, outer_dim, page_size, inner_dim, tensors, device_id=0, worker_id=0, dtype=None, barrier_id="kvbm".to_string()))]
+    #[pyo3(signature = (num_layers, num_device_blocks, num_host_blocks, num_disk_blocks, outer_dim, page_size, inner_dim, tensors, device_id=0, worker_id=0, dtype=None, barrier_id="kvbm".to_string()))]
     fn new(
         num_layers: usize,
-        num_blocks: usize,
+        num_device_blocks: usize,
+        num_host_blocks: usize,
+        num_disk_blocks: usize,
         outer_dim: usize,
         page_size: usize,
         inner_dim: usize,
@@ -158,32 +213,68 @@ impl KvbmWorker {
 
         let dtype = dtype.unwrap_or("fp16".to_string());
 
-        tracing::info!("Initializing KvbmWorker with params: num_layers={}, num_blocks={}, outer_dim={}, page_size={}, inner_dim={}, dtype={}", num_layers, num_blocks, outer_dim, page_size, inner_dim, dtype);
+        tracing::info!("Initializing KvbmWorker with params: num_layers={}, num_device_blocks={}, num_host_blocks={}, num_disk_blocks={}, outer_dim={}, page_size={}, inner_dim={}, dtype={}", num_layers, num_device_blocks, num_host_blocks, num_disk_blocks, outer_dim, page_size, inner_dim, dtype);
 
         let (device_tensors, shape) =
             load_and_validate_tensors(tensors, device_id).map_err(to_pyerr)?;
 
         let outer_contiguous = shape[0] == outer_dim;
 
-        let layout_builder = LayoutConfig::builder()
+        let mut layout_builder_instance = LayoutConfigBuilder::default();
+        let layout_builder = layout_builder_instance
             .num_layers(num_layers)
-            .num_blocks(num_blocks)
             .outer_dim(outer_dim)
             .page_size(page_size)
             .inner_dim(inner_dim)
-            .dtype(map_dtype(&dtype).map_err(to_pyerr)?)
+            .dtype(map_dtype(&dtype).map_err(to_pyerr)?);
+
+        let layout_type = LayoutType::LayerSeparate { outer_contiguous };
+
+        if num_device_blocks == 0 {
+            return Err(pyo3::exceptions::PyValueError::new_err(
+                "num_device_blocks must be greater than 0",
+            ));
+        }
+
+        let device_layout = layout_builder
+            .num_blocks(num_device_blocks)
             .build()
+            .map_err(to_pyerr)?
+            .create_layout(layout_type, device_tensors, true)
             .map_err(to_pyerr)?;
 
-        let layout = layout_builder
-            .create_layout(
-                LayoutType::LayerSeparate { outer_contiguous },
-                device_tensors,
-                true,
+        let host_layout = if num_host_blocks > 0 {
+            let host_allocator = Arc::new(PinnedAllocator::default());
+            Some(
+                layout_builder
+                    .num_blocks(num_host_blocks)
+                    .build()
+                    .map_err(to_pyerr)?
+                    .allocate_layout(layout_type, host_allocator)
+                    .map_err(to_pyerr)?,
             )
-            .map_err(to_pyerr)?;
+        } else {
+            None
+        };
 
-        let runtime = tokio::runtime::Runtime::new().map_err(to_pyerr)?;
+        let disk_layout = if num_disk_blocks > 0 {
+            if num_host_blocks == 0 {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "num_host_blocks must be greater than 0 if num_disk_blocks is greater than 0",
+                ));
+            }
+            let disk_allocator = Arc::new(DiskAllocator::default());
+            Some(
+                layout_builder
+                    .num_blocks(num_disk_blocks)
+                    .build()
+                    .map_err(to_pyerr)?
+                    .allocate_layout(layout_type, disk_allocator)
+                    .map_err(to_pyerr)?,
+            )
+        } else {
+            None
+        };
 
         let cancel_token = CancellationToken::new();
 
@@ -193,15 +284,36 @@ impl KvbmWorker {
                 .enable_all()
                 .build()
                 .unwrap();
+
+            let agent = NixlAgent::new(&format!("kvbm-worker-{}", worker_id)).unwrap();
+
+            let transfer_context = Arc::new(TransferContext::new(
+                Arc::new(Some(agent)),
+                DeviceAllocator::new(device_id)
+                    .unwrap()
+                    .ctx()
+                    .new_stream()
+                    .unwrap(),
+                runtime.handle().clone(),
+            ));
+
             runtime.block_on(async move {
-                KvbmWorker::worker_task(layout, barrier_id, worker_id, cancel_token_clone).await
+                KvbmWorker::worker_task(
+                    device_layout,
+                    host_layout,
+                    disk_layout,
+                    barrier_id,
+                    worker_id,
+                    transfer_context,
+                    cancel_token_clone,
+                )
+                .await
             })
         });
 
         Ok(Self {
             cancel_token,
             task: Some(task),
-            _runtime: runtime,
         })
     }
 }
