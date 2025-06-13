@@ -63,10 +63,10 @@ jobs:
     name: Deploy to dynamo.github.io
     needs: build-docs
     runs-on: ubuntu-latest
-
+    
     # Only run on pushes to release branches
     if: startsWith(github.ref, 'refs/heads/release')
-
+    
     steps:
       - name: Download documentation artifact
         uses: actions/download-artifact@v4
@@ -78,13 +78,13 @@ jobs:
         id: extract_branch
         run: echo "branch=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
 
-      - name: Deploy to dynamo.github.io
+      - name: Deploy to private documentation repository
         uses: peaceiris/actions-gh-pages@v3
         with:
           # Use a personal access token or deploy key stored in secrets
           personal_token: ${{ secrets.CI_TOKEN }}
-          # Target repository
-          external_repository: ai-dynamo/ai-dynamo.github.io
+          # Target repository (private repo for internal docs - GitHub Enterprise)
+          external_repository: ai-dynamo/dynamo-docs
           # Always deploy to main branch but in version-specific directory
           publish_branch: main
           # Directory containing the built documentation
