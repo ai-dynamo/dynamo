@@ -1,5 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Compare the with and without prefix caching."""
 
 import time
 from typing import Optional
@@ -221,11 +221,11 @@ def test_kvbm_prefill():
     manager = new_kv_cache_manager()
 
     # Complete 3 blocks (48 tokens)
-    common_token_ids = [i for i in range(16 * 3)]
+    common_token_ids = [i for i in range(3) for _ in range(16)]
 
     # Fully cache miss
     # Incomplete 1 block (7 tokens)
-    unique_token_ids = [88] * 7
+    unique_token_ids = [3] * 7
     all_token_ids = common_token_ids + unique_token_ids
     req0 = make_request("0", all_token_ids)
 
@@ -235,9 +235,12 @@ def test_kvbm_prefill():
     assert num_computed_tokens == 0
 
     # Step 2: Allocate slots for the request
-    _ = manager.allocate_slots(
+    blocks_req0 = manager.allocate_slots(
         req0, 55, len(computed_blocks.blocks) * 16, computed_blocks
     )
+
+    for block in blocks_req0.blocks:
+        assert block._block_hash is None
 
     # Verify allocation was successful
     block_ids = manager.get_block_ids(req0.request_id)
@@ -248,37 +251,36 @@ def test_kvbm_prefill():
     req0.append_output_token_ids(100)
     req0.num_computed_tokens = 55
 
-    # Step 4: Get the computed blocks
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
-    print("=>>>>>>>>>>>>>>>>>>>>>computed_blocks", computed_blocks)
-    print("=>>>>>>>>>>>>>>>>>>>>>num_computed_tokens", num_computed_tokens)
+    _ = manager.allocate_slots(req0, num_new_tokens=1)
 
-    # Step 5: Register the blocks as computed by allocating slots with the computed blocks
-    _ = manager.allocate_slots(
-        req0,
-        num_new_tokens=1,  # Allocate slots for all tokens
-        num_new_computed_tokens=0,  # All tokens are computed
-    )
-
-    # Step 6: Free the current request after registering blocks
-
-    # Step 7: Create a new request with the same prefix plus one token
-    req1 = make_request("1", common_token_ids + [99])
+    # Step 5: Create a new request with the same prefix plus one token
+    unique_token_ids = [3] * 4
+    req1 = make_request("1", common_token_ids + unique_token_ids)
 
     # Step 8: Check for computed blocks - should find the common prefix
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
-    print("=>>>>>>>>>>>>>>>>>>>>>computed_blocks for req1", computed_blocks)
-    print("=>>>>>>>>>>>>>>>>>>>>>num_computed_tokens for req1", num_computed_tokens)
+    assert len(computed_blocks.blocks) == 3
+    assert num_computed_tokens == len(computed_blocks.blocks) * 16
 
-    # Step 9: Allocate slots for the remaining tokens
-    _ = manager.allocate_slots(
-        req1,
-        len(req1.all_token_ids) - num_computed_tokens,
-        len(computed_blocks.blocks) * 16,
-        computed_blocks,
-    )
+    for block in computed_blocks.blocks:
+        assert block._block_hash is not None
 
     # Clean up
+    manager.free(req0)
     manager.free(req1)
 
-    time.sleep(1000)
+    # Cache miss and eviction.
+    req3 = make_request("3", [99] * (16 * 10) + [99] * 3)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req3)
+    assert not computed_blocks.blocks
+    assert num_computed_tokens == 0
+    blocks_req3 = manager.allocate_slots(
+        req3, 16 * 10, len(computed_blocks.blocks) * 16, computed_blocks
+    )
+
+    assert len(blocks_req3.blocks) == 10
+    for block in blocks_req3.blocks:
+        print("=>>>>>>>>>>>>>>>>>>>>>block", block.block_id)
+        assert block._block_hash is None
+
+    time.sleep(0.5)
