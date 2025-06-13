@@ -143,7 +143,7 @@ dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/mtp/mtp_agg.yaml
 Notes:
 - MTP is only available within the container built with the experimental TensorRT-LLM commit. Please add --use-default-experimental-tensorrtllm-commit to the arguments of the build.sh script.
 
-  ex: `./container/build.sh --framework tensorrtllm --use-default-experimental-tensorrtllm-commit`
+  Example: `./container/build.sh --framework tensorrtllm --use-default-experimental-tensorrtllm-commit`
 
 - There is a noticeable latency for the first two inference requests. Please send warm-up requests before starting the benchmark.
 - MTP performance may vary depending on the acceptance rate of predicted tokens, which is dependent on the dataset or queries used while benchmarking. Additionally, `ignore_eos` should generally be omitted or set to `false` when using MTP to avoid speculating garbage outputs and getting unrealistic acceptance rates.
