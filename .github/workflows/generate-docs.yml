@@ -82,7 +82,7 @@ jobs:
         uses: peaceiris/actions-gh-pages@v3
         with:
           # Use a personal access token or deploy key stored in secrets
-          personal_token: ${{ secrets.CI_TOKEN }}
+          personal_token: ${{ secrets.DOCS_TOKEN }}
           # Target repository (private repo for internal docs - GitHub Enterprise)
           external_repository: ai-dynamo/dynamo-docs
           # Always deploy to main branch but in version-specific directory
