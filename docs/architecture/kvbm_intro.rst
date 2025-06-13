@@ -26,26 +26,37 @@ It offers:
 
 The Dynamo KV Block Manager serves as a reference implementation that emphasizes modularity and extensibility. Its pluggable design enables developers to customize components and optimize for specific performance, memory, and deployment needs.
 
-+-------------------+----+-------------------+
-|                   |    | Feature           |
-+===================+====+===================+
-| **Backend**       | ✅ | Local             |
-+                   +----+-------------------+
-|                   | ✅ | Kubernetes        |
-+-------------------+----+-------------------+
-| **LLM Framework** | ✅ | vLLM              |
-+                   +----+-------------------+
-|                   | ❌ | TensorRT-LLM      |
-+                   +----+-------------------+
-|                   | ❌ | SGLang            |
-+                   +----+-------------------+
-|                   | ❌ | llama.cpp         |
-+-------------------+----+-------------------+
-| **Serving Type**  | ✅ | Aggregated        |
-+                   +----+-------------------+
-|                   | ✅ | Disaggregated     |
-+-------------------+----+-------------------+
+.. list-table::
+   :widths: 20 5 75
+   :header-rows: 1
 
+   * -
+     -
+     - Feature
+   * - **Backend**
+     - ✅
+     - Local
+   * -
+     - ✅
+     - Kubernetes
+   * - **LLM Framework**
+     - ✅
+     - vLLM
+   * -
+     - ❌
+     - TensorRT-LLM
+   * -
+     - ❌
+     - SGLang
+   * -
+     - ❌
+     - llama.cpp
+   * - **Serving Type**
+     - ✅
+     - Aggregated
+   * -
+     - ✅
+     - Disaggregated
 
 .. toctree::
    :hidden:
