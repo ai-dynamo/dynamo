@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -61,3 +61,15 @@ class DisaggPreprocessedRequest(BaseModel):
     bootstrap_port: int
     bootstrap_room: int
     data_parallel_rank: Optional[int] = None
+
+
+EmbeddingInput = Union[str, List[str], List[int], List[List[int]]]
+
+
+class EmbeddingRequest(BaseModel):
+    model: str
+    input: EmbeddingInput
+    user: Optional[str] = None
+    dimensions: Optional[
+        int
+    ] = None  # only supported in text-embedding-3 and later models from OpenAI
