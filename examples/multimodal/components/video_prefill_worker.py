@@ -262,7 +262,7 @@ class VllmPrefillWorker:
 
         raw_frames_tensor, descriptor = self._frames_descriptor
 
-        logger.info(
+        logger.debug(
             f"PrefillWorker {request_id}: Requesting frames from EncodeWorker for {video_url}"
         )
         # Create a writable operation handle for the remote EncodeWorker.
@@ -280,7 +280,7 @@ class VllmPrefillWorker:
                 pass
         # Wait for the remote write from the EncodeWorker to complete.
         await writable.wait_for_completion()
-        logger.info(
+        logger.debug(
             f"PrefillWorker {request_id}: Frames received from EncodeWorker, shape: {raw_frames_tensor.shape}"
         )
 
@@ -292,74 +292,59 @@ class VllmPrefillWorker:
                 "PrefillWorker requires prompt_token_ids from DecodeWorker"
             )
 
-        # Remove dummy tokens that were added after each video token.
+        # Constants for token manipulation
         DUMMY_TOKEN_ID = self.dummy_token_id
         VIDEO_TOKEN_ID = self.video_token_id
-        DUMMY_TOKENS_PER_FRAME = 144  # From DecodeWorker: embedding_size
 
-        video_count_before = sum(
-            1 for token in request.prompt_token_ids if token == VIDEO_TOKEN_ID
-        )
-
-        # Find all video token positions, then remove dummy tokens in reverse order
-        # to avoid position shifting issues.
+        # Step 1: Find all video token positions
         video_token_positions = [
             i
             for i, token in enumerate(request.prompt_token_ids)
             if token == VIDEO_TOKEN_ID
         ]
+        logger.debug(
+            f"PrefillWorker {request_id}: Found {len(video_token_positions)} video tokens at positions: {video_token_positions}"
+        )
 
-        current_prompt_tokens = list(request.prompt_token_ids)
+        # Step 2: Process tokens from end to start to avoid position shifting
+        processed_tokens = list(request.prompt_token_ids)
+        for pos in reversed(video_token_positions):
+            # Calculate range of tokens to remove (dummy tokens after this video token)
+            start_idx = pos + 1
+            end_idx = start_idx + self.dummy_tokens_per_frame
 
-        for video_pos in reversed(video_token_positions):
-            dummy_start_index = video_pos + 1
-            dummy_end_index = dummy_start_index + DUMMY_TOKENS_PER_FRAME
-
-            if dummy_end_index <= len(current_prompt_tokens):
-                dummy_tokens_to_remove = current_prompt_tokens[
-                    dummy_start_index:dummy_end_index
-                ]
-                non_dummy_count = sum(
-                    1 for t in dummy_tokens_to_remove if t != DUMMY_TOKEN_ID
-                )
-                if non_dummy_count > 0:
-                    logger.warning(
-                        f"PrefillWorker {request_id}: Found {non_dummy_count} non-dummy tokens in removal range!"
-                    )
-
-            if dummy_end_index <= len(current_prompt_tokens):
-                current_prompt_tokens = (
-                    current_prompt_tokens[:dummy_start_index]
-                    + current_prompt_tokens[dummy_end_index:]
-                )
-            else:
+            # Check if we have enough tokens to remove
+            if end_idx > len(processed_tokens):
                 logger.warning(
-                    f"PrefillWorker {request_id}: Dummy end index {dummy_end_index} exceeds sequence length {len(current_prompt_tokens)}, skipping removal"
+                    f"PrefillWorker {request_id}: Not enough tokens to remove at position {pos}"
                 )
+                continue
 
-        filtered_prompt_token_ids = current_prompt_tokens
+            # Remove the dummy tokens
+            processed_tokens = processed_tokens[:start_idx] + processed_tokens[end_idx:]
 
-        video_count_after = sum(
-            1 for token in filtered_prompt_token_ids if token == VIDEO_TOKEN_ID
+        # Step 3: Verify we have exactly one video token left
+        final_video_count = sum(
+            1 for token in processed_tokens if token == VIDEO_TOKEN_ID
         )
-
-        if video_count_after != video_count_before:
+        if final_video_count != 1:
             logger.error(
-                f"PrefillWorker {request_id}: CRITICAL: Lost video tokens! Expected {video_count_before}, got {video_count_after}"
+                f"PrefillWorker {request_id}: Wrong number of video tokens! Expected 1, got {final_video_count}"
             )
 
-        remaining_zeros = sum(1 for t in filtered_prompt_token_ids if t == 0)
-        if remaining_zeros > 0:
-            logger.warning(
-                f"PrefillWorker {request_id}: WARNING: {remaining_zeros} zero tokens remain in filtered sequence!"
-            )
-
-        prefill_vllm_input = TokensPrompt(
-            prompt_token_ids=filtered_prompt_token_ids,
-            multi_modal_data={"video": raw_frames_tensor.numpy()},
+        # Step 4: Check for any remaining dummy tokens (should be none)
+        remaining_dummies = sum(
+            1 for token in processed_tokens if token == DUMMY_TOKEN_ID
         )
-        logger.info(
-            f"PrefillWorker {request_id}: Constructed TokensPrompt input with {len(filtered_prompt_token_ids)} tokens."
+        if remaining_dummies > 0:
+            logger.warning(
+                f"PrefillWorker {request_id}: Found {remaining_dummies} remaining dummy tokens!"
+            )
+
+        # Create the input for vLLM
+        prefill_vllm_input = TokensPrompt(
+            prompt_token_ids=processed_tokens,
+            multi_modal_data={"video": raw_frames_tensor.numpy()},
         )
 
         sampling_params = request.sampling_params
@@ -382,7 +367,7 @@ class VllmPrefillWorker:
             )
             self._loaded_metadata.add(engine_id)
 
-        logger.info(
+        logger.debug(
             f"PrefillWorker {request_id}: Calling engine_client.generate for prefill."
         )
 

@@ -170,6 +170,8 @@ class VllmEncodeWorker:
             elif parsed_url.scheme in ("http", "https"):
                 if not self._http_client:
                     await self._init_http_client()
+                    if not self._http_client:  # Double check after initialization
+                        raise RuntimeError("Failed to initialize HTTP client")
 
                 logger.info(f"Downloading video from URL: {video_url}")
                 response = await self._http_client.get(
@@ -194,13 +196,9 @@ class VllmEncodeWorker:
                 if not os.path.exists(file_path):
                     raise FileNotFoundError(f"Error reading file: {file_path}")
 
-                logger.info(f"Error reading file: {file_path}")
                 with open(file_path, "rb") as f:
                     video_bytes = f.read()
                 video_data = BytesIO(video_bytes)
-                logger.info(
-                    f"Local video {file_path} read, size: {len(video_bytes)} bytes."
-                )
             else:
                 raise ValueError(
                     f"Unsupported video source scheme: {parsed_url.scheme} for URL {video_url}"
@@ -264,7 +262,7 @@ class VllmEncodeWorker:
             def open_video_container_sync():
                 try:
                     return av.open(video_content_stream, mode="r")
-                except av.AVError as ave:
+                except av.error.AVError as ave:
                     logger.error(
                         f"PyAV error opening video stream from {video_url}: {ave}"
                     )
@@ -281,15 +279,15 @@ class VllmEncodeWorker:
 
             container = await asyncio.to_thread(open_video_container_sync)
 
-            if not container.streams.video:
+            if not container or not container.streams.video:
                 logger.error(f"No video stream found in {video_url}.")
                 raise ValueError(f"No video stream in {video_url}.")
 
             stream_info = container.streams.video[0]
             total_frames = stream_info.frames
             # Duration can be useful for streams where total_frames is 0
-            if stream_info.duration:
-                duration_sec = stream_info.duration * float(stream_info.time_base)
+            if stream_info.duration and stream_info.time_base:
+                duration_sec = float(stream_info.duration * stream_info.time_base)
             else:
                 duration_sec = 0
 
@@ -301,7 +299,7 @@ class VllmEncodeWorker:
                     f"Video {video_url} reports 0 frames but has duration {duration_sec:.2f}s. Frame sampling may be based on requested count directly."
                 )
 
-            logger.info(
+            logger.debug(
                 f"Video {video_url} has {total_frames} frames (duration: {duration_sec:.2f}s). Sampling {self.num_frames_to_sample} frames."
             )
             indices: np.ndarray
@@ -339,6 +337,9 @@ class VllmEncodeWorker:
 
             logger.info(f"Selected frame indices for {video_url}: {indices.tolist()}")
 
+            if not container:
+                raise ValueError(f"Container is None for {video_url}")
+
             clip_np: np.ndarray = await self._read_video_pyav(container, indices)
 
             if clip_np.size == 0:
@@ -370,7 +371,7 @@ class VllmEncodeWorker:
             # Permute back to (T, H_new, W_new, C)
             resized_frames_tensor_hwc = resized_frames_tensor_chw.permute(0, 2, 3, 1)
 
-            logger.info(f"Resized frames to shape: {resized_frames_tensor_hwc.shape}")
+            logger.debug(f"Resized frames to shape: {resized_frames_tensor_hwc.shape}")
 
             # Ensure the tensor is contiguous, on CUDA and uint8 for the NIXL buffer.
             tensor_for_descriptor: torch.Tensor = resized_frames_tensor_hwc.to(
