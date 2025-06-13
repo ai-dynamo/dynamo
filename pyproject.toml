@@ -31,6 +31,8 @@ dependencies = [
     "ai-dynamo-runtime==0.3.0",
     "fastapi==0.115.6",
     "distro",
+    # filelock: required by planner
+    "filelock",
     "typer",
     "circus==0.19.0",
     "click<8.2.0",
@@ -147,6 +149,7 @@ filterwarnings = [
     "ignore:.*pkg_resources.*:DeprecationWarning",
     "ignore:.*pkg_resources.*:UserWarning",
     "ignore:.*multipart.*:PendingDeprecationWarning",
+    "ignore:.*PyType_Spec.*custom tp_new.*:DeprecationWarning", # Ignore protobuf deprecation warning
 ]
 
 

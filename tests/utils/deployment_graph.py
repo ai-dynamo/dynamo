@@ -26,9 +26,10 @@ class DeploymentGraph:
     module: str
     config: str
     directory: str
-    endpoint: str
-    response_handler: Callable[[Any], str]
+    endpoints: List[str]
+    response_handlers: List[Callable[[Any], str]]
     timeout: int = 900
+    delayed_start: int = 0
     marks: Optional[List[Any]] = field(default_factory=list)
 
 
@@ -38,12 +39,14 @@ class Payload:
     Represents a test payload with expected response and log patterns.
     """
 
-    payload: Dict[str, Any]
+    payload_chat: Dict[str, Any]
     expected_response: List[str]
     expected_log: List[str]
+    repeat_count: int = 1
+    payload_completions: Optional[Dict[str, Any]] = None
 
 
-def completions_response_handler(response):
+def chat_completions_response_handler(response):
     """
     Process chat completions API responses.
     """
@@ -55,3 +58,16 @@ def completions_response_handler(response):
     assert "message" in result["choices"][0], "Missing 'message' in first choice"
     assert "content" in result["choices"][0]["message"], "Missing 'content' in message"
     return result["choices"][0]["message"]["content"]
+
+
+def completions_response_handler(response):
+    """
+    Process completions API responses.
+    """
+    if response.status_code != 200:
+        return ""
+    result = response.json()
+    assert "choices" in result, "Missing 'choices' in response"
+    assert len(result["choices"]) > 0, "Empty choices in response"
+    assert "text" in result["choices"][0], "Missing 'text' in first choice"
+    return result["choices"][0]["text"]
