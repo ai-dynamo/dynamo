@@ -75,7 +75,7 @@ def upload_graph(
             "name": graph_name,
             "description": "Registered by Dynamo's KubernetesDeploymentManager",
         }
-        resp = session.post(comp_url, json=comp_payload)
+        resp = session.post(comp_url, json=comp_payload, timeout=REQUEST_TIMEOUT)
         if resp.status_code not in (200, 201, 409):
             raise RuntimeError(f"Failed to create component: {resp.text}")
 
@@ -106,11 +106,11 @@ def upload_graph(
             "name": entry_service.name,
             "description": f"Auto-registered version for {graph}",
             "resource_type": "dynamo_component_version",
-            "version": entry_service.version,
+            "version": graph_version,
             "manifest": manifest,
             "build_at": build_at.isoformat(),
         }
-        resp = session.post(ver_url, json=ver_payload)
+        resp = session.post(ver_url, json=ver_payload, timeout=REQUEST_TIMEOUT)
         if resp.status_code not in (200, 201, 409):
             raise RuntimeError(f"Failed to create component version: {resp.text}")
 
@@ -124,6 +124,11 @@ def upload_graph(
     tar_stream.seek(0)
     upload_url = f"{endpoint}/api/v1/dynamo_components/{graph_name}/versions/{graph_version}/upload"
     upload_headers = {"Content-Type": "application/x-tar"}
-    resp = session.put(upload_url, data=tar_stream, headers=upload_headers)
+    resp = session.put(
+        upload_url,
+        data=tar_stream,
+        headers=upload_headers,
+        timeout=REQUEST_TIMEOUT,
+    )
     if resp.status_code not in (200, 201, 204):
         raise RuntimeError(f"Failed to upload graph artifact: {resp.text}")
