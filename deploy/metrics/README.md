@@ -10,7 +10,7 @@ This directory contains configuration for visualizing metrics from the metrics a
 ## Topology
 
 Default Service Relationship Diagram:
-```
+```text
      ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
      │ nats-server │    │ etcd-server │    │dcgm-exporter│
      │   :4222     │    │   :2379     │    │   :9400     │
@@ -51,8 +51,8 @@ Default Service Relationship Diagram:
 ```
 
 Networks:
-  - monitoring: nats-prom-exp, etcd-server, dcgm-exporter, prometheus, grafana
-  - default: nats-server (accessible via host network)
+- monitoring: nats-prom-exp, etcd-server, dcgm-exporter, prometheus, grafana
+- default: nats-server (accessible via host network)
 
 ## Getting Started
 
