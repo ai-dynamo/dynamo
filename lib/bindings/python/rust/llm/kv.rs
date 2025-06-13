@@ -34,6 +34,10 @@ pub(crate) struct KvRouter {
 impl KvRouter {
     #[new]
     fn new(component: Component, kv_block_size: usize) -> PyResult<Self> {
+        if kv_block_size == 0 {
+            return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
+        };
+
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async {
             let inner =
@@ -64,9 +68,13 @@ impl KvRouter {
 }
 
 #[pyfunction]
-pub fn compute_block_hash_for_seq_py(tokens: Vec<u32>, kv_block_size: usize) -> Vec<u64> {
+pub fn compute_block_hash_for_seq_py(tokens: Vec<u32>, kv_block_size: usize) -> PyResult<Vec<u64>> {
+    if kv_block_size == 0 {
+        return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
+    }
+
     let hashes = compute_block_hash_for_seq(&tokens, kv_block_size);
-    hashes.into_iter().map(|h| h.0).collect()
+    Ok(hashes.into_iter().map(|h| h.0).collect())
 }
 
 #[pyclass]
@@ -210,6 +218,10 @@ pub(crate) struct ZmqKvEventListener {
 impl ZmqKvEventListener {
     #[new]
     fn new(zmq_endpoint: String, zmq_topic: String, kv_block_size: usize) -> PyResult<Self> {
+        if kv_block_size == 0 {
+            return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
+        }
+
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async {
             let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<KvCacheEvent>();
