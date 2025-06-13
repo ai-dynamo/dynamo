@@ -69,8 +69,7 @@ class DecodeInterpolator:
             self.y_context_length = raw_data["y_context_length"]
             self.z_itl = raw_data["z_itl"]
             self.z_thpt_per_gpu = raw_data["z_thpt_per_gpu"]
-            # self.max_kv_tokens = raw_data['max_kv_tokens'][0]
-            self.max_kv_tokens = 1000000
+            self.max_kv_tokens = raw_data['max_kv_tokens'][0]
 
         # pre-compute the interpolation grid for fast lookup
         self.resolution = resolution
