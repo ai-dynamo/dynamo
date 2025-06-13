@@ -18,6 +18,7 @@ Common:
     kv_connector: NixlConnector
     kv_role: kv_both
   served_model_name: deepseek-ai/DeepSeek-R1
+  enable_expert_parallel: false
 
   # data parallel configuration, these value may need to be overridden
   # depending on the deployment.
@@ -42,7 +43,7 @@ VllmPrefillWorker:
     workers: 1
     resources:
       gpu: '8'
-  common-configs: [model, kv_transfer_config, served_model_name, data_parallel_size, data_parallel_size_local, data_parallel_address, data_parallel_rpc_port, max-model-len, trust-remote-code]
+  common-configs: [model, kv_transfer_config, served_model_name, data_parallel_size, data_parallel_size_local, data_parallel_address, data_parallel_rpc_port, max-model-len, trust-remote-code, enable_expert_parallel]
 
 
 VllmDecodeWorker:
@@ -50,7 +51,7 @@ VllmDecodeWorker:
     workers: 1
     resources:
       gpu: '8'
-  common-configs: [model, kv_transfer_config, served_model_name, data_parallel_size, data_parallel_size_local, data_parallel_address, data_parallel_rpc_port, max-model-len, trust-remote-code]
+  common-configs: [model, kv_transfer_config, served_model_name, data_parallel_size, data_parallel_size_local, data_parallel_address, data_parallel_rpc_port, max-model-len, trust-remote-code, enable_expert_parallel]
 
 # VllmDpWorker is a special worker that is not part of the graph, and should be deployed separately
 # depending on the DP configuration of the VllmPrefillWorker / VllmDecodeWorker
@@ -64,4 +65,4 @@ VllmDpWorker:
     workers: 1
     resources:
       gpu: '8'
-  common-configs: [model, kv_transfer_config, served_model_name, data_parallel_size, data_parallel_size_local, data_parallel_address, data_parallel_rpc_port, max-model-len, trust-remote-code]
+  common-configs: [model, kv_transfer_config, served_model_name, data_parallel_size, data_parallel_size_local, data_parallel_address, data_parallel_rpc_port, max-model-len, trust-remote-code, enable_expert_parallel]
