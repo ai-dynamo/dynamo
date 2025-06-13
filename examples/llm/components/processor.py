@@ -20,6 +20,7 @@ from enum import Enum
 from typing import Any, AsyncIterator, Dict, List, Tuple, Union
 
 from components.kv_router import Router
+from components.worker import VllmWorker
 from components.llm_interfaces import LLMWorker
 from transformers import AutoTokenizer
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
@@ -55,7 +56,7 @@ class Processor(ProcessMixIn):
     vLLM pre and post processing
     """
 
-    worker = depends(LLMWorker)
+    worker = depends(VllmWorker)
     router = depends(Router)
 
     def __init__(self):

@@ -404,7 +404,7 @@ async def test_worker_failure(
     with DynamoServeProcess(
         deployment_graph, request, args=deployment_args
     ) as server_process:
-
+        time.sleep(300)
         _wait_until_ready(deployment_graph, server_process, payload)
         procs = []
         for i in range(num_clients):

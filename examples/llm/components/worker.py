@@ -20,7 +20,6 @@ import os
 import signal
 
 from components.disagg_router import PyDisaggregatedRouter
-from components.llm_interfaces import LLMWorker
 from components.prefill_worker import PrefillWorker
 from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
@@ -45,7 +44,7 @@ logger = logging.getLogger(__name__)
     resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
     workers=1,
 )
-class VllmWorker(LLMWorker):
+class VllmWorker:
     prefill_worker = depends(PrefillWorker)
 
     def __init__(self):
@@ -120,7 +119,6 @@ class VllmWorker(LLMWorker):
         )
 
         runtime = dynamo_context["runtime"]
-        self._runtime = runtime
 
         if self.engine_args.remote_prefill:
             metadata = self.engine_client.nixl_metadata
@@ -189,64 +187,49 @@ class VllmWorker(LLMWorker):
     async def generate(self, request: vLLMGenerateRequest):
         # TODO: consider prefix hit when deciding prefill locally or remotely
 
-        try:
-            if self.engine_client.errored:
-                print("Errored Exiting!", flush=True)
-                await self.graceful_shutdown(self._runtime)
-                return
+        if self.disaggregated_router is not None:
+            async with PrefillQueue.get_instance(
+                nats_server=self._prefill_queue_nats_server,
+                stream_name=self._prefill_queue_stream_name,
+            ) as prefill_queue:
+                prefill_queue_size = await prefill_queue.get_queue_size()
+            disagg_router_decision = await self.disaggregated_router.prefill_remote(
+                len(request.engine_prompt["prompt_token_ids"]),
+                request.prefix_hit_rate,
+                prefill_queue_size,
+            )
+        else:
+            # always prefill remotely if no disaggregated router is provided
+            disagg_router_decision = True
 
-            #        can_run_immediately = len(self.engine_client.schedulerrunning) < self.engine.scheduler_config.max_num_seqs
-            #       print(can_run_immediately)
-            #        logger.info(can_run_immediately)
+        if self.do_remote_prefill and disagg_router_decision:
+            remote_prefill_params = RemotePrefillParams(
+                is_remote_prefill=True,
+                remote_prefill_request_callback=self.get_remote_prefill_request_callback(),
+            )
+            logger.info(
+                f"Prefilling remotely for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
+            )
+        else:
+            remote_prefill_params = None
+            logger.info(
+                f"Prefilling locally for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
+            )
 
-            if self.disaggregated_router is not None:
-                async with PrefillQueue.get_instance(
-                    nats_server=self._prefill_queue_nats_server,
-                    stream_name=self._prefill_queue_stream_name,
-                ) as prefill_queue:
-                    prefill_queue_size = await prefill_queue.get_queue_size()
-                disagg_router_decision = await self.disaggregated_router.prefill_remote(
-                    len(request.engine_prompt["prompt_token_ids"]),
-                    request.prefix_hit_rate,
-                    prefill_queue_size,
-                )
-            else:
-                # always prefill remotely if no disaggregated router is provided
-                disagg_router_decision = True
+        # rust HTTP requires Delta streaming
+        request.sampling_params.output_kind = RequestOutputKind.DELTA
 
-            if self.do_remote_prefill and disagg_router_decision:
-                remote_prefill_params = RemotePrefillParams(
-                    is_remote_prefill=True,
-                    remote_prefill_request_callback=self.get_remote_prefill_request_callback(),
-                )
-                logger.info(
-                    f"Prefilling remotely for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
-                )
-            else:
-                remote_prefill_params = None
-                logger.info(
-                    f"Prefilling locally for request {request.request_id} with length {len(request.engine_prompt['prompt_token_ids'])}"
-                )
-
-            # rust HTTP requires Delta streaming
-            request.sampling_params.output_kind = RequestOutputKind.DELTA
-
-            async for response in self.engine_client.generate(
-                prompt=request.engine_prompt,
-                sampling_params=request.sampling_params,
-                request_id=request.request_id,
-                remote_prefill_params=remote_prefill_params,
-            ):
-                yield MyRequestOutput(
-                    request_id=response.request_id,
-                    prompt=response.prompt,
-                    prompt_token_ids=response.prompt_token_ids,
-                    prompt_logprobs=response.prompt_logprobs,
-                    outputs=response.outputs,
-                    finished=response.finished,
-                ).model_dump_json()
-        except RuntimeError as e:
-            print(f"gotcha Exiting {e}", flush=True)
-            #await self.graceful_shutdown(self._runtime)
-            #print(e)
-            raise e
+        async for response in self.engine_client.generate(
+            prompt=request.engine_prompt,
+            sampling_params=request.sampling_params,
+            request_id=request.request_id,
+            remote_prefill_params=remote_prefill_params,
+        ):
+            yield MyRequestOutput(
+                request_id=response.request_id,
+                prompt=response.prompt,
+                prompt_token_ids=response.prompt_token_ids,
+                prompt_logprobs=response.prompt_logprobs,
+                outputs=response.outputs,
+                finished=response.finished,
+            ).model_dump_json()
