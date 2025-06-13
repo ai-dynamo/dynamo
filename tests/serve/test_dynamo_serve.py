@@ -276,7 +276,8 @@ class DynamoServeProcess(ManagedProcess):
             health_check_urls = []
 
         self.port = port
-
+        self.graph = graph
+        
         super().__init__(
             command=command,
             timeout=timeout,
@@ -297,6 +298,71 @@ class DynamoServeProcess(ManagedProcess):
         if data.get("data") and len(data["data"]) > 0:
             return True
         return False
+
+    def wait_for_ready(self, payload, logger=logging.getLogger):
+        url = f"http://localhost:{self.port}/{self.endpoints[0]}"
+        start_time = time.time()
+        retry_delay = 5
+        elapsed = 0.0
+        
+        while time.time() - start_time < self.graph.timeout:
+            elapsed = time.time() - start_time
+            try:
+                response = requests.post(
+                    url,
+                    json=payload.payload_chat,
+                    timeout=self.graph.timeout - elapsed,
+                )
+           except (requests.RequestException, requests.Timeout) as e:
+               logger.warning("Retrying due to Request failed: %s", e)
+               time.sleep(retry_delay)
+               continue
+           logger.info("Response%r", response)
+           if response.status_code == 500:
+               error = response.json().get("error", "")
+               if "no instances" in error:
+                   logger.warning("Retrying due to no instances available")
+                   time.sleep(retry_delay)
+                   continue
+            if response.status_code == 404:
+                error = response.json().get("error", "")
+                if "Model not found" in error:
+                    logger.warning("Retrying due to model not found")
+                    time.sleep(retry_delay)
+                    continue
+            # Process the response
+            if response.status_code != 200:
+                logger.error(
+                    "Service returned status code %s: %s",
+                    response.status_code,
+                    response.text,
+                )
+                pytest.fail(
+                    "Service returned status code %s: %s"
+                    % (response.status_code, response.text)
+                )
+            else:
+                break
+        else:
+            logger.error(
+                "Service did not return a successful response within %s s",
+                deployment_graph.timeout,
+        )
+            pytest.fail(
+                "Service did not return a successful response within %s s"
+                % deployment_graph.timeout
+            )
+
+        content = deployment_graph.response_handlers[0](response)
+
+        logger.info("Received Content: %s", content)
+
+        # Check for expected responses
+        assert content, "Empty response content"
+
+        for expected in payload.expected_response:
+            assert expected in content, "Expected '%s' not found in response" % expected
+
 
 
 @pytest.fixture(

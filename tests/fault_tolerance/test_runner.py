@@ -50,10 +50,10 @@ text_payload = Payload(
                 "content": text_prompt,  # Shorter prompt
             }
         ],
-        "max_tokens": 150,  # Reduced from 500
+        "max_tokens": 150,  
         "temperature": 0.1,
 #        "seed": 10,
-        "ignore_eos": "1",
+        "ignore_eos": True,
         "min_tokens": 150,
         "stream": False,
     },
@@ -177,11 +177,6 @@ def _single_request(
     response = None
     end_time = None
     start_time = time.time()
-
-    # How many attempts it took
-    # How much time it took total
-    # How much time the request took
-    # Results
     results = []
 
     while retry_attempts:
@@ -248,18 +243,6 @@ def _wait_until_ready(
     start_time = time.time()
     retry_delay = 5
     elapsed = 0.0
-
-    paycheck={
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    "messages": [
-    {
-        "role": "user",
-        "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
-    }
-    ],
-    "stream":False,
-    "max_tokens": 30
-  }
     
     while time.time() - start_time < deployment_graph.timeout:
         elapsed = time.time() - start_time
@@ -322,7 +305,6 @@ def _wait_until_ready(
 
 def run_metrics_process(log_dir):
     asyncio.run(get_metrics(log_dir))
-
 
 @dynamo_worker()
 async def get_metrics(runtime,log_dir):
@@ -419,7 +401,10 @@ async def test_worker_failure(
         deployment_graph, request, args=deployment_args
     ) as server_process:
         #time.sleep(300)
-        _wait_until_ready(deployment_graph, server_process, payload)
+        #_wait_until_ready(deployment_graph, server_process, payload)
+
+        server_process.wait_for_ready(payload)
+        
         procs = []
         for i in range(num_clients):
             procs.append(
