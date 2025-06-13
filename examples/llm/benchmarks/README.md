@@ -22,37 +22,52 @@ This guide provides detailed steps on benchmarking Large Language Models (LLMs) 
 > [!NOTE]
 > We recommend trying out the [LLM Deployment Examples](./README.md) before benchmarking.
 
+
 ## Prerequisites
 
-H100 80GB x8 node(s) are required for benchmarking.
+> [!Important]
+> At least one 8xH100-80GB node is required for the following instructions.
+
+ 1. Build benchmarking image
+
+    ```bash
+    ./container/build.sh
+    ```
+
+ 2. Download model
+
+    ```bash
+    huggingface-cli download neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
+    ```
+
+ 3. Start NATS and ETCD
+
+    ```bash
+    docker compose -f deploy/docker_compose.yml up -d
+    ```
 
 > [!NOTE]
 > This guide was tested on node(s) with the following hardware configuration:
-> * **GPUs**: 8xH100 80GB HBM3 (GPU Memory Bandwidth 3.2 TBs)
-> * **CPU**: 2x Intel Saphire Rapids, Intel(R) Xeon(R) Platinum 8480CL E5, 112 cores (56 cores per CPU), 2.00 GHz (Base), 3.8 Ghz (Max boost), PCIe Gen5
-> * **NVLink**: NVLink 4th Generation, 900 GB/s (GPU to GPU NVLink bidirectional bandwidth), 18 Links per GPU
-> * **InfiniBand**: 8X400Gbit/s (Compute Links), 2X400Gbit/s (Storage Links)
+>
+> * **GPUs**:
+>   8xH100-80GB-HBM3 (GPU Memory Bandwidth 3.2 TBs)
+>
+> * **CPU**:
+>   2 x Intel Sapphire Rapids, Intel(R) Xeon(R) Platinum 8480CL E5, 112 cores (56 cores per CPU), 2.00 GHz (Base), 3.8 Ghz (Max boost), PCIe Gen5
+>
+> * **NVLink**:
+>   NVLink 4th Generation, 900 GB/s (GPU to GPU NVLink bidirectional bandwidth), 18 Links per GPU
+>
+> * **InfiniBand**:
+>   8x400Gbit/s (Compute Links), 2x400Gbit/s (Storage Links)
 >
 > Benchmarking with a different hardware configuration may yield suboptimal results.
 
-1\. Build benchmarking image
-```bash
-./container/build.sh
-```
-
-2\. Download model
-```bash
-huggingface-cli download neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic
-```
-
-3\. Start NATS and ETCD
-```bash
-docker compose -f deploy/docker_compose.yml up -d
-```
 
 ## Disaggregated Single Node Benchmarking
 
-One H100 80GB x8 node is required for this setup.
+> [!Important]
+> One 8xH100-80GB node is required for the following instructions.
 
 In the following setup we compare Dynamo disaggregated vLLM performance to
 [native vLLM Aggregated Baseline](#vllm-aggregated-baseline-benchmarking) on a single node. These were chosen to optimize
@@ -64,24 +79,40 @@ Each prefill worker will use tensor parallel 1 and the decode worker will use te
 
 With the Dynamo repository, benchmarking image and model available, and **NATS and ETCD started**, perform the following steps:
 
-1\. Run benchmarking container
-```bash
-./container/run.sh --mount-workspace
-```
-Note: The huggingface home source mount can be changed by setting `--hf-cache ~/.cache/huggingface`.
+ 1. Run benchmarking container
 
-2\. Start disaggregated services
-```bash
-cd /workspace/examples/llm
-dynamo serve benchmarks.disagg:Frontend -f benchmarks/disagg.yaml 1> disagg.log 2>&1 &
-```
-Note: Check the `disagg.log` to make sure the service is fully started before collecting performance numbers.
+    ```bash
+    ./container/run.sh --mount-workspace
+    ```
 
-Collect the performance numbers as shown on the [Collecting Performance Numbers](#collecting-performance-numbers) section below.
+> [!Tip]
+> The huggingface home source mount can be changed by setting `--hf-cache ~/.cache/huggingface`.
 
-## Disaggregated Multi Node Benchmarking
+ 2. Start disaggregated services
 
-Two H100 80GB x8 nodes are required for this setup.
+    ```bash
+    cd /workspace/examples/llm
+    dynamo serve benchmarks.disagg:Frontend -f benchmarks/disagg.yaml 1> disagg.log 2>&1 &
+    ```
+
+> [!Tip]
+> Check the `disagg.log` to make sure the service is fully started before collecting performance numbers.
+
+ 3. Collect the performance numbers:
+
+ ```bash
+ bash -x /workspace/benchmarks/llm/perf.sh --mode disaggregated --deployment-kind dynamo_vllm --prefill-tensor-parallelism 1 --prefill-data-parallelism 4 --decode-tensor-parallelism 4 --decode-data-parallelism 1
+ ```
+
+ > [!Important]
+ > We should be careful in specifying these options in `perf.sh` script. They should closely reflect the deployment config that is being benchmarked. See `perf.sh --help` to learn more about these option. In the above command, we described that our deployment is using disaggregated serving in dynamo with vLLM backend. We have also accurately described that we have 4 prefill workers with TP=1 and 1 decode worker with TP=4
+
+For more information see [Collecting Performance Numbers](#collecting-performance-numbers) section below.
+
+## Disaggregated Multinode Benchmarking
+
+> [!Important]
+> Two 8xH100-80GB nodes are required the following instructions.
 
 In the following steps we compare Dynamo disaggregated vLLM performance to
 [native vLLM Aggregated Baseline](#vllm-aggregated-baseline-benchmarking) on two nodes. These were chosen to optimize
@@ -93,87 +124,271 @@ Each prefill worker will use tensor parallel 1 and the decode worker will use te
 
 With the Dynamo repository, benchmarking image and model available, and **NATS and ETCD started on node 0**, perform the following steps:
 
-1\. Run benchmarking container (node 0 & 1)
-```bash
-./container/run.sh --mount-workspace
-```
-Note: The huggingface home source mount can be changed by setting `--hf-cache ~/.cache/huggingface`.
+ 1. Run benchmarking container (nodes 0 & 1)
 
-2\. Config NATS and ETCD (node 1)
-```bash
-export NATS_SERVER="nats://<node_0_ip_addr>"
-export ETCD_ENDPOINTS="<node_0_ip_addr>:2379"
-```
-Note: Node 1 must be able to reach Node 0 over the network for the above services.
+    ```bash
+    ./container/run.sh --mount-workspace
+    ```
 
-3\. Start workers (node 0)
-```bash
-cd /workspace/examples/llm
-dynamo serve benchmarks.disagg_multinode:Frontend -f benchmarks/disagg_multinode.yaml 1> disagg_multinode.log 2>&1 &
-```
-Note: Check the `disagg_multinode.log` to make sure the service is fully started before collecting performance numbers.
+> [!Tip]
+> The huggingface home source mount can be changed by setting `--hf-cache ~/.cache/huggingface`.
 
-4\. Start workers (node 1)
-```bash
-cd /workspace/examples/llm
-dynamo serve components.prefill_worker:PrefillWorker -f benchmarks/disagg_multinode.yaml 1> prefill_multinode.log 2>&1 &
-```
-Note: Check the `prefill_multinode.log` to make sure the service is fully started before collecting performance numbers.
+ 2. Config NATS and ETCD (node 1)
 
-Collect the performance numbers as shown on the [Collecting Performance Numbers](#collecting-performance-numbers) section above.
+    ```bash
+    export NATS_SERVER="nats://<node_0_ip_addr>"
+    export ETCD_ENDPOINTS="<node_0_ip_addr>:2379"
+    ```
+
+> [!Important]
+> Node 1 must be able to reach Node 0 over the network for the above services.
+
+ 3. Start workers (node 0)
+
+    ```bash
+    cd /workspace/examples/llm
+    dynamo serve benchmarks.disagg_multinode:Frontend -f benchmarks/disagg_multinode.yaml 1> disagg_multinode.log 2>&1 &
+    ```
+
+> [!Tip]
+> Check the `disagg_multinode.log` to make sure the service is fully started before collecting performance numbers.
+
+ 4. Start workers (node 1)
+
+    ```bash
+    cd /workspace/examples/llm
+    dynamo serve components.prefill_worker:PrefillWorker -f benchmarks/disagg_multinode.yaml 1> prefill_multinode.log 2>&1 &
+    ```
+
+> [!Tip]
+> Check the `prefill_multinode.log` to make sure the service is fully started before collecting performance numbers.
+
+ 5. Collect the performance numbers:
+
+ ```bash
+ bash -x /workspace/benchmarks/llm/perf.sh --mode disaggregated --deployment-kind dynamo_vllm --prefill-tensor-parallelism 1 --prefill-data-parallelism 8 --decode-tensor-parallelism 8 --decode-data-parallelism 1
+ ```
+
+ > [!Important]
+ > We should be careful in specifying these options in `perf.sh` script. They should closely reflect the deployment config that is being benchmarked. See `perf.sh --help` to learn more about these option. In the above command, we described that our deployment is using disaggregated serving in dynamo with vLLM backend. We have also accurately described that we have 8 prefill workers with TP=1 and 1 decode worker with TP=8
+
+For more information see [Collecting Performance Numbers](#collecting-performance-numbers) section below.
+
 
 ## vLLM Aggregated Baseline Benchmarking
 
-One (or two) H100 80GB x8 nodes are required for this setup.
+> [!Important]
+> One (or two) 8xH100-80GB nodes are required the following instructions.
 
 With the Dynamo repository and the benchmarking image available, perform the following steps:
 
-1\. Run benchmarking container
-```bash
-./container/run.sh --mount-workspace
-```
-Note: The huggingface home source mount can be changed by setting `--hf-cache ~/.cache/huggingface`.
+ 1. Run benchmarking container
 
-2\. Start vLLM serve
-```bash
-CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
-  --block-size 128 \
-  --max-model-len 3500 \
-  --max-num-batched-tokens 3500 \
-  --tensor-parallel-size 4 \
-  --gpu-memory-utilization 0.95 \
-  --disable-log-requests \
-  --port 8001 1> vllm_0.log 2>&1 &
-CUDA_VISIBLE_DEVICES=4,5,6,7 vllm serve neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
-  --block-size 128 \
-  --max-model-len 3500 \
-  --max-num-batched-tokens 3500 \
-  --tensor-parallel-size 4 \
-  --gpu-memory-utilization 0.95 \
-  --disable-log-requests \
-  --port 8002 1> vllm_1.log 2>&1 &
-```
-Notes:
-* Check the `vllm_0.log` and `vllm_1.log` to make sure the service is fully started before collecting performance numbers.
-* If benchmarking over 2 nodes, `--tensor-parallel-size 8` should be used and only run one `vllm serve` instance per node.
+    ```bash
+    ./container/run.sh --mount-workspace
+    ```
 
-3\. Use NGINX as load balancer
-```bash
-apt update && apt install -y nginx
-cp /workspace/examples/llm/benchmarks/nginx.conf /etc/nginx/nginx.conf
-service nginx restart
-```
-Note: If benchmarking over 2 nodes, the `upstream` configuration will need to be updated to link to the `vllm serve` on the second node.
+> [!Tip]
+> The Hugging Face home source mount can be changed by setting `--hf-cache ~/.cache/huggingface`.
 
-Collect the performance numbers as shown on the [Collecting Performance Numbers](#collecting-performance-numbers) section below.
+ 2. Start vLLM serve
+
+    ```bash
+    CUDA_VISIBLE_DEVICES=0,1,2,3 vllm serve neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
+      --block-size 128 \
+      --max-model-len 3500 \
+      --max-num-batched-tokens 3500 \
+      --tensor-parallel-size 4 \
+      --gpu-memory-utilization 0.95 \
+      --disable-log-requests \
+      --port 8001 1> vllm_0.log 2>&1 &
+    CUDA_VISIBLE_DEVICES=4,5,6,7 vllm serve neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
+      --block-size 128 \
+      --max-model-len 3500 \
+      --max-num-batched-tokens 3500 \
+      --tensor-parallel-size 4 \
+      --gpu-memory-utilization 0.95 \
+      --disable-log-requests \
+      --port 8002 1> vllm_1.log 2>&1 &
+    ```
+
+> [!Tip]
+> Check the `vllm_0.log` and `vllm_1.log` to make sure the service is fully started before collecting performance numbers.
+>
+> If benchmarking with two or more nodes, `--tensor-parallel-size 8` should be used and only run one `vllm serve` instance per node.
+
+ 3. Use NGINX as load balancer
+
+    ```bash
+    apt update && apt install -y nginx
+    cp /workspace/benchmarks/llm/nginx.conf /etc/nginx/nginx.conf
+    service nginx restart
+    ```
+
+> [!Note]
+> If benchmarking over 2 nodes, the `upstream` configuration will need to be updated to link to the `vllm serve` on the second node.
+
+ 4. Collect the performance numbers:
+
+Single-Node
+
+ ```bash
+ bash -x /workspace/benchmarks/llm/perf.sh --mode aggregated --deployment-kind vllm_serve --tensor-parallelism 4 --data-parallelism 2
+ ```
+
+ Two Nodes
+
+ ```bash
+ bash -x /workspace/benchmarks/llm/perf.sh --mode aggregated --deployment-kind vllm_serve --tensor-parallelism 8 --data-parallelism 2
+ ```
+
+ We could also run the benchmarking script and specify the model, input sequence length, output sequence length, and concurrency levels to target for benchmarking:
+
+ ```bash
+ bash -x /workspace/benchmarks/llm/perf.sh \
+  --mode aggregated \
+  --deployment-kind vllm_serve \
+  --tensor-parallelism 1 \
+  --data-parallelism 1 \
+  --model neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
+  --input-sequence-length 3000 \
+  --output-sequence-length 150 \
+  --url http://localhost:8000 \
+  --concurrency 1,2,4,8,16,32,64,128,256
+
+  # The `--concurrency` option accepts either a single value (e.g., 64) or a comma-separated list (e.g., 1,2,4,8) to specify multiple concurrency levels for benchmarking.
+ ```
+
+ > [!Important]
+ > We should be careful in specifying these options in `perf.sh` script. They should closely reflect the deployment config that is being benchmarked. See `perf.sh --help` to learn more about these option. In the above command, we described that our deployment is using aggregated serving in `vllm serve`. We have also accurately described that we have 2 workers with TP=4(or TP=8 for two nodes).
+
+For more information see [Collecting Performance Numbers](#collecting-performance-numbers) section below.
 
 ## Collecting Performance Numbers
 
-Run the benchmarking script
+Currently, there is no consistent way of obtaining the configuration of deployment service. Hence, we need to provide this information to the script in form of command line arguments. The benchmarking script `/workspace/benchmarks/llm/perf.sh` uses GenAI-Perf tool to collect the performance numbers at various different request concurrencies. The perf.sh script can be run multiple times to collect numbers for various different deployments. Each script execution will create a new artifacts directory in `artifacts_root` and dump these numbers in it. See [Plotting Pareto Graphs](#plotting-pareto-graphs) to learn how to convert the data from this `artifacts_root` to generate pareto graphs for the performance.
+
+Note: As each `perf.sh` adds a new artifacts directory in the `artifacts_root` always, proper care should be taken that we are starting experiment with clean `artifacts_root` so we include only results from runs that we want to compare.
+
+> [!Tip]
+> See [GenAI-Perf tutorial](https://github.com/triton-inference-server/perf_analyzer/blob/main/genai-perf/docs/tutorial.md)
+> @ [GitHub](https://github.com/triton-inference-server/perf_analyzer) for additional information about how to run GenAI-Perf
+> and how to interpret results.
+
+
+## Interpreting Results
+
+### Plotting Pareto Graphs
+
+The `artifacts` directory generated by GenAI-Perf contains the raw performance number from the benchmarking.
+
+Using the benchmarking image, install the dependencies for plotting Pareto graph
 ```bash
-bash -x /workspace/examples/llm/benchmarks/perf.sh
+pip3 install matplotlib seaborn
+```
+At the directory where the artifacts are located, plot the Pareto graph
+
+Single-Node:
+
+```bash
+python3 /workspace/benchmarks/llm/plot_pareto.py --artifacts-root-dir artifacts_root
 ```
 
-## Future Roadmap
+Two Nodes:
 
-* Results Interpretation
+```bash
+python3 /workspace/benchmarks/llm/plot_pareto.py --artifacts-root-dir artifacts_root --title "Two Nodes"
+```
+The graph will be saved to the current directory and named `pareto_plot.png`.
+
+### Interpreting Pareto Graphs
+
+The question we want to answer in this comparison is how much Output Token Throughput can be improved by switching from
+aggregated to disaggregated serving when both are performing under similar Inter Token Latency.
+
+For each concurrency benchmarked, it produces a latency and throughput value pair. The x-axis on the Pareto graph is
+latency (tokens/s/user), which the latency is lower if the value is higher. The y-axis on the Pareto graph is throughput
+(tokens/s/gpu). The latency and throughput value pair forms a dot on the Pareto graph. A line (Pareto Frontier) is
+formed when the dots from different concurrency values are plotted on the graph.
+
+With the Pareto Frontiers of the baseline and the disaggregated results plotted on the graph, we can look for the
+greatest increase in throughput (along the y-axis) between the baseline and the disaggregated result Pareto Frontier,
+over different latencies (along the x-axis).
+
+For example, at 45 tokens/s/user, the increase in tokens/s/gpu is `145 - 80 = 65`, from the orange baseline to the
+blue disaggregated line, so the improvement is around 1.44x speed up:
+![Example Pareto Plot](./example_plots/single_node_pareto_plot.png)
+Note: The above example was collected over a single benchmarking run, the actual number may vary between runs, configurations and hardware.
+
+## Supporting Additional Models
+
+The instructions above can be used for nearly any model desired.
+More complex setup instructions might be required for certain models.
+The above instruction regarding ETCD, NATS, nginx, dynamo-serve, and GenAI-Perf still apply and can be reused.
+The specifics of deploying with different hardware, in a unique environment, or using another model framework can be adapted using the links below.
+
+Regardless of the deployment mechanism, the GenAI-Perf tool will report the same metrics and measurements so long as an accessible endpoint is available for it to interact with. Use the provided [perf.sh](../../../benchmarks/llm/perf.sh) script to automate the measurement of model throughput and latency against multiple request concurrences.
+
+### Deployment Examples
+
+- [Dynamo Multinode Deployments](../../../docs/examples/multinode.md)
+- [Dynamo TensorRT LLM Deployments](../../../docs/examples/trtllm.md)
+    - [Aggregated Deployment of Very Large Models](../../../docs/examples/multinode.md#aggregated-deployment)
+- [Dynamo vLLM Deployments](../../../docs/examples/llm_deployment.md)
+
+
+## Monitor Benchmark Startup Status
+
+When running dynamo deployment, you may have multiple instances of the same worker kind for a particular benchmark run.
+The deployment can process the workflow as long as at least one worker is ready, in the case where the benchmark is run
+as soon as dynamo is responsive to inference request, which may result in inaccurate benchmark result at the beginning of
+the benchmark. In such a case, you may additionally deploy benchmark watcher to provide signal on whether the full deployment
+is ready. For instance, if you expect the total number of prefill and decode workers to be 10, you can run the below to start
+the watcher, which will exit if the total number is less than 10 after timeout. In addition to that, the watcher will create
+a HTTP server on port 7001 by default, which you can use to send GET request for readiness to build external benchmarking workflow.
+
+```bash
+# start your benchmark deployment
+...
+
+# start monitor separately, or it can be part of the deployment above
+dynamo serve --service-name Watcher benchmark_watcher:Watcher --Watcher.total-workers=10 --Watcher.timeout=10
+
+# Send curl request to check liveness
+curl localhost:7001
+127.0.0.1 - - [12/Jun/2025 23:31:52] "GET / HTTP/1.1" 400 -
+...
+curl localhost:7001
+127.0.0.1 - - [12/Jun/2025 23:32:46] "GET / HTTP/1.1" 200 -
+```
+
+## Utility for Setting Up Environment
+
+### vLLM
+- `vllm_multinode_setup.sh` is a helper script to configure the node for dynamo deployment for
+vLLM. Depending on whether environment variable `HEAD_NODE_IP` and `RAY_LEADER_NODE_IP` are set
+when the script is invoked, it will:
+  - start nats server and etcd on the current node if `HEAD_NODE_IP` is not set, otherwise
+  set the environment variables as expected by dynamo.
+  - run Ray and connect to the Ray cluster started by `RAY_LEADER_NODE_IP`, otherwise start
+  the Ray cluster with current node as the head node.
+  - print the command with `HEAD_NODE_IP` and `RAY_LEADER_NODE_IP` set, which can be used in
+  another node to setup connectivity with the current node.
+
+  ```bash
+  # On node 0
+  source vllm_multinode_setup.sh
+  ... # starting nats server, etcd and ray cluster
+
+  # script print command
+  HEAD_NODE_IP=NODE_0_IP RAY_LEADER_NODE_IP=NODE_0_IP source vllm_multinode_setup.sh
+
+  # On node 1
+  HEAD_NODE_IP=NODE_0_IP RAY_LEADER_NODE_IP=NODE_0_IP source vllm_multinode_setup.sh
+  ... # connecting to Ray cluster
+  ```
+
+## Metrics and Visualization
+
+For instructions on how to acquire per worker metrics and visualize them using Grafana,
+please see the provided [Visualization with Prometheus and Grafana](../../../deploy/metrics/README.md).

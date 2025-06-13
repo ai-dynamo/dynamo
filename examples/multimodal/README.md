@@ -18,7 +18,18 @@ limitations under the License.
 # Multimodal Deployment Examples
 
 This directory provides example workflows and reference implementations for deploying a multimodal model using Dynamo.
-The examples are based on the [llava-1.5-7b-hf](https://huggingface.co/llava-hf/llava-1.5-7b-hf) model.
+
+## Use the Latest Release
+
+We recommend using the latest stable release of dynamo to avoid breaking changes:
+
+[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
+
+You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
+
+```bash
+git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
+```
 
 ## Multimodal Aggregated Serving
 
@@ -47,11 +58,15 @@ flowchart LR
   decode_worker --image_url--> encode_worker
   encode_worker --embeddings--> decode_worker
 ```
-```
 
 ```bash
 cd $DYNAMO_HOME/examples/multimodal
-dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
+# Serve a LLaVA 1.5 7B model:
+dynamo serve graphs.agg:Frontend -f ./configs/agg-llava.yaml
+# Serve a Qwen2.5-VL model:
+# dynamo serve graphs.agg:Frontend -f ./configs/agg-qwen.yaml
+# Serve a Phi3V model:
+# dynamo serve graphs.agg:Frontend -f ./configs/agg-phi3v.yaml
 ```
 
 ### Client
@@ -80,9 +95,12 @@ curl http://localhost:8000/v1/chat/completions \
         }
       ],
       "max_tokens": 300,
+      "temperature": 0.0,
       "stream": false
     }'
 ```
+
+If serving the example Qwen model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"Qwen/Qwen2.5-VL-7B-Instruct"`. If serving the example Phi3V model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"microsoft/Phi-3.5-vision-instruct"`.
 
 You should see a response similar to this:
 ```json
@@ -150,6 +168,7 @@ curl http://localhost:8000/v1/chat/completions \
         }
       ],
       "max_tokens": 300,
+      "temperature": 0.0,
       "stream": false
     }'
 ```
@@ -158,6 +177,8 @@ You should see a response similar to this:
 ```json
 {"id": "c1774d61-3299-4aa3-bea1-a0af6c055ba8", "object": "chat.completion", "created": 1747725645, "model": "llava-hf/llava-1.5-7b-hf", "choices": [{"index": 0, "message": {"role": "assistant", "content": " This image shows a passenger bus traveling down the road near power lines and trees. The bus displays a sign that says \"OUT OF SERVICE\" on its front."}, "finish_reason": "stop"}]}
 ```
+
+***Note***: disaggregation is currently only confirmed to work with LLaVA. Qwen VL and PhiV are not confirmed to be supported.
 
 ## Deployment with Dynamo Operator
 
@@ -194,8 +215,12 @@ DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk
 
 # Deploy to Kubernetes
 export DEPLOYMENT_NAME=multimodal-agg
-# For aggregated serving:
-dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
+# For aggregated serving with LLaVA:
+dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg-llava.yaml
+# For aggregated serving with Qwen2.5-VL:
+# dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg-qwen.yaml
+# For aggregated serving with Phi3V:
+# dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg-phi3v.yaml
 # For disaggregated serving:
 # export DEPLOYMENT_NAME=multimodal-disagg
 # dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/disagg.yaml
@@ -232,8 +257,11 @@ curl localhost:8000/v1/chat/completions \
       }
     ],
     "max_tokens": 300,
+    "temperature": 0.0,
     "stream": false
   }'
 ```
+
+If serving the example Qwen model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"Qwen/Qwen2.5-VL-7B-Instruct"`. If serving the example Phi3V model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"microsoft/Phi-3.5-vision-instruct"`.
 
 For more details on managing deployments, testing, and troubleshooting, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md).

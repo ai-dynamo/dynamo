@@ -349,3 +349,190 @@ impl WorkerSelector for DefaultWorkerSelector {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Helper to create a worker endpoint
+    fn create_endpoint(
+        worker_id: i64,
+        gpu_cache_usage_perc: f32,
+        num_requests_waiting: u64,
+    ) -> Endpoint {
+        Endpoint {
+            name: format!("worker-{}", worker_id),
+            subject: format!("worker-subject-{:x}", worker_id),
+            data: ForwardPassMetrics {
+                gpu_cache_usage_perc,
+                num_requests_waiting,
+                // Other fields can be default initialized for this test
+                ..Default::default()
+            },
+        }
+    }
+
+    // Helper to create ProcessedEndpoints
+    struct WorkerInfo {
+        id: i64,
+        usage: f32,
+        waiting: u64,
+    }
+    fn create_workers(workers: Vec<WorkerInfo>) -> ProcessedEndpoints {
+        let mut endpoints = HashMap::new();
+        for worker in workers {
+            endpoints.insert(
+                worker.id,
+                create_endpoint(worker.id, worker.usage, worker.waiting),
+            );
+        }
+        ProcessedEndpoints {
+            endpoints,
+            load_avg: 0.0,
+            load_std: 0.0,
+        }
+    }
+
+    // Helper to create a scheduling request
+    struct WorkerOverlap {
+        worker_id: i64,
+        overlap_blocks: u32,
+    }
+    fn create_request(overlaps: Vec<WorkerOverlap>, isl_tokens: usize) -> SchedulingRequest {
+        SchedulingRequest {
+            isl_tokens,
+            overlap: OverlapScores {
+                scores: overlaps
+                    .into_iter()
+                    .map(|wo| (wo.worker_id, wo.overlap_blocks))
+                    .collect(),
+                frequencies: vec![],
+            },
+            resp_tx: tokio::sync::oneshot::channel().0,
+        }
+    }
+
+    #[test]
+    fn test_select_worker_basic() {
+        // Setup workers
+        let workers = create_workers(vec![
+            WorkerInfo {
+                id: 1,
+                usage: 0.50,
+                waiting: 1,
+            },
+            WorkerInfo {
+                id: 2,
+                usage: 0.80,
+                waiting: 0,
+            },
+        ]);
+
+        // Setup request: 100 tokens, block_size=20 (5 blocks)
+        let request = create_request(
+            vec![
+                WorkerOverlap {
+                    worker_id: 1,
+                    overlap_blocks: 3,
+                },
+                WorkerOverlap {
+                    worker_id: 2,
+                    overlap_blocks: 4,
+                },
+            ],
+            100,
+        );
+        let selector = DefaultWorkerSelector::new(None);
+        let block_size = 20;
+
+        // Execute selection
+        let result = selector
+            .select_worker(&workers, &request, block_size)
+            .expect("Should select a worker");
+        // Worker 2 should win because:
+        // Worker1: 2.0 * 0.600 - 1.0 * 0.500 - 1.0 * 1.000 = -0.3
+        // Worker2: 2.0 * 0.800 - 1.0 * 0.800 - 1.0 * 0.000 = 0.8
+        assert_eq!(result.worker_id, 2);
+        assert_eq!(result.required_blocks, 5); // 100 tokens / 20 block_size
+        assert_eq!(result.overlap_blocks, 4);
+    }
+
+    #[test]
+    fn test_no_endpoints() {
+        let workers = create_workers(vec![]);
+        let request = create_request(vec![], 100);
+        let selector = DefaultWorkerSelector::new(None);
+        let block_size = 20;
+
+        match selector.select_worker(&workers, &request, block_size) {
+            Err(KvSchedulerError::NoEndpoints) => {} // Expected
+            _ => panic!("Should return NoEndpoints error"),
+        }
+    }
+
+    #[test]
+    fn test_no_overlap_scores() {
+        // Workers exist but request has no overlap scores
+        let workers = create_workers(vec![WorkerInfo {
+            id: 1,
+            usage: 0.50,
+            waiting: 1,
+        }]);
+        let request = create_request(vec![], 100); // No overlaps
+        let selector = DefaultWorkerSelector::new(None);
+        let block_size = 20;
+
+        let result = selector
+            .select_worker(&workers, &request, block_size)
+            .expect("Should fallback to selecting worker");
+
+        // Worker1 should be selected with 0 overlap
+        assert_eq!(result.worker_id, 1);
+        assert_eq!(result.overlap_blocks, 0);
+    }
+
+    #[test]
+    fn test_custom_weights() {
+        // Setup workers
+        let workers = create_workers(vec![
+            WorkerInfo {
+                id: 1,
+                usage: 0.50,
+                waiting: 1,
+            },
+            WorkerInfo {
+                id: 2,
+                usage: 0.80,
+                waiting: 0,
+            },
+        ]);
+
+        // Custom config with high priority on GPU usage
+        let config = KvRouterConfig {
+            gpu_cache_usage_weight: 10.0, // Very high weight
+            overlap_score_weight: 2.0,    // just current defaults
+            waiting_requests_weight: 1.0,
+        };
+        let selector = DefaultWorkerSelector::new(Some(config));
+        let request = create_request(
+            vec![
+                WorkerOverlap {
+                    worker_id: 1,
+                    overlap_blocks: 3,
+                },
+                WorkerOverlap {
+                    worker_id: 2,
+                    overlap_blocks: 4,
+                },
+            ],
+            100,
+        );
+        let block_size = 20;
+
+        let result = selector
+            .select_worker(&workers, &request, block_size)
+            .expect("Should select worker");
+
+        assert_eq!(result.worker_id, 1);
+    }
+}

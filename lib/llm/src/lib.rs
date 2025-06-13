@@ -18,7 +18,7 @@ pub mod engines;
 pub mod gguf;
 pub mod http;
 pub mod hub;
-pub mod key_value_store;
+// pub mod key_value_store;
 pub mod kv_router;
 pub mod local_model;
 pub mod mocker;
