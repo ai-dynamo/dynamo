@@ -20,10 +20,10 @@ NUM_GPUS_TOTAL=16
 # Automate settings of certain variables for convenience, but you are free
 # to manually set these for more control as well.
 ACCOUNT="$(sacctmgr -nP show assoc where user=$(whoami) format=account)"
-HEAD_NODE="${SLURMD_NODENAME}"
-HEAD_NODE_IP="$(hostname -i)"
-ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
-NATS_SERVER="${HEAD_NODE_IP}:4222"
+export HEAD_NODE="${SLURMD_NODENAME}"
+export HEAD_NODE_IP="$(hostname -i)"
+export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
+export NATS_SERVER="${HEAD_NODE_IP}:4222"
 
 if [[ -z ${IMAGE} ]]; then
   echo "ERROR: You need to set the IMAGE environment variable to the " \
