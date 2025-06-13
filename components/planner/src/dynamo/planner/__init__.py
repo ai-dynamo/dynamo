@@ -18,7 +18,8 @@ __all__ = [
     "LocalConnector",
     "PlannerConnector",
     "KubernetesConnector",
-    "PlannerDefaults",
+    "LoadPlannerDefaults",
+    "SLAPlannerDefaults",
 ]
 
 # Import the classes
