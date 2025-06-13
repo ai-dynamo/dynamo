@@ -393,7 +393,7 @@ when the script is invoked, it will:
 For instructions on how to acquire per worker metrics and visualize them using Grafana,
 please see the provided [Visualization with Prometheus and Grafana](../../../deploy/metrics/README.md).
 
-## Trouble Shooting
+## Troubleshooting
 
 When benchmarking disaggregation performance, there can be cases where the latency and
 throughput number don't match the expectation within some margin. Below is a list of scenarios
@@ -415,20 +415,20 @@ reveal whether the desired transport is being used.
 
 ### The Full Deployment is Configured Correctly
 
-As the benchmarking often focuses on configuration where multiple workers are being used,
-one may mistakenly consider a deployment is ready for benchmark while there are only a
-subset of workers are taking requests. For example, in the aggregated baseline benchmarking,
+As benchmarking often focuses on configurations where multiple workers are being used,
+one may mistakenly consider a deployment ready for benchmarking while there are only a
+subset of workers taking requests. For example, in the aggregated baseline benchmarking,
 a user can miss updating the ip address to the other node in upstream section of `nginx.conf`.
-This could lead to only one of the node to serve request. In such a case,
+This could lead to only one of the nodes serving requests. In such a case,
 the benchmark can still run to completion, but the result will not reflect the deployment
 capacity, because not all the compute resources are being utilized.
 
 Therefore, it is important to verify that the requests can be routed to all workers before
 performing the benchmark:
 - **Framework-only benchmark** The simplest way is to send sample requests and check
-the logs of all workers. The framework may provides utilities for readiness check and please
-refer to their documentation for detail.
+the logs of all workers. Each framework may provide utilities for readiness checks, so please
+refer to the framework's documentation for those details.
 - **Dynamo based benchmark** Once you start the deployment, you can follow
-the instruction in [monitor benchmark startup status](#Monitor-Benchmark-Startup-Status),
-which will periodically pull the workers exposed to specific endpoints
+the instructions in [monitor benchmark startup status](#Monitor-Benchmark-Startup-Status),
+which will periodically poll the workers exposed to specific endpoints
 and return HTTP 200 code when the expected number of workers are met.
