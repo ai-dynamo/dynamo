@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+SPDX-License-Identifier: Apache-2.0
+-->
+
 # Example: Multi-node TRTLLM Workers with Dynamo on Slurm
 
 To run a single Dynamo+TRTLLM Worker that spans multiple nodes (ex: TP16),
