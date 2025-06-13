@@ -110,6 +110,33 @@ cd examples/vllm_v1
 dynamo serve components.worker:VllmPrefillWorker -f configs/deepseek_r1/disagg.yaml
 ```
 
+### Data Parallelism Deployment
+
+Additional configuration steps will be required for enabling DP for DSR1 model,
+as it typically requires setting up the DP groups across nodes.
+`configs/deepseek_r1/agg_dp.yaml` and `configs/deepseek_r1/disagg_dp.yaml` will be
+the replacement for aggregated deployment and disaggregated deployment.
+The below demonstration will use deployment of a single worker as an example,
+the reader should apply the same to any `dynamo serve` command that will create
+a worker.
+
+To create a single decode worker, take note of the IP address, referred as <head-ip> below, of the node, and:
+```bash
+cd examples/vllm_v1
+dynamo serve components.worker:VllmDecodeWorker -f configs/deepseek_r1/disagg_dp.yaml --VllmDecodeWorker.data_parallel_address=<head-ip>
+```
+
+The above command will create 1 of the 2 DP groups and the worker will be consdiered
+the head of the DP groups. Next we need to create a `VllmDpWorker` to create the rest of the DP groups, one for each group.
+
+```bash
+cd examples/vllm_v1
+# 'data_parallel_start_rank' == `dp_group_index * data_parallel_size_local`
+dynamo serve components.worker:VllmDpWorker -f configs/deepseek_r1/disagg_dp.yaml --VllmDpWorker.data_parallel_address=<head-ip> --VllmDpWorker.data_parallel_start_rank=8
+
+# repeat above until all DP groups are created
+```
+
 ## Testing
 
 Send a test request using curl:

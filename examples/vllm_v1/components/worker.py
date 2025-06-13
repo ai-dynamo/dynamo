@@ -27,6 +27,13 @@ from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
 )
 
+# Additional vLLM imports for DP worker
+from vllm.usage.usage_lib import UsageContext
+from vllm.utils import get_tcp_uri
+from vllm.v1.engine.core import EngineCoreProc
+from vllm.v1.engine.core_client import CoreEngineProcManager
+from vllm.v1.executor.abstract import Executor
+
 from dynamo.sdk import async_on_start, endpoint, service
 
 logger = logging.getLogger(__name__)
@@ -132,3 +139,48 @@ class VllmDecodeWorker(VllmBaseWorker):
     async def async_init(self):
         await super().async_init()
         logger.info("VllmDecodeWorker has been initialized")
+
+
+@service(
+    dynamo={
+        "enabled": True,
+        "namespace": "dynamo",
+    },
+    resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
+    workers=1,
+)
+class VllmDpWorker(VllmBaseWorker):
+    @async_on_start
+    async def async_init(self):
+        vllm_config = self.engine_args.create_engine_config(
+            usage_context=UsageContext.OPENAI_API_SERVER
+        )
+
+        parallel_config = vllm_config.parallel_config
+        local_engine_count = parallel_config.data_parallel_size_local
+        host = parallel_config.data_parallel_master_ip
+        port = self.engine_args.data_parallel_rpc_port  # add to config too
+        handshake_address = get_tcp_uri(host, port)
+
+        self.engine_manager = CoreEngineProcManager(
+            target_fn=EngineCoreProc.run_engine_core,
+            local_engine_count=local_engine_count,
+            start_index=self.engine_args.data_parallel_start_rank,
+            local_start_index=0,
+            vllm_config=vllm_config,
+            on_head_node=False,
+            handshake_address=handshake_address,
+            executor_class=Executor.get_class(vllm_config),
+            log_stats=not self.engine_args.disable_log_stats,
+        )
+
+    def shutdown_vllm_engine(self, signum, frame):
+        """Shutdown the engine manager"""
+        try:
+            self.engine_manager.join_first()
+        finally:
+            logger.info("Shutting down.")
+            self.engine_manager.close()
+
+    # [gluo FIXME] should DpWorker override set_side_channel_host_and_port()?
+    # How does PD disaggregated being done for attention DP
