@@ -58,9 +58,9 @@ jobs:
           path: dynamo-docs
           retention-days: 15
 
-  # Deploy to dynamo.github.io repository
+  # Deploy to dynamo-docs repository
   deploy:
-    name: Deploy to dynamo.github.io
+    name: Deploy to private documentation repository
     needs: build-docs
     runs-on: ubuntu-latest
     
