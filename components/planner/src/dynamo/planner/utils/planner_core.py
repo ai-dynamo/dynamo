@@ -19,12 +19,14 @@ import logging
 import math
 import time
 
-from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
-from dynamo.planner.utils.perf_interpolation import DecodeInterpolator, PrefillInterpolator
-from dynamo.planner.utils.prometheus import PrometheusAPIClient
-
 from dynamo.planner import KubernetesConnector, LocalConnector
 from dynamo.planner.defaults import PlannerDefaults
+from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
+from dynamo.planner.utils.perf_interpolation import (
+    DecodeInterpolator,
+    PrefillInterpolator,
+)
+from dynamo.planner.utils.prometheus import PrometheusAPIClient
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -282,6 +284,7 @@ class Planner:
                 self.observe_metrics()
                 await self.make_adjustments()
 
+            # sleep for a while to avoid busy-waiting but not too long to miss the next adjustment
             await asyncio.sleep(self.args.adjustment_interval / 10)
 
 

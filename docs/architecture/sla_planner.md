@@ -28,7 +28,7 @@ The SLA planner consists of several key components:
 Before using the SLA planner, you must profile the performance of the selected model and GPU to generate interpolation data:
 
 ```bash
-cd $DYNAMO_HOME/components/planner/src/dynamo/planner/
+cd $DYNAMO_HOME/benchmarks/profiler/
 python -m utils.profile_sla \
   --config <path-to-dynamo-config-file> \
   --output-dir <path-to-profile-results-dir> \
@@ -142,5 +142,5 @@ SLA-planner and prometheus server are provided as common components that can be 
 A `vllm_v0` example is available for reference:
 ```bash
 cd $DYNAMO_HOME/examples/vllm_v0
-dynamo serve graphs.disagg_planner:Frontend -f ./configs/disagg_planner.yaml 
+dynamo serve graphs.disagg_planner:Frontend -f ./configs/disagg_planner.yaml
 ```

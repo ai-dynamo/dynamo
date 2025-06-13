@@ -46,7 +46,9 @@ class Prometheus:
     def start_prometheus_server(self):
         logger.info("Starting prometheus server...")
 
-        self.temp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False)
+        self.temp_file = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".yml", delete=False
+        )
         yaml.dump(self.config, self.temp_file)
         self.temp_file.close()
         config_path = self.temp_file.name

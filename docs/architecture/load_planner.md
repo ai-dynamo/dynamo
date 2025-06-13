@@ -26,7 +26,7 @@ To ensure dynamo serve complies with the SLA, we provide a pre-deployment script
 We assume there is no piggy-backed prefill requests in the decode engine. Even if there are some short piggy-backed prefill requests in the decode engine, it should not affect the ITL too much in most conditions. However, if the piggy-backed prefill requests are too much, the ITL might be inaccurate.
 
 ```bash
-cd $DYNAMO_HOME/components/planner/src/dynamo/planner/
+cd $DYNAMO_HOME/benchmarks/profiler/
 python -m utils.profile_sla \
   --config <path-to-dynamo-config-file> \
   --output-dir <path-to-profile-results-dir> \

@@ -47,7 +47,7 @@ PrefillWorker:
 
 Prometheus:
   global:
-    scrape_interval: 5s 
+    scrape_interval: 5s
   scrape_configs:
     - job_name: 'prometheus'
       static_configs:
@@ -64,4 +64,3 @@ Planner:
   ttft: 0.5
   itl: 0.05
   load-predictor: "arima"
-  

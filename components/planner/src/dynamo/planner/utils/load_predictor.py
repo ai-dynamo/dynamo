@@ -16,6 +16,7 @@
 import logging
 import math
 import warnings
+from abc import ABC, abstractmethod
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -32,28 +33,12 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 
 
-class ConstantPredictor:
-    """
-    Assume load is constant and predict the next load to be the same as most recent load
-    """
+class BasePredictor(ABC):
+    """Base class for all load predictors"""
 
-    def __init__(self, **kwargs):
-        self.prev_load = None
-
-    def add_data_point(self, value):
-        if not math.isnan(value):
-            self.prev_load = value
-
-    def predict_next(self):
-        return self.prev_load
-
-
-class ARIMAPredictor:
-    def __init__(self, window_size=100, minimum_data_points=5):
-        self.window_size = window_size  # How many past points to use
-        self.model = None
-        self.data_buffer = []
+    def __init__(self, minimum_data_points=5):
         self.minimum_data_points = minimum_data_points
+        self.data_buffer = []
 
     def add_data_point(self, value):
         """Add new data point to the buffer"""
@@ -62,6 +47,38 @@ class ARIMAPredictor:
         else:
             self.data_buffer.append(0)
 
+    def get_last_value(self):
+        """Get the last value from the buffer"""
+        if not self.data_buffer:
+            return 0
+        return self.data_buffer[-1]
+
+    @abstractmethod
+    def predict_next(self):
+        """Predict the next value"""
+        pass
+
+
+class ConstantPredictor(BasePredictor):
+    """
+    Assume load is constant and predict the next load to be the same as most recent load
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(minimum_data_points=1)
+
+    def predict_next(self):
+        return self.get_last_value()
+
+
+class ARIMAPredictor(BasePredictor):
+    def __init__(self, window_size=100, minimum_data_points=5):
+        super().__init__(minimum_data_points=minimum_data_points)
+        self.window_size = window_size  # How many past points to use
+        self.model = None
+
+    def add_data_point(self, value):
+        super().add_data_point(value)
         # Keep only the last window_size points
         if len(self.data_buffer) > self.window_size:
             self.data_buffer = self.data_buffer[-self.window_size :]
@@ -69,8 +86,7 @@ class ARIMAPredictor:
     def predict_next(self):
         """Predict the next value(s)"""
         if len(self.data_buffer) < self.minimum_data_points:
-            # not enough data to make a prediction, simply return the last value
-            return self.data_buffer[-1]
+            return self.get_last_value()
 
         # Fit auto ARIMA model
         self.model = pmdarima.auto_arima(
@@ -81,18 +97,17 @@ class ARIMAPredictor:
 
         # Make prediction
         forecast = self.model.predict(n_periods=1)
-
         return forecast[0]
 
 
-class ProphetPredictor:
+class ProphetPredictor(BasePredictor):
     def __init__(self, window_size=100, step_size=3600, minimum_data_points=5):
+        super().__init__(minimum_data_points=minimum_data_points)
         self.window_size = window_size
-        self.data_buffer = []
-        self.minimum_data_points = minimum_data_points
         self.curr_step = 0
         self.step_size = step_size
         self.start_date = datetime(2024, 1, 1)  # Base date for generating timestamps
+        self.data_buffer = []  # Override to store dicts instead of values
 
     def add_data_point(self, value):
         """Add new data point to the buffer"""
@@ -106,11 +121,16 @@ class ProphetPredictor:
         if len(self.data_buffer) > self.window_size:
             self.data_buffer = self.data_buffer[-self.window_size :]
 
+    def get_last_value(self):
+        """Get the last value from the buffer"""
+        if not self.data_buffer:
+            return 0
+        return self.data_buffer[-1]["y"]
+
     def predict_next(self):
         """Predict the next value"""
         if len(self.data_buffer) < self.minimum_data_points:
-            # not enough data to make a prediction, simply return the last value
-            return self.data_buffer[-1]["y"]
+            return self.get_last_value()
 
         # Convert to DataFrame
         df = pd.DataFrame(self.data_buffer)
@@ -127,7 +147,6 @@ class ProphetPredictor:
 
         # Make prediction
         forecast = model.predict(future_df)
-
         return forecast["yhat"].iloc[0]
 
 

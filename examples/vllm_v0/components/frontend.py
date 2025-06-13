@@ -22,13 +22,11 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from dynamo import sdk
+from dynamo.planner.planner_sla import Planner
+from dynamo.planner.prometheus import Prometheus
 from dynamo.sdk import depends, service
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
-
-from dynamo.planner.planner_sla import Planner
-from dynamo.planner.prometheus import Prometheus
-
 
 logger = logging.getLogger(__name__)
 
