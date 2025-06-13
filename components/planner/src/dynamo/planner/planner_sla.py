@@ -14,11 +14,12 @@
 # limitations under the License.
 
 import argparse
+import asyncio
 import logging
 
 from pydantic import BaseModel
 
-from dynamo.planner.defaults import PlannerDefaults
+from dynamo.planner.defaults import SLAPlannerDefaults
 from dynamo.planner.utils.planner_core import start_sla_planner
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sdk import async_on_start, dynamo_context, endpoint, service
@@ -27,6 +28,10 @@ from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
 
 logger = logging.getLogger(__name__)
+
+# start planner 30 seconds after the other components to make sure planner can see them
+# TODO: remove this delay
+INIT_PLANNER_START_DELAY = 30
 
 
 class RequestType(BaseModel):
@@ -56,50 +61,50 @@ class Planner:
 
         self.args = argparse.Namespace(
             namespace=self.namespace,
-            environment=config_instance.get("environment", PlannerDefaults.environment),
-            no_operation=config_instance.get(
-                "no-operation", PlannerDefaults.no_operation
+            environment=config_instance.get(
+                "environment", SLAPlannerDefaults.environment
             ),
-            log_dir=config_instance.get("log-dir", PlannerDefaults.log_dir),
+            no_operation=config_instance.get(
+                "no-operation", SLAPlannerDefaults.no_operation
+            ),
+            log_dir=config_instance.get("log-dir", SLAPlannerDefaults.log_dir),
             adjustment_interval=config_instance.get(
-                "adjustment-interval", PlannerDefaults.adjustment_interval
+                "adjustment-interval", SLAPlannerDefaults.adjustment_interval
             ),
             max_gpu_budget=config_instance.get(
-                "max-gpu-budget", PlannerDefaults.max_gpu_budget
+                "max-gpu-budget", SLAPlannerDefaults.max_gpu_budget
             ),
             min_endpoint=config_instance.get(
-                "min-endpoint", PlannerDefaults.min_endpoint
+                "min-endpoint", SLAPlannerDefaults.min_endpoint
             ),
             decode_engine_num_gpu=config_instance.get(
-                "decode-engine-num-gpu", PlannerDefaults.decode_engine_num_gpu
+                "decode-engine-num-gpu", SLAPlannerDefaults.decode_engine_num_gpu
             ),
             prefill_engine_num_gpu=config_instance.get(
-                "prefill-engine-num-gpu", PlannerDefaults.prefill_engine_num_gpu
+                "prefill-engine-num-gpu", SLAPlannerDefaults.prefill_engine_num_gpu
             ),
             prometheus_endpoint=config_instance.get(
-                "prometheus-endpoint", PlannerDefaults.prometheus_endpoint
+                "prometheus-endpoint", SLAPlannerDefaults.prometheus_endpoint
             ),
             profile_results_dir=config_instance.get(
-                "profile-results-dir", PlannerDefaults.profile_results_dir
+                "profile-results-dir", SLAPlannerDefaults.profile_results_dir
             ),
-            isl=config_instance.get("isl", PlannerDefaults.isl),
-            osl=config_instance.get("osl", PlannerDefaults.osl),
-            ttft=config_instance.get("ttft", PlannerDefaults.ttft),
-            itl=config_instance.get("itl", PlannerDefaults.itl),
+            isl=config_instance.get("isl", SLAPlannerDefaults.isl),
+            osl=config_instance.get("osl", SLAPlannerDefaults.osl),
+            ttft=config_instance.get("ttft", SLAPlannerDefaults.ttft),
+            itl=config_instance.get("itl", SLAPlannerDefaults.itl),
             load_predictor=config_instance.get(
-                "load-predictor", PlannerDefaults.load_predictor
+                "load-predictor", SLAPlannerDefaults.load_predictor
             ),
             load_prediction_window_size=config_instance.get(
                 "load-prediction-window-size",
-                PlannerDefaults.load_prediction_window_size,
+                SLAPlannerDefaults.load_prediction_window_size,
             ),
         )
 
     @async_on_start
     async def async_init(self):
-        import asyncio
-
-        await asyncio.sleep(30)
+        await asyncio.sleep(INIT_PLANNER_START_DELAY)
         logger.info("Calling start_planner")
         await start_sla_planner(self.runtime, self.args)
         logger.info("Planner started")

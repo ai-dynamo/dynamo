@@ -15,7 +15,7 @@
 
 
 # Source of truth for planner defaults
-class PlannerDefaults:
+class BasePlannerDefaults:
     namespace = "dynamo"
     environment = "local"
     no_operation = False
@@ -26,14 +26,16 @@ class PlannerDefaults:
     decode_engine_num_gpu = 1
     prefill_engine_num_gpu = 1
 
-    # load-planner
+
+class LoadPlannerDefaults(BasePlannerDefaults):
     metric_pulling_interval = 10  # in seconds
     decode_kv_scale_up_threshold = 0.9
     decode_kv_scale_down_threshold = 0.5
     prefill_queue_scale_up_threshold = 5.0
     prefill_queue_scale_down_threshold = 0.2
 
-    # sla-planner
+
+class SLAPlannerDefaults(BasePlannerDefaults):
     prometheus_endpoint = "http://localhost:9090"
     profile_results_dir = "profiling_results"
     isl = 3000  # in number of tokens

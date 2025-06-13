@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from dynamo.planner import KubernetesConnector, LocalConnector
-from dynamo.planner.defaults import PlannerDefaults
+from dynamo.planner.defaults import SLAPlannerDefaults
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
 from dynamo.planner.utils.perf_interpolation import (
     DecodeInterpolator,
@@ -35,6 +35,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+
 @dataclass
 class Metrics:
     ttft: Optional[float] = None
@@ -45,6 +46,7 @@ class Metrics:
     request_duration: Optional[float] = None
     p_load: Optional[float] = None
     d_load: Optional[float] = None
+
 
 class Planner:
     def __init__(self, runtime: DistributedRuntime, args: argparse.Namespace):
@@ -135,17 +137,23 @@ class Planner:
                 f"{self.args.adjustment_interval}s"
             )
         )
-        self.last_metrics.isl = self.prometheus_api_client.get_avg_input_sequence_tokens(
-            f"{self.args.adjustment_interval}s"
+        self.last_metrics.isl = (
+            self.prometheus_api_client.get_avg_input_sequence_tokens(
+                f"{self.args.adjustment_interval}s"
+            )
         )
-        self.last_metrics.osl = self.prometheus_api_client.get_avg_output_sequence_tokens(
-            f"{self.args.adjustment_interval}s"
+        self.last_metrics.osl = (
+            self.prometheus_api_client.get_avg_output_sequence_tokens(
+                f"{self.args.adjustment_interval}s"
+            )
         )
 
         logger.info(
             f"Observed num_req: {self.last_metrics.num_req:.2f} isl: {self.last_metrics.isl:.2f} osl: {self.last_metrics.osl:.2f}"
         )
-        logger.info(f"Observed ttft: {self.last_metrics.ttft:.3f}s itl: {self.last_metrics.itl:.3f}s")
+        logger.info(
+            f"Observed ttft: {self.last_metrics.ttft:.3f}s itl: {self.last_metrics.itl:.3f}s"
+        )
 
         self.num_req_predictor.add_data_point(self.last_metrics.num_req)
         self.isl_predictor.add_data_point(self.last_metrics.isl)
@@ -160,7 +168,9 @@ class Planner:
 
             # first correct the prediction correction factor
             # for TTFT, we expect the correction factor to be << 1 due to queuing delay
-            expect_ttft = self.prefill_interpolator.interpolate_ttft(self.last_metrics.isl)
+            expect_ttft = self.prefill_interpolator.interpolate_ttft(
+                self.last_metrics.isl
+            )
             self.p_correction_factor = self.last_metrics.ttft / expect_ttft
             # for ITL, we expect the correction factor to be close to 1
             expect_itl = self.decode_interpolator.interpolate_itl(
@@ -304,104 +314,104 @@ if __name__ == "__main__":
     parser.add_argument(
         "--namespace",
         type=str,
-        default=PlannerDefaults.namespace,
+        default=SLAPlannerDefaults.namespace,
         help="Namespace planner will look at",
     )
     parser.add_argument(
         "--environment",
         type=str,
-        default=PlannerDefaults.environment,
+        default=SLAPlannerDefaults.environment,
         help="Environment to run the planner in (local, kubernetes)",
     )
     parser.add_argument(
         "--no-operation",
         action="store_true",
-        default=PlannerDefaults.no_operation,
+        default=SLAPlannerDefaults.no_operation,
         help="Do not make any adjustments, just observe the metrics",
     )
     parser.add_argument(
         "--log-dir",
         type=str,
-        default=PlannerDefaults.log_dir,
+        default=SLAPlannerDefaults.log_dir,
         help="Tensorboard logging directory",
     )
     parser.add_argument(
         "--adjustment-interval",
         type=int,
-        default=PlannerDefaults.adjustment_interval,
+        default=SLAPlannerDefaults.adjustment_interval,
         help="Interval in seconds between scaling adjustments",
     )
     parser.add_argument(
         "--max-gpu-budget",
         type=int,
-        default=PlannerDefaults.max_gpu_budget,
+        default=SLAPlannerDefaults.max_gpu_budget,
         help="Maximum number of GPUs to use",
     )
     parser.add_argument(
         "--min-endpoint",
         type=int,
-        default=PlannerDefaults.min_endpoint,
+        default=SLAPlannerDefaults.min_endpoint,
         help="Minimum number of endpoints to keep for prefill/decode workers",
     )
     parser.add_argument(
         "--decode-engine-num-gpu",
         type=int,
-        default=PlannerDefaults.decode_engine_num_gpu,
+        default=SLAPlannerDefaults.decode_engine_num_gpu,
         help="Number of GPUs per decode engine",
     )
     parser.add_argument(
         "--prefill-engine-num-gpu",
         type=int,
-        default=PlannerDefaults.prefill_engine_num_gpu,
+        default=SLAPlannerDefaults.prefill_engine_num_gpu,
         help="Number of GPUs per prefill engine",
     )
     # SLA-planner specific arguments
     parser.add_argument(
         "--prometheus-endpoint",
         type=str,
-        default=PlannerDefaults.prometheus_endpoint,
+        default=SLAPlannerDefaults.prometheus_endpoint,
         help="Prometheus endpoint url",
     )
     parser.add_argument(
         "--profile-results-dir",
         type=str,
-        default=PlannerDefaults.profile_dir,
+        default=SLAPlannerDefaults.profile_dir,
         help="Directory to pre-deployment profiling results",
     )
     parser.add_argument(
         "--isl",
         type=int,
-        default=PlannerDefaults.isl,
+        default=SLAPlannerDefaults.isl,
         help="Input sequence length",
     )
     parser.add_argument(
         "--osl",
         type=int,
-        default=PlannerDefaults.osl,
+        default=SLAPlannerDefaults.osl,
         help="Output sequence length",
     )
     parser.add_argument(
         "--ttft",
         type=float,
-        default=PlannerDefaults.ttft,
+        default=SLAPlannerDefaults.ttft,
         help="Time to first token (in seconds)",
     )
     parser.add_argument(
         "--itl",
         type=float,
-        default=PlannerDefaults.itl,
+        default=SLAPlannerDefaults.itl,
         help="Inter-token latency (in seconds)",
     )
     parser.add_argument(
         "--load-predictor",
         type=str,
-        default=PlannerDefaults.load_predictor,
+        default=SLAPlannerDefaults.load_predictor,
         help="Load predictor to use",
     )
     parser.add_argument(
         "--load-prediction-window-size",
         type=int,
-        default=PlannerDefaults.load_prediction_window_size,
+        default=SLAPlannerDefaults.load_prediction_window_size,
         help="Window size for load prediction",
     )
     args = parser.parse_args()

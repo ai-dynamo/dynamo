@@ -117,17 +117,21 @@ class DecodeInterpolator:
     def compute_idx(self, concurrency: float, context_length: float) -> tuple[int, int]:
         kv_usage = concurrency * context_length / self.max_kv_tokens
         # Calculate x index (kv_usage)
-        ix = int(np.clip(
-            np.round((kv_usage - self.xi[0]) / (self.xi[1] - self.xi[0])),
-            0,
-            self.resolution - 1
-        ))
+        ix = int(
+            np.clip(
+                np.round((kv_usage - self.xi[0]) / (self.xi[1] - self.xi[0])),
+                0,
+                self.resolution - 1,
+            )
+        )
         # Calculate y index (context_length)
-        iy = int(np.clip(
-            np.round((context_length - self.yi[0]) / (self.yi[1] - self.yi[0])),
-            0,
-            self.resolution - 1
-        ))
+        iy = int(
+            np.clip(
+                np.round((context_length - self.yi[0]) / (self.yi[1] - self.yi[0])),
+                0,
+                self.resolution - 1,
+            )
+        )
         return ix, iy
 
     def interpolate_itl(self, concurrency: float, context_length: float) -> float:
