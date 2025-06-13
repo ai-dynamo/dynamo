@@ -63,10 +63,10 @@ jobs:
     name: Deploy to dynamo.github.io
     needs: build-docs
     runs-on: ubuntu-latest
-    
+
     # Only run on pushes to release branches
     if: startsWith(github.ref, 'refs/heads/release')
-    
+
     steps:
       - name: Download documentation artifact
         uses: actions/download-artifact@v4
