@@ -67,11 +67,6 @@ class KvRouter:
 
         self.radix_tree = RadixTree()
 
-        self._load_locks: list[asyncio.Lock] = [
-            asyncio.Lock() for _ in range(num_workers)
-        ]
-        self._radix_lock = asyncio.Lock()
-
         self.kv_usages = [0.0] * num_workers
         self.waitings = [0] * num_workers
 
@@ -106,9 +101,8 @@ class KvRouter:
                 try:
                     metrics_dict = self.load_listeners[worker_id].recv_json(zmq.NOBLOCK)
                     metrics = LoadMetrics.model_validate(metrics_dict)
-                    async with self._load_locks[worker_id]:
-                        self.kv_usages[worker_id] = metrics.gpu_cache_usage
-                        self.waitings[worker_id] = metrics.num_waiting_reqs
+                    self.kv_usages[worker_id] = metrics.gpu_cache_usage
+                    self.waitings[worker_id] = metrics.num_waiting_reqs
                 except zmq.Again:
                     pass
                 except Exception as e:
@@ -130,10 +124,9 @@ class KvRouter:
                     ].get_events()
                     for event in kv_events:
                         event = json.loads(event)
-                        async with self._radix_lock:
-                            self.radix_tree.apply_event(
-                                worker_id, json.dumps(event).encode("utf-8")
-                            )
+                        self.radix_tree.apply_event(
+                            worker_id, json.dumps(event).encode("utf-8")
+                        )
                 except zmq.Again:
                     pass
                 except Exception as e:
@@ -152,8 +145,7 @@ class KvRouter:
                 raise ValueError("num_tokens must be positive")
 
             # local_hashes can be empty
-            async with self._radix_lock:
-                raw_scores = self.radix_tree.find_matches(local_hashes).scores
+            raw_scores = self.radix_tree.find_matches(local_hashes).scores
 
             overlap_scores = {
                 worker_id: raw_scores.get(worker_id, 0) * self.block_size / num_tokens
@@ -188,8 +180,8 @@ class KvRouter:
             # but it is helpful for handling short bursts of highly concurrent requests
             # we omit updating the gpu_usage_perc as done in the rusty router for simplicity
             # as this requires obtaining num_gpu_blocks from the engines and can be intrusive
-            async with self._load_locks[best_worker_id]:
-                self.waitings[best_worker_id] += 1
+            # no need for async lock here, as the state is intended to be continuously overwritten
+            self.waitings[best_worker_id] += 1
 
             return best_worker_id
 
