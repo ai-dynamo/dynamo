@@ -31,10 +31,16 @@ scrape_configs:
   - job_name: 'dcgm-exporter'
     scrape_interval: 5s
     static_configs:
-      - targets: ['dcgm-exporter:9400']  # on the "monitoring" network
+      - targets: ['dcgm-exporter:9401']  # on the "monitoring" network
 
   # Uncomment to see its own Prometheus metrics
   # - job_name: 'prometheus'
   #   scrape_interval: 5s
   #   static_configs:
   #     - targets: ['prometheus:9090']  # on the "monitoring" network
+
+  # Uncomment to see the metrics-aggregation-service metrics
+  # - job_name: 'metrics-aggregation-service'
+  #   scrape_interval: 2s
+  #   static_configs:
+  #     - targets: ['host.docker.internal:9091']  # metrics aggregation service on host
