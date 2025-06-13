@@ -70,7 +70,7 @@ class ConstantPredictor(BasePredictor):
     def predict_next(self):
         return self.get_last_value()
 
-
+# Auto ARIMA model from pmdarima
 class ARIMAPredictor(BasePredictor):
     def __init__(self, window_size=100, minimum_data_points=5):
         super().__init__(minimum_data_points=minimum_data_points)
@@ -99,7 +99,7 @@ class ARIMAPredictor(BasePredictor):
         forecast = self.model.predict(n_periods=1)
         return forecast[0]
 
-
+# Time-series forecasting model from Meta
 class ProphetPredictor(BasePredictor):
     def __init__(self, window_size=100, step_size=3600, minimum_data_points=5):
         super().__init__(minimum_data_points=minimum_data_points)
