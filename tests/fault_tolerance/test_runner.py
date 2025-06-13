@@ -41,7 +41,7 @@ from tests.utils.deployment_graph import (
 text_prompt = "Tell me a short joke about AI."
 
 text_payload = Payload(
-    payload={
+    payload_chat={
         "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         "messages": [
             {
@@ -66,8 +66,8 @@ deployment_graphs = {
             module="graphs.agg:Frontend",
             config="configs/agg.yaml",
             directory="/workspace/examples/llm",
-            endpoint="v1/chat/completions",
-            response_handler=completions_response_handler,
+            endpoints=["v1/chat/completions"],
+            response_handlers=[chat_completions_response_handler],
             marks=[pytest.mark.gpu_1, pytest.mark.vllm],
         ),
         text_payload,
@@ -77,8 +77,8 @@ deployment_graphs = {
             module="graphs.disagg:Frontend",
             config="configs/disagg.yaml",
             directory="/workspace/examples/llm",
-            endpoint="v1/chat/completions",
-            response_handler=completions_response_handler,
+            endpoints=["v1/chat/completions"],
+            response_handlers=[chat_completions_response_handler],
             marks=[pytest.mark.gpu_1, pytest.mark.vllm],
         ),
         text_payload,
@@ -88,8 +88,8 @@ deployment_graphs = {
             module="graphs.mock_agg:Frontend",
             config="configs/mock_agg.yaml",
             directory="/workspace/examples/llm",
-            endpoint="v1/chat/completions",
-            response_handler=completions_response_handler,
+            endpoints=["v1/chat/completions"],
+            response_handlers=[chat_completions_response_handler],
             marks=[pytest.mark.gpu_1, pytest.mark.vllm],
         ),
         text_payload,
@@ -243,17 +243,30 @@ def client(
 def _wait_until_ready(
     deployment_graph, server_process, payload, logger=logging.getLogger()
 ):
-    url = f"http://localhost:{server_process.port}/{deployment_graph.endpoint}"
+    url = f"http://localhost:{server_process.port}/{deployment_graph.endpoints[0]}"
     start_time = time.time()
     retry_delay = 5
     elapsed = 0.0
+
+    paycheck={
+    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "messages": [
+    {
+        "role": "user",
+        "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
+    }
+    ],
+    "stream":False,
+    "max_tokens": 30
+  }
+    
     while time.time() - start_time < deployment_graph.timeout:
         elapsed = time.time() - start_time
         try:
             response = requests.post(
                 url,
-                json=payload.payload,
-                timeout=deployment_graph.timeout - elapsed,
+                json=paycheck,
+                #timeout=deployment_graph.timeout - elapsed,
             )
         except (requests.RequestException, requests.Timeout) as e:
             logger.warning("Retrying due to Request failed: %s", e)
@@ -295,7 +308,7 @@ def _wait_until_ready(
             % deployment_graph.timeout
         )
 
-    content = deployment_graph.response_handler(response)
+    content = deployment_graph.response_handlers[0](response)
 
     logger.info("Received Content: %s", content)
 
@@ -404,7 +417,7 @@ async def test_worker_failure(
     with DynamoServeProcess(
         deployment_graph, request, args=deployment_args
     ) as server_process:
-        time.sleep(300)
+        #time.sleep(300)
         _wait_until_ready(deployment_graph, server_process, payload)
         procs = []
         for i in range(num_clients):
