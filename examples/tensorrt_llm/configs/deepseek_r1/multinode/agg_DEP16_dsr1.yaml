@@ -1,5 +1,4 @@
 backend: pytorch
-# DP Attn 16 + EP 16 for 4x4xGB200 or 2x8xH100
 tensor_parallel_size: 16
 moe_expert_parallel_size: 16
 enable_attention_dp: true
