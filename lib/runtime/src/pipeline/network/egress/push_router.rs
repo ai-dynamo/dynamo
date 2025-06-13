@@ -13,6 +13,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use async_nats::client::{
+    RequestError as NatsRequestError, RequestErrorKind::NoResponders as NatsNoResponders,
+};
 use async_trait::async_trait;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -202,9 +205,11 @@ where
         let request = request.map(|req| AddressedRequest::new(req, subject));
 
         let stream = self.addressed.generate(request).await;
-        if let Some(error) = stream.as_ref().err() {
-            if error.to_string() == "no responders: no responders" {
-                self.client.report_instance_down(instance_id).await;
+        if let Some(err) = stream.as_ref().err() {
+            if let Some(req_err) = err.downcast_ref::<NatsRequestError>() {
+                if matches!(req_err.kind(), NatsNoResponders) {
+                    self.client.report_instance_down(instance_id).await;
+                }
             }
         }
         stream
