@@ -40,11 +40,13 @@
 //! ## NOTE
 //! The current prefill and decoding time simulations are not scientific at all and are WIP
 
-use crate::kv_router::protocols::ForwardPassMetrics;
+use crate::kv_router::protocols::{ForwardPassMetrics, KvCacheEventData};
 use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::kv_manager::KvManager;
-use crate::mocker::protocols::{DirectRequest, MockEngineArgs};
-use crate::mocker::protocols::{MoveBlock, OutputSignal, PrefillCost, UniqueBlock};
+use crate::mocker::protocols::{
+    block_response_to_kv_event, MoveBlock, OutputSignal, PrefillCost, UniqueBlock,
+};
+use crate::mocker::protocols::{DirectRequest, MockEngineArgs, MoveBlockResponse};
 use crate::mocker::sequence::ActiveSequence;
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -204,12 +206,23 @@ impl Scheduler {
         args: MockEngineArgs,
         dp_rank: Option<u32>,
         output_tx: Option<mpsc::Sender<OutputSignal>>,
+        kv_events_tx: Option<mpsc::Sender<KvCacheEventData>>,
         cancellation_token: Option<CancellationToken>,
     ) -> Self {
         let state = Arc::new(Mutex::new(SchedulerState::default()));
-        let kv_manager = Arc::new(Mutex::new(KvManager::new(
+
+        // Create internal channel for KV events only if needed
+        let (block_resp_tx, mut block_resp_rx) = if kv_events_tx.is_some() {
+            let (tx, rx) = mpsc::unbounded_channel::<MoveBlockResponse>();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
+        let kv_manager = Arc::new(Mutex::new(KvManager::new_with_sender(
             args.num_gpu_blocks,
             args.block_size,
+            block_resp_tx,
         )));
         let hit_rates = Arc::new(Mutex::new(VecDeque::with_capacity(1000)));
 
@@ -320,6 +333,13 @@ impl Scheduler {
                             if !prefill_success {
                                 panic!("Block allocation for prefilling cannot fail.");
                             }
+
+                            // Drain KV events and forward to relay after prefill signal processing
+                            if let (Some(ref relay_tx), Some(ref mut rx)) = (&kv_events_tx, &mut block_resp_rx) {
+                                while let Ok(event) = rx.try_recv() {
+                                    let _ = relay_tx.try_send(block_response_to_kv_event(event));
+                                }
+                            }
                         }
 
                         // Process decoding
@@ -339,6 +359,13 @@ impl Scheduler {
                                     kv_manager_guard.process(&signal);
                                 }
                                 continue;
+                            }
+
+                            // Drain KV events and forward to relay after decode signal processing
+                            if let (Some(ref relay_tx), Some(ref mut rx)) = (&kv_events_tx, &mut block_resp_rx) {
+                                while let Ok(event) = rx.try_recv() {
+                                    let _ = relay_tx.try_send(block_response_to_kv_event(event));
+                                }
                             }
 
                             // Send UUID notification for each generated token
@@ -485,7 +512,7 @@ fn process_signals(
         }
 
         // Check we have a Use signal with blocks
-        let MoveBlock::Use(blocks, _) = signal else {
+        let MoveBlock::Use(blocks) = signal else {
             panic!("Failed signal is Invalid. Has to fail on generation signal.");
         };
 
@@ -536,7 +563,7 @@ mod tests {
             .unwrap();
 
         // Create scheduler with new args struct
-        let scheduler = Scheduler::new(args, None, Some(output_tx), None);
+        let scheduler = Scheduler::new(args, None, Some(output_tx), None, None);
 
         // Create shared tokens for caching case
         let shared_tokens = if use_shared_tokens {
@@ -649,7 +676,7 @@ mod tests {
             .unwrap();
 
         // Create scheduler
-        let scheduler = Scheduler::new(args, None, Some(output_tx), None);
+        let scheduler = Scheduler::new(args, None, Some(output_tx), None, None);
 
         // Create identical tokens for all requests
         let identical_tokens: Vec<u32> = (0..token_length).map(|i| i as u32).collect();

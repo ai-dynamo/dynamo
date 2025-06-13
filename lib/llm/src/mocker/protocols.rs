@@ -17,9 +17,12 @@ use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::kv_router::protocols::{
+    ExternalSequenceBlockHash, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
+    KvCacheStoredBlockData, LocalBlockHash,
+};
+
 pub type Token = u32;
-pub type LocalBlockHash = u64;
-/// A global hash identifier for blocks
 pub type GlobalHash = u64;
 pub type NumBlocks = usize;
 
@@ -40,12 +43,19 @@ impl Default for UniqueBlock {
 }
 
 /// Represents different block movement operations in the cache
+/// For Use and Promote variants, parent hash is the second field
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MoveBlock {
-    Use(Vec<UniqueBlock>, Option<f64>),
+    Use(Vec<UniqueBlock>),
     Destroy(Vec<UniqueBlock>),
     Deref(Vec<UniqueBlock>),
-    Promote(Uuid, GlobalHash),
+    Promote(Uuid, GlobalHash, Option<u64>),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum MoveBlockResponse {
+    Store(Vec<GlobalHash>, Option<u64>),
+    Remove(Vec<GlobalHash>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,6 +108,31 @@ pub struct MockEngineArgs {
 impl MockEngineArgs {
     pub fn builder() -> MockEngineArgsBuilder {
         MockEngineArgsBuilder::default()
+    }
+}
+
+/// Note: This assumes block_hash and tokens_hash are the same, which is not correct in rare cases
+/// where the sequence-aware hash differs from the token content hash.
+pub fn block_response_to_kv_event(response: MoveBlockResponse) -> KvCacheEventData {
+    match response {
+        MoveBlockResponse::Store(full_blocks, parent_hash) => {
+            KvCacheEventData::Stored(KvCacheStoreData {
+                parent_hash: parent_hash.map(ExternalSequenceBlockHash),
+                blocks: full_blocks
+                    .into_iter()
+                    .map(|block| KvCacheStoredBlockData {
+                        block_hash: ExternalSequenceBlockHash(block),
+                        tokens_hash: LocalBlockHash(block),
+                    })
+                    .collect(),
+            })
+        }
+        MoveBlockResponse::Remove(full_blocks) => KvCacheEventData::Removed(KvCacheRemoveData {
+            block_hashes: full_blocks
+                .into_iter()
+                .map(ExternalSequenceBlockHash)
+                .collect(),
+        }),
     }
 }
 

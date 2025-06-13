@@ -106,6 +106,7 @@ impl MockVllmEngine {
                 args.clone(),
                 Some(dp_rank),
                 Some(output_tx),
+                None,
                 Some(cancel_token.clone()),
             );
 

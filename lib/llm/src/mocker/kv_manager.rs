@@ -46,10 +46,11 @@
 //! implementation of the main block manager.
 
 use crate::mocker::evictor::LRUEvictor;
-use crate::mocker::protocols::{MoveBlock, PrefillCost, UniqueBlock};
+use crate::mocker::protocols::{MoveBlock, MoveBlockResponse, PrefillCost, UniqueBlock};
 use crate::mocker::sequence::ActiveSequence;
 use derive_getters::Getters;
 use std::collections::{HashMap, HashSet};
+use tokio::sync::mpsc;
 
 #[derive(Getters)]
 pub struct KvManager {
@@ -64,10 +65,20 @@ pub struct KvManager {
     inactive_blocks: LRUEvictor<UniqueBlock>,
 
     all_blocks: HashSet<UniqueBlock>,
+
+    move_block_response_tx: Option<mpsc::UnboundedSender<MoveBlockResponse>>,
 }
 
 impl KvManager {
     pub fn new(max_capacity: usize, block_size: usize) -> Self {
+        Self::new_with_sender(max_capacity, block_size, None)
+    }
+
+    pub fn new_with_sender(
+        max_capacity: usize,
+        block_size: usize,
+        move_block_response_tx: Option<mpsc::UnboundedSender<MoveBlockResponse>>,
+    ) -> Self {
         let active_blocks = HashMap::new();
         let inactive_blocks = LRUEvictor::default();
         let all_blocks = HashSet::new();
@@ -78,13 +89,39 @@ impl KvManager {
             active_blocks,
             inactive_blocks,
             all_blocks,
+            move_block_response_tx,
+        }
+    }
+
+    /// Utility method to send block responses with optional reversing
+    fn send_block_response(
+        &self,
+        mut blocks: Vec<u64>,
+        reverse: bool,
+        store: bool,
+        parent_hash: Option<u64>,
+    ) {
+        if let Some(ref tx) = self.move_block_response_tx {
+            if !blocks.is_empty() {
+                if reverse {
+                    blocks.reverse();
+                }
+                let response = if store {
+                    MoveBlockResponse::Store(blocks, parent_hash)
+                } else {
+                    MoveBlockResponse::Remove(blocks)
+                };
+                tx.send(response).unwrap();
+            }
         }
     }
 
     /// Process a MoveBlock instruction synchronously
     pub fn process(&mut self, event: &MoveBlock) -> bool {
         match event {
-            MoveBlock::Use(hashes, _) => {
+            MoveBlock::Use(hashes) => {
+                let mut blocks_stored = Vec::<u64>::new();
+
                 for hash in hashes {
                     // First check if it already exists in active blocks
                     if let Some(ref_count) = self.active_blocks.get_mut(hash) {
@@ -106,30 +143,47 @@ impl KvManager {
 
                     // If at max capacity, evict the oldest entry from inactive blocks
                     if active_count + inactive_count >= self.max_capacity {
-                        if let Some(evicted) = self.inactive_blocks.evict() {
-                            // Remove evicted block from all_blocks
-                            self.all_blocks.remove(&evicted);
-                        } else {
-                            // Cannot evict block, meaning no free blocks left in inactive pool
-                            // Send a signal, scheduler would expect to handle preemption upon receiving this
+                        let Some(evicted) = self.inactive_blocks.evict() else {
                             return false;
+                        };
+                        self.all_blocks.remove(&evicted);
+                        if let UniqueBlock::FullBlock(evicted_full_block) = evicted {
+                            self.send_block_response(vec![evicted_full_block], false, false, None);
                         }
                     }
 
                     // Now insert the new block in active blocks with reference count 1
                     self.active_blocks.insert(hash.clone(), 1);
-                    // Add to all_blocks as it's a new block
                     self.all_blocks.insert(hash.clone());
+                    if self.move_block_response_tx.is_some() {
+                        if let UniqueBlock::FullBlock(stored_full_block) = hash {
+                            blocks_stored.push(*stored_full_block);
+                        }
+                    }
                 }
+                self.send_block_response(blocks_stored, false, true, None);
             }
+
             MoveBlock::Destroy(hashes) => {
+                let mut blocks_destroyed = Vec::<u64>::new();
+
                 // Loop in inverse direction
                 for hash in hashes.iter().rev() {
                     self.active_blocks.remove(hash).unwrap();
                     // Remove from all_blocks when destroyed
                     assert!(self.all_blocks.remove(hash));
+
+                    // Track blocks for batch sending
+                    if self.move_block_response_tx.is_some() {
+                        if let UniqueBlock::FullBlock(destroyed_full_block) = hash {
+                            blocks_destroyed.push(*destroyed_full_block);
+                        }
+                    }
                 }
+
+                self.send_block_response(blocks_destroyed, true, false, None);
             }
+
             MoveBlock::Deref(hashes) => {
                 // Loop in inverse direction
                 for hash in hashes.iter().rev() {
@@ -149,7 +203,8 @@ impl KvManager {
                     }
                 }
             }
-            MoveBlock::Promote(uuid, hash) => {
+
+            MoveBlock::Promote(uuid, hash, parent_hash) => {
                 let uuid_block = UniqueBlock::PartialBlock(*uuid);
                 let hash_block = UniqueBlock::FullBlock(*hash);
 
@@ -167,6 +222,7 @@ impl KvManager {
                 // Update all_blocks
                 assert!(self.all_blocks.remove(&uuid_block));
                 self.all_blocks.insert(hash_block);
+                self.send_block_response(vec![*hash], false, true, *parent_hash);
             }
         }
 
@@ -252,7 +308,7 @@ mod tests {
         // Helper function to use multiple blocks that returns the response
         fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) -> bool {
             let blocks = ids.into_iter().map(UniqueBlock::FullBlock).collect();
-            manager.process(&MoveBlock::Use(blocks, None))
+            manager.process(&MoveBlock::Use(blocks))
         }
 
         // First use 10 blocks (0 to 9) in a batch
@@ -279,7 +335,7 @@ mod tests {
         // Helper function to use multiple blocks
         fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) {
             let blocks = ids.into_iter().map(UniqueBlock::FullBlock).collect();
-            manager.process(&MoveBlock::Use(blocks, None));
+            manager.process(&MoveBlock::Use(blocks));
         }
 
         // Helper function to destroy multiple blocks
