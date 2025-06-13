@@ -85,9 +85,13 @@ jobs:
           personal_token: ${{ secrets.CI_TOKEN }}
           # Target repository
           external_repository: ai-dynamo/dynamo.github.io
-          # Branch to deploy to (same as source branch)
-          publish_branch: ${{ steps.extract_branch.outputs.branch }}
+          # Always deploy to main branch but in version-specific directory
+          publish_branch: main
           # Directory containing the built documentation
           publish_dir: ./dynamo-docs
+          # Deploy to version-specific subdirectory
+          destination_dir: ${{ steps.extract_branch.outputs.branch }}
           # Optional: Add a commit message
           commit_message: 'Deploy documentation from ${{ github.repository }}@${{ github.sha }} (branch: ${{ steps.extract_branch.outputs.branch }})'
+          # Keep existing files (don't delete other versions)
+          keep_files: true
