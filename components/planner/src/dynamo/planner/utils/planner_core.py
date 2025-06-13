@@ -375,7 +375,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--profile-results-dir",
         type=str,
-        default=SLAPlannerDefaults.profile_dir,
+        default=SLAPlannerDefaults.profile_results_dir,
         help="Directory to pre-deployment profiling results",
     )
     parser.add_argument(
