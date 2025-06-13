@@ -286,6 +286,10 @@ pub(crate) struct KvEventPublisher {
 impl KvEventPublisher {
     #[new]
     fn new(component: Component, worker_id: i64, kv_block_size: usize) -> PyResult<Self> {
+        if kv_block_size == 0 {
+            return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
+        }
+        
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
             component.inner,
             worker_id,
