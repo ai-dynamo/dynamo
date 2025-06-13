@@ -361,6 +361,18 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 				return nil, err
 			}
 		}
+
+		// propagate generic pod-level overrides
+		if service.Config.ExtraPodSpec != nil {
+			if deployment.Spec.ExtraPodSpec == nil {
+				deployment.Spec.ExtraPodSpec = new(common.ExtraPodSpec)
+			}
+			if err := mergo.Merge(deployment.Spec.ExtraPodSpec,
+				service.Config.ExtraPodSpec, mergo.WithOverride); err != nil {
+				return nil, fmt.Errorf("merge extraPodSpec: %w", err)
+			}
+		}
+
 		deployment.Spec.Autoscaling = &v1alpha1.Autoscaling{
 			Enabled: false,
 		}
