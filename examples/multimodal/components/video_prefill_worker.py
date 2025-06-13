@@ -27,7 +27,7 @@ from pydantic import BaseModel
 from utils.logging import check_required_workers
 from utils.nixl import NixlMetadataStore
 from utils.prefill_queue import PrefillQueue
-from utils.video_protocol import EncodeRequest
+from utils.protocol import EncodeRequest
 from utils.vllm import parse_vllm_args
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,

@@ -22,12 +22,8 @@ from typing import AsyncIterator, Tuple, Union
 from components.video_decode_worker import VllmDecodeWorker
 from transformers import AutoTokenizer
 from utils.logging import check_required_workers
+from utils.protocol import MultiModalRequest, MyRequestOutput, vLLMMultimodalRequest
 from utils.video_chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
-from utils.video_protocol import (
-    MultiModalRequest,
-    MyRequestOutput,
-    vLLMMultimodalRequest,
-)
 from utils.vllm import parse_vllm_args
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
@@ -191,6 +187,7 @@ class Processor(ProcessMixIn):
     # The generate endpoint will be used by the frontend to handle incoming requests.
     @endpoint()
     async def generate(self, raw_request: MultiModalRequest):
+        # TODO: Make the template consumed from the config file
         msg = {
             "role": "user",
             "content": "USER: <video>\nQuestion:"

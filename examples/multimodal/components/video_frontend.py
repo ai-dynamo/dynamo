@@ -19,7 +19,7 @@ import logging
 from components.video_processor import Processor
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
-from utils.video_protocol import MultiModalRequest
+from utils.protocol import MultiModalRequest
 
 from dynamo.sdk import DYNAMO_IMAGE, api, depends, service
 

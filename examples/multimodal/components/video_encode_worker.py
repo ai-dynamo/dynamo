@@ -30,7 +30,7 @@ import httpx
 import numpy as np
 import torch
 import torch.nn.functional as F
-from utils.video_protocol import EncodeRequest
+from utils.protocol import EncodeRequest
 from utils.vllm import parse_vllm_args
 
 from dynamo.sdk import async_on_start, endpoint, service
@@ -65,8 +65,6 @@ class VllmEncodeWorker:
 
         self._http_client: Optional[httpx.AsyncClient] = None
         self._http_timeout = 60.0
-
-        self.num_frames_to_sample = 8
 
     async def _read_video_pyav(
         self, container: av.container.InputContainer, indices: np.ndarray
