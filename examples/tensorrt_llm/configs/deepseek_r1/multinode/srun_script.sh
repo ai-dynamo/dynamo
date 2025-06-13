@@ -11,7 +11,7 @@ IMAGE="${IMAGE:-""}"
 # is to mount paths to NFS storage for common scripts, model weights, etc.
 # NOTE: This can be a comma separated list of multiple mounts as well.
 DEFAULT_MOUNT="${PWD}:/mnt"
-MOUNTS="${MOUNTS:-"${DEFAULT_MOUNT}"}"
+MOUNTS="${MOUNTS:-${DEFAULT_MOUNT}}"
 
 # Example values, assuming 4 nodes with 4 GPUs on each node, such as 4xGB200 nodes.
 # For 8xH100 nodes as an example, you may set this to 2 nodes x 16 gpus, or 4 nodes x 32 gpus instead.
