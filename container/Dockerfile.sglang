@@ -135,8 +135,9 @@ RUN if [ "$ARCH" = "arm64" ]; then \
 
 # Install sglang
 # Once either 0.4.6post6 or 0.4.7 is released, we can switch back to using the published version
-# This commit references a fix to add DP attention based routing along with other perf fixes https://github.com/sgl-project/sglang/pull/6884
-ARG SGLANG_COMMIT="f1569876d54dd3b6601f5280f12652e9fbb1375c"
+# (6/9) This commit references a fix to add DP attention based routing along with other perf fixes https://github.com/sgl-project/sglang/pull/6884
+# (6/12) This commit fixes ZMQ KV event publisher inside sglang
+ARG SGLANG_COMMIT="777688b8929c877e4e28c2eac208d776abe4c3af"
 RUN --mount=type=cache,target=/root/.cache/uv \
     git clone https://github.com/sgl-project/sglang.git && \
     cd sglang && \
