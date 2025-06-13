@@ -116,33 +116,29 @@ class DecodeInterpolator:
 
     def compute_idx(self, concurrency: float, context_length: float) -> tuple[int, int]:
         kv_usage = concurrency * context_length / self.max_kv_tokens
-        ix = int(
-            np.clip(
-                np.round((kv_usage - self.xi[0]) / (self.xi[1] - self.xi[0])),
-                0,
-                self.resolution - 1,
-            )
-        )
-        iy = int(
-            np.clip(
-                np.round((context_length - self.yi[0]) / (self.yi[1] - self.yi[0])),
-                0,
-                self.resolution - 1,
-            )
-        )
-        ix = max(0, min(ix, self.resolution - 1))
-        iy = max(0, min(iy, self.resolution - 1))
+        # Calculate x index (kv_usage)
+        ix = int(np.clip(
+            np.round((kv_usage - self.xi[0]) / (self.xi[1] - self.xi[0])),
+            0,
+            self.resolution - 1
+        ))
+        # Calculate y index (context_length)
+        iy = int(np.clip(
+            np.round((context_length - self.yi[0]) / (self.yi[1] - self.yi[0])),
+            0,
+            self.resolution - 1
+        ))
         return ix, iy
 
     def interpolate_itl(self, concurrency: float, context_length: float) -> float:
         ix, iy = self.compute_idx(concurrency, context_length)
-        return self.itl_interpolator[ix, iy]
+        return self.itl_interpolator[iy, ix]
 
     def interpolate_thpt_per_gpu(
         self, concurrency: float, context_length: float
     ) -> float:
         ix, iy = self.compute_idx(concurrency, context_length)
-        return self.thpt_interpolator[ix, iy]
+        return self.thpt_interpolator[iy, ix]
 
     def find_best_throughput_per_gpu(self, itl: float, context_length: float) -> float:
         # find the max kv_load that has itl <= target itl
@@ -157,6 +153,6 @@ class DecodeInterpolator:
         iy = max(0, min(iy, self.resolution - 1))
 
         for ix in range(self.resolution - 1, -1, -1):
-            if self.itl_interpolator[ix, iy] <= itl:
-                return self.thpt_interpolator[ix, iy]
-        return self.thpt_interpolator[0, iy]
+            if self.itl_interpolator[iy, ix] <= itl:
+                return self.thpt_interpolator[iy, ix]
+        return self.thpt_interpolator[iy, 0]
