@@ -3,6 +3,10 @@
 
 use super::*;
 
+mod leader;
+mod utils;
 mod worker;
+mod zmq;
 
+pub use leader::KvbmLeader;
 pub use worker::KvbmWorker;

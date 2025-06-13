@@ -3,84 +3,22 @@
 
 use super::*;
 
+use leader::KvbmLeaderData;
+use utils::*;
+use zmq::*;
+
 use llm_rs::block_manager::{
-    block::{layout_to_blocks, Block},
+    block::layout_to_blocks,
     layout::LayoutType,
-    storage::{
-        torch::{TorchDevice, TorchTensor},
-        DeviceAllocator, DeviceStorage,
-    },
+    storage::{torch::TorchTensor, DeviceAllocator, DeviceStorage},
     BasicMetadata, LayoutConfig, NixlLayout,
 };
 
 use nixl_sys::Agent as NixlAgent;
+use std::collections::HashMap;
+use tokio_util::sync::CancellationToken;
 
-use dynamo_runtime::{DistributedRuntime, Runtime, utils::leader_worker_barrier::WorkerBarrier};
-
-#[derive(Clone, Debug)]
-struct VllmTensor {
-    _py_tensor: Py<PyAny>,
-    device: TorchDevice,
-    data_ptr: u64,
-    size_bytes: usize,
-    shape: Vec<usize>,
-    stride: Vec<usize>,
-}
-
-impl VllmTensor {
-    fn new(py_tensor: Py<PyAny>) -> anyhow::Result<Self> {
-        Python::with_gil(|py| {
-            let device = py_tensor.getattr(py, "device")?;
-            let device_type = device.getattr(py, "type")?.extract::<String>(py)?;
-
-            let device = if device_type == "cuda" {
-                TorchDevice::Cuda(device.getattr(py, "index")?.extract::<usize>(py)?)
-            } else {
-                TorchDevice::Other(device_type)
-            };
-
-            let data_ptr = py_tensor.call_method0(py, "data_ptr")?.extract::<u64>(py)?;
-            let size_bytes = py_tensor
-                .getattr(py, "nbytes")?
-                .extract::<usize>(py)?;
-            let shape = py_tensor.getattr(py, "shape")?.extract::<Vec<usize>>(py)?;
-            let stride = py_tensor
-                .call_method0(py, "stride")?
-                .extract::<Vec<usize>>(py)?;
-
-            Ok(Self {
-                _py_tensor: py_tensor,
-                device,
-                data_ptr,
-                size_bytes,
-                shape,
-                stride,
-            })
-        })
-    }
-}
-
-impl TorchTensor for VllmTensor {
-    fn device(&self) -> TorchDevice {
-        self.device.clone()
-    }
-
-    fn data_ptr(&self) -> u64 {
-        self.data_ptr
-    }
-
-    fn size_bytes(&self) -> usize {
-        self.size_bytes
-    }
-
-    fn shape(&self) -> Vec<usize> {
-        self.shape.clone()
-    }
-
-    fn stride(&self) -> Vec<usize> {
-        self.stride.clone()
-    }
-}
+use dynamo_runtime::{utils::leader_worker_barrier::WorkerBarrier, DistributedRuntime, Runtime};
 
 fn load_and_validate_tensors(
     tensors: Vec<Py<PyAny>>,
@@ -123,29 +61,71 @@ fn load_and_validate_tensors(
     Ok((device_tensors, shape.unwrap()))
 }
 
-fn build_drt(barrier_id: String, worker_id: usize) -> anyhow::Result<DistributedRuntime> {
-    let rt = tokio::runtime::Runtime::new()?;
-
-    let runtime = Runtime::from_handle(rt.handle().clone())?;
-
-    rt.handle().block_on(async move {
-        let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
-
-        tracing::info!("Worker id {} waiting for barrier {}", worker_id, barrier_id);
-
-        let _barrier = WorkerBarrier::<()>::new(barrier_id, worker_id.to_string());
-        
-        // TODO: Enable only after we have the leader side.
-        // barrier.wait(&drt).await?;
-
-        Ok(drt)
-    })
-}
-
 #[pyclass]
 pub struct KvbmWorker {
-    _device_blocks: Vec<Block<DeviceStorage, BasicMetadata>>,
-    _drt: DistributedRuntime
+    cancel_token: CancellationToken,
+    task: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
+    // The DistributedRuntime only stores a handle, so we need to keep the runtime around.
+    _runtime: tokio::runtime::Runtime,
+}
+
+impl KvbmWorker {
+    async fn worker_task(
+        mut device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage>>,
+        barrier_id: String,
+        worker_id: usize,
+        cancel_token: CancellationToken,
+    ) -> anyhow::Result<()> {
+        let agent = NixlAgent::new(&format!("kvbm-worker-{}", worker_id)).map_err(to_pyerr)?;
+
+        device_layout
+            .nixl_register(&agent, None)
+            .map_err(to_pyerr)?;
+        let device_layout: Arc<dyn NixlLayout<StorageType = DeviceStorage>> =
+            Arc::from(device_layout);
+        let _device_blocks =
+            layout_to_blocks::<_, BasicMetadata>(device_layout, 0, worker_id as u64)?;
+
+        let runtime = Runtime::from_current()?;
+        let drt = DistributedRuntime::from_settings(runtime).await?;
+
+        tracing::info!("Worker {} waiting on barrier {}", worker_id, barrier_id);
+
+        let worker_barrier =
+            WorkerBarrier::<KvbmLeaderData>::new(barrier_id, worker_id.to_string());
+
+        let leader_data = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Ok(())
+            }
+            leader_data = worker_barrier.sync(&drt) => {
+                leader_data
+            }
+        }.map_err(|e| {
+            to_pyerr(anyhow::anyhow!(format!(
+                "Failed to sync worker barrier: {:?}",
+                e
+            )))
+        })?;
+
+        tracing::info!(
+            "Worker {} received leader data: {:?}",
+            worker_id,
+            leader_data
+        );
+
+        let _zmq_worker = ZmqActiveMessageWorker::new(
+            &leader_data.zmq_url,
+            leader_data.broadcast_port,
+            leader_data.ack_port,
+            HashMap::new(),
+        )?;
+
+        // TODO: Some sort of fancy loop here.
+        std::future::pending::<()>().await;
+
+        Ok(())
+    }
 }
 
 #[pymethods]
@@ -162,7 +142,7 @@ impl KvbmWorker {
         device_id: usize,
         worker_id: usize,
         dtype: Option<String>,
-        barrier_id: String
+        barrier_id: String,
     ) -> PyResult<Self> {
         if num_layers == 0 {
             return Err(pyo3::exceptions::PyValueError::new_err(
@@ -185,8 +165,6 @@ impl KvbmWorker {
 
         let outer_contiguous = shape[0] == outer_dim;
 
-        let agent = NixlAgent::new(&format!("kvbm-worker-{}", worker_id)).map_err(to_pyerr)?;
-
         let layout_builder = LayoutConfig::builder()
             .num_layers(num_layers)
             .num_blocks(num_blocks)
@@ -197,7 +175,7 @@ impl KvbmWorker {
             .build()
             .map_err(to_pyerr)?;
 
-        let mut layout = layout_builder
+        let layout = layout_builder
             .create_layout(
                 LayoutType::LayerSeparate { outer_contiguous },
                 device_tensors,
@@ -205,20 +183,34 @@ impl KvbmWorker {
             )
             .map_err(to_pyerr)?;
 
-        layout.nixl_register(&agent, None).map_err(to_pyerr)?;
+        let runtime = tokio::runtime::Runtime::new().map_err(to_pyerr)?;
 
-        let layout: Arc<dyn NixlLayout<StorageType = DeviceStorage>> = Arc::from(layout);
+        let cancel_token = CancellationToken::new();
 
-        // let serialized = layout.serialize().map_err(to_pyerr)?;
-
-        let device_blocks =
-            layout_to_blocks::<_, BasicMetadata>(layout, 0, worker_id as u64).map_err(to_pyerr)?;
-        
-        let drt = build_drt(barrier_id, worker_id).map_err(to_pyerr)?;
+        let cancel_token_clone = cancel_token.clone();
+        let task = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            runtime.block_on(async move {
+                KvbmWorker::worker_task(layout, barrier_id, worker_id, cancel_token_clone).await
+            })
+        });
 
         Ok(Self {
-            _device_blocks: device_blocks,
-            _drt: drt
+            cancel_token,
+            task: Some(task),
+            _runtime: runtime,
         })
+    }
+}
+
+impl Drop for KvbmWorker {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
+        if let Some(task) = self.task.take() {
+            task.join().unwrap().unwrap();
+        }
     }
 }
