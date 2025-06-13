@@ -58,16 +58,17 @@ jobs:
           path: dynamo-docs
           retention-days: 15
 
-  # Deploy to dynamo-docs repository
   deploy:
     name: Deploy to private documentation repository
     needs: build-docs
     runs-on: ubuntu-latest
 
-    # Only run on pushes to release branches
     if: startsWith(github.ref, 'refs/heads/release')
 
     steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+
       - name: Download documentation artifact
         uses: actions/download-artifact@v4
         with:
@@ -78,6 +79,12 @@ jobs:
         id: extract_branch
         run: echo "branch=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
 
+      - name: Clean potentially stale metadata files
+        run: |
+          rm -f ./dynamo-docs/CNAME
+          rm -f ./dynamo-docs/_config.yml
+          rm -f ./dynamo-docs/index.html || true
+
       - name: Debug - Check token availability
         run: |
           if [ -z "${{ secrets.DOCS_TOKEN }}" ]; then
@@ -87,20 +94,13 @@ jobs:
             echo "DOCS_TOKEN secret is available"
           fi
 
-      - name: Deploy to private documentation repository
+      - name: Deploy to internal GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
-          # Use a personal access token or deploy key stored in secrets
-          personal_token: ${{ secrets.DOCS_TOKEN || secrets.CI_TOKEN || secrets.GITHUB_TOKEN }}
-          # Target repository (private repo for internal docs - GitHub Enterprise)
+          personal_token: ${{ secrets.DOCS_TOKEN }}
           external_repository: ai-dynamo/dynamo-docs
-          # Always deploy to main branch but in version-specific directory
           publish_branch: main
-          # Directory containing the built documentation
           publish_dir: ./dynamo-docs
-          # Deploy to version-specific subdirectory
           destination_dir: ${{ steps.extract_branch.outputs.branch }}
-          # Optional: Add a commit message
           commit_message: 'Deploy documentation from ${{ github.repository }}@${{ github.sha }} (branch: ${{ steps.extract_branch.outputs.branch }})'
-          # Keep existing files (don't delete other versions)
           keep_files: true
