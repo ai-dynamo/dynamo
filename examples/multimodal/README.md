@@ -351,6 +351,13 @@ You should see a response describing the video's content similar to
 
 This example demonstrates deploying a disaggregated multimodal model that can process video inputs.
 
+### Dependency
+
+Video example relies on `av` package for video preprocessing inside the encode_worker.
+Please install `av` inside the dynamo container to enable video example.
+
+`pip install av`
+
 ### Components
 
 - workers: For disaggregated video serving, we have three workers, [video_encode_worker](components/video_encode_worker.py) for decoding video into frames, [video_decode_worker](components/video_decode_worker.py) for decoding, and [video_prefill_worker](components/video_prefill_worker.py) for prefilling.
