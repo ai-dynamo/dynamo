@@ -67,6 +67,8 @@ pub enum InstanceSource {
     Dynamic(tokio::sync::watch::Receiver<Vec<Instance>>),
 }
 
+// TODO: Avoid returning a full clone of `Vec<Instance>` everytime from Client
+//       See instances() and instances_avail() methods
 impl Client {
     // Client will only talk to a single static endpoint
     pub(crate) async fn new_static(endpoint: Endpoint) -> Result<Self> {
