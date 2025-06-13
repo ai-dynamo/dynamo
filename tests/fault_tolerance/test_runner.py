@@ -36,6 +36,7 @@ from tests.utils.deployment_graph import (
     DeploymentGraph,
     Payload,
     completions_response_handler,
+    chat_completions_response_handler
 )
 
 text_prompt = "Tell me a short joke about AI."
@@ -51,7 +52,7 @@ text_payload = Payload(
         ],
         "max_tokens": 150,  # Reduced from 500
         "temperature": 0.1,
-        "seed": 0,
+#        "seed": 10,
         "ignore_eos": "1",
         "min_tokens": 150,
         "stream": False,
@@ -226,14 +227,14 @@ def client(
         log_path = os.path.join(log_dir,f"client_{index}.log.txt")
         with open(log_path,"w") as log:
             logger = logging.getLogger(f"CLIENT: {index}")
-            url = f"http://localhost:{server_process.port}/{deployment_graph.endpoint}"
+            url = f"http://localhost:{server_process.port}/{deployment_graph.endpoints[0]}"
             start_time = time.time()
             retry_delay = 5
             elapsed = 0.0
 
             for i in range(requests_per_client):
                 logger.info(f"Request: {i}")
-                result=_single_request(url, payload.payload, logger,max_retries,input_token_length=input_token_length,output_token_length=output_token_length)
+                result=_single_request(url, payload.payload_chat, logger,max_retries,input_token_length=input_token_length,output_token_length=output_token_length)
                 log.write(json.dumps(result)+"\n")
                 log.flush()
     except Exception as e:
@@ -265,8 +266,8 @@ def _wait_until_ready(
         try:
             response = requests.post(
                 url,
-                json=paycheck,
-                #timeout=deployment_graph.timeout - elapsed,
+                json=payload.payload_chat,
+                timeout=deployment_graph.timeout - elapsed,
             )
         except (requests.RequestException, requests.Timeout) as e:
             logger.warning("Retrying due to Request failed: %s", e)
