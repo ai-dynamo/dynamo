@@ -39,7 +39,7 @@ class Prometheus:
         self.config = ServiceConfig.get_parsed_config("Prometheus")
         self.process = None
 
-        logger.warning(f"Prometheus config: {self.config}")
+        logger.info(f"Prometheus config: {self.config}")
 
         self.start_prometheus_server()
 
