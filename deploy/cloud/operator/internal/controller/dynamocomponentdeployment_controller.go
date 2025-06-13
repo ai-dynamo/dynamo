@@ -1561,7 +1561,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		Name:           "main",
 		Image:          imageName,
 		Command:        []string{"sh", "-c"},
-		Args:           args,
+		Args:           []string{strings.Join(args, " ")},
 		LivenessProbe:  livenessProbe,
 		ReadinessProbe: readinessProbe,
 		Resources:      resources,
