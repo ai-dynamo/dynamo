@@ -154,6 +154,12 @@ You can find the example Deepseek R1 configs for GB200
 [here](configs/deepseek_r1), but the config settings can be customized for testing
 other hardware configurations or parallelism strategies.
 
+This "multi-node" example demonstrates how to generally connect dynamo workers from
+different nodes, but for simplicity, each worker individually fits on a single node.
+For details on how to launch a worker that spans multiple nodes due to sheer model
+size, or for features like large scale expert parallelism, see the
+[multinode worker example](configs/deepseek_r1/multinode).
+
 ##### Head Node
 
 Start nats/etcd:
@@ -294,7 +300,7 @@ Remaining tasks:
 - [x] Add support for the disaggregated serving.
 - [x] Add multi-node support.
 - [x] Add instructions for benchmarking.
+- [x] Use processor from dynamo-llm framework.
 - [ ] Add integration test coverage.
 - [ ] Merge the code base with llm example to reduce the code duplication.
-- [ ] Use processor from dynamo-llm framework.
 - [ ] Enable NIXL integration with TensorRT-LLM once available. Currently, TensorRT-LLM uses UCX to transfer KV cache.
