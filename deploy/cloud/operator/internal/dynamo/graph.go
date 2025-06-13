@@ -285,6 +285,7 @@ func SetLwsAnnotations(serviceArgs *ServiceArgs, deployment *v1alpha1.DynamoComp
 
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig
 func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, config *DynamoGraphConfig, ingressSpec *v1alpha1.IngressSpec) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
+	logger := log.FromContext(ctx)
 	dynamoServices := make(map[string]string)
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
 	graphDynamoNamespace := ""
@@ -362,14 +363,34 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			}
 		}
 
-		// propagate generic pod-level overrides
-		if service.Config.ExtraPodSpec != nil {
+		// Override command and args if provided.
+		if service.Config.ExtraPodSpec != nil && service.Config.ExtraPodSpec.MainContainer != nil {
 			if deployment.Spec.ExtraPodSpec == nil {
 				deployment.Spec.ExtraPodSpec = new(common.ExtraPodSpec)
 			}
-			if err := mergo.Merge(deployment.Spec.ExtraPodSpec,
-				service.Config.ExtraPodSpec, mergo.WithOverride); err != nil {
-				return nil, fmt.Errorf("merge extraPodSpec: %w", err)
+
+			commandIsSet := len(service.Config.ExtraPodSpec.MainContainer.Command) > 0
+			argsIsSet := len(service.Config.ExtraPodSpec.MainContainer.Args) > 0
+
+			if commandIsSet || argsIsSet {
+				deployment.Spec.ExtraPodSpec.MainContainer = &corev1.Container{}
+
+				if commandIsSet {
+					deployment.Spec.ExtraPodSpec.MainContainer.Command = service.Config.ExtraPodSpec.MainContainer.Command
+				}
+
+				if argsIsSet {
+					deployment.Spec.ExtraPodSpec.MainContainer.Args = service.Config.ExtraPodSpec.MainContainer.Args
+				}
+
+				extraPodSpecBytes, err := json.MarshalIndent(deployment.Spec.ExtraPodSpec.MainContainer, "", "  ")
+				if err != nil {
+					logger.Error(err, "failed to marshal deployment.Spec.ExtraPodSpec.MainContainer for logging", "service", service.Name)
+				} else {
+					logger.Info("Copied MainContainer Command/Args", "service", service.Name, "MainContainer", string(extraPodSpecBytes))
+				}
+			} else {
+				logger.Info("Skipping MainContainer because both Command and Args are empty", "service", service.Name)
 			}
 		}
 
