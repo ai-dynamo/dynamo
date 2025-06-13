@@ -286,7 +286,7 @@ See [close deployment](../../docs/guides/dynamo_serve.md#close-deployment) secti
 ### Benchmarking
 
 To benchmark your deployment with GenAI-Perf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](../llm/benchmarks/perf.sh)
+`model` name and `host` based on your deployment: [perf.sh](../../benchmarks/llm/perf.sh)
 
 ### Future Work
 
