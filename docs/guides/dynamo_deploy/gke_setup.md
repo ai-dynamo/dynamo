@@ -28,6 +28,7 @@ export CLUSTER_WIN=$(gcloud container clusters describe ${CLUSTER_NAME} \
 
 ```{important}
 Make sure Workload Identity is enabled in your cluster!
+```
 
 
 ## Service Account Creation and Configuration
