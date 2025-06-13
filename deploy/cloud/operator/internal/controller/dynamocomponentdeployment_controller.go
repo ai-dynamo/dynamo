@@ -1141,11 +1141,15 @@ func (r *DynamoComponentDeploymentReconciler) getGenericServiceName(dynamoCompon
 	return r.getKubeName(dynamoComponentDeployment, dynamoComponent, false)
 }
 
-func (r *DynamoComponentDeploymentReconciler) getKubeLabels(_ *v1alpha1.DynamoComponentDeployment, dynamoComponent *v1alpha1.DynamoComponent) map[string]string {
+func (r *DynamoComponentDeploymentReconciler) getKubeLabels(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, dynamoComponent *v1alpha1.DynamoComponent) map[string]string {
 	labels := map[string]string{
 		commonconsts.KubeLabelDynamoComponent: dynamoComponent.Name,
 	}
-	labels[commonconsts.KubeLabelDynamoComponentType] = commonconsts.DynamoApiServerComponentName
+	if dynamoComponentDeployment != nil && dynamoComponentDeployment.Labels != nil {
+		if v, ok := dynamoComponentDeployment.Labels[commonconsts.KubeLabelDynamoComponent]; ok && v != "" {
+			labels[commonconsts.KubeLabelDynamoComponentType] = v
+		}
+	}
 	return labels
 }
 
