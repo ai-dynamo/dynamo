@@ -191,25 +191,19 @@ where
         request: SingleIn<T>,
     ) -> anyhow::Result<ManyOut<U>>
     where
-        F: Fn() -> R,
+        F: FnOnce() -> R,
         R: Future<Output = anyhow::Result<i64>>,
     {
-        let request = request.map(|req| Arc::new(req));
-        let req_data = (*request).clone();
+        let instance_id = routing_algorithm().await?;
 
-        loop {
-            let instance_id = routing_algorithm().await?;
+        let subject = self.client.endpoint.subject_to(instance_id);
+        let request = request.map(|req| AddressedRequest::new(req, subject));
 
-            let subject = self.client.endpoint.subject_to(instance_id);
-            let request =
-                SingleIn::from(req_data.clone()).map(|req| AddressedRequest::new(req, subject));
-
-            let stream = self.addressed.generate(request).await;
-            if stream.is_ok() {
-                return stream;
-            }
+        let stream = self.addressed.generate(request).await;
+        if stream.is_err() {
             self.client.report_instance_down(instance_id).await;
         }
+        stream
     }
 }
 
