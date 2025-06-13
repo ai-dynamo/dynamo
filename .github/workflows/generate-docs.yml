@@ -57,3 +57,37 @@ jobs:
           name: dynamo-docs-${{ github.run_id }}
           path: dynamo-docs
           retention-days: 15
+
+  # Deploy to dynamo.github.io repository
+  deploy:
+    name: Deploy to dynamo.github.io
+    needs: build-docs
+    runs-on: ubuntu-latest
+    
+    # Only run on pushes to release branches
+    if: startsWith(github.ref, 'refs/heads/release')
+    
+    steps:
+      - name: Download documentation artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: dynamo-docs-${{ github.run_id }}
+          path: dynamo-docs
+
+      - name: Extract branch name
+        id: extract_branch
+        run: echo "branch=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
+
+      - name: Deploy to dynamo.github.io
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          # Use a personal access token or deploy key stored in secrets
+          personal_token: ${{ secrets.CI_TOKEN }}
+          # Target repository
+          external_repository: ai-dynamo/dynamo.github.io
+          # Branch to deploy to (same as source branch)
+          publish_branch: ${{ steps.extract_branch.outputs.branch }}
+          # Directory containing the built documentation
+          publish_dir: ./dynamo-docs
+          # Optional: Add a commit message
+          commit_message: 'Deploy documentation from ${{ github.repository }}@${{ github.sha }} (branch: ${{ steps.extract_branch.outputs.branch }})'
