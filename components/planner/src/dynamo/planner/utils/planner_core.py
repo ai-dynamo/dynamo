@@ -18,6 +18,8 @@ import asyncio
 import logging
 import math
 import time
+from dataclasses import dataclass
+from typing import Optional
 
 from dynamo.planner import KubernetesConnector, LocalConnector
 from dynamo.planner.defaults import PlannerDefaults
@@ -33,6 +35,16 @@ from dynamo.runtime.logging import configure_dynamo_logging
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+@dataclass
+class Metrics:
+    ttft: Optional[float] = None
+    itl: Optional[float] = None
+    num_req: Optional[float] = None
+    isl: Optional[float] = None
+    osl: Optional[float] = None
+    request_duration: Optional[float] = None
+    p_load: Optional[float] = None
+    d_load: Optional[float] = None
 
 class Planner:
     def __init__(self, runtime: DistributedRuntime, args: argparse.Namespace):
@@ -69,14 +81,7 @@ class Planner:
         self.d_endpoints = []  # type: ignore
 
         self.last_adjustment_time = time.time()
-        self.last_ttft = None
-        self.last_itl = None
-        self.last_num_req = None
-        self.last_isl = None
-        self.last_osl = None
-        self.last_request_duration = None
-        self.last_p_load = None
-        self.last_d_load = None
+        self.last_metrics = Metrics()
 
         self.p_correction_factor = 1.0
         self.d_correction_factor = 1.0
@@ -116,35 +121,35 @@ class Planner:
         return p_endpoints, d_endpoints
 
     def observe_metrics(self):
-        self.last_ttft = self.prometheus_api_client.get_avg_time_to_first_token(
+        self.last_metrics.ttft = self.prometheus_api_client.get_avg_time_to_first_token(
             f"{self.args.adjustment_interval}s"
         )
-        self.last_itl = self.prometheus_api_client.get_avg_inter_token_latency(
+        self.last_metrics.itl = self.prometheus_api_client.get_avg_inter_token_latency(
             f"{self.args.adjustment_interval}s"
         )
-        self.last_num_req = self.prometheus_api_client.get_avg_request_count(
+        self.last_metrics.num_req = self.prometheus_api_client.get_avg_request_count(
             f"{self.args.adjustment_interval}s"
         )
-        self.last_request_duration = (
+        self.last_metrics.request_duration = (
             self.prometheus_api_client.get_avg_request_duration(
                 f"{self.args.adjustment_interval}s"
             )
         )
-        self.last_isl = self.prometheus_api_client.get_avg_input_sequence_tokens(
+        self.last_metrics.isl = self.prometheus_api_client.get_avg_input_sequence_tokens(
             f"{self.args.adjustment_interval}s"
         )
-        self.last_osl = self.prometheus_api_client.get_avg_output_sequence_tokens(
+        self.last_metrics.osl = self.prometheus_api_client.get_avg_output_sequence_tokens(
             f"{self.args.adjustment_interval}s"
         )
 
         logger.info(
-            f"Observed num_req: {self.last_num_req:.2f} isl: {self.last_isl:.2f} osl: {self.last_osl:.2f}"
+            f"Observed num_req: {self.last_metrics.num_req:.2f} isl: {self.last_metrics.isl:.2f} osl: {self.last_metrics.osl:.2f}"
         )
-        logger.info(f"Observed ttft: {self.last_ttft:.3f}s itl: {self.last_itl:.3f}s")
+        logger.info(f"Observed ttft: {self.last_metrics.ttft:.3f}s itl: {self.last_metrics.itl:.3f}s")
 
-        self.num_req_predictor.add_data_point(self.last_num_req)
-        self.isl_predictor.add_data_point(self.last_isl)
-        self.osl_predictor.add_data_point(self.last_osl)
+        self.num_req_predictor.add_data_point(self.last_metrics.num_req)
+        self.isl_predictor.add_data_point(self.last_metrics.isl)
+        self.osl_predictor.add_data_point(self.last_metrics.osl)
 
     async def make_adjustments(self):
         try:
@@ -155,17 +160,17 @@ class Planner:
 
             # first correct the prediction correction factor
             # for TTFT, we expect the correction factor to be << 1 due to queuing delay
-            expect_ttft = self.prefill_interpolator.interpolate_ttft(self.last_isl)
-            self.p_correction_factor = self.last_ttft / expect_ttft
+            expect_ttft = self.prefill_interpolator.interpolate_ttft(self.last_metrics.isl)
+            self.p_correction_factor = self.last_metrics.ttft / expect_ttft
             # for ITL, we expect the correction factor to be close to 1
             expect_itl = self.decode_interpolator.interpolate_itl(
-                concurrency=self.last_num_req  # type: ignore
+                concurrency=self.last_metrics.num_req  # type: ignore
                 / len(self.d_endpoints)
-                * self.last_request_duration  # type: ignore
+                * self.last_metrics.request_duration  # type: ignore
                 / self.args.adjustment_interval,
-                context_length=self.last_isl + self.last_osl / 2,  # type: ignore
+                context_length=self.last_metrics.isl + self.last_metrics.osl / 2,  # type: ignore
             )
-            self.d_correction_factor = self.last_itl / expect_itl
+            self.d_correction_factor = self.last_metrics.itl / expect_itl
             logger.info(
                 f"Correction factors: TTFT: {self.p_correction_factor:.3f}, ITL: {self.d_correction_factor:.3f}"
             )
