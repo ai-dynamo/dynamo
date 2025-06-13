@@ -237,25 +237,7 @@ func ParseDynamoGraphConfig(ctx context.Context, yamlContent *bytes.Buffer) (*Dy
 	logger := log.FromContext(ctx)
 	logger.Info("trying to parse dynamo graph config", "yamlContent", yamlContent.String())
 	err := yaml.Unmarshal(yamlContent.Bytes(), &config)
-	if err != nil {
-		return nil, err
-	}
-
-	// Add debug logging for ExtraPodSpec
-	for _, service := range config.Services {
-		if service.Config.ExtraPodSpec != nil {
-			extraPodSpecBytes, err := json.MarshalIndent(service.Config.ExtraPodSpec, "", "  ")
-			if err != nil {
-				logger.Error(err, "failed to marshal ExtraPodSpec for logging", "service", service.Name)
-			} else {
-				logger.Info("Parsed ExtraPodSpec for service", "service", service.Name, "ExtraPodSpec", string(extraPodSpecBytes))
-			}
-		} else {
-			logger.Info("No ExtraPodSpec found for service", "service", service.Name)
-		}
-	}
-
-	return &config, nil
+	return &config, err
 }
 
 func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeploymentConfig, error) {
@@ -408,15 +390,6 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 				if argsIsSet {
 					deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec.MainContainer.Args = service.Config.ExtraPodSpec.MainContainer.Args
 				}
-
-				extraPodSpecBytes, err := json.MarshalIndent(deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec.MainContainer, "", "  ")
-				if err != nil {
-					logger.Error(err, "failed to marshal deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec.MainContainer for logging", "service", service.Name)
-				} else {
-					logger.Info("Copied MainContainer Command/Args", "service", service.Name, "MainContainer", string(extraPodSpecBytes))
-				}
-			} else {
-				logger.Info("Skipping MainContainer because both Command and Args are empty", "service", service.Name)
 			}
 		}
 

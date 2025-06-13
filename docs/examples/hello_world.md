@@ -124,7 +124,7 @@ cd $PROJECT_ROOT/examples/hello_world
 DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk '{ print $3 }' | sed 's/\.$//')
 
 # Deploy to Kubernetes
-export DEPLOYMENT_NAME=ci-hw
+export DEPLOYMENT_NAME=fixlib
 dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME
 ```
 

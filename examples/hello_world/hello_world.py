@@ -125,10 +125,11 @@ class Middle:
 @service(
     dynamo={"namespace": "inference"},
     image=DYNAMO_IMAGE,
-    kubernetes_overrides={
-        "entrypoint": "sh -c",
-        "cmd": "echo hello from FrontEnd!; sleep 99999",
-    },
+    # Example of kubernetes overrides if needed.
+    # kubernetes_overrides={
+    #     "entrypoint": "sh -c",
+    #     "cmd": "echo hello from FrontEnd!",
+    # },
 )
 class Frontend:
     """A simple frontend HTTP API that forwards requests to the dynamo graph."""
