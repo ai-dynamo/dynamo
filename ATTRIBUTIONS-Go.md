@@ -1484,7 +1484,7 @@ Subdependencies:
 * `golang.org/x/net`
 * `golang.org/x/text`
 * `gopkg.in/inf.v0`
-* `gopkg.in/yaml.v2`
+* `github.com/goccy/go-yaml`
 * `k8s.io/klog/v2`
 * `k8s.io/utils`
 * `sigs.k8s.io/json`
@@ -3179,7 +3179,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-### gopkg.in/yaml.v2
+### github.com/goccy/go-yaml
 
 License Identifier: Apache-2.0
 License Text:
@@ -4864,7 +4864,7 @@ Subdependencies:
 * `google.golang.org/genproto/googleapis/api`
 * `google.golang.org/genproto/googleapis/rpc`
 * `google.golang.org/protobuf`
-* `gopkg.in/yaml.v2`
+* `github.com/goccy/go-yaml`
 
 ### github.com/dustin/go-humanize
 
@@ -8180,7 +8180,7 @@ Subdependencies:
 * `golang.org/x/text`
 * `google.golang.org/genproto/googleapis/rpc`
 * `gopkg.in/inf.v0`
-* `gopkg.in/yaml.v2`
+* `github.com/goccy/go-yaml`
 * `k8s.io/klog/v2`
 * `k8s.io/utils`
 * `sigs.k8s.io/json`
@@ -9056,7 +9056,7 @@ Subdependencies:
 * `google.golang.org/genproto/googleapis/api`
 * `google.golang.org/protobuf`
 * `gopkg.in/inf.v0`
-* `gopkg.in/yaml.v2`
+* `github.com/goccy/go-yaml`
 * `gopkg.in/yaml.v3`
 * `k8s.io/api`
 * `k8s.io/klog/v2`
@@ -22970,7 +22970,7 @@ Subdependencies:
 * `google.golang.org/protobuf`
 * `gopkg.in/evanphx/json-patch.v4`
 * `gopkg.in/inf.v0`
-* `gopkg.in/yaml.v2`
+* `github.com/goccy/go-yaml`
 * `gopkg.in/yaml.v3`
 * `k8s.io/component-base`
 * `k8s.io/gengo/v2`

@@ -42,7 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/archive"
-	"gopkg.in/yaml.v2"
+	"github.com/goccy/go-yaml"
 )
 
 const (
@@ -237,7 +237,25 @@ func ParseDynamoGraphConfig(ctx context.Context, yamlContent *bytes.Buffer) (*Dy
 	logger := log.FromContext(ctx)
 	logger.Info("trying to parse dynamo graph config", "yamlContent", yamlContent.String())
 	err := yaml.Unmarshal(yamlContent.Bytes(), &config)
-	return &config, err
+	if err != nil {
+		return nil, err
+	}
+
+	// Add debug logging for ExtraPodSpec
+	for _, service := range config.Services {
+		if service.Config.ExtraPodSpec != nil {
+			extraPodSpecBytes, err := json.MarshalIndent(service.Config.ExtraPodSpec, "", "  ")
+			if err != nil {
+				logger.Error(err, "failed to marshal ExtraPodSpec for logging", "service", service.Name)
+			} else {
+				logger.Info("Parsed ExtraPodSpec for service", "service", service.Name, "ExtraPodSpec", string(extraPodSpecBytes))
+			}
+		} else {
+			logger.Info("No ExtraPodSpec found for service", "service", service.Name)
+		}
+	}
+
+	return &config, nil
 }
 
 func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeploymentConfig, error) {
@@ -371,15 +389,6 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			deployment.Spec.Autoscaling.MinReplicas = service.Config.Autoscaling.MinReplicas
 			deployment.Spec.Autoscaling.MaxReplicas = service.Config.Autoscaling.MaxReplicas
 		}
-
-		// override the component config with the component config that is in the parent deployment
-		if configOverride, ok := parentDynamoGraphDeployment.Spec.Services[service.Name]; ok {
-			err := mergo.Merge(&deployment.Spec.DynamoComponentDeploymentSharedSpec, configOverride.DynamoComponentDeploymentSharedSpec, mergo.WithOverride)
-			if err != nil {
-				return nil, err
-			}
-		}
-
 		// Override command and args if provided.
 		if service.Config.ExtraPodSpec != nil && service.Config.ExtraPodSpec.MainContainer != nil {
 			if deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec == nil {
@@ -408,6 +417,14 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 				}
 			} else {
 				logger.Info("Skipping MainContainer because both Command and Args are empty", "service", service.Name)
+			}
+		}
+
+		// override the component config with the component config that is in the parent deployment
+		if configOverride, ok := parentDynamoGraphDeployment.Spec.Services[service.Name]; ok {
+			err := mergo.Merge(&deployment.Spec.DynamoComponentDeploymentSharedSpec, configOverride.DynamoComponentDeploymentSharedSpec, mergo.WithOverride)
+			if err != nil {
+				return nil, err
 			}
 		}
 
