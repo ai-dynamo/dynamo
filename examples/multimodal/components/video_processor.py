@@ -21,9 +21,9 @@ from typing import AsyncIterator, Tuple, Union
 
 from components.video_decode_worker import VllmDecodeWorker
 from transformers import AutoTokenizer
+from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.logging import check_required_workers
 from utils.protocol import MultiModalRequest, MyRequestOutput, vLLMMultimodalRequest
-from utils.video_chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.vllm import parse_vllm_args
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
@@ -59,6 +59,7 @@ class Processor(ProcessMixIn):
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
         self.model_config = self.engine_args.create_model_config()
+        self.default_sampling_params = self.model_config.get_diff_sampling_param()
         self.tokenizer = self._create_tokenizer(self.engine_args)
         self.chat_processor = ChatProcessor(self.tokenizer, self.model_config)
         self.completions_processor = CompletionsProcessor(
