@@ -17,21 +17,22 @@ limitations under the License.
 
 # Planner
 
-The planner monitors the state of the system and adjusts workers to ensure that the system runs efficiently. Currently, the planner can scale the number of vllm workers up and down based on the kv cache load and prefill queue size:
+The planner monitors the state of the system and adjusts workers to ensure that the system runs efficiently.
+Currently, the planner can scale the number of vllm workers up and down based on the kv cache load and prefill queue size:
 
-|                     |    | Feature           |
-| :----------------   | :--| :-----------------|
-| **Backend**         | ✅ | Local              |
-|                     | ✅ | Kubernetes         |
-| **LLM Framework**   | ✅ | vLLM               |
-|                     | ❌ | TensorRT-LLM       |
-|                     | ❌ | SGLang             |
-|                     | ❌ | llama.cpp          |
-| **Serving Type**    | ✅ | Aggregated         |
-|                     | ✅ | Disaggregated      |
-| **Planner Actions** | ✅ | Load-based scaling up/down prefill/decode workers |
+|                     |   | Feature                                                             |
+| :------------------ | - | :------------------------------------------------------------------ |
+| **Backend**         | ✅ | Local                                                               |
+|                     | ✅ | Kubernetes                                                          |
+| **LLM Framework**   | ✅ | vLLM                                                                |
+|                     | ❌ | TensorRT-LLM                                                        |
+|                     | ❌ | SGLang                                                              |
+|                     | ❌ | llama.cpp                                                           |
+| **Serving Type**    | ✅ | Aggregated                                                          |
+|                     | ✅ | Disaggregated                                                       |
+| **Planner Actions** | ✅ | Load-based scaling up/down prefill/decode workers                   |
 |                     | ✅ | SLA-based scaling up/down prefill/decode workers **<sup>[1]</sup>** |
-|                     | ✅ | Adjusting engine knobs |
+|                     | ✅ | Adjusting engine knobs                                              |
 
 **<sup>[1]</sup>** Supported with some limitations.
 
@@ -39,25 +40,32 @@ We currently provide two reference planner designs:
 1. Load-based planner: [docs](load_planner.md)
 2. SLA-based planner: [docs](sla_planner.md)
 
+
 ## Backends
 
 The planner supports local and kubernetes backends for worker management.
 
 ### Local Backend
 
-The local backend uses Circus to control worker processes. A Watcher tracks each `serve_dynamo.py` process. The planner adds or removes watchers to scale workers.
+The local backend uses Circus to control worker processes. A Watcher tracks each `serve_dynamo.py` process.
+The planner adds or removes watchers to scale workers.
 
 Note: Circus's `increment` feature doesn't support GPU scheduling variables, so we create separate watchers per process.
 
 #### State Management
 
 The planner maintains state in a JSON file at `~/.dynamo/state/{namespace}.json`. This file:
-* Tracks worker names as `{namespace}_{component_name}`
-* Records GPU allocations from the allocator
-* Updates after each planner action
-* Cleans up automatically when the arbiter exits
+
+- Tracks worker names as `{namespace}_{component_name}`.
+
+- Records GPU allocations from the allocator.
+
+- Updates after each planner action.
+
+- Cleans up automatically when the arbiter exits.
 
 Example state file evolution:
+
 ```none
 # Initial decode worker
 {
@@ -81,11 +89,15 @@ Example state file evolution:
 }
 ```
 
-Note: Start with one replica per worker. Multiple initial replicas currently share a single watcher.
+> [!Note]
+> Start with one replica per worker.
+> Multiple initial replicas currently share a single watcher.
 
 ### Kubernetes Backend
 
-The Kubernetes backend scales workers by updating DynamoGraphDeployment replica counts. When scaling needs change, the planner:
+The Kubernetes backend scales workers by updating DynamoGraphDeployment replica counts.
+When scaling needs change, the planner:
+
 1. Updates the deployment's replica count
 2. Lets the Kubernetes operator create/remove pods
 3. Maintains seamless scaling without manual intervention

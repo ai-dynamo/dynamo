@@ -69,6 +69,48 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
         default="<prompt>",
         help="Prompt template to use for the model",
     )
+    parser.add_argument(
+        "--num-sampled-frames",
+        type=int,
+        default=8,
+        help="Number of frames to sample from the video",
+    )
+    parser.add_argument(
+        "--frame-height",
+        type=int,
+        default=336,
+        help="Height of the video frames",
+    )
+    parser.add_argument(
+        "--frame-width",
+        type=int,
+        default=336,
+        help="Width of the video frames",
+    )
+    parser.add_argument(
+        "--frame-channels",
+        type=int,
+        default=3,
+        help="Number of channels in the video frames",
+    )
+    parser.add_argument(
+        "--dummy-token-id",
+        type=int,
+        default=0,
+        help="Dummy token ID",
+    )
+    parser.add_argument(
+        "--video-token-id",
+        type=int,
+        default=32000,
+        help="Video token ID",
+    )
+    parser.add_argument(
+        "--dummy-tokens-per-frame",
+        type=int,
+        default=144,
+        help="Number of dummy tokens per frame",
+    )
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args(vllm_args)
     engine_args = AsyncEngineArgs.from_cli_args(args)
@@ -78,6 +120,13 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     engine_args.max_local_prefill_length = args.max_local_prefill_length
     engine_args.max_prefill_queue_size = args.max_prefill_queue_size
     engine_args.prompt_template = args.prompt_template
+    engine_args.num_sampled_frames = args.num_sampled_frames
+    engine_args.frame_height = args.frame_height
+    engine_args.frame_width = args.frame_width
+    engine_args.frame_channels = args.frame_channels
+    engine_args.dummy_token_id = args.dummy_token_id
+    engine_args.video_token_id = args.video_token_id
+    engine_args.dummy_tokens_per_frame = args.dummy_tokens_per_frame
     engine_args.num_patches = args.num_patches
     engine_args.image_token_id = args.image_token_id
     return engine_args
