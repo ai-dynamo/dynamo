@@ -412,3 +412,23 @@ In the case of UCX backend, you can use `ucx_info -d` to check if the desired in
 devices are being recognized. At runtime, `UCX_LOG_LEVEL=debug` and `UCX_PROTO_INFO=y`
 can be set as environment variables to provide detailed logs on UCX activities. This will
 reveal whether the desired transport is being used.
+
+### The Full Deployment is Configured Correctly
+
+As the benchmarking often focuses on configuration where multiple workers are being used,
+one may mistakenly consider a deployment is ready for benchmark while there are only a
+subset of workers are taking requests. For example, in the aggregated baseline benchmarking,
+a user can miss updating the ip address to the other node in upstream section of `nginx.conf`.
+This could lead to only one of the node to serve request. In such a case,
+the benchmark can still run to completion, but the result will not reflect the deployment
+capacity, because not all the compute resources are being utilized.
+
+Therefore, it is important to verify that the requests can be routed to all workers before
+performing the benchmark:
+- **Framework-only benchmark** The simplest way is to send sample requests and check
+the logs of all workers. The framework may provides utilities for readiness check and please
+refer to their documentation for detail.
+- **Dynamo based benchmark** Once you start the deployment, you can follow
+the instruction in [monitor benchmark startup status](#Monitor-Benchmark-Startup-Status),
+which will periodically pull the workers exposed to specific endpoints
+and return HTTP 200 code when the expected number of workers are met.
