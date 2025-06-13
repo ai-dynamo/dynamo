@@ -380,6 +380,10 @@ async def test_worker_failure(
                 result = circus_controller.client.call(
                     {"command": "list", "properties": {"name": f"{component_name}"}}
                 )
+                if result["status"] == "error":
+                    logger.warn(f"component {component_name} not found {result}")
+                    continue
+                
                 num_processes = len(result["pids"])
                 if number is None:
                     number = num_processes
