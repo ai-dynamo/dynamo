@@ -363,6 +363,14 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			}
 		}
 
+		// override the component config with the component config that is in the parent deployment
+		if configOverride, ok := parentDynamoGraphDeployment.Spec.Services[service.Name]; ok {
+			err := mergo.Merge(&deployment.Spec.DynamoComponentDeploymentSharedSpec, configOverride.DynamoComponentDeploymentSharedSpec, mergo.WithOverride)
+			if err != nil {
+				return nil, err
+			}
+		}
+
 		// Override command and args if provided.
 		if service.Config.ExtraPodSpec != nil && service.Config.ExtraPodSpec.MainContainer != nil {
 			if deployment.Spec.ExtraPodSpec == nil {
@@ -401,13 +409,6 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			deployment.Spec.Autoscaling.Enabled = true
 			deployment.Spec.Autoscaling.MinReplicas = service.Config.Autoscaling.MinReplicas
 			deployment.Spec.Autoscaling.MaxReplicas = service.Config.Autoscaling.MaxReplicas
-		}
-		// override the component config with the component config that is in the parent deployment
-		if configOverride, ok := parentDynamoGraphDeployment.Spec.Services[service.Name]; ok {
-			err := mergo.Merge(&deployment.Spec.DynamoComponentDeploymentSharedSpec, configOverride.DynamoComponentDeploymentSharedSpec, mergo.WithOverride)
-			if err != nil {
-				return nil, err
-			}
 		}
 		// merge the envs from the parent deployment with the envs from the service
 		if len(parentDynamoGraphDeployment.Spec.Envs) > 0 {
