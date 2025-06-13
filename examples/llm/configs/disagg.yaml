@@ -15,7 +15,7 @@
 Common:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   block-size: 64
-  max-model-len: 10
+  max-model-len: 16384
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
 
 Frontend:
@@ -32,7 +32,6 @@ VllmWorker:
   conditional-disagg: true
   max-local-prefill-length: 10
   max-prefill-queue-size: 2
-  gpu-memory-utilization: 0.1
   ServiceArgs:
     workers: 1
     resources:

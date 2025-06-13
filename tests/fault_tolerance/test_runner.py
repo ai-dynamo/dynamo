@@ -363,17 +363,12 @@ def worker_metrics(request):
     
 
 def _set_deployment_args(request,
-                         decode_workers,
-                         prefill_workers,
                          max_num_seqs):
 
     decode_worker_name = "VllmWorker"
     if "mock" in request.node.name:
         decode_worker_name = "MockVllmWorker"
     args = {}
-
-    if decode_workers is not None:
-        args[f"--{decode_worker_name}.ServiceArgs.workers"] = decode_workers
 
     if max_num_seqs is not None:
         args[f"--{decode_worker_name}.max_num_seqs"] = max_num_seqs
@@ -385,7 +380,7 @@ def _set_deployment_args(request,
 @pytest.mark.slow
 async def test_worker_failure(
         deployment_graph_test, request, runtime_services, num_clients, requests_per_client, worker_metrics,respawn, failures,
-        input_token_length,output_token_length, decode_workers, prefill_workers, max_num_seqs, max_retries
+        input_token_length,output_token_length, max_num_seqs, max_retries
 ):
     """
     Test dynamo serve deployments with different graph configurations.
@@ -404,8 +399,6 @@ async def test_worker_failure(
             del os.environ["DYN_CIRCUS_RESPAWN"]
 
     deployment_args = _set_deployment_args(request,
-                                           decode_workers,
-                                           prefill_workers,
                                            max_num_seqs)
     
     with DynamoServeProcess(

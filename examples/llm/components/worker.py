@@ -246,7 +246,7 @@ class VllmWorker(LLMWorker):
                     finished=response.finished,
                 ).model_dump_json()
         except RuntimeError as e:
-            print("gotcha Exiting", flush=True)
-            await self.graceful_shutdown(self._runtime)
-            print(e)
+            print(f"gotcha Exiting {e}", flush=True)
+            #await self.graceful_shutdown(self._runtime)
+            #print(e)
             raise e
