@@ -26,8 +26,8 @@ export CLUSTER_WIN=$(gcloud container clusters describe ${CLUSTER_NAME} \
   --format="value(workloadIdentityConfig.workloadPool)")
 ```
 
-+ !!! important
-+ Make sure Workload Identity is enabled in your cluster!
+!!! important
+    Make sure Workload Identity is enabled in your cluster!
 
 
 ## Service Account Creation and Configuration

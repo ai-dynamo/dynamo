@@ -100,7 +100,7 @@ kubectl get storageclass
 # standard (default)   kubernetes.io/gce-pd    Delete          Immediate              true                   1d
 ```
 
-### Cloud provider specific deployment
+### Cloud Provider-Specific deployment
 
 #### Google Kubernetes Engine (GKE) deployment
 
