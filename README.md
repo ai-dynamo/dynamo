@@ -19,11 +19,9 @@ limitations under the License.
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/nvidia-dynamo)
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/dynamo)
 
-| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[User Guides](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Support Matrix](docs/support_matrix.md)** | **[Architecture and Features](docs/architecture/architecture.md)** | **[APIs](lib/bindings/python/README.md)** | **[SDK](deploy/dynamo/sdk/README.md)** |
-
-### 📢 **Please join us for our** [ **first Dynamo in-person meetup with vLLM and SGLang leads**](https://events.nvidia.com/nvidiadynamousermeetups) **on 6/5 (Thu) in SF!** ###
-
+| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[Documentation](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Examples](https://github.com/ai-dynamo/examples)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** |
 
 ### The Era of Multi-Node, Multi-GPU
 
