@@ -34,11 +34,11 @@ ARG ARCH_ALT=x86_64
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS nixl_base
 
-WORKDIR /opt/nixl
+WORKDIR /opt/nvidia/nvda_nixl
 # Add a cache hint that only changes when the nixl commit changes
 ARG NIXL_COMMIT
 # This line acts as a cache key - it only changes when NIXL_COMMIT changes
-RUN echo "NIXL commit: ${NIXL_COMMIT}" > /opt/nixl/commit.txt
+RUN echo "NIXL commit: ${NIXL_COMMIT}" > /opt/nvidia/nvda_nixl/commit.txt
 # Copy the nixl source
 COPY --from=nixl . .
 
@@ -100,25 +100,25 @@ SHELL ["/bin/bash", "-c"]
 
 # NIXL SETUP
 # Copy nixl source, and use commit hash as cache hint
-COPY --from=nixl_base /opt/nixl /opt/nixl
-COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
+COPY --from=nixl_base /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
+COPY --from=nixl_base /opt/nvidia/nvda_nixl/commit.txt /opt/nvidia/nvda_nixl/commit.txt
 RUN if [ "$ARCH" = "arm64" ]; then \
-        cd /opt/nixl && \
+        cd /opt/nvidia/nvda_nixl && \
         mkdir build && \
-        meson setup build/ --prefix=/usr/local/nixl -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
+        meson setup build/ --prefix=/opt/nvidia/nvda_nixl -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
         cd build/ && \
         ninja && \
         ninja install; \
     else \
-        cd /opt/nixl && \
+        cd /opt/nvidia/nvda_nixl && \
         mkdir build && \
-        meson setup build/ --prefix=/usr/local/nixl && \
+        meson setup build/ --prefix=/opt/nvidia/nvda_nixl && \
         cd build/ && \
         ninja && \
         ninja install; \
     fi
 
-ENV NIXL_PREFIX=/usr/local/nixl
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
 
 # nats
 RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-${ARCH}.deb && \
@@ -249,7 +249,7 @@ COPY --from=build $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=build $CARGO_HOME $CARGO_HOME
 COPY --from=build /workspace /workspace
 COPY --from=build $VIRTUAL_ENV $VIRTUAL_ENV
-COPY --from=build /usr/local/nixl /opt/nvidia/nvda_nixl
+COPY --from=build /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
 ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
 
 # Copy configuration files
@@ -327,6 +327,10 @@ ENV DYNAMO_HOME=/workspace
 # Use UCX for TRTLLM KV Cache Transfer
 ENV TRTLLM_USE_UCX_KVCACHE=1
 
+# Setup NIXL_PLUGIN_DIR and LD_LIBRARY_PATH for NIXL (and plugins)
+ARG ARCH_ALT
+ENV NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins
+ENV LD_LIBRARY_PATH=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu:/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:$LD_LIBRARY_PATH
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
