@@ -376,20 +376,10 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 				deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec = new(common.ExtraPodSpec)
 			}
 
-			commandIsSet := len(service.Config.ExtraPodSpec.MainContainer.Command) > 0
-			argsIsSet := len(service.Config.ExtraPodSpec.MainContainer.Args) > 0
-
-			if commandIsSet || argsIsSet {
-				deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec.MainContainer = &corev1.Container{}
-
-				if commandIsSet {
-					deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec.MainContainer.Command = service.Config.ExtraPodSpec.MainContainer.Command
-				}
-
-				if argsIsSet {
-					deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec.MainContainer.Args = service.Config.ExtraPodSpec.MainContainer.Args
-				}
-			}
+			overrideExtraPodSpecMainContainer(
+				service.Config.ExtraPodSpec,
+				deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec,
+			)
 		}
 
 		// override the component config with the component config that is in the parent deployment
@@ -550,4 +540,29 @@ func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 		merged = append(merged, env)
 	}
 	return merged
+}
+
+func overrideExtraPodSpecMainContainer(src *common.ExtraPodSpec, dst *common.ExtraPodSpec) {
+	if src == nil || src.MainContainer == nil {
+		return
+	}
+
+	commandIsSet := len(src.MainContainer.Command) > 0
+	argsIsSet := len(src.MainContainer.Args) > 0
+
+	if !commandIsSet && !argsIsSet {
+		return
+	}
+
+	if dst == nil {
+		panic("overrideExtraPodSpecMainContainer: dst must not be nil")
+	}
+
+	dst.MainContainer = &corev1.Container{}
+	if commandIsSet {
+		dst.MainContainer.Command = src.MainContainer.Command
+	}
+	if argsIsSet {
+		dst.MainContainer.Args = src.MainContainer.Args
+	}
 }
