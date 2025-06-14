@@ -289,25 +289,25 @@ if __name__ == "__main__":
 
 ## Advantages
 
-### 1. Zero Configuration
-- Just add decorator or inherit Mixin class
-- No manual handling of HTTP headers or responses
-- Automatic request ID propagation
+1. Zero Configuration
+    - Just add decorator or inherit Mixin class
+    - No manual handling of HTTP headers or responses
+    - Automatic request ID propagation
 
-### 2. Consistency
-- All components use the same request ID format
-- Unified logging format and tracing approach
-- Compatible with vLLM and OpenAI standards
+2. Consistency
+    - All components use the same request ID format
+    - Unified logging format and tracing approach
+    - Compatible with vLLM and OpenAI standards
 
-### 3. Flexibility
-- Supports class decorators, method decorators, and Mixin classes
-- Can get current request ID anywhere
-- Supports manual request ID passing
+3. Flexibility
+    - Supports class decorators, method decorators, and Mixin classes
+    - Can get current request ID anywhere
+    - Supports manual request ID passing
 
-### 4. Performance
-- Uses thread-local storage, no global locks
-- Minimal performance overhead
-- Automatic context cleanup
+4. Performance
+    - Uses thread-local storage, no global locks
+    - Minimal performance overhead
+    - Automatic context cleanup
 
 ## Migration Guide
 
@@ -345,11 +345,14 @@ class Frontend:
             yield response
 ```
 
-## Important Notes
-
-1. **FastAPI Request Object**: Frontend endpoints need to include `Request` parameter to extract HTTP headers
-2. **Optional Parameters**: Processor methods should accept `Optional[str] request_id` parameter
-3. **Thread Safety**: Uses thread-local storage, safe in async environments
-4. **Context Propagation**: Router and Worker components automatically get request ID through Dynamo's Context system
+[!Important]
+1. **FastAPI Request Object**: 
+    Frontend endpoints need to include `Request` parameter to extract HTTP headers
+2. **Optional Parameters**: 
+    Processor methods should accept `Optional[str] request_id` parameter
+3. **Thread Safety**: 
+    Uses thread-local storage, safe in async environments
+4. **Context Propagation**: 
+    Router and Worker components automatically get request ID through Dynamo's Context system
 
 This universal approach greatly simplifies X-Request-Id implementation, allowing developers to focus on business logic rather than infrastructure code.
