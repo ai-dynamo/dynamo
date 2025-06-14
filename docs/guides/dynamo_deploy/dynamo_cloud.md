@@ -23,7 +23,7 @@ The Dynamo Cloud platform is a comprehensive solution for deploying and managing
 
 The Dynamo cloud platform consists of several key components:
 
-- **Dynamo Operator**: A Kubernetes operator that manages the lifecycle of Dynamo inference graphs from build ➡️ deploy. For more information on the operator, see the [Dynamo Operator Page](dynamo_operator.md).
+- **Dynamo Operator**: A Kubernetes operator that manages the lifecycle of Dynamo inference graphs from build ➡️ deploy. For more information on the operator, see [Dynamo Kubernetes Operator Documentation](../dynamo_deploy/dynamo_operator.md)
 - **API Store**: Stores and manages service configurations and metadata related to Dynamo deployments. Needs to be exposed externally.
 - **Custom Resources**: Kubernetes custom resources for defining and managing Dynamo services
 
@@ -65,8 +65,8 @@ Where:
 - `<CONTAINER_REGISTRY>`: Your container registry (e.g., `nvcr.io`, `docker.io/<your-username>`, etc.)
 - `<TAG>`: The version tag for your images (e.g., `latest`, `0.0.1`, `v1.0.0`)
 
-```{important}
-Make sure you're logged in to your container registry before pushing images:
+**Important** Make sure you're logged in to your container registry before pushing images. For example:
+
 ```bash
 docker login <CONTAINER_REGISTRY>
 ```
@@ -99,6 +99,12 @@ kubectl get storageclass
 # NAME                 PROVISIONER             RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
 # standard (default)   kubernetes.io/gce-pd    Delete          Immediate              true                   1d
 ```
+
+### Cloud Provider-Specific deployment
+
+#### Google Kubernetes Engine (GKE) deployment
+
+You can find detailed instructions for deployment in GKE [here](../dynamo_deploy/gke_setup.md)
 
 ### Installation
 
@@ -154,7 +160,7 @@ kubectl config set-context --current --namespace=$NAMESPACE
 ./deploy.sh --crds
 ```
 
-if you wish to be guided through the deployment process, you can run the deploy script with the `--interactive` flag:
+if you want guidance during the process, run the deployment script with the `--interactive` flag:
 
 ```bash
 ./deploy.sh --crds --interactive
@@ -165,7 +171,7 @@ omitting `--crds` will skip the CRDs installation/upgrade. This is useful when i
 4. **Expose Dynamo Cloud Externally**
 
 ``` {note}
-The script automatically displays information about the endpoint you can use to access Dynamo Cloud. In our docs, we refer to this externally available endpoint as `DYNAMO_CLOUD`.
+The script automatically displays information about the endpoint that you can use to access Dynamo Cloud. We refer to this externally available endpoint as `DYNAMO_CLOUD`.
 ```
 
 The simplest way to expose the `dynamo-store` service within the namespace externally is to use a port-forward:
@@ -180,7 +186,7 @@ export DYNAMO_CLOUD=http://localhost:<local-port>
 After deploying the Dynamo cloud platform, you can:
 
 1. Deploy your first inference graph using the [Dynamo CLI](operator_deployment.md)
-2. Deploy Dynamo LLM pipelines to Kubernetes using the [Dynamo CLI](../../examples/llm_deployment.md)!
+2. Deploy Dynamo LLM pipelines to Kubernetes using the [Dynamo CLI](../../examples/llm_deployment.md)
 3. Manage your deployments using the Dynamo CLI
 
 For more detailed information about deploying inference graphs, see the [Dynamo Deploy Guide](README.md).

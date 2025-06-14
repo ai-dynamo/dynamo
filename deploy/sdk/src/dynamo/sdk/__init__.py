@@ -16,17 +16,13 @@
 import warnings
 from typing import Any
 
-# Suppress warning from setuptools caused by bentoml
-# TODO: Remove this line after the bentoml import is removed from this file
 warnings.filterwarnings("ignore", category=UserWarning, message=".*pkg_resources.*")
 
 # flake8: noqa: E402
-from bentoml import on_shutdown as async_on_shutdown
-
-# flake8: noqa: E402
-from dynamo.sdk.core.decorators.endpoint import api, endpoint
+from dynamo.sdk.core.decorators.endpoint import abstract_endpoint, api, endpoint
 from dynamo.sdk.core.lib import DYNAMO_IMAGE, depends, liveness, readiness, service
-from dynamo.sdk.lib.decorators import async_on_start
+from dynamo.sdk.core.protocol.interface import AbstractService
+from dynamo.sdk.lib.decorators import async_on_start, on_shutdown
 from dynamo.sdk.request_tracing import (
     RequestTracingMixin,
     auto_trace_endpoints,
@@ -42,7 +38,7 @@ dynamo_context: dict[str, Any] = {}
 
 __all__ = [
     "DYNAMO_IMAGE",
-    "async_on_shutdown",
+    "on_shutdown",
     "async_on_start",
     "auto_trace_endpoints",
     "depends",
@@ -57,6 +53,8 @@ __all__ = [
     "trace_processor_method",
     "with_request_tracing",
     "with_request_id",
+    "AbstractService",
+    "abstract_endpoint",
     "liveness",
     "readiness",
 ]

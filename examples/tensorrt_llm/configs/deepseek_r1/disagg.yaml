@@ -16,19 +16,12 @@
 Frontend:
   # This is the client-facing model name, you can set this to anything you'd like.
   served_model_name: "nvidia/DeepSeek-R1-FP4"
-  endpoint_chat: dynamo.Processor.chat/completions
-  endpoint_completions: dynamo.Processor.completions
+  endpoint: dynamo.TensorRTLLMWorker.generate
   port: 8000
-
-Processor:
-  engine_args: "configs/deepseek_r1/agg_llm_api_config.yaml"
   router: round-robin
-  remote-prefill: true
-  # Parallelize preprocessing/tokenization to avoid bottlenecks
-  ServiceArgs:
-    workers: 5
 
 TensorRTLLMWorker:
+  served_model_name: "nvidia/DeepSeek-R1-FP4"
   engine_args: "configs/deepseek_r1/agg_llm_api_config.yaml"
   llmapi-disaggregated-config: "configs/deepseek_r1/disagg_llm_api_config.yaml"
   remote-prefill: true

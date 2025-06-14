@@ -19,6 +19,17 @@ limitations under the License.
 
 This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations using TensorRT-LLM.
 
+## Use the Latest Release
+
+We recommend using the latest stable release of dynamo to avoid breaking changes:
+
+[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
+
+You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
+
+```bash
+git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
+```
 
 ## Deployment Architectures
 
@@ -118,6 +129,16 @@ cd /workspace/examples/tensorrt_llm
 dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
 ```
 
+#### Aggregated serving with Multi-Token Prediction (MTP) and DeepSeek R1
+```bash
+cd /workspace/examples/tensorrt_llm
+dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/mtp/mtp_agg.yaml
+```
+
+Notes:
+- There is a noticeable latency for the first two inference requests. Please send warm-up requests before starting the benchmark.
+- MTP performance may vary depending on the acceptance rate of predicted tokens, which is dependent on the dataset or queries used while benchmarking. Additionally, `ignore_eos` should generally be omitted or set to `false` when using MTP to avoid speculating garbage outputs and getting unrealistic acceptance rates.
+
 #### Multi-Node Disaggregated Serving
 
 In the following example, we will demonstrate how to run a Disaggregated Serving
@@ -125,6 +146,19 @@ deployment across multiple nodes. For simplicity, we will demonstrate how to
 deploy a single Decode worker on one node, and a single Prefill worker on the other node.
 However, the instance counts, TP sizes, other configs, and responsibilities of each node
 can be customized and deployed in similar ways.
+
+For example, to deploy Deepseek R1, you could replace the referenced example
+configs (`configs/agg.yaml`, `configs/disagg.yaml`) with corresponding Deepseek R1
+example configs (`configs/deepseek_r1/agg.yaml`, `configs/deepseek_r1/disagg.yaml`).
+You can find the example Deepseek R1 configs for GB200
+[here](configs/deepseek_r1), but the config settings can be customized for testing
+other hardware configurations or parallelism strategies.
+
+This "multi-node" example demonstrates how to generally connect dynamo workers from
+different nodes, but for simplicity, each worker individually fits on a single node.
+For details on how to launch a worker that spans multiple nodes due to sheer model
+size, or for features like large scale expert parallelism, see the
+[multinode worker example](configs/deepseek_r1/multinode).
 
 ##### Head Node
 
@@ -140,7 +174,7 @@ etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0
 #       helps to guarantee a clean and reproducible results.
 ```
 
-Launch graph of Frontend, Processor, and TensorRTLLMWorker (decode) on head node:
+Launch graph of Frontend and TensorRTLLMWorker (decode) on head node:
 
 ```bash
 cd /workspace/examples/tensorrt_llm
@@ -173,7 +207,7 @@ export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
 ```
 
 Deploy a Prefill worker:
-```
+```bash
 cd /workspace/examples/tensorrt_llm
 dynamo serve components.prefill_worker:TensorRTLLMPrefillWorker -f ./configs/disagg.yaml --service-name TensorRTLLMPrefillWorker &
 ```
@@ -206,6 +240,45 @@ Notes:
   unset SLURM_JOBID SLURM_JOB_ID SLURM_NODELIST
   ```
 
+#### Multi-Node Disaggregated Serving with Multi-Token Prediction (MTP) and DeepSeek R1
+
+Most of the steps remain the same as the above example, but this time we will have `dynamo serve` point to different config files that contains the MTP configurations
+
+##### Head Node
+
+Start nats/etcd
+```bash
+nats-server -js &
+etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd &
+```
+
+Launch graph of Frontend and TensorRTLLMWorker (decode) on head node:
+
+```bash
+cd /workspace/examples/tensorrt_llm
+dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/mtp/mtp_disagg.yaml  &
+```
+
+##### Worker Node(s)
+
+Set environment variables pointing at the etcd/nats endpoints on the head node.
+```bash
+export HEAD_NODE_IP="<head-node-ip>"
+export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
+export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
+```
+
+Deploy a Prefill worker:
+```bash
+cd /workspace/examples/tensorrt_llm
+dynamo serve components.prefill_worker:TensorRTLLMPrefillWorker -f configs/deepseek_r1/mtp/mtp_disagg.yaml --service-name TensorRTLLMPrefillWorker &
+```
+
+Notes:
+- There is a noticeable latency for the first two inference requests. Please send warm-up requests before starting the benchmark.
+- MTP performance may vary depending on the acceptance rate of predicted tokens, which is dependent on the dataset or queries used while benchmarking. Additionally, `ignore_eos` should generally be omitted or set to `false` when using MTP to avoid speculating garbage outputs and getting unrealistic acceptance rates.
+
+
 ### Client
 
 See [client](../llm/README.md#client) section to learn how to send request to the deployment.
@@ -219,7 +292,7 @@ See [close deployment](../../docs/guides/dynamo_serve.md#close-deployment) secti
 ### Benchmarking
 
 To benchmark your deployment with GenAI-Perf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](../llm/benchmarks/perf.sh)
+`model` name and `host` based on your deployment: [perf.sh](../../benchmarks/llm/perf.sh)
 
 ### Future Work
 
@@ -227,7 +300,7 @@ Remaining tasks:
 - [x] Add support for the disaggregated serving.
 - [x] Add multi-node support.
 - [x] Add instructions for benchmarking.
+- [x] Use processor from dynamo-llm framework.
 - [ ] Add integration test coverage.
 - [ ] Merge the code base with llm example to reduce the code duplication.
-- [ ] Use processor from dynamo-llm framework.
 - [ ] Enable NIXL integration with TensorRT-LLM once available. Currently, TensorRT-LLM uses UCX to transfer KV cache.

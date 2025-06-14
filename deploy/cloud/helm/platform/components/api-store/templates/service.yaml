@@ -15,7 +15,7 @@
 apiVersion: v1
 kind: Service
 metadata:
-  name: "dynamo-store"
+  name: {{ include "helm.fullname" . }}
   {{- with .Values.service.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
@@ -30,4 +30,4 @@ spec:
       protocol: TCP
       name: http
   selector:
-    app: dynamo-api-store
+    app: {{ include "helm.name" . }}

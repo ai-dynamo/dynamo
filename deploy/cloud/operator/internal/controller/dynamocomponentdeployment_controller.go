@@ -38,7 +38,6 @@ import (
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/config"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -1001,21 +1000,23 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 	return
 }
 
-func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx context.Context, opt generateResourceOption) (modified bool, err error) {
-	modified, _, err = commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1.Ingress, bool, error) {
+func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx context.Context, opt generateResourceOption) (bool, error) {
+	modified, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1.Ingress, bool, error) {
 		return r.generateIngress(ctx, opt)
 	})
 	if err != nil {
-		return
+		return false, err
 	}
-	modified_, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
-		return r.generateVirtualService(ctx, opt)
-	})
-	if err != nil {
-		return
+	if r.UseVirtualService {
+		modified_, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
+			return r.generateVirtualService(ctx, opt)
+		})
+		if err != nil {
+			return false, err
+		}
+		return modified || modified_, nil
 	}
-	modified = modified || modified_
-	return
+	return modified, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateIngress(ctx context.Context, opt generateResourceOption) (*networkingv1.Ingress, bool, error) {
@@ -1142,11 +1143,15 @@ func (r *DynamoComponentDeploymentReconciler) getGenericServiceName(dynamoCompon
 	return r.getKubeName(dynamoComponentDeployment, dynamoComponent, false)
 }
 
-func (r *DynamoComponentDeploymentReconciler) getKubeLabels(_ *v1alpha1.DynamoComponentDeployment, dynamoComponent *v1alpha1.DynamoComponent) map[string]string {
+func (r *DynamoComponentDeploymentReconciler) getKubeLabels(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, dynamoComponent *v1alpha1.DynamoComponent) map[string]string {
 	labels := map[string]string{
 		commonconsts.KubeLabelDynamoComponent: dynamoComponent.Name,
 	}
-	labels[commonconsts.KubeLabelDynamoComponentType] = commonconsts.DynamoApiServerComponentName
+	if dynamoComponentDeployment != nil && dynamoComponentDeployment.Labels != nil {
+		if v, ok := dynamoComponentDeployment.Labels[commonconsts.KubeLabelDynamoComponent]; ok && v != "" {
+			labels[commonconsts.KubeLabelDynamoComponentType] = v
+		}
+	}
 	return labels
 }
 
@@ -1697,17 +1702,18 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		Volumes:    volumes,
 	}
 
-	podSpec.ImagePullSecrets = []corev1.LocalObjectReference{
-		{
-			Name: config.GetDockerRegistryConfig().SecretName,
-		},
-	}
+	imagePullSecrets := []corev1.LocalObjectReference{}
+
 	if opt.dynamoComponent.Spec.DockerConfigJSONSecretName != "" {
-		podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, corev1.LocalObjectReference{
+		imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{
 			Name: opt.dynamoComponent.Spec.DockerConfigJSONSecretName,
 		})
 	}
-	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, opt.dynamoComponent.Spec.ImagePullSecrets...)
+	imagePullSecrets = append(imagePullSecrets, opt.dynamoComponent.Spec.ImagePullSecrets...)
+
+	if len(imagePullSecrets) > 0 {
+		podSpec.ImagePullSecrets = imagePullSecrets
+	}
 
 	extraPodMetadata := opt.dynamoComponentDeployment.Spec.ExtraPodMetadata
 
@@ -1736,7 +1742,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	if podSpec.ServiceAccountName == "" {
 		serviceAccounts := &corev1.ServiceAccountList{}
 		err = r.List(ctx, serviceAccounts, client.InNamespace(opt.dynamoComponentDeployment.Namespace), client.MatchingLabels{
-			commonconsts.KubeLabelDynamoDeploymentPod: commonconsts.KubeLabelValueTrue,
+			commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue,
 		})
 		if err != nil {
 			err = errors.Wrapf(err, "failed to list service accounts in namespace %s", opt.dynamoComponentDeployment.Namespace)

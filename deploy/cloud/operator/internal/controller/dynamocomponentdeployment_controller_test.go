@@ -893,7 +893,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 							Name:      "default-test-sa", // Name it will be resolved to
 							Namespace: "default",         // Must match dynamoComponentDeployment.Namespace
 							Labels: map[string]string{
-								commonconsts.KubeLabelDynamoDeploymentPod: commonconsts.KubeLabelValueTrue,
+								commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue,
 							},
 						},
 					},
@@ -904,9 +904,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 					Name:      "test-lws-deploy-0",
 					Namespace: "default",
 					Labels: map[string]string{
-						commonconsts.KubeLabelDynamoComponent:     "test-lws-component",
-						commonconsts.KubeLabelDynamoComponentType: commonconsts.DynamoApiServerComponentName,
-						"instance-id": "0",
+						commonconsts.KubeLabelDynamoComponent: "test-lws-component",
+						"instance-id":                         "0",
 					},
 				},
 				Spec: leaderworkersetv1.LeaderWorkerSetSpec{
@@ -920,7 +919,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									"instance-id":                         "0",
 									"role":                                "leader",
 									commonconsts.KubeLabelDynamoComponent: "test-lws-component",
-									commonconsts.KubeLabelDynamoComponentType: commonconsts.DynamoApiServerComponentName,
 								},
 								Annotations: map[string]string{
 									"scheduling.k8s.io/group-name": "test-lws-deploy-0",
@@ -964,8 +962,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									},
 								},
 								Volumes:            []corev1.Volume{{Name: "shared-memory", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: limit}}}},
-								ImagePullSecrets:   []corev1.LocalObjectReference{{Name: ""}}, // Assuming default config gives empty secret name
-								ServiceAccountName: "default-test-sa",                         // Updated to reflect mocked SA
+								ImagePullSecrets:   nil,               // Assuming default config gives empty secret name
+								ServiceAccountName: "default-test-sa", // Updated to reflect mocked SA
 							},
 						},
 						WorkerTemplate: corev1.PodTemplateSpec{
@@ -974,7 +972,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									"instance-id":                         "0",
 									"role":                                "worker",
 									commonconsts.KubeLabelDynamoComponent: "test-lws-component",
-									commonconsts.KubeLabelDynamoComponentType: commonconsts.DynamoApiServerComponentName,
 								},
 								Annotations: map[string]string{
 									"scheduling.k8s.io/group-name": "test-lws-deploy-0",
@@ -1002,7 +999,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									},
 								},
 								Volumes:            []corev1.Volume{{Name: "shared-memory", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: limit}}}},
-								ImagePullSecrets:   []corev1.LocalObjectReference{{Name: ""}},
+								ImagePullSecrets:   nil,
 								ServiceAccountName: "default-test-sa", // Updated to reflect mocked SA
 							},
 						},
@@ -1043,7 +1040,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 					&corev1.ServiceAccount{
 						ObjectMeta: metav1.ObjectMeta{
 							Name: "default-test-sa", Namespace: "default", // Match namespace
-							Labels: map[string]string{commonconsts.KubeLabelDynamoDeploymentPod: commonconsts.KubeLabelValueTrue},
+							Labels: map[string]string{commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue},
 						},
 					},
 				},
@@ -1084,7 +1081,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 					&corev1.ServiceAccount{
 						ObjectMeta: metav1.ObjectMeta{
 							Name: "default-test-sa", Namespace: "default", // Match namespace
-							Labels: map[string]string{commonconsts.KubeLabelDynamoDeploymentPod: commonconsts.KubeLabelValueTrue},
+							Labels: map[string]string{commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue},
 						},
 					},
 				},

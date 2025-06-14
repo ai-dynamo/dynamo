@@ -165,7 +165,7 @@ class DynamoComponentVersionApiSchema(BaseModel):
 
 class DynamoComponentVersionManifestSchema(BaseModel):
     service: str
-    bentoml_version: Optional[str] = None
+    dynamo_version: Optional[str] = None
     apis: Dict[str, DynamoComponentVersionApiSchema]
     size_bytes: int
 
@@ -179,7 +179,7 @@ def _validate_manifest(v):
 
 
 class DynamoComponentVersionSchema(ResourceSchema):
-    bento_repository_uid: str
+    dynamo_repository_uid: str
     version: str
     description: str
     image_build_status: ImageBuildStatus
@@ -205,9 +205,9 @@ class DynamoComponentVersionFullSchema(DynamoComponentVersionSchema):
 
 
 class DynamoComponentSchema(ResourceSchema):
-    latest_bento: Optional[DynamoComponentVersionSchema]
-    latest_bentos: Optional[List[DynamoComponentVersionSchema]]
-    n_bentos: int
+    latest_dynamo: Optional[DynamoComponentVersionSchema]
+    latest_dynamos: Optional[List[DynamoComponentVersionSchema]]
+    n_dynamos: int
     description: str
 
 

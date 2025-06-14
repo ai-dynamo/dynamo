@@ -188,11 +188,22 @@ class Processor(ProcessMixIn):
     # The generate endpoint will be used by the frontend to handle incoming requests.
     @endpoint()
     async def generate(self, raw_request: MultiModalRequest):
+        # Ensure the configured template includes the placeholder
+        template = self.engine_args.prompt_template
+        if "<prompt>" not in template:
+            raise ValueError("prompt_template must contain '<prompt>' placeholder")
+
+        # Safely extract user text
+        try:
+            user_text = raw_request.messages[0].content[0].text
+        except (IndexError, AttributeError) as e:
+            raise ValueError(f"Invalid message structure: {e}")
+
+        prompt = template.replace("<prompt>", user_text)
+
         msg = {
             "role": "user",
-            "content": "USER: <image>\nQuestion:"
-            + raw_request.messages[0].content[0].text
-            + " Answer:",
+            "content": prompt,
         }
 
         chat_request = ChatCompletionRequest(
@@ -200,6 +211,7 @@ class Processor(ProcessMixIn):
             messages=[msg],
             stream=raw_request.stream,
             max_tokens=raw_request.max_tokens,
+            temperature=raw_request.temperature,
             request_id=str(uuid.uuid4()),
         )
         image_url = None
