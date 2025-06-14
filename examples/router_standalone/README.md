@@ -58,7 +58,7 @@ While not implemented in this example, the router can also operate in a pure pre
 >
 > The toy communication pattern is as follows:
 > - **OpenAI Compatible Frontend** – FastAPI application serving OpenAI compatible HTTP API.
-> - **Router** – Standalone FastAPI application for routing and load balancing traffic to workers.
+> - **Router** – Standalone FastAPI endpoint for best worker selection, with core routines implemented in Rust exposed via Python bindings.
 > - **Workers** – Served in-process within the frontend application to reduce complexity and boilerplate, rather than as separate endpoints.
 
 ### `router.py`
