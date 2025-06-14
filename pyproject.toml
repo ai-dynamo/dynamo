@@ -15,7 +15,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.3.0"
+version = "0.3.1"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -28,7 +28,7 @@ dependencies = [
     "pytest>=8.3.4",
     "types-psutil==7.0.0.20250218",
     "kubernetes==32.0.1",
-    "ai-dynamo-runtime==0.3.0",
+    "ai-dynamo-runtime==0.3.1",
     "fastapi==0.115.6",
     "distro",
     # filelock: required by planner

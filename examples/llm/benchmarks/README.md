@@ -242,6 +242,23 @@ Single-Node
  bash -x /workspace/benchmarks/llm/perf.sh --mode aggregated --deployment-kind vllm_serve --tensor-parallelism 8 --data-parallelism 2
  ```
 
+ We could also run the benchmarking script and specify the model, input sequence length, output sequence length, and concurrency levels to target for benchmarking:
+
+ ```bash
+ bash -x /workspace/benchmarks/llm/perf.sh \
+  --mode aggregated \
+  --deployment-kind vllm_serve \
+  --tensor-parallelism 1 \
+  --data-parallelism 1 \
+  --model neuralmagic/DeepSeek-R1-Distill-Llama-70B-FP8-dynamic \
+  --input-sequence-length 3000 \
+  --output-sequence-length 150 \
+  --url http://localhost:8000 \
+  --concurrency 1,2,4,8,16,32,64,128,256
+
+  # The `--concurrency` option accepts either a single value (e.g., 64) or a comma-separated list (e.g., 1,2,4,8) to specify multiple concurrency levels for benchmarking.
+ ```
+
  > [!Important]
  > We should be careful in specifying these options in `perf.sh` script. They should closely reflect the deployment config that is being benchmarked. See `perf.sh --help` to learn more about these option. In the above command, we described that our deployment is using aggregated serving in `vllm serve`. We have also accurately described that we have 2 workers with TP=4(or TP=8 for two nodes).
 
@@ -249,7 +266,7 @@ For more information see [Collecting Performance Numbers](#collecting-performanc
 
 ## Collecting Performance Numbers
 
-Currently, there is no consistent way of obtaining the configuration of deployment service. Hence, we need to provide this information to the script in form of command line arguments. The benchmarking script `/workspace/examples/llm/benchmarks/perf.sh` uses GenAI-Perf tool to collect the performance numbers at various different request concurrencies. The perf.sh script can be run multiple times to collect numbers for various different deployments. Each script execution will create a new artifacts directory in `artifacts_root` and dump these numbers in it. See [Plotting Pareto Graphs](#plotting-pareto-graphs) to learn how to convert the data from this `artifacts_root` to generate pareto graphs for the performance.
+Currently, there is no consistent way of obtaining the configuration of deployment service. Hence, we need to provide this information to the script in form of command line arguments. The benchmarking script `/workspace/benchmarks/llm/perf.sh` uses GenAI-Perf tool to collect the performance numbers at various different request concurrencies. The perf.sh script can be run multiple times to collect numbers for various different deployments. Each script execution will create a new artifacts directory in `artifacts_root` and dump these numbers in it. See [Plotting Pareto Graphs](#plotting-pareto-graphs) to learn how to convert the data from this `artifacts_root` to generate pareto graphs for the performance.
 
 Note: As each `perf.sh` adds a new artifacts directory in the `artifacts_root` always, proper care should be taken that we are starting experiment with clean `artifacts_root` so we include only results from runs that we want to compare.
 
@@ -320,7 +337,98 @@ Regardless of the deployment mechanism, the GenAI-Perf tool will report the same
 - [Dynamo vLLM Deployments](../../../docs/examples/llm_deployment.md)
 
 
+## Monitor Benchmark Startup Status
+
+When running dynamo deployment, you may have multiple instances of the same worker kind for a particular benchmark run.
+The deployment can process the workflow as long as at least one worker is ready, in the case where the benchmark is run
+as soon as dynamo is responsive to inference request, which may result in inaccurate benchmark result at the beginning of
+the benchmark. In such a case, you may additionally deploy benchmark watcher to provide signal on whether the full deployment
+is ready. For instance, if you expect the total number of prefill and decode workers to be 10, you can run the below to start
+the watcher, which will exit if the total number is less than 10 after timeout. In addition to that, the watcher will create
+a HTTP server on port 7001 by default, which you can use to send GET request for readiness to build external benchmarking workflow.
+
+```bash
+# start your benchmark deployment
+...
+
+# start monitor separately, or it can be part of the deployment above
+dynamo serve --service-name Watcher benchmark_watcher:Watcher --Watcher.total-workers=10 --Watcher.timeout=10
+
+# Send curl request to check liveness
+curl localhost:7001
+127.0.0.1 - - [12/Jun/2025 23:31:52] "GET / HTTP/1.1" 400 -
+...
+curl localhost:7001
+127.0.0.1 - - [12/Jun/2025 23:32:46] "GET / HTTP/1.1" 200 -
+```
+
+## Utility for Setting Up Environment
+
+### vLLM
+- `vllm_multinode_setup.sh` is a helper script to configure the node for dynamo deployment for
+vLLM. Depending on whether environment variable `HEAD_NODE_IP` and `RAY_LEADER_NODE_IP` are set
+when the script is invoked, it will:
+  - start nats server and etcd on the current node if `HEAD_NODE_IP` is not set, otherwise
+  set the environment variables as expected by dynamo.
+  - run Ray and connect to the Ray cluster started by `RAY_LEADER_NODE_IP`, otherwise start
+  the Ray cluster with current node as the head node.
+  - print the command with `HEAD_NODE_IP` and `RAY_LEADER_NODE_IP` set, which can be used in
+  another node to setup connectivity with the current node.
+
+  ```bash
+  # On node 0
+  source vllm_multinode_setup.sh
+  ... # starting nats server, etcd and ray cluster
+
+  # script print command
+  HEAD_NODE_IP=NODE_0_IP RAY_LEADER_NODE_IP=NODE_0_IP source vllm_multinode_setup.sh
+
+  # On node 1
+  HEAD_NODE_IP=NODE_0_IP RAY_LEADER_NODE_IP=NODE_0_IP source vllm_multinode_setup.sh
+  ... # connecting to Ray cluster
+  ```
+
 ## Metrics and Visualization
 
 For instructions on how to acquire per worker metrics and visualize them using Grafana,
 please see the provided [Visualization with Prometheus and Grafana](../../../deploy/metrics/README.md).
+
+## Troubleshooting
+
+When benchmarking disaggregation performance, there can be cases where the latency and
+throughput number don't match the expectation within some margin. Below is a list of scenarios
+that have been encountered, and details on observations and resolutions.
+
+### Interconnect Configuration
+
+Even if the nodes have faster interconnect hardware available, there can be misconfiguration such that
+the fastest route may not be selected by NIXL ([example regression](https://github.com/ai-dynamo/dynamo/pull/1314)). NIXL simplifies the interconnect but also hides
+selection detail. Therefore this can be the cause if you observe abnormal TTFT increase when
+splitting prefill workers and decode workers to different nodes. For example, we have seen instances of ~2 second overhead added to TTFT when TCP is selected over RDMA for KV Cache transfer due to a misconfigured environment.
+
+Currently NIXL doesn't provide utility for reporting which transport is selected. Therefore
+you will need to verify if that is the cause by using backend specific debug options.
+In the case of UCX backend, you can use `ucx_info -d` to check if the desired interconnect
+devices are being recognized. At runtime, `UCX_LOG_LEVEL=debug` and `UCX_PROTO_INFO=y`
+can be set as environment variables to provide detailed logs on UCX activities. This will
+reveal whether the desired transport is being used.
+
+### The Full Deployment is Configured Correctly
+
+As benchmarking often focuses on configurations where multiple workers are being used,
+one may mistakenly consider a deployment ready for benchmarking while there are only a
+subset of workers taking requests. For example, in the aggregated baseline benchmarking,
+a user can miss updating the ip address to the other node in upstream section of `nginx.conf`.
+This could lead to only one of the nodes serving requests. In such a case,
+the benchmark can still run to completion, but the result will not reflect the deployment
+capacity, because not all the compute resources are being utilized.
+
+Therefore, it is important to verify that the requests can be routed to all workers before
+performing the benchmark:
+- **Framework-only benchmark** The simplest way is to send sample requests and check
+the logs of all workers. Each framework may provide utilities for readiness checks, so please
+refer to the framework's documentation for those details.
+- **Dynamo based benchmark** Once you start the deployment, you can follow
+the instructions in [monitor benchmark startup status](#Monitor-Benchmark-Startup-Status),
+which will periodically poll the workers exposed to specific endpoints
+and return HTTP 200 code when the expected number of workers are met.
