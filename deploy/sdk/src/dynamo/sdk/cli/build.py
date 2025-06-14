@@ -236,14 +236,14 @@ class ManifestInfo(BaseModel):
                     if isinstance(entrypoint, str):
                         main_container["command"] = shlex.split(entrypoint)
                     else:
-                        main_container["command"] = entrypoint
+                        main_container["command"] = shlex.split(entrypoint[0])
 
                 cmd = kube_overrides.get("cmd")
                 if cmd:
                     if isinstance(cmd, str):
                         main_container["args"] = shlex.split(cmd)
                     else:
-                        main_container["args"] = cmd
+                        main_container["args"] = shlex.split(cmd[0])
 
                 if main_container:
                     service_dict["config"]["extraPodSpec"] = {

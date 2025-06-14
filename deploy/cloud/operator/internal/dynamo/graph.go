@@ -370,20 +370,10 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			deployment.Spec.Autoscaling.MinReplicas = service.Config.Autoscaling.MinReplicas
 			deployment.Spec.Autoscaling.MaxReplicas = service.Config.Autoscaling.MaxReplicas
 		}
+
 		// Override properties from the ExtraPodSpec (i.e. command and args) if provided.
-		if service.Config.ExtraPodSpec != nil && service.Config.ExtraPodSpec.MainContainer != nil {
-			if deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec == nil {
-				deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec = new(common.ExtraPodSpec)
-			}
-			err := mergo.Merge(
-				deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec,
-				service.Config.ExtraPodSpec,
-				mergo.WithOverride,
-				mergo.WithOverwriteWithEmptyValue,
-			)
-			if err != nil {
-				return nil, err
-			}
+		if err := mergeExtraPodSpec(deployment, &service.Config); err != nil {
+			return nil, err
 		}
 
 		// override the component config with the component config that is in the parent deployment
@@ -544,4 +534,23 @@ func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 		merged = append(merged, env)
 	}
 	return merged
+}
+
+// mergeExtraPodSpec merges the ExtraPodSpec from service config into the deployment spec
+func mergeExtraPodSpec(deployment *v1alpha1.DynamoComponentDeployment, serviceConfig *Config) error {
+	if serviceConfig.ExtraPodSpec != nil && serviceConfig.ExtraPodSpec.MainContainer != nil {
+		if deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec == nil {
+			deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec = new(common.ExtraPodSpec)
+		}
+		err := mergo.Merge(
+			deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec,
+			serviceConfig.ExtraPodSpec,
+			mergo.WithOverride,
+			mergo.WithOverwriteWithEmptyValue,
+		)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
