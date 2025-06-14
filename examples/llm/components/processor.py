@@ -21,6 +21,7 @@ from typing import Any, AsyncIterator, Dict, List, Tuple, Union
 
 from components.kv_router import Router
 from components.worker import VllmWorker
+from components.llm_interfaces import LLMWorker
 from transformers import AutoTokenizer
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.check_worker import check_required_workers
@@ -94,7 +95,7 @@ class Processor(ProcessMixIn):
     @async_on_start
     async def async_init(self):
         runtime = dynamo_context["runtime"]
-        comp_ns, comp_name = VllmWorker.dynamo_address()  # type: ignore
+        comp_ns, comp_name = self.worker._service.dynamo_address()  # type: ignore
         self.worker_client = (
             await runtime.namespace(comp_ns)
             .component(comp_name)
