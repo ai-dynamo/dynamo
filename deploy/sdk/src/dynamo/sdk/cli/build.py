@@ -454,7 +454,7 @@ class Package:
         return ret
 
     @staticmethod
-    def _get_dockerfile_template(base_image: str = "dynamo:latest") -> str:
+    def get_dockerfile_template(base_image: str = "dynamo:latest") -> str:
         """Get the Dockerfile template content with configurable base image."""
         # Try to load the Dockerfile.template template from the CLI directory
         cli_template_path = Path(__file__).parent / "Dockerfile.template"
@@ -607,11 +607,16 @@ def build(
         if next_steps:
             console.print(f"\n[blue]Next steps: {''.join(next_steps)}[/]")
 
+        if output_dir is None:
+            raise BuildError(
+                "output_dir must not be None when building docker_dir path"
+            )
+        output_path = Path(output_dir)
         docker_dir = output_path / "env" / "docker"
         docker_dir.mkdir(exist_ok=True, parents=True)
         docker_file = docker_dir / "Dockerfile"
 
-        dockerfile_content = Package._get_dockerfile_template(DYNAMO_IMAGE)
+        dockerfile_content = Package.get_dockerfile_template(DYNAMO_IMAGE)
         with open(docker_file, "w") as f:
             f.write(dockerfile_content)
 
@@ -657,6 +662,47 @@ def build(
     except Exception as e:
         console.print(f"[red]Error with build: {str(e)}")
         raise
+
+
+def build_package(
+    service: str, output_dir: t.Optional[str], force: bool, tag: t.Optional[str]
+) -> Package:
+    """
+    Shared build/package process, returning Package objects
+    """
+    build_config = BuildConfig(service=service, version=tag)
+    package = Package.create(build_config, os.getcwd())
+
+    if output_dir:
+        output_path = Path(output_dir)
+        if output_path.exists() and not force:
+            raise BuildError(
+                f"Output directory {output_dir} already exists. Use --force to overwrite."
+            )
+    else:
+        home_dir = Path.home()
+        packages_dir = home_dir / ".dynamo" / "packages"
+        service_dir = packages_dir / package.tag.name.lower()
+        version = package.tag.version if package.tag.version else "default"
+        output_path = service_dir / version
+
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    if str(package.path) != str(output_path):
+        if output_path.exists():
+            shutil.rmtree(output_path)
+        output_path.mkdir(parents=True)
+        for item in os.listdir(package.path):
+            s = os.path.join(package.path, item)
+            d = os.path.join(str(output_path), item)
+            if os.path.isdir(s):
+                shutil.copytree(s, d, dirs_exist_ok=True)
+            else:
+                shutil.copy2(s, d)
+
+    package.path = str(output_path)
+    package.generate_manifests()
+    return package
 
 
 def generate_random_tag() -> str:
