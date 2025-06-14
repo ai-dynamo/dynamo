@@ -77,14 +77,15 @@
 //! - [`StorageMemset`] - Memory initialization operations
 //! - [`StorageAllocator`] - Factory for creating storage instances
 
+pub mod arena;
 pub mod cuda;
 pub mod disk;
 pub mod nixl;
-
-pub mod arena;
+pub mod torch;
 
 pub use cuda::*;
 pub use disk::*;
+use torch::*;
 
 use std::{
     alloc::{alloc_zeroed, dealloc, Layout},
