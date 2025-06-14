@@ -22,6 +22,7 @@ import importlib.util
 import inspect
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -42,6 +43,7 @@ from dynamo.sdk.core.protocol.deployment import Service
 from dynamo.sdk.core.protocol.interface import (
     DynamoConfig,
     DynamoTransport,
+    KubernetesOverrides,
     LinkedServices,
     ServiceInterface,
 )
@@ -110,6 +112,7 @@ class ServiceConfig(BaseModel):
     dynamo: DynamoConfig = Field(default_factory=DynamoConfig)
     http_exposed: bool = False
     api_endpoints: t.List[str] = Field(default_factory=list)
+    kubernetes_overrides: KubernetesOverrides | None = None
 
 
 class ServiceInfo(BaseModel):
@@ -147,6 +150,7 @@ class ServiceInfo(BaseModel):
             dynamo=DynamoConfig(**service.config.dynamo.model_dump()),
             http_exposed=len(api_endpoints) > 0,
             api_endpoints=api_endpoints,
+            kubernetes_overrides=service.config.kubernetes_overrides,
         )
 
         return cls(
@@ -221,6 +225,33 @@ class ManifestInfo(BaseModel):
                     "dynamo": service["config"]["dynamo"],
                 },
             }
+            # Add kubernetes_overrides if present.
+            if (
+                "kubernetes_overrides" in service["config"]
+                and service["config"]["kubernetes_overrides"]
+            ):
+                # Map kubernetes_overrides fields to mainContainer if present.
+                kube_overrides = service["config"]["kubernetes_overrides"]
+                main_container = {}
+
+                entrypoint = kube_overrides.get("entrypoint")
+                if entrypoint:
+                    if isinstance(entrypoint, str):
+                        main_container["command"] = shlex.split(entrypoint)
+                    else:
+                        main_container["command"] = shlex.split(entrypoint[0])
+
+                cmd = kube_overrides.get("cmd")
+                if cmd:
+                    if isinstance(cmd, str):
+                        main_container["args"] = shlex.split(cmd)
+                    else:
+                        main_container["args"] = shlex.split(cmd[0])
+
+                if main_container:
+                    service_dict["config"]["extraPodSpec"] = {
+                        "mainContainer": main_container
+                    }
 
             # Add HTTP configuration if exposed
             if service["config"]["http_exposed"]:
@@ -309,6 +340,7 @@ class Package:
         build_ctx: str,
         version: t.Optional[str] = None,
     ) -> Package:
+        """Create a package from a build config."""
         dyn_svc = cls.dynamo_service(build_config, build_ctx)
 
         # Get service name for package
