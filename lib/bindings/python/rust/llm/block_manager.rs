@@ -48,6 +48,7 @@ pub struct BlockManager {
 impl BlockManager {
     #[new]
     #[pyo3(signature = (worker_id, num_layer, outer_dim, page_size, inner_dim, dtype=None, host_num_blocks=None, device_num_blocks=None, device_id=0))]
+    #[allow(clippy::too_many_arguments)]
     fn new(
         worker_id: u64,
         num_layer: usize,

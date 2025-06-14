@@ -44,6 +44,7 @@ pub mod runnable;
 pub mod runtime;
 pub mod service;
 pub mod slug;
+pub mod storage;
 pub mod traits;
 pub mod transports;
 pub mod utils;

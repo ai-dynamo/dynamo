@@ -19,12 +19,13 @@
 //! mechanisms. It handles storage allocation, block management, and safe access
 //! patterns for both system memory and remote (NIXL) storage.
 
-mod config;
+pub mod config;
 mod state;
 
 pub mod block;
 pub mod events;
 pub mod layout;
+pub mod metrics;
 pub mod offload;
 pub mod pool;
 pub mod storage;
@@ -375,7 +376,7 @@ mod tests {
         let host_blocks = block_manager
             .host()
             .unwrap()
-            .match_sequence_hashes(vec![immutable_device_blocks[0].sequence_hash()?].as_slice())
+            .match_sequence_hashes(vec![immutable_device_blocks[0].sequence_hash()].as_slice())
             .await
             .unwrap();
         assert_eq!(host_blocks.len(), 1);
@@ -383,7 +384,7 @@ mod tests {
         let disk_blocks = block_manager
             .disk()
             .unwrap()
-            .match_sequence_hashes(vec![immutable_device_blocks[0].sequence_hash()?].as_slice())
+            .match_sequence_hashes(vec![immutable_device_blocks[0].sequence_hash()].as_slice())
             .await
             .unwrap();
         assert_eq!(disk_blocks.len(), 1);

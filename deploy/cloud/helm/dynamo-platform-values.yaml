@@ -28,6 +28,8 @@ dynamo-operator:
 
   dynamo:
     enableLWS: ${ENABLE_LWS}
+    apiStore:
+      endpoint: http://${RELEASE_NAME}-dynamo-api-store
     ingress:
       enabled: ${INGRESS_ENABLED}
       className: ${INGRESS_CLASS}
@@ -37,6 +39,7 @@ dynamo-operator:
       gateway: ${ISTIO_GATEWAY}
     ingressHostSuffix: ${DYNAMO_INGRESS_SUFFIX}
     dockerRegistry:
+      useKubernetesSecret: true
       server: ${PIPELINES_DOCKER_SERVER}
       username: ${PIPELINES_DOCKER_USERNAME}
       password: ${PIPELINES_DOCKER_PASSWORD}

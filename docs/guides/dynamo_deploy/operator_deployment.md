@@ -23,7 +23,7 @@ This guide walks you through deploying an inference graph created with the Dynam
 
 Before proceeding with deployment, ensure you have:
 
-- [Dynamo Python package](../../get_started.md#installation) installed
+- [Dynamo Python package](../../get_started.md#alternative-setup-manual-installation) installed
 - A Kubernetes cluster with the [Dynamo cloud platform](dynamo_cloud.md) installed
 - Ubuntu 24.04 as the base image for your services
 - Required dependencies:
@@ -224,4 +224,3 @@ dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml \
   --env-from-secret ANOTHER_SECRET=another_secret.key \
   --target kubernetes
 ```
-

@@ -32,7 +32,10 @@ pub use etcd_client::{ConnectOptions, KeyValue, LeaseClient};
 use tokio::time::{interval, Duration};
 
 mod lease;
+mod path;
+
 use lease::*;
+pub use path::*;
 
 //pub use etcd::ConnectOptions as EtcdConnectOptions;
 
@@ -130,7 +133,7 @@ impl Client {
     }
 
     /// Get a reference to the underlying [`etcd_client::Client`] instance.
-    pub fn etcd_client(&self) -> &etcd_client::Client {
+    pub(crate) fn etcd_client(&self) -> &etcd_client::Client {
         &self.client
     }
 

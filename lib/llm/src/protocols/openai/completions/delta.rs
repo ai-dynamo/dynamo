@@ -13,11 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{CompletionChoice, CompletionRequest, CompletionResponse};
+use super::{CompletionChoice, CompletionResponse, NvCreateCompletionRequest};
 use crate::protocols::common;
 use crate::protocols::openai::CompletionUsage;
 
-impl CompletionRequest {
+impl NvCreateCompletionRequest {
     // put this method on the request
     // inspect the request to extract options
     pub fn response_generator(&self) -> DeltaGenerator {

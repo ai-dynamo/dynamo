@@ -85,13 +85,13 @@ async def create_deployment(deployment: CreateDeploymentSchema):
         kube_namespace = get_namespace()
 
         # Generate deployment name
-        deployment_name = sanitize_deployment_name(deployment.name, deployment.bento)
+        deployment_name = sanitize_deployment_name(deployment.name, deployment.dynamo)
 
         # Create the deployment using helper function
         created_crd = create_dynamo_deployment(
             name=deployment_name,
             namespace=kube_namespace,
-            dynamo_component=deployment.bento or deployment.component,
+            dynamo_component=deployment.dynamo or deployment.component,
             labels={
                 "ngc-organization": ownership["organization_id"],
                 "ngc-user": ownership["user_id"],
@@ -323,17 +323,17 @@ def update_deployment(name: str, deployment: UpdateDeploymentSchema):
         ownership = {"organization_id": "default-org", "user_id": "default-user"}
         kube_namespace = get_namespace()
         existing_deployment = get_deployment(name)
-        if existing_deployment.bento != deployment.bento:
+        if existing_deployment.dynamo != deployment.dynamo:
             raise HTTPException(
                 status_code=422,
                 detail="Cannot update the Dynamo components of a deployment.",
             )
 
-        deployment_name = sanitize_deployment_name(name, deployment.bento)
+        deployment_name = sanitize_deployment_name(name, deployment.dynamo)
         updated_crd = update_dynamo_deployment(
             name=deployment_name,
             namespace=kube_namespace,
-            dynamo_nim=deployment.bento,
+            dynamo_nim=deployment.dynamo,
             labels={
                 "ngc-organization": ownership["organization_id"],
                 "ngc-user": ownership["user_id"],

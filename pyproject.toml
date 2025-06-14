@@ -26,12 +26,13 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
     "pytest>=8.3.4",
-    "bentoml==1.4.8",
     "types-psutil==7.0.0.20250218",
     "kubernetes==32.0.1",
     "ai-dynamo-runtime==0.3.0",
     "fastapi==0.115.6",
     "distro",
+    # filelock: required by planner
+    "filelock",
     "typer",
     "circus==0.19.0",
     "click<8.2.0",
@@ -148,6 +149,7 @@ filterwarnings = [
     "ignore:.*pkg_resources.*:DeprecationWarning",
     "ignore:.*pkg_resources.*:UserWarning",
     "ignore:.*multipart.*:PendingDeprecationWarning",
+    "ignore:.*PyType_Spec.*custom tp_new.*:DeprecationWarning", # Ignore protobuf deprecation warning
 ]
 
 
@@ -157,7 +159,16 @@ markers = [
     "pre_merge: marks tests to run before merging",
     "nightly: marks tests to run nightly",
     "weekly: marks tests to run weekly",
-    "gpu: marks tests to run on GPU"
+    "gpu_1: marks tests to run on GPU",
+    "gpu_2: marks tests to run on 2GPUs",
+    "e2e: marks tests as end-to-end tests",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+    "stress: marks tests as stress tests",
+    "vllm: marks tests as requiring vllm",
+    "tensorrtllm: marks tests as requiring tensorrtllm",
+    "sglang: marks tests as requiring sglang",
+    "slow: marks tests as known to be slow"
 ]
 
 # Linting/formatting
@@ -191,22 +202,23 @@ check_untyped_defs = true
 
 [[tool.mypy.overrides]]
 # Skip mypy analysis on internal dependencies of vllm
-module = ["vllm.*", "bentoml.*", "fs.*", "_bentoml_sdk.*"]
+module = ["vllm.*"]
 follow_imports = "skip"
 ignore_missing_imports = true
 
+[tool.sphinx]
+
 # extra-content-head
-#extra_content_head = [
-#    '''
-#    <script src="https://assets.adobedtm.com/5d4962a43b79/c1061d2c5e7b/launch-191c2462b890.min.js" ></script>
-#    ''',
-#]
+extra_content_head = [
+   '''
+   <script src="https://assets.adobedtm.com/5d4962a43b79/c1061d2c5e7b/launch-191c2462b890.min.js" ></script>
+   ''',
+]
 
-#[tool.sphinx]
+#extra-content-footer
+extra_content_footer = [
+   '''
+   <script type="text/javascript">if (typeof _satellite !== "undefined") {_satellite.pageBottom();}</script>
+   ''',
+]
 
-# extra-content-footer
-#extra_content_footer = [
-#    '''
-#    <script type="text/javascript">if (typeof _satellite !== "undefined") {_satellite.pageBottom();}</script>
-#    ''',
-#]

@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! # Model Deployment Card
 //!
@@ -33,20 +21,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use derive_builder::Builder;
-use dynamo_runtime::slug::Slug;
-use dynamo_runtime::transports::nats;
-use either::Either;
+use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned, transports::nats};
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 use url::Url;
 
 use crate::gguf::{Content, ContentConfig, ModelConfigLike};
-use crate::key_value_store::Versioned;
 use crate::protocols::TokenIdType;
-
-/// Delete model deployment cards that haven't been re-published after this long.
-/// Cleans up if the worker stopped.
-pub const BUCKET_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// If a model deployment card hasn't been refreshed in this much time the worker is likely gone
 const CARD_MAX_AGE: chrono::TimeDelta = chrono::TimeDelta::minutes(5);
@@ -94,6 +75,13 @@ pub enum PromptContextMixin {
     Llama3DateTime,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(rename_all = "snake_case")]
+pub enum GenerationConfig {
+    HfGenerationConfigJson(String),
+    GGUF(PathBuf),
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug, Builder, Default)]
 pub struct ModelDeploymentCard {
     /// Human readable model name, e.g. "Meta Llama 3.1 8B Instruct"
@@ -112,6 +100,10 @@ pub struct ModelDeploymentCard {
     /// Prompt Formatter configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_formatter: Option<PromptFormatterArtifact>,
+
+    /// Generation config - default sampling params
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gen_config: Option<GenerationConfig>,
 
     /// Prompt Formatter Config
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -244,38 +236,39 @@ impl ModelDeploymentCard {
             "Uploading model deployment card fields to NATS"
         );
 
-        if let Some(ModelInfoType::HfConfigJson(ref src_file)) = self.model_info {
-            if !nats::is_nats_url(src_file) {
-                let target = format!("nats://{nats_addr}/{bucket_name}/config.json");
-                nats_client
-                    .object_store_upload(&PathBuf::from(src_file), Url::parse(&target)?)
-                    .await?;
-                self.model_info = Some(ModelInfoType::HfConfigJson(target));
-            }
+        macro_rules! nats_upload {
+            ($field:expr, $enum_variant:path, $filename:literal) => {
+                if let Some($enum_variant(src_file)) = $field.take() {
+                    if !nats::is_nats_url(&src_file) {
+                        let target = format!("nats://{nats_addr}/{bucket_name}/{}", $filename);
+                        nats_client
+                            .object_store_upload(
+                                &std::path::PathBuf::from(&src_file),
+                                url::Url::parse(&target)?,
+                            )
+                            .await?;
+                        $field = Some($enum_variant(target));
+                    }
+                }
+            };
         }
 
-        if let Some(PromptFormatterArtifact::HfTokenizerConfigJson(ref src_file)) =
-            self.prompt_formatter
-        {
-            if !nats::is_nats_url(src_file) {
-                let target = format!("nats://{nats_addr}/{bucket_name}/tokenizer_config.json");
-                nats_client
-                    .object_store_upload(&PathBuf::from(src_file), Url::parse(&target)?)
-                    .await?;
-                self.prompt_formatter =
-                    Some(PromptFormatterArtifact::HfTokenizerConfigJson(target));
-            }
-        }
-
-        if let Some(TokenizerKind::HfTokenizerJson(ref src_file)) = self.tokenizer {
-            if !nats::is_nats_url(src_file) {
-                let target = format!("nats://{nats_addr}/{bucket_name}/tokenizer.json");
-                nats_client
-                    .object_store_upload(&PathBuf::from(src_file), Url::parse(&target)?)
-                    .await?;
-                self.tokenizer = Some(TokenizerKind::HfTokenizerJson(target));
-            }
-        }
+        nats_upload!(self.model_info, ModelInfoType::HfConfigJson, "config.json");
+        nats_upload!(
+            self.prompt_formatter,
+            PromptFormatterArtifact::HfTokenizerConfigJson,
+            "tokenizer_config.json"
+        );
+        nats_upload!(
+            self.tokenizer,
+            TokenizerKind::HfTokenizerJson,
+            "tokenizer.json"
+        );
+        nats_upload!(
+            self.gen_config,
+            GenerationConfig::HfGenerationConfigJson,
+            "generation_config.json"
+        );
 
         Ok(())
     }
@@ -295,39 +288,36 @@ impl ModelDeploymentCard {
             "Downloading model deployment card fields from NATS"
         );
 
-        if let Some(ModelInfoType::HfConfigJson(ref src_url)) = self.model_info {
-            if nats::is_nats_url(src_url) {
-                let target = target_dir.path().join("config.json");
-                nats_client
-                    .object_store_download(Url::parse(src_url)?, &target)
-                    .await?;
-                self.model_info = Some(ModelInfoType::HfConfigJson(target.display().to_string()));
-            }
+        macro_rules! nats_download {
+            ($field:expr, $enum_variant:path, $filename:literal) => {
+                if let Some($enum_variant(src_url)) = $field.take() {
+                    if nats::is_nats_url(&src_url) {
+                        let target = target_dir.path().join($filename);
+                        nats_client
+                            .object_store_download(Url::parse(&src_url)?, &target)
+                            .await?;
+                        $field = Some($enum_variant(target.display().to_string()));
+                    }
+                }
+            };
         }
 
-        if let Some(PromptFormatterArtifact::HfTokenizerConfigJson(ref src_url)) =
-            self.prompt_formatter
-        {
-            if nats::is_nats_url(src_url) {
-                let target = target_dir.path().join("tokenizer_config.json");
-                nats_client
-                    .object_store_download(Url::parse(src_url)?, &target)
-                    .await?;
-                self.prompt_formatter = Some(PromptFormatterArtifact::HfTokenizerConfigJson(
-                    target.display().to_string(),
-                ));
-            }
-        }
-
-        if let Some(TokenizerKind::HfTokenizerJson(ref src_url)) = self.tokenizer {
-            if nats::is_nats_url(src_url) {
-                let target = target_dir.path().join("tokenizer.json");
-                nats_client
-                    .object_store_download(Url::parse(src_url)?, &target)
-                    .await?;
-                self.tokenizer = Some(TokenizerKind::HfTokenizerJson(target.display().to_string()));
-            }
-        }
+        nats_download!(self.model_info, ModelInfoType::HfConfigJson, "config.json");
+        nats_download!(
+            self.prompt_formatter,
+            PromptFormatterArtifact::HfTokenizerConfigJson,
+            "tokenizer_config.json"
+        );
+        nats_download!(
+            self.tokenizer,
+            TokenizerKind::HfTokenizerJson,
+            "tokenizer.json"
+        );
+        nats_download!(
+            self.gen_config,
+            GenerationConfig::HfGenerationConfigJson,
+            "generation_config.json"
+        );
 
         Ok(target_dir)
     }
@@ -374,10 +364,12 @@ pub trait ModelInfo: Send + Sync {
     fn eos_token_ids(&self) -> Vec<TokenIdType>;
 
     /// Maximum position embeddings / max sequence length
-    fn max_position_embeddings(&self) -> usize;
+    /// TODO: This is only used in a single test, no other code. Remove?
+    fn max_position_embeddings(&self) -> Option<usize>;
 
     /// Vocabulary size
-    fn vocab_size(&self) -> usize;
+    /// TODO: This is only used in a single test, no other code. Remove?
+    fn vocab_size(&self) -> Option<usize>;
 }
 
 impl ModelInfoType {
@@ -402,36 +394,123 @@ struct HFConfig {
     model_type: String,
 
     text_config: Option<HFTextConfig>,
+
+    // Sometimes it's inside HFTextConfig, sometimes it's here
+    eos_token_id: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HFTextConfig {
-    bos_token_id: TokenIdType,
+    // It can take multiple attempts to load this, so Option
+    bos_token_id: Option<TokenIdType>,
 
-    #[serde(with = "either::serde_untagged")]
-    eos_token_id: Either<TokenIdType, Vec<TokenIdType>>,
+    // We set this once bos_token_id is loaded so we don't have to deal with Option
+    #[serde(default)]
+    final_bos_token_id: TokenIdType,
+
+    eos_token_id: Option<serde_json::Value>,
+
+    #[serde(default)]
+    final_eos_token_ids: Vec<TokenIdType>,
 
     /// max sequence length
-    max_position_embeddings: usize,
+    max_position_embeddings: Option<usize>,
 
     /// number of layers in the model
     num_hidden_layers: usize,
 
     /// number of attention heads in the model
-    num_attention_heads: usize,
+    num_attention_heads: Option<usize>,
 
     /// Vocabulary size
-    vocab_size: usize,
+    vocab_size: Option<usize>,
 }
 
 impl HFConfig {
     async fn from_json_file(file: &str) -> Result<Arc<dyn ModelInfo>> {
+        let file_pathbuf = PathBuf::from(file);
         let contents = std::fs::read_to_string(file)?;
         let mut config: Self = serde_json::from_str(&contents)?;
         if config.text_config.is_none() {
             let text_config: HFTextConfig = serde_json::from_str(&contents)?;
             config.text_config = Some(text_config);
         }
+        // Sometimes bos_token_id is in generation_config.json not config.json
+        let Some(text_config) = config.text_config.as_mut() else {
+            anyhow::bail!(
+                "Missing text config fields (model_type, eos_token_ids, etc) in config.json"
+            );
+        };
+
+        if text_config.bos_token_id.is_none() {
+            let bos_token_id = crate::file_json_field::<TokenIdType>(
+                &Path::join(
+                    file_pathbuf.parent().unwrap_or(&PathBuf::from("")),
+                    "generation_config.json",
+                ),
+                "bos_token_id",
+            )
+            .context(
+                "missing bos_token_id in generation_config.json and config.json, cannot load",
+            )?;
+            text_config.bos_token_id = Some(bos_token_id);
+        }
+        // Now that we have it for sure, set it in the non-Option field
+        let final_bos_token_id = text_config.bos_token_id.take().unwrap();
+        text_config.final_bos_token_id = final_bos_token_id;
+
+        // TODO: refactor this when we switch to per-architecture tokenization
+        let final_eos_token_ids: Vec<TokenIdType> = config
+            .eos_token_id
+            .as_ref()
+            .or(text_config.eos_token_id.as_ref())
+            .and_then(|v| {
+                if v.is_number() {
+                    v.as_number()
+                        .and_then(|n| n.as_u64())
+                        .map(|n| vec![n as TokenIdType])
+                } else if v.is_array() {
+                    let arr = v.as_array().unwrap(); // Safety: We just checked
+                    Some(
+                        arr.iter()
+                            .filter_map(|inner_v| {
+                                inner_v
+                                    .as_number()
+                                    .and_then(|n| n.as_u64())
+                                    .map(|n| n as TokenIdType)
+                            })
+                            .collect(),
+                    )
+                } else {
+                    tracing::error!(
+                        ?v,
+                        file,
+                        "eos_token_id is not a number or an array, cannot use"
+                    );
+                    None
+                }
+            })
+            .or_else(|| {
+                // Maybe it's in generation_config.json
+                crate::file_json_field(
+                    &Path::join(
+                        file_pathbuf.parent().unwrap_or(&PathBuf::from("")),
+                        "generation_config.json",
+                    ),
+                    "eos_token_id",
+                )
+                .inspect_err(
+                    |err| tracing::warn!(%err, "Missing eos_token_id in generation_config.json"),
+                )
+                .ok()
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "missing eos_token_id in config.json and generation_config.json, cannot load"
+                )
+            })?;
+        text_config.final_eos_token_ids = final_eos_token_ids;
+
         Ok(Arc::new(config))
     }
     fn from_gguf(gguf_file: &Path) -> Result<Arc<dyn ModelInfo>> {
@@ -454,17 +533,22 @@ impl HFConfig {
             // "general.architecture"
             model_type: arch,
             text_config: Some(HFTextConfig {
-                bos_token_id,
-                eos_token_id: Either::Left(eos_token_id),
+                bos_token_id: None,
+                final_bos_token_id: bos_token_id,
+
+                eos_token_id: None,
+                final_eos_token_ids: vec![eos_token_id],
+
                 // "llama.context_length"
-                max_position_embeddings: model_config_metadata.max_seq_len(),
+                max_position_embeddings: Some(model_config_metadata.max_seq_len()),
                 // "llama.block_count"
                 num_hidden_layers,
                 // "llama.attention.head_count"
-                num_attention_heads: model_config_metadata.num_attn_heads(),
+                num_attention_heads: Some(model_config_metadata.num_attn_heads()),
                 // "tokenizer.ggml.tokens".len()
-                vocab_size,
+                vocab_size: Some(vocab_size),
             }),
+            eos_token_id: None,
         }))
     }
 }
@@ -475,21 +559,22 @@ impl ModelInfo for HFConfig {
     }
 
     fn bos_token_id(&self) -> TokenIdType {
-        self.text_config.as_ref().unwrap().bos_token_id
+        self.text_config.as_ref().unwrap().final_bos_token_id
     }
 
     fn eos_token_ids(&self) -> Vec<TokenIdType> {
-        match &self.text_config.as_ref().unwrap().eos_token_id {
-            Either::Left(eos_token_id) => vec![*eos_token_id],
-            Either::Right(eos_token_ids) => eos_token_ids.clone(),
-        }
+        self.text_config
+            .as_ref()
+            .unwrap()
+            .final_eos_token_ids
+            .clone()
     }
 
-    fn max_position_embeddings(&self) -> usize {
+    fn max_position_embeddings(&self) -> Option<usize> {
         self.text_config.as_ref().unwrap().max_position_embeddings
     }
 
-    fn vocab_size(&self) -> usize {
+    fn vocab_size(&self) -> Option<usize> {
         self.text_config.as_ref().unwrap().vocab_size
     }
 }

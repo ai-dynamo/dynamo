@@ -59,7 +59,10 @@ impl EndpointConfigBuilder {
         let lease = lease.or(endpoint.drt().primary_lease());
         let lease_id = lease.as_ref().map(|l| l.id()).unwrap_or(0);
 
-        tracing::debug!("Starting endpoint: {}", endpoint.etcd_path(lease_id));
+        tracing::debug!(
+            "Starting endpoint: {}",
+            endpoint.etcd_path_with_lease_id(lease_id)
+        );
 
         let service_name = endpoint.component.service_name();
 
@@ -124,7 +127,11 @@ impl EndpointConfigBuilder {
 
         if let Some(etcd_client) = &endpoint.component.drt.etcd_client {
             if let Err(e) = etcd_client
-                .kv_create(endpoint.etcd_path(lease_id), info, Some(lease_id))
+                .kv_create(
+                    endpoint.etcd_path_with_lease_id(lease_id),
+                    info,
+                    Some(lease_id),
+                )
                 .await
             {
                 tracing::error!("Failed to register discoverable service: {:?}", e);

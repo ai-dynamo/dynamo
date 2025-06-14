@@ -893,7 +893,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 							Name:      "default-test-sa", // Name it will be resolved to
 							Namespace: "default",         // Must match dynamoComponentDeployment.Namespace
 							Labels: map[string]string{
-								commonconsts.KubeLabelDynamoDeploymentPod: commonconsts.KubeLabelValueTrue,
+								commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue,
 							},
 						},
 					},
@@ -964,8 +964,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									},
 								},
 								Volumes:            []corev1.Volume{{Name: "shared-memory", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: limit}}}},
-								ImagePullSecrets:   []corev1.LocalObjectReference{{Name: ""}}, // Assuming default config gives empty secret name
-								ServiceAccountName: "default-test-sa",                         // Updated to reflect mocked SA
+								ImagePullSecrets:   nil,               // Assuming default config gives empty secret name
+								ServiceAccountName: "default-test-sa", // Updated to reflect mocked SA
 							},
 						},
 						WorkerTemplate: corev1.PodTemplateSpec{
@@ -1002,7 +1002,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									},
 								},
 								Volumes:            []corev1.Volume{{Name: "shared-memory", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{Medium: corev1.StorageMediumMemory, SizeLimit: limit}}}},
-								ImagePullSecrets:   []corev1.LocalObjectReference{{Name: ""}},
+								ImagePullSecrets:   nil,
 								ServiceAccountName: "default-test-sa", // Updated to reflect mocked SA
 							},
 						},
@@ -1043,7 +1043,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 					&corev1.ServiceAccount{
 						ObjectMeta: metav1.ObjectMeta{
 							Name: "default-test-sa", Namespace: "default", // Match namespace
-							Labels: map[string]string{commonconsts.KubeLabelDynamoDeploymentPod: commonconsts.KubeLabelValueTrue},
+							Labels: map[string]string{commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue},
 						},
 					},
 				},
@@ -1084,7 +1084,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 					&corev1.ServiceAccount{
 						ObjectMeta: metav1.ObjectMeta{
 							Name: "default-test-sa", Namespace: "default", // Match namespace
-							Labels: map[string]string{commonconsts.KubeLabelDynamoDeploymentPod: commonconsts.KubeLabelValueTrue},
+							Labels: map[string]string{commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue},
 						},
 					},
 				},

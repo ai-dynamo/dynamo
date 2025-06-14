@@ -29,10 +29,15 @@
 //!
 //! TODO: Top-level Overview of Endpoints/Functions
 
-use crate::{discovery::Lease, service::ServiceSet};
+use crate::{discovery::Lease, service::ServiceSet, transports::etcd::EtcdPath};
 
 use super::{
-    error, traits::*, transports::nats::Slug, utils::Duration, DistributedRuntime, Result, Runtime,
+    error,
+    traits::*,
+    transports::etcd::{COMPONENT_KEYWORD, ENDPOINT_KEYWORD},
+    transports::nats::Slug,
+    utils::Duration,
+    DistributedRuntime, Result, Runtime,
 };
 
 use crate::pipeline::network::{ingress::push_endpoint::PushEndpoint, PushWorkHandler};
@@ -62,6 +67,9 @@ pub use client::{Client, InstanceSource};
 /// The root etcd path where each instance registers itself in etcd.
 /// An instance is namespace+component+endpoint+lease_id and must be unique.
 pub const INSTANCE_ROOT_PATH: &str = "instances";
+
+/// The root etcd path where each namespace is registered in etcd.
+pub const ETCD_ROOT_PATH: &str = "dynamo://";
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -100,17 +108,18 @@ impl Instance {
 /// a [Service] then adding one or more [Endpoint] to the [Service].
 ///
 /// You can also issue a request to a [Component]'s [Endpoint] by creating a [Client].
-#[derive(Educe, Builder, Clone)]
+#[derive(Educe, Builder, Clone, Validate)]
 #[educe(Debug)]
 #[builder(pattern = "owned")]
 pub struct Component {
     #[builder(private)]
     #[educe(Debug(ignore))]
-    drt: DistributedRuntime,
+    drt: Arc<DistributedRuntime>,
 
     // todo - restrict the namespace to a-z0-9-_A-Z
     /// Name of the component
     #[builder(setter(into))]
+    #[validate(custom(function = "validate_allowed_chars"))]
     name: String,
 
     // todo - restrict the namespace to a-z0-9-_A-Z
@@ -174,6 +183,11 @@ impl Component {
 
     pub fn path(&self) -> String {
         format!("{}/{}", self.namespace.name(), self.name)
+    }
+
+    pub fn etcd_path(&self) -> EtcdPath {
+        EtcdPath::new_component(&self.namespace.name(), &self.name)
+            .expect("Component name and namespace should be valid")
     }
 
     pub fn namespace(&self) -> &Namespace {
@@ -240,7 +254,7 @@ impl Component {
 }
 
 impl ComponentBuilder {
-    pub fn from_runtime(drt: DistributedRuntime) -> Self {
+    pub fn from_runtime(drt: Arc<DistributedRuntime>) -> Self {
         Self::default().drt(drt)
     }
 }
@@ -303,8 +317,14 @@ impl Endpoint {
         &self.component
     }
 
+    // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers
     pub fn path(&self) -> String {
-        format!("{}/{}", self.component.path(), self.name)
+        format!(
+            "{}/{}/{}",
+            self.component.path(),
+            ENDPOINT_KEYWORD,
+            self.name
+        )
     }
 
     /// The endpoint part of an instance path in etcd
@@ -314,13 +334,38 @@ impl Endpoint {
         format!("{component_path}/{endpoint_name}")
     }
 
+    /// The endpoint as an EtcdPath object
+    pub fn etcd_path(&self) -> EtcdPath {
+        EtcdPath::new_endpoint(
+            &self.component.namespace().name(),
+            &self.component.name(),
+            &self.name,
+        )
+        .expect("Endpoint name and component name should be valid")
+    }
+
     /// The fully path of an instance in etcd
-    pub fn etcd_path(&self, lease_id: i64) -> String {
+    pub fn etcd_path_with_lease_id(&self, lease_id: i64) -> String {
         let endpoint_root = self.etcd_root();
         if self.is_static {
             endpoint_root
         } else {
             format!("{endpoint_root}:{lease_id:x}")
+        }
+    }
+
+    /// The endpoint as an EtcdPath object with lease ID
+    pub fn etcd_path_object_with_lease_id(&self, lease_id: i64) -> EtcdPath {
+        if self.is_static {
+            self.etcd_path()
+        } else {
+            EtcdPath::new_endpoint_with_lease(
+                &self.component.namespace().name(),
+                &self.component.name(),
+                &self.name,
+                lease_id,
+            )
+            .expect("Endpoint name and component name should be valid")
         }
     }
 
@@ -358,23 +403,34 @@ impl Endpoint {
     }
 }
 
-#[derive(Educe, Builder, Clone, Validate)]
-#[educe(Debug)]
+#[derive(Builder, Clone, Validate)]
 #[builder(pattern = "owned")]
 pub struct Namespace {
     #[builder(private)]
-    #[educe(Debug(ignore))]
-    runtime: DistributedRuntime,
+    runtime: Arc<DistributedRuntime>,
 
-    #[validate()]
+    #[validate(custom(function = "validate_allowed_chars"))]
     name: String,
 
     is_static: bool,
+
+    #[builder(default = "None")]
+    parent: Option<Arc<Namespace>>,
 }
 
 impl DistributedRuntimeProvider for Namespace {
     fn drt(&self) -> &DistributedRuntime {
         &self.runtime
+    }
+}
+
+impl std::fmt::Debug for Namespace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Namespace {{ name: {}; is_static: {}; parent: {:?} }}",
+            self.name, self.is_static, self.parent
+        )
     }
 }
 
@@ -393,7 +449,7 @@ impl std::fmt::Display for Namespace {
 impl Namespace {
     pub(crate) fn new(runtime: DistributedRuntime, name: String, is_static: bool) -> Result<Self> {
         Ok(NamespaceBuilder::default()
-            .runtime(runtime)
+            .runtime(Arc::new(runtime))
             .name(name)
             .is_static(is_static)
             .build()?)
@@ -408,8 +464,25 @@ impl Namespace {
             .build()?)
     }
 
-    pub fn name(&self) -> &str {
-        &self.name
+    /// Create a [`Namespace`] in the parent namespace
+    pub fn namespace(&self, name: impl Into<String>) -> Result<Namespace> {
+        Ok(NamespaceBuilder::default()
+            .runtime(self.runtime.clone())
+            .name(name.into())
+            .is_static(self.is_static)
+            .parent(Some(Arc::new(self.clone())))
+            .build()?)
+    }
+
+    pub fn etcd_path(&self) -> String {
+        format!("{}{}", ETCD_ROOT_PATH, self.name())
+    }
+
+    pub fn name(&self) -> String {
+        match &self.parent {
+            Some(parent) => format!("{}.{}", parent.name(), self.name),
+            None => self.name.clone(),
+        }
     }
 }
 

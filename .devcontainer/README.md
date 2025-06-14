@@ -17,7 +17,7 @@ limitations under the License.
 
 # NVIDIA Dynamo Development Environment
 
-> Warning: devcontainers is an experimental feature and we are not testing in CI. Please submit any feedback using the issues on github.
+> Warning: devcontainers is an experimental feature and we are not testing in CI. Please submit any feedback using the issues on GitHub.
 
 ## Prerequisites
 - [Docker](https://docs.docker.com/get-started/get-docker/) installed and configured on your host system
@@ -51,7 +51,23 @@ Make sure HF_HOME is sourced in your .bashrc or .zshenv and your vscode default 
 - The container will mount your local code
 - `post-create.sh` will build the project and configure the environment
 
-If `post-create.sh` fails, you can try to debug or [submit](https://github.com/ai-dynamo/dynamo/issues) an issue on github.
+If `post-create.sh` fails, you can try to debug or [submit](https://github.com/ai-dynamo/dynamo/issues) an issue on GitHub.
+
+## Development Flow
+
+If you make changes to Rust code and want to compile, use [cargo build](https://doc.rust-lang.org/cargo/commands/cargo-build.html). This will update Rust binaries such as dynamo-run.
+
+```bash
+cd /home/ubuntu/dynamo && cargo build --locked --profile dev
+```
+
+Before pushing code to GitHub, remember to run `cargo fmt` and `cargo clippy`
+
+If you make changes to Rust code and want to propagate to Python bindings then can use [maturin](https://www.maturin.rs/#usage) (pre-installed). This will update the Python bindings with your new Rust changes.
+
+```bash
+cd /home/ubuntu/dynamo/lib/bindings/python && maturin develop
+```
 
 ## What's Inside
 Development Environment:
@@ -79,6 +95,15 @@ Edit `.devcontainer/devcontainer.json` to modify:
 - Environment variables
 - Container configuration
 - Custom Mounts
+
+## Documentation
+
+To look at the docs run:
+```bash
+cd ~/dynamo/.build/target/doc && python3 -m http.server 8000
+```
+
+VSCode will automatically port-forward and you can check them out in your browser.
 
 ## FAQ
 

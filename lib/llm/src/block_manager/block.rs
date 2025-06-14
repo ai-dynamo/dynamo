@@ -24,6 +24,7 @@ use nixl_sys::NixlDescriptor;
 
 pub use registry::{GlobalRegistry, RegistrationHandle};
 pub use state::{BlockState, BlockStateInvalid};
+pub use transfer::TransferContext;
 
 use crate::block_manager::{
     state::KvBlockManagerState as BlockManager,
@@ -186,7 +187,17 @@ impl<S: Storage, M: BlockMetadata> Block<S, M> {
             BlockState::Complete(state) => Ok(state.token_block().sequence_hash()),
             BlockState::Registered(state, _) => Ok(state.sequence_hash()),
             _ => Err(BlockError::InvalidState(
-                "Block is not complete".to_string(),
+                "Block is not complete nor registered.".to_string(),
+            )),
+        }
+    }
+
+    pub fn parent_sequence_hash(&self) -> Result<Option<SequenceHash>, BlockError> {
+        match self.state() {
+            BlockState::Complete(state) => Ok(state.token_block().parent_sequence_hash()),
+            BlockState::Registered(state, _) => Ok(state.parent_sequence_hash()),
+            _ => Err(BlockError::InvalidState(
+                "Block is not complete nor registered.".to_string(),
             )),
         }
     }
@@ -223,6 +234,11 @@ impl<S: Storage, M: BlockMetadata> Block<S, M> {
     /// Get a reference to the state of the block
     pub fn state(&self) -> &BlockState {
         &self.state
+    }
+
+    /// Get a mutable reference to the state of the block
+    pub fn state_mut(&mut self) -> &mut BlockState {
+        &mut self.state
     }
 
     /// Get the number of blocks in the block
@@ -638,6 +654,9 @@ pub(crate) fn layout_to_blocks<S: Storage, M: BlockMetadata>(
 pub struct MutableBlock<S: Storage, M: BlockMetadata> {
     block: Option<Block<S, M>>,
     return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, M>>,
+    // Use to track parent relationship, as well as ensure that parents of registered blocks stay
+    // alive as long as the child is alive.
+    parent: Option<Arc<MutableBlock<S, M>>>,
 }
 
 impl<S: Storage, M: BlockMetadata> BlockIdentifier for MutableBlock<S, M> {
@@ -676,7 +695,12 @@ impl<S: Storage, M: BlockMetadata> MutableBlock<S, M> {
         Self {
             block: Some(block),
             return_tx,
+            parent: None,
         }
+    }
+
+    pub fn set_parent(&mut self, parent: Arc<MutableBlock<S, M>>) {
+        self.parent = Some(parent);
     }
 }
 
@@ -804,6 +828,7 @@ impl<S: Storage + NixlDescriptor, M: BlockMetadata> IntoReadableBlocks<M> for Mu
 #[derive(Debug)]
 pub struct ImmutableBlock<S: Storage, M: BlockMetadata> {
     block: Arc<MutableBlock<S, M>>,
+    sequence_hash: SequenceHash,
 }
 
 impl<S: Storage, M: BlockMetadata> BlockIdentifier for ImmutableBlock<S, M> {
@@ -824,17 +849,26 @@ impl<S: Storage, M: BlockMetadata> Clone for ImmutableBlock<S, M> {
     fn clone(&self) -> Self {
         Self {
             block: self.block.clone(),
+            sequence_hash: self.sequence_hash,
         }
     }
 }
 
 impl<S: Storage, M: BlockMetadata> ImmutableBlock<S, M> {
     pub(crate) fn new(block: Arc<MutableBlock<S, M>>) -> Self {
-        Self { block }
+        let sequence_hash = block.sequence_hash().expect("block is in the wrong state");
+        Self {
+            block,
+            sequence_hash,
+        }
     }
 
-    pub fn mutable_block(&self) -> &Arc<MutableBlock<S, M>> {
+    pub(crate) fn mutable_block(&self) -> &Arc<MutableBlock<S, M>> {
         &self.block
+    }
+
+    pub fn sequence_hash(&self) -> SequenceHash {
+        self.sequence_hash
     }
 }
 

@@ -119,6 +119,7 @@ class MultiModalRequest(BaseModel):
     model: str
     messages: List[ChatMessage]
     max_tokens: Optional[int] = None
+    temperature: Optional[float] = None
     stream: Optional[bool] = True
 
 
@@ -141,6 +142,8 @@ class EncodeRequest(BaseModel):
 class EncodeResponse(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
     request_id: str
+    image_grid_thw: Optional[List[Any]] = None
+    image_sizes: Optional[List[Any]] = None
 
 
 class MyRequestOutput(BaseModel):

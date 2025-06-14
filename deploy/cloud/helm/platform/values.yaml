@@ -43,8 +43,8 @@ dynamo-operator:
       debugger: python:3.12-slim
     enableRestrictedSecurityContext: false
     dockerRegistry:
+      useKubernetesSecret: false
       server: ""
-      inClusterServer: ""
       username: ""
       password: ""
       secure: true

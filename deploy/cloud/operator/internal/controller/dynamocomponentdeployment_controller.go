@@ -38,7 +38,6 @@ import (
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/config"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -1697,17 +1696,18 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		Volumes:    volumes,
 	}
 
-	podSpec.ImagePullSecrets = []corev1.LocalObjectReference{
-		{
-			Name: config.GetDockerRegistryConfig().SecretName,
-		},
-	}
+	imagePullSecrets := []corev1.LocalObjectReference{}
+
 	if opt.dynamoComponent.Spec.DockerConfigJSONSecretName != "" {
-		podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, corev1.LocalObjectReference{
+		imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{
 			Name: opt.dynamoComponent.Spec.DockerConfigJSONSecretName,
 		})
 	}
-	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, opt.dynamoComponent.Spec.ImagePullSecrets...)
+	imagePullSecrets = append(imagePullSecrets, opt.dynamoComponent.Spec.ImagePullSecrets...)
+
+	if len(imagePullSecrets) > 0 {
+		podSpec.ImagePullSecrets = imagePullSecrets
+	}
 
 	extraPodMetadata := opt.dynamoComponentDeployment.Spec.ExtraPodMetadata
 
@@ -1736,7 +1736,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	if podSpec.ServiceAccountName == "" {
 		serviceAccounts := &corev1.ServiceAccountList{}
 		err = r.List(ctx, serviceAccounts, client.InNamespace(opt.dynamoComponentDeployment.Namespace), client.MatchingLabels{
-			commonconsts.KubeLabelDynamoDeploymentPod: commonconsts.KubeLabelValueTrue,
+			commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue,
 		})
 		if err != nil {
 			err = errors.Wrapf(err, "failed to list service accounts in namespace %s", opt.dynamoComponentDeployment.Namespace)
