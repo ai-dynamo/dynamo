@@ -455,6 +455,35 @@ Execute the following to load the TensorRT-LLM model specified in the configurat
 dynamo-run in=http out=trtllm TinyLlama/TinyLlama-1.1B-Chat-v1.0
 ```
 
+**Multi-GPU**
+
+Pass `--tensor-parallel-size <NUM-GPUS>` to `dynamo-run`.
+
+To specify which GPUs to use set environment variable `CUDA_VISIBLE_DEVICES`.
+
+**Multinode:**
+
+See the instructions [here](../../examples/tensorrt_llm/configs/deepseek_r1/multinode/) to learn how to launch tensorrtllm model on multiple nodes.
+
+**Disaggregated Serving:**
+The trtllm engine can be configured to run in disaggregated way using `--task`.
+
+```
+# Ingress
+dynamo run in=http out=dyn
+
+# Prefill
+dynamo-run in=dyn://dynamo.prefill.generate out=trtllm --task prefill --extra-engine-args=trtllm_config/sample.yaml TinyLlama/TinyLlama-1.1B-Chat-v1.0
+
+# Decode
+dynamo-run in=dyn://dynamo.decode.generate out=trtllm --task decode --extra-engine-args=trtllm_config/sample.yaml TinyLlama/TinyLlama-1.1B-Chat-v1.0
+
+```
+The environment variable `CUDA_VISIBLE_DEVICES` can be set for each invocation to specify GPUs for each worker.
+
+> [!Important]
+> The current implementation of disaggregated serving uses hard-coded endpoints (`dyn://dynamo.prefill.generate` and `dyn://dynamo.decode.generate`). This limitation means you can only deploy one model at a time in your system. We are actively working on making the endpoint configuration more flexible to support multiple models simultaneously.
+
 #### Echo Engines
 
 Dynamo includes two echo engines for testing and debugging purposes:

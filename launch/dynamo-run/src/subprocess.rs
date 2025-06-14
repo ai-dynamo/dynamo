@@ -53,9 +53,15 @@ pub async fn start(
         card.context_length.to_string(),
     ];
     // TRTLLM only
+    //
     // The worker node will only publish events and metrics if the router mode is KV
     if flags.router_mode == RouterMode::KV {
         args.push("--publish-events-and-metrics".to_string());
+    }
+    // Specific task for TRTLLM engine
+    if flags.task.is_some() {
+        args.push("--task".to_string());
+        args.push(flags.task.clone().unwrap());
     }
 
     // sglang only

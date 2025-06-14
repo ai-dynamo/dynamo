@@ -46,6 +46,17 @@ pub struct Flags {
     #[arg(long)]
     pub model_name: Option<String>,
 
+    /// TRTLLM only
+    ///
+    /// The task to perform with the model. Can be used to execute engines in disaggregated mode.
+    ///
+    /// Supported tasks:
+    /// - prefill_and_decode: Prefill and decode (default)
+    /// - decode: Decode
+    /// - prefill: Prefill
+    #[arg(long)]
+    pub task: Option<String>,
+
     /// Verbose output (-v for debug, -vv for trace)
     #[arg(short = 'v', action = clap::ArgAction::Count, default_value_t = 0)]
     pub verbosity: u8,
