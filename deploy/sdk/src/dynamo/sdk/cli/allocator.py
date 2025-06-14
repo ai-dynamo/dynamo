@@ -78,7 +78,7 @@ class ResourceAllocator:
             List of GPU indices that were assigned
         """
         if count > self.remaining_gpus:
-            logger.warning(
+            raise ResourceError(
                 f"Requested {count} GPUs, but only {self.remaining_gpus} are remaining. "
                 f"Serving may fail due to inadequate GPUs. Set {DYN_DISABLE_AUTO_GPU_ALLOCATION}=1 "
                 "to disable automatic allocation and allocate GPUs manually."
