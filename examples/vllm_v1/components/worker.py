@@ -181,6 +181,3 @@ class VllmDpWorker(VllmBaseWorker):
         finally:
             logger.info("Shutting down.")
             self.engine_manager.close()
-
-    # [gluo FIXME] should DpWorker override set_side_channel_host_and_port()?
-    # How does PD disaggregated being done for attention DP

@@ -49,7 +49,7 @@ PYTHON_PACKAGE_VERSION=${current_tag:-$latest_tag.dev+$commit_id}
 # dependencies are specified in the /container/deps folder and
 # installed within framework specific sections of the Dockerfile.
 
-declare -A FRAMEWORKS=(["VLLM"]=1 ["TENSORRTLLM"]=2 ["NONE"]=3, ["SGLANG"]=4, ["VLLM_V1"]=5)
+declare -A FRAMEWORKS=(["VLLM"]=1 ["TENSORRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4 ["VLLM_V1"]=5)
 DEFAULT_FRAMEWORK=VLLM
 
 SOURCE_DIR=$(dirname "$(readlink -f "$0")")
