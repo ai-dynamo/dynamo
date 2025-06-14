@@ -346,13 +346,13 @@ class Frontend:
 ```
 
 [!Important]
-1. **FastAPI Request Object**: 
+1. **FastAPI Request Object**:
     Frontend endpoints need to include `Request` parameter to extract HTTP headers
-2. **Optional Parameters**: 
+2. **Optional Parameters**:
     Processor methods should accept `Optional[str] request_id` parameter
-3. **Thread Safety**: 
+3. **Thread Safety**:
     Uses thread-local storage, safe in async environments
-4. **Context Propagation**: 
+4. **Context Propagation**:
     Router and Worker components automatically get request ID through Dynamo's Context system
 
 This universal approach greatly simplifies X-Request-Id implementation, allowing developers to focus on business logic rather than infrastructure code.
