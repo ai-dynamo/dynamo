@@ -172,27 +172,27 @@ impl MockVllmEngine {
         component: Option<Component>,
         cancel_token: CancellationToken,
     ) -> Result<()> {
-        println!("🔧 Creating metrics publisher...");
+        tracing::info!("Creating metrics publisher");
         let metrics_publisher = Arc::new(WorkerMetricsPublisher::new()?);
-        println!("✓ Metrics publisher created");
+        tracing::info!("Metrics publisher created");
 
         if let Some(comp) = component {
-            println!("🔧 Creating metrics endpoint...");
+            tracing::info!("Creating metrics endpoint");
             tokio::spawn({
                 let publisher = metrics_publisher.clone();
                 async move {
                     if let Err(e) = publisher.create_endpoint(comp.clone()).await {
-                        println!("Metrics endpoint failed: {}", e);
+                        tracing::error!("Metrics endpoint failed: {}", e);
                     }
                 }
             });
 
             // Give it a moment to start
             tokio::time::sleep(Duration::from_millis(100)).await;
-            println!("✓ Metrics endpoint started (background)");
+            tracing::info!("Metrics endpoint started (background)");
         }
 
-        println!("🔧 Starting metrics background tasks...");
+        tracing::info!("Starting metrics background tasks");
         for (dp_rank, scheduler) in schedulers.iter().enumerate() {
             let scheduler = scheduler.clone();
             let publisher = metrics_publisher.clone();
@@ -223,7 +223,7 @@ impl MockVllmEngine {
                 }
             });
         }
-        println!("✓ Metrics background tasks started");
+        tracing::info!("Metrics background tasks started");
         Ok(())
     }
 
@@ -234,45 +234,45 @@ impl MockVllmEngine {
         block_size: usize,
         cancel_token: CancellationToken,
     ) -> Result<()> {
-        println!("🔧 Starting KV events publishing...");
+        tracing::info!("Starting KV events publishing");
 
         // Only start KV events publishing if we have a component
         let Some(comp) = component else {
-            println!("⚠️ No component provided, skipping KV events publishing");
+            tracing::warn!("No component provided, skipping KV events publishing");
             return Ok(());
         };
-        println!("✓ Component found for KV events publishing");
+        tracing::info!("Component found for KV events publishing");
 
-        println!("🔧 Getting worker_id...");
+        tracing::debug!("Getting worker_id");
         let worker_id = comp
             .drt()
             .primary_lease()
             .expect("Cannot publish KV events without lease") // ← This will PANIC on static!
             .id();
         // let worker_id = 0;
-        println!("✓ Worker_id set to: {}", worker_id);
+        tracing::debug!("Worker_id set to: {}", worker_id);
 
-        println!("🔧 Creating KV event publisher...");
+        tracing::info!("Creating KV event publisher");
         let kv_event_publisher = Arc::new(KvEventPublisher::new(
             comp.clone(),
             worker_id,
             block_size,
             None,
         )?);
-        println!("✓ KV event publisher created");
+        tracing::info!("KV event publisher created");
 
-        println!(
-            "🔧 Starting KV event background tasks for {} receivers...",
+        tracing::info!(
+            "Starting KV event background tasks for {} receivers",
             kv_event_receivers.len()
         );
         for (dp_rank, mut kv_events_rx) in kv_event_receivers.into_iter().enumerate() {
-            println!("🔧 Starting background task for DP rank {}", dp_rank);
+            tracing::debug!("Starting background task for DP rank {}", dp_rank);
             let publisher = kv_event_publisher.clone();
             let dp_rank = dp_rank as u32;
             let cancel_token = cancel_token.clone();
 
             tokio::spawn(async move {
-                println!("✓ Background task started for DP rank {}", dp_rank);
+                tracing::debug!("Background task started for DP rank {}", dp_rank);
                 loop {
                     tokio::select! {
                         // Receive actual KV events from the scheduler
@@ -298,7 +298,7 @@ impl MockVllmEngine {
                 }
             });
         }
-        println!("✓ All KV event background tasks started");
+        tracing::info!("All KV event background tasks started");
 
         Ok(())
     }
@@ -403,7 +403,7 @@ mod integration_tests {
         let worker = Worker::from_settings()?;
         let runtime = worker.runtime();
         let distributed = DistributedRuntime::from_settings(runtime.clone()).await?;
-        println!("✓ Runtime and distributed runtime created");
+        tracing::info!("✓ Runtime and distributed runtime created");
 
         // Create component for MockVllmEngine (needed for publishers)
         let test_component = distributed
@@ -412,7 +412,7 @@ mod integration_tests {
             .service_builder()
             .create()
             .await?;
-        println!("✓ Test component created");
+        tracing::info!("✓ Test component created");
 
         // Create MockVllmEngine WITH component (enables publishers)
         let args = MockEngineArgs::builder()
@@ -423,15 +423,15 @@ mod integration_tests {
             .unwrap();
 
         let engine = Arc::new(MockVllmEngine::new(args, Some(test_component.clone()), None).await?);
-        println!("✓ MockVllmEngine created with DP_SIZE: {}", DP_SIZE);
+        tracing::info!("✓ MockVllmEngine created with DP_SIZE: {}", DP_SIZE);
 
         // Set up KV events subscriber
         let mut kv_events_subscriber = test_component.subscribe(KV_EVENT_SUBJECT).await?;
-        println!("✓ KV events subscriber created");
+        tracing::info!("✓ KV events subscriber created");
 
         // Wrap with Ingress and register with component/endpoint
         let ingress = Ingress::for_engine(engine)?;
-        println!("✓ Ingress wrapper created");
+        tracing::info!("✓ Ingress wrapper created");
 
         // Start the server in background
         let server_handle = tokio::spawn({
@@ -448,18 +448,18 @@ mod integration_tests {
                 }
             }
         });
-        println!("✓ Server started in background");
+        tracing::info!("✓ Server started in background");
 
         // Give server time to start
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-        println!("✓ Server startup delay completed");
+        tracing::info!("✓ Server startup delay completed");
 
         // Print all registered instances from etcd
         match test_component.list_instances().await {
             Ok(instances) => {
-                println!("📋 Found {} registered instances:", instances.len());
+                tracing::info!("📋 Found {} registered instances:", instances.len());
                 for instance in instances {
-                    println!(
+                    tracing::info!(
                         "  • {}/{}/{} (ID: {})",
                         instance.namespace,
                         instance.component,
@@ -469,7 +469,7 @@ mod integration_tests {
                 }
             }
             Err(e) => {
-                println!("❌ Failed to list instances: {}", e);
+                tracing::error!("❌ Failed to list instances: {}", e);
             }
         }
 
@@ -480,10 +480,10 @@ mod integration_tests {
             .endpoint("generate")
             .client()
             .await?;
-        println!("✓ Client created");
+        tracing::info!("✓ Client created");
 
         let router = PushRouter::from_client(client, Default::default()).await?;
-        println!("✓ Router created");
+        tracing::info!("✓ Router created");
 
         // Create test requests for both DP workers
         let create_request = |tokens: Vec<u32>, dp_rank: u32| DirectRequest {
@@ -499,14 +499,14 @@ mod integration_tests {
             create_request(vec![1, 2, 3, 4, 5], 1),
             create_request(vec![1, 2, 3, 4, 5], 1),
         ];
-        println!(
+        tracing::info!(
             "✓ Test requests created ({} requests total)",
             requests.len()
         );
 
         // Test each request
         for (i, request) in requests.into_iter().enumerate() {
-            println!("Testing request {}", i + 1);
+            tracing::info!("Testing request {}", i + 1);
 
             let response_stream = router.generate(Context::new(request)).await?;
             let responses: Vec<Annotated<String>> = response_stream.collect().await;
@@ -535,17 +535,17 @@ mod integration_tests {
                 }
             }
 
-            println!(
+            tracing::info!(
                 "✓ Request {} completed successfully with {} tokens",
                 i + 1,
                 responses.len()
             );
         }
 
-        println!("🎉 All requests completed successfully!");
+        tracing::info!("🎉 All requests completed successfully!");
 
         // Try to receive at least one KV event with 100ms timeout
-        println!("Waiting for KV event with 100ms timeout...");
+        tracing::info!("Waiting for KV event with 100ms timeout...");
         let msg = timeout(Duration::from_millis(100), kv_events_subscriber.next())
             .await
             .map_err(|_| Error::msg("Timeout waiting for KV event"))?
@@ -553,7 +553,7 @@ mod integration_tests {
 
         match serde_json::from_slice::<RouterEvent>(&msg.payload) {
             Ok(event) => {
-                println!("✓ Received KV event: {:?}", event);
+                tracing::info!("✓ Received KV event: {:?}", event);
             }
             Err(e) => {
                 return Err(Error::msg(format!("Failed to deserialize KV event: {}", e)));
@@ -570,7 +570,7 @@ mod integration_tests {
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
 
         let processed_endpoints = metrics_aggregator.get_endpoints();
-        println!(
+        tracing::info!(
             "Found {} metrics endpoints",
             processed_endpoints.endpoints.len()
         );
@@ -580,17 +580,17 @@ mod integration_tests {
             !processed_endpoints.endpoints.is_empty(),
             "Should find at least one metrics endpoint"
         );
-        println!(
+        tracing::info!(
             "✓ Successfully found {} metrics endpoints",
             processed_endpoints.endpoints.len()
         );
 
         // Verify the metrics endpoints contain valid data
         for (worker_id, endpoint) in &processed_endpoints.endpoints {
-            println!("✓ Worker {} metrics: {:?}", worker_id, endpoint.data);
+            tracing::info!("✓ Worker {} metrics: {:?}", worker_id, endpoint.data);
         }
 
-        println!("🎉 Event verification completed!");
+        tracing::info!("🎉 Event verification completed!");
 
         // Cleanup
         distributed.shutdown();
