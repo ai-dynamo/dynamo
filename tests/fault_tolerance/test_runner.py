@@ -31,6 +31,8 @@ from datetime import datetime
 from dynamo.llm import KvMetricsAggregator
 from dynamo.runtime import dynamo_worker
 from tests.fault_tolerance.utils.circus_controller import CircusController
+from tests.utils.managed_process import terminate_process, terminate_process_tree
+from tests.fault_tolerance.utils.metrics import worker_metrics, nvidia_smi
 from tests.serve.test_dynamo_serve import DynamoServeProcess
 from tests.utils.deployment_graph import (
     DeploymentGraph,
@@ -131,31 +133,6 @@ def deployment_graph_test(request):
     """
     return deployment_graphs[request.param]
 
-
-def _terminate_process(process):
-    try:
-        logging.info("Terminating %s", process)
-        process.terminate()
-    except psutil.AccessDenied:
-        logging.warning("Access denied for PID %s", process.pid)
-    except psutil.NoSuchProcess:
-        logging.warning("PID %s no longer exists", process.pid)
-    except psutil.TimeoutExpired:
-        logging.warning("PID %s did not terminate before timeout, killing", process.pid)
-        process.kill()
-
-
-def _terminate_process_tree(pid):
-    try:
-        parent = psutil.Process(pid)
-        for child in parent.children(recursive=True):
-            _terminate_process(child)
-        _terminate_process(parent)
-    except psutil.NoSuchProcess:
-        # Process already terminated
-        pass
-
-
 def _get_random_prompt(length):
     word_list = [f"{i}" for i in range(10)]
     return " ".join(random.choices(word_list, k=length))
@@ -232,9 +209,7 @@ def client(
         with open(log_path,"w") as log:
             logger = logging.getLogger(f"CLIENT: {index}")
             url = f"http://localhost:{server_process.port}/{deployment_graph.endpoints[0]}"
-            start_time = time.time()
-            elapsed = 0.0
-
+         
             for i in range(requests_per_client):
                 result=_single_request(url, payload.payload_chat, logger,
                                        max_retries,
@@ -249,62 +224,6 @@ def client(
         print(e)
     logger.info("Exiting")
     
-
-def run_metrics_process(log_dir):
-    asyncio.run(get_metrics(log_dir))
-
-@dynamo_worker()
-async def get_metrics(runtime,log_dir):
-    # Log # processes
-    # Log # metrics per vllm worker
-    circus_controller = None
-    pipeline = None
-    log_path = os.path.join(log_dir,"watcher.log.txt")
-    with open(log_path,"w") as log:
-        while True:
-            try:
-                await asyncio.sleep(0.5)
-
-                if not circus_controller:
-                    circus_controller = CircusController.from_state_file("dynamo")
-                if not pipeline:
-                        pipeline = (
-                            await runtime.namespace("dynamo")
-                            .component("VllmWorker")
-                            .endpoint("load_metrics")
-                            .client()
-                        )
-
-                watchers = []
-                for x in await circus_controller._list_watchers():
-                    result = circus_controller.client.call(
-                        {"command": "list", "properties": {"name": f"{x}"}}
-                    )
-                    watchers.append((x, result))
-           
-                metrics = []
-                for x in pipeline.instance_ids():
-                    async for worker_metric in await pipeline.direct(None,x):
-                        metrics.append((x,worker_metric.data()))
-                record = {"time": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-                          "watchers":watchers,
-                          "metrics":metrics}
-                log.write(json.dumps(record)+"\n")
-                log.flush()
-            except Exception as e:
-                pass
-
-
-@pytest.fixture
-def worker_metrics(request):
-    print(request.node.name)
-    process = Process(target=run_metrics_process,
-                      args=(request.node.name,))
-    process.start()
-    yield
-    process.kill()
-    
-
 def _set_deployment_args(request,
                          max_num_seqs):
 
@@ -323,7 +242,7 @@ def _set_deployment_args(request,
 @pytest.mark.slow
 async def test_worker_failure(
         deployment_graph_test, request, runtime_services, num_clients, requests_per_client, worker_metrics,respawn, failures,
-        input_token_length,output_token_length, max_num_seqs, max_retries,display_dynamo_output
+        input_token_length,output_token_length, max_num_seqs, max_retries,display_dynamo_output, nvidia_smi
 ):
     """
     Test dynamo serve deployments with different graph configurations.
@@ -390,7 +309,7 @@ async def test_worker_failure(
                 for x in range(number):
                     pid = result["pids"][x%num_processes]
                     logger.info(f"Terminating {component_name} Pid {pid}")
-                    _terminate_process_tree(pid)
+                    terminate_process_tree(pid,logger)
                     
         for proc in procs:
             logger.info(f"{proc} waiting for join")
