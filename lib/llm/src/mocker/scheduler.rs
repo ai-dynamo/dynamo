@@ -196,7 +196,7 @@ pub struct Scheduler {
     dp_rank: Option<u32>,
     state: Arc<Mutex<SchedulerState>>,
     kv_manager: Arc<Mutex<KvManager>>,
-    request_tx: mpsc::Sender<DirectRequest>,
+    request_tx: mpsc::UnboundedSender<DirectRequest>,
     hit_rates: Arc<Mutex<VecDeque<f32>>>,
 }
 
@@ -205,8 +205,8 @@ impl Scheduler {
     pub fn new(
         args: MockEngineArgs,
         dp_rank: Option<u32>,
-        output_tx: Option<mpsc::Sender<OutputSignal>>,
-        kv_events_tx: Option<mpsc::Sender<KvCacheEventData>>,
+        output_tx: Option<mpsc::UnboundedSender<OutputSignal>>,
+        kv_events_tx: Option<mpsc::UnboundedSender<KvCacheEventData>>,
         cancellation_token: Option<CancellationToken>,
     ) -> Self {
         let state = Arc::new(Mutex::new(SchedulerState::default()));
@@ -234,7 +234,7 @@ impl Scheduler {
         );
 
         // Create channel for request handling
-        let (request_tx, mut request_rx) = mpsc::channel::<DirectRequest>(1024);
+        let (request_tx, mut request_rx) = mpsc::unbounded_channel::<DirectRequest>();
 
         // Create a clone for the background task
         let state_clone = state.clone();
@@ -337,7 +337,7 @@ impl Scheduler {
                             // Drain KV events and forward to relay after prefill signal processing
                             if let (Some(ref relay_tx), Some(ref mut rx)) = (&kv_events_tx, &mut block_resp_rx) {
                                 while let Ok(event) = rx.try_recv() {
-                                    let _ = relay_tx.try_send(block_response_to_kv_event(event));
+                                    let _ = relay_tx.send(block_response_to_kv_event(event));
                                 }
                             }
                         }
@@ -364,7 +364,7 @@ impl Scheduler {
                             // Drain KV events and forward to relay after decode signal processing
                             if let (Some(ref relay_tx), Some(ref mut rx)) = (&kv_events_tx, &mut block_resp_rx) {
                                 while let Ok(event) = rx.try_recv() {
-                                    let _ = relay_tx.try_send(block_response_to_kv_event(event));
+                                    let _ = relay_tx.send(block_response_to_kv_event(event));
                                 }
                             }
 
@@ -374,7 +374,7 @@ impl Scheduler {
                                     uuid,
                                     completed: false,
                                 };
-                                let _ = tx.try_send(signal);
+                                let _ = tx.send(signal);
                             }
 
                             // Check if we're done after generating
@@ -384,7 +384,7 @@ impl Scheduler {
                                         uuid,
                                         completed: true,
                                     };
-                                    let _ = tx.try_send(signal);
+                                    let _ = tx.send(signal);
                                 }
                                 state_guard.complete(&uuid);
                                 continue;
@@ -414,7 +414,7 @@ impl Scheduler {
 
     /// Add a new request to the waiting queue
     pub async fn receive(&self, request: DirectRequest) {
-        let _ = self.request_tx.send(request).await;
+        let _ = self.request_tx.send(request);
     }
 
     /// Get the count of waiting requests
@@ -552,7 +552,7 @@ mod tests {
         let max_output_tokens: usize = 100;
 
         // Create channel for token output
-        let (output_tx, mut output_rx) = mpsc::channel::<OutputSignal>(1024);
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
 
         // Create scheduler args using builder
         let args = MockEngineArgs::builder()
@@ -665,7 +665,7 @@ mod tests {
         let token_length = 65;
 
         // Create channel for token output
-        let (output_tx, mut output_rx) = mpsc::channel::<OutputSignal>(1024);
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
 
         // Create scheduler args
         let args = MockEngineArgs::builder()
