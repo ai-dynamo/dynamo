@@ -47,6 +47,7 @@ use crate::protocols::{
     openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{CompletionResponse, NvCreateCompletionRequest},
+        embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
         nvext::NvExtProvider,
         DeltaGeneratorExt,
     },
@@ -56,6 +57,9 @@ use crate::tokenizers::{traits::Tokenizer, HuggingFaceTokenizer};
 use crate::preprocessor::prompt::PromptFormatter;
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
+pub use crate::protocols::common::preprocessor::PreprocessedEmbeddingRequest;
+
+use crate::protocols::common::llm_backend::EmbeddingsEngineOutput;
 
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
 pub const ANNOTATION_TOKEN_IDS: &str = "token_ids";
@@ -217,6 +221,60 @@ impl OpenAIPreprocessor {
         Ok((builder.build()?, annotations))
     }
 
+    /// Preprocess an embedding request, tokenizing input text to token IDs
+    pub fn preprocess_embedding_request(
+        &self,
+        request: &NvCreateEmbeddingRequest,
+    ) -> Result<(PreprocessedEmbeddingRequest, HashMap<String, String>)> {
+        let mut annotations = HashMap::new();
+        let mut builder = PreprocessedEmbeddingRequest::builder();
+
+        // Extract input texts - handle both string and array formats
+        let input_texts: Vec<String> = match &request.inner.input {
+            async_openai::types::EmbeddingInput::String(s) => vec![s.clone()],
+            async_openai::types::EmbeddingInput::StringArray(arr) => arr.clone(),
+            async_openai::types::EmbeddingInput::IntegerArray(_) => {
+                anyhow::bail!("Token ID arrays not supported - expecting text input");
+            }
+            async_openai::types::EmbeddingInput::ArrayOfIntegerArray(_) => {
+                anyhow::bail!("Token ID arrays not supported - expecting text input");
+            }
+        };
+
+        // Tokenize all input texts (keep separate for each input)
+        let mut all_token_ids = Vec::new();
+        let input_strs: Vec<&str> = input_texts.iter().map(|s| s.as_str()).collect();
+        let encodings = tokio::task::block_in_place(|| self.tokenizer.encode_batch(&input_strs))?;
+        for encoding in encodings {
+            all_token_ids.push(encoding.token_ids);
+        }
+
+        // Handle annotations
+        if request.has_annotation(ANNOTATION_TOKEN_IDS) {
+            annotations.insert(
+                ANNOTATION_TOKEN_IDS.to_string(),
+                serde_json::to_string(&all_token_ids)?,
+            );
+        }
+
+        builder.token_ids(all_token_ids);
+        builder.input_texts(input_texts);
+        builder.model(request.inner.model.clone());
+        builder.encoding_format(
+            request
+                .inner
+                .encoding_format
+                .clone()
+                .map(|f| format!("{:?}", f)),
+        );
+        builder.dimensions(request.inner.dimensions);
+
+        builder.annotations(request.annotations().unwrap_or_default());
+        builder.mdc_sum(Some(self.mdcsum.clone()));
+
+        Ok((builder.build()?, annotations))
+    }
+
     pub fn transform_postprocessor_stream<Resp: Send + Sync + 'static + std::fmt::Debug>(
         stream: ManyOut<Annotated<BackendOutput>>,
         generator: Box<dyn DeltaGeneratorExt<Resp>>,
@@ -318,6 +376,46 @@ impl OpenAIPreprocessor {
         });
 
         ResponseStream::new(Box::pin(stream), context)
+    }
+
+    /// Transform engine embedding output stream to OpenAI embedding response stream
+    pub fn transform_embedding_postprocessor_stream(
+        stream: ManyOut<Annotated<EmbeddingsEngineOutput>>,
+        original_request: NvCreateEmbeddingRequest,
+    ) -> ManyOut<Annotated<NvCreateEmbeddingResponse>> {
+        let context = stream.context();
+
+        let transformed_stream = stream.map(move |output| {
+            output.map_data(|engine_output| {
+                // Convert engine output to OpenAI response format
+                let embeddings: Vec<async_openai::types::Embedding> = engine_output
+                    .embeddings
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, embedding)| async_openai::types::Embedding {
+                        index: index as u32,
+                        object: "embedding".to_string(),
+                        embedding: embedding.into_iter().map(|f| f as f32).collect(),
+                    })
+                    .collect();
+
+                let response = NvCreateEmbeddingResponse {
+                    inner: async_openai::types::CreateEmbeddingResponse {
+                        object: "list".to_string(),
+                        model: original_request.inner.model.clone(),
+                        data: embeddings,
+                        usage: async_openai::types::EmbeddingUsage {
+                            prompt_tokens: engine_output.prompt_tokens,
+                            total_tokens: engine_output.total_tokens,
+                        },
+                    },
+                };
+
+                Ok(response)
+            })
+        });
+
+        ResponseStream::new(Box::pin(transformed_stream), context)
     }
 }
 
@@ -438,5 +536,52 @@ impl
 
         // return the response stream
         Ok(ResponseStream::new(Box::pin(stream), context))
+    }
+}
+
+#[async_trait]
+impl
+    Operator<
+        SingleIn<NvCreateEmbeddingRequest>,
+        ManyOut<Annotated<NvCreateEmbeddingResponse>>,
+        SingleIn<PreprocessedEmbeddingRequest>,
+        ManyOut<Annotated<EmbeddingsEngineOutput>>,
+    > for OpenAIPreprocessor
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateEmbeddingRequest>,
+        next: Arc<
+            dyn AsyncEngine<
+                SingleIn<PreprocessedEmbeddingRequest>,
+                ManyOut<Annotated<EmbeddingsEngineOutput>>,
+                Error,
+            >,
+        >,
+    ) -> Result<ManyOut<Annotated<NvCreateEmbeddingResponse>>, Error> {
+        // Unpack request
+        let (request, context) = request.into_parts();
+
+        // Preprocess the embedding request
+        let (preprocessed_request, annotations) = self.preprocess_embedding_request(&request)?;
+
+        // Forward to next stage
+        let preprocessed_request = context.map(|_| preprocessed_request);
+        let response_stream = next.generate(preprocessed_request).await?;
+
+        // Transform response stream back to OpenAI format
+        let stream = Self::transform_embedding_postprocessor_stream(response_stream, request);
+        let context = stream.context();
+
+        // Prepend annotations
+        let annotations_stream = stream::iter(
+            annotations
+                .into_iter()
+                .flat_map(|(k, v)| Annotated::from_annotation(k, &v))
+                .collect::<Vec<_>>(),
+        );
+
+        let combined_stream = annotations_stream.chain(stream);
+        Ok(ResponseStream::new(Box::pin(combined_stream), context))
     }
 }
