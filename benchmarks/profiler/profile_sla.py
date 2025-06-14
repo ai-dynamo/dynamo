@@ -949,6 +949,7 @@ if __name__ == "__main__":
             y_context_length=np.array(y_context_length),
             z_itl=np.array(z_itl),
             z_thpt_per_gpu=np.array(z_thpt_per_gpu),
+            max_kv_tokens=np.array([max_kv_tokens]),
         )
         logger.info(f"Saved data points to {save_path}")
 

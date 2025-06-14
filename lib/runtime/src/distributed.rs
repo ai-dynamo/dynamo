@@ -151,6 +151,7 @@ impl DistributedRuntime {
         self.nats_client.clone()
     }
 
+    // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers
     pub fn etcd_client(&self) -> Option<etcd::Client> {
         self.etcd_client.clone()
     }

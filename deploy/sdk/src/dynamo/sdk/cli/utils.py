@@ -31,7 +31,7 @@ import typer
 import yaml
 from rich.console import Console
 
-from dynamo.planner.defaults import PlannerDefaults  # type: ignore[attr-defined]
+from dynamo.planner.defaults import BasePlannerDefaults  # type: ignore[attr-defined]
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sdk.core.protocol.interface import ComponentType
 from dynamo.sdk.core.runner import TargetEnum
@@ -50,7 +50,7 @@ class ServiceProtocol(Protocol):
     name: str
     inner: Any
     models: list[Any]
-    bento: Any
+    dynamo: Any
 
     def is_dynamo_component(self) -> bool:
         ...
@@ -344,7 +344,7 @@ def is_local_planner_enabled(svc: Any, service_configs: dict) -> bool:
     if planners:
         # Get the config for the planner and check environment
         planner_config = service_configs.get(PLANNER_SERVICE_NAME, {})
-        environment = planner_config.get("environment", PlannerDefaults.environment)
+        environment = planner_config.get("environment", BasePlannerDefaults.environment)
         return environment == "local"
 
     return False
@@ -360,7 +360,7 @@ def raise_local_planner_warning(svc: Any, service_configs: dict) -> None:
     planner_config = service_configs.get(PLANNER_SERVICE_NAME, {})
 
     # Resolve no-op setting
-    no_op = planner_config.get("no-operation", PlannerDefaults.no_operation)
+    no_op = planner_config.get("no-operation", BasePlannerDefaults.no_operation)
 
     # Check worker counts across nodes
     nodes = [dep for dep in svc.all_services().values()]

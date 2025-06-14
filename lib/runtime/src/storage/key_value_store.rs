@@ -22,9 +22,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::slug::Slug;
+use crate::CancellationToken;
 use async_trait::async_trait;
-use dynamo_runtime::slug::Slug;
-use dynamo_runtime::CancellationToken;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
@@ -312,7 +312,7 @@ mod tests {
     }
 
     fn init() {
-        dynamo_runtime::logging::init();
+        crate::logging::init();
     }
 
     #[tokio::test]

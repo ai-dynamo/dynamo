@@ -27,8 +27,16 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     parser.add_argument(
         "--enable-disagg", action="store_true", help="Enable disaggregation"
     )
+    parser.add_argument(
+        "--data-parallel-start-rank",
+        "-dpr",
+        type=int,
+        default=0,
+        help="Starting data parallel rank for secondary nodes.",
+    )
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args(vllm_args)
     engine_args = AsyncEngineArgs.from_cli_args(args)
     engine_args.enable_disagg = args.enable_disagg
+    engine_args.data_parallel_start_rank = args.data_parallel_start_rank
     return engine_args
