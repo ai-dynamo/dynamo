@@ -87,7 +87,7 @@ class KvbmCacheManager:
             self.prefix_cache_stats.queries += request.num_tokens
             self.prefix_cache_stats.hits += num_computed_tokens
 
-        print(f"owned_blocks_count: {block_count}")
+        # print(f"owned_blocks_count: {block_count}")
 
         return KvbmCacheBlocks(owned_blocks), num_computed_tokens
 
@@ -170,9 +170,9 @@ class KvbmCacheManager:
             prev_computed_tokens:num_computed_tokens
         ]
 
-        print(
-            f"request_id: {request.request_id}, num_new_tokens: {num_new_tokens}, num_new_computed_tokens: {num_new_computed_tokens}, tokens_to_append: {len(tokens_to_append)}"
-        )
+        # print(
+        #     f"request_id: {request.request_id}, num_new_tokens: {num_new_tokens}, num_new_computed_tokens: {num_new_computed_tokens}, tokens_to_append: {len(tokens_to_append)}"
+        # )
 
         # take ownership "owned_blocks" of the new computed blocks
         owned_blocks = getattr(new_computed_blocks, "_owned_blocks", None)
