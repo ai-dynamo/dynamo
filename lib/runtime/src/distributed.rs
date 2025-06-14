@@ -22,7 +22,9 @@ use crate::{
     ErrorContext,
 };
 
-use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, Weak, OK};
+use super::{
+    error, Arc, DistributedRuntime, HttpManagementServiceInfo, OnceCell, Result, Runtime, Weak, OK,
+};
 
 use derive_getters::Dissolve;
 use figment::error;
@@ -73,6 +75,7 @@ impl DistributedRuntime {
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
+            http_management_service: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -162,6 +165,50 @@ impl DistributedRuntime {
 
     pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>> {
         self.instance_sources.clone()
+    }
+
+    /// Try to atomically start the HTTP management service
+    /// Returns Some(()) if this call should start the service, None if already started
+    pub async fn try_start_http_management_service(&self) -> Result<Option<()>> {
+        let mut service_guard = self.http_management_service.lock().await;
+
+        // If service is already running, return None
+        if service_guard.is_some() {
+            return Ok(None);
+        }
+
+        // We get to start the service, reserve the slot
+        *service_guard = Some(HttpManagementServiceInfo {
+            task_handle: tokio::spawn(async {}), // Placeholder task
+        });
+
+        tracing::info!("Reserved HTTP management service slot");
+        Ok(Some(()))
+    }
+
+    /// Complete the HTTP management service registration with the actual task handle
+    pub async fn complete_http_management_service_registration(
+        &self,
+        task_handle: tokio::task::JoinHandle<()>,
+    ) {
+        let mut service_guard = self.http_management_service.lock().await;
+        if let Some(ref mut service_info) = *service_guard {
+            // Abort the placeholder task and replace with the real one
+            service_info.task_handle.abort();
+            service_info.task_handle = task_handle;
+        }
+    }
+
+    /// Clear the HTTP management service info
+    pub async fn clear_http_management_service(&self) {
+        let mut service_guard = self.http_management_service.lock().await;
+        *service_guard = None;
+    }
+
+    /// Check if the HTTP management service is running
+    pub async fn is_http_management_service_running(&self) -> bool {
+        let service_guard = self.http_management_service.lock().await;
+        service_guard.is_some()
     }
 }
 

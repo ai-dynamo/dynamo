@@ -97,4 +97,14 @@ pub struct DistributedRuntime {
     is_static: bool,
 
     instance_sources: Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
+
+    // HTTP management service tracking
+    // Stores the HTTP management service info (port, task handle) if started
+    http_management_service: Arc<Mutex<Option<HttpManagementServiceInfo>>>,
+}
+
+/// Information about the HTTP management service
+#[derive(Debug)]
+pub struct HttpManagementServiceInfo {
+    task_handle: tokio::task::JoinHandle<()>,
 }
