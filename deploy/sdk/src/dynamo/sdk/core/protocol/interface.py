@@ -77,8 +77,8 @@ class ResourceConfig(BaseModel):
 class KubernetesOverrides(BaseModel):
     """Class for kubernetes overrides from the sdk to limit to supported fields."""
 
-    entrypoint: str | None = None
-    cmd: str | None = None
+    entrypoint: List[str] | None = None
+    cmd: List[str] | None = None
 
 
 class ServiceConfig(BaseModel):

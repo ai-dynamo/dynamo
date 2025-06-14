@@ -233,7 +233,10 @@ class ManifestInfo(BaseModel):
 
                 entrypoint = kube_overrides.get("entrypoint")
                 if entrypoint:
-                    main_container["command"] = shlex.split(entrypoint)
+                    if isinstance(entrypoint, str):
+                        main_container["command"] = shlex.split(entrypoint)
+                    else:
+                        main_container["command"] = entrypoint
 
                 cmd = kube_overrides.get("cmd")
                 if cmd:

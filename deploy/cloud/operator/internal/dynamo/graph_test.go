@@ -1421,7 +1421,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 							Name:         "service1",
 							Dependencies: []map[string]string{},
 							Config: Config{
-								ExtraPodSpec: &common.ExtraPodSpec{
+								ExtraPodSpec: &compounaiCommon.ExtraPodSpec{
 									MainContainer: &corev1.Container{
 										Command: []string{"sh", "-c"},
 										Args:    []string{"echo hello world", "sleep 99999"},
@@ -1453,7 +1453,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 							Labels: map[string]string{
 								commonconsts.KubeLabelDynamoComponent: "service1",
 							},
-							ExtraPodSpec: &common.ExtraPodSpec{
+							ExtraPodSpec: &compounaiCommon.ExtraPodSpec{
 								MainContainer: &corev1.Container{
 									Command: []string{"sh", "-c"},
 									Args:    []string{"echo hello world", "sleep 99999"},

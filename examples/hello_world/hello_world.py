@@ -127,8 +127,8 @@ class Middle:
     image=DYNAMO_IMAGE,
     # Example of kubernetes overrides if needed.
     # kubernetes_overrides={
-    #     "entrypoint": "sh -c",
-    #     "cmd": "echo hello from FrontEnd!",
+    #     "entrypoint": ["sh -c"],
+    #     "cmd": ["echo hello from FrontEnd!"],
     # },
 )
 class Frontend:
