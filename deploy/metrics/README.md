@@ -7,27 +7,81 @@ This directory contains configuration for visualizing metrics from the metrics a
 - **Prometheus**: Collects and stores metrics from the service
 - **Grafana**: Provides visualization dashboards for the metrics
 
+## Topology
+
+Default Service Relationship Diagram:
+```text
+     ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
+     │ nats-server │    │ etcd-server │    │dcgm-exporter│
+     │   :4222     │    │   :2379     │    │   :9400     │
+     │   :6222     │    │   :2380     │    │             │
+     │   :8222     │    │             │    │             │
+     └──────┬──────┘    └──────┬──────┘    └──────┬──────┘
+            │                  │                  │
+            │ :8222/varz       │ :2379/metrics    │ :9400/metrics
+            │                  │                  │
+            ▼                  │                  │
+     ┌─────────────┐           │                  │
+     │nats-prom-exp│           │                  │
+     │   :7777     │           │                  │
+     │             │           │                  │
+     │  /metrics   │           │                  │
+     └──────┬──────┘           │                  │
+            │                  │                  │
+            │ :7777/metrics    │                  │
+            │                  │                  │
+            ▼                  ▼                  ▼
+     ┌─────────────────────────────────────────────────┐
+     │                prometheus                       │
+     │                  :9090                          │
+     │                                                 │
+     │  scrapes: nats-prom-exp:7777/metrics            │
+     │           etcd-server:2379/metrics              │
+     │           dcgm-exporter:9400/metrics            │
+     └──────────────────┬──────────────────────────────┘
+                        │
+                        │ :9090/query API
+                        │
+                        ▼
+                ┌─────────────┐
+                │   grafana   │
+                │    :3001    │
+                │             │
+                └─────────────┘
+```
+
+Networks:
+- monitoring: nats-prom-exp, etcd-server, dcgm-exporter, prometheus, grafana
+- default: nats-server (accessible via host network)
+
 ## Getting Started
 
 1. Make sure Docker and Docker Compose are installed on your system
 
-2. Start the `components/metrics` application to begin monitoring for metric events from dynamo workers
+2. Start the visualization stack:
+
+   ```bash
+   docker compose --profile metrics up -d
+   ```
+
+3. Web servers started. The ones that end in /metrics are in Prometheus format:
+   - Grafana: `http://localhost:3001` (default login: dynamo/dynamo)
+   - Prometheus Server: `http://localhost:9090`
+   - NATS Server: `http://localhost:8222` (monitoring endpoints: /varz, /healthz, etc.)
+   - NATS Prometheus Exporter: `http://localhost:7777/metrics`
+   - etcd Server: `http://localhost:2379/metrics`
+   - DCGM Exporter: `http://localhost:9401/metrics`
+
+4. Optionally, if you want to experiment further:
+   Start the `components/metrics` application to begin monitoring for metric events from dynamo workers
    and aggregating them on a prometheus metrics endpoint: `http://localhost:9091/metrics`.
 
-3. Start worker(s) that publishes KV Cache metrics.
-  - For quick testing, `examples/rust/service_metrics/bin/server.rs` can populate dummy KV Cache metrics.
-  - For a real workflow with real data, see the KV Routing example in `examples/python_rs/llm/vllm`.
+   Then, uncomment the appropriate lines in prometheus.yml.
 
-4. Start the visualization stack:
+5. Optionally, start worker(s) that publishes KV Cache metrics:
+   - For quick testing, `examples/rust/service_metrics/bin/server.rs` can populate dummy KV Cache metrics.
+   - For a real workflow with real data, see the KV Routing example in `examples/python_rs/llm/vllm`.
 
-  ```bash
-  docker compose --profile metrics up -d
-  ```
-
-5. Web servers started:
-   - Grafana: `http://localhost:3001` (default login: admin/admin) (started by docker compose)
-   - Prometheus Server: `http://localhost:9090` (started by docker compose)
-   - Prometheus Metrics Endpoint: `http://localhost:9091/metrics` (started by `components/metrics` application)
 
 ## Configuration
 
@@ -42,6 +96,7 @@ Note: You may need to adjust the target based on your host configuration and net
 Grafana is pre-configured with:
 - Prometheus datasource
 - Sample dashboard for visualizing service metrics
+![grafana image](./grafana1.png)
 
 ## Required Files
 
