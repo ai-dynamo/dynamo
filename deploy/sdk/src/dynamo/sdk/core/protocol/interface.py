@@ -21,7 +21,7 @@ from enum import Enum, auto
 from typing import Any, Dict, Generic, List, Optional, Set, Tuple, Type, TypeVar
 
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .deployment import Env
 
@@ -77,8 +77,19 @@ class ResourceConfig(BaseModel):
 class KubernetesOverrides(BaseModel):
     """Class for kubernetes overrides from the sdk to limit to supported fields."""
 
+    model_config = ConfigDict(extra="forbid")
+
     entrypoint: List[str] | None = None
     cmd: List[str] | None = None
+
+    @field_validator("entrypoint", "cmd", mode="before")
+    @classmethod
+    def _coerce_str_to_list(cls, v):
+        if v is None or isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            return [v]
+        raise TypeError("Must be str or list[str]")
 
 
 class ServiceConfig(BaseModel):
