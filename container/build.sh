@@ -93,7 +93,7 @@ TRTLLM_COMMIT=""
 
 # TensorRT-LLM PyPI index URL
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt_llm==0.21.0rc1"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==0.21.0rc0"
 TENSORRTLLM_PIP_WHEEL=""
 
 
