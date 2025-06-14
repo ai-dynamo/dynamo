@@ -209,7 +209,6 @@ class ManifestInfo(BaseModel):
     def to_dict(self) -> t.Dict[str, t.Any]:
         """Convert to dictionary for YAML serialization."""
         result = self.model_dump()
-        print(f"result={result}")
         # Convert ServiceInfo objects to dictionaries
         services_dict = []
         for service in result["services"]:
