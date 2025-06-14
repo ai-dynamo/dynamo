@@ -25,6 +25,7 @@ import dynamo.sdk as sdk
 from dynamo.sdk import depends, service
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
+from components.kv_router import Router
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,7 @@ class FrontendConfig(BaseModel):
     app=FastAPI(title="LLM Example"),
 )
 class Frontend:
-    worker = depends(SGLangWorker)
+    worker = depends(Router)
 
     def __init__(self):
         """Initialize Frontend service with HTTP server and model configuration."""

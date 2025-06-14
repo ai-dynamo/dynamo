@@ -14,12 +14,15 @@
 # limitations under the License.
 
 import argparse
+import logging
 from argparse import Namespace
 
 from sglang.srt.server_args import ServerArgs
 
 from dynamo.sdk.cli.utils import reserve_free_port
 from dynamo.sdk.lib.config import ServiceConfig
+
+logger = logging.getLogger(__name__)
 
 
 def parse_sglang_args(service_name, prefix) -> ServerArgs:
@@ -38,6 +41,15 @@ def parse_sglang_args(service_name, prefix) -> ServerArgs:
         args_dict = vars(args)
         args_dict["disaggregation_bootstrap_port"] = bootstrap_port
         args = Namespace(**args_dict)
+    
+    if not any(
+        arg.startswith("--page_size") for arg in sglang_args
+    ):
+        logger.info("=== adding page_size to 16")
+        args_dict = vars(args)
+        args_dict["page_size"] = 16 # This should match dynamo's kv_block_size
+        args = Namespace(**args_dict)
+
     return ServerArgs.from_cli_args(args)
 
 

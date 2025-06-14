@@ -19,6 +19,26 @@ from pydantic import BaseModel, Field
 
 TokenIdType = int
 
+class Request(BaseModel):
+    prompt: str
+    sampling_params: dict
+
+
+class Tokens(BaseModel):
+    tokens: list[int]
+
+
+class PrefillRequest(Request):
+    request_id: str
+
+
+class Response(BaseModel):
+    text: str
+
+
+class PrefillResponse(BaseModel):
+    prefilled: bool
+
 
 # TODO: move these to common for all LLMs once we adopt dynamo-run
 # derived from lib/llm/src/protocols/common/preprocessor.rs

@@ -35,7 +35,12 @@ from sglang.srt.utils import get_ip
 from utils.protocol import DisaggPreprocessedRequest, PreprocessedRequest
 from utils.sglang import parse_sglang_args
 
-from dynamo.llm import ModelType, register_llm
+from dynamo.llm import (
+    ModelType,
+    register_llm,
+    ZmqKvEventPublisher,
+    ZmqKvEventPublisherConfig,
+)
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
@@ -54,6 +59,7 @@ class SGLangWorker:
     def __init__(self):
         class_name = self.__class__.__name__
         self.engine_args = parse_sglang_args(class_name, "")
+        logger.info(f"=== SGLangWorker __init__ ===, engine_args: {self.engine_args}")
         self.engine = sgl.Engine(server_args=self.engine_args)
 
         logger.info("SGLangWorker initialized")
@@ -79,6 +85,38 @@ class SGLangWorker:
                 .endpoint("generate")
                 .client()
             )
+
+        # -------------------------------------------------------------
+        # Set up KV cache event publisher (ZMQ -> NATS)
+        # -------------------------------------------------------------
+        logger.info("=== Trying Initialising ZMQ KV event publisher ===")
+        try:
+            # Create a reference to the underlying Component so that the
+            # publisher can expose its own endpoint/statistics.
+            component_ref = runtime.namespace(comp_ns).component(comp_name)
+
+            # Derive KV block size from engine args, falling back to 16
+            kv_block_size = getattr(
+                self.engine_args, "page_size", getattr(self.engine_args, "block_size", 16)
+            )
+
+            zmq_config = ZmqKvEventPublisherConfig(
+                worker_id=endpoint.lease_id(),
+                kv_block_size=kv_block_size,
+            )
+
+            logger.info("=== 1. initi zmq kv publisher with config: %s", zmq_config)
+
+            # Keep a reference so it is not garbage-collected.
+            self._kv_publisher = ZmqKvEventPublisher(
+                component=component_ref,
+                config=zmq_config,
+            )
+
+            logger.info("=== 2. created zmq kv publisher")
+            logger.info("=== ZMQ KV event publisher initialised (block_size=%s)", kv_block_size)
+        except Exception as e:
+            logger.exception("=== Failed to initialise ZMQ KV event publisher: %s", e)
 
     def _get_bootstrap_info(self):
         """
