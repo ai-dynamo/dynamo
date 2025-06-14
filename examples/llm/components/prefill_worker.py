@@ -39,6 +39,14 @@ class RequestType(BaseModel):
     text: str
 
 
+async def wrap_generator(generator):
+    while True:
+        try:
+            await generator.__anext__()
+        except StopAsyncIteration:
+            break
+
+
 @service(
     dynamo={
         "namespace": "dynamo",
@@ -152,15 +160,18 @@ class PrefillWorker:
         ) as prefill_queue:
             logger.info("prefill queue handler started")
             while True:
-                # TODO: this might add a small overhead to pull prefill from nats
-                # need to test and check how much overhead it is
-                prefill_request = await prefill_queue.dequeue_prefill_request()
-                if prefill_request is not None:
-                    logger.info(
-                        f"Dequeued prefill request: {prefill_request.request_id}"
-                    )
-                    async for _ in self.generate(prefill_request):
-                        pass
+                reqs = await prefill_queue.dequeue_prefill_request_batch(
+                    self.engine_args.max_batched_prefill_tokens,
+                    self.engine_args.block_size,
+                )
+
+                if reqs is not None:
+                    logger.debug(f"Running batch of {len(reqs)} prefill requests")
+                    # Create futures which indicate the completion of each prefill.
+                    futures = [wrap_generator(self.generate(req)) for req in reqs]
+                    # Wait for all prefills to complete.
+                    await asyncio.gather(*futures)
+
                 if self.shutdown_requested:
                     logger.info(
                         "Shutdown requested, checking if engine has any pending prefill sending requests"
