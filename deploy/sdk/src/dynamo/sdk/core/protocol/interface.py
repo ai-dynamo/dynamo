@@ -74,6 +74,13 @@ class ResourceConfig(BaseModel):
     gpu: str = Field(default="0")
 
 
+class KubernetesOverrides(BaseModel):
+    """Class for kubernetes overrides from the sdk to limit to supported fields."""
+
+    entrypoint: str | None = None
+    cmd: str | None = None
+
+
 class ServiceConfig(BaseModel):
     """Base service configuration that can be extended by adapters"""
 
@@ -83,7 +90,7 @@ class ServiceConfig(BaseModel):
     image: str | None = None
     envs: List[Env] | None = None
     labels: Dict[str, str] | None = None
-    kubernetes_overrides: Dict[str, Any] | None = None
+    kubernetes_overrides: KubernetesOverrides | None = None
 
 
 class DynamoEndpointInterface(ABC):

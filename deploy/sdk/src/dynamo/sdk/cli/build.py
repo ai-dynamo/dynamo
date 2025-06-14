@@ -41,6 +41,7 @@ from rich.progress import Progress, SpinnerColumn, TextColumn
 from dynamo.sdk import DYNAMO_IMAGE
 from dynamo.sdk.core.protocol.interface import (
     DynamoTransport,
+    KubernetesOverrides,
     LinkedServices,
     ServiceInterface,
 )
@@ -108,7 +109,7 @@ class ServiceConfig(BaseModel):
     dynamo: t.Dict[str, t.Any] = Field(default_factory=dict)
     http_exposed: bool = False
     api_endpoints: t.List[str] = Field(default_factory=list)
-    kubernetes_overrides: t.Optional[t.Dict[str, t.Any]] = Field(default_factory=dict)
+    kubernetes_overrides: KubernetesOverrides | None = None
 
 
 class ServiceInfo(BaseModel):
@@ -208,6 +209,7 @@ class ManifestInfo(BaseModel):
     def to_dict(self) -> t.Dict[str, t.Any]:
         """Convert to dictionary for YAML serialization."""
         result = self.model_dump()
+        print(f"result={result}")
         # Convert ServiceInfo objects to dictionaries
         services_dict = []
         for service in result["services"]:
