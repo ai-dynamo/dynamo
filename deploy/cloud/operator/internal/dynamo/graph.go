@@ -285,7 +285,6 @@ func SetLwsAnnotations(serviceArgs *ServiceArgs, deployment *v1alpha1.DynamoComp
 
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig
 func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, config *DynamoGraphConfig, ingressSpec *v1alpha1.IngressSpec) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
-	logger := log.FromContext(ctx)
 	dynamoServices := make(map[string]string)
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
 	graphDynamoNamespace := ""
