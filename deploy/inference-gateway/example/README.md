@@ -80,7 +80,7 @@ Deploy the Inference Gateway resources to your Kubernetes cluster:
 
 ```bash
 cd deploy/inference-gateway/example
-kubectl apply -f inference-gateway-resources.yaml
+kubectl apply -f resources
 ```
 
 Key configurations include:
