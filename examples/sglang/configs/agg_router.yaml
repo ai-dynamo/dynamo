@@ -1,0 +1,26 @@
+Common:
+  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  router: kv
+  block-size: 64
+  page-size: 64
+  max-model-len: 16384
+  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
+
+Frontend:
+  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  endpoint: dynamo.Router.generate
+  port: 1234
+
+Router:
+  min-workers: 1
+  common-configs: [model, block-size, router]
+
+SGLangWorker:
+  tp: 1
+  trust-remote-code: true
+  skip-tokenizer-init: true
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: '1'
+  common-configs: [model, page-size]

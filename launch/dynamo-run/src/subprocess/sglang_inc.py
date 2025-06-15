@@ -131,8 +131,11 @@ async def init(runtime: DistributedRuntime, config: Config):
         "base_gpu_id": config.base_gpu_id,
     }
 
-    if config.kv_block_size:
+    if config.kv_block_size and config.kv_block_size > 0:
         arg_map["page_size"] = config.kv_block_size
+    else:
+        # Fallback to a sensible default that avoids SGLang's implicit page_size=1
+        arg_map["page_size"] = 16
 
     if config.context_length:
         arg_map["context_length"] = config.context_length

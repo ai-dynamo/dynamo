@@ -43,6 +43,7 @@ uv pip install maturin
 
 4. Build and install dynamo wheel
 ```
+cd lib/bindings/python
 maturin develop --uv
 ```
 
