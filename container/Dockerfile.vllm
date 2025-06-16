@@ -520,8 +520,7 @@ COPY --from=base /workspace/wheels/nixl/*.whl wheelhouse/
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
     uv pip install nixl --find-links wheelhouse && \
-    ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
-    rm -r wheelhouse
+    ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
