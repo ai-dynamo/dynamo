@@ -357,7 +357,7 @@ class DynamoServeProcess(ManagedProcess):
 
         content = self.graph.response_handlers[0](response)
 
-        logger.info("Received Content: %s", content)
+        logger.debug("Received Content: %s", content)
 
         # Check for expected responses
         assert content, "Empty response content"

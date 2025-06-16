@@ -23,14 +23,28 @@ from tests.utils.managed_process import ManagedProcess
 
 # Custom format inspired by your example
 LOG_FORMAT = "[TEST] %(asctime)s %(levelname)s %(name)s: %(message)s"
+DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format=LOG_FORMAT,
-    datefmt="%Y-%m-%dT%H:%M:%S",  # ISO 8601 UTC format
+    datefmt=DATE_FORMAT,  # ISO 8601 UTC format
 )
 
+@pytest.fixture(autouse=True)
+def logger(request):
+    log_path = os.path.join(request.node.name,"test.log.txt")
+    logger = logging.getLogger()
+    os.makedirs(request.node.name,exist_ok=True)
+    handler = logging.FileHandler(log_path,mode="w")
+    formatter = logging.Formatter(LOG_FORMAT,datefmt=DATE_FORMAT)
+    handler.setFormatter(formatter)
+    logger.addHandler(handler)
+    yield
+    handler.close()
+    logger.removeHandler(handler)
+    
 
 def pytest_collection_modifyitems(config, items):
     """
@@ -69,7 +83,7 @@ class EtcdServer(ManagedProcess):
             timeout=timeout,
             display_output=False,
             health_check_ports=[port],
-            data_dir=tempfile.mkdtemp(prefix="etcd_"),
+            data_dir=data_dir,
             log_dir=request.node.name,
         )
 

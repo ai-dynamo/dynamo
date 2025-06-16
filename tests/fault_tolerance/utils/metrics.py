@@ -22,6 +22,8 @@ import json
 from datetime import datetime
 from tests.utils.managed_process import ManagedProcess
 from multiprocessing import Process
+import psutil
+import logging
 
 def run_metrics_process(log_dir):
     asyncio.run(get_metrics(log_dir))
@@ -59,9 +61,21 @@ async def get_metrics(runtime,log_dir):
                 for x in pipeline.instance_ids():
                     async for worker_metric in await pipeline.direct(None,x):
                         metrics.append((x,worker_metric.data()))
+                    
+                vllm_processes = []
+                
+                for ps_process in psutil.process_iter(["name", "cmdline"]):
+                    try:
+                        if "spawn" in " ".join(ps_process.cmdline()):
+                            vllm_processes.append(ps_process.pid)
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        # Process may have terminated or become inaccessible during iteration
+                        pass
+                        
                 record = {"time": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
                           "watchers":watchers,
-                          "metrics":metrics}
+                          "metrics":metrics,
+                          "vllm_processes":vllm_processes}
                 log.write(json.dumps(record)+"\n")
                 log.flush()
             except Exception as e:

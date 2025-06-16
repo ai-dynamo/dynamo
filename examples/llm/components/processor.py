@@ -21,7 +21,6 @@ from typing import Any, AsyncIterator, Dict, List, Tuple, Union
 
 from components.kv_router import Router
 from components.worker import VllmWorker
-from components.llm_interfaces import LLMWorker
 from transformers import AutoTokenizer
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.check_worker import check_required_workers

@@ -64,10 +64,10 @@ text_payload = Payload(
 )
 
 deployment_graphs = {
-    "agg": (
+    "agg-tp-1-dp-1": (
         DeploymentGraph(
             module="graphs.agg:Frontend",
-            config="configs/agg.yaml",
+            config="/workspace/tests/fault_tolerance/configs/agg_tp_1_dp_1.yaml",
             directory="/workspace/examples/llm",
             endpoints=["v1/chat/completions"],
             response_handlers=[chat_completions_response_handler],
@@ -75,10 +75,32 @@ deployment_graphs = {
         ),
         text_payload,
     ),
-    "disagg": (
+    "agg-tp-1-dp-8": (
+        DeploymentGraph(
+            module="graphs.agg:Frontend",
+            config="/workspace/tests/fault_tolerance/configs/agg_tp_1_dp_8.yaml",
+            directory="/workspace/examples/llm",
+            endpoints=["v1/chat/completions"],
+            response_handlers=[chat_completions_response_handler],
+            marks=[pytest.mark.gpu_1, pytest.mark.vllm],
+        ),
+        text_payload,
+    ),
+    "agg-tp-2-dp-4": (
+        DeploymentGraph(
+            module="graphs.agg:Frontend",
+            config="/workspace/tests/fault_tolerance/configs/agg_tp_2_dp_4.yaml",
+            directory="/workspace/examples/llm",
+            endpoints=["v1/chat/completions"],
+            response_handlers=[chat_completions_response_handler],
+            marks=[pytest.mark.gpu_1, pytest.mark.vllm],
+        ),
+        text_payload,
+    ),
+    "disagg-p-tp-1-dp-1-d-tp-1-tp-1": (
         DeploymentGraph(
             module="graphs.disagg:Frontend",
-            config="configs/disagg.yaml",
+            config="/workspace/tests/fault_tolerance/configs/disagg_p_tp_1_dp_1_d_tp_1_dp_1.yaml",
             directory="/workspace/examples/llm",
             endpoints=["v1/chat/completions"],
             response_handlers=[chat_completions_response_handler],
@@ -86,10 +108,43 @@ deployment_graphs = {
         ),
         text_payload,
     ),
-    "mock_agg": (
+    "disagg-p-tp-1-dp-1-d-tp-1-tp-1": (
         DeploymentGraph(
-            module="graphs.mock_agg:Frontend",
-            config="configs/mock_agg.yaml",
+            module="graphs.disagg:Frontend",
+            config="/workspace/tests/fault_tolerance/configs/disagg_p_tp_1_dp_1_d_tp_1_dp_1.yaml",
+            directory="/workspace/examples/llm",
+            endpoints=["v1/chat/completions"],
+            response_handlers=[chat_completions_response_handler],
+            marks=[pytest.mark.gpu_1, pytest.mark.vllm],
+        ),
+        text_payload,
+    ),
+    "disagg-p-tp-1-dp-4-d-tp-4-tp-1": (
+        DeploymentGraph(
+            module="graphs.disagg:Frontend",
+            config="/workspace/tests/fault_tolerance/configs/disagg_p_tp_1_dp_4_d_tp_4_dp_1.yaml",
+            directory="/workspace/examples/llm",
+            endpoints=["v1/chat/completions"],
+            response_handlers=[chat_completions_response_handler],
+            marks=[pytest.mark.gpu_1, pytest.mark.vllm],
+        ),
+        text_payload,
+    ),
+    "disagg-p-tp-1-dp-4-d-tp-4-tp-1": (
+        DeploymentGraph(
+            module="graphs.disagg:Frontend",
+            config="/workspace/tests/fault_tolerance/configs/disagg_p_tp_1_dp_4_d_tp_4_dp_1.yaml",
+            directory="/workspace/examples/llm",
+            endpoints=["v1/chat/completions"],
+            response_handlers=[chat_completions_response_handler],
+            marks=[pytest.mark.gpu_1, pytest.mark.vllm],
+        ),
+        text_payload,
+    ),
+    "disagg-p-tp-2-dp-2-d-tp-4-tp-1": (
+        DeploymentGraph(
+            module="graphs.disagg:Frontend",
+            config="/workspace/tests/fault_tolerance/configs/disagg_p_tp_2_dp_2_d_tp_4_dp_1.yaml",
             directory="/workspace/examples/llm",
             endpoints=["v1/chat/completions"],
             response_handlers=[chat_completions_response_handler],
@@ -104,28 +159,17 @@ failure_scenarios = {
     "prefill_worker": [[10,[("dynamo_prefillworker",1)]]],
     "frontend": [[10,[("dynamo_frontend",1)]]],
     "processor": [[10,[("dynamo_processor",1)]]],
-    "mock_decode_worker": [[10,[("dynamo_mockvllmworker",1)]]],
+    "vllm_worker": [[10,[("vllm_worker",1)]]],
     "none":[],
-    "mock_none":[]
 }
 @pytest.fixture(
     params=["none", "decode_worker","prefill_worker","frontend","processor"]
 )
 def failures(request):
-    scenario = failure_scenarios[request.param]
-    if "mock" in request.node.name:
-        param = "mock_" + request.param
-    else:
-        param = request.param
-    return failure_scenarios[param]
+    return failure_scenarios[request.param]
 
 @pytest.fixture(
-    params=[
-        pytest.param("agg", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
-        pytest.param("disagg", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
-        pytest.param("mock_agg", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
-
-    ]
+    params=list(deployment_graphs.keys())
 )
 def deployment_graph_test(request):
     """
@@ -216,7 +260,7 @@ def client(
                                        input_token_length=input_token_length,
                                        output_token_length=output_token_length,
                                        retry_delay=retry_delay)
-                logger.info(f"Request: {i} Status: {result['results'][-1]['status']}")
+                logger.info(f"Request: {i} Status: {result['results'][-1]['status']} Latency: {result['results'][-1]['request_elapsed_time']}")
           
                 log.write(json.dumps(result)+"\n")
                 log.flush()
@@ -237,7 +281,14 @@ def _set_deployment_args(request,
     
     return args
 
-    
+def _list_vllm_worker_processes():
+    processes = []
+    for ps_process in psutil.process_iter(["name", "cmdline"]):
+        if "spawn" in " ".join(ps_process.cmdline()):
+            logging.info(f"vllm worker process {ps_process}")
+            processes.append(ps_process.pid)
+    return processes
+
 @pytest.mark.e2e
 @pytest.mark.slow
 async def test_worker_failure(
@@ -296,20 +347,30 @@ async def test_worker_failure(
             watcher_list = await circus_controller._list_watchers()
             for component_name, number in component:
                 logger.info(f"Injecting failure for: {component_name}")
-                result = circus_controller.client.call(
-                    {"command": "list", "properties": {"name": f"{component_name}"}}
-                )
-                if result["status"] == "error":
-                    logger.warn(f"component {component_name} not found {result}")
-                    continue
-                
-                num_processes = len(result["pids"])
-                if number is None:
-                    number = num_processes
-                for x in range(number):
-                    pid = result["pids"][x%num_processes]
-                    logger.info(f"Terminating {component_name} Pid {pid}")
-                    terminate_process_tree(pid,logger)
+
+                if "dynamo" in component_name:               
+                    result = circus_controller.client.call(
+                        {"command": "list", "properties": {"name": f"{component_name}"}}
+                    )
+                    if result["status"] == "error":
+                        logger.warn(f"component {component_name} not found {result}")
+                        continue
+
+                    num_processes = len(result["pids"])
+                    if number is None:
+                        number = num_processes
+                    for x in range(number):
+                        pid = result["pids"][x%num_processes]
+                        logger.info(f"Terminating {component_name} Pid {pid}")
+                        terminate_process_tree(pid,logger)
+                elif "vllm" in component_name:
+                    vllm_processes = _list_vllm_worker_processes()
+                    num_processes = len(vllm_processes)
+                    if number is None:
+                        number = len(vllm_processes)
+                    for x in range(number):
+                        pid = vllm_processes[x%num_processes]
+                        terminate_process_tree(pid,logger)
                     
         for proc in procs:
             logger.info(f"{proc} waiting for join")
