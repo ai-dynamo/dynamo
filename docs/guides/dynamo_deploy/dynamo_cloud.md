@@ -100,6 +100,12 @@ kubectl get storageclass
 # standard (default)   kubernetes.io/gce-pd    Delete          Immediate              true                   1d
 ```
 
+### Cloud Provider-Specific deployment
+
+#### Google Kubernetes Engine (GKE) deployment
+
+You can find detailed instructions for deployment in GKE [here](../dynamo_deploy/gke_setup.md)
+
 ### Installation
 
 1. Set the required environment variables:
