@@ -284,8 +284,8 @@ def _set_deployment_args(request,
 def _list_vllm_worker_processes():
     processes = []
     for ps_process in psutil.process_iter(["name", "cmdline"]):
-        if "spawn" in " ".join(ps_process.cmdline()):
-            logging.info(f"vllm worker process {ps_process}")
+        if "from multiprocessing.spawn import spawn_main;" in " ".join(ps_process.cmdline()):
+            logging.info(f"vllm worker process {ps_process} {ps_process.cmdline()}")
             processes.append(ps_process.pid)
     return processes
 
@@ -370,7 +370,7 @@ async def test_worker_failure(
                         number = len(vllm_processes)
                     for x in range(number):
                         pid = vllm_processes[x%num_processes]
-                        terminate_process_tree(pid,logger)
+                        terminate_process_tree(pid, logger)
                     
         for proc in procs:
             logger.info(f"{proc} waiting for join")

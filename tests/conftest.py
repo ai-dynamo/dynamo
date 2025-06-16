@@ -32,6 +32,10 @@ logging.basicConfig(
     datefmt=DATE_FORMAT,  # ISO 8601 UTC format
 )
 
+import shutil
+import os
+import pytest
+
 @pytest.fixture(autouse=True)
 def logger(request):
     log_path = os.path.join(request.node.name,"test.log.txt")

@@ -66,7 +66,7 @@ async def get_metrics(runtime,log_dir):
                 
                 for ps_process in psutil.process_iter(["name", "cmdline"]):
                     try:
-                        if "spawn" in " ".join(ps_process.cmdline()):
+                        if "from multiprocessing.spawn import spawn_main;" in " ".join(ps_process.cmdline()):
                             vllm_processes.append(ps_process.pid)
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         # Process may have terminated or become inaccessible during iteration
