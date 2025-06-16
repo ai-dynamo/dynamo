@@ -163,7 +163,7 @@ failure_scenarios = {
     "none":[],
 }
 @pytest.fixture(
-    params=["none", "decode_worker","prefill_worker","frontend","processor"]
+    params=["none", "decode_worker","prefill_worker","frontend","processor","vllm_worker"]
 )
 def failures(request):
     return failure_scenarios[request.param]
