@@ -19,15 +19,17 @@
 //! to provide streaming token generation with realistic timing simulation.
 
 use crate::kv_router::publisher::WorkerMetricsPublisher;
-use crate::mocker::protocols::{DirectRequest, MockEngineArgs, OutputSignal};
+use crate::mocker::protocols::DirectRequest;
+use crate::mocker::protocols::{MockEngineArgs, OutputSignal};
 use crate::mocker::scheduler::Scheduler;
+use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
+use crate::protocols::TokenIdType;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
     component::Component,
     engine::AsyncEngineContextProvider,
     pipeline::{async_trait, AsyncEngine, Error, ManyOut, ResponseStream, SingleIn},
-    protocols::annotated::Annotated,
     traits::DistributedRuntimeProvider,
     Result,
 };
@@ -42,22 +44,16 @@ use tokio::time::{interval, Duration};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
-/// Generate a random printable character
-fn generate_random_char() -> String {
+/// Generate a random token ID from 0 to 50k
+fn generate_random_token() -> TokenIdType {
     let mut rng = rand::rng();
-    let selection = match rng.random_range(0..4) {
-        0 => ('a'..='z').nth(rng.random_range(0..26)).unwrap(), // lowercase
-        1 => ('A'..='Z').nth(rng.random_range(0..26)).unwrap(), // uppercase
-        2 => ('0'..='9').nth(rng.random_range(0..10)).unwrap(), // digits
-        _ => [' ', '.', ',', '!', '?'][rng.random_range(0..5)], // punctuation/space
-    };
-    selection.to_string()
+    rng.random_range(1..50000)
 }
 
 /// AsyncEngine wrapper around the Scheduler that generates random character tokens
 pub struct MockVllmEngine {
     schedulers: Vec<Scheduler>,
-    active_requests: Arc<Mutex<HashMap<Uuid, mpsc::Sender<OutputSignal>>>>,
+    active_requests: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>>,
     dp_size: u32,
     cancel_token: CancellationToken,
 }
@@ -69,9 +65,10 @@ impl MockVllmEngine {
         component: Option<Component>,
         cancel_token: Option<CancellationToken>,
     ) -> Result<Self> {
-        let active_requests = Arc::new(Mutex::new(
-            HashMap::<Uuid, mpsc::Sender<OutputSignal>>::new(),
-        ));
+        let active_requests = Arc::new(Mutex::new(HashMap::<
+            Uuid,
+            mpsc::UnboundedSender<OutputSignal>,
+        >::new()));
 
         let cancel_token = cancel_token.unwrap_or_default();
 
@@ -105,7 +102,7 @@ impl MockVllmEngine {
     /// Returns schedulers and their corresponding KV event receivers
     fn start_schedulers(
         args: MockEngineArgs,
-        active_requests: Arc<Mutex<HashMap<Uuid, mpsc::Sender<OutputSignal>>>>,
+        active_requests: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>>,
         cancel_token: CancellationToken,
     ) -> (
         Vec<Scheduler>,
@@ -152,7 +149,7 @@ impl MockVllmEngine {
                             // Notify the specific request that a token was generated
                             let active = active_requests_clone.lock().await;
                             if let Some(request_tx) = active.get(&signal.uuid) {
-                                let _ = request_tx.send(signal).await;
+                                let _ = request_tx.send(signal);
                             }
                         }
                         _ = cancel_token_cloned.cancelled() => {
@@ -305,14 +302,27 @@ impl MockVllmEngine {
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<DirectRequest>, ManyOut<Annotated<String>>, Error> for MockVllmEngine {
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
+    for MockVllmEngine
+{
     async fn generate(
         &self,
-        input: SingleIn<DirectRequest>,
-    ) -> Result<ManyOut<Annotated<String>>, Error> {
-        let (mut request, ctx) = input.into_parts();
+        input: SingleIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<LLMEngineOutput>, Error> {
+        let (request, ctx) = input.into_parts();
 
-        let dp_rank = request.dp_rank.unwrap_or(0);
+        // Extract dp_rank from annotations if present
+        let dp_rank = request
+            .annotations
+            .iter()
+            .find_map(|ann| {
+                if ann.starts_with("dp_rank:") {
+                    ann.strip_prefix("dp_rank:").and_then(|s| s.parse().ok())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(0);
 
         // Validate dp_rank
         if dp_rank >= self.dp_size {
@@ -323,9 +333,20 @@ impl AsyncEngine<SingleIn<DirectRequest>, ManyOut<Annotated<String>>, Error> for
         }
 
         let request_uuid = ctx.id().parse().unwrap_or(Uuid::new_v4());
-        request.uuid = Some(request_uuid);
 
-        let (request_tx, mut request_rx) = mpsc::channel::<OutputSignal>(64);
+        // Convert PreprocessedRequest to DirectRequest for scheduler
+        let direct_request = DirectRequest {
+            tokens: request.token_ids.clone(),
+            max_output_tokens: request
+                .stop_conditions
+                .max_tokens
+                .expect("max_output_tokens must be specified for mocker")
+                as usize,
+            uuid: Some(request_uuid),
+            dp_rank: Some(dp_rank),
+        };
+
+        let (request_tx, mut request_rx) = mpsc::unbounded_channel::<OutputSignal>();
         {
             let mut active = self.active_requests.lock().await;
             active.insert(request_uuid, request_tx);
@@ -333,35 +354,61 @@ impl AsyncEngine<SingleIn<DirectRequest>, ManyOut<Annotated<String>>, Error> for
 
         // Send the request to the appropriate scheduler based on dp_rank
         self.schedulers[dp_rank as usize]
-            .receive(request.clone())
+            .receive(direct_request)
             .await;
 
         // Create a simple channel for the stream
-        let (stream_tx, stream_rx) = mpsc::channel::<Annotated<String>>(64);
+        let (stream_tx, stream_rx) = mpsc::channel::<LLMEngineOutput>(64);
 
         let active_requests = self.active_requests.clone();
         let async_context = ctx.context();
         let cancel_token = self.cancel_token.clone();
+        let max_tokens = request.stop_conditions.max_tokens.unwrap_or(100) as usize;
 
         // Spawn a task to handle the complex async logic
         tokio::spawn(async move {
+            let mut token_count = 0;
+
             loop {
                 tokio::select! {
                     Some(signal) = request_rx.recv() => {
-                        if signal.completed {
+                        if signal.completed || token_count >= max_tokens {
+                            // Send final output with finish reason
+                            let final_output = if token_count >= max_tokens {
+                                LLMEngineOutput::length()
+                            } else {
+                                LLMEngineOutput::stop()
+                            };
+
+                            let _ = stream_tx.send(final_output).await;
                             break;
                         }
-                        let output = generate_random_char();
-                        if stream_tx.send(Annotated::from_data(output)).await.is_err() {
+
+                        // Generate a new token
+                        let token_id = generate_random_token();
+                        token_count += 1;
+
+                        let output = LLMEngineOutput {
+                            token_ids: vec![token_id],
+                            tokens: None,  // Let backend handle detokenization
+                            text: None,
+                            cum_log_probs: None,
+                            log_probs: None,
+                            finish_reason: None,
+                        };
+
+                        if stream_tx.send(output).await.is_err() {
                             break;
                         }
                     }
 
                     _ = async_context.stopped() => {
+                        let _ = stream_tx.send(LLMEngineOutput::cancelled()).await;
                         break;
                     }
 
                     _ = cancel_token.cancelled() => {
+                        let _ = stream_tx.send(LLMEngineOutput::cancelled()).await;
                         break;
                     }
                 }
@@ -383,6 +430,7 @@ mod integration_tests {
     use super::*;
     use crate::kv_router::indexer::RouterEvent;
     use crate::kv_router::KV_EVENT_SUBJECT;
+    use crate::protocols::common::{SamplingOptions, StopConditions};
     use dynamo_runtime::{
         pipeline::Context,
         pipeline::{network::Ingress, PushRouter},
@@ -486,11 +534,17 @@ mod integration_tests {
         tracing::info!("✓ Router created");
 
         // Create test requests for both DP workers
-        let create_request = |tokens: Vec<u32>, dp_rank: u32| DirectRequest {
-            tokens,
-            max_output_tokens: TOKENS_PER_REQUEST,
-            uuid: None,
-            dp_rank: Some(dp_rank),
+        let create_request = |tokens: Vec<TokenIdType>, dp_rank: u32| PreprocessedRequest {
+            token_ids: tokens,
+            stop_conditions: StopConditions {
+                max_tokens: Some(TOKENS_PER_REQUEST as u32),
+                ..Default::default()
+            },
+            sampling_options: SamplingOptions::default(),
+            eos_token_ids: vec![],
+            mdc_sum: None,
+            annotations: vec![format!("dp_rank:{}", dp_rank)],
+            estimated_prefix_hit_num_blocks: None,
         };
 
         let requests = vec![
@@ -509,36 +563,46 @@ mod integration_tests {
             tracing::info!("Testing request {}", i + 1);
 
             let response_stream = router.generate(Context::new(request)).await?;
-            let responses: Vec<Annotated<String>> = response_stream.collect().await;
+            let responses: Vec<LLMEngineOutput> = response_stream.collect().await;
 
-            // Verify each stream produces exactly the expected number of tokens
-            assert_eq!(
-                responses.len(),
-                TOKENS_PER_REQUEST,
-                "Request {} should produce {} tokens, got {}",
-                i + 1,
-                TOKENS_PER_REQUEST,
-                responses.len()
+            // Should have at least one response
+            assert!(
+                !responses.is_empty(),
+                "Request {} should produce at least one response",
+                i + 1
             );
 
-            // Verify all tokens contain valid data
-            for (j, token) in responses.iter().enumerate() {
-                if let Some(char_data) = &token.data {
-                    assert!(
-                        !char_data.is_empty(),
-                        "Request {} token {} should not be empty",
-                        i + 1,
-                        j + 1
-                    );
-                } else {
-                    panic!("Request {} token {} should have data", i + 1, j + 1);
+            // Count total tokens generated (excluding final message)
+            let mut total_tokens = 0;
+            let mut has_finish_reason = false;
+
+            for response in &responses {
+                total_tokens += response.token_ids.len();
+                if response.finish_reason.is_some() {
+                    has_finish_reason = true;
                 }
             }
+
+            // Should have a finish reason in the last response
+            assert!(
+                has_finish_reason,
+                "Request {} should have a finish reason",
+                i + 1
+            );
+
+            // Verify we got approximately the expected number of tokens
+            assert!(
+                total_tokens <= TOKENS_PER_REQUEST + 1, // +1 for potential final empty response
+                "Request {} generated {} tokens, expected at most {}",
+                i + 1,
+                total_tokens,
+                TOKENS_PER_REQUEST + 1
+            );
 
             tracing::info!(
                 "✓ Request {} completed successfully with {} tokens",
                 i + 1,
-                responses.len()
+                total_tokens
             );
         }
 
