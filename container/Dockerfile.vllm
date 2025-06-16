@@ -120,21 +120,12 @@ WORKDIR /workspace
 # Copy nixl source, and use commit hash as cache hint
 COPY --from=nixl_base /opt/nixl /opt/nixl
 COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
-RUN if [ "$ARCH" = "arm64" ]; then \
-        cd /opt/nixl && \
-        mkdir build && \
-        meson setup build/ --buildtype=release --prefix=/usr/local/nixl -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
-        cd build/ && \
-        ninja && \
-        ninja install; \
-    else \
-        cd /opt/nixl && \
-        mkdir build && \
-        meson setup build/ --buildtype=release --prefix=/usr/local/nixl && \
-        cd build/ && \
-        ninja && \
-        ninja install; \
-    fi
+RUN cd /opt/nixl && \
+    mkdir build && \
+    meson setup build/ --buildtype=release --prefix=/usr/local/nixl && \
+    cd build/ && \
+    ninja && \
+    ninja install
 
 ### NATS & ETCD SETUP ###
 # nats
