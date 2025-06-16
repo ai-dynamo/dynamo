@@ -92,6 +92,6 @@ jobs:
           external_repository: ai-dynamo/dynamo-docs
           publish_branch: main
           publish_dir: ./dynamo-docs
-          destination_dir: ${{ steps.extract_branch.outputs.branch }}
-          commit_message: 'Deploy documentation from ${{ github.repository }}@${{ github.sha }} (branch: ${{ steps.extract_branch.outputs.branch }})'
+          destination_dir: ${{ github.ref_name }}
+          commit_message: 'Deploy documentation from ${{ github.repository }}@${{ github.sha }} (branch: ${{ github.ref_name }})'
           keep_files: true
