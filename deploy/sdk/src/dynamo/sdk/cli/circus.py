@@ -31,7 +31,7 @@ import psutil
 from circus.arbiter import Arbiter as _Arbiter
 from circus.sockets import CircusSocket
 from circus.watcher import Watcher
-
+import time
 from .utils import ServiceProtocol, reserve_free_port
 
 
@@ -95,6 +95,14 @@ def create_circus_watcher(
         use_sockets=use_sockets,
         graceful_timeout=86400,
         respawn=os.environ.get("DYN_CIRCUS_RESPAWN", False),  # TODO
+        stdout_stream={
+            'class': 'FileStream',
+            'filename': f'{name}%(process_num)_{time.time()}/output.log'
+        },
+        stderr_stream={
+            'class': 'FileStream', 
+            'filename': f'{name}%(process_num)_{time.time()}/error.log'
+        },
         **kwargs,
     )
 
