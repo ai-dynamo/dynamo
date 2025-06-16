@@ -88,12 +88,13 @@ TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-TRTLLM_COMMIT="137fe35539ea182f1495f5021bfda97c729e50c3"
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="137fe35539ea182f1495f5021bfda97c729e50c3"
+TRTLLM_COMMIT=""
 
 # TensorRT-LLM PyPI index URL
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==0.21.0rc0"
 TENSORRTLLM_PIP_WHEEL=""
-
 
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
@@ -154,6 +155,13 @@ get_options() {
             else
                 missing_requirement "$1"
             fi
+            ;;
+        --use-default-experimental-tensorrtllm-commit)
+            if [ -n "$2" ] && [[ "$2" != --* ]]; then
+                echo "ERROR: --use-default-experimental-tensorrtllm-commit does not take any argument"
+                exit 1
+            fi
+            USE_DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT=true
             ;;
         --tensorrtllm-pip-wheel)
             if [ "$2" ]; then
@@ -341,6 +349,7 @@ show_help() {
     echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
     echo "  [--tensorrtllm-pip-wheel-dir path to tensorrtllm pip wheel directory]"
     echo "  [--tensorrtllm-commit tensorrtllm commit to use for building the trtllm wheel if the wheel is not provided]"
+    echo "  [--use-default-experimental-tensorrtllm-commit] Use the default experimental commit (${DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT}) to build TensorRT-LLM. This is a flag (no argument). Do not combine with --tensorrtllm-commit or --tensorrtllm-pip-wheel."
     echo "  [--tensorrtllm-pip-wheel tensorrtllm pip wheel on artifactory]"
     echo "  [--tensorrtllm-index-url tensorrtllm PyPI index URL if providing the wheel from artifactory]"
     echo "  [--build-arg additional build args to pass to docker build]"
@@ -470,6 +479,19 @@ check_wheel_file() {
 }
 
 if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
+    if [ "$USE_DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT" = true ]; then
+        if [ -n "$TRTLLM_COMMIT" ] || [ -n "$TENSORRTLLM_PIP_WHEEL" ]; then
+            echo "ERROR: When using --use-default-experimental-trtllm-commit, do not set --tensorrtllm-commit or --tensorrtllm-pip-wheel."
+            exit 1
+        fi
+        TRTLLM_COMMIT="$DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT"
+    fi
+
+    # If user didn't set both wheel and commit, use default tensorrt_llm pip wheel
+    if [ -z "$TENSORRTLLM_PIP_WHEEL" ] && [ -z "$TRTLLM_COMMIT" ]; then
+        TENSORRTLLM_PIP_WHEEL="$DEFAULT_TENSORRTLLM_PIP_WHEEL"
+    fi
+
     if [ -z "${TENSORRTLLM_PIP_WHEEL}" ]; then
         # Use option 1
         if [ ! -d "${TENSORRTLLM_PIP_WHEEL_DIR}" ]; then

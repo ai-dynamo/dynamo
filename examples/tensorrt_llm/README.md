@@ -62,6 +62,11 @@ apt-get update && apt-get -y install git git-lfs
 
 # On an ARM machine:
 ./container/build.sh --framework tensorrtllm --platform linux/arm64
+
+# Build the container with the default experimental TensorRT-LLM commit
+# WARNING: This is for experimental feature testing only.
+# The container should not be used in a production environment.
+./container/build.sh --framework tensorrtllm --use-default-experimental-tensorrtllm-commit
 ```
 
 > [!NOTE]
@@ -136,6 +141,10 @@ dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/mtp/mtp_agg.yaml
 ```
 
 Notes:
+- MTP is only available within the container built with the experimental TensorRT-LLM commit. Please add --use-default-experimental-tensorrtllm-commit to the arguments of the build.sh script.
+
+  Example: `./container/build.sh --framework tensorrtllm --use-default-experimental-tensorrtllm-commit`
+
 - There is a noticeable latency for the first two inference requests. Please send warm-up requests before starting the benchmark.
 - MTP performance may vary depending on the acceptance rate of predicted tokens, which is dependent on the dataset or queries used while benchmarking. Additionally, `ignore_eos` should generally be omitted or set to `false` when using MTP to avoid speculating garbage outputs and getting unrealistic acceptance rates.
 
@@ -275,6 +284,9 @@ dynamo serve components.prefill_worker:TensorRTLLMPrefillWorker -f configs/deeps
 ```
 
 Notes:
+- MTP is only available within the container built with the experimental TensorRT-LLM commit. Please add --use-default-experimental-tensorrtllm-commit to the arguments of the build.sh script.
+
+  Example: `./container/build.sh --framework tensorrtllm --use-default-experimental-tensorrtllm-commit`
 - There is a noticeable latency for the first two inference requests. Please send warm-up requests before starting the benchmark.
 - MTP performance may vary depending on the acceptance rate of predicted tokens, which is dependent on the dataset or queries used while benchmarking. Additionally, `ignore_eos` should generally be omitted or set to `false` when using MTP to avoid speculating garbage outputs and getting unrealistic acceptance rates.
 
