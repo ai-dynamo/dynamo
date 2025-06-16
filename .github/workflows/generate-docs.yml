@@ -85,15 +85,6 @@ jobs:
           rm -f ./dynamo-docs/_config.yml
           rm -f ./dynamo-docs/index.html || true
 
-      - name: Debug - Check token availability
-        run: |
-          if [ -z "${{ secrets.DOCS_TOKEN }}" ]; then
-            echo "ERROR: DOCS_TOKEN secret is not available"
-            exit 1
-          else
-            echo "DOCS_TOKEN secret is available"
-          fi
-
       - name: Deploy to internal GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
