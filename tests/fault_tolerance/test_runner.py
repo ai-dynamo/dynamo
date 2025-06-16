@@ -311,6 +311,8 @@ async def test_worker_failure(
         if "DYN_CIRCUS_RESPAWN" in os.environ:
             del os.environ["DYN_CIRCUS_RESPAWN"]
 
+    os.environ["DYN_CIRCUS_LOG_DIR"] = os.path.abspath(request.node.name)
+
     deployment_args = _set_deployment_args(request,
                                            max_num_seqs)
     
