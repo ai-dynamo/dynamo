@@ -20,6 +20,7 @@ from components.processor import Processor
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
 from utils.protocol import MultiModalRequest
+from utils.vllm import parse_vllm_args
 
 from dynamo.sdk import DYNAMO_IMAGE, api, depends, service
 
@@ -40,6 +41,18 @@ class Frontend:
 
     @api(name="v1/chat/completions")
     async def generate(self, request: MultiModalRequest):
+        class_name = self.__class__.__name__
+        self.engine_args = parse_vllm_args(class_name, "")
+        self.model = self.engine_args.model
+
+        if self.model != request.model:
+            return StreamingResponse(
+                "Model not found",
+                media_type="text/event-stream",
+                status_code=400,
+                headers={"Content-Type": "text/event-stream"},
+            )
+
         async def content_generator():
             async for response in self.processor.generate(request.model_dump_json()):
                 try:
