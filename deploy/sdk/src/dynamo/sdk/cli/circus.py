@@ -88,7 +88,7 @@ def create_circus_watcher(
 ) -> Watcher:
 
     log_dir = os.environ.get("DYN_CIRCUS_LOG_DIR",None)
-    prefix = f'{log_dir}/{name}_{time.time()}'
+    prefix = f'{log_dir}/{name}'
     os.makedirs(prefix,exist_ok=True)
     if log_dir is not None:
         stdout_stream={
