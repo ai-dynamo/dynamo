@@ -75,10 +75,6 @@ jobs:
           name: dynamo-docs-${{ github.run_id }}
           path: dynamo-docs
 
-      - name: Extract branch name
-        id: extract_branch
-        run: echo "branch=${GITHUB_REF#refs/heads/}" >> $GITHUB_OUTPUT
-
       - name: Clean potentially stale metadata files
         run: |
           rm -f ./dynamo-docs/CNAME
