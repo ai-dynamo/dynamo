@@ -230,8 +230,6 @@ get_options() {
 	VOLUME_MOUNTS+=" -v ${SOURCE_DIR}/..:/workspace "
 	VOLUME_MOUNTS+=" -v /tmp:/tmp "
 	VOLUME_MOUNTS+=" -v /mnt/:/mnt "
-	VOLUME_MOUNTS+=" -v /var/run/docker.sock:/var/run/docker.sock "
-
 
 	if [ -z "$HF_CACHE" ]; then
 	    HF_CACHE=$DEFAULT_HF_CACHE
