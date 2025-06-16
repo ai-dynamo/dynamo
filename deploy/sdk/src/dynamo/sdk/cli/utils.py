@@ -23,9 +23,8 @@ import json
 import logging
 import os
 import pathlib
-import random
 import socket
-from typing import Any, DefaultDict, Dict, Iterator, Optional, Protocol, TextIO, Union
+from typing import Any, DefaultDict, Dict, Iterator, Protocol, TextIO, Union
 
 import typer
 import yaml
@@ -59,47 +58,39 @@ class ServiceProtocol(Protocol):
         ...
 
 
-@contextlib.contextmanager
-def reserve_free_port(
-    host: str = "localhost",
-    port: int | None = None,
-    prefix: Optional[str] = None,
-    max_retry: int = 50,
-    enable_so_reuseport: bool = False,
-) -> Iterator[int]:
-    """
-    detect free port and reserve until exit the context
-    """
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    if enable_so_reuseport:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        if sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT) == 0:
-            raise RuntimeError("Failed to set SO_REUSEPORT.") from None
+class PortReserver:
+    def __init__(self, host: str):
+        self.host = host
+        self.socket = None
+        self.port = None
 
-    if prefix is not None:
-        prefix_num = int(prefix) * 10 ** (5 - len(prefix))
-        suffix_range = min(65535 - prefix_num, 10 ** (5 - len(prefix)))
-        for _ in range(max_retry):
-            suffix = random.randint(0, suffix_range)
-            port = int(f"{prefix_num + suffix}")
-            try:
-                sock.bind((host, port))
-                break
-            except OSError:
-                continue
-        else:
-            raise RuntimeError(
-                f"Cannot find free port with prefix {prefix} after {max_retry} retries."
-            ) from None
-    else:
-        if port:
-            sock.bind((host, port))
-        else:
-            sock.bind((host, 0))
-    try:
-        yield sock.getsockname()[1]
-    finally:
-        sock.close()
+    def __enter__(self) -> int:
+        try:
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.bind((self.host, 0))
+            _, self.port = self.socket.getsockname()
+            return self.port
+        except socket.error as e:
+            logger.warning(f"Failed to reserve port on {self.host}: {str(e)}")
+            raise
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        try:
+            if self.socket:
+                self.socket.close()
+        except socket.error as e:
+            logger.warning(f"Error while closing socket: {str(e)}")
+            # Don't re-raise the exception as this is cleanup code
+            return True
+
+
+def reserve_free_port(host: str = "localhost") -> Iterator[int]:
+    """
+    Detect free port and reserve until exit the context.
+    Returns an iterator that yields the reserved port.
+    """
+    with PortReserver(host) as port:
+        yield port
 
 
 def save_dynamo_state(
