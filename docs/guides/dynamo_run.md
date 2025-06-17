@@ -8,7 +8,7 @@ It supports these engines: mistralrs, llamacpp, sglang, vllm, and tensorrt-llm. 
 
 Usage:
 ```
-dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=2.0] [--kv-gpu-cache-usage-weight=1.0] [--kv-waiting-requests-weight=1.0] [--verbosity (-v|-vv)]
+dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mocker|mistralrs|llamacpp|sglang|vllm|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--extra-mocker-args=args_mocker.json] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=2.0] [--kv-gpu-cache-usage-weight=1.0] [--kv-waiting-requests-weight=1.0] [--verbosity (-v|-vv)]
 ```
 
 Example: `dynamo run Qwen/Qwen3-0.6B`
@@ -512,6 +512,39 @@ The output looks like this:
 ```
 {"text":"What is the capital of France?","response":"The capital of France is Paris.","tokens_in":7,"tokens_out":7,"elapsed_ms":1566}
 {"text":"What is the capital of Spain?","response":".The capital of Spain is Madrid.","tokens_in":7,"tokens_out":7,"elapsed_ms":855}
+```
+
+#### Mocker engine
+
+The mocker engine is a mock vLLM implementation designed for testing and development purposes. It simulates realistic token generation timing without requiring actual model inference, making it useful for:
+
+- Testing distributed system components without GPU resources
+- Benchmarking infrastructure and networking overhead
+- Developing and debugging Dynamo components
+- Load testing and performance analysis
+
+**Basic usage:**
+
+```bash
+dynamo-run in=http out=mocker --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0
+```
+
+The `--model-path` is required but can point to any valid model path - the mocker doesn't actually load the model weights.
+
+Available options:
+- `speedup_ratio`: Speed multiplier for token generation (default: 1.0). Higher values make the simulation engines run faster.
+- `dp_size`: Number of data parallel workers to simulate (default: 1)
+- `num_gpu_blocks`: Number of GPU blocks to simulate for the KV cache (default: 16384). This is normally calculated automatically by the real vllm engine based on the VRAM size and model KV cache size.
+- `max_num_batched_tokens`: Maximum number of tokens that can be batched together (default: 8192)
+- `watermark`: KV cache watermark threshold as a fraction (default: 0.01)
+
+**Example with custom settings:**
+```bash
+# Create configuration file
+echo '{"speedup_ratio": 10.0, "dp_size": 4}' > mocker_args.json
+
+# Run mocker with configuration
+dynamo-run in=http out=mocker --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 --extra-mocker-args mocker_args.json
 ```
 
 ### Extra engine arguments
