@@ -13,7 +13,7 @@ This guide provides instructions for setting up the Inference Gateway with Dynam
 
 Follow the instructions in [deploy/cloud/README.md](../../deploy/cloud/README.md) to deploy Dynamo Cloud on your Kubernetes cluster. This will set up the necessary infrastructure components for managing Dynamo inference graphs.
 
-2. **Launch 2 dynamo graphs**
+2. **Launch 2 Dynamo Deployments**
 
 Deploy 2 dynamo aggregated graphs following the instructions in [examples/llm/README.md](../../examples/llm/README.md):
 
