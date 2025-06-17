@@ -20,5 +20,6 @@
 # You might have to tweak this config based on your model size and GPU memory.
 
 backend: pytorch
+disable_overlap_scheduler: true
 kv_cache_config:
   free_gpu_memory_fraction: 0.40
