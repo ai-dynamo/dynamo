@@ -219,16 +219,7 @@ where
     ) -> Result<()> {
         let notify = pending_transfer
             .sources
-            .write_to(
-                &mut pending_transfer.targets,
-                true,
-                self.transfer_ctx.clone(),
-            )?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "write_to returned None when notify was true. This should never happen!"
-                )
-            })?;
+            .write_to(&mut pending_transfer.targets, self.transfer_ctx.clone())?;
 
         let completion_future = async move {
             let _ = notify.await;
