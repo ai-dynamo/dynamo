@@ -16,6 +16,8 @@ Common:
   model: llava-hf/llava-1.5-7b-hf
   block-size: 64
   max-model-len: 4096
+  image-token-id: 32000
+  num-patches: 576
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
 
 Processor:
@@ -32,7 +34,7 @@ VllmDecodeWorker:
     workers: 1
     resources:
       gpu: '1'
-  common-configs: [model, block-size, max-model-len, kv-transfer-config]
+  common-configs: [model, block-size, image-token-id, max-model-len, num-patches, kv-transfer-config]
 
 VllmPrefillWorker:
   max-num-batched-tokens: 16384
@@ -40,7 +42,7 @@ VllmPrefillWorker:
     workers: 1
     resources:
       gpu: '1'
-  common-configs: [model, block-size, max-model-len, kv-transfer-config]
+  common-configs: [model, block-size, image-token-id, max-model-len, num-patches, kv-transfer-config]
 
 VllmEncodeWorker:
   tensor-parallel-size: 1

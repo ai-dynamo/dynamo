@@ -49,7 +49,7 @@ PYTHON_PACKAGE_VERSION=${current_tag:-$latest_tag.dev+$commit_id}
 # dependencies are specified in the /container/deps folder and
 # installed within framework specific sections of the Dockerfile.
 
-declare -A FRAMEWORKS=(["VLLM"]=1 ["TENSORRTLLM"]=2 ["NONE"]=3, ["SGLANG"]=4)
+declare -A FRAMEWORKS=(["VLLM"]=1 ["TENSORRTLLM"]=2 ["NONE"]=3 ["SGLANG"]=4 ["VLLM_V1"]=5)
 DEFAULT_FRAMEWORK=VLLM
 
 SOURCE_DIR=$(dirname "$(readlink -f "$0")")
@@ -88,12 +88,13 @@ TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-TRTLLM_COMMIT="8cb6163a57226e69d8a85788eff542a440ed9c89"
+DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="137fe35539ea182f1495f5021bfda97c729e50c3"
+TRTLLM_COMMIT=""
 
 # TensorRT-LLM PyPI index URL
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==0.21.0rc0"
 TENSORRTLLM_PIP_WHEEL=""
-
 
 
 VLLM_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
@@ -109,7 +110,10 @@ NONE_BASE_IMAGE_TAG="24.04"
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-NIXL_COMMIT=f531404be4866d85ed618b3baf4008c636798d63
+VLLM_V1_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
+VLLM_V1_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
+
+NIXL_COMMIT=16348080f5bdeb9fe6058a23be140cec020ef3f3
 NIXL_REPO=ai-dynamo/nixl.git
 
 NIXL_UCX_EFA_REF=7ec95b95e524a87e81cac92f5ca8523e3966b16b
@@ -154,6 +158,13 @@ get_options() {
             else
                 missing_requirement "$1"
             fi
+            ;;
+        --use-default-experimental-tensorrtllm-commit)
+            if [ -n "$2" ] && [[ "$2" != --* ]]; then
+                echo "ERROR: --use-default-experimental-tensorrtllm-commit does not take any argument"
+                exit 1
+            fi
+            USE_DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT=true
             ;;
         --tensorrtllm-pip-wheel)
             if [ "$2" ]; then
@@ -341,6 +352,7 @@ show_help() {
     echo "  [--framework framework one of ${!FRAMEWORKS[*]}]"
     echo "  [--tensorrtllm-pip-wheel-dir path to tensorrtllm pip wheel directory]"
     echo "  [--tensorrtllm-commit tensorrtllm commit to use for building the trtllm wheel if the wheel is not provided]"
+    echo "  [--use-default-experimental-tensorrtllm-commit] Use the default experimental commit (${DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT}) to build TensorRT-LLM. This is a flag (no argument). Do not combine with --tensorrtllm-commit or --tensorrtllm-pip-wheel."
     echo "  [--tensorrtllm-pip-wheel tensorrtllm pip wheel on artifactory]"
     echo "  [--tensorrtllm-index-url tensorrtllm PyPI index URL if providing the wheel from artifactory]"
     echo "  [--build-arg additional build args to pass to docker build]"
@@ -382,6 +394,8 @@ elif [[ $FRAMEWORK == "NONE" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.none
 elif [[ $FRAMEWORK == "SGLANG" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang
+elif [[ $FRAMEWORK == "VLLM_V1" ]]; then
+    DOCKERFILE=${SOURCE_DIR}/Dockerfile.vllm_v1
 fi
 
 NIXL_DIR="/tmp/nixl/nixl_src"
@@ -470,6 +484,19 @@ check_wheel_file() {
 }
 
 if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
+    if [ "$USE_DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT" = true ]; then
+        if [ -n "$TRTLLM_COMMIT" ] || [ -n "$TENSORRTLLM_PIP_WHEEL" ]; then
+            echo "ERROR: When using --use-default-experimental-trtllm-commit, do not set --tensorrtllm-commit or --tensorrtllm-pip-wheel."
+            exit 1
+        fi
+        TRTLLM_COMMIT="$DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT"
+    fi
+
+    # If user didn't set both wheel and commit, use default tensorrt_llm pip wheel
+    if [ -z "$TENSORRTLLM_PIP_WHEEL" ] && [ -z "$TRTLLM_COMMIT" ]; then
+        TENSORRTLLM_PIP_WHEEL="$DEFAULT_TENSORRTLLM_PIP_WHEEL"
+    fi
+
     if [ -z "${TENSORRTLLM_PIP_WHEEL}" ]; then
         # Use option 1
         if [ ! -d "${TENSORRTLLM_PIP_WHEEL_DIR}" ]; then

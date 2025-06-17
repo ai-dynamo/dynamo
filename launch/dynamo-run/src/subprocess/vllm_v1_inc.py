@@ -40,12 +40,13 @@ from dynamo.llm import (
     register_llm,
 )
 from dynamo.runtime import Component, DistributedRuntime, dynamo_worker
+from dynamo.runtime.logging import configure_dynamo_logging
 
 # Only used if you run it manually from the command line
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
-logging.basicConfig(level=logging.DEBUG)
+configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
@@ -115,13 +116,20 @@ class StatLoggerFactory:
 
 class RequestHandler:
     """
-    Request handler for the generate endpoint
+    Request handler for the generate and clear_kv_blocks endpoints.
     """
 
     def __init__(self, component, engine, default_sampling_params):
         self.component = component
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
+
+    async def clear_kv_blocks(self, request=None):
+        try:
+            self.engine_client.reset_prefix_cache()
+            yield {"status": "success", "message": "KV cache cleared"}
+        except Exception as e:
+            yield {"status": "error", "message": str(e)}
 
     async def generate(self, request):
         request_id = str(uuid.uuid4().hex)
@@ -174,13 +182,16 @@ async def init(runtime: DistributedRuntime, config: Config):
     """
     Instantiate and serve
     """
+
     component = runtime.namespace(config.namespace).component(config.component)
     await component.create_service()
 
-    endpoint = component.endpoint(config.endpoint)
+    generate_endpoint = component.endpoint(config.endpoint)
+    clear_endpoint = component.endpoint("clear_kv_blocks")
+
     await register_llm(
         ModelType.Backend,
-        endpoint,
+        generate_endpoint,
         config.model_path,
         config.model_name,
         kv_cache_block_size=config.kv_block_size,
@@ -248,16 +259,21 @@ async def init(runtime: DistributedRuntime, config: Config):
     logger.info("VllmWorker has been initialized")
 
     zmq_config = ZmqKvEventPublisherConfig(
-        worker_id=endpoint.lease_id(), kv_block_size=engine_args.block_size
+        worker_id=generate_endpoint.lease_id(), kv_block_size=engine_args.block_size
     )
 
     _ = ZmqKvEventPublisher(component=component, config=zmq_config)
 
     handler = RequestHandler(component, engine_client, default_sampling_params)
 
-    # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
-    # after the lease is revoked
-    await endpoint.serve_endpoint(handler.generate)
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(handler.generate),
+            clear_endpoint.serve_endpoint(handler.clear_kv_blocks),
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve endpoints: {e}")
+        raise
 
 
 def cmd_line_args():

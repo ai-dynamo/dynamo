@@ -135,6 +135,10 @@ deployment_graphs = {
                 completions_response_handler,
             ],
             marks=[pytest.mark.gpu_1, pytest.mark.vllm],
+            # FIXME: This is a hack to allow deployments to start before sending any requests.
+            # When using KV-router, if all the endpoints are not registered, the service
+            # enters a non-recoverable state.
+            delayed_start=120,
         ),
         text_payload,
     ),
@@ -149,6 +153,10 @@ deployment_graphs = {
                 completions_response_handler,
             ],
             marks=[pytest.mark.gpu_2, pytest.mark.vllm],
+            # FIXME: This is a hack to allow deployments to start before sending any requests.
+            # When using KV-router, if all the endpoints are not registered, the service
+            # enters a non-recoverable state.
+            delayed_start=120,
         ),
         text_payload,
     ),
@@ -208,7 +216,7 @@ deployment_graphs = {
             # FIXME: This is a hack to allow deployments to start before sending any requests.
             # When using KV-router, if all the endpoints are not registered, the service
             # enters a non-recoverable state.
-            delayed_start=60,
+            delayed_start=120,
         ),
         text_payload,
     ),

@@ -344,6 +344,19 @@ class DisaggregatedRouter:
         """
         ...
 
+def compute_block_hash_for_seq_py(tokens: List[int], kv_block_size: int) -> List[int]:
+    """
+    Compute block hashes for a sequence of tokens
+
+    Args:
+        tokens: List of token IDs
+        kv_block_size: Size of each KV cache block
+
+    Returns:
+        List of block hashes as integers
+    """
+    ...
+
 class WorkerMetricsPublisher:
     """
     A metrics publisher will provide metrics to the router.
@@ -418,7 +431,89 @@ class OverlapScores:
     'scores' is a map of worker id to the score which is the number of matching blocks.
     """
 
-    ...
+    @property
+    def scores(self) -> Dict[int, int]:
+        """
+        Map of worker_id to the score which is the number of matching blocks.
+
+        Returns:
+            Dictionary mapping worker IDs to their overlap scores
+        """
+        ...
+
+    @property
+    def frequencies(self) -> List[int]:
+        """
+        List of frequencies that the blocks have been accessed.
+        Entries with value 0 are omitted.
+
+        Returns:
+            List of access frequencies for each block
+        """
+        ...
+
+class RadixTree:
+    """
+    A RadixTree that tracks KV cache blocks and can find prefix matches for sequences.
+
+    NOTE: This class is not thread-safe and should only be used from a single thread in Python.
+    """
+
+    def __init__(self, expiration_duration_secs: Optional[float] = None) -> None:
+        """
+        Create a new RadixTree instance.
+
+        Args:
+            expiration_duration_secs: Optional expiration duration in seconds for cached blocks.
+                                    If None, blocks never expire.
+        """
+        ...
+
+    def find_matches(
+        self, sequence: List[int], early_exit: bool = False
+    ) -> OverlapScores:
+        """
+        Find prefix matches for the given sequence of block hashes.
+
+        Args:
+            sequence: List of block hashes to find matches for
+            early_exit: If True, stop searching after finding the first match
+
+        Returns:
+            OverlapScores containing worker matching scores and frequencies
+        """
+        ...
+
+    def apply_event(self, worker_id: int, kv_cache_event_bytes: bytes) -> None:
+        """
+        Apply a KV cache event to update the RadixTree state.
+
+        Args:
+            worker_id: ID of the worker that generated the event
+            kv_cache_event_bytes: Serialized KV cache event as bytes
+
+        Raises:
+            ValueError: If the event bytes cannot be deserialized
+        """
+        ...
+
+    def remove_worker(self, worker_id: int) -> None:
+        """
+        Remove all blocks associated with a specific worker.
+
+        Args:
+            worker_id: ID of the worker to remove
+        """
+        ...
+
+    def clear_all_blocks(self, worker_id: int) -> None:
+        """
+        Clear all blocks for a specific worker.
+
+        Args:
+            worker_id: ID of the worker whose blocks should be cleared
+        """
+        ...
 
 class KvIndexer:
     """
@@ -917,5 +1012,36 @@ class BlockManager:
         --------
         BlockList
             List of allocated blocks
+        """
+        ...
+
+class ZmqKvEventListener:
+    """
+    A ZMQ-based key-value cache event listener that operates independently
+    of the dynamo runtime or event plane infrastructure.
+    """
+
+    def __init__(
+        self, zmq_endpoint: str, zmq_topic: str, kv_block_size: int
+    ) -> None:
+        """
+        Create a new ZmqKvEventListener instance.
+
+        Args:
+            zmq_endpoint: ZeroMQ endpoint to connect to (e.g., "tcp://127.0.0.1:5557")
+            zmq_topic: ZeroMQ topic to subscribe to
+            kv_block_size: Size of KV cache blocks
+        """
+        ...
+
+    async def get_events(self) -> List[str]:
+        """
+        Get all available KV cache events from the ZMQ listener.
+
+        Returns:
+            List of JSON-serialized KV cache events as strings
+
+        Raises:
+            ValueError: If events cannot be serialized to JSON
         """
         ...

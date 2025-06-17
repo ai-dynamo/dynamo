@@ -1092,7 +1092,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "akin",
  "anyhow",
@@ -1155,7 +1155,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-py3"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1174,13 +1174,14 @@ dependencies = [
  "thiserror 2.0.12",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
 ]
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-nats",
@@ -2810,9 +2811,9 @@ dependencies = [
 
 [[package]]
 name = "nixl-sys"
-version = "0.3.0-rc.2"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a1727039c315bf41aeadcdbea02522b8a3df69a77bd732996243502a5fb6f07"
+checksum = "c5ed1b2b73a39516cb082cc2e0c8cf5fa9aadf7364b3b7851f43fbcda70566ee"
 dependencies = [
  "bindgen",
  "cc",

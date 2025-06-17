@@ -18,6 +18,7 @@ Common:
   max-model-len: 16384
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
   tensor-parallel-size: 16
+  disable-log-requests: true
 
 Frontend:
   served_model_name: deepseek-ai/DeepSeek-R1
@@ -35,7 +36,7 @@ VllmWorker:
     workers: 1
     resources:
       gpu: '16'
-  common-configs: [model, block-size, max-model-len, kv-transfer-config, tensor-parallel-size]
+  common-configs: [model, block-size, max-model-len, kv-transfer-config, tensor-parallel-size, disable-log-requests]
 
 PrefillWorker:
   max-num-batched-tokens: 16384
@@ -43,4 +44,4 @@ PrefillWorker:
     workers: 1
     resources:
       gpu: '16'
-  common-configs: [model, block-size, max-model-len, kv-transfer-config, tensor-parallel-size]
+  common-configs: [model, block-size, max-model-len, kv-transfer-config, tensor-parallel-size, disable-log-requests]
