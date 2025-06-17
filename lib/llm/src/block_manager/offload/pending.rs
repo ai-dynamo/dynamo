@@ -30,8 +30,6 @@
 //! This is implemented through the [`TransferManager`] trait, which takes a single [`PendingTransfer`]
 //! and initiates the transfer.
 //!
-//! Since CUDA and NIXL transfers use completely different semantics, we implement two separate transfer managers.
-//!
 //! ## Workflow
 //! 1. A transfer request is made by calling [`TransferManager::enqueue_transfer`]
 //! 2. [`TransferManager::enqueue_transfer`] performs the transfer, and enqueues relevant data into a bounded channel.
@@ -158,7 +156,6 @@ impl LocalTransferManager {
     pub fn new(
         transfer_ctx: Arc<TransferContext>,
         max_concurrent_transfers: usize,
-        runtime: &Handle,
         cancellation_token: CancellationToken,
     ) -> Result<Self> {
         let (futures_tx, mut futures_rx) = mpsc::channel(1);
@@ -192,7 +189,7 @@ impl LocalTransferManager {
             },
             cancellation_token.clone(),
             "Local Transfer Manager",
-            runtime,
+            transfer_ctx.async_rt_handle(),
         )?
         .detach();
 
@@ -235,13 +232,9 @@ where
 
         let completion_future = async move {
             let _ = notify.await;
-            match pending_transfer.handle_complete() {
-                Ok(_) => {}
-                Err(e) => {
-                    // The only case where this can fail is if the progress engine is being shutdown.
-                    // This is not a problem, so we can just ignore it.
-                    tracing::warn!("Error handling transfer completion: {:?}", e);
-                }
+
+            if let Err(e) = pending_transfer.handle_complete() {
+                tracing::warn!("Error handling transfer completion: {:?}", e);
             }
         };
 
@@ -278,13 +271,13 @@ where
     pub fn new(
         transfer_manager: Manager,
         max_transfer_batch_size: usize,
-        runtime: &Handle,
+        transfer_ctx: Arc<TransferContext>,
         cancellation_token: CancellationToken,
     ) -> Self {
         Self {
             transfer_manager,
             max_transfer_batch_size,
-            runtime: runtime.clone(),
+            runtime: transfer_ctx.async_rt_handle().clone(),
             cancellation_token,
             _phantom: PhantomData,
         }
@@ -324,12 +317,10 @@ where
         let mut indicators = Vec::new();
 
         while !sources.is_empty() {
-            let sources = sources
-                .drain(..std::cmp::min(self.max_transfer_batch_size, sources.len()))
-                .collect();
-            let targets = targets
-                .drain(..std::cmp::min(self.max_transfer_batch_size, targets.len()))
-                .collect();
+            // Sources and targets are guaranteed to be the same length.
+            let num_blocks = std::cmp::min(self.max_transfer_batch_size, sources.len());
+            let sources = sources.drain(..num_blocks).collect();
+            let targets = targets.drain(..num_blocks).collect();
 
             // If we have a completion indicator, we need to create a new one for each sub-transfer.
             let indicator = if completion_indicator.is_some() {
