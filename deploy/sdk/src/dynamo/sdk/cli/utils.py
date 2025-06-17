@@ -24,7 +24,7 @@ import logging
 import os
 import pathlib
 import socket
-from typing import Any, DefaultDict, Dict, Protocol, TextIO, Union
+from typing import Any, DefaultDict, Dict, Iterator, Protocol, TextIO, Union
 
 import typer
 import yaml
@@ -61,8 +61,8 @@ class ServiceProtocol(Protocol):
 class PortReserver:
     def __init__(self, host: str = "localhost"):
         self.host = host
-        self.socket = None
-        self.port = None
+        self.socket: socket.socket | None = None
+        self.port: int | None = None
 
     def __enter__(self) -> int:
         try:
@@ -91,7 +91,7 @@ class PortReserver:
 @contextlib.contextmanager
 def reserve_free_port(
     host: str = "localhost",
-) -> contextlib.AbstractContextManager[int]:
+) -> Iterator[int]:
     """
     Detect free port and reserve until exit the context.
     Returns a context manager that yields the reserved port.
