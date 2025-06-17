@@ -146,18 +146,21 @@ impl Client {
         let instances = self.instances();
         let mut inhibited = self.instance_inhibited.lock().await;
 
-        instances
+        // 1. Remove inhibited instances that are no longer in `self.instances()`
+        // 2. Remove inhibited instances that have expired
+        // 3. Only return instances that are not inhibited after removals
+        let mut new_inhibited = HashMap::<i64, u64>::new();
+        let filtered = instances
             .into_iter()
             .filter_map(|instance| {
                 let id = instance.id();
                 if let Some(&timestamp) = inhibited.get(&id) {
-                    // If the inhibition is stale, remove it and include the instance
                     if now.saturating_sub(timestamp) > ETCD_LEASE_TTL {
                         tracing::debug!("instance {id} stale inhibition");
-                        inhibited.remove(&id);
                         Some(instance)
                     } else {
                         tracing::debug!("instance {id} is inhibited");
+                        new_inhibited.insert(id, timestamp);
                         None
                     }
                 } else {
@@ -165,7 +168,10 @@ impl Client {
                     Some(instance)
                 }
             })
-            .collect()
+            .collect();
+
+        *inhibited = new_inhibited;
+        filtered
     }
 
     /// Mark an instance as down/unavailable
