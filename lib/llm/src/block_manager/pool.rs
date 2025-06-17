@@ -78,8 +78,8 @@ use super::storage::Storage;
 
 use crate::tokens::{SequenceHash, TokenBlock};
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use prometheus::Registry;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::{
     collections::{BTreeSet, HashMap, VecDeque},
     sync::{Arc, Weak},

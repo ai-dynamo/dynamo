@@ -23,14 +23,13 @@ pub mod config;
 mod state;
 
 pub mod block;
+pub mod distributed;
 pub mod events;
 pub mod layout;
 pub mod metrics;
 pub mod offload;
 pub mod pool;
 pub mod storage;
-
-// pub mod distributed;
 
 pub use crate::common::dtype::DType;
 pub use block::{

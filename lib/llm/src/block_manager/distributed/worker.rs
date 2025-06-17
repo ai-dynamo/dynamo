@@ -1,256 +1,334 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{collections::HashMap, sync::Arc};
+use super::*;
 
-use anyhow::{Context, Result};
-use nixl_sys::Agent as NixlAgent;
-use tokio_util::sync::CancellationToken;
-use tracing::info;
-use validator::Validate;
+use leader::KvbmLeaderData;
+
+use transfer::*;
+use utils::*;
+use zmq::*;
 
 use crate::block_manager::{
-    block::{self, *},
-    layout::*,
-    state::*,
-    storage::{self, *},
-    DeviceStorage, KvBlockManagerConfig, NixlOptions, WorkerID,
+    block::{layout_to_blocks, transfer::TransferContext, Block},
+    layout::LayoutType,
+    storage::{
+        torch::TorchTensor, DeviceAllocator, DeviceStorage, DiskAllocator, DiskStorage,
+        PinnedAllocator, PinnedStorage,
+    },
+    BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage,
 };
+use crate::common::dtype::DType;
 
-use super::active_message::{
-    ActiveMessageFactory, ActiveMessageHandlerFactory, ActiveMessageReceiver, ActiveMessageSender,
-    SharedResponseReceiver,
-};
+use nixl_sys::Agent as NixlAgent;
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
-pub struct KvBlockManagerWorker {
-    worker_id: WorkerID,
-    cancellation_token: CancellationToken,
+use dynamo_runtime::{utils::leader_worker_barrier::WorkerBarrier, DistributedRuntime, Runtime};
 
-    nixl_agent: NixlAgent,
-    nixl_backends: HashMap<String, Arc<nixl_sys::Backend>>,
+fn load_and_validate_tensors(
+    tensors: Vec<Box<dyn TorchTensor>>,
+    device_id: usize,
+) -> anyhow::Result<(Vec<DeviceStorage>, Vec<usize>)> {
+    let mut shape = None;
 
-    disk_layout: Option<Arc<dyn BlockLayout<StorageType = DiskStorage>>>,
-    host_layout: Option<Arc<dyn BlockLayout<StorageType = PinnedStorage>>>,
-    device_layout: Arc<dyn BlockLayout<StorageType = DeviceStorage>>,
+    let mut device_tensors = Vec::with_capacity(tensors.len());
+    let allocator = DeviceAllocator::new(device_id)?;
 
-    // Active message handling
-    am_receiver: Option<ActiveMessageReceiver>,
-    am_sender: Option<ActiveMessageSender>,
-}
-
-impl KvBlockManagerWorker {
-    pub fn new(config: KvBlockManagerConfig) -> Result<Self> {
-        config
-            .runtime
-            .validate()
-            .context("Validating runtime config")?;
-
-        config.model.validate().context("Validating model config")?;
-
-        let worker_id = config.runtime.worker_id;
-        let cancellation_token = config.runtime.cancellation_token;
-
-        // Create a map of NIXL backends
-        let mut nixl_backends: HashMap<String, Arc<nixl_sys::Backend>> = HashMap::new();
-
-        // Create a NIXL agent if NIXL is enabled and instantiate requested backends
-        // TODO: Build a map of NIXL backends to block pools/sets
-        let nixl_agent = match config.runtime.nixl {
-            NixlOptions::Enabled => {
-                tracing::debug!("Creating NIXL agent");
-                let agent = NixlAgent::new(&worker_id.to_string())?;
-
-                tracing::debug!("Creating NIXL backends");
-
-                if let Ok((_, ucx_params)) = agent.get_plugin_params("UCX") {
-                    let backend = agent.create_backend("UCX", &ucx_params)?;
-                    nixl_backends.insert("UCX".to_string(), Arc::new(backend));
-                } else {
-                    tracing::warn!("No UCX plugin found; will not create UCX backend");
-                }
-
-                if config.disk_layout.is_some() {
-                    if let Ok((_, gds_params)) = agent.get_plugin_params("GDS") {
-                        let backend = agent.create_backend("GDS", &gds_params)?;
-                        nixl_backends.insert("GDS".to_string(), Arc::new(backend));
-                    } else {
-                        tracing::warn!("No GDS plugin found; will not create GDS backend");
-                    }
-                }
-
-                Some(agent)
+    for tensor in tensors {
+        // Check the stride, and ensure our tensor is contiguous.
+        // TODO: We eventually need to be able to handle this.
+        let stride = tensor.stride();
+        for i in 1..stride.len() {
+            if stride[i] > stride[i - 1] {
+                return Err(anyhow::anyhow!(
+                    "Tensor strides must be monotonically decreasing! Got {:?}",
+                    stride
+                ));
             }
-            NixlOptions::EnabledWithAgent(agent) => Some(agent),
-            NixlOptions::Disabled => None,
-        };
-
-        if nixl_agent.is_none() {
-            anyhow::bail!("KvBlockManagerWorkers must be configured with NIXL enabled");
         }
 
-        // Initialize model-specific layout config. The layout_builder is incomplete at this point.
-        // We will clone this builder and apply the storage-specific configs to each clone in the
-        // following steps.
-        let model = &config.model;
-        let mut layout_builder = LayoutConfig::builder();
-
-        layout_builder
-            .num_layers(model.num_layers)
-            .outer_dim(model.outer_dim)
-            .page_size(model.page_size)
-            .inner_dim(model.inner_dim)
-            .dtype(model.dtype);
-
-        let mut next_block_set_idx = 0;
-        let mut local_block_set = block::nixl::NixlBlockSet::new(worker_id);
-
-        let disk_layout = if let Some(config) = config.disk_layout {
-            next_block_set_idx += 1;
-            tracing::debug!("Constructing disk pool.");
-            let layout = create_layout(layout_builder.clone(), config, nixl_agent.as_ref())?;
-            local_block_set.add_block_set(next_block_set_idx, layout.serialize()?);
-            Some(layout)
+        // Check that all layer tensors have the same shape.
+        // TODO: We eventually need to support the weirder models with heterogenous layers.
+        if let Some(shape) = shape.as_ref() {
+            if *shape != tensor.shape() {
+                return Err(anyhow::anyhow!(
+                    "All tensors must have the same shape! Got {:?} and {:?}",
+                    *shape,
+                    tensor.shape()
+                ));
+            }
         } else {
-            tracing::debug!("No disk layout provided; will not allocate disk blocks.");
-            None
-        };
-
-        // Create the host block pool if a host layout is provided
-        let host_layout = if let Some(config) = config.host_layout {
-            next_block_set_idx += 1;
-            tracing::debug!("Constructing host pool.");
-            let layout = create_layout(layout_builder.clone(), config, nixl_agent.as_ref())?;
-            local_block_set.add_block_set(next_block_set_idx, layout.serialize()?);
-            Some(layout)
-        } else {
-            tracing::debug!("No host layout provided; will not allocate host blocks.");
-            None
-        };
-
-        // Create the device block pool if a device layout is provided
-        let device_layout = if let Some(config) = config.device_layout {
-            next_block_set_idx += 1;
-            tracing::debug!("Constructing device pool.");
-            let layout = create_layout(layout_builder.clone(), config, nixl_agent.as_ref())?;
-            local_block_set.add_block_set(next_block_set_idx, layout.serialize()?);
-            Some(layout)
-        } else {
-            tracing::debug!("No device layout provided; will not allocate device blocks.");
-            None
-        };
-
-        // Finalize the local block set by adding NIXL metadata
-        if let Some(nixl_agent) = nixl_agent.as_ref() {
-            tracing::debug!("Finalize NixlBlockSet: adding NIXL metadata.");
-            local_block_set.set_nixl_metadata(nixl_agent.get_local_md()?);
+            shape = Some(tensor.shape());
         }
 
-        Ok(Self {
-            worker_id,
-            cancellation_token,
-            nixl_agent: nixl_agent.unwrap(),
-            nixl_backends,
+        // Build the storage object from the tensor.
+        let device_tensor = DeviceStorage::new_from_torch(allocator.ctx(), tensor)?;
 
-            disk_layout: disk_layout
-                .map(|l| l as Arc<dyn BlockLayout<StorageType = disk::DiskStorage>>),
-            host_layout: host_layout
-                .map(|l| l as Arc<dyn BlockLayout<StorageType = storage::cuda::PinnedStorage>>),
-            device_layout: device_layout.expect("device layout is required")
-                as Arc<dyn BlockLayout<StorageType = storage::cuda::DeviceStorage>>,
-            am_receiver: None,
-            am_sender: None,
-        })
+        device_tensors.push(device_tensor);
     }
 
-    /// Initialize the active message system with the specified concurrency
-    pub fn init_active_message_system(&mut self, concurrency: usize) -> Result<()> {
-        let (receiver, sender) =
-            ActiveMessageFactory::create(concurrency, self.cancellation_token.clone())?;
+    Ok((device_tensors, shape.unwrap()))
+}
 
-        self.am_receiver = Some(receiver);
-        self.am_sender = Some(sender);
+pub struct KvbmWorker {
+    cancel_token: CancellationToken,
+    task: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
+}
+
+impl KvbmWorker {
+    fn register_layout<S: Storage, M: BlockMetadata>(
+        mut layout: Box<dyn NixlLayout<StorageType = S>>,
+        agent: &Option<NixlAgent>,
+        block_set_idx: usize,
+        worker_id: usize,
+    ) -> anyhow::Result<Vec<Block<S, M>>> {
+        // Register with NIXL, if applicable.
+        if let Some(agent) = agent {
+            layout.nixl_register(agent, None)?;
+        }
+
+        // Convert the layout into blocks.
+        let layout: Arc<dyn NixlLayout<StorageType = S>> = Arc::from(layout);
+        let blocks = layout_to_blocks::<_, M>(layout, block_set_idx, worker_id as u64)?;
+        Ok(blocks)
+    }
+
+    async fn worker_task(
+        device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage>>,
+        host_layout: Option<Box<dyn NixlLayout<StorageType = PinnedStorage>>>,
+        disk_layout: Option<Box<dyn NixlLayout<StorageType = DiskStorage>>>,
+        barrier_id: String,
+        worker_id: usize,
+        transfer_context: Arc<TransferContext>,
+        cancel_token: CancellationToken,
+    ) -> anyhow::Result<()> {
+        // Build our device, host, and disk block lists.
+        let device_blocks = Some(Self::register_layout::<_, BasicMetadata>(
+            device_layout,
+            transfer_context.nixl_agent().as_ref(),
+            0,
+            worker_id,
+        )?);
+        let host_blocks = host_layout
+            .map(|layout| {
+                Self::register_layout::<_, BasicMetadata>(
+                    layout,
+                    transfer_context.nixl_agent().as_ref(),
+                    1,
+                    worker_id,
+                )
+            })
+            .transpose()?;
+        let disk_blocks = disk_layout
+            .map(|layout| {
+                Self::register_layout::<_, BasicMetadata>(
+                    layout,
+                    transfer_context.nixl_agent().as_ref(),
+                    2,
+                    worker_id,
+                )
+            })
+            .transpose()?;
+
+        // Create the handler for our active message worker.
+        let block_transfer_handler = BlockTransferHandler::new(
+            device_blocks,
+            host_blocks,
+            disk_blocks,
+            transfer_context,
+            cancel_token.clone(),
+        )?;
+
+        let handlers = HashMap::from([(
+            ZMQ_TRANSFER_BLOCKS_MESSAGE.to_string(),
+            Arc::new(block_transfer_handler) as Arc<dyn Handler>,
+        )]);
+
+        let runtime = Runtime::from_current()?;
+        let drt = DistributedRuntime::from_settings(runtime).await?;
+
+        tracing::info!("Worker {} waiting on barrier {}", worker_id, barrier_id);
+
+        let worker_barrier =
+            WorkerBarrier::<KvbmLeaderData>::new(barrier_id, worker_id.to_string());
+
+        let leader_data = tokio::select! {
+            _ = cancel_token.cancelled() => {
+                return Ok(())
+            }
+            leader_data = worker_barrier.sync(&drt) => {
+                leader_data
+            }
+        }
+        .map_err(|e| anyhow::anyhow!("Failed to sync worker barrier: {:?}", e))?;
+
+        tracing::info!(
+            "Worker {} received leader data: {:?}",
+            worker_id,
+            leader_data
+        );
+
+        let _zmq_worker = ZmqActiveMessageWorker::new(
+            &leader_data.zmq_url,
+            leader_data.broadcast_port,
+            leader_data.ack_port,
+            handlers,
+            cancel_token,
+        )?;
+
+        // TODO: Some sort of fancy loop here.
+        std::future::pending::<()>().await;
+
         Ok(())
     }
+}
 
-    /// Register handlers with the active message receiver
-    pub fn register_handlers(
-        &mut self,
-        handlers: HashMap<String, ActiveMessageHandlerFactory>,
-    ) -> Result<()> {
-        if let Some(ref mut receiver) = self.am_receiver {
-            receiver.register_handlers(handlers)?;
-            Ok(())
-        } else {
-            anyhow::bail!(
-                "Active message system not initialized. Call init_active_message_system first."
-            );
-        }
-    }
+impl KvbmWorker {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        num_device_blocks: usize,
+        num_host_blocks: usize,
+        num_disk_blocks: usize,
+        page_size: usize,
+        tensors: Vec<Box<dyn TorchTensor>>,
+        device_id: usize,
+        worker_id: usize,
+        dtype: DType,
+        barrier_id: String,
+    ) -> anyhow::Result<Self> {
+        tracing::info!("Initializing KvbmWorker with params: num_device_blocks={}, num_host_blocks={}, num_disk_blocks={}, page_size={}, dtype={:?}", num_device_blocks, num_host_blocks, num_disk_blocks, page_size, dtype);
 
-    /// Register a single handler with the active message receiver
-    pub fn register_handler(
-        &mut self,
-        message_type: String,
-        handler: ActiveMessageHandlerFactory,
-    ) -> Result<()> {
-        if let Some(ref mut receiver) = self.am_receiver {
-            receiver.register_handler(message_type, handler)?;
-            Ok(())
-        } else {
-            anyhow::bail!("Active message system not initialized");
+        if num_device_blocks == 0 {
+            return Err(anyhow::anyhow!("num_device_blocks must be greater than 0"));
+        } else if num_disk_blocks > 0 && num_host_blocks == 0 {
+            return Err(anyhow::anyhow!(
+                "Host offloading is required for disk offloading to be enabled."
+            ));
         }
-    }
 
-    /// Start the active message receiver
-    pub fn start_active_message_receiver(&mut self) -> Result<()> {
-        if let Some(ref mut receiver) = self.am_receiver {
-            receiver.start()?;
-            info!(
-                "Active message receiver started for worker {}",
-                self.worker_id
-            );
-            Ok(())
-        } else {
-            anyhow::bail!("Active message system not initialized");
-        }
-    }
+        let (device_tensors, shape) = load_and_validate_tensors(tensors, device_id)?;
 
-    /// Stop the active message receiver
-    pub async fn stop_active_message_receiver(&mut self) -> Result<()> {
-        if let Some(ref mut receiver) = self.am_receiver {
-            receiver.stop().await?;
-            info!(
-                "Active message receiver stopped for worker {}",
-                self.worker_id
-            );
-            Ok(())
-        } else {
-            Ok(()) // Already stopped or never started
+        if shape.len() < 3 {
+            return Err(anyhow::anyhow!(format!(
+                "Unsupported kv cache layout. Got shape: {:?}",
+                shape
+            )));
         }
-    }
 
-    /// Get a sender for active messages
-    pub fn get_message_sender(&self) -> Result<ActiveMessageSender> {
-        if let Some(ref sender) = self.am_sender {
-            Ok(sender.clone())
+        let (outer_contiguous, outer_dim) = if shape[0] == num_device_blocks {
+            (false, shape[1])
+        } else if shape[1] == num_device_blocks {
+            (true, shape[0])
         } else {
-            anyhow::bail!("Active message system not initialized")
-        }
-    }
+            return Err(anyhow::anyhow!(format!(
+                "Unsupported kv cache layout. Got shape: {:?}",
+                shape
+            )));
+        };
 
-    /// Get a receiver for response notifications
-    pub fn get_response_receiver(&self) -> Result<SharedResponseReceiver> {
-        if let Some(ref receiver) = self.am_receiver {
-            Ok(receiver.get_response_receiver())
+        let inner_dim = shape[2..].iter().product::<usize>() / page_size;
+
+        tracing::info!(
+            "Inferred layout: num_layers={}, outer_dim={}, page_size={}, inner_dim={}",
+            device_tensors.len(),
+            outer_dim,
+            page_size,
+            inner_dim
+        );
+
+        let mut layout_builder_instance = LayoutConfigBuilder::default();
+        let layout_builder = layout_builder_instance
+            .num_layers(device_tensors.len())
+            .outer_dim(outer_dim)
+            .page_size(page_size)
+            .inner_dim(inner_dim)
+            .dtype(dtype);
+
+        let layout_type = LayoutType::LayerSeparate { outer_contiguous };
+
+        let device_layout = layout_builder
+            .num_blocks(num_device_blocks)
+            .build()?
+            .create_layout(layout_type, device_tensors, true)?;
+
+        let host_layout = if num_host_blocks > 0 {
+            let host_allocator = Arc::new(PinnedAllocator::default());
+            Some(
+                layout_builder
+                    .num_blocks(num_host_blocks)
+                    .build()?
+                    .allocate_layout(layout_type, host_allocator)?,
+            )
         } else {
-            anyhow::bail!("Active message system not initialized")
-        }
+            None
+        };
+
+        let disk_layout = if num_disk_blocks > 0 {
+            if num_host_blocks == 0 {
+                return Err(anyhow::anyhow!(
+                    "num_host_blocks must be greater than 0 if num_disk_blocks is greater than 0"
+                ));
+            }
+            let disk_allocator = Arc::new(DiskAllocator);
+            Some(
+                layout_builder
+                    .num_blocks(num_disk_blocks)
+                    .build()?
+                    .allocate_layout(layout_type, disk_allocator)?,
+            )
+        } else {
+            None
+        };
+
+        let cancel_token = CancellationToken::new();
+
+        let cancel_token_clone = cancel_token.clone();
+        let task = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+
+            let agent = NixlAgent::new(&format!("kvbm-worker-{}", worker_id)).unwrap();
+
+            let transfer_context = Arc::new(TransferContext::new(
+                Arc::new(Some(agent)),
+                DeviceAllocator::new(device_id)
+                    .unwrap()
+                    .ctx()
+                    .new_stream()
+                    .unwrap(),
+                runtime.handle().clone(),
+            ));
+
+            runtime.block_on(async move {
+                KvbmWorker::worker_task(
+                    device_layout,
+                    host_layout,
+                    disk_layout,
+                    barrier_id,
+                    worker_id,
+                    transfer_context,
+                    cancel_token_clone,
+                )
+                .await
+            })
+        });
+
+        Ok(Self {
+            cancel_token,
+            task: Some(task),
+        })
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    include!("worker_test.rs");
+impl Drop for KvbmWorker {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
+        if let Some(task) = self.task.take() {
+            task.join().unwrap().unwrap();
+        }
+    }
 }

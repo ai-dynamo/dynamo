@@ -18,6 +18,7 @@ use pyo3::PyResult;
 
 mod block;
 mod block_list;
+mod distributed;
 mod dlpack;
 mod layer;
 
@@ -29,10 +30,30 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<block::Block>()?;
     m.add_class::<block_list::BlockList>()?;
     m.add_class::<BlockManager>()?;
+    m.add_class::<distributed::KvbmWorker>()?;
+    m.add_class::<distributed::KvbmLeader>()?;
 
     vllm::add_to_module(m)?;
 
     Ok(())
+}
+
+pub fn map_dtype(dtype: &str) -> anyhow::Result<dynamo_llm::common::dtype::DType> {
+    Ok(match dtype {
+        "fp8" | "FP8" => dynamo_llm::common::dtype::DType::FP8,
+        "fp16" | "FP16" => dynamo_llm::common::dtype::DType::FP16,
+        "bf16" | "BF16" => dynamo_llm::common::dtype::DType::BF16,
+        "fp32" | "FP32" => dynamo_llm::common::dtype::DType::FP32,
+        "u8" | "U8" => dynamo_llm::common::dtype::DType::U8,
+        "u16" | "U16" => dynamo_llm::common::dtype::DType::U16,
+        "u32" | "U32" => dynamo_llm::common::dtype::DType::U32,
+        "u64" | "U64" => dynamo_llm::common::dtype::DType::U64,
+        "i8" | "I8" => dynamo_llm::common::dtype::DType::I8,
+        "i16" | "I16" => dynamo_llm::common::dtype::DType::I16,
+        "i32" | "I32" => dynamo_llm::common::dtype::DType::I32,
+        "i64" | "I64" => dynamo_llm::common::dtype::DType::I64,
+        _ => return Err(anyhow::anyhow!("Unsupported dtype: {}", dtype)),
+    })
 }
 
 #[pyclass]
@@ -73,26 +94,7 @@ impl BlockManager {
             .inner_dim(inner_dim);
         let mut dtype_ = dynamo_llm::common::dtype::DType::FP16; // Default in block_manager config
         if let Some(dtype_str) = dtype {
-            dtype_ = match dtype_str.as_str() {
-                "fp8" | "FP8" => dynamo_llm::common::dtype::DType::FP8,
-                "fp16" | "FP16" => dynamo_llm::common::dtype::DType::FP16,
-                "bf16" | "BF16" => dynamo_llm::common::dtype::DType::BF16,
-                "fp32" | "FP32" => dynamo_llm::common::dtype::DType::FP32,
-                "u8" | "U8" => dynamo_llm::common::dtype::DType::U8,
-                "u16" | "U16" => dynamo_llm::common::dtype::DType::U16,
-                "u32" | "U32" => dynamo_llm::common::dtype::DType::U32,
-                "u64" | "U64" => dynamo_llm::common::dtype::DType::U64,
-                "i8" | "I8" => dynamo_llm::common::dtype::DType::I8,
-                "i16" | "I16" => dynamo_llm::common::dtype::DType::I16,
-                "i32" | "I32" => dynamo_llm::common::dtype::DType::I32,
-                "i64" | "I64" => dynamo_llm::common::dtype::DType::I64,
-                _ => {
-                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
-                        "Unsupported dtype: {}",
-                        dtype_str
-                    )))
-                }
-            };
+            dtype_ = map_dtype(&dtype_str).map_err(to_pyerr)?;
         }
         model_config = model_config.dtype(dtype_);
         config = config.model(model_config.build().map_err(to_pyerr)?);
