@@ -20,7 +20,7 @@ use nixl_sys::{MemoryRegion, NixlDescriptor, XferDescList};
 use std::future::Future;
 
 fn append_xfer_request<Source, Destination>(
-    src: &Arc<Source>,
+    src: &Source,
     dst: &mut Destination,
     src_dl: &mut XferDescList,
     dst_dl: &mut XferDescList,
@@ -84,7 +84,7 @@ where
 
 /// Copy a block from a source to a destination using CUDA memcpy
 pub fn write_blocks_to<Source, Destination>(
-    src: &[Arc<Source>],
+    src: &[Source],
     dst: &mut [Destination],
     ctx: &Arc<TransferContext>,
     transfer_type: NixlTransfer,

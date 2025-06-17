@@ -300,6 +300,30 @@ impl<S: Storage, M: BlockMetadata> PrivateBlockExt for Block<S, M> {
     }
 }
 
+impl<S: Storage + NixlDescriptor, M: BlockMetadata> ReadableBlock for Block<S, M> {
+    type StorageType = S;
+}
+impl<S: Storage + NixlDescriptor, M: BlockMetadata> WritableBlock for Block<S, M> {
+    type StorageType = S;
+}
+impl<S: Storage + NixlDescriptor, M: BlockMetadata> Readable for Block<S, M> {}
+impl<S: Storage + NixlDescriptor, M: BlockMetadata> Writable for Block<S, M> {}
+impl<S: Storage + NixlDescriptor, M: BlockMetadata> Local for Block<S, M> {}
+
+impl<S: Storage + NixlDescriptor, M: BlockMetadata> BlockDataProvider for Block<S, M> {
+    type StorageType = S;
+
+    fn block_data(&self, _: private::PrivateToken) -> &BlockData<S> {
+        &self.data
+    }
+}
+
+impl<S: Storage + NixlDescriptor, M: BlockMetadata> BlockDataProviderMut for Block<S, M> {
+    fn block_data_mut(&mut self, _: private::PrivateToken) -> &mut BlockData<S> {
+        &mut self.data
+    }
+}
+
 pub trait BlockExt {
     /// Reset the state of the block
     fn reset(&mut self);

@@ -47,8 +47,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::block_manager::block::{
     transfer::{WriteTo, WriteToStrategy},
-    BlockError, BlockExt, BlockMetadata, BlockState, MutableBlock, ReadableBlock, TransferContext,
-    WritableBlock,
+    BlockError, BlockExt, BlockMetadata, BlockState, ImmutableBlock, MutableBlock, ReadableBlock,
+    TransferContext, WritableBlock,
 };
 use crate::block_manager::pool::BlockPoolError;
 use crate::block_manager::storage::{Local, Storage};
@@ -65,7 +65,7 @@ use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 /// Manage a set of pending transfers.
 pub struct PendingTransfer<Source: Storage, Target: Storage, Metadata: BlockMetadata> {
     /// The block being copied from.
-    sources: Vec<Arc<MutableBlock<Source, Metadata>>>,
+    sources: Vec<ImmutableBlock<Source, Metadata>>,
     /// The block being copied to.
     targets: Vec<MutableBlock<Target, Metadata>>,
     /// The oneshot sender that optionally returns the registered blocks once the transfer is complete.
@@ -78,7 +78,7 @@ impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
     PendingTransfer<Source, Target, Metadata>
 {
     pub fn new(
-        sources: Vec<Arc<MutableBlock<Source, Metadata>>>,
+        sources: Vec<ImmutableBlock<Source, Metadata>>,
         targets: Vec<MutableBlock<Target, Metadata>>,
         completion_indicator: Option<oneshot::Sender<BlockResult<Target, Metadata>>>,
         target_pool: Arc<BlockPool<Target, Metadata>>,
@@ -118,7 +118,7 @@ impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
 }
 
 fn transfer_metadata<Source: Storage, Target: Storage, Metadata: BlockMetadata>(
-    source: &Arc<MutableBlock<Source, Metadata>>,
+    source: &ImmutableBlock<Source, Metadata>,
     target: &mut MutableBlock<Target, Metadata>,
 ) -> Result<()> {
     // Only registered blocks can be transferred. There are upstream checks for this, so this shouldn't ever fail.
@@ -216,7 +216,7 @@ where
     Target: Storage,
     Metadata: BlockMetadata,
     // Check that the source block is readable, local, and writable to the target block.
-    MutableBlock<Source, Metadata>: ReadableBlock<StorageType = Source>
+    ImmutableBlock<Source, Metadata>: ReadableBlock<StorageType = Source>
         + Local
         + WriteToStrategy<MutableBlock<Target, Metadata>>,
     // Check that the target block is writable.
@@ -310,7 +310,7 @@ where
     Target: Storage,
     Metadata: BlockMetadata,
     // Check that the source block is readable, local, and writable to the target block.
-    MutableBlock<Source, Metadata>: ReadableBlock<StorageType = Source>
+    ImmutableBlock<Source, Metadata>: ReadableBlock<StorageType = Source>
         + Local
         + WriteToStrategy<MutableBlock<Target, Metadata>>,
     // Check that the target block is writable.

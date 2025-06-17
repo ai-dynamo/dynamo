@@ -11,21 +11,64 @@ use BlockTransferPool::*;
 use crate::block_manager::{
     block::{
         transfer::{TransferContext, WriteTo, WriteToStrategy},
-        Block, BlockIdentifier, MutableBlock, ReadableBlock, WritableBlock,
+        Block, BlockIdentifier, ReadableBlock, WritableBlock,
     },
     storage::{DeviceStorage, DiskStorage, Local, PinnedStorage},
     BasicMetadata, BlockMetadata, Storage,
 };
 
-use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
-
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tokio_util::sync::CancellationToken;
 
 type BlockList<S, M> = Vec<Option<Block<S, M>>>;
+
+/// A list of blocks that are being transferred.
+/// Ensures that blocks are returned to the pool after their transfer is complete.
+struct TransferList<S: Storage, M: BlockMetadata> {
+    blocks: Arc<Mutex<BlockList<S, M>>>,
+    list: Option<Vec<Block<S, M>>>,
+}
+
+impl<S: Storage, M: BlockMetadata> TransferList<S, M> {
+    fn new(blocks: Arc<Mutex<BlockList<S, M>>>, list: Vec<Block<S, M>>) -> Self {
+        Self {
+            blocks,
+            list: Some(list),
+        }
+    }
+
+    fn get(&self) -> &Vec<Block<S, M>> {
+        self.list.as_ref().unwrap()
+    }
+
+    fn get_mut(&mut self) -> &mut Vec<Block<S, M>> {
+        self.list.as_mut().unwrap()
+    }
+
+    async fn return_blocks(mut self) -> Result<()> {
+        let list = self.list.take().unwrap();
+        let mut blocks_handle = self.blocks.lock().await;
+        for block in list {
+            let id = block.block_id();
+            if blocks_handle[id].is_some() {
+                return Err(anyhow::anyhow!("Block already returned"));
+            }
+            blocks_handle[id] = Some(block);
+        }
+
+        Ok(())
+    }
+}
+
+impl<S: Storage, M: BlockMetadata> Drop for TransferList<S, M> {
+    fn drop(&mut self) {
+        if self.list.is_some() {
+            panic!("TransferList not returned!");
+        }
+    }
+}
 
 /// A manager for a pool of blocks.
 /// This performs two functions:
@@ -34,68 +77,27 @@ type BlockList<S, M> = Vec<Option<Block<S, M>>>;
 // TODO: This seems like a bit of an ugly workaround. Surely there's a better way to do this.
 struct BlockTransferPoolManager<S: Storage, M: BlockMetadata> {
     blocks: Arc<Mutex<BlockList<S, M>>>,
-    return_sender: tokio::sync::mpsc::UnboundedSender<Block<S, M>>,
 }
 
 impl<S: Storage, M: BlockMetadata> BlockTransferPoolManager<S, M> {
-    fn new(blocks: Vec<Block<S, M>>, cancel_token: CancellationToken) -> Result<Self> {
-        // Create our return channel.
-        let (return_tx, return_rx) = tokio::sync::mpsc::unbounded_channel();
-
+    fn new(blocks: Vec<Block<S, M>>) -> Result<Self> {
         let blocks = blocks.into_iter().map(Some).collect();
         let blocks = Arc::new(Mutex::new(blocks));
 
-        // Kick off the task that returns blocks to the pool.
-        let blocks_clone = blocks.clone();
-        CriticalTaskExecutionHandle::new(
-            |cancel_token| Self::return_worker(blocks_clone, return_rx, cancel_token),
-            cancel_token,
-            "Block transfer pool manager return worker",
-        )?
-        .detach();
-
-        Ok(Self {
-            blocks,
-            return_sender: return_tx,
-        })
-    }
-
-    /// A task that returns blocks to the pool.
-    async fn return_worker(
-        blocks: Arc<Mutex<BlockList<S, M>>>,
-        mut receiver: tokio::sync::mpsc::UnboundedReceiver<Block<S, M>>,
-        cancel_token: CancellationToken,
-    ) -> Result<()> {
-        loop {
-            tokio::select! {
-                Some(block) = receiver.recv() => {
-                    let mut blocks_handle = blocks.lock().await;
-                    let id = block.block_id();
-                    blocks_handle[id] = Some(block);
-                }
-                _ = cancel_token.cancelled() => {
-                    break;
-                }
-            }
-        }
-
-        Ok(())
+        Ok(Self { blocks })
     }
 
     /// Get a set of blocks from the pool.
-    async fn get_blocks(&self, block_idxs: impl Iterator<Item = usize>) -> Vec<MutableBlock<S, M>> {
+    async fn get_blocks(&self, block_idxs: impl Iterator<Item = usize>) -> TransferList<S, M> {
         let mut blocks_handle = self.blocks.lock().await;
 
-        let mut blocks = Vec::new();
+        let mut list = Vec::new();
         for idx in block_idxs {
             // This shouldn't ever fail. If it does, it indicates a logic error on the leader.
             // TODO: This seems a bit fragile.
-            blocks.push(MutableBlock::new(
-                blocks_handle[idx].take().unwrap(),
-                self.return_sender.clone(),
-            ));
+            list.push(blocks_handle[idx].take().unwrap());
         }
-        blocks
+        TransferList::new(self.blocks.clone(), list)
     }
 }
 
@@ -113,15 +115,11 @@ impl BlockTransferHandler {
         host_blocks: Option<Vec<Block<PinnedStorage, BasicMetadata>>>,
         disk_blocks: Option<Vec<Block<DiskStorage, BasicMetadata>>>,
         context: Arc<TransferContext>,
-        cancel_token: CancellationToken,
     ) -> Result<Self> {
         Ok(Self {
-            device: device_blocks
-                .map(|blocks| BlockTransferPoolManager::new(blocks, cancel_token.clone()).unwrap()),
-            host: host_blocks
-                .map(|blocks| BlockTransferPoolManager::new(blocks, cancel_token.clone()).unwrap()),
-            disk: disk_blocks
-                .map(|blocks| BlockTransferPoolManager::new(blocks, cancel_token.clone()).unwrap()),
+            device: device_blocks.map(|blocks| BlockTransferPoolManager::new(blocks).unwrap()),
+            host: host_blocks.map(|blocks| BlockTransferPoolManager::new(blocks).unwrap()),
+            disk: disk_blocks.map(|blocks| BlockTransferPoolManager::new(blocks).unwrap()),
             context,
         })
     }
@@ -132,17 +130,16 @@ impl BlockTransferHandler {
         source_pool_manager: &Option<BlockTransferPoolManager<Source, Metadata>>,
         target_pool_manager: &Option<BlockTransferPoolManager<Target, Metadata>>,
         request: BlockTransferRequest,
-    ) -> anyhow::Result<tokio::sync::oneshot::Receiver<()>>
+    ) -> Result<tokio::sync::oneshot::Receiver<()>>
     where
         Source: Storage,
         Target: Storage,
         Metadata: BlockMetadata,
         // Check that the source block is readable, local, and writable to the target block.
-        MutableBlock<Source, Metadata>: ReadableBlock<StorageType = Source>
-            + Local
-            + WriteToStrategy<MutableBlock<Target, Metadata>>,
+        Block<Source, Metadata>:
+            ReadableBlock<StorageType = Source> + Local + WriteToStrategy<Block<Target, Metadata>>,
         // Check that the target block is writable.
-        MutableBlock<Target, Metadata>: WritableBlock<StorageType = Target>,
+        Block<Target, Metadata>: WritableBlock<StorageType = Target>,
     {
         let Some(source_pool_manager) = source_pool_manager else {
             return Err(anyhow::anyhow!("Source pool manager not initialized"));
@@ -159,23 +156,31 @@ impl BlockTransferHandler {
         let sources = source_pool_manager.get_blocks(source_idxs).await;
         let mut targets = target_pool_manager.get_blocks(target_idxs).await;
 
-        // For now, write_to is only implemented for Vec<Arc<ReadableBlock>>.
-        // Because of this, we need to wrap our source blocks in Arcs.
-        // TODO: This shouldn't be necessary.
-        let sources = sources.into_iter().map(Arc::new).collect::<Vec<_>>();
-
         // Perform the transfer, and return the notifying channel.
-        let channel = sources
-            .write_to(&mut targets, true, self.context.clone())?
-            .unwrap();
+        let channel = match sources
+            .get()
+            .write_to(targets.get_mut(), true, self.context.clone())
+        {
+            Ok(Some(channel)) => Ok(channel),
+            Err(e) => {
+                tracing::error!("Failed to write to blocks: {:?}", e);
+                Err(e.into())
+            }
+            Ok(None) => {
+                panic!("Failed to write blocks. No channel returned. This should never happen.")
+            }
+        };
 
-        Ok(channel)
+        sources.return_blocks().await?;
+        targets.return_blocks().await?;
+
+        channel
     }
 }
 
 #[async_trait]
 impl Handler for BlockTransferHandler {
-    async fn handle(&self, mut message: MessageHandle) -> anyhow::Result<()> {
+    async fn handle(&self, mut message: MessageHandle) -> Result<()> {
         if message.data.len() != 1 {
             return Err(anyhow::anyhow!(
                 "Block transfer request must have exactly one data element"

@@ -133,13 +133,8 @@ impl KvbmWorker {
             .transpose()?;
 
         // Create the handler for our active message worker.
-        let block_transfer_handler = BlockTransferHandler::new(
-            device_blocks,
-            host_blocks,
-            disk_blocks,
-            transfer_context,
-            cancel_token.clone(),
-        )?;
+        let block_transfer_handler =
+            BlockTransferHandler::new(device_blocks, host_blocks, disk_blocks, transfer_context)?;
 
         let handlers = HashMap::from([(
             ZMQ_TRANSFER_BLOCKS_MESSAGE.to_string(),

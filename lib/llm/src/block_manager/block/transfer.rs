@@ -155,7 +155,7 @@ pub trait WriteTo<Target> {
     ) -> Result<Option<oneshot::Receiver<()>>, TransferError>;
 }
 
-impl<RB: ReadableBlock, WB: WritableBlock> WriteTo<WB> for Vec<Arc<RB>>
+impl<RB: ReadableBlock, WB: WritableBlock> WriteTo<WB> for Vec<RB>
 where
     RB: WriteToStrategy<WB> + Local,
 {
@@ -172,7 +172,7 @@ where
                 for (src, dst) in self.iter().zip(dst.iter_mut()) {
                     // TODO: Unlike all other transfer strategies, this is fully blocking.
                     // We probably want some sort of thread pool to handle these.
-                    memcpy::copy_block(src.as_ref(), dst)?;
+                    memcpy::copy_block(src, dst)?;
                 }
 
                 if notify {
@@ -186,12 +186,7 @@ where
             | TransferStrategy::CudaAsyncD2H
             | TransferStrategy::CudaAsyncD2D => {
                 for (src, dst) in self.iter().zip(dst.iter_mut()) {
-                    cuda::copy_block(
-                        src.as_ref(),
-                        dst,
-                        ctx.stream().as_ref(),
-                        RB::write_to_strategy(),
-                    )?;
+                    cuda::copy_block(src, dst, ctx.stream().as_ref(), RB::write_to_strategy())?;
                 }
 
                 if notify {
