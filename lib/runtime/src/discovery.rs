@@ -13,13 +13,122 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! Service discovery and coordination primitives for distributed component management.
+//!
+//! This module provides the bridge between Dynamo's entity layer and the underlying etcd
+//! transport, enabling entities to perform distributed coordination operations through
+//! a standardized interface.
+//!
+//! # Architecture Overview
+//!
+//! The discovery system consists of two primary components:
+//!
+//! - [`Storage`]: A scoped handle for etcd operations on a specific key
+//! - [`DiscoveryClient`]: A trait that entities implement to access their storage
+//!
+//! Together, these components enable entities to:
+//! - Register themselves in the distributed system
+//! - Discover other components and services
+//! - Coordinate through atomic operations and leases
+//! - Watch for changes in the system state
+//!
+//! # Key Design Principles
+//!
+//! 1. **Scoped Operations**: Each `Storage` instance is scoped to a specific etcd key
+//! 2. **Lifetime Management**: Storage borrows the etcd client, ensuring safe access
+//! 3. **Consistent Interface**: All entities use the same discovery patterns
+//! 4. **Atomic Primitives**: Support for atomic creates, compare-and-swap operations
+//!
+//! # Storage Operations
+//!
+//! The `Storage` type provides comprehensive etcd operations:
+//!
+//! ```ignore
+//! // Get storage for an entity
+//! let storage = entity.storage()?;
+//!
+//! // Atomic operations
+//! storage.create(data, lease_id).await?;           // Fails if exists
+//! storage.create_or_validate(data, lease_id).await?; // Validates if exists
+//!
+//! // Standard CRUD
+//! storage.put(data, lease_id).await?;              // Create or update
+//! let values = storage.get().await?;               // Retrieve by key
+//! let all = storage.get_prefix().await?;           // Get all with prefix
+//! storage.delete(None).await?;                     // Delete
+//!
+//! // Lease management
+//! let lease = storage.create_lease(ttl).await?;    // Create time-bound lease
+//! storage.revoke_lease(lease.id()).await?;         // Revoke early
+//!
+//! // Watch for changes
+//! let watcher = storage.watch_prefix().await?;     // Watch prefix for updates
+//! ```
+//!
+//! # Integration with Entities
+//!
+//! All entities (Namespace, Component, Endpoint, Path) implement `DiscoveryClient`:
+//!
+//! ```ignore
+//! use dynamo::runtime::discovery::DiscoveryClient;
+//!
+//! // Any entity can use discovery operations
+//! let component = drt.component("prod", "api")?;
+//! let storage = component.storage()?;
+//!
+//! // Register component with lease
+//! let lease = storage.create_lease(30).await?;
+//! storage.create(b"component_data".to_vec(), Some(lease.id())).await?;
+//!
+//! // Discover other components
+//! let namespace = drt.namespace("prod")?;
+//! let ns_storage = namespace.storage()?;
+//! let components = ns_storage.get_prefix().await?;
+//! ```
+//!
+//! # Leases and Ephemeral Data
+//!
+//! Leases enable automatic cleanup of data when components disconnect:
+//!
+//! ```ignore
+//! // Create ephemeral endpoint registration
+//! let endpoint = drt.endpoint("prod", "api", "grpc")?;
+//! let storage = endpoint.storage()?;
+//!
+//! // Data will be automatically removed if lease expires
+//! let lease = storage.create_lease(60).await?; // 60 second TTL
+//! storage.put(endpoint_metadata, Some(lease.id())).await?;
+//!
+//! // Lease is automatically kept alive with heartbeats until dropped
+//! ```
+//!
+//! # Error Handling
+//!
+//! The `storage()` method returns `Result<Storage>` to handle cases where:
+//! - etcd client is not available (e.g., running without discovery)
+//! - Network connectivity issues
+//! - Configuration problems
+//!
+//! ```ignore
+//! match entity.storage() {
+//!     Ok(storage) => {
+//!         // Perform discovery operations
+//!         storage.put(data, None).await?;
+//!     }
+//!     Err(_) => {
+//!         // Handle offline mode or fallback behavior
+//!         eprintln!("Discovery unavailable, running in standalone mode");
+//!     }
+//! }
+//! ```
+
 use crate::{transports::etcd, Result, DistributedRuntime};
 
 pub use etcd::{Lease, PrefixWatcher};
 pub use etcd_client::{GetResponse, GetOptions, PutOptions, DeleteOptions, KeyValue};
 
 /// Storage handle that provides etcd operations scoped to a specific key
-/// We are borrowing from distributed runtime, hence the lifetime parameter
+/// We are borrowing client from distributed runtime, hence the lifetime parameter
 pub struct Storage<'a> {
     client: &'a etcd::Client,
     key: String,

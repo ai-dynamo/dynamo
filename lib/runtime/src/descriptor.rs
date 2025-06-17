@@ -1,22 +1,78 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Descriptors for pure data representation of components without runtime dependencies
+//! Pure data descriptors for component identification without runtime dependencies.
 //!
-//! All descriptor types implement Display to produce canonical string representations
-//! in the `dynamo://` path format. Use `.to_string()` to get the canonical path string.
+//! This module implements the descriptor layer of Dynamo's two-tier architecture for
+//! distributed component management. Descriptors are immutable data structures that
+//! represent component paths and identities in the canonical `dynamo://` format.
 //!
-//! The Keys descriptor always inserts `_path_` before additional segments.
-//! User-provided segments cannot start with underscore (reserved for internal use).
+//! # Architecture Overview
+//!
+//! The descriptor system provides three core types that build on each other:
+//!
+//! - [`Identifier`]: Basic identification for namespaces, components, and endpoints
+//! - [`Instance`]: An endpoint identifier extended with an instance ID (lease ID)
+//! - [`Keys`]: Extended paths with additional segments for arbitrary data storage
+//!
+//! All descriptors:
+//! - Own the canonical `dynamo://` path format
+//! - Provide validation and parsing
+//! - Are immutable once created
+//! - Have no runtime dependencies
+//!
+//! # Path Format
+//!
+//! Dynamo paths follow a hierarchical structure with reserved keywords:
+//!
+//! ```text
+//! dynamo://namespace[/_component_/name][/_endpoint_/name[:instance_id]][/_path_/segments...]
+//! ```
+//!
+//! Reserved keywords:
+//! - `_component_`: Marks the component section
+//! - `_endpoint_`: Marks the endpoint section
+//! - `_path_`: Marks extended path segments
+//! - `_static_`: Marks static endpoints (single instance)
+//!
+//! # Usage Examples
 //!
 //! ```ignore
-//! // Always inserts _path_
-//! let keys = Keys::from_identifier(id, vec!["config".to_string(), "v1".to_string()])?;
-//! assert_eq!(keys.to_string(), "dynamo://ns/_component_/comp/_path_/config/v1");
+//! use dynamo::runtime::descriptor::{Identifier, Instance, Keys};
 //!
-//! // Segments starting with underscore are rejected
-//! let err = Keys::from_identifier(id, vec!["_invalid".to_string()]); // Error!
+//! // Create basic identifiers
+//! let ns = Identifier::new_namespace("production.api")?;
+//! let comp = Identifier::new_component("production", "gateway")?;
+//! let ep = Identifier::new_endpoint("production", "gateway", "http")?;
+//!
+//! // Create instance with ID
+//! let instance = Instance::new(ep.clone(), 0x1234)?;
+//! assert_eq!(instance.to_string(), "dynamo://production/_component_/gateway/_endpoint_/http:1234");
+//!
+//! // Create extended paths with Keys
+//! let keys = Keys::from_identifier(comp, vec!["v1".to_string(), "config".to_string()])?;
+//! assert_eq!(keys.to_string(), "dynamo://production/_component_/gateway/_path_/v1/config");
 //! ```
+//!
+//! # Lenient Parsing
+//!
+//! Descriptors support lenient parsing when converting from strings:
+//!
+//! ```ignore
+//! let path = "dynamo://ns/_component_/comp/_endpoint_/ep:1234/_path_/extra/data";
+//!
+//! // Parse as simpler type drops extra information
+//! let id: Identifier = path.try_into()?;  // Drops :1234 and /extra/data
+//! let inst: Instance = path.try_into()?;  // Drops /extra/data
+//! let keys: Keys = path.try_into()?;      // Preserves everything
+//! ```
+//!
+//! # Validation Rules
+//!
+//! - Names can only contain lowercase letters, numbers, hyphens, and underscores
+//! - User-provided names cannot start with underscore (reserved for keywords)
+//! - Namespaces support dot notation for hierarchical organization
+//! - Instance IDs are represented as lowercase hexadecimal
 
 use once_cell::sync::Lazy;
 use std::str::FromStr;

@@ -1,8 +1,90 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-//! Entities for distributed runtime operations on descriptors
-//! WIP
+//! Operational entities that provide distributed runtime capabilities for descriptors.
+//!
+//! This module implements the entity layer of Dynamo's two-tier architecture for
+//! distributed component management. Entities wrap descriptors with a `DistributedRuntime`
+//! handle to enable actual etcd operations and distributed coordination.
+//!
+//! # Architecture Overview
+//!
+//! The entity system mirrors the descriptor hierarchy with operational types:
+//!
+//! - [`Namespace`]: Operational namespace with discovery and hierarchical navigation
+//! - [`Component`]: Operational component that can host endpoints and store data
+//! - [`Endpoint`]: Operational endpoint with automatic instance ID management
+//! - [`Path`]: Operational extended path for arbitrary data storage
+//!
+//! All entities:
+//! - Embed a `DistributedRuntime` for etcd operations
+//! - Implement `DiscoveryClient` for standardized storage access
+//! - Provide navigation methods for traversing the hierarchy
+//! - Can be created from descriptors via the `ToEntity` trait
+//!
+//! # Key Design Principles
+//!
+//! 1. **Separation of Concerns**: Descriptors handle data representation, entities handle operations
+//! 2. **Immutable Descriptors**: Entities wrap immutable descriptors, never modify them
+//! 3. **Factory Pattern**: Descriptors convert to entities via `ToEntity::to_entity()`
+//! 4. **Navigation**: Entities provide methods to traverse the component hierarchy
+//!
+//! # Usage Examples
+//!
+//! ```ignore
+//! use dynamo::runtime::{DistributedRuntime, EntityChain};
+//! use dynamo::runtime::descriptor::Identifier;
+//! use dynamo::runtime::entity::{ToEntity, DiscoveryClient};
+//!
+//! // Create entities using the fluent API
+//! let ns = drt.namespace("production")?;
+//! let comp = ns.component("gateway")?;
+//! let ep = comp.endpoint("http")?;
+//! let path = ep.path(&["v1", "config"])?;
+//!
+//! // Convert descriptors to entities
+//! let id = Identifier::new_component("prod", "api")?;
+//! let entity = id.to_entity(drt.clone())?;
+//!
+//! // Use DiscoveryClient for etcd operations
+//! let storage = comp.storage()?;
+//! storage.put(b"config_data".to_vec(), None).await?;
+//! let values = storage.get().await?;
+//! ```
+//!
+//! # Navigation and Chaining
+//!
+//! Entities support fluent navigation through the component hierarchy:
+//!
+//! ```ignore
+//! // Start from runtime and chain down
+//! let endpoint = drt.namespace("prod")?
+//!     .component("api")?
+//!     .endpoint("grpc")?;
+//!
+//! // Navigate from endpoint to extended paths
+//! let metrics = endpoint.path(&["metrics", "cpu"])?;
+//!
+//! // Navigate up with parent() methods
+//! let parent_path = metrics.parent()?;  // Returns Path for "metrics"
+//! let parent_ns = ns.parent()?;         // Returns parent namespace
+//! ```
+//!
+//! # Integration with DiscoveryClient
+//!
+//! All entities implement `DiscoveryClient`, providing standardized etcd operations:
+//!
+//! ```ignore
+//! // Every entity can access its storage
+//! let storage = entity.storage()?;
+//!
+//! // Perform etcd operations scoped to the entity's path
+//! storage.create(data, lease_id).await?;  // Atomic create
+//! storage.put(data, lease_id).await?;     // Create or update
+//! storage.get().await?;                    // Retrieve
+//! storage.delete(None).await?;            // Delete
+//! storage.watch_prefix().await?;          // Watch for changes
+//! ```
 
 use crate::{
     descriptor::{
