@@ -19,12 +19,12 @@
 //! to provide streaming token generation with realistic timing simulation.
 
 use crate::kv_router::publisher::WorkerMetricsPublisher;
-use dynamo_runtime::protocols::annotated::Annotated;
 use crate::mocker::protocols::DirectRequest;
 use crate::mocker::protocols::{MockEngineArgs, OutputSignal};
 use crate::mocker::scheduler::Scheduler;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use crate::protocols::TokenIdType;
+use dynamo_runtime::protocols::annotated::Annotated;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
@@ -37,6 +37,7 @@ use dynamo_runtime::{
 
 use crate::kv_router::protocols::{KvCacheEvent, KvCacheEventData};
 use crate::kv_router::publisher::KvEventPublisher;
+use futures::StreamExt;
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -44,7 +45,6 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::{interval, Duration};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
-use futures::StreamExt;
 
 /// Generate a random token ID from 0 to 5k
 fn generate_random_token() -> TokenIdType {
@@ -456,7 +456,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 }
 
 /// Create a mocker engine as ExecutionContext
-pub async fn make_mocker_engine(args: MockEngineArgs) -> Result<crate::backend::ExecutionContext, Error> {
+pub async fn make_mocker_engine(
+    args: MockEngineArgs,
+) -> Result<crate::backend::ExecutionContext, Error> {
     let engine = MockVllmEngine::new(args, None, None).await?;
     let annotated = AnnotatedMockEngine::new(Arc::new(engine));
     Ok(Arc::new(annotated))
