@@ -19,16 +19,23 @@ import math
 import os
 import subprocess
 
-import matplotlib.pyplot as plt
 import numpy as np
 import yaml
-from matplotlib import cm
-from scipy.interpolate import griddata
+from utils.config import CONFIG_MODIFIERS
 from utils.defaults import DECODE_NUM_REQUESTS_RANGE
 from utils.genai_perf import benchmark_decode, benchmark_prefill
-from utils.utils import get_available_gpu_count, get_dynamo_serve_cmd, shutdown_deployment, wait_for_server_ready
-from utils.config import CONFIG_MODIFIERS
-from utils.plot import plot_prefill_performance, plot_decode_performance, plot_prefill_interpolation, plot_decode_3d_surface
+from utils.plot import (
+    plot_decode_3d_surface,
+    plot_decode_performance,
+    plot_prefill_interpolation,
+    plot_prefill_performance,
+)
+from utils.utils import (
+    get_available_gpu_count,
+    get_dynamo_serve_cmd,
+    shutdown_deployment,
+    wait_for_server_ready,
+)
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -176,7 +183,13 @@ if __name__ == "__main__":
 
     # Plot the results as a 2D scatter plot
     if prefill_tp_size and prefill_ttft and prefill_thpt_per_gpu:
-        plot_prefill_performance(prefill_tp_size, prefill_ttft, prefill_thpt_per_gpu, args.ttft, args.output_dir)
+        plot_prefill_performance(
+            prefill_tp_size,
+            prefill_ttft,
+            prefill_thpt_per_gpu,
+            args.ttft,
+            args.output_dir,
+        )
 
     # then profile decode
     decode_tp_size = []
@@ -387,7 +400,9 @@ if __name__ == "__main__":
         )
 
         # Call the plotting function
-        plot_prefill_interpolation(prefill_isl_np, prefill_ttft_np, prefill_thpt_per_gpu_np, work_dir)
+        plot_prefill_interpolation(
+            prefill_isl_np, prefill_ttft_np, prefill_thpt_per_gpu_np, work_dir
+        )
     else:
         logger.warning(
             "Not enough data points to perform interpolation (need at least 3 points)"
@@ -474,4 +489,6 @@ if __name__ == "__main__":
         logger.info(f"Saved data points to {save_path}")
 
         # Plot 3D surface
-        plot_decode_3d_surface(x_kv_usage, y_context_length, z_itl, best_decode_tp, work_dir)
+        plot_decode_3d_surface(
+            x_kv_usage, y_context_length, z_itl, best_decode_tp, work_dir
+        )

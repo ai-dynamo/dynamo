@@ -13,13 +13,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+
 import matplotlib.pyplot as plt
 import numpy as np
-import logging
 from matplotlib import cm
 from scipy.interpolate import griddata
-
-import logging
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -32,10 +31,12 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-def plot_prefill_performance(prefill_tp_size, prefill_ttft, prefill_thpt_per_gpu, target_ttft, output_dir):
+def plot_prefill_performance(
+    prefill_tp_size, prefill_ttft, prefill_thpt_per_gpu, target_ttft, output_dir
+):
     """
     Plot prefill performance as a 2D scatter plot with TP size annotations.
-    
+
     Args:
         prefill_tp_size: list of TP sizes
         prefill_ttft: list of time to first token values
@@ -73,14 +74,14 @@ def plot_prefill_performance(prefill_tp_size, prefill_ttft, prefill_thpt_per_gpu
 def plot_decode_performance(decode_results, target_itl, output_dir):
     """
     Plot decode performance with multiple TP size lines.
-    
+
     Args:
         decode_results: list of tuples (tp_size, itl_list, thpt_per_gpu_list)
         target_itl: target ITL value for the vertical line
         output_dir: directory to save the plot
     """
     plt.figure(figsize=(10, 6))
-    
+
     for tp_size, itl_list, thpt_per_gpu_list in decode_results:
         plt.plot(itl_list, thpt_per_gpu_list, label=f"TP{tp_size}")
 
@@ -99,10 +100,12 @@ def plot_decode_performance(decode_results, target_itl, output_dir):
     plt.close()
 
 
-def plot_prefill_interpolation(prefill_isl_np, prefill_ttft_np, prefill_thpt_per_gpu_np, work_dir):
+def plot_prefill_interpolation(
+    prefill_isl_np, prefill_ttft_np, prefill_thpt_per_gpu_np, work_dir
+):
     """
     Plot TTFT and throughput vs ISL with quadratic interpolation.
-    
+
     Args:
         prefill_isl_np: numpy array of input sequence lengths
         prefill_ttft_np: numpy array of time to first token values
@@ -145,9 +148,7 @@ def plot_prefill_interpolation(prefill_isl_np, prefill_ttft_np, prefill_thpt_per
 
     # Plot Throughput vs ISL
     plt.figure(figsize=(10, 6))
-    plt.scatter(
-        prefill_isl_np, prefill_thpt_per_gpu_np, s=100, label="Measured data"
-    )
+    plt.scatter(prefill_isl_np, prefill_thpt_per_gpu_np, s=100, label="Measured data")
     plt.plot(
         x_interp,
         thpt_interp,
@@ -172,7 +173,7 @@ def plot_prefill_interpolation(prefill_isl_np, prefill_ttft_np, prefill_thpt_per
 def plot_decode_3d_surface(x_kv_usage, y_context_length, z_itl, tp_size, work_dir):
     """
     Plot 3D surface for decode interpolation with KV usage, context length, and ITL.
-    
+
     Args:
         x_kv_usage: list of KV usage percentages
         y_context_length: list of context lengths

@@ -15,10 +15,11 @@
 
 import logging
 import os
-import pynvml
-import time
 import signal
 import subprocess
+import time
+
+import pynvml
 import requests
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,7 @@ formatter = logging.Formatter(
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
+
 def get_dynamo_serve_cmd(config_file_path):
     config_file_path = os.path.abspath(config_file_path)
     return [
@@ -41,9 +43,9 @@ def get_dynamo_serve_cmd(config_file_path):
         config_file_path,
     ]
 
+
 def get_available_gpu_count():
     try:
-
         pynvml.nvmlInit()
         gpu_count = pynvml.nvmlDeviceGetCount()
 
@@ -74,7 +76,7 @@ def get_available_gpu_count():
     except Exception as e:
         logger.error(f"Error detecting GPUs: {e}")
         return 0
-    
+
 
 def shutdown_deployment(dynamo_process):
     os.killpg(os.getpgid(dynamo_process.pid), signal.SIGINT)
@@ -97,6 +99,7 @@ def shutdown_deployment(dynamo_process):
     except Exception as e:
         logger.error(f"Error killing Python processes: {e}")
     time.sleep(5)
+
 
 def wait_for_server_ready(model_name: str, port: int, timeout: int = 300):
     logger.info("Waiting for the server to be ready...")

@@ -13,9 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import Literal
-
 import logging
+from typing import Literal
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -27,8 +26,8 @@ formatter = logging.Formatter(
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-class VllmV0ConfigModifier:
 
+class VllmV0ConfigModifier:
     @classmethod
     def convert_config(cls, config: dict, target: Literal["prefill", "decode"]) -> dict:
         config = config.copy()
@@ -105,9 +104,12 @@ class VllmV0ConfigModifier:
                         )
                         return int(token_count * concurrency)
         except Exception as e:
-            logger.warning(f"Failed to parse KV cache size from line: {line}. Error: {e}")
+            logger.warning(
+                f"Failed to parse KV cache size from line: {line}. Error: {e}"
+            )
         return 0
-    
+
+
 CONFIG_MODIFIERS = {
     "vllm_v0": VllmV0ConfigModifier,
 }

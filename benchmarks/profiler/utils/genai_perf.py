@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import json
+import logging
+import os
 import random
 import subprocess
-import logging
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -28,6 +28,7 @@ formatter = logging.Formatter(
 )
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
+
 
 def _get_common_genai_perf_cmd(
     artifact_dir,
