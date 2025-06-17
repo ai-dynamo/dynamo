@@ -34,7 +34,7 @@ from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.core_client import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
 
-from dynamo.sdk import async_on_start, endpoint, service, dynamo_context
+from dynamo.sdk import async_on_start, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -63,13 +63,13 @@ class VllmBaseWorker:
     def graceful_shutdown(self, signum, frame):
         """
         Gracefully shutdown the worker by shutting down the dynamo runtime.
-        This will 
+        This will
             1. disable the generate endpoint so no new requests are accepted.
             2. wait until all in-flight requests are completed.
             3. finish the awaiting for the endpoint service.
             4. rely on python's garbage collection to clean up the GPU.
         """
-        logger.info(f"Shutting down dynamo runtime...")
+        logger.info("Shutting down dynamo runtime...")
         dynamo_context["runtime"].shutdown()
         logger.info("Dynamo runtime shutdown complete.")
 
