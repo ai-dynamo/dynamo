@@ -269,8 +269,6 @@ mod tests {
         let _block_manager = create_reference_block_manager();
     }
 
-    // todo: solve the async runtime issue
-    #[ignore]
     #[test]
     fn test_reference_block_manager_blocking() {
         dynamo_runtime::logging::init();
@@ -283,6 +281,8 @@ mod tests {
     //
     // This test is meant to mimic the behavior of the basic nixl integration test found here:
     // https://github.com/ai-dynamo/nixl/blob/main/src/bindings/rust/src/tests.rs
+    // TODO: This test doesn't work because NIXL doesn't support partial metadata in the rust bindings.
+    #[ignore]
     #[tokio::test]
     async fn test_reference_block_managers() {
         dynamo_runtime::logging::init();
