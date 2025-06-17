@@ -17,7 +17,7 @@ Follow the instructions in [deploy/cloud/README.md](../../deploy/cloud/README.md
 
 Deploy 2 dynamo aggregated graphs following the instructions in [examples/llm/README.md](../../examples/llm/README.md):
 
-## build dynamo graph
+### Build Dynamo Graph
 ```bash
 export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
 
