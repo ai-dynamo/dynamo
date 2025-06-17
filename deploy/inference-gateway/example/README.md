@@ -1,4 +1,6 @@
-# Installing Inference Gateway with Dynamo
+# Installing Inference Gateway with Dynamo (Experimental)
+
+This is an experimental setup that treats each Dynamo deployment as a black box and routes traffic randomly among the deployments.
 
 This guide provides instructions for setting up the Inference Gateway with Dynamo for managing and routing inference requests.
 
