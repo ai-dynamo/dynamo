@@ -63,7 +63,7 @@ kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/downloa
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/raw/main/config/manifests/gateway/kgateway/gateway.yaml
 ```
 
-# Validate Resources
+### Validate Resources
 ```bash
 kubectl get gateway inference-gateway
 
