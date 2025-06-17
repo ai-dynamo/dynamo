@@ -17,7 +17,7 @@ Follow the instructions in [deploy/cloud/README.md](../../deploy/cloud/README.md
 
 2. **Launch 2 Dynamo Deployments**
 
-Deploy 2 dynamo aggregated graphs following the instructions in [examples/llm/README.md](../../examples/llm/README.md):
+Deploy 2 Dynamo aggregated graphs following the instructions in [examples/llm/README.md](../../examples/llm/README.md):
 
 ### Build Dynamo Graph
 ```bash
@@ -41,26 +41,25 @@ dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
 
 3. **Deploy Inference Gateway**
 
-First, deploy an inference gateway service. In this example we'll install `kgateway`.
+First, deploy an inference gateway service. In this example, we'll install `kgateway` based gateway implementation.
 
-Install the Inference Extension CRDs
+Install the Inference Extension CRDs:
 ```bash
 VERSION=v0.3.0
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/releases/download/$VERSION/manifests.yaml
 ```
 
-Deploy an Inference Gateway.  In this example we'll install `Kgateway`
+Deploy an Inference Gateway. In this example, we'll install `Kgateway`:
 ```bash
 KGTW_VERSION=v2.0.2
 
-# install the Kgateway CRDs
+# Install the Kgateway CRDs
 helm upgrade -i --create-namespace --namespace kgateway-system --version $KGTW_VERSION kgateway-crds oci://cr.kgateway.dev/kgateway-dev/charts/kgateway-crds
 
 # Install Kgateway
 helm upgrade -i --namespace kgateway-system --version $KGTW_VERSION kgateway oci://cr.kgateway.dev/kgateway-dev/charts/kgateway --set inferenceExtension.enabled=true
 
 # Deploy the Gateway
-
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api/releases/download/v1.3.0/standard-install.yaml
 kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extension/raw/main/config/manifests/gateway/kgateway/gateway.yaml
 ```
@@ -74,7 +73,7 @@ kubectl get gateway inference-gateway
 # inference-gateway   kgateway             True         1m
 ```
 
-4. **Apply Dynamo specific manifests**
+4. **Apply Dynamo-specific manifests**
 
 The Inference Gateway is configured through the `inference-gateway-resources.yaml` file.
 
@@ -101,7 +100,7 @@ kubectl get inferencemodel
 kubectl get httproute
 ```
 
-Sample output
+Sample output:
 
 ```bash
 # kubectl get inferencepool
@@ -121,14 +120,12 @@ llm-route               6s
 
 The Inference Gateway provides HTTP/2 endpoints for model inference. The default service is exposed on port 9002.
 
-
-
-### 1: Poulate gateway url for your k8s cluster
+### 1: Populate gateway URL for your k8s cluster
 ```bash
 export GATEWAY_URL=<Gateway-URL>
 ```
 
-To test the gateway in minikube use the following:
+To test the gateway in minikube, use the following command:
 ```bash
 minikube tunnel &
 
@@ -143,9 +140,9 @@ Query models:
 curl $GATEWAY_URL/v1/models | jq .
 ```
 
-Send inference request to gateway
+Send inference request to gateway:
 
-```
+```bash
 curl $GATEWAY_URL/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
