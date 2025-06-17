@@ -173,7 +173,7 @@ where
                     memcpy::copy_block(src.as_ref(), dst)?;
                 }
 
-                tx.send(()).unwrap();
+                let _ = tx.send(());
                 Ok(rx)
             }
             TransferStrategy::CudaAsyncH2D
@@ -196,7 +196,7 @@ where
 
                 ctx.async_rt_handle().spawn(async move {
                     transfer_fut.await;
-                    tx.send(()).unwrap();
+                    let _ = tx.send(());
                 });
 
                 Ok(rx)
