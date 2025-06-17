@@ -13,6 +13,7 @@ use crate::{
 };
 use crate::traits::{DistributedRuntimeProvider, RuntimeProvider};
 use std::fmt;
+use crate::discovery::DiscoveryClient;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EntityError {
@@ -104,6 +105,12 @@ impl fmt::Display for Namespace {
     }
 }
 
+impl DiscoveryClient for Namespace {
+    fn etcd_key(&self) -> String {
+        self.to_string()
+    }
+}
+
 /// Operational component with distributed runtime
 #[derive(Clone)]
 pub struct Component {
@@ -163,6 +170,12 @@ impl RuntimeProvider for Component {
 impl fmt::Display for Component {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.descriptor)
+    }
+}
+
+impl DiscoveryClient for Component {
+    fn etcd_key(&self) -> String {
+        self.to_string()
     }
 }
 
@@ -234,6 +247,12 @@ impl RuntimeProvider for Endpoint {
 impl fmt::Display for Endpoint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.descriptor)
+    }
+}
+
+impl DiscoveryClient for Endpoint {
+    fn etcd_key(&self) -> String {
+        self.to_string()
     }
 }
 
@@ -330,6 +349,12 @@ impl RuntimeProvider for Path {
 impl fmt::Display for Path {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.descriptor)
+    }
+}
+
+impl DiscoveryClient for Path {
+    fn etcd_key(&self) -> String {
+        self.to_string()
     }
 }
 
@@ -605,5 +630,97 @@ mod tests {
 
         let ep_child = ep_path.child("cpu").unwrap();
         assert_eq!(ep_child.to_string(), "dynamo://prod/_component_/svc/_endpoint_/http/_static_/_path_/metrics/cpu");
+    }
+
+    #[tokio::test]
+    async fn test_discovery_client_trait() {
+        use crate::discovery::DiscoveryClient;
+        use crate::distributed::DistributedConfig;
+
+        // Helper to create test runtime with etcd
+        async fn create_test_runtime_with_etcd() -> Result<DistributedRuntime, anyhow::Error> {
+            let runtime = Runtime::from_current()?;
+            let mut config = DistributedConfig::from_settings(false);
+            config.etcd_config.etcd_url = vec!["http://localhost:2379".to_string()];
+            DistributedRuntime::new(runtime, config).await
+        }
+
+        // Check if etcd is available
+        if etcd_client::Client::connect(["localhost:2379"], None).await.is_err() {
+            eprintln!("Skipping test: ETCD not available");
+            return;
+        }
+
+        let drt = match create_test_runtime_with_etcd().await {
+            Ok(drt) => drt,
+            Err(_) => {
+                eprintln!("Skipping test: Could not create runtime with etcd");
+                return;
+            }
+        };
+
+        // Test namespace can use DiscoveryClient
+        let ns = drt.namespace("test.discovery").unwrap();
+        assert_eq!(ns.etcd_key(), "dynamo://test.discovery");
+
+        // Test namespace storage operations
+        if let Ok(storage) = ns.storage() {
+            let test_data = b"namespace data".to_vec();
+
+            storage.put(test_data.clone(), None).await.unwrap();
+            let values = storage.get().await.unwrap();
+            assert_eq!(values[0].value(), &test_data);
+
+            // Cleanup
+            storage.delete(None).await.unwrap();
+        }
+
+        // Test component can use DiscoveryClient
+        let comp = drt.component("test", "discovery").unwrap();
+        assert_eq!(comp.etcd_key(), "dynamo://test/_component_/discovery");
+
+        // Test component storage operations
+        if let Ok(storage) = comp.storage() {
+            let test_data = b"component data".to_vec();
+
+            storage.put(test_data.clone(), None).await.unwrap();
+            let values = storage.get().await.unwrap();
+            assert_eq!(values[0].value(), &test_data);
+
+            // Cleanup
+            storage.delete(None).await.unwrap();
+        }
+
+        // Test endpoint can use DiscoveryClient
+        let ep = drt.endpoint("test", "discovery", "http").unwrap();
+        assert!(ep.etcd_key().starts_with("dynamo://test/_component_/discovery/_endpoint_/http"));
+
+        // Test endpoint storage operations
+        if let Ok(storage) = ep.storage() {
+            let test_data = b"endpoint data".to_vec();
+
+            storage.put(test_data.clone(), None).await.unwrap();
+            let values = storage.get().await.unwrap();
+            assert_eq!(values[0].value(), &test_data);
+
+            // Cleanup
+            storage.delete(None).await.unwrap();
+        }
+
+        // Test path can use DiscoveryClient
+        let path = comp.path(&["v1", "config"]).unwrap();
+        assert_eq!(path.etcd_key(), "dynamo://test/_component_/discovery/_path_/v1/config");
+
+        // Test path storage operations
+        if let Ok(storage) = path.storage() {
+            let test_data = b"path data".to_vec();
+
+            storage.put(test_data.clone(), None).await.unwrap();
+            let values = storage.get().await.unwrap();
+            assert_eq!(values[0].value(), &test_data);
+
+            // Cleanup
+            storage.delete(None).await.unwrap();
+        }
     }
 }

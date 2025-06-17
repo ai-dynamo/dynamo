@@ -122,14 +122,14 @@ impl DistributedRuntime {
     //         .build()?)
     // }
 
-    pub(crate) fn discovery_client(&self, namespace: impl Into<String>) -> DiscoveryClient {
-        DiscoveryClient::new(
-            namespace.into(),
-            self.etcd_client
-                .clone()
-                .expect("Attempt to get discovery_client on static DistributedRuntime"),
-        )
-    }
+    // pub(crate) fn discovery_client(&self, namespace: impl Into<String>) -> DiscoveryClient {
+    //     DiscoveryClient::new(
+    //         namespace.into(),
+    //         self.etcd_client
+    //             .clone()
+    //             .expect("Attempt to get discovery_client on static DistributedRuntime"),
+    //     )
+    // }
 
     pub(crate) fn service_client(&self) -> ServiceClient {
         ServiceClient::new(self.nats_client.clone())
@@ -151,7 +151,16 @@ impl DistributedRuntime {
         self.nats_client.clone()
     }
 
-    // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers
+    /// Internal method for accessing etcd client. Only available within this crate.
+    /// This is used by the Discovery trait implementations.
+    pub(crate) fn etcd_client_internal(&self) -> Option<&etcd::Client> {
+        self.etcd_client.as_ref()
+    }
+
+    #[deprecated(
+        since = "0.3.0",
+        note = "Use discovery traits on entities to read and write from etcd."
+    )]
     pub fn etcd_client(&self) -> Option<etcd::Client> {
         self.etcd_client.clone()
     }
