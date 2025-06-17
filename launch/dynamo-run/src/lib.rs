@@ -58,6 +58,7 @@ pub async fn run(
         anyhow::bail!("Cannot use endpoint for both in and out");
     }
 
+    let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
     let cancel_token = runtime.primary_token();
     let maybe_path = flags
         .model_path_pos
@@ -287,6 +288,11 @@ pub async fn run(
         }
 
         Output::Mocker => {
+            let endpoint = match &in_opt {
+                Input::Endpoint(path) => path.parse()?,
+                _ => internal_endpoint("mocker"),
+            };
+
             // Load mocker args from JSON file if provided
             let mocker_args = flags.load_extra_mocker_args()?;
 
@@ -320,9 +326,13 @@ pub async fn run(
                 .build()
                 .map_err(|e| anyhow::anyhow!("Failed to build MockEngineArgs: {}", e))?;
 
-            let engine = dynamo_llm::mocker::engine::make_mocker_engine(args)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to create mocker engine: {}", e))?;
+            let engine = dynamo_llm::mocker::engine::make_mocker_engine(
+                distributed_runtime.clone(),
+                endpoint,
+                args,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to create mocker engine: {}", e))?;
 
             EngineConfig::StaticCore {
                 engine,
@@ -355,7 +365,6 @@ pub async fn run(
                 .await?;
         }
         Input::Endpoint(path) => {
-            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
             crate::input::endpoint::run(distributed_runtime, path, engine_config).await?;
         }
     }

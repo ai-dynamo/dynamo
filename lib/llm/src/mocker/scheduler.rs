@@ -417,6 +417,11 @@ impl Scheduler {
         let _ = self.request_tx.send(request);
     }
 
+    /// Expose the sender
+    pub fn request_sender(&self) -> mpsc::UnboundedSender<DirectRequest> {
+        self.request_tx.clone()
+    }
+
     /// Get the count of waiting requests
     pub async fn waiting_count(&self) -> usize {
         let state = self.state.lock().await;

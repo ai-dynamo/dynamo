@@ -525,10 +525,6 @@ The mocker engine is a mock vLLM implementation designed for testing and develop
 
 **Basic usage:**
 
-```bash
-dynamo-run in=http out=mocker --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0
-```
-
 The `--model-path` is required but can point to any valid model path - the mocker doesn't actually load the model weights.
 
 Available options:
@@ -538,13 +534,10 @@ Available options:
 - `max_num_batched_tokens`: Maximum number of tokens that can be batched together (default: 8192)
 - `watermark`: KV cache watermark threshold as a fraction (default: 0.01)
 
-**Example with custom settings:**
 ```bash
-# Create configuration file
-echo '{"speedup_ratio": 10.0, "dp_size": 4}' > mocker_args.json
-
-# Run mocker with configuration
-dynamo-run in=http out=mocker --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 --extra-mocker-args mocker_args.json
+echo '{"speedup_ratio": 10.0}' > mocker_args.json
+dynamo-run in=dyn://dynamo.mocker.generate out=mocker --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0
+dynamo-run in=http out=dyn --router-mode kv
 ```
 
 ### Extra engine arguments

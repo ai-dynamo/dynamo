@@ -25,6 +25,7 @@ use crate::mocker::scheduler::Scheduler;
 use crate::protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest};
 use crate::protocols::TokenIdType;
 use dynamo_runtime::protocols::annotated::Annotated;
+use dynamo_runtime::DistributedRuntime;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
@@ -41,43 +42,38 @@ use futures::StreamExt;
 use rand::Rng;
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, Mutex, OnceCell};
 use tokio::time::{interval, Duration};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
 
 pub const MOCKER_COMPONENT: &str = "mocker";
 
-/// Generate a random token ID from 0 to 5k
+/// Generate a random token ID from 1k to 5k
 fn generate_random_token() -> TokenIdType {
     let mut rng = rand::rng();
-    rng.random_range(1..5000)
+    rng.random_range(1000..5000)
 }
 
 /// AsyncEngine wrapper around the Scheduler that generates random character tokens
 #[derive(Clone)]
 pub struct MockVllmEngine {
     active_requests: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>>,
-    schedulers: Option<Vec<Scheduler>>,
+    request_senders: Arc<OnceCell<Vec<mpsc::UnboundedSender<DirectRequest>>>>,
     engine_args: MockEngineArgs,
 }
 
 impl MockVllmEngine {
     /// Create a new MockVllmEngine with the given parameters
     pub fn new(args: MockEngineArgs) -> Self {
-        let active_requests = Arc::new(Mutex::new(HashMap::<
-            Uuid,
-            mpsc::UnboundedSender<OutputSignal>,
-        >::new()));
-
         Self {
-            active_requests,
-            schedulers: None,
+            active_requests: Arc::new(Mutex::new(HashMap::new())),
+            request_senders: Arc::new(OnceCell::new()),
             engine_args: args,
         }
     }
 
-    pub async fn start(&mut self, component: Component) -> Result<()> {
+    pub async fn start(&self, component: Component) -> Result<()> {
         let cancel_token = component.drt().runtime().child_token();
 
         let (schedulers, kv_event_receiver) = self.start_schedulers(
@@ -101,10 +97,15 @@ impl MockVllmEngine {
         Ok(())
     }
 
+    pub fn direct(&self, request: DirectRequest, dp_rank: usize) {
+        let senders = self.request_senders.get().expect("Not initialized");
+        let _ = senders[dp_rank].send(request);
+    }
+
     /// Create schedulers and spawn their background tasks for distributing token notifications
     /// Returns schedulers and their corresponding KV event receivers
     fn start_schedulers(
-        &mut self,
+        &self,
         args: MockEngineArgs,
         active_requests: Arc<Mutex<HashMap<Uuid, mpsc::UnboundedSender<OutputSignal>>>>,
         cancel_token: CancellationToken,
@@ -114,6 +115,7 @@ impl MockVllmEngine {
     ) {
         let mut schedulers = Vec::<Scheduler>::new();
         let mut kv_event_receivers = Vec::new();
+        let mut senders = Vec::with_capacity(args.dp_size as usize);
 
         // Create multiple schedulers and their background tasks
         for dp_rank in 0..args.dp_size {
@@ -131,6 +133,7 @@ impl MockVllmEngine {
                 Some(cancel_token.clone()),
             );
 
+            senders.push(scheduler.request_sender());
             schedulers.push(scheduler);
             kv_event_receivers.push(kv_events_rx);
 
@@ -161,7 +164,11 @@ impl MockVllmEngine {
             });
         }
 
-        self.schedulers = Some(schedulers.clone());
+        // Set the senders once
+        self.request_senders
+            .set(senders)
+            .expect("Already initialized");
+
         (schedulers, kv_event_receivers)
     }
 
@@ -355,9 +362,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         }
 
         // Send the request to the appropriate scheduler based on dp_rank
-        self.schedulers.as_ref().unwrap()[dp_rank as usize]
-            .receive(direct_request)
-            .await;
+        self.direct(direct_request, dp_rank as usize);
 
         // Create a simple channel for the stream
         let (stream_tx, stream_rx) = mpsc::channel::<LLMEngineOutput>(64);
@@ -374,18 +379,17 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                 tokio::select! {
                     maybe_signal = request_rx.recv() => {
                         let Some(signal) = maybe_signal else {
+                            let _ = stream_tx.send(LLMEngineOutput::error("All output transmitters closed".to_string())).await;
                             break;
                         };
 
-                        if signal.completed || token_count >= max_tokens {
-                            // Send final output with finish reason
-                            let final_output = if token_count >= max_tokens {
-                                LLMEngineOutput::length()
-                            } else {
-                                LLMEngineOutput::stop()
-                            };
+                        if signal.completed && token_count < max_tokens {
+                            let _ = stream_tx.send(LLMEngineOutput::error("Completion signal received before max tokens reached".to_string())).await;
+                            break;
+                        }
 
-                            let _ = stream_tx.send(final_output).await;
+                        if signal.completed {
+                            let _ = stream_tx.send(LLMEngineOutput::length()).await;
                             break;
                         }
 
@@ -426,17 +430,58 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
 }
 
 pub struct AnnotatedMockEngine {
-    inner: MockVllmEngine,
+    inner: Arc<MockVllmEngine>,
 }
 
 impl AnnotatedMockEngine {
-    pub fn new(inner: MockVllmEngine) -> Self {
-        Self { inner }
-    }
+    pub fn new(
+        inner: MockVllmEngine,
+        distributed_runtime: DistributedRuntime,
+        endpoint: dynamo_runtime::protocols::Endpoint,
+    ) -> Self {
+        let inner = Arc::new(inner);
+        let inner_clone = inner.clone();
 
-    pub async fn start(&self, component: Component) -> Result<()> {
-        self.inner.clone().start(component).await?;
-        Ok(())
+        // Start background task to wait for component service and start the engine
+        tokio::spawn(async move {
+            loop {
+                // Try to create component
+                let Ok(namespace) = distributed_runtime.namespace(&endpoint.namespace) else {
+                    tracing::debug!("Namespace not available yet, retrying...");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                };
+
+                let Ok(component) = namespace.component(&endpoint.component) else {
+                    tracing::debug!("Component not available yet, retrying...");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                };
+
+                // Check if service is available by trying to list instances
+                let Ok(instances) = component.list_instances().await else {
+                    tracing::debug!("Cannot list instances yet, retrying...");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                };
+
+                if instances.is_empty() {
+                    tracing::debug!("No instances available yet, retrying...");
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    continue;
+                }
+
+                tracing::info!("Component service is now available, starting mocker engine");
+
+                // Start the engine with the component
+                if let Err(e) = inner_clone.start(component).await {
+                    tracing::error!("Failed to start mocker engine: {}", e);
+                }
+                break;
+            }
+        });
+
+        Self { inner }
     }
 }
 
@@ -460,11 +505,16 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
 /// Create a mocker engine as ExecutionContext
 pub async fn make_mocker_engine(
+    distributed_runtime: DistributedRuntime,
+    endpoint: dynamo_runtime::protocols::Endpoint,
     args: MockEngineArgs,
 ) -> Result<crate::backend::ExecutionContext, Error> {
-    Ok(Arc::new(AnnotatedMockEngine::new(MockVllmEngine::new(
-        args,
-    ))))
+    // Create the mocker engine
+    tracing::info!("Creating mocker engine (service will be started in background)");
+    let annotated_engine =
+        AnnotatedMockEngine::new(MockVllmEngine::new(args), distributed_runtime, endpoint);
+
+    Ok(Arc::new(annotated_engine))
 }
 
 #[cfg(test)]
@@ -512,7 +562,7 @@ mod integration_tests {
             .build()
             .unwrap();
 
-        let mut engine = MockVllmEngine::new(args);
+        let engine = MockVllmEngine::new(args);
         engine.start(test_component.clone()).await?;
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         let engine = Arc::new(engine);
