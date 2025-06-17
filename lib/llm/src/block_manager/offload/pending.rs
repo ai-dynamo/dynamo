@@ -149,112 +149,12 @@ pub trait TransferManager<Source: Storage, Target: Storage, Metadata: BlockMetad
     ) -> Result<()>;
 }
 
-pub struct CudaTransferManager<Source: Storage, Target: Storage, Metadata: BlockMetadata> {
-    pending_transfer_q: mpsc::Sender<(
-        PendingTransfer<Source, Target, Metadata>,
-        tokio::sync::oneshot::Receiver<()>,
-    )>,
-    transfer_ctx: Arc<TransferContext>,
-}
-
-impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
-    CudaTransferManager<Source, Target, Metadata>
-{
-    pub fn new(
-        transfer_ctx: Arc<TransferContext>,
-        max_concurrent_transfers: usize,
-        runtime: &Handle,
-        cancellation_token: CancellationToken,
-    ) -> Result<Self> {
-        let (tx, mut rx) = mpsc::channel::<(
-            PendingTransfer<Source, Target, Metadata>,
-            tokio::sync::oneshot::Receiver<()>,
-        )>(max_concurrent_transfers);
-
-        CriticalTaskExecutionHandle::new_with_runtime(
-            move |cancel_token| async move {
-                loop {
-                    tokio::select! {
-                        Some((pending_transfer, notify)) = rx.recv() => {
-                            // Wait for the event.
-                            notify.await.map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
-                            // Only finalize the transfer after the event is signaled.
-                            match pending_transfer.handle_complete() {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    // The only case where this can fail is if the progress engine is being shutdown.
-                                    // This is not a problem, so we can just ignore it.
-                                    tracing::warn!("Error handling transfer completion: {:?}", e);
-                                }
-                            }
-                        }
-
-                        _ = cancel_token.cancelled() => {
-                            return Ok(());
-                        }
-                    }
-                }
-            },
-            cancellation_token.clone(),
-            "Cuda Transfer Manager",
-            runtime,
-        )?
-        .detach();
-
-        Ok(Self {
-            pending_transfer_q: tx,
-            transfer_ctx,
-        })
-    }
-}
-
-#[async_trait]
-impl<Source, Target, Metadata> TransferManager<Source, Target, Metadata>
-    for CudaTransferManager<Source, Target, Metadata>
-where
-    Source: Storage,
-    Target: Storage,
-    Metadata: BlockMetadata,
-    // Check that the source block is readable, local, and writable to the target block.
-    MutableBlock<Source, Metadata>: ReadableBlock<StorageType = Source>
-        + Local
-        + WriteToStrategy<MutableBlock<Target, Metadata>>,
-    // Check that the target block is writable.
-    MutableBlock<Target, Metadata>: WritableBlock<StorageType = Target>,
-{
-    async fn enqueue_transfer(
-        &self,
-        mut pending_transfer: PendingTransfer<Source, Target, Metadata>,
-    ) -> Result<()> {
-        let notify = pending_transfer
-            .sources
-            .write_to(
-                &mut pending_transfer.targets,
-                true,
-                self.transfer_ctx.clone(),
-            )?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "write_to returned None when notify was true. This should never happen!"
-                )
-            })?;
-
-        // Send the pending transfer and event to the worker thread.
-        // If the queue is full, we block the worker until space becomes available.
-        self.pending_transfer_q
-            .send((pending_transfer, notify))
-            .await?;
-
-        Ok(())
-    }
-}
-
-pub struct DiskTransferManager {
+pub struct LocalTransferManager {
     futures_tx: mpsc::Sender<Pin<Box<dyn std::future::Future<Output = ()> + Send + Sync>>>,
     transfer_ctx: Arc<TransferContext>,
 }
 
-impl DiskTransferManager {
+impl LocalTransferManager {
     pub fn new(
         transfer_ctx: Arc<TransferContext>,
         max_concurrent_transfers: usize,
@@ -291,7 +191,7 @@ impl DiskTransferManager {
                 }
             },
             cancellation_token.clone(),
-            "Disk Transfer Manager",
+            "Local Transfer Manager",
             runtime,
         )?
         .detach();
@@ -304,7 +204,7 @@ impl DiskTransferManager {
 }
 
 #[async_trait]
-impl<Source, Target, Metadata> TransferManager<Source, Target, Metadata> for DiskTransferManager
+impl<Source, Target, Metadata> TransferManager<Source, Target, Metadata> for LocalTransferManager
 where
     Source: Storage,
     Target: Storage,

@@ -32,8 +32,7 @@
 //! ## Transfer Managers
 //! The offload manager uses two transfer managers to handle the offloading and onboarding of blocks.
 //!
-//! The [`CudaTransferManager`] is responsible for transfers between the device and host.
-//! The [`DiskTransferManager`] is responsible for transfers from host to disk and disk to device.
+//! The [`LocalTransferManager`] is responsible for transfers involving disk, host, and device.
 //!
 //! ## Worker Threads
 //! The offload manager uses two kinds of worker threads to handle the offloading and onboarding of blocks.
@@ -66,9 +65,7 @@ use std::collections::BTreeSet;
 mod pending;
 pub mod request;
 
-use pending::{
-    CudaTransferManager, DiskTransferManager, PendingTransfer, TransferBatcher, TransferManager,
-};
+use pending::{LocalTransferManager, PendingTransfer, TransferBatcher, TransferManager};
 use request::{BlockResult, OffloadRequest, OffloadRequestKey, OnboardRequest};
 
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
@@ -137,7 +134,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             this.host.clone(),
             device_offload_rx,
             Arc::new(TransferBatcher::new(
-                CudaTransferManager::new(
+                LocalTransferManager::new(
                     device_offload_transfer_ctx,
                     MAX_CONCURRENT_TRANSFERS,
                     &async_rt_handle,
@@ -170,7 +167,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             this.disk.clone(),
             host_offload_rx,
             Arc::new(TransferBatcher::new(
-                DiskTransferManager::new(
+                LocalTransferManager::new(
                     transfer_ctx.clone(),
                     MAX_CONCURRENT_TRANSFERS,
                     &async_rt_handle,
@@ -197,7 +194,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             this.device.clone(),
             host_onboard_rx,
             Arc::new(TransferBatcher::new(
-                CudaTransferManager::new(
+                LocalTransferManager::new(
                     transfer_ctx.clone(),
                     MAX_CONCURRENT_TRANSFERS,
                     &async_rt_handle,
@@ -224,7 +221,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
             this.device.clone(),
             disk_onboard_rx,
             Arc::new(TransferBatcher::new(
-                DiskTransferManager::new(
+                LocalTransferManager::new(
                     transfer_ctx.clone(),
                     MAX_CONCURRENT_TRANSFERS,
                     &async_rt_handle,
