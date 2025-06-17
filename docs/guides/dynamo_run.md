@@ -536,7 +536,7 @@ Available options:
 
 ```bash
 echo '{"speedup_ratio": 10.0}' > mocker_args.json
-dynamo-run in=dyn://dynamo.mocker.generate out=mocker --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0
+dynamo-run in=dyn://dynamo.mocker.generate out=mocker --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 --extra-mocker-args mocker_args.json
 dynamo-run in=http out=dyn --router-mode kv
 ```
 
