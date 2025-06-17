@@ -285,6 +285,50 @@ pub async fn run(
                 model: Box::new(local_model),
             }
         }
+
+        Output::Mocker => {
+            // Load mocker args from JSON file if provided
+            let mocker_args = flags.load_extra_mocker_args()?;
+
+            let mut builder = dynamo_llm::mocker::protocols::MockEngineArgs::builder();
+
+            // Use kv_cache_block_size flag as block_size if provided
+            if let Some(block_size) = flags.kv_cache_block_size {
+                builder = builder.block_size(block_size);
+            }
+
+            // Apply args from JSON file if provided
+            if let Some(args) = mocker_args {
+                if let Some(v) = args.get("speedup_ratio").and_then(|v| v.as_f64()) {
+                    builder = builder.speedup_ratio(v);
+                }
+                if let Some(v) = args.get("dp_size").and_then(|v| v.as_u64()) {
+                    builder = builder.dp_size(v as u32);
+                }
+                if let Some(v) = args.get("num_gpu_blocks").and_then(|v| v.as_u64()) {
+                    builder = builder.num_gpu_blocks(v as usize);
+                }
+                if let Some(v) = args.get("max_num_batched_tokens").and_then(|v| v.as_u64()) {
+                    builder = builder.max_num_batched_tokens(Some(v as usize));
+                }
+                if let Some(v) = args.get("watermark").and_then(|v| v.as_f64()) {
+                    builder = builder.watermark(v);
+                }
+            }
+
+            let args = builder
+                .build()
+                .map_err(|e| anyhow::anyhow!("Failed to build MockEngineArgs: {}", e))?;
+
+            let engine = dynamo_llm::mocker::engine::make_mocker_engine(args)
+                .await
+                .map_err(|e| anyhow::anyhow!("Failed to create mocker engine: {}", e))?;
+
+            EngineConfig::StaticCore {
+                engine,
+                model: Box::new(local_model),
+            }
+        }
     };
 
     match in_opt {

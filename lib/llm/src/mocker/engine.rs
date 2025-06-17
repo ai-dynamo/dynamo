@@ -19,6 +19,7 @@
 //! to provide streaming token generation with realistic timing simulation.
 
 use crate::kv_router::publisher::WorkerMetricsPublisher;
+use dynamo_runtime::protocols::annotated::Annotated;
 use crate::mocker::protocols::DirectRequest;
 use crate::mocker::protocols::{MockEngineArgs, OutputSignal};
 use crate::mocker::scheduler::Scheduler;
@@ -43,11 +44,12 @@ use tokio::sync::{mpsc, Mutex};
 use tokio::time::{interval, Duration};
 use tokio_stream::wrappers::ReceiverStream;
 use uuid::Uuid;
+use futures::StreamExt;
 
-/// Generate a random token ID from 0 to 50k
+/// Generate a random token ID from 0 to 5k
 fn generate_random_token() -> TokenIdType {
     let mut rng = rand::rng();
-    rng.random_range(1..50000)
+    rng.random_range(1..5000)
 }
 
 /// AsyncEngine wrapper around the Scheduler that generates random character tokens
@@ -423,6 +425,41 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
         let stream = ReceiverStream::new(stream_rx);
         Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
     }
+}
+
+pub struct AnnotatedMockEngine {
+    inner: Arc<MockVllmEngine>,
+}
+
+impl AnnotatedMockEngine {
+    pub fn new(inner: Arc<MockVllmEngine>) -> Self {
+        Self { inner }
+    }
+}
+
+#[async_trait]
+impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutput>>, Error>
+    for AnnotatedMockEngine
+{
+    async fn generate(
+        &self,
+        input: SingleIn<PreprocessedRequest>,
+    ) -> Result<ManyOut<Annotated<LLMEngineOutput>>, Error> {
+        let stream = self.inner.generate(input).await?;
+        let context = stream.context();
+
+        // Convert stream of LLMEngineOutput to Annotated<LLMEngineOutput>
+        let annotated_stream = stream.map(Annotated::from_data);
+
+        Ok(ResponseStream::new(Box::pin(annotated_stream), context))
+    }
+}
+
+/// Create a mocker engine as ExecutionContext
+pub async fn make_mocker_engine(args: MockEngineArgs) -> Result<crate::backend::ExecutionContext, Error> {
+    let engine = MockVllmEngine::new(args, None, None).await?;
+    let annotated = AnnotatedMockEngine::new(Arc::new(engine));
+    Ok(Arc::new(annotated))
 }
 
 #[cfg(test)]

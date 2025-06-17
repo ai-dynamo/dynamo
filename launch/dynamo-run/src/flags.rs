@@ -151,6 +151,18 @@ pub struct Flags {
     /// These are the command line arguments to the python engine when using `pystr` or `pytok`.
     #[arg(index = 2, last = true, hide = true, allow_hyphen_values = true)]
     pub last: Vec<String>,
+
+    /// Mocker engine configuration from a JSON file.
+    /// Example file contents:
+    /// {
+    ///     "speedup_ratio": 1.0,
+    ///     "dp_size": 1,
+    ///     "num_gpu_blocks": 16384,
+    ///     "max_num_batched_tokens": 8192,
+    ///     "watermark": 0.01
+    /// }
+    #[arg(long)]
+    pub extra_mocker_args: Option<PathBuf>,
 }
 
 impl Flags {
@@ -216,18 +228,34 @@ impl Flags {
         out
     }
 
-    /// Load extra engine arguments from a JSON file
+    /// Load extra arguments from a JSON file
     /// Returns a HashMap of parameter names to values
-    pub fn load_extra_engine_args(
-        &self,
+    fn load_json_args(
+        path: &Option<PathBuf>,
     ) -> anyhow::Result<Option<HashMap<String, serde_json::Value>>> {
-        if let Some(path) = &self.extra_engine_args {
+        if let Some(path) = path {
             let file_content = std::fs::read_to_string(path)?;
             let args: HashMap<String, serde_json::Value> = serde_json::from_str(&file_content)?;
             Ok(Some(args))
         } else {
             Ok(None)
         }
+    }
+
+    /// Load extra engine arguments from a JSON file
+    /// Returns a HashMap of parameter names to values
+    pub fn load_extra_engine_args(
+        &self,
+    ) -> anyhow::Result<Option<HashMap<String, serde_json::Value>>> {
+        Self::load_json_args(&self.extra_engine_args)
+    }
+
+    /// Load extra mocker arguments from a JSON file
+    /// Returns a HashMap of parameter names to values
+    pub fn load_extra_mocker_args(
+        &self,
+    ) -> anyhow::Result<Option<HashMap<String, serde_json::Value>>> {
+        Self::load_json_args(&self.extra_mocker_args)
     }
 }
 
