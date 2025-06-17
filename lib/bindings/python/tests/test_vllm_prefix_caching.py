@@ -18,18 +18,16 @@ from vllm.v1.kv_cache_interface import (
 from dynamo.llm import BlockManager
 from dynamo.llm.vllm_integration.kv_cache_manager import KvbmCacheManager
 
-WORKER_ID = 0
-NUM_LAYER = 1
-OUTER_DIM = 1
-PAGE_SIZE = 16
-INNER_DIM = 1
-DTYPE = "FP32"
-HOST_NUM_BLOCKS = 11
-DEVICE_NUM_BLOCKS = 11
-DEVICE_ID = 0
 
-
-def new_kv_cache_manager():
+def new_kv_cache_manager(
+    worker_id: int = 0,
+    num_layer: int = 1,
+    outer_dim: int = 1,
+    page_size: int = 16,
+    inner_dim: int = 1,
+    device_id: int = 0,
+    num_blocks: int = 11,
+):
     """
     Creates a new KVBM cache manager.
 
@@ -38,15 +36,15 @@ def new_kv_cache_manager():
     """
     return KvbmCacheManager(
         BlockManager(
-            WORKER_ID,
-            NUM_LAYER,
-            OUTER_DIM,
-            PAGE_SIZE,
-            INNER_DIM,
-            DTYPE,
-            HOST_NUM_BLOCKS,
-            DEVICE_NUM_BLOCKS,
-            DEVICE_ID,
+            worker_id,
+            num_layer,
+            outer_dim,
+            page_size,
+            inner_dim,
+            "FP32",  # dtype
+            num_blocks,  # host_num_blocks
+            num_blocks,  # device_num_blocks
+            device_id,
         )
     )
 
@@ -285,6 +283,282 @@ def test_prefill_plp():
         assert manager.block_pool.blocks[block_id].ref_cnt == 1
 
     manager.free(req2)
+
+
+def test_decode():
+    manager = new_kv_cache_manager()
+
+    # Complete 3 blocks (48 tokens)
+    common_token_ids = [i for i in range(3) for _ in range(16)]
+
+    # Fully cache miss
+    # Incomplete 1 block (7 tokens)
+    unique_token_ids = [3] * 7
+    req0 = make_request("0", common_token_ids + unique_token_ids)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert not computed_blocks.blocks
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req0, 55, len(computed_blocks.blocks) * 16, computed_blocks
+    )
+    # assert blocks.get_block_ids() == [[1, 2, 3, 4]]
+    assert blocks.get_block_ids() == [[0, 1, 2, 3]]
+    # Append slots without allocating a new block.
+    req0.num_computed_tokens = 55
+    for _ in range(4):
+        req0.append_output_token_ids(8)
+
+    new_blocks = manager.allocate_slots(
+        req0, 4, len(computed_blocks.blocks) * 16, computed_blocks
+    )
+    assert new_blocks is not None and len(new_blocks.blocks) == 0
+
+    # NOTE(): There's no way to access the current active non-registered block
+    # from the python bindings.
+    # assert manager.single_type_manager.req_to_blocks[
+    #    req0.request_id][-1].block_hash is None
+
+    # Append slots with allocating a new block.
+    req0.num_computed_tokens = 59
+    # 9 tokens to fill the previous block, and 10 tokens to fill
+    # the preallocated block.
+    for _ in range(9 + 10):
+        req0.append_output_token_ids(7)
+
+    print(len(computed_blocks.blocks))
+    new_blocks = manager.allocate_slots(
+        req0, 19, len(computed_blocks.blocks) * 16, computed_blocks
+    )
+    assert new_blocks is not None and len(new_blocks.blocks) == 1
+    assert new_blocks.blocks[-1].block_hash is None
+
+    req0.num_computed_tokens = 78
+    req0.append_output_token_ids(100)
+
+    # The following is required for KVBM to register the block with id=3
+    _ = manager.allocate_slots(
+        req0, 1, len(computed_blocks.blocks) * 16, computed_blocks
+    )
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+
+    # assert manager.single_type_manager.req_to_blocks[
+    #    req0.request_id][-2].block_hash is not None
+    # assert manager.single_type_manager.req_to_blocks[
+    #    req0.request_id][-1].block_hash is None
+    assert computed_blocks.blocks[-1].block_id == 3
+    assert computed_blocks.blocks[-1].block_hash is not None
+
+    # Clean up
+    manager.free_block_hashes(req0)
+
+
+def test_evict():
+    manager = new_kv_cache_manager()
+    used_blocks = set()
+
+    last_token_id = 5 * 16 + 7
+    req0 = make_request("0", list(range(last_token_id)))
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert not computed_blocks.blocks
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req0, 5 * 16 + 7, len(computed_blocks.blocks) * 16, computed_blocks
+    )
+    assert len(blocks.blocks) == 6  # 5 full + 1 partial
+    used_blocks.update(blocks.get_block_ids()[0])
+
+    req0.append_output_token_ids(100)
+    req0.num_computed_tokens = 5 * 16 + 7
+    manager.allocate_slots(req0, 1, len(computed_blocks.blocks) * 16, computed_blocks)
+
+    req1 = make_request("1", list(range(last_token_id, last_token_id + 3 * 16 - 1)))
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    assert not computed_blocks.blocks
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req1, 3 * 16, len(computed_blocks.blocks) * 16, computed_blocks
+    )
+    assert (
+        len(blocks.blocks) == 3
+    )  # 2 full blocks and 1 partial (15 tokens) 1 more will be added during allocate_slots
+    last_token_id += 3 * 16 - 1
+    used_blocks.update(blocks.get_block_ids()[0])
+
+    # 10 - (6 + 3) == 1
+    assert len(used_blocks) == 6 + 3
+
+    req1.append_output_token_ids(100)
+    req1.num_computed_tokens = 3 * 16 - 1
+    blocks = manager.allocate_slots(
+        req1, 1, len(computed_blocks.blocks) * 16, computed_blocks
+    )
+
+    manager.free(req0)
+    manager.free(req1)
+    # Can't access the free blocks queue from the python bindings.
+    # assert manager.block_pool.free_block_queue.num_free_blocks == 10
+    # assert [
+    #     b.block_id
+    #     for b in manager.block_pool.free_block_queue.get_all_free_blocks()
+    # ] == [10, 6, 5, 4, 3, 2, 1, 9, 8, 7]
+
+    # Touch the first 2 blocks.
+    req2 = make_request("2", list(range(2 * 16 + 3)))
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    # assert computed_blocks.get_block_ids() == [[1, 2]]
+    assert computed_blocks.get_block_ids() == [[0, 1]]
+    assert num_computed_tokens == 2 * 16
+    blocks = manager.allocate_slots(
+        req2, 3, len(computed_blocks.blocks) * 16, computed_blocks
+    )
+
+    assert blocks.get_block_ids() == [[9]]
+    # Can't access the free blocks queue from the python bindings.
+    # assert manager.block_pool.free_block_queue.num_free_blocks == 7
+
+
+def test_hash_block_correct_reuse():
+    """
+    This tests when a previously cached block is reused as a new block,
+    its hash metadata should be correctly reset.
+    """
+    block_size = 16
+    manager = new_kv_cache_manager(num_blocks=2)
+
+    # Allocate 1 block and cache it.
+    num_tokens = block_size
+    req = make_request("0", list(range(num_tokens)))
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
+    assert not computed_blocks.blocks
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req, num_tokens, len(computed_blocks.blocks) * 16, computed_blocks
+    )
+    assert len(blocks.blocks) == 1
+    for t in range(5):
+        req.append_output_token_ids(100)
+    req.num_computed_tokens = num_tokens
+    blocks = manager.allocate_slots(
+        req, 5, len(computed_blocks.blocks) * 16, computed_blocks
+    )
+
+    computed_blocks, _ = manager.get_computed_blocks(req)
+    assert computed_blocks.blocks[0].block_hash is not None
+    assert computed_blocks.blocks[0].block_id == 0
+
+    # Deallocate the block.
+    manager.free(req)
+
+    # Allocate new blocks, last one is partial not full, make sure hash info on the
+    # blocks are cleared.
+    # KVBM will allocate block 1 first, then block 0. Need to verify,
+    # that block's 0 hash is cleared
+    req = make_request("1", list(range(256, 256 + 2 * num_tokens - 1)))
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
+    assert not computed_blocks.blocks
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req, 2 * num_tokens - 1, len(computed_blocks.blocks) * 16, computed_blocks
+    )
+    assert len(blocks.blocks) == 2
+
+    assert blocks.blocks[1].block_id == 0
+    assert blocks.blocks[1].block_hash is None
+
+
+def test_computed_blocks_not_evicted():
+    """
+    Test that the computed blocks are not evicted when getting new blocks
+    for a request if there are any other free blocks.
+    """
+    block_size = 16
+    manager = new_kv_cache_manager(num_blocks=3)
+
+    # Allocate a block and cache it.
+    num_tokens = block_size * 1
+    req0 = make_request("0", list(range(num_tokens)))
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert not computed_blocks.blocks
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req0, num_tokens, len(computed_blocks.blocks) * 16, computed_blocks
+    )
+    assert len(blocks.blocks) == 1
+    # assert blocks.blocks[0].block_id == 1
+    assert blocks.blocks[0].block_id == 0
+
+    # Allocate another block.
+    req1 = make_request("1", list(range(num_tokens, num_tokens * 2)))
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    assert not computed_blocks.blocks
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req1, num_tokens, len(computed_blocks.blocks) * 16, computed_blocks
+    )
+    assert len(blocks.blocks) == 1
+    # assert blocks.blocks[0].block_id == 2
+    assert blocks.blocks[0].block_id == 1
+
+    # Need to simulate the forward pass to get blocks registered
+    req0.append_output_token_ids(100)
+    req0.num_computed_tokens = num_tokens
+    _ = manager.allocate_slots(
+        req0, 1, len(computed_blocks.blocks) * 16, computed_blocks
+    )
+
+    req1.append_output_token_ids(100)
+    req1.num_computed_tokens = num_tokens
+    _ = manager.allocate_slots(
+        req1, 1, len(computed_blocks.blocks) * 16, computed_blocks
+    )
+
+    # Free the blocks.
+    manager.free(req0)
+    manager.free(req1)
+
+    # Now if we have a cache hit on the block_id 0, we should evict the block_id 1
+    # cached block rather than the first one.
+    req2 = make_request("2", list(range(num_tokens * 3)))
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    assert len(computed_blocks.blocks) == 1
+    # assert computed_blocks.blocks[0].block_id == 1
+    assert computed_blocks.blocks[0].block_id == 0
+    assert num_computed_tokens == block_size
+
+    # Allocate should return a free block with id 2 first, and then block with id 1
+    # which was evicted.
+    blocks = manager.allocate_slots(
+        req2,
+        num_tokens * 3 - num_computed_tokens,
+        len(computed_blocks.blocks) * 16,
+        computed_blocks,
+    )
+    assert len(blocks.blocks) == 2
+    assert blocks.blocks[0].block_id == 2
+    assert blocks.blocks[1].block_id == 1
+
+
+def _test_basic_prefix_caching_disabled():
+    """
+    Currently, KVBM does not support `enable_caching` or setting it to False to disable prefix caching.
+    """
+    pass
+
+
+# @pytest.mark.parametrize("hash_fn", [sha256, hash])
+def _test_cache_blocks(hash_fn):
+    """
+    Hashing is done by KVBM and tested by the core library.
+    """
+    pass
+
+
+def _test_mm_prefix_caching():
+    """
+    KVBM currently does not support multi-modal prefix caching.
+    This tests that the multi-modal prefix caching is correct.
+    """
+    pass
 
 
 def test_prefill_not_enough_free_blocks_with_computed_blocks():
