@@ -107,6 +107,7 @@ Dynamo supports SGLang's implementation of wide expert parallelism and large sca
 Steps to run:
 
 1. Build the SGLang DeepEP container
+
 ```bash
 git clone https://github.com/sgl-project/sglang.git
 cd sglang/docker
@@ -116,10 +117,12 @@ docker build -f Dockerfile.deepep -t deepep .
 You will now have a `deepep:latest` image
 
 2. Build the Dynamo container
+
 ```bash
 cd $DYNAMO_ROOT
 docker build -f container/Dockerfile.sglang-deepep . -t dynamo-deepep --no-cache
 ```
+
 3. You can run this container on each 8xH100 node using the following command.
 
 > [!IMPORTANT]
@@ -169,8 +172,9 @@ export ETCD_ENDPOINTS=http://HEAD_PREFILL_NODE_IP:2379
 Each container contains the configuration file in `configs/dsr1.yaml`. For our example, we will make the following changes:
 
 On the prefill head node, `vim` into the configs and change the following section of the `SGLangWorker`:
+
 ```yaml
-SGlangWorker:
+SGLangWorker:
     ...
     dist-init-addr: HEAD_PREFILL_NODE_IP
     nnodes: 2
@@ -179,8 +183,9 @@ SGlangWorker:
 ```
 
 On the other prefill node (since this example has 2 prefill nodes), change the following section of the `SGLangWorker`:
+
 ```yaml
-SGlangWorker:
+SGLangWorker:
     ...
     dist-init-addr: HEAD_PREFILL_NODE_IP
     nnodes: 2
@@ -189,8 +194,9 @@ SGlangWorker:
 ```
 
 On the decode head node, `vim` into the configs and change the following section of the `SGLangDecodeWorker`:
+
 ```yaml
-SGlangDecodeWorker:
+SGLangDecodeWorker:
     ...
     dist-init-addr: HEAD_DECODE_NODE_IP
     nnodes: 4
@@ -212,16 +218,19 @@ SGLangDecodeWorker:
 7. Start up the workers using the following commands
 
 On prefill head node
+
 ```bash
 dynamo serve graphs.agg:Frontend -f configs/dsr1.yaml
 ```
 
 On prefill child node
+
 ```bash
 dynamo serve graphs.agg:Frontend -f configs/dsr1.yaml --service-name SGLangWorker
 ```
 
 On all decode nodes
+
 ```bash
 dynamo serve graphs.disagg:Frontend -f configs/dsr1.yaml --service-name SGLangDecodeWorker
 ```

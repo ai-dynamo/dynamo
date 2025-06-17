@@ -48,6 +48,7 @@ SGLangWorker:
   #max-total-tokens: 131072
   #context-length: 8192
   #init-expert-location: /configs/prefill_in4096.json
+  #deepep-config: /configs/deepep.json
   chunked-prefill-size: 524288
   ep-num-redundant-experts: 32
   ep-dispatch-algorithm: dynamic
@@ -90,7 +91,7 @@ SGLangDecodeWorker:
   #context-length: 4500
   #init-expert-location: /configs/decode_in2000out100.json
   ep-num-redundant-experts: 32
-  cuda-graph-bs: 128
+  cuda-graph-bs: 256
   ServiceArgs:
     workers: 1
     resources:
