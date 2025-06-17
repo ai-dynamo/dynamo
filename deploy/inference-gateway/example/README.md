@@ -26,7 +26,7 @@ cd $PROJECT_ROOT/examples/llm
 export DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk '{ print $NF }' | sed 's/\.$//')
 ```
 
-## Deploy 2 Dynamo Inference Graphs
+### Deploy Dynamo Graphs 
 ```bash
 # Deploy first graph
 export DEPLOYMENT_NAME=llm-agg1
