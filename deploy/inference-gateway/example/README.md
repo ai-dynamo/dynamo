@@ -115,7 +115,7 @@ NAME        HOSTNAMES   AGE
 llm-route               6s
 ```
 
-4. Usage
+## Usage
 
 The Inference Gateway provides HTTP/2 endpoints for model inference. The default service is exposed on port 9002.
 
