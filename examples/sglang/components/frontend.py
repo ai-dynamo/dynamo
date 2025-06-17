@@ -17,6 +17,7 @@ import logging
 import subprocess
 from pathlib import Path
 
+from components.embedding_worker import SGLangEmbeddingWorker
 from components.worker import SGLangWorker
 from fastapi import FastAPI
 from pydantic import BaseModel
@@ -57,6 +58,7 @@ class FrontendConfig(BaseModel):
 )
 class Frontend:
     worker = depends(SGLangWorker)
+    embedding_worker = depends(SGLangEmbeddingWorker)
 
     def __init__(self):
         """Initialize Frontend service with HTTP server and model configuration."""
