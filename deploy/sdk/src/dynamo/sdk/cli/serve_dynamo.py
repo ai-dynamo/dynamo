@@ -188,7 +188,11 @@ def main(
             dynamo_context["component"] = component
             dynamo_context["endpoints"] = endpoints
             class_instance = service.inner()
-            # signal that class_instance (and its setup) is done
+
+            # Run startup hooks before setting up endpoints
+            await run_startup_hooks(class_instance)
+
+            # Signal that class_instance is ready and startup hooks have been run
             instanceReady.set()
             dynamo_handlers = []
             for name, endpoint in dynamo_endpoints.items():
@@ -201,19 +205,7 @@ def main(
                         bound_method
                     )
                     dynamo_handlers.append(dynamo_wrapped_method)
-            # Run startup hooks before setting up endpoints
-            for name, member in vars(class_instance.__class__).items():
-                if callable(member) and getattr(
-                    member, "__dynamo_startup_hook__", False
-                ):
-                    logger.debug(f"Running startup hook: {name}")
-                    result = getattr(class_instance, name)()
-                    if inspect.isawaitable(result):
-                        # await on startup hook async_on_start
-                        await result
-                        logger.debug(f"Completed async startup hook: {name}")
-                    else:
-                        logger.info(f"Completed startup hook: {name}")
+
             logger.info(
                 f"Starting {service.name} instance with all registered endpoints"
             )
@@ -253,10 +245,10 @@ def main(
     async def web_worker():
         # We want to wait until dyn_worker has initialized class_instance
         await instanceReady.wait()
+
         if not service.app:
             return
 
-        # TODO: init hooks
         # Add API routes to the FastAPI app
         added_routes = add_fastapi_routes(service.app, service, class_instance)
         if added_routes:
@@ -355,6 +347,19 @@ def main(
     # Always start the dynamo worker, no reason not to
     worker_tasks.append(dyn_worker())
     asyncio.run(run_concurrent_workers(worker_tasks))
+
+
+async def run_startup_hooks(class_instance):
+    """Run all startup hooks on the class instance"""
+    for name, member in vars(class_instance.__class__).items():
+        if callable(member) and getattr(member, "__dynamo_startup_hook__", False):
+            logger.debug(f"Running startup hook: {name}")
+            result = getattr(class_instance, name)()
+            if inspect.isawaitable(result):
+                await result
+                logger.debug(f"Completed async startup hook: {name}")
+            else:
+                logger.info(f"Completed startup hook: {name}")
 
 
 def run_shutdown_hooks(class_instance):
