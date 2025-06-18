@@ -79,6 +79,7 @@ class KvbmCacheManager:
 
         owned_blocks = self.cache_manager.get_computed_blocks(sequence_hashes)
         block_count = owned_blocks.block_count()
+
         num_computed_tokens = block_count * self.block_size
 
         if self.log_stats:
@@ -88,7 +89,7 @@ class KvbmCacheManager:
 
         print(f"owned_blocks_count: {block_count}")
 
-        return KvbmCacheBlocks(owned_blocks), block_count * self.block_size
+        return KvbmCacheBlocks(owned_blocks), num_computed_tokens
 
     def _create_slot(self, request: Request) -> list[int]:
         """Create a slot for the request."""
