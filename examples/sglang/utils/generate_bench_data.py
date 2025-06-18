@@ -10,6 +10,9 @@ Helper script that uses SGLang's random request generator to sample ShareGPT dat
 and then converts it to a jsonl file that can be used by GenAI perf for benchmarking
 
 We specifically leverage the `/v1/experimental/dynamo/completions` endpoint to benchmark
+
+Example usage:
+python3 generate_bench_data.py --model deepseek-ai/DeepSeek-R1 --output data.jsonl
 """
 
 def main():
@@ -51,6 +54,8 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
+    # this is what SGL uses in their benchmarking
+    # https://github.com/sgl-project/sglang/blob/b783c1cb829ec451639d1a3ce68380fb7a7be4a3/python/sglang/bench_one_batch_server.py#L131
     samples = sample_random_requests(
         input_len=args.input_len,
         output_len=args.output_len,
@@ -64,11 +69,10 @@ def main():
 
     with open(args.output, "w", encoding="utf-8") as fout:
         for row in samples:
+            # genai-perf expects this format
             payload = {
-                "model": args.model,
-                "token_ids": row.prompt,
-                "stream": True,
-                "max_tokens": row.output_len,
+                "text": row.prompt,
+                "output_length": row.output_len,
             }
             fout.write(json.dumps(payload) + "\n")
 
