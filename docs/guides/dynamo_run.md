@@ -1,38 +1,5 @@
 # Running Dynamo (`dynamo run`)
 
-- [Running Dynamo (`dynamo run`)](#running-dynamo-dynamo-run)
-  - [Quickstart with pip and vllm](#quickstart-with-pip-and-vllm)
-    - [Use model from Hugging Face](#use-model-from-hugging-face)
-    - [Run a model from local file](#run-a-model-from-local-file)
-      - [Download model from Hugging Face](#download-model-from-hugging-face)
-      - [Run model from local file](#run-model-from-local-file)
-    - [Distributed System](#distributed-system)
-    - [Network names](#network-names)
-    - [KV-aware routing](#kv-aware-routing)
-  - [Full usage details](#full-usage-details)
-    - [Getting Started](#getting-started)
-      - [Setup](#setup)
-        - [Step 1: Install libraries](#step-1-install-libraries)
-        - [Step 2: Install Rust](#step-2-install-rust)
-        - [Step 3: Build](#step-3-build)
-      - [Defaults](#defaults)
-    - [Running Inference with Pre-built Engines](#running-inference-with-pre-built-engines)
-      - [mistralrs](#mistralrs)
-      - [llamacpp](#llamacpp)
-      - [sglang](#sglang)
-      - [vllm](#vllm)
-      - [trtllm](#trtllm)
-        - [Step 1: Build the environment](#step-1-build-the-environment)
-        - [Step 2: Run the environment](#step-2-run-the-environment)
-        - [Step 3: Execute `dynamo run` command](#step-3-execute-dynamo-run-command)
-      - [Echo Engines](#echo-engines)
-        - [echo\_core](#echo_core)
-        - [echo\_full](#echo_full)
-        - [Configuration](#configuration)
-      - [Batch mode](#batch-mode)
-    - [Extra engine arguments](#extra-engine-arguments)
-    - [Writing your own engine in Python](#writing-your-own-engine-in-python)
-
 This guide explains the`dynamo run` command.
 
 `dynamo-run` is a CLI tool for exploring the Dynamo components. It's also an example of how to use components from Rust. If you use the Python wheel, it's available as `dynamo run` .
@@ -41,12 +8,19 @@ It supports these engines: mistralrs, llamacpp, sglang, vllm, and tensorrt-llm. 
 
 Usage:
 ```
-dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=2.0] [--kv-gpu-cache-usage-weight=1.0] [--kv-waiting-requests-weight=1.0]
+dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=2.0] [--kv-gpu-cache-usage-weight=1.0] [--kv-waiting-requests-weight=1.0] [--verbosity (-v|-vv)]
 ```
 
 Example: `dynamo run Qwen/Qwen3-0.6B`
 
 Set the environment variable `DYN_LOG` to adjust the logging level; for example, `export DYN_LOG=debug`. It has the same syntax as `RUST_LOG`.
+
+To adjust verbosity, use `-v` to enable debug logging or `-vv` to enable full trace logging. For example:
+
+```bash
+dynamo-run in=http out=mistralrs -v  # enables debug logging
+dynamo-run in=text out=llamacpp -vv  # enables full trace logging
+```
 
 ## Quickstart with pip and vllm
 
@@ -414,7 +388,9 @@ uv pip install pip
 uv pip install vllm==0.8.4 setuptools
 ```
 
-**Note: If you're on Ubuntu 22.04 or earlier, you must add `--python=python3.10` to your `uv venv` command**
+```{note}
+If you're on Ubuntu 22.04 or earlier, you must add `--python=python3.10` to your `uv venv` command.
+```
 
 2. Build:
 ```
@@ -431,7 +407,7 @@ Inside that virtualenv:
 
 ```
 
-To pass extra arguments to the vllm engine see [Extra engine arguments](#extra-engine-arguments) below.
+To pass extra arguments to the vllm engine see [Extra engine arguments](#extra-engine-arguments).
 
 vllm attempts to allocate enough KV cache for the full context length at startup. If that does not fit in your available memory pass `--context-length <value>`.
 
@@ -567,8 +543,6 @@ dynamo-run in=http out=trtllm TinyLlama/TinyLlama-1.1B-Chat-v1.0 --extra-engine-
 
 ### Writing your own engine in Python
 
-Note: This section replaces "bring-your-own-engine".
-
 The [dynamo](https://pypi.org/project/ai-dynamo/) Python library allows you to build your own engine and attach it to Dynamo.
 
 The Python file must do three things:
@@ -580,10 +554,10 @@ The Python file must do three things:
 from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
-# 1. Decorate a function to get the runtime
-#
-@dynamo_worker(static=False)
-async def worker(runtime: DistributedRuntime):
+   # 1. Decorate a function to get the runtime
+   #
+   @dynamo_worker(static=False)
+   async def worker(runtime: DistributedRuntime):
 
     # 2. Register ourselves on the network
     #

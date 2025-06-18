@@ -25,7 +25,7 @@ use crate::{
     protocols::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
-    protocols::openai::completions::{CompletionRequest, CompletionResponse},
+    protocols::openai::completions::{CompletionResponse, NvCreateCompletionRequest},
     protocols::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
 };
 
@@ -106,8 +106,12 @@ impl ModelWatcher {
                             tracing::info!(model_name = model_entry.name, "added model");
                             self.notify_on_model.notify_waiters();
                         }
-                        Err(e) => {
-                            tracing::error!(%e, "error adding model {}", model_entry.name);
+                        Err(err) => {
+                            tracing::error!(
+                                error = format!("{err:#}"),
+                                "error adding model {}",
+                                model_entry.name
+                            );
                         }
                     }
                 }
@@ -235,7 +239,7 @@ impl ModelWatcher {
                     .add_chat_completions_model(&model_entry.name, chat_engine)?;
 
                 let frontend = SegmentSource::<
-                    SingleIn<CompletionRequest>,
+                    SingleIn<NvCreateCompletionRequest>,
                     ManyOut<Annotated<CompletionResponse>>,
                 >::new();
                 let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
@@ -286,12 +290,11 @@ impl ModelWatcher {
                     .add_chat_completions_model(&model_entry.name, engine)?;
             }
             ModelType::Completion => {
-                let push_router =
-                    PushRouter::<CompletionRequest, Annotated<CompletionResponse>>::from_client(
-                        client,
-                        Default::default(),
-                    )
-                    .await?;
+                let push_router = PushRouter::<
+                    NvCreateCompletionRequest,
+                    Annotated<CompletionResponse>,
+                >::from_client(client, Default::default())
+                .await?;
                 let engine = Arc::new(push_router);
                 self.manager
                     .add_completions_model(&model_entry.name, engine)?;

@@ -25,7 +25,7 @@ use dynamo_runtime::protocols::annotated::Annotated;
 
 use dynamo_llm::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-    completions::{prompt_to_string, CompletionRequest, CompletionResponse},
+    completions::{prompt_to_string, CompletionResponse, NvCreateCompletionRequest},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
 };
 
@@ -65,6 +65,7 @@ fn best_device() -> pipeline_error::Result<Device> {
 
 struct MistralRsEngine {
     mistralrs: Arc<MistralRs>,
+    context_length: usize,
 }
 
 impl MistralRsEngine {
@@ -203,6 +204,7 @@ impl MistralRsEngine {
         .with_prefix_cache_n(16);
         let engine = MistralRsEngine {
             mistralrs: builder.build(),
+            context_length: max_seq_len,
         };
 
         // skip the id used for dummy run https://github.com/EricLBuehler/mistral.rs/issues/1218
@@ -310,12 +312,21 @@ impl
             frequency_penalty: request.inner.frequency_penalty.or(det.frequency_penalty),
             presence_penalty: request.inner.presence_penalty.or(det.presence_penalty),
             stop_toks: request.inner.stop.map(to_stop_tokens).or(det.stop_toks),
-            max_len: request
-                .inner
-                .max_completion_tokens
-                .or(request.inner.max_tokens)
-                .map(|m| m as usize)
-                .or(det.max_len),
+            max_len: {
+                let requested_max_tokens = request
+                    .inner
+                    .max_completion_tokens
+                    .or(request.inner.max_tokens)
+                    .map(|m| m as usize);
+
+                // Ensure max_len doesn't exceed context length
+                match requested_max_tokens {
+                    Some(max_tokens) => Some(std::cmp::min(max_tokens, self.context_length)),
+                    None => det
+                        .max_len
+                        .map(|len| std::cmp::min(len, self.context_length)),
+                }
+            },
             logits_bias: request
                 .inner
                 .logit_bias
@@ -407,9 +418,6 @@ impl
                             id: None,
                             data: Some(delta),
                             event: None,
-                            chunk_tokens: None,
-                            input_tokens: None,
-                            output_tokens: None,
                             comment: None,
                         };
                         yield ann;
@@ -459,12 +467,12 @@ fn to_logit_bias(lb: HashMap<String, serde_json::Value>) -> HashMap<u32, f32> {
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<CompletionRequest>, ManyOut<Annotated<CompletionResponse>>, Error>
+impl AsyncEngine<SingleIn<NvCreateCompletionRequest>, ManyOut<Annotated<CompletionResponse>>, Error>
     for MistralRsEngine
 {
     async fn generate(
         &self,
-        request: SingleIn<CompletionRequest>,
+        request: SingleIn<NvCreateCompletionRequest>,
     ) -> Result<ManyOut<Annotated<CompletionResponse>>, Error> {
         let (request, context) = request.transfer(());
         let ctx = context.context();
@@ -499,12 +507,17 @@ impl AsyncEngine<SingleIn<CompletionRequest>, ManyOut<Annotated<CompletionRespon
                 .clone()
                 .map(to_stop_tokens)
                 .or(det.stop_toks),
-            max_len: request
-                .inner
-                .max_tokens
-                .or(request.inner.max_tokens)
-                .map(|m| m as usize)
-                .or(det.max_len),
+            max_len: {
+                let requested_max_tokens = request.inner.max_tokens.map(|m| m as usize);
+
+                // Ensure max_len doesn't exceed context length
+                match requested_max_tokens {
+                    Some(max_tokens) => Some(std::cmp::min(max_tokens, self.context_length)),
+                    None => det
+                        .max_len
+                        .map(|len| std::cmp::min(len, self.context_length)),
+                }
+            },
             logits_bias: request
                 .inner
                 .logit_bias
@@ -569,9 +582,6 @@ impl AsyncEngine<SingleIn<CompletionRequest>, ManyOut<Annotated<CompletionRespon
                             id: None,
                             data: Some(inner),
                             event: None,
-                            chunk_tokens: None,
-                            input_tokens: None,
-                            output_tokens: None,
                             comment: None,
                         };
                         yield ann;

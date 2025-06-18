@@ -18,6 +18,10 @@ kind: ServiceAccount
 metadata:
   name: planner-serviceaccount
   namespace: {{ .Values.namespace }}
+{{- if .Values.dynamo.dockerRegistry.useKubernetesSecret }}
+imagePullSecrets:
+- name: dynamo-regcred
+{{- end }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

@@ -3,40 +3,23 @@
 
 use super::*;
 
-use std::sync::Arc;
-
-use dynamo_llm::tokens::{compute_hash_v2, TokenBlockSequence, Tokens};
+use dynamo_llm::tokens::compute_hash_v2;
 
 /// Request Inputs
 #[pyclass]
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct KvbmRequest {
-    request_id: String,
-    lora_name: Option<String>,
-    salt_hash: u64,
-    tbs: Arc<TokenBlockSequence>,
+    pub request_id: String,
+    pub lora_name: Option<String>,
+    pub salt_hash: u64,
 }
 
 #[pymethods]
 impl KvbmRequest {
     #[new]
-    #[pyo3(signature = (request_id, tokens, block_size, lora_name=None, salt_hash=None))]
-    pub fn new(
-        request_id: String,
-        tokens: Vec<usize>,
-        block_size: usize,
-        lora_name: Option<String>,
-        salt_hash: Option<String>,
-    ) -> Self {
-        let tokens: Tokens = tokens
-            .into_iter()
-            .map(|t| t as u32)
-            .collect::<Vec<_>>()
-            .into();
-
-        tracing::debug!("tokens: {:?}", tokens);
-
+    #[pyo3(signature = (request_id, lora_name=None, salt_hash=None))]
+    pub fn new(request_id: String, lora_name: Option<String>, salt_hash: Option<String>) -> Self {
         // compute salt
         #[derive(Debug, serde::Serialize)]
         struct Salt {
@@ -58,23 +41,10 @@ impl KvbmRequest {
 
         tracing::debug!("salt_hash: {:?}", salt_hash);
 
-        let sequence = Arc::new(TokenBlockSequence::new(tokens, block_size, Some(salt_hash)));
-
-        tracing::debug!("sequence: {:?}", sequence);
-
         Self {
             request_id,
             lora_name,
             salt_hash,
-            tbs: sequence,
         }
-    }
-
-    pub fn sequence_hashes(&self) -> Vec<u64> {
-        self.tbs
-            .blocks()
-            .iter()
-            .map(|b| b.sequence_hash())
-            .collect()
     }
 }

@@ -52,6 +52,7 @@ derive_builder = {workspace = true }
 either = { workspace = true }
 etcd-client = { workspace = true }
 futures =  { workspace = true }
+futures-util = "0.3.31"
 hf-hub = { workspace = true }
 rand = { workspace = true }
 oneshot = { workspace = true }
@@ -61,6 +62,7 @@ serde_json = { workspace = true }
 strum = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+tmq = "0.5.0"
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }

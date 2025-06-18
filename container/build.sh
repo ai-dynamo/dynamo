@@ -88,7 +88,7 @@ TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # TensorRT-LLM commit to use for building the trtllm wheel if not provided.
 # Important Note: This commit is not used in our CI pipeline. See the CI
 # variables to learn how to run a pipeline with a specific commit.
-TRTLLM_COMMIT="8cb6163a57226e69d8a85788eff542a440ed9c89"
+TRTLLM_COMMIT="137fe35539ea182f1495f5021bfda97c729e50c3"
 
 # TensorRT-LLM PyPI index URL
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
@@ -111,6 +111,8 @@ SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
 NIXL_COMMIT=f531404be4866d85ed618b3baf4008c636798d63
 NIXL_REPO=ai-dynamo/nixl.git
+
+NIXL_UCX_EFA_REF=7ec95b95e524a87e81cac92f5ca8523e3966b16b
 
 NO_CACHE=""
 
@@ -247,6 +249,9 @@ get_options() {
         --release-build)
             RELEASE_BUILD=true
             ;;
+        --make-efa)
+            NIXL_UCX_REF=$NIXL_UCX_EFA_REF
+            ;;
         --)
             shift
             break
@@ -345,6 +350,8 @@ show_help() {
     echo "  [--no-cache disable docker build cache]"
     echo "  [--dry-run print docker commands without running]"
     echo "  [--build-context name=path to add build context]"
+    echo "  [--release-build perform a release build]"
+    echo "  [--make-efa Enables EFA support for NIXL]"
     exit 0
 }
 
@@ -498,6 +505,10 @@ fi
 if [  ! -z ${RELEASE_BUILD} ]; then
     echo "Performing a release build!"
     BUILD_ARGS+=" --build-arg RELEASE_BUILD=${RELEASE_BUILD} "
+fi
+
+if [ -n "${NIXL_UCX_REF}" ]; then
+    BUILD_ARGS+=" --build-arg NIXL_UCX_REF=${NIXL_UCX_REF} "
 fi
 
 LATEST_TAG="--tag dynamo:latest-${FRAMEWORK,,}"

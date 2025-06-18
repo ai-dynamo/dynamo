@@ -28,12 +28,13 @@ from vllm.inputs import TokensPrompt
 
 from dynamo.llm import ModelType, WorkerMetricsPublisher, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime.logging import configure_dynamo_logging
 
 # Only used if you run it manually from the command line
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
-logging.basicConfig(level=logging.DEBUG)
+configure_dynamo_logging()
 
 
 class Config:

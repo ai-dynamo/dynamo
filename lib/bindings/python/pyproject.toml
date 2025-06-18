@@ -28,7 +28,6 @@ requires-python = ">=3.10"
 dependencies = [
     "pydantic>=2.10.6,<2.11.0",
     "uvloop>=0.21.0",
-    "nats-py>=2.6.0",
 ]
 classifiers = [
     "Development Status :: 4 - Beta",

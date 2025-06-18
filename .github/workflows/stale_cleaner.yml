@@ -1,0 +1,37 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# https://github.com/actions/stale
+# This workflow is used to close stale issues and PRs after 30 days of inactivity.
+# Scheduled to run every day at 1:30 AM PST.
+# Configured to close issues with the label 'bug' after 30 days of inactivity.
+# Configured to close all PRs after 30 days of inactivity.
+# Configured to close the issue and PR after 5 days of inactivity.
+# Configured to delete the branch of the PR after 5 days of inactivity.
+
+
+name: 'Close stale issues and PRs'
+on:
+  schedule:
+    - cron: '30 9 * * *'
+
+permissions:
+  actions: write
+  contents: write # only for delete-branch option
+  issues: write
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@v9
+        with:
+          stale-issue-message: 'This issue is stale because it has been open 30 days with no activity. Remove stale label or comment or this will be closed in 5 days.'
+          close-issue-message: 'This issue has been closed due to inactivity. If you believe this issue is still relevant, please feel free to reopen it with additional context or information.'
+          stale-pr-message: 'This PR is stale because it has been open 30 days with no activity. Remove stale label or comment or this will be closed in 5 days.'
+          close-pr-message: 'This PR has been closed due to inactivity. If you believe this PR is still relevant, please feel free to reopen it with additional context or information.'
+          delete-branch: true
+          days-before-stale: 30
+          days-before-close: 5
+          any-of-issue-labels: 'bug'

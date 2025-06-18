@@ -34,7 +34,7 @@ use super::{
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
-pub struct CompletionRequest {
+pub struct NvCreateCompletionRequest {
     #[serde(flatten)]
     pub inner: async_openai::types::CreateCompletionRequest,
 
@@ -141,7 +141,7 @@ pub fn prompt_to_string(prompt: &async_openai::types::Prompt) -> String {
     }
 }
 
-impl NvExtProvider for CompletionRequest {
+impl NvExtProvider for NvCreateCompletionRequest {
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
     }
@@ -158,7 +158,7 @@ impl NvExtProvider for CompletionRequest {
     }
 }
 
-impl AnnotationsProvider for CompletionRequest {
+impl AnnotationsProvider for NvCreateCompletionRequest {
     fn annotations(&self) -> Option<Vec<String>> {
         self.nvext
             .as_ref()
@@ -174,7 +174,7 @@ impl AnnotationsProvider for CompletionRequest {
     }
 }
 
-impl OpenAISamplingOptionsProvider for CompletionRequest {
+impl OpenAISamplingOptionsProvider for NvCreateCompletionRequest {
     fn get_temperature(&self) -> Option<f32> {
         self.inner.temperature
     }
@@ -196,7 +196,7 @@ impl OpenAISamplingOptionsProvider for CompletionRequest {
     }
 }
 
-impl OpenAIStopConditionsProvider for CompletionRequest {
+impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
     fn get_max_tokens(&self) -> Option<u32> {
         self.inner.max_tokens
     }
@@ -255,10 +255,10 @@ impl ResponseFactory {
 }
 
 /// Implements TryFrom for converting an OpenAI's CompletionRequest to an Engine's CompletionRequest
-impl TryFrom<CompletionRequest> for common::CompletionRequest {
+impl TryFrom<NvCreateCompletionRequest> for common::CompletionRequest {
     type Error = anyhow::Error;
 
-    fn try_from(request: CompletionRequest) -> Result<Self, Self::Error> {
+    fn try_from(request: NvCreateCompletionRequest) -> Result<Self, Self::Error> {
         // openai_api_rs::v1::completion::CompletionRequest {
         // NA  pub model: String,
         //     pub prompt: String,

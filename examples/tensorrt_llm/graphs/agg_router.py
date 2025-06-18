@@ -14,8 +14,6 @@
 # limitations under the License.
 
 from components.frontend import Frontend
-from components.kv_router import Router
-from components.processor import Processor
 from components.worker import TensorRTLLMWorker
 
-Frontend.link(Processor).link(Router).link(TensorRTLLMWorker)
+Frontend.link(TensorRTLLMWorker)

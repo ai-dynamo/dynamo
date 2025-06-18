@@ -19,17 +19,17 @@
 //! mechanisms. It handles storage allocation, block management, and safe access
 //! patterns for both system memory and remote (NIXL) storage.
 
-mod config;
+pub mod config;
 mod state;
 
 pub mod block;
+pub mod distributed;
 pub mod events;
 pub mod layout;
+pub mod metrics;
 pub mod offload;
 pub mod pool;
 pub mod storage;
-
-// pub mod distributed;
 
 pub use crate::common::dtype::DType;
 pub use block::{
@@ -269,8 +269,6 @@ mod tests {
         let _block_manager = create_reference_block_manager();
     }
 
-    // todo: solve the async runtime issue
-    #[ignore]
     #[test]
     fn test_reference_block_manager_blocking() {
         dynamo_runtime::logging::init();
@@ -283,6 +281,8 @@ mod tests {
     //
     // This test is meant to mimic the behavior of the basic nixl integration test found here:
     // https://github.com/ai-dynamo/nixl/blob/main/src/bindings/rust/src/tests.rs
+    // TODO: This test doesn't work because NIXL doesn't support partial metadata in the rust bindings.
+    #[ignore]
     #[tokio::test]
     async fn test_reference_block_managers() {
         dynamo_runtime::logging::init();
@@ -375,7 +375,7 @@ mod tests {
         let host_blocks = block_manager
             .host()
             .unwrap()
-            .match_sequence_hashes(vec![immutable_device_blocks[0].sequence_hash()?].as_slice())
+            .match_sequence_hashes(vec![immutable_device_blocks[0].sequence_hash()].as_slice())
             .await
             .unwrap();
         assert_eq!(host_blocks.len(), 1);
@@ -383,7 +383,7 @@ mod tests {
         let disk_blocks = block_manager
             .disk()
             .unwrap()
-            .match_sequence_hashes(vec![immutable_device_blocks[0].sequence_hash()?].as_slice())
+            .match_sequence_hashes(vec![immutable_device_blocks[0].sequence_hash()].as_slice())
             .await
             .unwrap();
         assert_eq!(disk_blocks.len(), 1);

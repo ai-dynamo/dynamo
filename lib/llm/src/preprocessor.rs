@@ -46,7 +46,7 @@ use crate::protocols::{
     common::{SamplingOptionsProvider, StopConditionsProvider},
     openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-        completions::{CompletionRequest, CompletionResponse},
+        completions::{CompletionResponse, NvCreateCompletionRequest},
         nvext::NvExtProvider,
         DeltaGeneratorExt,
     },
@@ -59,6 +59,41 @@ pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedReque
 
 pub const ANNOTATION_FORMATTED_PROMPT: &str = "formatted_prompt";
 pub const ANNOTATION_TOKEN_IDS: &str = "token_ids";
+pub const ANNOTATION_LLM_METRICS: &str = "llm_metrics";
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct LLMMetricAnnotation {
+    pub input_tokens: usize,
+    pub output_tokens: usize,
+    pub chunk_tokens: usize,
+}
+
+impl LLMMetricAnnotation {
+    /// Convert this metrics struct to an Annotated event
+    pub fn to_annotation<T>(&self) -> Result<Annotated<T>, serde_json::Error> {
+        Annotated::from_annotation(ANNOTATION_LLM_METRICS, self)
+    }
+
+    /// Extract LLM metrics from an Annotated event, if present
+    pub fn from_annotation<T>(
+        annotation: &Annotated<T>,
+    ) -> Result<Option<LLMMetricAnnotation>, Box<dyn std::error::Error>> {
+        if annotation.event.is_none() {
+            return Ok(None);
+        }
+        if annotation.event.as_ref().unwrap() != ANNOTATION_LLM_METRICS {
+            return Ok(None);
+        }
+        let comments = annotation
+            .comment
+            .as_ref()
+            .ok_or("missing comments block")?;
+        if comments.len() != 1 {
+            return Err("malformed comments block - expected exactly 1 comment".into());
+        }
+        let metrics: LLMMetricAnnotation = serde_json::from_str(&comments[0])?;
+        Ok(Some(metrics))
+    }
+}
 
 pub struct OpenAIPreprocessor {
     mdcsum: String,
@@ -251,9 +286,20 @@ impl OpenAIPreprocessor {
                             .map_err(|e| e.to_string())
                     });
 
-                    response.chunk_tokens = Some(chunk_tokens);
-                    response.input_tokens = Some(isl);
-                    response.output_tokens = Some(current_osl);
+                    // Create LLM metrics annotation
+                    let llm_metrics = LLMMetricAnnotation {
+                        input_tokens: isl,
+                        output_tokens: current_osl,
+                        chunk_tokens,
+                    };
+
+                    if let Ok(metrics_annotated) = llm_metrics.to_annotation::<()>() {
+                        // Only set event if not already set to avoid overriding existing events (like errors)
+                        if response.event.is_none() {
+                            response.event = metrics_annotated.event;
+                        }
+                        response.comment = metrics_annotated.comment;
+                    }
 
                     tracing::trace!(
                         request_id = inner.context.id(),
@@ -341,7 +387,7 @@ impl
 #[async_trait]
 impl
     Operator<
-        SingleIn<CompletionRequest>,
+        SingleIn<NvCreateCompletionRequest>,
         ManyOut<Annotated<CompletionResponse>>,
         SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<BackendOutput>>,
@@ -349,7 +395,7 @@ impl
 {
     async fn generate(
         &self,
-        request: SingleIn<CompletionRequest>,
+        request: SingleIn<NvCreateCompletionRequest>,
         next: Arc<
             dyn AsyncEngine<
                 SingleIn<PreprocessedRequest>,

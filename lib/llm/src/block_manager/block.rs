@@ -24,6 +24,7 @@ use nixl_sys::NixlDescriptor;
 
 pub use registry::{GlobalRegistry, RegistrationHandle};
 pub use state::{BlockState, BlockStateInvalid};
+pub use transfer::TransferContext;
 
 use crate::block_manager::{
     state::KvBlockManagerState as BlockManager,
@@ -186,7 +187,17 @@ impl<S: Storage, M: BlockMetadata> Block<S, M> {
             BlockState::Complete(state) => Ok(state.token_block().sequence_hash()),
             BlockState::Registered(state, _) => Ok(state.sequence_hash()),
             _ => Err(BlockError::InvalidState(
-                "Block is not complete".to_string(),
+                "Block is not complete nor registered.".to_string(),
+            )),
+        }
+    }
+
+    pub fn parent_sequence_hash(&self) -> Result<Option<SequenceHash>, BlockError> {
+        match self.state() {
+            BlockState::Complete(state) => Ok(state.token_block().parent_sequence_hash()),
+            BlockState::Registered(state, _) => Ok(state.parent_sequence_hash()),
+            _ => Err(BlockError::InvalidState(
+                "Block is not complete nor registered.".to_string(),
             )),
         }
     }
@@ -223,6 +234,11 @@ impl<S: Storage, M: BlockMetadata> Block<S, M> {
     /// Get a reference to the state of the block
     pub fn state(&self) -> &BlockState {
         &self.state
+    }
+
+    /// Get a mutable reference to the state of the block
+    pub fn state_mut(&mut self) -> &mut BlockState {
+        &mut self.state
     }
 
     /// Get the number of blocks in the block
@@ -281,6 +297,30 @@ impl<S: Storage, M: BlockMetadata> PrivateBlockExt for Block<S, M> {
         registry: &mut registry::BlockRegistry,
     ) -> Result<Option<PublishHandle>, registry::BlockRegistationError> {
         registry.register_block(&mut self.state)
+    }
+}
+
+impl<S: Storage + NixlDescriptor, M: BlockMetadata> ReadableBlock for Block<S, M> {
+    type StorageType = S;
+}
+impl<S: Storage + NixlDescriptor, M: BlockMetadata> WritableBlock for Block<S, M> {
+    type StorageType = S;
+}
+impl<S: Storage + NixlDescriptor, M: BlockMetadata> Readable for Block<S, M> {}
+impl<S: Storage + NixlDescriptor, M: BlockMetadata> Writable for Block<S, M> {}
+impl<S: Storage + NixlDescriptor, M: BlockMetadata> Local for Block<S, M> {}
+
+impl<S: Storage + NixlDescriptor, M: BlockMetadata> BlockDataProvider for Block<S, M> {
+    type StorageType = S;
+
+    fn block_data(&self, _: private::PrivateToken) -> &BlockData<S> {
+        &self.data
+    }
+}
+
+impl<S: Storage + NixlDescriptor, M: BlockMetadata> BlockDataProviderMut for Block<S, M> {
+    fn block_data_mut(&mut self, _: private::PrivateToken) -> &mut BlockData<S> {
+        &mut self.data
     }
 }
 
@@ -504,7 +544,7 @@ where
         let mr = self
             .layout
             .memory_region(self.block_idx, layer_idx, outer_idx)?;
-        unsafe { view::LayerView::new(self, mr.addr(), mr.size()) }
+        unsafe { view::LayerView::new(self, mr.addr(), mr.size(), mr.storage_idx()) }
     }
 
     fn layer_view_mut(
@@ -515,7 +555,7 @@ where
         let mr = self
             .layout
             .memory_region(self.block_idx, layer_idx, outer_idx)?;
-        unsafe { view::LayerViewMut::new(self, mr.addr(), mr.size()) }
+        unsafe { view::LayerViewMut::new(self, mr.addr(), mr.size(), mr.storage_idx()) }
     }
 
     fn block_view(&self) -> BlockResult<view::BlockView<S>> {
@@ -523,7 +563,7 @@ where
             let mr = self.layout.memory_region(self.block_idx, 0, 0)?;
             let offset = mr.addr();
             let size = mr.size() * self.num_layers();
-            unsafe { view::BlockView::new(self, offset, size) }
+            unsafe { view::BlockView::new(self, offset, size, mr.storage_idx()) }
         } else {
             Err(BlockError::InvalidState(
                 "Block is not fully contiguous".to_string(),
@@ -536,7 +576,7 @@ where
             let mr = self.layout.memory_region(self.block_idx, 0, 0)?;
             let offset = mr.addr();
             let size = mr.size() * self.num_layers();
-            unsafe { view::BlockViewMut::new(self, offset, size) }
+            unsafe { view::BlockViewMut::new(self, offset, size, mr.storage_idx()) }
         } else {
             Err(BlockError::InvalidState(
                 "Block is not fully contiguous".to_string(),
@@ -638,6 +678,9 @@ pub(crate) fn layout_to_blocks<S: Storage, M: BlockMetadata>(
 pub struct MutableBlock<S: Storage, M: BlockMetadata> {
     block: Option<Block<S, M>>,
     return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, M>>,
+    // Use to track parent relationship, as well as ensure that parents of registered blocks stay
+    // alive as long as the child is alive.
+    parent: Option<Arc<MutableBlock<S, M>>>,
 }
 
 impl<S: Storage, M: BlockMetadata> BlockIdentifier for MutableBlock<S, M> {
@@ -676,7 +719,12 @@ impl<S: Storage, M: BlockMetadata> MutableBlock<S, M> {
         Self {
             block: Some(block),
             return_tx,
+            parent: None,
         }
+    }
+
+    pub fn set_parent(&mut self, parent: Arc<MutableBlock<S, M>>) {
+        self.parent = Some(parent);
     }
 }
 
@@ -804,6 +852,7 @@ impl<S: Storage + NixlDescriptor, M: BlockMetadata> IntoReadableBlocks<M> for Mu
 #[derive(Debug)]
 pub struct ImmutableBlock<S: Storage, M: BlockMetadata> {
     block: Arc<MutableBlock<S, M>>,
+    sequence_hash: SequenceHash,
 }
 
 impl<S: Storage, M: BlockMetadata> BlockIdentifier for ImmutableBlock<S, M> {
@@ -824,17 +873,26 @@ impl<S: Storage, M: BlockMetadata> Clone for ImmutableBlock<S, M> {
     fn clone(&self) -> Self {
         Self {
             block: self.block.clone(),
+            sequence_hash: self.sequence_hash,
         }
     }
 }
 
 impl<S: Storage, M: BlockMetadata> ImmutableBlock<S, M> {
     pub(crate) fn new(block: Arc<MutableBlock<S, M>>) -> Self {
-        Self { block }
+        let sequence_hash = block.sequence_hash().expect("block is in the wrong state");
+        Self {
+            block,
+            sequence_hash,
+        }
     }
 
-    pub fn mutable_block(&self) -> &Arc<MutableBlock<S, M>> {
+    pub(crate) fn mutable_block(&self) -> &Arc<MutableBlock<S, M>> {
         &self.block
+    }
+
+    pub fn sequence_hash(&self) -> SequenceHash {
+        self.sequence_hash
     }
 }
 
@@ -1612,7 +1670,7 @@ mod tests {
         FullyContiguous, LayoutConfig,
     };
     use crate::block_manager::storage::SystemAllocator;
-    use crate::tokens::TokenBlockSequence;
+    use crate::tokens::{TokenBlockSequence, Tokens};
 
     use dynamo_runtime::logging::init as init_logging;
     use nixl_sys::Agent as NixlAgent;
@@ -1948,7 +2006,14 @@ mod tests {
         // Create a block and wrap it in a MutableBlock
         let block_data = BlockData::new(layout.clone(), 0, 42, 0);
         let block = Block::new(block_data, BasicMetadata::default()).unwrap();
-        let mutable_block = MutableBlock::new(block, return_tx.clone());
+        let mut mutable_block = MutableBlock::new(block, return_tx.clone());
+
+        let tbs = TokenBlockSequence::new(Tokens::from(vec![0, 0, 0, 0]), 4, None);
+        let token_block = tbs.blocks().iter().next().unwrap();
+
+        mutable_block
+            .apply_token_block(token_block.clone())
+            .unwrap();
 
         // Wrap the mutable block in an Arc and create an ImmutableBlock from it
         let arc_mutable_block = Arc::new(mutable_block);

@@ -25,6 +25,8 @@ from typing import Any, Callable, Coroutine, Optional, TypedDict, Union
 
 logger = logging.getLogger(__name__)
 
+AsyncTask = Union[Callable[..., Coroutine[Any, Any, bool]], weakref.WeakMethod]
+
 
 class RoutingStrategy(Enum):
     ROUND_ROBIN = "round_robin"
@@ -54,9 +56,7 @@ class ConversationMessage(TypedDict):
 class ManagedThread(threading.Thread):
     def __init__(
         self,
-        task: Optional[
-            Union[Callable[..., Coroutine[Any, Any, bool]], weakref.WeakMethod]
-        ],
+        task: Optional[AsyncTask],
         error_queue: Optional[Queue] = None,
         name: Optional[str] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
@@ -76,9 +76,7 @@ class ManagedThread(threading.Thread):
 
     def run(self):
         while not self.stop_event.is_set():
-            task: Optional[
-                Union[Callable[..., Coroutine[Any, Any, bool]], weakref.WeakMethod]
-            ] = self.task
+            task: Optional[AsyncTask] = self.task
             if isinstance(task, weakref.WeakMethod):
                 task = task()
                 if task is None:
