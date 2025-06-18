@@ -29,9 +29,8 @@ Before using the SLA planner, you must profile the performance of the selected m
 
 ```bash
 cd $DYNAMO_HOME/benchmarks/profiler/
- python -m profile_sla \
-   --backend <vllm_v0/vllm_v1> \
-   --config <path-to-dynamo-config-file> \
+python -m profile_sla \
+  --backend <vllm_v0/vllm_v1> \
   --config <path-to-dynamo-config-file> \
   --output-dir <path-to-profile-results-dir> \
   --isl <target-input-sequence-length> \
