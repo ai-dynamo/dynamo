@@ -97,7 +97,7 @@ deployment_graphs = {
         ),
         text_payload,
     ),
-    "disagg-p-tp-1-dp-1-d-tp-1-tp-1": (
+    "disagg-p-tp-1-dp-1-d-tp-1-dp-1": (
         DeploymentGraph(
             module="graphs.disagg:Frontend",
             config="/workspace/tests/fault_tolerance/configs/disagg_p_tp_1_dp_1_d_tp_1_dp_1.yaml",
@@ -108,7 +108,7 @@ deployment_graphs = {
         ),
         text_payload,
     ),
-    "disagg-p-tp-1-dp-1-d-tp-1-tp-1": (
+    "disagg-p-tp-1-dp-1-d-tp-1-dp-1": (
         DeploymentGraph(
             module="graphs.disagg:Frontend",
             config="/workspace/tests/fault_tolerance/configs/disagg_p_tp_1_dp_1_d_tp_1_dp_1.yaml",
@@ -119,7 +119,7 @@ deployment_graphs = {
         ),
         text_payload,
     ),
-    "disagg-p-tp-1-dp-4-d-tp-4-tp-1": (
+    "disagg-p-tp-1-dp-4-d-tp-4-dp-1": (
         DeploymentGraph(
             module="graphs.disagg:Frontend",
             config="/workspace/tests/fault_tolerance/configs/disagg_p_tp_1_dp_4_d_tp_4_dp_1.yaml",
@@ -130,7 +130,7 @@ deployment_graphs = {
         ),
         text_payload,
     ),
-    "disagg-p-tp-1-dp-4-d-tp-4-tp-1": (
+    "disagg-p-tp-1-dp-4-d-tp-4-dp-1": (
         DeploymentGraph(
             module="graphs.disagg:Frontend",
             config="/workspace/tests/fault_tolerance/configs/disagg_p_tp_1_dp_4_d_tp_4_dp_1.yaml",
@@ -141,7 +141,7 @@ deployment_graphs = {
         ),
         text_payload,
     ),
-    "disagg-p-tp-2-dp-2-d-tp-4-tp-1": (
+    "disagg-p-tp-2-dp-2-d-tp-4-dp-1": (
         DeploymentGraph(
             module="graphs.disagg:Frontend",
             config="/workspace/tests/fault_tolerance/configs/disagg_p_tp_2_dp_2_d_tp_4_dp_1.yaml",
@@ -293,7 +293,7 @@ def _list_vllm_worker_processes():
 @pytest.mark.slow
 async def test_worker_failure(
         deployment_graph_test, request, runtime_services, num_clients, requests_per_client, worker_metrics,respawn, failures,
-        input_token_length,output_token_length, max_num_seqs, max_retries,display_dynamo_output, nvidia_smi
+        input_token_length,output_token_length, max_num_seqs, max_retries,display_dynamo_output, nvidia_smi, separate_process_logs
 ):
     """
     Test dynamo serve deployments with different graph configurations.
@@ -310,6 +310,9 @@ async def test_worker_failure(
     else:
         if "DYN_CIRCUS_RESPAWN" in os.environ:
             del os.environ["DYN_CIRCUS_RESPAWN"]
+
+    if separate_process_logs:
+        os.environ["DYN_CIRCUS_LOG_DIR"] = os.path.abspath(request.node.name)
 
     deployment_args = _set_deployment_args(request,
                                            max_num_seqs)

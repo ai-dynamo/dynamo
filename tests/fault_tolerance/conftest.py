@@ -9,7 +9,8 @@ def pytest_addoption(parser):
     parser.addoption("--max-num-seqs", type=int, default=None)
     parser.addoption("--max-retries", type=int, default=1)
     parser.addoption("--display-dynamo-output", action="store_true", default=False)
-
+    parser.addoption("--separate-process-logs", action="store_true", default=False)
+    
 @pytest.fixture
 def display_dynamo_output(request):
     return request.config.getoption("--display-dynamo-output")
@@ -41,6 +42,10 @@ def requests_per_client(request):
 @pytest.fixture
 def respawn(request):
     return request.config.getoption("--respawn")
+
+@pytest.fixture
+def separate_process_logs(request):
+    return request.config.getoption("--separate-process-logs")
 
    
    
