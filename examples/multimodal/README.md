@@ -265,3 +265,182 @@ curl localhost:8000/v1/chat/completions \
 If serving the example Qwen model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"Qwen/Qwen2.5-VL-7B-Instruct"`. If serving the example Phi3V model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"microsoft/Phi-3.5-vision-instruct"`.
 
 For more details on managing deployments, testing, and troubleshooting, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md).
+
+## Multimodal Aggregated Video Serving
+
+This example demonstrates deploying an aggregated multimodal model that can process video inputs.
+
+### Dependency
+
+Video example relies on `av` package for video preprocessing inside the encode_worker.
+Please install `av` inside the dynamo container to enable video example.
+
+`pip install av`
+
+### Components
+
+- workers: For video serving, we have two workers, [video_encode_worker](components/video_encode_worker.py) for decoding video into frames, and [video_decode_worker](components/video_decode_worker.py) for prefilling and decoding.
+- processor: Tokenizes the prompt and passes it to the decode worker.
+- frontend: HTTP endpoint to handle incoming requests.
+
+### Graph
+
+In this graph, we have two workers, `video_encode_worker` and `video_decode_worker`.
+The `video_encode_worker` is responsible for decoding the video into a series of frames. Unlike the image pipeline which generates embeddings, this pipeline passes the raw frames directly to the `video_decode_worker`. This transfer is done efficiently using RDMA.
+The `video_decode_worker` then receives these frames, and performs prefill and decode steps with the model. Separating the video processing from the language model inference allows for flexible scaling.
+
+This figure shows the flow of the graph:
+```mermaid
+flowchart LR
+  HTTP --> processor
+  processor --> HTTP
+  processor --> video_decode_worker
+  video_decode_worker --> processor
+  video_decode_worker --video_url--> video_encode_worker
+  video_encode_worker --frames--> video_decode_worker
+```
+
+```bash
+cd $DYNAMO_HOME/examples/multimodal
+# Serve a LLaVA-NeXT-Video-7B model:
+dynamo serve graphs.agg_video:Frontend -f ./configs/agg_video.yaml
+```
+
+### Client
+
+In another terminal:
+```bash
+curl -X 'POST'   'http://localhost:8000/v1/chat/completions'   -H 'Content-Type: application/json'   -d '{
+    "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Describe the video in detail"
+          },
+          {
+            "type": "video_url",
+            "video_url": {
+              "url": "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+            }
+          }
+        ]
+      }
+    ],
+    "max_tokens": 300,
+    "stream": false
+  }' | jq
+```
+
+You should see a response describing the video's content similar to
+```json
+{
+  "id": "b5714626-5889-4bb7-8c51-f3bca65b4683",
+  "object": "chat.completion",
+  "created": 1749772533,
+  "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": " Sure! The video features a group of anthropomorphic animals who appear human-like. They're out in a meadow, which is a large, open area covered in grasses, and have given human qualities like speaking and a desire to go on adventures. The animals are seen play-fighting with each other clearly seen glancing at the camera when they sense it, blinking, and Roman the second can be directly heard by the camera reciting the line, \"When the challenge becomes insane, the behavior becomes erratic.\" A white rabbit is the first in shot and he winks the left eye and flips the right ear before shaking with the mouse and squirrel friends on a blurry rock ledge under the sky. At some point, the rabbit turns towards the camera and starts playing with the thing, and there's a distant mountain in the background. Furthermore, a little animal from a tree in the background flies with two rocks, and it's joined by the rest of the group of friends. That outro is an elder turtle in the Ramden musical style saturated with a horn-like thing pattern."
+      },
+      "finish_reason": "stop"
+    }
+  ]
+}
+```
+
+## Multimodal Disaggregated Video Serving
+
+This example demonstrates deploying a disaggregated multimodal model that can process video inputs.
+
+### Dependency
+
+Video example relies on `av` package for video preprocessing inside the encode_worker.
+Please install `av` inside the dynamo container to enable video example.
+
+`pip install av`
+
+### Components
+
+- workers: For disaggregated video serving, we have three workers, [video_encode_worker](components/video_encode_worker.py) for decoding video into frames, [video_decode_worker](components/video_decode_worker.py) for decoding, and [video_prefill_worker](components/video_prefill_worker.py) for prefilling.
+- processor: Tokenizes the prompt and passes it to the decode worker.
+- frontend: HTTP endpoint to handle incoming requests.
+
+### Graph
+
+In this graph, we have three workers, `video_encode_worker`, `video_decode_worker`, and `video_prefill_worker`.
+For the LLaVA-NeXT-Video-7B model, frames are only required during the prefill stage. As such, the `video_encode_worker` is connected directly to the `video_prefill_worker`.
+The `video_encode_worker` is responsible for decoding the video into a series of frames and passing them to the `video_prefill_worker` via RDMA.
+The `video_prefill_worker` performs the prefilling step and forwards the KV cache to the `video_decode_worker` for decoding.
+
+This figure shows the flow of the graph:
+```mermaid
+flowchart LR
+  HTTP --> processor
+  processor --> HTTP
+  processor --> video_decode_worker
+  video_decode_worker --> processor
+  video_decode_worker --> video_prefill_worker
+  video_prefill_worker --> video_decode_worker
+  video_prefill_worker --video_url--> video_encode_worker
+  video_encode_worker --frames--> video_prefill_worker
+```
+
+```bash
+cd $DYNAMO_HOME/examples/multimodal
+# Serve a LLaVA-NeXT-Video-7B model:
+dynamo serve graphs.disagg_video:Frontend -f ./configs/disagg_video.yaml
+```
+
+### Client
+
+In another terminal:
+```bash
+curl -X 'POST'   'http://localhost:8000/v1/chat/completions'   -H 'Content-Type: application/json'   -d '{
+    "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
+    "messages": [
+      {
+        "role": "user",
+        "content": [
+          {
+            "type": "text",
+            "text": "Describe the video in detail"
+          },
+          {
+            "type": "video_url",
+            "video_url": {
+              "url": "https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4"
+            }
+          }
+        ]
+      }
+    ],
+    "max_tokens": 300,
+    "stream": false
+  }' | jq
+```
+
+You should see a response describing the video's content similar to
+```json
+{
+  "id": "d1d641b1-4daf-48d3-9d06-6a60743b5a42",
+  "object": "chat.completion",
+  "created": 1749775300,
+  "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": " The video features two animals in a lush, green outdoor environment. On the ground, there is a white rabbit with big brown eyes, a playful expression, and two antlers. The rabbit is accompanied by a uniquely colored bird with orange pupils, possibly a squirrel or a hamster, sitting on its head. These two animals seem to have embarked on an unlikely journey, flying together in the sky. The backdrop showcases rolling green hills and trees under the pleasant weather. The sky is clear, indicating a beautiful day. The colors and contrast suggest the landscape is during spring or summer, signifying the rabbit and bird could also be engaging in outdoor activities during those seasons. Overall, it's a charming scene depicting an unlikely yet harmonious pair, enjoying a surprise adventure in nature."
+      },
+      "finish_reason": "stop"
+    }
+  ]
+}
+```
