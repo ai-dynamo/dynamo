@@ -1,0 +1,79 @@
+import argparse
+import json
+import random
+import numpy as np
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from sglang.bench_serving import sample_random_requests
+
+"""
+Helper script that uses SGLang's random request generator to sample ShareGPT data 
+and then converts it to a jsonl file that can be used by GenAI perf for benchmarking
+
+We specifically leverage the `/v1/experimental/dynamo/completions` endpoint to benchmark
+"""
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Use sglang.sample_random_requests to generate token-based JSONL for GenAI-Perf"
+    )
+    parser.add_argument(
+        "--dataset-path", type=str, default="", help="Path or URL to ShareGPT JSON"
+    )
+    parser.add_argument(
+        "--output", type=str, required=True, help="Output JSONL filename"
+    )
+    parser.add_argument(
+        "--model", type=str, required=True, help="Model identifier for payloads"
+    )
+    parser.add_argument(
+        "--tokenizer", type=str, required=True, help="HuggingFace tokenizer name"
+    )
+    parser.add_argument(
+        "--num-prompts", type=int, default=8192, help="Total number of samples"
+    )
+    parser.add_argument(
+        "--input-len", type=int, default=4096, help="Target input token length"
+    )
+    parser.add_argument(
+        "--output-len", type=int, default=5, help="Target output token length"
+    )
+    parser.add_argument(
+        "--range-ratio", type=float, default=1.0, help="Sampling length range ratio"
+    )
+    parser.add_argument(
+        "--random-seed", type=int, default=1, help="Random seed for reproducibility"
+    )
+    args = parser.parse_args()
+
+    random.seed(args.random_seed)
+    np.random.seed(args.random_seed)
+
+    tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
+        args.tokenizer, trust_remote_code=True
+    )
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    samples = sample_random_requests(
+        input_len=args.input_len,
+        output_len=args.output_len,
+        num_prompts=args.num_prompts,
+        range_ratio=args.range_ratio,
+        tokenizer=tokenizer,
+        dataset_path=args.dataset_path,
+        random_sample=True,
+        return_text=False,
+    )
+
+    with open(args.output, "w", encoding="utf-8") as fout:
+        for row in samples:
+            payload = {
+                "model": args.model,
+                "token_ids": row.prompt,
+                "stream": True,
+                "max_tokens": row.output_len,
+            }
+            fout.write(json.dumps(payload) + "\n")
+
+if __name__ == "__main__":
+    main()
