@@ -15,7 +15,8 @@ use futures::StreamExt;
 use std::sync::Arc;
 
 use super::{
-    openai::{process_event_converter, ErrorResponse},
+    metrics::Endpoint,
+    openai::{monitor_for_disconnects, process_event_converter, ErrorResponse},
     service_v2, RouteDoc,
 };
 use crate::protocols::{
@@ -31,7 +32,6 @@ async fn token_completions(
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     let model = request.model.clone();
     let request_id = uuid::Uuid::new_v4().to_string();
-
     let streaming = request.stream.unwrap_or(false);
 
     let engine = state
@@ -39,20 +39,32 @@ async fn token_completions(
         .get_token_completion_engine(&model)
         .map_err(|_| ErrorResponse::model_not_found())?;
 
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(&model, Endpoint::Completions, streaming);
+
+    let mut response_collector = state.metrics_clone().create_response_collector(&model);
+
     let request_context = Context::with_id(request, request_id);
     let stream = engine
         .generate(request_context)
         .await
         .map_err(|e| ErrorResponse::from_anyhow(e, "Generation failed"))?;
 
+    // Capture the context to cancel the stream if the client disconnects
+    let ctx = stream.context();
+
     if streaming {
-        let mut response_collector = state.metrics_clone().create_response_collector(&model);
         let stream = stream.map(move |response| {
             process_event_converter(
                 super::openai::EventConverter::from(response),
                 &mut response_collector,
             )
         });
+
+        // Add monitor_for_disconnects to send [DONE] event - same as OpenAI completions
+        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight_guard).await;
 
         let mut sse_stream = Sse::new(stream);
         if let Some(keep_alive) = state.sse_keep_alive() {
@@ -65,6 +77,7 @@ async fn token_completions(
             .await
             .map_err(|e| ErrorResponse::from_anyhow(e, "Failed to process response"))?;
 
+        inflight_guard.mark_ok();
         Ok(Json(response).into_response())
     }
 }

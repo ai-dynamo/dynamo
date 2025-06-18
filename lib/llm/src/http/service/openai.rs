@@ -456,7 +456,7 @@ struct ModelListing {
 ///
 /// If a disconnect is detected, then the context will issue a `stop_generating` call to the context which will
 /// propagate the cancellation signal to the backend.
-async fn monitor_for_disconnects(
+pub async fn monitor_for_disconnects(
     stream: Pin<
         Box<dyn Stream<Item = Result<axum::response::sse::Event, axum::Error>> + std::marker::Send>,
     >,
