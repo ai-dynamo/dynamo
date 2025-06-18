@@ -236,12 +236,13 @@ class Processor(ProcessMixIn):
             # Create an async generator function to process this request
             async def process_and_stream():
                 # TODO: queue request at processor when engines are full
-                router_mode = (await self.etcd_kv_cache.get("router")).decode()
-
-                self.use_router = router_mode in (RouterType.KV, RouterType.KV_LOAD)
+                logger.info(
+                    f"DEBUG: self.use_router = {self.use_router}, self.engine_args.router = '{self.engine_args.router}'"
+                )
 
                 prefix_hit_rate = 0.0  # Default value
                 if self.use_router:
+                    logger.info("DEBUG: Taking KV router path")
                     router_generator = await self.router_client.generate(
                         Tokens(
                             tokens=engine_prompt["prompt_token_ids"]
@@ -249,6 +250,9 @@ class Processor(ProcessMixIn):
                     )
                     decision = await router_generator.__anext__()
                     worker_id, prefix_hit_rate = decision.data()
+                    logger.info(
+                        f"DEBUG: KV router returned worker_id='{worker_id}' (type: {type(worker_id)}), prefix_hit_rate={prefix_hit_rate}"
+                    )
                     prefix_hit_rate = float(prefix_hit_rate)
 
                 # Create request object once with default prefix_hit_rate
@@ -260,18 +264,28 @@ class Processor(ProcessMixIn):
                 ).model_dump_json()
 
                 if self.use_router:
-                    if worker_id == "":
+                    if worker_id is None or worker_id == "":
+                        logger.info(
+                            "DEBUG: KV router - using generate() because worker_id is None or empty"
+                        )
                         engine_generator = await self.worker_client.generate(
                             request_obj
                         )
                     else:
+                        logger.info(
+                            f"DEBUG: KV router - using direct() with worker_id={worker_id}"
+                        )
                         engine_generator = await self.worker_client.direct(
                             request_obj, int(worker_id)
                         )
-                elif router_mode == RouterType.RANDOM:
+                elif self.engine_args.router == RouterType.RANDOM:
+                    logger.info("DEBUG: Using RANDOM router")
                     engine_generator = await self.worker_client.generate(request_obj)
-                elif router_mode == RouterType.ROUND_ROBIN:
+                elif self.engine_args.router == RouterType.ROUND_ROBIN:
+                    logger.info("DEBUG: Using ROUND_ROBIN router")
                     engine_generator = await self.worker_client.round_robin(request_obj)
+                else:
+                    logger.error(f"DEBUG: Unknown router: '{self.engine_args.router}'")
 
                 output_generator = self._generate_responses(
                     engine_generator, request_type

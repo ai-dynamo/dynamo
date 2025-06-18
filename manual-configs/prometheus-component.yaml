@@ -1,0 +1,26 @@
+apiVersion: dynamo.nvidia.com/v1alpha1
+kind: DynamoComponentDeployment
+metadata:
+  name: prometheus
+  namespace: hannahz-dynamo
+spec:
+  graph: llm-disagg  # Attach to existing DynamoGraphDeployment
+  component:
+    name: Prometheus
+    image: prom/prometheus:latest
+    command: ["prometheus", "--config.file=/etc/prometheus/prometheus.yml"]
+    ports:
+      - containerPort: 9090
+    volumeMounts:
+      - name: prometheus-config
+        mountPath: /etc/prometheus/
+    resources:
+      requests:
+        cpu: "0.5"
+        memory: "512Mi"
+    imagePullSecrets:
+      - name: docker-imagepullsecret
+  volumes:
+    - name: prometheus-config
+      configMap:
+        name: prometheus-config

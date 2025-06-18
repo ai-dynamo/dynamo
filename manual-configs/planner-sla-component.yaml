@@ -1,0 +1,33 @@
+apiVersion: dynamo.nvidia.com/v1alpha1
+kind: DynamoComponentDeployment
+metadata:
+  name: planner-sla
+  namespace: hannahz-dynamo
+spec:
+  graph: llm-disagg
+  component:
+    name: Planner
+    image: nvcr.io/nvidian/nim-llm-dev/dynamo-base-docker-llm:dep-178.2
+    command: ["python", "/workspace/examples/common/components/planner_sla.py"]
+    env:
+      - name: DYN_DEPLOYMENT_CONFIG
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.annotations['dynamo.nvidia.com/deployment-config']
+      - name: PROMETHEUS_ENDPOINT
+        value: "http://prometheus:9090"
+      - name: PROFILE_RESULTS_DIR
+        value: "/workspace/profiling_results"
+    volumeMounts:
+      - name: profiling-results
+        mountPath: /workspace/profiling_results
+    resources:
+      requests:
+        cpu: "1"
+        memory: "2Gi"
+    imagePullSecrets:
+      - name: docker-imagepullsecret
+  volumes:
+    - name: profiling-results
+      persistentVolumeClaim:
+        claimName: profiling-pvc
