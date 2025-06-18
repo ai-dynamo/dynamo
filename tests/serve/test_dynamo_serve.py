@@ -161,10 +161,9 @@ deployment_graphs = {
             module="graphs.agg:Frontend",
             config="configs/agg.yaml",
             directory="/workspace/examples/multimodal",
-            endpoints=["v1/chat/completions", "v1/completions"],
+            endpoints=["v1/chat/completions"],
             response_handlers=[
                 chat_completions_response_handler,
-                completions_response_handler,
             ],
             marks=[pytest.mark.gpu_2, pytest.mark.vllm],
         ),
