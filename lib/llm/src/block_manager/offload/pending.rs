@@ -30,8 +30,6 @@
 //! This is implemented through the [`TransferManager`] trait, which takes a single [`PendingTransfer`]
 //! and initiates the transfer.
 //!
-//! Since CUDA and NIXL transfers use completely different semantics, we implement two separate transfer managers.
-//!
 //! ## Workflow
 //! 1. A transfer request is made by calling [`TransferManager::enqueue_transfer`]
 //! 2. [`TransferManager::enqueue_transfer`] performs the transfer, and enqueues relevant data into a bounded channel.
@@ -149,116 +147,15 @@ pub trait TransferManager<Source: Storage, Target: Storage, Metadata: BlockMetad
     ) -> Result<()>;
 }
 
-pub struct CudaTransferManager<Source: Storage, Target: Storage, Metadata: BlockMetadata> {
-    pending_transfer_q: mpsc::Sender<(
-        PendingTransfer<Source, Target, Metadata>,
-        tokio::sync::oneshot::Receiver<()>,
-    )>,
-    transfer_ctx: Arc<TransferContext>,
-}
-
-impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
-    CudaTransferManager<Source, Target, Metadata>
-{
-    pub fn new(
-        transfer_ctx: Arc<TransferContext>,
-        max_concurrent_transfers: usize,
-        runtime: &Handle,
-        cancellation_token: CancellationToken,
-    ) -> Result<Self> {
-        let (tx, mut rx) = mpsc::channel::<(
-            PendingTransfer<Source, Target, Metadata>,
-            tokio::sync::oneshot::Receiver<()>,
-        )>(max_concurrent_transfers);
-
-        CriticalTaskExecutionHandle::new_with_runtime(
-            move |cancel_token| async move {
-                loop {
-                    tokio::select! {
-                        Some((pending_transfer, notify)) = rx.recv() => {
-                            // Wait for the event.
-                            notify.await.map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
-                            // Only finalize the transfer after the event is signaled.
-                            match pending_transfer.handle_complete() {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    // The only case where this can fail is if the progress engine is being shutdown.
-                                    // This is not a problem, so we can just ignore it.
-                                    tracing::warn!("Error handling transfer completion: {:?}", e);
-                                }
-                            }
-                        }
-
-                        _ = cancel_token.cancelled() => {
-                            return Ok(());
-                        }
-                    }
-                }
-            },
-            cancellation_token.clone(),
-            "Cuda Transfer Manager",
-            runtime,
-        )?
-        .detach();
-
-        Ok(Self {
-            pending_transfer_q: tx,
-            transfer_ctx,
-        })
-    }
-}
-
-#[async_trait]
-impl<Source, Target, Metadata> TransferManager<Source, Target, Metadata>
-    for CudaTransferManager<Source, Target, Metadata>
-where
-    Source: Storage,
-    Target: Storage,
-    Metadata: BlockMetadata,
-    // Check that the source block is readable, local, and writable to the target block.
-    MutableBlock<Source, Metadata>: ReadableBlock<StorageType = Source>
-        + Local
-        + WriteToStrategy<MutableBlock<Target, Metadata>>,
-    // Check that the target block is writable.
-    MutableBlock<Target, Metadata>: WritableBlock<StorageType = Target>,
-{
-    async fn enqueue_transfer(
-        &self,
-        mut pending_transfer: PendingTransfer<Source, Target, Metadata>,
-    ) -> Result<()> {
-        let notify = pending_transfer
-            .sources
-            .write_to(
-                &mut pending_transfer.targets,
-                true,
-                self.transfer_ctx.clone(),
-            )?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "write_to returned None when notify was true. This should never happen!"
-                )
-            })?;
-
-        // Send the pending transfer and event to the worker thread.
-        // If the queue is full, we block the worker until space becomes available.
-        self.pending_transfer_q
-            .send((pending_transfer, notify))
-            .await?;
-
-        Ok(())
-    }
-}
-
-pub struct DiskTransferManager {
+pub struct LocalTransferManager {
     futures_tx: mpsc::Sender<Pin<Box<dyn std::future::Future<Output = ()> + Send + Sync>>>,
     transfer_ctx: Arc<TransferContext>,
 }
 
-impl DiskTransferManager {
+impl LocalTransferManager {
     pub fn new(
         transfer_ctx: Arc<TransferContext>,
         max_concurrent_transfers: usize,
-        runtime: &Handle,
         cancellation_token: CancellationToken,
     ) -> Result<Self> {
         let (futures_tx, mut futures_rx) = mpsc::channel(1);
@@ -291,8 +188,8 @@ impl DiskTransferManager {
                 }
             },
             cancellation_token.clone(),
-            "Disk Transfer Manager",
-            runtime,
+            "Local Transfer Manager",
+            transfer_ctx.async_rt_handle(),
         )?
         .detach();
 
@@ -304,7 +201,7 @@ impl DiskTransferManager {
 }
 
 #[async_trait]
-impl<Source, Target, Metadata> TransferManager<Source, Target, Metadata> for DiskTransferManager
+impl<Source, Target, Metadata> TransferManager<Source, Target, Metadata> for LocalTransferManager
 where
     Source: Storage,
     Target: Storage,
@@ -322,26 +219,13 @@ where
     ) -> Result<()> {
         let notify = pending_transfer
             .sources
-            .write_to(
-                &mut pending_transfer.targets,
-                true,
-                self.transfer_ctx.clone(),
-            )?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "write_to returned None when notify was true. This should never happen!"
-                )
-            })?;
+            .write_to(&mut pending_transfer.targets, self.transfer_ctx.clone())?;
 
         let completion_future = async move {
             let _ = notify.await;
-            match pending_transfer.handle_complete() {
-                Ok(_) => {}
-                Err(e) => {
-                    // The only case where this can fail is if the progress engine is being shutdown.
-                    // This is not a problem, so we can just ignore it.
-                    tracing::warn!("Error handling transfer completion: {:?}", e);
-                }
+
+            if let Err(e) = pending_transfer.handle_complete() {
+                tracing::warn!("Error handling transfer completion: {:?}", e);
             }
         };
 
@@ -378,13 +262,13 @@ where
     pub fn new(
         transfer_manager: Manager,
         max_transfer_batch_size: usize,
-        runtime: &Handle,
+        transfer_ctx: Arc<TransferContext>,
         cancellation_token: CancellationToken,
     ) -> Self {
         Self {
             transfer_manager,
             max_transfer_batch_size,
-            runtime: runtime.clone(),
+            runtime: transfer_ctx.async_rt_handle().clone(),
             cancellation_token,
             _phantom: PhantomData,
         }
@@ -424,12 +308,10 @@ where
         let mut indicators = Vec::new();
 
         while !sources.is_empty() {
-            let sources = sources
-                .drain(..std::cmp::min(self.max_transfer_batch_size, sources.len()))
-                .collect();
-            let targets = targets
-                .drain(..std::cmp::min(self.max_transfer_batch_size, targets.len()))
-                .collect();
+            // Sources and targets are guaranteed to be the same length.
+            let num_blocks = std::cmp::min(self.max_transfer_batch_size, sources.len());
+            let sources = sources.drain(..num_blocks).collect();
+            let targets = targets.drain(..num_blocks).collect();
 
             // If we have a completion indicator, we need to create a new one for each sub-transfer.
             let indicator = if completion_indicator.is_some() {
