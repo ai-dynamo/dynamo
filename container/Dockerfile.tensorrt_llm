@@ -103,11 +103,11 @@ SHELL ["/bin/bash", "-c"]
 COPY --from=nixl_base /opt/nixl /opt/nixl
 COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
 RUN cd /opt/nixl && \
-        mkdir build && \
-        meson setup build/ --prefix=/usr/local/nixl && \
-        cd build/ && \
-        ninja && \
-        ninja install
+    mkdir build && \
+    meson setup build/ --prefix=/usr/local/nixl && \
+    cd build/ && \
+    ninja && \
+    ninja install
 
 ENV NIXL_PREFIX=/usr/local/nixl
 
