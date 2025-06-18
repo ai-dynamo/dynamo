@@ -71,7 +71,8 @@ services:
               count: all
               capabilities: [gpu]
     environment:
-      - NVIDIA_VISIBLE_DEVICES=all  # Make all GPUs visible to the container
+      # dcgm uses NVIDIA_VISIBLE_DEVICES variable but normally it is CUDA_VISIBLE_DEVICES
+      - NVIDIA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-all}
     runtime: nvidia  # Specify the NVIDIA runtime
     networks:
       - monitoring

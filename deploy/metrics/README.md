@@ -58,10 +58,17 @@ Networks:
 
 1. Make sure Docker and Docker Compose are installed on your system
 
-2. Start the visualization stack:
+2. Start Dynamo dependencies. Assume you're at the root dynamo path:
 
    ```bash
-   docker compose --profile metrics up -d
+   docker compose -f deploy/metrics/docker-compose.yml up -d  # Minimum components for Dynamo: etcd/nats/dcgm-exporter
+   # or
+   docker compose -f deploy/metrics/docker-compose.yml --profile metrics up -d  # In addition to the above, start Prometheus & Grafana
+   ```
+
+   If you have particular GPU(s) to use, set the variable below before docker compose:
+   ```bash
+   export CUDA_VISIBLE_DEVICES=0,2
    ```
 
 3. Web servers started. The ones that end in /metrics are in Prometheus format:
@@ -72,19 +79,19 @@ Networks:
    - etcd Server: `http://localhost:2379/metrics`
    - DCGM Exporter: `http://localhost:9401/metrics`
 
-4. Optionally, if you want to experiment further, look through components/metrics/README.md for more details on launching a metrics server, mock_worker, and a real worker.
+4. Optionally, if you want to experiment further, look through components/metrics/README.md for more details on launching a metrics server (subscribes to nats), mock_worker (publishes to nats), and real workers.
 
-   - Start the `components/metrics` application to begin monitoring for metric events from dynamo workers and aggregating them on a Prometheus metrics endpoint: `http://localhost:9091/metrics`.
+   - Start the [components/metrics](../../components/metrics/README.md) application to begin monitoring for metric events from dynamo workers and aggregating them on a Prometheus metrics endpoint: `http://localhost:9091/metrics`.
    - Uncomment the appropriate lines in prometheus.yml to poll port 9091.
-   - Start worker(s) that publishes KV Cache metrics: `examples/rust/service_metrics/bin/server.rs` can populate dummy KV Cache metrics.
-   - For a real workflow with real data, see the KV Routing example in `examples/python_rs/llm/vllm`.
+   - Start worker(s) that publishes KV Cache metrics: [examples/rust/service_metrics/bin/server](../../lib/runtime/examples/service_metrics/README.md)` can populate dummy KV Cache metrics.
+   - For a real workflow with real data, see the KV Routing example in [examples/llm/utils/vllm.py](../../examples/llm/utils/vllm.py).
 
 
 ## Configuration
 
 ### Prometheus
 
-The Prometheus configuration is defined in `prometheus.yml`. It is configured to scrape metrics from the metrics aggregation service endpoint.
+The Prometheus configuration is defined in [prometheus.yml](./prometheus.yml). It is configured to scrape metrics from the metrics aggregation service endpoint.
 
 Note: You may need to adjust the target based on your host configuration and network setup.
 
@@ -98,15 +105,15 @@ Grafana is pre-configured with:
 ## Required Files
 
 The following configuration files should be present in this directory:
-- `docker-compose.yml`: Defines the Prometheus and Grafana services
-- `prometheus.yml`: Contains Prometheus scraping configuration
-- `grafana.json`: Contains Grafana dashboard configuration
-- `grafana-datasources.yml`: Contains Grafana datasource configuration
-- `grafana-dashboard-providers.yml`: Contains Grafana dashboard provider configuration
+- [docker-compose.yml](./docker-compose.yml): Defines the Prometheus and Grafana services
+- [prometheus.yml](./prometheus.yml): Contains Prometheus scraping configuration
+- [grafana.json](./grafana.json): Contains Grafana dashboard configuration
+- [grafana-datasources.yml](./grafana-datasources.yml): Contains Grafana datasource configuration
+- [grafana-dashboard-providers.yml](./grafana-dashboard-providers.yml): Contains Grafana dashboard provider configuration
 
-## Metrics
+## Running the example `metrics` component
 
-The prometheus metrics endpoint exposes the following metrics:
+When you run the example [components/metrics](../../components/metrics/README.md) component, it exposes a Prometheus /metrics endpoint with the followings (defined in [../../components/metrics/src/lib.rs](../../components/metrics/src/lib.rs)):
 - `llm_requests_active_slots`: Number of currently active request slots per worker
 - `llm_requests_total_slots`: Total available request slots per worker
 - `llm_kv_blocks_active`: Number of active KV blocks per worker
