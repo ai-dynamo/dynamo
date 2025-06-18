@@ -298,7 +298,7 @@ To benchmark your deployment with GenAI-Perf, see this utility script, configuri
 `model` name and `host` based on your deployment: [perf.sh](../../benchmarks/llm/perf.sh)
 
 
-### Disaggregated Serving with KV Cache Transfer using **NIXL** (EXPERIMENTAL)
+### KV Cache Transfer for Disaggregated Serving
 
 In disaggregated serving architectures, KV cache must be transferred between prefill and decode nodes. TensorRT-LLM supports two methods for this transfer:
 
