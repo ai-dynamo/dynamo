@@ -552,9 +552,3 @@ fi
 $RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
 
 { set +x; } 2>/dev/null
-
-if [ -z "$RUN_PREFIX" ]; then
-    set -x
-fi
-
-{ set +x; } 2>/dev/null

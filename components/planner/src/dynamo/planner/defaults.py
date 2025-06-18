@@ -44,3 +44,19 @@ class SLAPlannerDefaults(BasePlannerDefaults):
     itl = 0.05  # in seconds
     load_predictor = "arima"  # ["constant", "arima", "prophet"]
     load_prediction_window_size = 50  # predict load using how many recent load samples
+
+
+class VllmV0ComponentName:
+    prefill_worker = "PrefillWorker"
+    decode_worker = "VllmWorker"
+
+
+class VllmV1ComponentName:
+    prefill_worker = "VllmPrefillWorker"
+    decode_worker = "VllmDecodeWorker"
+
+
+WORKER_COMPONENT_NAMES = {
+    "vllm_v0": VllmV0ComponentName,
+    "vllm_v1": VllmV1ComponentName,
+}

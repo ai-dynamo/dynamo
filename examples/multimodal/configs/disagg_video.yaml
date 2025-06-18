@@ -25,6 +25,9 @@ Common:
   video-token-id: 32000
   dummy-tokens-per-frame: 144
 
+Frontend:
+  common-configs: [model]
+
 Processor:
   router: round-robin
   common-configs: [model, block-size]
