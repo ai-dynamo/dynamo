@@ -13,29 +13,32 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import os
 import asyncio
+import json
+import os
+from datetime import datetime
+from multiprocessing import Process
+
+import psutil
 import pytest
+
 from dynamo.runtime import dynamo_worker
 from tests.fault_tolerance.utils.circus_controller import CircusController
-import json
-from datetime import datetime
 from tests.utils.managed_process import ManagedProcess
-from multiprocessing import Process
-import psutil
-import logging
+
 
 def run_metrics_process(log_dir):
     asyncio.run(get_metrics(log_dir))
 
+
 @dynamo_worker()
-async def get_metrics(runtime,log_dir):
+async def get_metrics(runtime, log_dir):
     # Log # processes
     # Log # metrics per vllm worker
     circus_controller = None
     pipeline = None
-    log_path = os.path.join(log_dir,"watcher.log.txt")
-    with open(log_path,"w") as log:
+    log_path = os.path.join(log_dir, "watcher.log.txt")
+    with open(log_path, "w") as log:
         while True:
             try:
                 await asyncio.sleep(0.5)
@@ -56,36 +59,39 @@ async def get_metrics(runtime,log_dir):
                         {"command": "list", "properties": {"name": f"{x}"}}
                     )
                     watchers.append((x, result))
-           
+
                 metrics = []
                 for x in pipeline.instance_ids():
-                    async for worker_metric in await pipeline.direct(None,x):
-                        metrics.append((x,worker_metric.data()))
-                    
+                    async for worker_metric in await pipeline.direct(None, x):
+                        metrics.append((x, worker_metric.data()))
+
                 vllm_processes = []
-                
+
                 for ps_process in psutil.process_iter(["name", "cmdline"]):
                     try:
-                        if "from multiprocessing.spawn import spawn_main;" in " ".join(ps_process.cmdline()):
+                        if "from multiprocessing.spawn import spawn_main;" in " ".join(
+                            ps_process.cmdline()
+                        ):
                             vllm_processes.append(ps_process.pid)
                     except (psutil.NoSuchProcess, psutil.AccessDenied):
                         # Process may have terminated or become inaccessible during iteration
                         pass
-                        
-                record = {"time": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-                          "watchers":watchers,
-                          "metrics":metrics,
-                          "vllm_processes":vllm_processes}
-                log.write(json.dumps(record)+"\n")
+
+                record = {
+                    "time": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                    "watchers": watchers,
+                    "metrics": metrics,
+                    "vllm_processes": vllm_processes,
+                }
+                log.write(json.dumps(record) + "\n")
                 log.flush()
-            except Exception as e:
+            except Exception:
                 pass
 
 
 @pytest.fixture
 def worker_metrics(request):
-    process = Process(target=run_metrics_process,
-                      args=(request.node.name,))
+    process = Process(target=run_metrics_process, args=(request.node.name,))
     process.start()
     yield
     process.kill()
@@ -105,6 +111,7 @@ class NvidiaSMI(ManagedProcess):
             data_dir=None,
             log_dir=request.node.name,
         )
+
 
 @pytest.fixture
 def nvidia_smi(request):

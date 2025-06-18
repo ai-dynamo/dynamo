@@ -26,7 +26,7 @@ import psutil
 import requests
 
 
-def terminate_process(process, logger = logging.getLogger()):
+def terminate_process(process, logger=logging.getLogger()):
     try:
         logger.info("Terminating %s", process)
         process.terminate()
@@ -48,7 +48,6 @@ def terminate_process_tree(pid, logger=logging.getLogger()):
     except psutil.NoSuchProcess:
         # Process already terminated
         pass
-
 
 
 @dataclass
@@ -229,9 +228,12 @@ class ManagedProcess:
         if self.terminate_existing:
             for proc in psutil.process_iter(["name", "cmdline"]):
                 if proc.name() == self._command_name or proc.name() in self.stragglers:
-                    self._logger.info("Terminating Existing %s %s", proc.name(), proc.pid)
+                    self._logger.info(
+                        "Terminating Existing %s %s", proc.name(), proc.pid
+                    )
 
                     terminate_process_tree(proc.pid, self._logger)
+
 
 def main():
     with ManagedProcess(

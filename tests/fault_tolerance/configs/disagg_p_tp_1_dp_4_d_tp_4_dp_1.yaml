@@ -43,7 +43,7 @@ PrefillWorker:
   max-num-batched-tokens: 16384
   ServiceArgs:
     workers: 4
-    resources:g
+    resources:
       gpu: '1'
   common-configs: [model, block-size, max-model-len, kv-transfer-config]
 

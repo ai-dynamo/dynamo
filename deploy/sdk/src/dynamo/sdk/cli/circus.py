@@ -31,7 +31,7 @@ import psutil
 from circus.arbiter import Arbiter as _Arbiter
 from circus.sockets import CircusSocket
 from circus.watcher import Watcher
-import time
+
 from .utils import ServiceProtocol, reserve_free_port
 
 
@@ -86,25 +86,24 @@ def create_circus_watcher(
     use_sockets: bool = True,
     **kwargs: Any,
 ) -> Watcher:
-
-    log_dir = os.environ.get("DYN_CIRCUS_LOG_DIR",None)
-    prefix = f'{log_dir}/{name}'
-    os.makedirs(prefix,exist_ok=True)
+    log_dir = os.environ.get("DYN_CIRCUS_LOG_DIR", None)
+    prefix = f"{log_dir}/{name}"
+    os.makedirs(prefix, exist_ok=True)
     if log_dir is not None:
-        stdout_stream={
-            'class': 'FileStream',
-            'filename': f'{prefix}/output.log',
-            'backup_count':10
+        stdout_stream = {
+            "class": "FileStream",
+            "filename": f"{prefix}/output.log",
+            "backup_count": 10,
         }
-        stderr_stream={
-            'class': 'FileStream', 
-            'filename': f'{prefix}/error.log',
-            'backup_count':10
+        stderr_stream = {
+            "class": "FileStream",
+            "filename": f"{prefix}/error.log",
+            "backup_count": 10,
         }
     else:
         stdout_stream = None
         stderr_stream = None
-        
+
     return Watcher(
         name=name,
         cmd=shlex.quote(cmd) if psutil.POSIX else cmd,

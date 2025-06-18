@@ -32,23 +32,20 @@ logging.basicConfig(
     datefmt=DATE_FORMAT,  # ISO 8601 UTC format
 )
 
-import shutil
-import os
-import pytest
 
 @pytest.fixture(autouse=True)
 def logger(request):
-    log_path = os.path.join(request.node.name,"test.log.txt")
+    log_path = os.path.join(request.node.name, "test.log.txt")
     logger = logging.getLogger()
-    os.makedirs(request.node.name,exist_ok=True)
-    handler = logging.FileHandler(log_path,mode="w")
-    formatter = logging.Formatter(LOG_FORMAT,datefmt=DATE_FORMAT)
+    os.makedirs(request.node.name, exist_ok=True)
+    handler = logging.FileHandler(log_path, mode="w")
+    formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
     handler.setFormatter(formatter)
     logger.addHandler(handler)
     yield
     handler.close()
     logger.removeHandler(handler)
-    
+
 
 def pytest_collection_modifyitems(config, items):
     """
