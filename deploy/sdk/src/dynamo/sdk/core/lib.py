@@ -14,6 +14,8 @@
 #  limitations under the License.
 #  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
 
+import asyncio
+import functools
 import logging
 import os
 from typing import Any, Callable, Dict, Optional, Type, TypeVar, Union
@@ -178,3 +180,42 @@ def get_readiness_handler(obj):
         if callable(fn) and getattr(fn, "__is_readiness_probe__", False):
             return fn
     return None
+
+
+def health_check(func):
+    """
+    Decorator for custom health check handler.
+    The function must return a tuple of (status, details) where status is either 'healthy' or 'unhealthy'
+    and details is a string describing the health status.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args, **kwargs):
+        result = func(*args, **kwargs)
+        if asyncio.iscoroutine(result):
+            try:
+                loop = asyncio.get_running_loop()
+                result = loop.run_until_complete(result)  # Already in event loop
+            except RuntimeError:
+                result = asyncio.run(result)  # No event loop
+        if not isinstance(result, tuple) or len(result) != 2:
+            raise ValueError(
+                "Health check function must return (status, details) tuple"
+            )
+        status, details = result
+        if status not in ["healthy", "unhealthy"]:
+            raise ValueError("status must be 'healthy' or 'unhealthy'")
+        return (status, details)
+
+    wrapper.__is_health_check__ = True  # Add a marker to the wrapper function
+    return wrapper
+
+
+def get_health_check_handlers(obj):
+    """Get all health check handlers from an object."""
+    handlers = []
+    for attr in dir(obj):
+        fn = getattr(obj, attr)
+        if callable(fn) and getattr(fn, "__is_health_check__", False):
+            handlers.append(fn)
+    return handlers

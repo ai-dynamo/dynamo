@@ -61,6 +61,13 @@ url = { workspace = true }
 validator = { workspace = true }
 xxhash-rust = { workspace = true }
 
+# HTTP service dependencies
+axum = { workspace = true }
+hyper = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+pyo3 = { version = "0.23.4", features = ["auto-initialize"] }
+
 async-once-cell = { version = "0.5.4" }
 educe = { version = "0.6.0" }
 figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }

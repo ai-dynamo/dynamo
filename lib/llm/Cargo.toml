@@ -90,7 +90,7 @@ nix = { version = "0.26", optional = true }
 unicode-segmentation = "1.12"
 
 # http-service
-axum = "0.8"
+axum = { workspace = true }
 
 # tokenizers
 tokenizers = { version = "0.21.1", default-features = false, features = [
