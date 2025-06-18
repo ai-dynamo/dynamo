@@ -40,7 +40,8 @@ docker:
     ARG DOCKER_SERVER=my-registry
     ARG IMAGE_TAG=latest
     ARG IMAGE_SUFFIX=dynamo-operator
-    FROM gcr.io/distroless/static-debian11
+    ARG BASE_IMAGE=urm.nvidia.com/sw-gpu-ucs-hardened-docker/distroless/go:v3.1.6-amd64
+    FROM $BASE_IMAGE
     WORKDIR /
     COPY +build/manager .
     USER 65532:65532
