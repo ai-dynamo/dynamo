@@ -111,7 +111,7 @@ impl WorkerMetricsPublisher {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (request_active_slots, request_total_slots, kv_active_blocks, kv_total_blocks, num_requests_waiting, gpu_cache_usage_perc, gpu_prefix_cache_hit_rate, data_parallel_rank = 0))]
+    #[pyo3(signature = (request_active_slots, request_total_slots, kv_active_blocks, kv_total_blocks, num_requests_waiting, gpu_cache_usage_perc, gpu_prefix_cache_hit_rate, data_parallel_rank = 0, spec_dec_num_spec_tokens = None, spec_dec_num_drafts = None, spec_dec_num_draft_tokens = None, spec_dec_num_accepted_tokens = None, spec_dec_num_accepted_tokens_per_pos = None))]
     fn publish(
         &self,
         _py: Python,
@@ -123,18 +123,51 @@ impl WorkerMetricsPublisher {
         gpu_cache_usage_perc: f32,
         gpu_prefix_cache_hit_rate: f32,
         data_parallel_rank: u32,
+        spec_dec_num_spec_tokens: Option<u32>,
+        spec_dec_num_drafts: Option<u32>,
+        spec_dec_num_draft_tokens: Option<u32>,
+        spec_dec_num_accepted_tokens: Option<u32>,
+        spec_dec_num_accepted_tokens_per_pos: Option<Vec<u32>>,
     ) -> PyResult<()> {
+        let worker_stats = llm_rs::kv_router::protocols::WorkerStats {
+            data_parallel_rank: Some(data_parallel_rank),
+            request_active_slots,
+            request_total_slots,
+            num_requests_waiting,
+        };
+
+        let kv_stats = llm_rs::kv_router::protocols::KvStats {
+            kv_active_blocks,
+            kv_total_blocks,
+            gpu_cache_usage_perc,
+            gpu_prefix_cache_hit_rate,
+        };
+
+        // create spec decode stats if spec decode metrics provided
+        let spec_decode_stats = if spec_dec_num_spec_tokens.is_some()
+            || spec_dec_num_drafts.is_some()
+            || spec_dec_num_draft_tokens.is_some()
+            || spec_dec_num_accepted_tokens.is_some()
+            || spec_dec_num_accepted_tokens_per_pos.is_some()
+        {
+            Some(llm_rs::kv_router::protocols::SpecDecodeStats {
+                num_spec_tokens: spec_dec_num_spec_tokens,
+                num_drafts: spec_dec_num_drafts,
+                num_draft_tokens: spec_dec_num_draft_tokens,
+                num_accepted_tokens: spec_dec_num_accepted_tokens,
+                num_accepted_tokens_per_pos: spec_dec_num_accepted_tokens_per_pos,
+            })
+        } else {
+            None
+        };
+
+        // Create and publish the complete metrics
         self.inner
             .publish(
                 llm_rs::kv_router::protocols::ForwardPassMetrics {
-                    data_parallel_rank: Some(data_parallel_rank),
-                    request_active_slots,
-                    request_total_slots,
-                    kv_active_blocks,
-                    kv_total_blocks,
-                    num_requests_waiting,
-                    gpu_cache_usage_perc,
-                    gpu_prefix_cache_hit_rate,
+                    worker_stats,
+                    kv_stats,
+                    spec_decode_stats,
                 }
                 .into(),
             )
@@ -561,13 +594,13 @@ impl KvMetricsAggregator {
             .iter()
             .map(|(worker_id, x)| EndpointKvMetrics {
                 worker_id: *worker_id,
-                request_active_slots: x.data.request_active_slots,
-                request_total_slots: x.data.request_total_slots,
-                kv_active_blocks: x.data.kv_active_blocks,
-                kv_total_blocks: x.data.kv_total_blocks,
-                num_requests_waiting: x.data.num_requests_waiting,
-                gpu_cache_usage_perc: x.data.gpu_cache_usage_perc,
-                gpu_prefix_cache_hit_rate: x.data.gpu_prefix_cache_hit_rate,
+                request_active_slots: x.data.worker_stats.request_active_slots,
+                request_total_slots: x.data.worker_stats.request_total_slots,
+                kv_active_blocks: x.data.kv_stats.kv_active_blocks,
+                kv_total_blocks: x.data.kv_stats.kv_total_blocks,
+                num_requests_waiting: x.data.worker_stats.num_requests_waiting,
+                gpu_cache_usage_perc: x.data.kv_stats.gpu_cache_usage_perc,
+                gpu_prefix_cache_hit_rate: x.data.kv_stats.gpu_prefix_cache_hit_rate,
             })
             .collect();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {

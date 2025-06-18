@@ -385,6 +385,11 @@ class WorkerMetricsPublisher:
         gpu_cache_usage_perc: float,
         gpu_prefix_cache_hit_rate: float,
         data_parallel_rank: int = 0,
+        spec_dec_num_spec_tokens: Optional[int] = None,
+        spec_dec_num_drafts: Optional[int] = None,
+        spec_dec_num_draft_tokens: Optional[int] = None,
+        spec_dec_num_accepted_tokens: Optional[int] = None,
+        spec_dec_num_accepted_tokens_per_pos: Optional[list[int]] = None,
     ) -> None:
         """
         Update the KV metrics being reported.

@@ -455,31 +455,31 @@ impl PrometheusMetrics {
                 &self.kv_blocks_active,
                 config,
                 &worker_id,
-                metrics.kv_active_blocks as f64,
+                metrics.kv_stats.kv_active_blocks as f64,
             );
             self.set_worker_gauge(
                 &self.kv_blocks_total,
                 config,
                 &worker_id,
-                metrics.kv_total_blocks as f64,
+                metrics.kv_stats.kv_total_blocks as f64,
             );
             self.set_worker_gauge(
                 &self.requests_active,
                 config,
                 &worker_id,
-                metrics.request_active_slots as f64,
+                metrics.worker_stats.request_active_slots as f64,
             );
             self.set_worker_gauge(
                 &self.requests_total,
                 config,
                 &worker_id,
-                metrics.request_total_slots as f64,
+                metrics.worker_stats.request_total_slots as f64,
             );
             self.set_worker_gauge(
                 &self.kv_hit_rate_percent,
                 config,
                 &worker_id,
-                metrics.gpu_prefix_cache_hit_rate as f64,
+                metrics.kv_stats.gpu_prefix_cache_hit_rate as f64,
             );
         }
 
