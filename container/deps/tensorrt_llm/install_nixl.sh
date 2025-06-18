@@ -74,7 +74,6 @@ cd nixl
 git checkout ${NIXL_COMMIT}
 meson setup builddir -Ducx_path=${UCX_INSTALL_PATH}  -Dstatic_plugins=UCX  -Dbuildtype=release ${EXTRA_NIXL_ARGS}
 cd builddir && ninja install
-rm -f /usr/local/lib/libcuda.so /usr/local/lib/libcuda.so.1
 cd ../..
 rm -rf nixl*  # Remove NIXL source tree to save space
 
