@@ -640,50 +640,6 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     manager.free_block_hashes(req3)
 
 
-def test_kvbm_wrong_blocks_provided():
-    """
-    Tests that providing wrong blocks to allocate_slots results in an error.
-    Specifically, we test that using blocks from one request for another request
-    with different tokens should fail.
-    """
-    manager = new_kv_cache_manager()
-
-    # Create two requests with different token patterns
-    req0 = make_request("0", [i for i in range(48)])  # 3 blocks of sequential tokens
-    req1 = make_request("1", [i * 2 for i in range(48)])  # 3 blocks of even tokens
-
-    # Allocate and compute blocks for req0
-    computed_blocks_req0, _ = manager.get_computed_blocks(req0)
-    _ = manager.allocate_slots(req0, 48, 0, computed_blocks_req0)
-
-    # Simulate forward pass
-    req0.append_output_token_ids(100)  # Add output token
-    req0.num_computed_tokens = 48  # Mark all input tokens as computed
-    _ = manager.allocate_slots(req0, num_new_tokens=1)  # Allocate slot for output token
-
-    # Try to use req0's blocks for req1 - this should fail
-    with pytest.raises(Exception) as exc_info:
-        manager.allocate_slots(req1, 48, 48, computed_blocks_req0)
-    assert (
-        "slot error: Insufficient capacity: need 48 tokens but only 0 available in mutable blocks"
-        in str(exc_info.value)
-    )
-
-    # Get computed blocks after forward pass
-    computed_blocks_req0, num_computed_tokens = manager.get_computed_blocks(req0)
-    assert len(computed_blocks_req0.blocks) == 3  # Should have 3 complete blocks
-    assert num_computed_tokens == 48  # All input tokens should be computed
-
-    # Try to use req0's blocks for req1 - this should fail
-    with pytest.raises(Exception) as exc_info:
-        manager.allocate_slots(req1, 48, 48, computed_blocks_req0)
-    assert "slot error: computed block sequence hash mismatch" in str(exc_info.value)
-
-    # Clean up
-    manager.free_block_hashes(req0)
-    manager.free_block_hashes(req1)
-
-
 def _test_reset_prefix_cache():
     """
     `reset_prefix_cache` is currently not implemented.
@@ -726,3 +682,47 @@ def _test_eagle_with_sliding_window():
     """NOTE: KVBM does not support spec decoding at the moment.
     Test Eagle behavior with sliding window."""
     pass
+
+
+def test_kvbm_wrong_blocks_provided():
+    """
+    Tests that providing wrong blocks to allocate_slots results in an error.
+    Specifically, we test that using blocks from one request for another request
+    with different tokens should fail.
+    """
+    manager = new_kv_cache_manager()
+
+    # Create two requests with different token patterns
+    req0 = make_request("0", [i for i in range(48)])  # 3 blocks of sequential tokens
+    req1 = make_request("1", [i * 2 for i in range(48)])  # 3 blocks of even tokens
+
+    # Allocate and compute blocks for req0
+    computed_blocks_req0, _ = manager.get_computed_blocks(req0)
+    _ = manager.allocate_slots(req0, 48, 0, computed_blocks_req0)
+
+    # Simulate forward pass
+    req0.append_output_token_ids(100)  # Add output token
+    req0.num_computed_tokens = 48  # Mark all input tokens as computed
+    _ = manager.allocate_slots(req0, num_new_tokens=1)  # Allocate slot for output token
+
+    # Try to use req0's blocks for req1 - this should fail
+    with pytest.raises(Exception) as exc_info:
+        manager.allocate_slots(req1, 48, 48, computed_blocks_req0)
+    assert (
+        "slot error: Insufficient capacity: need 48 tokens but only 0 available in mutable blocks"
+        in str(exc_info.value)
+    )
+
+    # Get computed blocks after forward pass
+    computed_blocks_req0, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert len(computed_blocks_req0.blocks) == 3  # Should have 3 complete blocks
+    assert num_computed_tokens == 48  # All input tokens should be computed
+
+    # Try to use req0's blocks for req1 - this should fail
+    with pytest.raises(Exception) as exc_info:
+        manager.allocate_slots(req1, 48, 48, computed_blocks_req0)
+    assert "slot error: computed block sequence hash mismatch" in str(exc_info.value)
+
+    # Clean up
+    manager.free_block_hashes(req0)
+    manager.free_block_hashes(req1)
