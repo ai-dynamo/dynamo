@@ -1,0 +1,16 @@
+FROM nvcr.io/nvidia/tritonserver:25.05-pyt-python-py3
+
+# Install SGL to use its data generator 
+RUN pip install "sglang==0.4.7"
+
+# Move the base gap script in 
+COPY examples/sglang/utils/gap_bench.sh /opt/tritonserver/gap_bench.sh
+
+# Move the data generator script in 
+COPY examples/sglang/utils/generate_bench_data.py /opt/tritonserver/generate_bench_data.py
+
+# Install patched gap
+RUN git clone https://github.com/ishandhanani/perf_analyzer.git &&  cd perf_analyzer && git checkout ishan/token-id-hack
+RUN cd perf_analyzer/genai-perf && pip install -e .
+
+RUN pip install pydantic

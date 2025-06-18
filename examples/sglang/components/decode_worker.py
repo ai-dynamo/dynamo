@@ -19,7 +19,7 @@ import logging
 
 import sglang as sgl
 from utils.protocol import DisaggPreprocessedRequest
-from utils.sglang import parse_sglang_args
+from utils.sgl_utils import parse_sglang_args
 
 from dynamo.sdk import endpoint, service
 
