@@ -50,7 +50,9 @@ RUN pip install --break-system-packages "sglang==0.4.7"
 WORKDIR /sgl-workspace
 # https://github.com/ai-dynamo/dynamo/pull/1510
 ARG DYNAMO_COMMIT="382e3aedc421b3b3abc338062b332b54b5aa8529"
-RUN git clone https://github.com/ai-dynamo/dynamo.git && cd dynamo && git checkout ${DYNAMO_COMMIT}
+# TODO: swap this once https://github.com/ai-dynamo/dynamo/pull/1565 is merged
+ARG DYNAMO_BRANCH="ishan/token-endpoint"
+RUN git clone https://github.com/ai-dynamo/dynamo.git && cd dynamo && git checkout ${DYNAMO_BRANCH}
 
 # install dynamo in editable mode
 WORKDIR /sgl-workspace/dynamo
