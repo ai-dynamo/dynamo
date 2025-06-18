@@ -197,46 +197,53 @@ impl ModelWatcher {
                 // function. Needs checking carefully, possibly we need to store it in state.
                 let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
 
-                let frontend = SegmentSource::<
-                    SingleIn<NvCreateChatCompletionRequest>,
-                    ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-                >::new();
-                let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
-                let backend = Backend::from_mdc(card.clone()).await?.into_operator();
-                let router =
-                    PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
-                        client.clone(),
-                        self.router_mode,
-                    )
-                    .await?;
-                let service_backend = match self.router_mode {
-                    RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
-                        ServiceBackend::from_engine(Arc::new(router))
-                    }
-                    RouterMode::KV => {
-                        let chooser = self
-                            .manager
-                            .kv_chooser_for(
-                                &model_entry.name,
-                                &component,
-                                card.kv_cache_block_size,
-                                self.kv_router_config.clone(),
+                match card.prompt_formatter {
+                    Some(ref _prompt_formatter) => {
+                        let frontend = SegmentSource::<
+                            SingleIn<NvCreateChatCompletionRequest>,
+                            ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+                        >::new();
+                        let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
+                        let backend = Backend::from_mdc(card.clone()).await?.into_operator();
+                        let router =
+                            PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
+                                client.clone(),
+                                self.router_mode,
                             )
                             .await?;
-                        let kv_push_router = KvPushRouter::new(router, chooser);
-                        ServiceBackend::from_engine(Arc::new(kv_push_router))
-                    }
-                };
+                        let service_backend = match self.router_mode {
+                            RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
+                                ServiceBackend::from_engine(Arc::new(router))
+                            }
+                            RouterMode::KV => {
+                                let chooser = self
+                                    .manager
+                                    .kv_chooser_for(
+                                        &model_entry.name,
+                                        &component,
+                                        card.kv_cache_block_size,
+                                        self.kv_router_config.clone(),
+                                    )
+                                    .await?;
+                                let kv_push_router = KvPushRouter::new(router, chooser);
+                                ServiceBackend::from_engine(Arc::new(kv_push_router))
+                            }
+                        };
 
-                let chat_engine = frontend
-                    .link(preprocessor.forward_edge())?
-                    .link(backend.forward_edge())?
-                    .link(service_backend)?
-                    .link(backend.backward_edge())?
-                    .link(preprocessor.backward_edge())?
-                    .link(frontend)?;
-                self.manager
-                    .add_chat_completions_model(&model_entry.name, chat_engine)?;
+                        let chat_engine = frontend
+                            .link(preprocessor.forward_edge())?
+                            .link(backend.forward_edge())?
+                            .link(service_backend)?
+                            .link(backend.backward_edge())?
+                            .link(preprocessor.backward_edge())?
+                            .link(frontend)?;
+                        self.manager
+                            .add_chat_completions_model(&model_entry.name, chat_engine)?;
+                    }
+                    None => {
+                        tracing::warn!("Chat Completions endpoint can't be deployed: Model tokenizer does not contain chat template.");
+                    }
+                }
 
                 let frontend = SegmentSource::<
                     SingleIn<NvCreateCompletionRequest>,

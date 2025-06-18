@@ -247,7 +247,11 @@ impl MistralRsEngine {
                             tracing::debug!(request_id, "Warmup response: {r:?}");
                         }
                         Err(err) => {
-                            tracing::error!(request_id, %err, "Failed converting response to result.");
+                            return Err(anyhow::anyhow!(
+                                "{}: {}",
+                                "Failed converting response to result.",
+                                err
+                            ));
                         }
                     }
                 }

@@ -30,10 +30,14 @@ use tokcfg::ChatTemplate;
 
 impl PromptFormatter {
     pub async fn from_mdc(mdc: ModelDeploymentCard) -> Result<PromptFormatter> {
-        match mdc
-            .prompt_formatter
-            .ok_or(anyhow::anyhow!("MDC does not contain a prompt formatter"))?
-        {
+        let prompt_formatter = match mdc.prompt_formatter {
+            Some(prompt_formatter) => prompt_formatter,
+            None => {
+                tracing::warn!("No prompt formatter found in MDC, using NoOp formatter");
+                return Ok(Self::OAI(Arc::new(NoOpFormatter::default())));
+            }
+        };
+        match prompt_formatter {
             PromptFormatterArtifact::HfTokenizerConfigJson(file) => {
                 let content = std::fs::read_to_string(&file)
                     .with_context(|| format!("fs:read_to_string '{file}'"))?;
@@ -87,6 +91,13 @@ struct HfTokenizerConfigJsonFormatter {
     mixins: Arc<ContextMixins>,
     supports_add_generation_prompt: bool,
 }
+
+/// No-op formatter that passes through input without any template processing
+///
+/// Simple formatter that doesn't apply any template transformations.
+/// Used as a fallback when template processing is not needed.
+#[derive(Debug, Default)]
+struct NoOpFormatter {}
 
 // /// OpenAI Standard Prompt Formatter
 // pub trait StandardPromptFormatter {
