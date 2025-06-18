@@ -86,7 +86,7 @@ kubectl get storageclass
 
 1. Set the required environment variables:
 ```bash
-export PROJECT_ROOT=($pwd)
+export PROJECT_ROOT=$(pwd)
 export DOCKER_USERNAME=<your-docker-username>
 export DOCKER_PASSWORD=<your-docker-password>
 export DOCKER_SERVER=<your-docker-server>
