@@ -23,10 +23,7 @@ def main():
         "--output", type=str, required=True, help="Output JSONL filename"
     )
     parser.add_argument(
-        "--model", type=str, required=True, help="Model identifier for payloads"
-    )
-    parser.add_argument(
-        "--tokenizer", type=str, required=True, help="HuggingFace tokenizer name"
+        "--model", type=str, required=True, help="Model identifier for payloads and tokenizer name"
     )
     parser.add_argument(
         "--num-prompts", type=int, default=8192, help="Total number of samples"
@@ -49,7 +46,7 @@ def main():
     np.random.seed(args.random_seed)
 
     tokenizer: PreTrainedTokenizerBase = AutoTokenizer.from_pretrained(
-        args.tokenizer, trust_remote_code=True
+        args.model, trust_remote_code=True
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
