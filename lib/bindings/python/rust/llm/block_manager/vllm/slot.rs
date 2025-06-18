@@ -145,7 +145,7 @@ impl<S: Storage> Slot<S> {
 
     /// Apply computed/cached blocks to the slot.
     ///
-    /// Note: We should only every apply computed blocks once at the beginning.
+    /// Note: We should only apply computed blocks once at the beginning.
     /// Here we clear the list of immutable blocks before applying them because vLLM can try to apply
     /// this multiple times if the slot was unable acquire blocks for the remainder of the sequence.
     pub fn apply_computed_blocks(
@@ -162,7 +162,6 @@ impl<S: Storage> Slot<S> {
             .sequence
             .blocks()
             .iter()
-            .skip(self.immutable.len())
             .zip(computed_blocks);
 
         // validate the sequence hashes of the incoming immutable computed blocks

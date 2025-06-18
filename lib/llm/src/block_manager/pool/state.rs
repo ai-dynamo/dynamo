@@ -245,7 +245,7 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
             let immutable = self
                 .active
                 .register(mutable)
-                .expect("unable to register block; should ever happen");
+                .expect("unable to register block; should never happen");
 
             immutable_blocks.push(immutable);
         }

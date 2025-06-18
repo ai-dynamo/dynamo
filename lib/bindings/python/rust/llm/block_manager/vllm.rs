@@ -94,7 +94,7 @@ impl KvbmCacheManager {
             .map_err(to_pyerr)
     }
 
-    /// Returns the number of tokens that have been computed/accepted for the given request.
+    /// Returns the number of tokens that have been computed for the given request.
     pub fn num_computed_tokens(&self, request_id: String) -> PyResult<usize> {
         let slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
         slot_manager
@@ -119,6 +119,7 @@ impl KvbmCacheManager {
     }
 
     /// Updates the slot manager with the current request state and allocates new blocks if needed.
+    /// Returns the new blocks if they were allocated, otherwise returns None.
     pub fn alloctate_slots(&self, update: SlotUpdate) -> PyResult<Option<BlockStates>> {
         self.slot_manager
             .lock()
@@ -191,7 +192,7 @@ pub struct GenericSlotUpdate<R> {
     pub request_num_computed_tokens: usize,
 
     /// The tokens to append to the sequence.
-    /// After the tokens are appendend, the internal sequence length should match `request_num_token`
+    /// After the tokens are appendend, the internal sequence length should match `request_num_tokens`.
     pub tokens_to_append: Vec<u32>,
 
     /// The number of new tokens which advances the sequence state.
@@ -345,13 +346,14 @@ impl<R: RequestKey> SlotManager<R> {
             delay_cache_blocks,
         ) = update.dissolve();
 
-        // todo(ryan): add support for lookahead blocks
+        // TODO(ryan): add support for lookahead blocks
         if num_lookahead_blocks.is_some() {
             return Err(SlotError::Error(
                 "num_lookahead_blocks is not supported".to_string(),
             ));
         }
 
+        // TODO: add support for delay_cache_blocks
         if delay_cache_blocks.unwrap_or(false) {
             return Err(SlotError::Error(
                 "delay_cache_blocks is not supported".to_string(),
@@ -361,9 +363,9 @@ impl<R: RequestKey> SlotManager<R> {
         let slot = self.slots.get_mut(&request_id).ok_or(SlotError::NotFound)?;
 
         // we always apply the matched blocks to the beginning of the sequence; however,
-        // if we fail to allocate the request new blocks, vllm treats the request as never started,
-        // so we need to drop the applied immutable block.  however, if we have successfully advanced
-        // the sequence state, then we rely on the schedule to free any held blocks.
+        // if we fail to allocate the requested new blocks, vllm treats the request as never started,
+        // so we need to drop the applied immutable block. however, if we have successfully advanced
+        // the sequence state, then we rely on the scheduler to free any held blocks.
         let first_allocation = slot.first_allocation();
 
         // first apply any new computed blocks
