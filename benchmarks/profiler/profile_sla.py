@@ -53,7 +53,7 @@ if __name__ == "__main__":
         "--backend",
         type=str,
         default="vllm_v0",
-        choices=["vllm_v0"],
+        choices=["vllm_v0", "vllm_v1"],
         help="backend type (currently only vllm is supported)",
     )
     parser.add_argument(
