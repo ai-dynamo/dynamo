@@ -14,10 +14,10 @@ pub struct KvbmLeader {
 #[pymethods]
 impl KvbmLeader {
     #[new]
-    #[pyo3(signature = (barrier_id, world_size=1))]
-    fn new(barrier_id: String, world_size: usize) -> PyResult<Self> {
+    #[pyo3(signature = (barrier_id, bytes_per_block, world_size))]
+    fn new(barrier_id: String, bytes_per_block: usize, world_size: usize) -> PyResult<Self> {
 
-        let leader = KvbmLeaderImpl::new(barrier_id, world_size).map_err(to_pyerr)?;
+        let leader = KvbmLeaderImpl::new(barrier_id, bytes_per_block, world_size).map_err(to_pyerr)?;
 
         Ok(Self {
             _impl: Arc::new(leader),

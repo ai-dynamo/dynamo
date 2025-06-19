@@ -19,6 +19,16 @@ pub struct KvbmLeaderData {
     pub zmq_url: String,
     pub broadcast_port: usize,
     pub ack_port: usize,
+    pub num_host_blocks: usize,
+    pub num_disk_blocks: usize,
+}
+
+fn compute_num_blocks(env_var: &str, bytes_per_block: usize) -> usize {
+    let cache_size_gb = std::env::var(env_var)
+        .unwrap_or_default()
+        .parse::<usize>()
+        .unwrap_or(0);
+    (cache_size_gb * 1_000_000_000) / bytes_per_block
 }
 
 /// The leader of the KVBM.
@@ -35,7 +45,11 @@ pub struct KvbmLeader {
 }
 
 impl KvbmLeader {
-    pub fn new(barrier_id: String, world_size: usize) -> anyhow::Result<Self> {
+    pub fn new(
+        barrier_id: String,
+        bytes_per_block: usize,
+        world_size: usize,
+    ) -> anyhow::Result<Self> {
         let (drt, runtime) = build_drt()?;
 
         tracing::info!(
@@ -44,11 +58,16 @@ impl KvbmLeader {
             barrier_id
         );
 
+        let num_host_blocks = compute_num_blocks("DYNAMO_KVBM_CPU_CACHE", bytes_per_block);
+        let num_disk_blocks = compute_num_blocks("DYNAMO_KVBM_DISK_CACHE", bytes_per_block);
+
         // TODO: For now, just hardcode localhost.
         let zmq_data = Arc::new(KvbmLeaderData {
             zmq_url: "127.0.0.1".to_string(),
             broadcast_port: 5555,
             ack_port: 5556,
+            num_host_blocks,
+            num_disk_blocks,
         });
 
         // Build our leader barrier and publish the data.

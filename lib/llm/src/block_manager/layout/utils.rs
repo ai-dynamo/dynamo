@@ -40,7 +40,6 @@ pub fn align_up(value: usize, alignment: usize) -> usize {
 pub fn validate_storage<S: Storage, C: BlockLayoutConfig>(
     storage: &S,
     config: &C,
-    require_exact: bool,
 ) -> Result<usize, LayoutError> {
     let provided_size = storage.size();
     let storage_addr = storage.addr();
@@ -73,16 +72,6 @@ pub fn validate_storage<S: Storage, C: BlockLayoutConfig>(
         );
         return Err(LayoutError::InvalidConfig(format!(
             "Storage size {} is less than required size {} (including base offset for alignment)",
-            provided_size, total_required_size_with_offset
-        )));
-    } else if require_exact && provided_size != total_required_size_with_offset {
-        tracing::warn!(
-            provided_size,
-            total_required_size_with_offset,
-            "Storage size does not exactly match required size"
-        );
-        return Err(LayoutError::InvalidConfig(format!(
-            "Storage size {} does not exactly match required size {}",
             provided_size, total_required_size_with_offset
         )));
     }

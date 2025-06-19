@@ -79,11 +79,9 @@ pub struct KvbmWorker {
 #[pymethods]
 impl KvbmWorker {
     #[new]
-    #[pyo3(signature = (num_device_blocks, num_host_blocks, num_disk_blocks, page_size, tensors, device_id=0, worker_id=0, dtype=None, barrier_id="kvbm".to_string()))]
+    #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, worker_id=0, dtype=None, barrier_id="kvbm".to_string()))]
     fn new(
         num_device_blocks: usize,
-        num_host_blocks: usize,
-        num_disk_blocks: usize,
         page_size: usize,
         tensors: Vec<Py<PyAny>>,
         device_id: usize,
@@ -102,8 +100,6 @@ impl KvbmWorker {
 
         let worker = KvbmWorkerImpl::new(
             num_device_blocks,
-            num_host_blocks,
-            num_disk_blocks,
             page_size,
             vllm_tensors,
             device_id,

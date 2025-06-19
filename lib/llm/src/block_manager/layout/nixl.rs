@@ -153,18 +153,12 @@ impl LayoutConfig {
         &self,
         layout_type: LayoutType,
         storage: Vec<S>,
-        require_exact: bool,
     ) -> Result<Box<dyn NixlLayout<StorageType = S>>, LayoutError> {
         Ok(match layout_type {
-            LayoutType::FullyContiguous => {
-                Box::new(FullyContiguous::new(self.clone(), storage, require_exact)?)
+            LayoutType::FullyContiguous => Box::new(FullyContiguous::new(self.clone(), storage)?),
+            LayoutType::LayerSeparate { outer_contiguous } => {
+                Box::new(LayerSeparate::new(self.clone(), storage, outer_contiguous)?)
             }
-            LayoutType::LayerSeparate { outer_contiguous } => Box::new(LayerSeparate::new(
-                self.clone(),
-                storage,
-                require_exact,
-                outer_contiguous,
-            )?),
         })
     }
 
