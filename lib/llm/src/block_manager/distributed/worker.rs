@@ -17,6 +17,7 @@ use crate::block_manager::{
 };
 use crate::common::dtype::DType;
 
+use derive_builder::Builder;
 use nixl_sys::Agent as NixlAgent;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -72,6 +73,36 @@ fn load_and_validate_tensors(
     Ok((device_tensors, shape.unwrap()))
 }
 
+#[derive(Builder, Debug)]
+#[builder(pattern = "owned")]
+pub struct KvbmWorkerConfig {
+    num_device_blocks: usize,
+
+    #[builder(default = "32")]
+    page_size: usize,
+
+    #[builder(default = "Vec::new()")]
+    tensors: Vec<Box<dyn TorchTensor>>,
+
+    #[builder(default = "0")]
+    device_id: usize,
+
+    #[builder(default = "1")]
+    worker_id: usize,
+
+    #[builder(default = "DType::FP16")]
+    dtype: DType,
+
+    #[builder(default = "String::from(\"kvbm\")")]
+    barrier_id: String,
+}
+
+impl KvbmWorkerConfig {
+    pub fn builder() -> KvbmWorkerConfigBuilder {
+        KvbmWorkerConfigBuilder::default()
+    }
+}
+
 pub struct KvbmWorker {
     cancel_token: CancellationToken,
     task: Option<std::thread::JoinHandle<()>>,
@@ -79,27 +110,19 @@ pub struct KvbmWorker {
 
 impl KvbmWorker {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        num_device_blocks: usize,
-        page_size: usize,
-        tensors: Vec<Box<dyn TorchTensor>>,
-        device_id: usize,
-        worker_id: usize,
-        dtype: DType,
-        barrier_id: String,
-    ) -> anyhow::Result<Self> {
+    pub fn new(config: KvbmWorkerConfig) -> anyhow::Result<Self> {
         tracing::info!(
             "Initializing KvbmWorker with params: num_device_blocks={}, page_size={}, dtype={:?}",
-            num_device_blocks,
-            page_size,
-            dtype
+            config.num_device_blocks,
+            config.page_size,
+            config.dtype
         );
 
-        if num_device_blocks == 0 {
+        if config.num_device_blocks == 0 {
             return Err(anyhow::anyhow!("num_device_blocks must be greater than 0"));
         }
 
-        let (device_tensors, shape) = load_and_validate_tensors(tensors, device_id)?;
+        let (device_tensors, shape) = load_and_validate_tensors(config.tensors, config.device_id)?;
 
         if shape.len() < 3 {
             return Err(anyhow::anyhow!(format!(
@@ -108,9 +131,9 @@ impl KvbmWorker {
             )));
         }
 
-        let (outer_contiguous, outer_dim) = if shape[0] >= num_device_blocks {
+        let (outer_contiguous, outer_dim) = if shape[0] >= config.num_device_blocks {
             (false, shape[1])
-        } else if shape[1] >= num_device_blocks {
+        } else if shape[1] >= config.num_device_blocks {
             (true, shape[0])
         } else {
             return Err(anyhow::anyhow!(format!(
@@ -119,13 +142,13 @@ impl KvbmWorker {
             )));
         };
 
-        let inner_dim = shape[2..].iter().product::<usize>() / page_size;
+        let inner_dim = shape[2..].iter().product::<usize>() / config.page_size;
 
         tracing::info!(
             "Inferred layout: num_layers={}, outer_dim={}, page_size={}, inner_dim={}",
             device_tensors.len(),
             outer_dim,
-            page_size,
+            config.page_size,
             inner_dim
         );
 
@@ -133,14 +156,14 @@ impl KvbmWorker {
         let layout_builder = layout_builder_instance
             .num_layers(device_tensors.len())
             .outer_dim(outer_dim)
-            .page_size(page_size)
+            .page_size(config.page_size)
             .inner_dim(inner_dim)
-            .dtype(dtype);
+            .dtype(config.dtype);
 
         let layout_type = LayoutType::LayerSeparate { outer_contiguous };
 
         let device_layout = layout_builder
-            .num_blocks(num_device_blocks)
+            .num_blocks(config.num_device_blocks)
             .build()?
             .create_layout(layout_type, device_tensors)?;
 
@@ -154,11 +177,11 @@ impl KvbmWorker {
                 .build()
                 .unwrap();
 
-            let agent = NixlAgent::new(&format!("kvbm-worker-{}", worker_id)).unwrap();
+            let agent = NixlAgent::new(&format!("kvbm-worker-{}", config.worker_id)).unwrap();
 
             let transfer_context = Arc::new(TransferContext::new(
                 Arc::new(Some(agent)),
-                DeviceAllocator::new(device_id)
+                DeviceAllocator::new(config.device_id)
                     .unwrap()
                     .ctx()
                     .new_stream()
@@ -173,8 +196,8 @@ impl KvbmWorker {
                             device_layout,
                             layout_builder_clone,
                             layout_type,
-                            barrier_id,
-                            worker_id,
+                            config.barrier_id,
+                            config.worker_id,
                             transfer_context,
                             cancel_token,
                         )

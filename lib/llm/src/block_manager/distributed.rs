@@ -8,8 +8,8 @@ mod zmq;
 mod leader;
 mod worker;
 
-pub use leader::KvbmLeader;
-pub use worker::KvbmWorker;
+pub use leader::{KvbmLeader, KvbmLeaderConfig};
+pub use worker::{KvbmWorker, KvbmWorkerConfig};
 
 #[cfg(all(test, feature = "testing-cuda", feature = "testing-etcd"))]
 mod tests {
@@ -17,7 +17,6 @@ mod tests {
         torch::{TorchDevice, TorchTensor},
         DeviceAllocator, Storage, StorageAllocator,
     };
-    use crate::common::dtype::DType;
 
     use anyhow::Result;
 
@@ -55,11 +54,11 @@ mod tests {
         }
 
         fn shape(&self) -> Vec<usize> {
-            vec![2, 8, 16]
+            vec![2, 8, 32]
         }
 
         fn stride(&self) -> Vec<usize> {
-            vec![256, 32, 1]
+            vec![512, 64, 1]
         }
     }
 
@@ -76,12 +75,24 @@ mod tests {
         // On the other hand, the leader startup is fully synchronous. It will only return once it's established a zmq connection with all workers.
         for i in 0..NUM_WORKERS {
             let tensors: Vec<Box<dyn TorchTensor>> = vec![Box::new(MockTensor::new())];
-            let worker = KvbmWorker::new(8, 4, tensors, 0, i, DType::FP16, "kvbm".to_string())?;
+
+            let config = KvbmWorkerConfig::builder()
+                .num_device_blocks(8)
+                .tensors(tensors)
+                .worker_id(i)
+                .build()?;
+
+            let worker = KvbmWorker::new(config)?;
             workers.push(worker);
         }
 
+        let leader_config = KvbmLeaderConfig::builder()
+            .world_size(NUM_WORKERS)
+            .bytes_per_block(1)
+            .build()?;
+
         // When/if this returns, we know that all the workers were also successful.
-        let _ = KvbmLeader::new("kvbm".to_string(), 1, NUM_WORKERS)?;
+        let _ = KvbmLeader::new(leader_config)?;
 
         Ok(())
     }
