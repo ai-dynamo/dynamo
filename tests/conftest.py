@@ -18,6 +18,7 @@ import os
 import tempfile
 
 import pytest
+import shutil
 
 from tests.utils.managed_process import ManagedProcess
 
@@ -37,6 +38,7 @@ logging.basicConfig(
 def logger(request):
     log_path = os.path.join(request.node.name, "test.log.txt")
     logger = logging.getLogger()
+    shutil.rmtree(request.node.name,ignore_errors=True)
     os.makedirs(request.node.name, exist_ok=True)
     handler = logging.FileHandler(log_path, mode="w")
     formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)

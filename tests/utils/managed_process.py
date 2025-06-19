@@ -28,7 +28,7 @@ import requests
 
 def terminate_process(process, logger=logging.getLogger()):
     try:
-        logger.info("Terminating %s", process)
+        logger.info("Terminating PID: %s name: %s", process.pid, process.name())
         process.terminate()
     except psutil.AccessDenied:
         logger.warning("Access denied for PID %s", process.pid)

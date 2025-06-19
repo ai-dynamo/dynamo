@@ -28,6 +28,7 @@ import requests
 
 from tests.fault_tolerance.utils.circus_controller import CircusController
 from tests.serve.test_dynamo_serve import DynamoServeProcess
+from tests.fault_tolerance.utils.metrics import worker_metrics, nvidia_smi
 from tests.utils.deployment_graph import (
     DeploymentGraph,
     Payload,
@@ -127,11 +128,11 @@ deployment_graphs = {
 }
 
 failure_scenarios = {
-    "decode_worker": [[10, [("dynamo_vllmworker", 1)]]],
-    "prefill_worker": [[10, [("dynamo_prefillworker", 1)]]],
-    "frontend": [[10, [("dynamo_frontend", 1)]]],
-    "processor": [[10, [("dynamo_processor", 1)]]],
-    "vllm_worker": [[10, [("vllm_worker", 1)]]],
+    "decode_worker": [[30, [("dynamo_vllmworker", 1)]]],
+    "prefill_worker": [[30, [("dynamo_prefillworker", 1)]]],
+    "frontend": [[30, [("dynamo_frontend", 1)]]],
+    "processor": [[30, [("dynamo_processor", 1)]]],
+    "vllm_worker": [[30, [("vllm_worker", 1)]]],
     "none": [],
 }
 
@@ -275,8 +276,6 @@ def client(
 
 def _set_deployment_args(request, max_num_seqs):
     decode_worker_name = "VllmWorker"
-    if "mock" in request.node.name:
-        decode_worker_name = "MockVllmWorker"
     args = {}
 
     if max_num_seqs is not None:
@@ -395,8 +394,8 @@ async def test_worker_failure(
                         terminate_process_tree(pid, logger)
 
         for proc in procs:
-            logger.info(f"{proc} waiting for join")
+            logger.debug(f"{proc} waiting for join")
             proc.join()
-            logger.info(f"{proc} joined")
+            logger.debug(f"{proc} joined")
 
         circus_controller.close()
