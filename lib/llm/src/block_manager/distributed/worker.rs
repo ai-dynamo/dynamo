@@ -22,7 +22,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use dynamo_runtime::{utils::leader_worker_barrier::WorkerBarrier, DistributedRuntime, Runtime};
+use dynamo_runtime::{
+    utils::{leader_worker_barrier::WorkerBarrier, task::CriticalTaskExecutionHandle},
+    DistributedRuntime, Runtime,
+};
 
 fn load_and_validate_tensors(
     tensors: Vec<Box<dyn TorchTensor>>,
@@ -71,7 +74,7 @@ fn load_and_validate_tensors(
 
 pub struct KvbmWorker {
     cancel_token: CancellationToken,
-    task: Option<std::thread::JoinHandle<anyhow::Result<()>>>,
+    task: Option<std::thread::JoinHandle<()>>,
 }
 
 impl KvbmWorker {
@@ -164,16 +167,28 @@ impl KvbmWorker {
             ));
 
             runtime.block_on(async move {
-                KvbmWorker::worker_task(
-                    device_layout,
-                    layout_builder_clone,
-                    layout_type,
-                    barrier_id,
-                    worker_id,
-                    transfer_context,
+                let res = CriticalTaskExecutionHandle::new(
+                    move |cancel_token| {
+                        KvbmWorker::worker_task(
+                            device_layout,
+                            layout_builder_clone,
+                            layout_type,
+                            barrier_id,
+                            worker_id,
+                            transfer_context,
+                            cancel_token,
+                        )
+                    },
                     cancel_token_clone,
+                    "kvbm-worker-task",
                 )
-                .await
+                .unwrap()
+                .join()
+                .await;
+
+                if let Err(e) = res {
+                    tracing::error!("Error in worker task: {:?}", e);
+                }
             })
         });
 
@@ -289,11 +304,12 @@ impl KvbmWorker {
             leader_data.broadcast_port,
             leader_data.ack_port,
             handlers,
-            cancel_token,
+            cancel_token.clone(),
         )?;
 
         // TODO: Some sort of fancy loop here.
-        std::future::pending::<()>().await;
+        // For now, just wait for cancellation.
+        cancel_token.cancelled().await;
 
         Ok(())
     }
@@ -303,7 +319,7 @@ impl Drop for KvbmWorker {
     fn drop(&mut self) {
         self.cancel_token.cancel();
         if let Some(task) = self.task.take() {
-            task.join().unwrap().unwrap();
+            task.join().unwrap();
         }
     }
 }
