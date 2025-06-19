@@ -77,6 +77,7 @@
 use once_cell::sync::Lazy;
 use std::str::FromStr;
 use validator::ValidationError;
+use serde::{Deserialize, Serialize};
 
 pub const ETCD_ROOT_PATH: &str = "dynamo://";
 pub const COMPONENT_KEYWORD: &str = "_component_";

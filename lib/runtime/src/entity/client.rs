@@ -59,10 +59,24 @@ pub struct Client {
     pub instance_source: Arc<InstanceSource>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportType {
+    NatsTcp(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct StoredValue<T> {
+    pub key: Instance,
+    pub value: T,
+}
+
+type StoredTransport = StoredValue<TransportType>;
+
 #[derive(Clone, Debug)]
 pub enum InstanceSource {
     Static,
-    Dynamic(tokio::sync::watch::Receiver<Vec<Instance>>),
+    Dynamic(tokio::sync::watch::Receiver<Vec<StoredTransport>>),
 }
 
 impl Client {
@@ -77,12 +91,8 @@ impl Client {
     // Client with auto-discover instances using etcd
     pub(crate) async fn new_dynamic(endpoint: Endpoint) -> Result<Self> {
         // create live endpoint watcher
-        let Some(etcd_client) = &endpoint.component.drt.etcd_client else {
-            anyhow::bail!("Attempt to create a dynamic client on a static endpoint");
-        };
-
         let instance_source =
-            Self::get_or_create_dynamic_instance_source(etcd_client, &endpoint).await?;
+            Self::get_or_create_dynamic_instance_source(&endpoint).await?;
 
         Ok(Client {
             endpoint,
@@ -133,9 +143,9 @@ impl Client {
     }
 
     async fn get_or_create_dynamic_instance_source(
-        etcd_client: &EtcdClient,
         endpoint: &Endpoint,
     ) -> Result<Arc<InstanceSource>> {
+        let storage = endpoint.storage()?;
         let drt = endpoint.drt();
         let instance_sources = drt.instance_sources();
         let mut instance_sources = instance_sources.lock().await;
@@ -148,15 +158,12 @@ impl Client {
             }
         }
 
-        let prefix_watcher = etcd_client
-            .kv_get_and_watch_prefix(endpoint.etcd_root())
-            .await?;
-
+        let prefix_watcher = storage.watch_prefix().await?;
         let (prefix, _watcher, mut kv_event_rx) = prefix_watcher.dissolve();
 
         let (watch_tx, watch_rx) = tokio::sync::watch::channel(vec![]);
 
-        let secondary = endpoint.component.drt.runtime.secondary().clone();
+        let secondary = drt.runtime.secondary().clone();
 
         // this task should be included in the registry
         // currently this is created once per client, but this object/task should only be instantiated
@@ -184,12 +191,21 @@ impl Client {
 
                 match kv_event {
                     WatchEvent::Put(kv) => {
-                        let key = String::from_utf8(kv.key().to_vec());
-                        let val = serde_json::from_slice::<Instance>(kv.value());
-                        if let (Ok(key), Ok(val)) = (key, val) {
-                            map.insert(key.clone(), val);
+                        if let Ok(key) = String::from_utf8(kv.key().to_vec()) {
+                            match Instance::parse(&key) {
+                                Ok(instance) => {
+                                    let val = serde_json::from_slice::<TransportType>(kv.value());
+                                    if let Ok(transport) = val {
+                                        map.insert(instance.clone(), StoredValue { key: instance, value: transport });
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("Failed to parse instance from key '{}': {}", key, e);
+                                    continue; // Skip this entry instead of breaking
+                                }
+                            }
                         } else {
-                            tracing::error!("Unable to parse put endpoint event; shutting down endpoint watcher for prefix: {prefix}");
+                            tracing::error!("Unable to parse key as UTF-8");
                             break;
                         }
                     }
