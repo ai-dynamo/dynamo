@@ -58,6 +58,19 @@ enum KvEventSource {
     },
 }
 
+/// Configure the sink of KV events
+/// We support NATS and Echo
+pub enum KvEventSinkConfig {
+    Nats,
+    Echo,
+}
+
+/// The sink of KV events.
+enum KvEventSink {
+    Nats { component: Component },
+    Echo,
+}
+
 impl KvEventSource {
     /// Start the event source from a [`KvEventSourceConfig`].
     fn start(
@@ -95,6 +108,15 @@ impl KvEventSource {
     }
 }
 
+impl KvEventSink {
+    fn start(component: Component, sink_config: KvEventSinkConfig) -> Result<Self> {
+        match sink_config {
+            KvEventSinkConfig::Nats => Ok(KvEventSink::Nats { component }),
+            KvEventSinkConfig::Echo => Ok(KvEventSink::Echo),
+        }
+    }
+}
+
 /// A publisher of KV events.
 pub struct KvEventPublisher {
     /// The size of the KV block.
@@ -108,12 +130,60 @@ pub struct KvEventPublisher {
     tx: mpsc::UnboundedSender<KvCacheEvent>,
 }
 
+#[async_trait]
+impl EventPublisher for KvEventSink {
+    fn subject(&self) -> String {
+        match self {
+            KvEventSink::Nats { component } => {
+                format!(
+                    "namespace.{}.component.{}",
+                    component.namespace(),
+                    component.name()
+                )
+            }
+            KvEventSink::Echo => {
+                format!("echopublisher")
+            }
+        }
+    }
+
+    async fn publish(
+        &self,
+        event_name: impl AsRef<str> + Send + Sync,
+        event: &(impl Serialize + Send + Sync),
+    ) -> Result<()> {
+        let bytes = serde_json::to_vec(event)?;
+        match self {
+            KvEventSink::Nats { component: _ } => self.publish_bytes(event_name, bytes).await,
+            KvEventSink::Echo => self.publish_bytes(event_name, bytes).await,
+        }
+    }
+
+    async fn publish_bytes(
+        &self,
+        event_name: impl AsRef<str> + Send + Sync,
+        bytes: Vec<u8>,
+    ) -> Result<()> {
+        let subject = format!("{}.{}", self.subject(), event_name.as_ref());
+        match self {
+            KvEventSink::Nats { component } => Ok(component
+                .drt()
+                .nats_client()
+                .client()
+                .publish(subject, bytes.into())
+                .await?),
+            KvEventSink::Echo => Ok(println!("{:?}", subject)),
+        }
+    }
+}
+
 impl KvEventPublisher {
     pub fn new(
         component: Component,
         worker_id: i64,
         kv_block_size: usize,
         source_config: Option<KvEventSourceConfig>,
+        sink_config: Option<KvEventSinkConfig>,
     ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
 
@@ -131,12 +201,19 @@ impl KvEventPublisher {
             )?);
         }
 
+        // Create our event sink (default is NATS via component)
+        let sink = if let Some(config) = sink_config {
+            KvEventSink::start(component.clone(), config)?
+        } else {
+            KvEventSink::start(component.clone(), KvEventSinkConfig::Nats)?
+        };
+
         component
             .drt()
             .runtime()
             .secondary()
             .spawn(start_event_processor(
-                component,
+                sink,
                 worker_id,
                 cancellation_token.clone(),
                 rx,
