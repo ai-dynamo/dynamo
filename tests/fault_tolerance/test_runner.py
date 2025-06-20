@@ -13,265 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-
-import json
 import logging
 import os
-import random
 import time
-from datetime import datetime
+from contextlib import contextmanager
 from multiprocessing import Process
 
 import psutil
 import pytest
-import requests
 
+from tests.fault_tolerance.client import client
 from tests.fault_tolerance.utils.circus_controller import CircusController
 from tests.serve.test_dynamo_serve import DynamoServeProcess
-from tests.fault_tolerance.utils.metrics import worker_metrics, nvidia_smi
-from tests.utils.deployment_graph import (
-    DeploymentGraph,
-    Payload,
-    chat_completions_response_handler,
-)
 from tests.utils.managed_process import terminate_process_tree
-
-text_prompt = "Tell me a short joke about AI."
-
-text_payload = Payload(
-    payload_chat={
-        "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        "messages": [
-            {
-                "role": "user",
-                "content": text_prompt,  # Shorter prompt
-            }
-        ],
-        "max_tokens": 150,
-        "temperature": 0.1,
-        #        "seed": 10,
-        "ignore_eos": True,
-        "min_tokens": 150,
-        "stream": False,
-    },
-    expected_log=[],
-    expected_response=["AI"],
-)
-
-deployment_graphs = {
-    "agg-tp-1-dp-1": (
-        DeploymentGraph(
-            module="graphs.agg:Frontend",
-            config="/workspace/tests/fault_tolerance/configs/agg_tp_1_dp_1.yaml",
-            directory="/workspace/examples/llm",
-            endpoints=["v1/chat/completions"],
-            response_handlers=[chat_completions_response_handler],
-            marks=[pytest.mark.gpu_1, pytest.mark.vllm],
-        ),
-        text_payload,
-    ),
-    "agg-tp-1-dp-8": (
-        DeploymentGraph(
-            module="graphs.agg:Frontend",
-            config="/workspace/tests/fault_tolerance/configs/agg_tp_1_dp_8.yaml",
-            directory="/workspace/examples/llm",
-            endpoints=["v1/chat/completions"],
-            response_handlers=[chat_completions_response_handler],
-            marks=[pytest.mark.gpu_1, pytest.mark.vllm],
-        ),
-        text_payload,
-    ),
-    "agg-tp-2-dp-4": (
-        DeploymentGraph(
-            module="graphs.agg:Frontend",
-            config="/workspace/tests/fault_tolerance/configs/agg_tp_2_dp_4.yaml",
-            directory="/workspace/examples/llm",
-            endpoints=["v1/chat/completions"],
-            response_handlers=[chat_completions_response_handler],
-            marks=[pytest.mark.gpu_1, pytest.mark.vllm],
-        ),
-        text_payload,
-    ),
-    "disagg-p-tp-1-dp-1-d-tp-1-dp-1": (
-        DeploymentGraph(
-            module="graphs.disagg:Frontend",
-            config="/workspace/tests/fault_tolerance/configs/disagg_p_tp_1_dp_1_d_tp_1_dp_1.yaml",
-            directory="/workspace/examples/llm",
-            endpoints=["v1/chat/completions"],
-            response_handlers=[chat_completions_response_handler],
-            marks=[pytest.mark.gpu_1, pytest.mark.vllm],
-        ),
-        text_payload,
-    ),
-    "disagg-p-tp-1-dp-4-d-tp-4-dp-1": (
-        DeploymentGraph(
-            module="graphs.disagg:Frontend",
-            config="/workspace/tests/fault_tolerance/configs/disagg_p_tp_1_dp_4_d_tp_4_dp_1.yaml",
-            directory="/workspace/examples/llm",
-            endpoints=["v1/chat/completions"],
-            response_handlers=[chat_completions_response_handler],
-            marks=[pytest.mark.gpu_1, pytest.mark.vllm],
-        ),
-        text_payload,
-    ),
-    "disagg-p-tp-2-dp-2-d-tp-4-dp-1": (
-        DeploymentGraph(
-            module="graphs.disagg:Frontend",
-            config="/workspace/tests/fault_tolerance/configs/disagg_p_tp_2_dp_2_d_tp_4_dp_1.yaml",
-            directory="/workspace/examples/llm",
-            endpoints=["v1/chat/completions"],
-            response_handlers=[chat_completions_response_handler],
-            marks=[pytest.mark.gpu_1, pytest.mark.vllm],
-        ),
-        text_payload,
-    ),
-}
-
-failure_scenarios = {
-    "decode_worker": [[30, [("dynamo_vllmworker", 1)]]],
-    "prefill_worker": [[30, [("dynamo_prefillworker", 1)]]],
-    "frontend": [[30, [("dynamo_frontend", 1)]]],
-    "processor": [[30, [("dynamo_processor", 1)]]],
-    "vllm_worker": [[30, [("vllm_worker", 1)]]],
-    "none": [],
-}
-
-
-@pytest.fixture(
-    params=[
-        "none",
-        "decode_worker",
-        "prefill_worker",
-        "frontend",
-        "processor",
-        "vllm_worker",
-    ]
-)
-def failures(request):
-    return failure_scenarios[request.param]
-
-
-@pytest.fixture(params=list(deployment_graphs.keys()))
-def deployment_graph_test(request):
-    """
-    Fixture that provides different deployment graph test configurations.
-    """
-    return deployment_graphs[request.param]
-
-
-def _get_random_prompt(length):
-    word_list = [f"{i}" for i in range(10)]
-    return " ".join(random.choices(word_list, k=length))
-
-
-def _single_request(
-    url,
-    payload,
-    logger,
-    retry_attempts=1,
-    input_token_length=100,
-    output_token_length=100,
-    timeout=30,
-    retry_delay=1,
-):
-    prompt = _get_random_prompt(input_token_length)
-    payload["messages"][0]["content"] = prompt
-    payload["max_tokens"] = output_token_length
-    response = None
-    end_time = None
-    start_time = time.time()
-    results = []
-
-    while retry_attempts:
-        start_request_time = time.time()
-
-        try:
-            response = requests.post(
-                url,
-                json=payload,
-                timeout=timeout,
-            )
-            end_time = time.time()
-
-            content = None
-
-            try:
-                content = response.json()
-            except json.JSONDecodeError:
-                pass
-
-            results.append(
-                {
-                    "status": response.status_code,
-                    "result": content,
-                    "request_elapsed_time": end_time - start_request_time,
-                }
-            )
-
-            if response.status_code != 200:
-                time.sleep(retry_delay)
-                retry_attempts -= 1
-                continue
-            else:
-                break
-
-        except (requests.RequestException, requests.Timeout) as e:
-            results.append(
-                {
-                    "status": str(e),
-                    "result": None,
-                    "request_elapsed_time": time.time() - start_request_time,
-                }
-            )
-            logger.warning("Retrying due to Request failed: %s", e)
-            time.sleep(retry_delay)
-            retry_attempts -= 1
-            continue
-
-    return {
-        "time": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
-        "results": results,
-        "total_time": time.time() - start_time,
-    }
-
-
-def client(
-    deployment_graph,
-    server_process,
-    payload,
-    log_dir,
-    index,
-    requests_per_client,
-    input_token_length,
-    output_token_length,
-    max_retries,
-    retry_delay=1,
-):
-    try:
-        log_path = os.path.join(log_dir, f"client_{index}.log.txt")
-        with open(log_path, "w") as log:
-            logger = logging.getLogger(f"CLIENT: {index}")
-            url = f"http://localhost:{server_process.port}/{deployment_graph.endpoints[0]}"
-
-            for i in range(requests_per_client):
-                result = _single_request(
-                    url,
-                    payload.payload_chat,
-                    logger,
-                    max_retries,
-                    input_token_length=input_token_length,
-                    output_token_length=output_token_length,
-                    retry_delay=retry_delay,
-                )
-                logger.info(
-                    f"Request: {i} Status: {result['results'][-1]['status']} Latency: {result['results'][-1]['request_elapsed_time']}"
-                )
-
-                log.write(json.dumps(result) + "\n")
-                log.flush()
-    except Exception as e:
-        print(e)
-    logger.info("Exiting")
 
 
 def _set_deployment_args(request, max_num_seqs):
@@ -292,6 +46,81 @@ def _list_vllm_worker_processes():
         ):
             processes.append(ps_process.pid)
     return processes
+
+
+@contextmanager
+def _clients(
+    logger,
+    num_clients,
+    request,
+    deployment_graph,
+    server_process,
+    payload,
+    requests_per_client,
+    input_token_length,
+    output_token_length,
+    max_retries,
+):
+    procs = []
+    for i in range(num_clients):
+        procs.append(
+            Process(
+                target=client,
+                args=(
+                    deployment_graph,
+                    server_process,
+                    payload,
+                    request.node.name,
+                    i,
+                    requests_per_client,
+                    input_token_length,
+                    output_token_length,
+                    max_retries,
+                ),
+            )
+        )
+        procs[-1].start()
+    yield procs
+
+    for proc in procs:
+        logger.debug(f"{proc} waiting for join")
+        proc.join()
+        logger.debug(f"{proc} joined")
+
+
+def _inject_failures(failures, logger):
+    circus_controller = CircusController.from_state_file("dynamo")
+
+    for failure_time, component in failures:
+        time.sleep(failure_time)
+        for component_name, number in component:
+            logger.info(f"Injecting failure for: {component_name}")
+
+            if "dynamo" in component_name:
+                result = circus_controller.client.call(
+                    {"command": "list", "properties": {"name": f"{component_name}"}}
+                )
+                if result["status"] == "error":
+                    logger.warning(f"component {component_name} not found {result}")
+                    continue
+
+                num_processes = len(result["pids"])
+                if number is None:
+                    number = num_processes
+                for x in range(number):
+                    pid = result["pids"][x % num_processes]
+                    logger.info(f"Terminating {component_name} Pid {pid}")
+                    terminate_process_tree(pid, logger)
+            elif "vllm" in component_name:
+                vllm_processes = _list_vllm_worker_processes()
+                num_processes = len(vllm_processes)
+                if number is None:
+                    number = len(vllm_processes)
+                for x in range(number):
+                    pid = vllm_processes[x % num_processes]
+                    terminate_process_tree(pid, logger)
+
+        circus_controller.close()
 
 
 @pytest.mark.e2e
@@ -342,60 +171,16 @@ async def test_worker_failure(
     ) as server_process:
         server_process.wait_for_ready(payload)
 
-        procs = []
-        for i in range(num_clients):
-            procs.append(
-                Process(
-                    target=client,
-                    args=(
-                        deployment_graph,
-                        server_process,
-                        payload,
-                        request.node.name,
-                        i,
-                        requests_per_client,
-                        input_token_length,
-                        output_token_length,
-                        max_retries,
-                    ),
-                )
-            )
-            procs[-1].start()
-
-        circus_controller = CircusController.from_state_file("dynamo")
-
-        for failure_time, component in failures:
-            time.sleep(failure_time)
-            for component_name, number in component:
-                logger.info(f"Injecting failure for: {component_name}")
-
-                if "dynamo" in component_name:
-                    result = circus_controller.client.call(
-                        {"command": "list", "properties": {"name": f"{component_name}"}}
-                    )
-                    if result["status"] == "error":
-                        logger.warn(f"component {component_name} not found {result}")
-                        continue
-
-                    num_processes = len(result["pids"])
-                    if number is None:
-                        number = num_processes
-                    for x in range(number):
-                        pid = result["pids"][x % num_processes]
-                        logger.info(f"Terminating {component_name} Pid {pid}")
-                        terminate_process_tree(pid, logger)
-                elif "vllm" in component_name:
-                    vllm_processes = _list_vllm_worker_processes()
-                    num_processes = len(vllm_processes)
-                    if number is None:
-                        number = len(vllm_processes)
-                    for x in range(number):
-                        pid = vllm_processes[x % num_processes]
-                        terminate_process_tree(pid, logger)
-
-        for proc in procs:
-            logger.debug(f"{proc} waiting for join")
-            proc.join()
-            logger.debug(f"{proc} joined")
-
-        circus_controller.close()
+        with _clients(
+            logger,
+            num_clients,
+            request,
+            deployment_graph,
+            server_process,
+            payload,
+            requests_per_client,
+            input_token_length,
+            output_token_length,
+            max_retries,
+        ):
+            _inject_failures(failures, logger)
