@@ -24,7 +24,6 @@ uv-base:
     COPY +uv-source/uv /bin/uv
     RUN uv venv
     ENV PATH="/app/.venv/bin:$PATH"
-    RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
     WORKDIR /app
     COPY uv.lock pyproject.toml README.md /app
     RUN uv sync --frozen --no-install-project --no-dev --no-install-workspace --no-editable
