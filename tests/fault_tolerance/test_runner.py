@@ -374,7 +374,7 @@ async def test_worker_failure(
                         {"command": "list", "properties": {"name": f"{component_name}"}}
                     )
                     if result["status"] == "error":
-                        logger.warn(f"component {component_name} not found {result}")
+                        logger.warning(f"component {component_name} not found {result}")
                         continue
 
                     num_processes = len(result["pids"])
