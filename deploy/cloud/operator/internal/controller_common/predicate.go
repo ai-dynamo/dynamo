@@ -33,6 +33,10 @@ type Config struct {
 	// If true, assume VirtualService endpoints are HTTPS
 	VirtualServiceSupportsHTTPS bool
 	EnableLWS                   bool
+	// Custom path for liveness probe (if not specified, defaults to /healthz)
+	CustomLivenessPath string
+	// Custom path for readiness probe (if not specified, defaults to /readyz)
+	CustomReadinessPath string
 }
 
 func EphemeralDeploymentEventFilter(config Config) predicate.Predicate {

@@ -1424,15 +1424,8 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		}
 	}
 
-	var livenessProbe *corev1.Probe
-	if opt.dynamoComponentDeployment.Spec.LivenessProbe != nil {
-		livenessProbe = opt.dynamoComponentDeployment.Spec.LivenessProbe
-	}
-
-	var readinessProbe *corev1.Probe
-	if opt.dynamoComponentDeployment.Spec.ReadinessProbe != nil {
-		readinessProbe = opt.dynamoComponentDeployment.Spec.ReadinessProbe
-	}
+	// Get liveness and readiness probes with custom paths
+	livenessProbe, readinessProbe := GetProbesWithCustomPaths(opt.dynamoComponentDeployment, &r.Config)
 
 	volumes := make([]corev1.Volume, 0)
 	volumeMounts := make([]corev1.VolumeMount, 0)

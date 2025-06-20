@@ -23,6 +23,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"os"
+	"strings"
 	"time"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
@@ -83,6 +84,8 @@ func main() {
 	var ingressControllerTLSSecretName string
 	var ingressHostSuffix string
 	var enableLWS bool
+	var customLivenessPath string
+	var customReadinessPath string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -110,6 +113,10 @@ func main() {
 		"The suffix to use for the ingress host")
 	flag.BoolVar(&enableLWS, "enable-lws", false,
 		"If set, enable leader worker set")
+	flag.StringVar(&customLivenessPath, "custom-liveness-path", "",
+		"Custom path for liveness probe (if not specified, defaults to /healthz)")
+	flag.StringVar(&customReadinessPath, "custom-readiness-path", "",
+		"Custom path for readiness probe (if not specified, defaults to /readyz)")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -122,6 +129,8 @@ func main() {
 		RestrictedNamespace:         restrictedNamespace,
 		VirtualServiceSupportsHTTPS: virtualServiceSupportsHTTPS,
 		EnableLWS:                   enableLWS,
+		CustomLivenessPath:          customLivenessPath,
+		CustomReadinessPath:         customReadinessPath,
 	}
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
@@ -226,16 +235,31 @@ func main() {
 	}
 	//+kubebuilder:scaffold:builder
 
-	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up health check")
+	// Use custom health check paths if provided, otherwise use defaults
+	livenessPath := "healthz"
+	if customLivenessPath != "" {
+		// Remove leading slash if present
+		livenessPath = strings.TrimPrefix(customLivenessPath, "/")
+	}
+
+	readinessPath := "readyz"
+	if customReadinessPath != "" {
+		// Remove leading slash if present
+		readinessPath = strings.TrimPrefix(customReadinessPath, "/")
+	}
+
+	if err := mgr.AddHealthzCheck(livenessPath, healthz.Ping); err != nil {
+		setupLog.Error(err, "unable to set up health check", "path", livenessPath)
 		os.Exit(1)
 	}
-	if err := mgr.AddReadyzCheck("readyz", healthz.Ping); err != nil {
-		setupLog.Error(err, "unable to set up ready check")
+	if err := mgr.AddReadyzCheck(readinessPath, healthz.Ping); err != nil {
+		setupLog.Error(err, "unable to set up ready check", "path", readinessPath)
 		os.Exit(1)
 	}
 
-	setupLog.Info("starting manager")
+	setupLog.Info("Health check endpoints configured", "liveness", "/"+livenessPath, "readiness", "/"+readinessPath)
+
+	setupLog.Info("Starting manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
