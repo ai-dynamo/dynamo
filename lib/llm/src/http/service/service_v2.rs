@@ -3,6 +3,7 @@
 
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 
 use super::metrics;
 use super::Metrics;
@@ -16,10 +17,19 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 /// HTTP service shared state
+#[derive(Default)]
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
     runtime: Option<Arc<DistributedRuntime>>,
+    flags: RwLock<StateFlags>,
+}
+
+#[derive(Default, Debug, Clone)]
+struct StateFlags {
+    chat_endpoints_enabled: bool,
+    cmpl_endpoints_enabled: bool,
+    embeddings_endpoints_enabled: bool,
 }
 
 impl State {
@@ -28,6 +38,11 @@ impl State {
             manager,
             metrics: Arc::new(Metrics::default()),
             runtime: None,
+            flags: RwLock::new(StateFlags {
+                chat_endpoints_enabled: false,
+                cmpl_endpoints_enabled: false,
+                embeddings_endpoints_enabled: false,
+            }),
         }
     }
 
@@ -36,6 +51,11 @@ impl State {
             manager,
             metrics: Arc::new(Metrics::default()),
             runtime: Some(runtime),
+            flags: RwLock::new(StateFlags {
+                chat_endpoints_enabled: false,
+                cmpl_endpoints_enabled: false,
+                embeddings_endpoints_enabled: false,
+            }),
         }
     }
 
@@ -85,10 +105,10 @@ pub struct HttpServiceConfig {
 
     // #[builder(default)]
     // custom: Vec<axum::Router>
-    #[builder(default = "true")]
+    #[builder(default = "false")]
     enable_chat_endpoints: bool,
 
-    #[builder(default = "true")]
+    #[builder(default = "false")]
     enable_cmpl_endpoints: bool,
 
     #[builder(default = "true")]
@@ -146,6 +166,36 @@ impl HttpService {
     pub fn route_docs(&self) -> &[RouteDoc] {
         &self.route_docs
     }
+
+    /// Enable or disable chat completion endpoints
+    pub async fn enable_chat_endpoints(&self, enable: bool) {
+        let mut state_flags = self.state.flags.write().await;
+        state_flags.chat_endpoints_enabled = enable;
+        tracing::info!(
+            "Chat completion endpoints {}",
+            if enable { "enabled" } else { "disabled" }
+        );
+    }
+
+    /// Enable or disable completion endpoints
+    pub async fn enable_cmpl_endpoints(&self, enable: bool) {
+        let mut state_flags = self.state.flags.write().await;
+        state_flags.cmpl_endpoints_enabled = enable;
+        tracing::info!(
+            "Completion endpoints {}",
+            if enable { "enabled" } else { "disabled" }
+        );
+    }
+
+    /// Enable or disable embeddings endpoints
+    pub async fn enable_embeddings_endpoints(&self, enable: bool) {
+        let mut state_flags = self.state.flags.write().await;
+        state_flags.embeddings_endpoints_enabled = enable;
+        tracing::info!(
+            "Embeddings endpoints {}",
+            if enable { "enabled" } else { "disabled" }
+        );
+    }
 }
 
 impl HttpServiceConfigBuilder {
@@ -158,6 +208,16 @@ impl HttpServiceConfigBuilder {
         } else {
             Arc::new(State::new(model_manager))
         };
+
+        // Set initial state flags based on config
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut state_flags = state.flags.write().await;
+                state_flags.chat_endpoints_enabled = config.enable_chat_endpoints;
+                state_flags.cmpl_endpoints_enabled = config.enable_cmpl_endpoints;
+                state_flags.embeddings_endpoints_enabled = config.enable_embeddings_endpoints;
+            });
+        });
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -174,28 +234,72 @@ impl HttpServiceConfigBuilder {
             super::clear_kv_blocks::clear_kv_blocks_router(state.clone(), None),
         ];
 
-        if config.enable_chat_endpoints {
-            routes.push(super::openai::chat_completions_router(
-                state.clone(),
-                config.request_template,
-                None,
-            ));
-        }
+        // Add chat completions route with conditional middleware
+        let (chat_docs, chat_route) =
+            super::openai::chat_completions_router(state.clone(), config.request_template, None);
+        let state_chat_route = state.clone();
+        let chat_route = chat_route.route_layer(axum::middleware::from_fn(
+            move |req, next: axum::middleware::Next| {
+                let state = state_chat_route.clone();
+                async move {
+                    // Read the flag value and drop the lock before async operations
+                    let guard = state.flags.read().await;
+                    let enabled = guard.chat_endpoints_enabled;
 
-        if config.enable_cmpl_endpoints {
-            routes.push(super::openai::completions_router(state.clone(), None));
-        }
+                    if enabled {
+                        Ok(next.run(req).await)
+                    } else {
+                        tracing::debug!("Chat endpoints are disabled");
+                        Err(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+                    }
+                }
+            },
+        ));
+        routes.push((chat_docs, chat_route));
 
-        if config.enable_embeddings_endpoints {
-            routes.push(super::openai::embeddings_router(state.clone(), None));
-        }
+        // Add completions route with conditional middleware
+        let state_cmpl = state.clone();
+        let (cmpl_docs, cmpl_route) = super::openai::completions_router(state_cmpl, None);
 
-        // for (route_docs, route) in routes.into_iter().chain(self.routes.into_iter()) {
-        //     router = router.merge(route);
-        //     all_docs.extend(route_docs);
-        // }
+        let state_cmpl_route = state.clone();
+        let cmpl_route = cmpl_route.route_layer(axum::middleware::from_fn(
+            move |req, next: axum::middleware::Next| {
+                let state_api = state_cmpl_route.clone();
+                async move {
+                    let guard = state_api.flags.read().await;
+                    let enabled = guard.cmpl_endpoints_enabled;
 
-        for (route_docs, route) in routes.into_iter() {
+                    if enabled {
+                        Ok(next.run(req).await)
+                    } else {
+                        Err(axum::http::StatusCode::NOT_FOUND)
+                    }
+                }
+            },
+        ));
+        routes.push((cmpl_docs, cmpl_route));
+
+        // Add embeddings route with conditional middleware
+        let (embed_docs, embed_route) = super::openai::embeddings_router(state.clone(), None);
+        let state_embed_route = state.clone();
+        let embed_route = embed_route.route_layer(axum::middleware::from_fn(
+            move |req, next: axum::middleware::Next| {
+                let state_api = state_embed_route.clone();
+                async move {
+                    let guard = state_api.flags.read().await;
+                    let enabled = guard.embeddings_endpoints_enabled;
+
+                    if enabled {
+                        Ok(next.run(req).await)
+                    } else {
+                        Err(axum::http::StatusCode::NOT_FOUND)
+                    }
+                }
+            },
+        ));
+        routes.push((embed_docs, embed_route));
+
+        for (route_docs, route) in routes {
             router = router.merge(route);
             all_docs.extend(route_docs);
         }
