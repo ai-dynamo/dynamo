@@ -20,6 +20,8 @@ from typing import Any, Awaitable, Union
 
 from fastapi import FastAPI, Response
 
+from dynamo.sdk.core.lib import IS_LIVENESS_PROBE_PROP, IS_READINESS_PROBE_PROP
+
 
 # TODO: These defaults should be set by the provider. For now, I'm just adding them so that something is exposed when we do --use-default-health-checks
 def default_liveness_check() -> bool:
@@ -54,7 +56,7 @@ def register_liveness_probe(
     decorated_method = None
     for attr in dir(instance):
         method = getattr(instance, attr)
-        if callable(method) and getattr(method, "__is_liveness_probe__", False):
+        if callable(method) and getattr(method, IS_LIVENESS_PROBE_PROP, False):
             decorated_method = method
             break
 
@@ -100,7 +102,7 @@ def register_readiness_probe(
     decorated_method = None
     for attr in dir(instance):
         method = getattr(instance, attr)
-        if callable(method) and getattr(method, "__is_readiness_probe__", False):
+        if callable(method) and getattr(method, IS_READINESS_PROBE_PROP, False):
             decorated_method = method
             break
 

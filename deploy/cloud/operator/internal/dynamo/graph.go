@@ -539,10 +539,17 @@ func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 // mergeExtraPodSpec merges the ExtraPodSpec from service config into the deployment spec
 func mergeExtraPodSpec(deployment *v1alpha1.DynamoComponentDeployment, serviceConfig *Config) error {
 	if serviceConfig.ExtraPodSpec != nil && serviceConfig.ExtraPodSpec.MainContainer != nil {
+		// Log the entire ExtraPodSpec
+		extraPodSpecJSON, err := json.MarshalIndent(serviceConfig.ExtraPodSpec, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal ExtraPodSpec to JSON: %w", err)
+		}
+		fmt.Printf("ExtraPodSpec for deployment %s: %s\n", deployment.Name, string(extraPodSpecJSON))
+
 		if deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec == nil {
 			deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec = new(common.ExtraPodSpec)
 		}
-		err := mergo.Merge(
+		err = mergo.Merge(
 			deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec,
 			serviceConfig.ExtraPodSpec,
 			mergo.WithOverride,

@@ -59,6 +59,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
+	"github.com/go-logr/logr"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
@@ -594,11 +595,9 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx 
 		return nil, fmt.Errorf("generateLeaderPodTemplateSpec: GPU limit is not set for Ray leader pod")
 	}
 
-	// TODO: Liveness and readiness probes are temporarily disabled for leader worker sets
-	// until we implement proper probe configuration that can differentiate between
-	// leader and worker pods.
-	leaderPodTemplateSpec.Spec.Containers[0].LivenessProbe = nil
-	leaderPodTemplateSpec.Spec.Containers[0].ReadinessProbe = nil
+	// In leader worker sets configurations
+	// Liveness and readiness probes enabled on Leaders only.
+	// Let the generatePodTemplateSpec fill them in.
 
 	leaderPodTemplateSpec.Spec.Containers[0].Args[0] = fmt.Sprintf("ray start --head --port=6379 && %s", currentArgs)
 
@@ -639,9 +638,9 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 		return nil, fmt.Errorf("generateWorkerPodTemplateSpec: GPU limit is not set for Ray worker pod")
 	}
 
-	// TODO: Liveness and readiness probes are temporarily disabled for leader worker sets
-	// until we implement proper probe configuration that can differentiate between
-	// leader and worker pods.
+	// In leader worker sets configurations Liveness and Readiness probes enabled on Leaders only.
+	// They are populated by default in the generatePodTemplateSpec.
+	// Disable them for workers. We only provide one configuration for the leaders through the sdk.
 	workerPodTemplateSpec.Spec.Containers[0].LivenessProbe = nil
 	workerPodTemplateSpec.Spec.Containers[0].ReadinessProbe = nil
 
@@ -1000,23 +999,21 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 	return
 }
 
-func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx context.Context, opt generateResourceOption) (bool, error) {
-	modified, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1.Ingress, bool, error) {
+func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx context.Context, opt generateResourceOption) (modified bool, err error) {
+	modified, _, err = commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1.Ingress, bool, error) {
 		return r.generateIngress(ctx, opt)
 	})
 	if err != nil {
-		return false, err
+		return
 	}
-	if r.UseVirtualService {
-		modified_, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
-			return r.generateVirtualService(ctx, opt)
-		})
-		if err != nil {
-			return false, err
-		}
-		return modified || modified_, nil
+	modified_, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
+		return r.generateVirtualService(ctx, opt)
+	})
+	if err != nil {
+		return
 	}
-	return modified, nil
+	modified = modified || modified_
+	return
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateIngress(ctx context.Context, opt generateResourceOption) (*networkingv1.Ingress, bool, error) {
@@ -1143,15 +1140,11 @@ func (r *DynamoComponentDeploymentReconciler) getGenericServiceName(dynamoCompon
 	return r.getKubeName(dynamoComponentDeployment, dynamoComponent, false)
 }
 
-func (r *DynamoComponentDeploymentReconciler) getKubeLabels(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, dynamoComponent *v1alpha1.DynamoComponent) map[string]string {
+func (r *DynamoComponentDeploymentReconciler) getKubeLabels(_ *v1alpha1.DynamoComponentDeployment, dynamoComponent *v1alpha1.DynamoComponent) map[string]string {
 	labels := map[string]string{
 		commonconsts.KubeLabelDynamoComponent: dynamoComponent.Name,
 	}
-	if dynamoComponentDeployment != nil && dynamoComponentDeployment.Labels != nil {
-		if v, ok := dynamoComponentDeployment.Labels[commonconsts.KubeLabelDynamoComponent]; ok && v != "" {
-			labels[commonconsts.KubeLabelDynamoComponentType] = v
-		}
-	}
+	labels[commonconsts.KubeLabelDynamoComponentType] = commonconsts.DynamoApiServerComponentName
 	return labels
 }
 
@@ -1424,15 +1417,15 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		}
 	}
 
-	var livenessProbe *corev1.Probe
-	if opt.dynamoComponentDeployment.Spec.LivenessProbe != nil {
-		livenessProbe = opt.dynamoComponentDeployment.Spec.LivenessProbe
-	}
+	// var livenessProbe *corev1.Probe
+	// if opt.dynamoComponentDeployment.Spec.LivenessProbe != nil {
+	// 	livenessProbe = opt.dynamoComponentDeployment.Spec.LivenessProbe
+	// }
 
-	var readinessProbe *corev1.Probe
-	if opt.dynamoComponentDeployment.Spec.ReadinessProbe != nil {
-		readinessProbe = opt.dynamoComponentDeployment.Spec.ReadinessProbe
-	}
+	// var readinessProbe *corev1.Probe
+	// if opt.dynamoComponentDeployment.Spec.ReadinessProbe != nil {
+	// 	readinessProbe = opt.dynamoComponentDeployment.Spec.ReadinessProbe
+	// }
 
 	volumes := make([]corev1.Volume, 0)
 	volumeMounts := make([]corev1.VolumeMount, 0)
@@ -1564,17 +1557,17 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	// TODO: Temporarily disabling probes
 	container := corev1.Container{
-		Name:           "main",
-		Image:          imageName,
-		Command:        []string{"sh", "-c"},
-		Args:           []string{strings.Join(args, " ")},
-		LivenessProbe:  livenessProbe,
-		ReadinessProbe: readinessProbe,
-		Resources:      resources,
-		Env:            envs,
-		TTY:            true,
-		Stdin:          true,
-		VolumeMounts:   volumeMounts,
+		Name:    "main",
+		Image:   imageName,
+		Command: []string{"sh", "-c"},
+		Args:    []string{strings.Join(args, " ")},
+		// LivenessProbe:  livenessProbe,
+		// ReadinessProbe: readinessProbe,
+		Resources:    resources,
+		Env:          envs,
+		TTY:          true,
+		Stdin:        true,
+		VolumeMounts: volumeMounts,
 		Ports: []corev1.ContainerPort{
 			{
 				Protocol:      corev1.ProtocolTCP,
@@ -1588,41 +1581,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			},
 		},
 		SecurityContext: mainContainerSecurityContext,
-	}
-
-	// Set default probes if none are provided
-	if livenessProbe == nil {
-		container.LivenessProbe = &corev1.Probe{
-			// TODO: Initial delay and other probe settings should be read off sdk, these are default settings that should cover vllm / hello-world
-			InitialDelaySeconds: 60, // 1 minute
-			PeriodSeconds:       60, // Check every 1 minute
-			TimeoutSeconds:      5,  // 5 second timeout
-			FailureThreshold:    10, // Allow 10 failures before declaring unhealthy
-			SuccessThreshold:    1,  // Need 1 success to be considered healthy
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/healthz",
-					Port: intstr.FromString(commonconsts.DynamoHealthPortName),
-				},
-			},
-		}
-	}
-
-	if readinessProbe == nil {
-		container.ReadinessProbe = &corev1.Probe{
-			// TODO: Initial delay and other probe settings should be read off sdk, these are default settings that should cover vllm / hello-world
-			InitialDelaySeconds: 60, // 1 minute
-			PeriodSeconds:       60, // Check every 1 minute
-			TimeoutSeconds:      5,  // 5 second timeout
-			FailureThreshold:    10, // Allow 10 failures before declaring not ready
-			SuccessThreshold:    1,  // Need 1 success to be considered ready
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{
-					Path: "/readyz",
-					Port: intstr.FromString(commonconsts.DynamoHealthPortName),
-				},
-			},
-		}
 	}
 
 	if opt.dynamoComponentDeployment.Spec.EnvFromSecret != nil {
@@ -1660,27 +1618,8 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		container.SecurityContext.RunAsUser = &[]int64{0}[0]
 	}
 
-	// For now only overwrite the command and args.
-	if opt.dynamoComponentDeployment.Spec.ExtraPodSpec != nil {
-		extraPodSpecMainContainer := opt.dynamoComponentDeployment.Spec.ExtraPodSpec.MainContainer
-		if extraPodSpecMainContainer != nil {
-			if len(extraPodSpecMainContainer.Command) > 0 {
-				logs.Info("Overriding container '" + container.Name + "' Command with: " + strings.Join(extraPodSpecMainContainer.Command, " "))
-				container.Command = extraPodSpecMainContainer.Command
-			}
-			if len(extraPodSpecMainContainer.Args) > 0 {
-				// Special case: if command is "sh -c", we must collapse args into a single string
-				if len(container.Command) == 2 && container.Command[0] == "sh" && container.Command[1] == "-c" {
-					joinedArgs := strings.Join(extraPodSpecMainContainer.Args, " ")
-					logs.Info("Special case detected for container '" + container.Name + "': Command is 'sh -c'; collapsing Args to: " + joinedArgs)
-					container.Args = []string{joinedArgs}
-				} else {
-					logs.Info("Overriding container '" + container.Name + "' Args with: " + strings.Join(extraPodSpecMainContainer.Args, " "))
-					container.Args = extraPodSpecMainContainer.Args
-				}
-			}
-		}
-	}
+	// For now only overwrite the command, args and readyness and liveness settings.
+	overrideContainerWithExtraPodSpec(&container, opt.dynamoComponentDeployment.Spec.ExtraPodSpec, logs)
 
 	containers = append(containers, container)
 
@@ -2022,4 +1961,42 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 
 func (r *DynamoComponentDeploymentReconciler) GetRecorder() record.EventRecorder {
 	return r.Recorder
+}
+
+// overrideContainerWithExtraPodSpec overrides the container's command, args, and probe settings with ExtraPodSpec
+func overrideContainerWithExtraPodSpec(container *corev1.Container, extraPodSpec *dynamoCommon.ExtraPodSpec, logs logr.Logger) {
+	if extraPodSpec == nil || extraPodSpec.MainContainer == nil {
+		return
+	}
+
+	extraPodSpecMainContainer := extraPodSpec.MainContainer
+
+	if len(extraPodSpecMainContainer.Command) > 0 {
+		logs.Info("Overriding container '" + container.Name + "' Command with: " + strings.Join(extraPodSpecMainContainer.Command, " "))
+		container.Command = extraPodSpecMainContainer.Command
+	}
+
+	if len(extraPodSpecMainContainer.Args) > 0 {
+		// Special case: if command is "sh -c", we must collapse args into a single string.
+		if len(container.Command) == 2 && container.Command[0] == "sh" && container.Command[1] == "-c" {
+			joinedArgs := strings.Join(extraPodSpecMainContainer.Args, " ")
+			logs.Info("Special case detected for container '" + container.Name + "': Command is 'sh -c'; collapsing Args to: " + joinedArgs)
+			container.Args = []string{joinedArgs}
+		} else {
+			logs.Info("Overriding container '" + container.Name + "' Args with: " + strings.Join(extraPodSpecMainContainer.Args, " "))
+			container.Args = extraPodSpecMainContainer.Args
+		}
+	}
+
+	// Override LivenessProbe if present in ExtraPodSpec.
+	if extraPodSpecMainContainer.LivenessProbe != nil {
+		logs.Info("Overriding container '" + container.Name + "' LivenessProbe with ExtraPodSpec configuration")
+		container.LivenessProbe = extraPodSpecMainContainer.LivenessProbe
+	}
+
+	// Override ReadinessProbe if present in ExtraPodSpec.
+	if extraPodSpecMainContainer.ReadinessProbe != nil {
+		logs.Info("Overriding container '" + container.Name + "' ReadinessProbe with ExtraPodSpec configuration")
+		container.ReadinessProbe = extraPodSpecMainContainer.ReadinessProbe
+	}
 }

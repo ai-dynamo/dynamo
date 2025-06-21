@@ -39,16 +39,19 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from dynamo.sdk import DYNAMO_IMAGE
-from dynamo.sdk.core.protocol.deployment import Service
+from dynamo.sdk.core.lib import (
+    IS_LIVENESS_PROBE_PROP,
+    IS_READINESS_PROBE_PROP,
+    LIVENESS_PROBE_PROP_PATH,
+    READYESS_PROBE_PROP_PATH,
+)
 from dynamo.sdk.core.protocol.interface import (
-    DynamoConfig,
     DynamoTransport,
     KubernetesOverrides,
     LinkedServices,
     ServiceInterface,
 )
 from dynamo.sdk.core.runner import TargetEnum
-from dynamo.sdk.lib.utils import upload_graph
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -109,7 +112,7 @@ class ServiceConfig(BaseModel):
     resources: t.Dict[str, t.Any] = Field(default_factory=dict)
     workers: t.Optional[int] = None
     image: str = "dynamo:latest"
-    dynamo: DynamoConfig = Field(default_factory=DynamoConfig)
+    dynamo: t.Dict[str, t.Any] = Field(default_factory=dict)
     http_exposed: bool = False
     api_endpoints: t.List[str] = Field(default_factory=list)
     kubernetes_overrides: KubernetesOverrides | None = None
@@ -128,6 +131,26 @@ class ServiceInfo(BaseModel):
         """Create ServiceInfo from a service instance."""
         service_class = service.inner
         name = getattr(service, "name", service_class.__name__)
+        if service.config.kubernetes_overrides is not None:
+            liveliness_func = cls.find_health_probe_method(
+                klass=service_class, check_property=IS_LIVENESS_PROBE_PROP
+            )
+            if not liveliness_func:
+                # Inconsistency. Remove the kubernetes overrides if presenst.
+                logger.warning(
+                    f"No @liveness decorator specified for {name}, removing liveness settings from kubernetes overrides."
+                )
+                service.config.kubernetes_overrides.liveness_probe_settings = None
+
+            readyness_func = cls.find_health_probe_method(
+                klass=service_class, check_property=IS_READINESS_PROBE_PROP
+            )
+            if not readyness_func:
+                # Inconsistency. Remove the kubernetes overrides if presenst.
+                logger.warning(
+                    f"No @readiness decorator specified for {name}, removing readiness settings from kubernetes overrides."
+                )
+                service.config.kubernetes_overrides.readyness_probe_settings = None
 
         # Extract API endpoints if available
         api_endpoints = []
@@ -147,7 +170,7 @@ class ServiceInfo(BaseModel):
             resources=service.config.resources.model_dump(),
             workers=service.config.workers,
             image=image,
-            dynamo=DynamoConfig(**service.config.dynamo.model_dump()),
+            dynamo=service.config.dynamo.model_dump(),
             http_exposed=len(api_endpoints) > 0,
             api_endpoints=api_endpoints,
             kubernetes_overrides=service.config.kubernetes_overrides,
@@ -160,9 +183,18 @@ class ServiceInfo(BaseModel):
             config=config,
         )
 
+    @classmethod
+    def find_health_probe_method(self, klass: type, check_property: str) -> t.Callable:
+        """Determine if the user provided @live or @health method and return the callable."""
+        for attr_name in dir(klass):
+            attr = getattr(klass, attr_name)
+            if callable(attr) and hasattr(attr, check_property):
+                return attr
+        return None
+
 
 class BuildConfig(BaseModel):
-    """Configuration for building a Dynamo graph."""
+    """Configuration for building a Dynamo pipeline."""
 
     service: str
     name: t.Optional[str] = None
@@ -211,10 +243,17 @@ class ManifestInfo(BaseModel):
 
     def to_dict(self) -> t.Dict[str, t.Any]:
         """Convert to dictionary for YAML serialization."""
-        result = self.model_dump()
+        result = self.model_dump(by_alias=True, exclude_none=True)
         # Convert ServiceInfo objects to dictionaries
         services_dict = []
         for service in result["services"]:
+            #
+            for attr in dir(service):
+                method = getattr(service, attr)
+                if callable(method) and getattr(method, "__is_liveness_probe__", False):
+                    decorated_method = method
+                    print(f"decorated_method {decorated_method}")
+            #
             service_dict = {
                 "name": service["name"],
                 "service": service["config"]["service"],
@@ -226,32 +265,7 @@ class ManifestInfo(BaseModel):
                 },
             }
             # Add kubernetes_overrides if present.
-            if (
-                "kubernetes_overrides" in service["config"]
-                and service["config"]["kubernetes_overrides"]
-            ):
-                # Map kubernetes_overrides fields to mainContainer if present.
-                kube_overrides = service["config"]["kubernetes_overrides"]
-                main_container = {}
-
-                entrypoint = kube_overrides.get("entrypoint")
-                if entrypoint:
-                    if isinstance(entrypoint, str):
-                        main_container["command"] = shlex.split(entrypoint)
-                    else:
-                        main_container["command"] = shlex.split(entrypoint[0])
-
-                cmd = kube_overrides.get("cmd")
-                if cmd:
-                    if isinstance(cmd, str):
-                        main_container["args"] = shlex.split(cmd)
-                    else:
-                        main_container["args"] = shlex.split(cmd[0])
-
-                if main_container:
-                    service_dict["config"]["extraPodSpec"] = {
-                        "mainContainer": main_container
-                    }
+            process_kubernetes_overrides(service, service_dict)
 
             # Add HTTP configuration if exposed
             if service["config"]["http_exposed"]:
@@ -311,7 +325,7 @@ class Package:
         cls,
         build_config: BuildConfig,
         build_ctx: t.Optional[str] = None,
-    ) -> ServiceInterface:
+    ) -> t.Any:
         """Get a dynamo service from config."""
         build_ctx = (
             os.getcwd()
@@ -401,26 +415,6 @@ class Package:
             manifest_dict = manifest.to_dict()
             with open(os.path.join(self.path, "dynamo.yaml"), "w") as f:
                 yaml.dump(manifest_dict, f, default_flow_style=False)
-
-    def get_entry_service(self) -> Service:
-        """Get the entry service."""
-        for service in self.info.services:
-            if service.name == self.info.entry_service:
-                entry_service = service
-                break
-        else:
-            raise ValueError(
-                f"Entry service {self.info.entry_service} not found in services"
-            )
-
-        return Service(
-            service_name=self.info.service,
-            name=self.info.entry_service,
-            namespace=entry_service.config.dynamo.namespace,
-            version=self.info.tag.version,
-            path=self.path,
-            envs=self.info.envs,
-        )
 
     @staticmethod
     def load_service(service_path: str, working_dir: str) -> t.Any:
@@ -532,12 +526,60 @@ class Package:
                 shutil.copy2(file_path, target_path)
 
 
+def process_kubernetes_overrides(service: dict, service_dict: dict) -> None:
+    """Process kubernetes_overrides and add them to service_dict config if present."""
+    if not (
+        "kubernetes_overrides" in service["config"]
+        and service["config"]["kubernetes_overrides"]
+    ):
+        return
+    # Map kubernetes_overrides fields to mainContainer if present.
+    kube_overrides = service["config"]["kubernetes_overrides"]
+    main_container = {}
+
+    entrypoint = kube_overrides.get("entrypoint")
+    if entrypoint:
+        if isinstance(entrypoint, str):
+            main_container["command"] = shlex.split(entrypoint)
+        else:
+            main_container["command"] = shlex.split(entrypoint[0])
+
+    cmd = kube_overrides.get("cmd")
+    if cmd:
+        if isinstance(cmd, str):
+            main_container["args"] = shlex.split(cmd)
+        else:
+            main_container["args"] = shlex.split(cmd[0])
+
+    liveness_probe_settings = kube_overrides.get("liveness_probe_settings")
+    if liveness_probe_settings:
+        main_container["livenessProbe"] = {
+            k: v for k, v in liveness_probe_settings.items() if v is not None
+        }
+        if (
+            "path" not in liveness_probe_settings
+            and "Path" not in liveness_probe_settings
+        ):
+            main_container["livenessProbe"]["Path"] = LIVENESS_PROBE_PROP_PATH
+
+    readyness_probe_settings = kube_overrides.get("readyness_probe_settings")
+    if readyness_probe_settings:
+        main_container["readynesProbe"] = {
+            k: v for k, v in readyness_probe_settings.items() if v is not None
+        }
+        if (
+            "path" not in readyness_probe_settings
+            and "Path" not in readyness_probe_settings
+        ):
+            main_container["readynesProbe"]["Path"] = READYESS_PROBE_PROP_PATH
+
+    if main_container:
+        service_dict["config"]["extraPodSpec"] = {"mainContainer": main_container}
+
+
 def build(
     service: str = typer.Argument(
         ..., help="Service specification in the format module:ServiceClass"
-    ),
-    endpoint: t.Optional[str] = typer.Option(
-        None, "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD"
     ),
     output_dir: t.Optional[str] = typer.Option(
         None, "--output-dir", "-o", help="Output directory for the build"
@@ -548,25 +590,13 @@ def build(
     containerize: bool = typer.Option(
         False,
         "--containerize",
-        help="Containerize the dynamo graph after building.",
-    ),
-    push: bool = typer.Option(
-        False,
-        "--push",
-        help="Push the built dynamo graph to the Dynamo cloud remote API store.",
+        help="Containerize the dynamo pipeline after building.",
     ),
 ) -> None:
-    """Packages Dynamo service for deployment. Optionally builds and/or pushes a docker container."""
+    """Packages Dynamo service for deployment. Optionally builds a docker container."""
     from dynamo.sdk.cli.utils import configure_target_environment
 
     configure_target_environment(TargetEnum.DYNAMO)
-    if push:
-        containerize = True
-        if endpoint is None:
-            console.print(
-                "[bold red]Error: --push requires --endpoint, -e, or DYNAMO_CLOUD environment variable to be set.[/]"
-            )
-            raise typer.Exit(1)
 
     # Determine output directory
     if output_dir is None:
@@ -628,12 +658,9 @@ def build(
         next_steps = []
         if not containerize:
             next_steps.append(
-                "\n\n* Containerize your Dynamo graph with "
+                "\n\n* Containerize your Dynamo pipeline with "
                 "`dynamo build --containerize <service_name>`:\n"
                 f"    $ dynamo build --containerize {service}"
-                "\n\n* Push your Dynamo graph to the Dynamo cloud with "
-                "`dynamo build --push <service_name>`:\n"
-                f"    $ dynamo build --push {service}"
             )
 
         if next_steps:
@@ -670,29 +697,13 @@ def build(
                     check=True,
                 )
             console.print(f"[green]Successfully built Docker image {image_name}.")
-
-        if push:
-            # Upload the graph to the Dynamo cloud remote API store
-            with Progress(
-                SpinnerColumn(),
-                TextColumn(
-                    f"[bold green]Pushing graph {image_name} to Dynamo cloud..."
-                ),
-                transient=True,
-            ) as progress:
-                progress.add_task("push", total=None)
-                entry_service = package.get_entry_service()
-                upload_graph(endpoint, image_name, entry_service)
-            console.print(
-                f"[green]Successfully pushed graph {image_name} to Dynamo cloud."
-            )
     except Exception as e:
-        console.print(f"[red]Error with build: {str(e)}")
+        console.print(f"[red]Error building package: {str(e)}")
         raise
 
 
 def generate_random_tag() -> str:
-    """Generate a random tag for the Dynamo graph."""
+    """Generate a random tag for the Dynamo pipeline."""
     return f"{uuid.uuid4().hex[:8]}"
 
 

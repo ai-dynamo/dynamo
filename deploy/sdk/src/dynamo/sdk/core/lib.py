@@ -16,7 +16,7 @@
 
 import logging
 import os
-from typing import Any, Callable, Dict, Optional, Type, TypeVar, Union
+from typing import Any, Callable, Dict, Final, Optional, Type, TypeVar, Union
 
 from fastapi import FastAPI
 
@@ -43,6 +43,11 @@ _abstract_service_cache: Dict[Type[AbstractService], ServiceInterface[Any]] = {}
 logger = logging.getLogger(__name__)
 
 DYNAMO_IMAGE = os.getenv("DYNAMO_IMAGE", "dynamo:latest-vllm")
+
+IS_READINESS_PROBE_PROP: Final[str] = "__is_readiness_probe__"
+IS_LIVENESS_PROBE_PROP: Final[str] = "__is_liveness_probe__"
+READYESS_PROBE_PROP_PATH: Final[str] = "/readyz"
+LIVENESS_PROBE_PROP_PATH: Final[str] = "/healthz"
 
 
 def set_target(target: DeploymentTarget) -> None:
@@ -151,14 +156,14 @@ def liveness(func: G) -> G:
     if not callable(func):
         raise TypeError("@liveness can only decorate callable methods")
 
-    func.__is_liveness_probe__ = True  # type: ignore
+    setattr(func, IS_LIVENESS_PROBE_PROP, True)  # type: ignore
     return func
 
 
 def get_liveness_handler(obj):
     for attr in dir(obj):
         fn = getattr(obj, attr)
-        if callable(fn) and getattr(fn, "__is_liveness_probe__", False):
+        if callable(fn) and getattr(fn, IS_LIVENESS_PROBE_PROP, False):
             return fn
     return None
 
@@ -168,13 +173,13 @@ def readiness(func: G) -> G:
     if not callable(func):
         raise TypeError("@readiness can only decorate callable methods")
 
-    func.__is_readiness_probe__ = True  # type: ignore
+    setattr(func, IS_READINESS_PROBE_PROP, True)  # type: ignore
     return func
 
 
 def get_readiness_handler(obj):
     for attr in dir(obj):
         fn = getattr(obj, attr)
-        if callable(fn) and getattr(fn, "__is_readiness_probe__", False):
+        if callable(fn) and getattr(fn, IS_READINESS_PROBE_PROP, False):
             return fn
     return None
