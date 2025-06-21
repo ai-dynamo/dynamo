@@ -126,7 +126,7 @@ async fn run_watcher(
     let (_prefix, _watcher, receiver) = models_watcher.dissolve();
 
     // Create a channel to receive model type updates
-    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
 
     watch_obj.set_notify_on_model_update(tx);
 
@@ -157,13 +157,20 @@ async fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdat
             ModelType::Chat => service.enable_chat_endpoints(true).await,
             ModelType::Completion => service.enable_cmpl_endpoints(true).await,
             ModelType::Embedding => service.enable_embeddings_endpoints(true).await,
-            ModelType::Backend => {}
+            ModelType::Backend => {
+                service.enable_chat_endpoints(true).await;
+                service.enable_cmpl_endpoints(true).await;
+            }
         },
         ModelUpdate::Removed(model_type) => match model_type {
             ModelType::Chat => service.enable_chat_endpoints(false).await,
             ModelType::Completion => service.enable_cmpl_endpoints(false).await,
             ModelType::Embedding => service.enable_embeddings_endpoints(false).await,
-            ModelType::Backend => {}
+            ModelType::Backend => {
+                service.enable_chat_endpoints(false).await;
+                service.enable_cmpl_endpoints(false).await;
+
+            }
         },
     }
 }
