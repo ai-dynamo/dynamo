@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use crate::block_manager::{
-    block::{registry::BlockRegistationError, BlockState, PrivateBlockExt},
+    block::{registry::BlockRegistrationError, BlockState, PrivateBlockExt},
     events::Publisher,
 };
 
@@ -175,7 +175,7 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
                         }
                         block
                     }
-                    Err(BlockRegistationError::BlockAlreadyRegistered(_)) => {
+                    Err(BlockRegistrationError::BlockAlreadyRegistered(_)) => {
                         // Block is already registered, wait for it to be returned
                         offload = false;
                         let raw_block =
