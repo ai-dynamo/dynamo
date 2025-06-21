@@ -31,7 +31,7 @@ The vllm and sglang engines require [etcd](https://etcd.io/) and [nats](https://
 
 ### Use model from Hugging Face
 
-To automatically download dynamo Qwen3 4B from Hugging Face (16 GiB download) and starts it in interactive text mode:
+To automatically download the Dynamo Qwen3 4B model from Hugging Face (approximately 16 GiB), and start it in interactive text mode, run the following command:
 
 ```
 dynamo run out=vllm Qwen/Qwen3-4B
