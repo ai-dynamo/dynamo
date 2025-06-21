@@ -126,10 +126,17 @@ class Middle:
     dynamo={"namespace": "inference"},
     image=DYNAMO_IMAGE,
     # Example of kubernetes overrides if needed.
-    # kubernetes_overrides={
-    #     "entrypoint": ["sh -c"],
-    #     "cmd": ["echo hello from FrontEnd!"],
-    # },
+    kubernetes_overrides={
+        "entrypoint": ["sh -c"],
+        "cmd": ["echo hello from FrontEnd!"],
+        "liveness_probe_settings": {
+            "http_get": {
+                "path": "/healthz",
+                "port": {"number": 8080},
+            },  # "probe"
+            "initial_delay_seconds": 10000,
+        },  # liveness_probe_settings
+    },
 )
 class Frontend:
     """A simple frontend HTTP API that forwards requests to the dynamo graph."""
