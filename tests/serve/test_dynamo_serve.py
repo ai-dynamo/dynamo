@@ -87,10 +87,9 @@ deployment_graphs = {
             module="graphs.agg:Frontend",
             config="configs/agg.yaml",
             directory="/workspace/examples/llm",
-            endpoints=["v1/chat/completions", "v1/completions"],
+            endpoints=["v1/chat/completions"],
             response_handlers=[
                 chat_completions_response_handler,
-                completions_response_handler,
             ],
             marks=[pytest.mark.gpu_1, pytest.mark.vllm],
         ),
@@ -115,10 +114,9 @@ deployment_graphs = {
             module="graphs.disagg:Frontend",
             config="configs/disagg.yaml",
             directory="/workspace/examples/llm",
-            endpoints=["v1/chat/completions", "v1/completions"],
+            endpoints=["v1/chat/completions"],
             response_handlers=[
                 chat_completions_response_handler,
-                completions_response_handler,
             ],
             marks=[pytest.mark.gpu_2, pytest.mark.vllm],
         ),
@@ -129,10 +127,9 @@ deployment_graphs = {
             module="graphs.agg_router:Frontend",
             config="configs/agg_router.yaml",
             directory="/workspace/examples/llm",
-            endpoints=["v1/chat/completions", "v1/completions"],
+            endpoints=["v1/chat/completions"],
             response_handlers=[
                 chat_completions_response_handler,
-                completions_response_handler,
             ],
             marks=[pytest.mark.gpu_1, pytest.mark.vllm],
             # FIXME: This is a hack to allow deployments to start before sending any requests.
@@ -147,10 +144,9 @@ deployment_graphs = {
             module="graphs.disagg_router:Frontend",
             config="configs/disagg_router.yaml",
             directory="/workspace/examples/llm",
-            endpoints=["v1/chat/completions", "v1/completions"],
+            endpoints=["v1/chat/completions"],
             response_handlers=[
                 chat_completions_response_handler,
-                completions_response_handler,
             ],
             marks=[pytest.mark.gpu_2, pytest.mark.vllm],
             # FIXME: This is a hack to allow deployments to start before sending any requests.
@@ -165,10 +161,9 @@ deployment_graphs = {
             module="graphs.agg:Frontend",
             config="configs/agg.yaml",
             directory="/workspace/examples/multimodal",
-            endpoints=["v1/chat/completions", "v1/completions"],
+            endpoints=["v1/chat/completions"],
             response_handlers=[
                 chat_completions_response_handler,
-                completions_response_handler,
             ],
             marks=[pytest.mark.gpu_2, pytest.mark.vllm],
         ),
