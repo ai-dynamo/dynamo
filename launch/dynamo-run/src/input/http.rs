@@ -169,7 +169,6 @@ async fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdat
             ModelType::Backend => {
                 service.enable_chat_endpoints(false).await;
                 service.enable_cmpl_endpoints(false).await;
-
             }
         },
     }
