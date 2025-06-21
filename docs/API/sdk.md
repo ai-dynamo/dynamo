@@ -439,6 +439,48 @@ Following these practices help create flexible and maintainable Dynamo services 
 
 You can deploy a single service for local development even if you have a dependency graph defined using `depends()` using `dynamo serve --service-name <ClassName> <entrypoint> <configuration arguments>`. You can see an example of this in our multinode documentation [here](../examples/multinode.md).
 
+### Direct Python Invocation
+
+Components can also be invoked directly using Python without the Dynamo CLI. Simply add a `__main__` block to your Python file that sets up argument parsing and calls `serve()`. Here's a complete example:
+
+```python
+from pydantic import BaseModel
+from dynamo.sdk import service, endpoint, serve, DynamoContext
+
+class GreetingRequest(BaseModel):
+    name: str
+
+@service(dynamo={"namespace": "example"})
+class GreetingService:
+    def __init__(self, dynamo_context: DynamoContext, greeting: str = "Hello") -> None:
+        # dynamo_context is injected when properly type hinted as first argument
+        self.runtime = dynamo_context.runtime
+        self.greeting = greeting
+
+    @endpoint()
+    async def greet(self, request: GreetingRequest):
+        yield f"{self.greeting}, {request.name}!"
+
+if __name__ == "__main__":
+    import argparse
+    import asyncio
+    import uvloop
+
+    parser = argparse.ArgumentParser(description="Run the greeting service")
+    parser.add_argument("--greeting", default="Hello", help="Greeting to use")
+    args = parser.parse_args()
+
+    uvloop.install()  # Optional: Use uvloop for better performance
+    # All args after service name are passed to __init__
+    asyncio.run(serve(GreetingService, greeting=args.greeting))
+```
+
+This component can be run via `dynamo serve` or directly with python.
+
+**Notes:**
+- To receive the `dynamo_context` in your service, declare it as the first argument after `self` in `__init__` with the type hint `DynamoContext`
+- All arguments passed to `serve()` after the service class are forwarded to the service's `__init__` method
+
 ### Composing Services into an Graph
 
 There are two main ways to compose services in Dynamo:
