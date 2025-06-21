@@ -81,6 +81,7 @@ class Frontend:
                 f"out={endpoint}",
                 "--http-port",
                 str(self.frontend_config.port),
+                "--router-mode", "kv",
             ],
             stdout=None,
             stderr=None,

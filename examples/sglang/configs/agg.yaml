@@ -21,6 +21,7 @@ SGLangWorker:
   model-path: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   served-model-name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   tp: 1
+  page-size: 16
   trust-remote-code: true
   skip-tokenizer-init: true
   ServiceArgs:
