@@ -13,7 +13,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{fmt::Debug, future::Future, pin::Pin, sync::Arc};
+use std::{
+    any::{Any, TypeId},
+    fmt::Debug,
+    future::Future,
+    marker::PhantomData,
+    pin::Pin,
+    sync::Arc,
+};
 
 pub use async_trait::async_trait;
 use futures::stream::Stream;
@@ -164,5 +171,188 @@ impl<T: Data> AsyncEngineContextProvider for Pin<Box<dyn AsyncEngineUnary<T>>> {
 impl<T: Data> AsyncEngineContextProvider for Pin<Box<dyn AsyncEngineStream<T>>> {
     fn context(&self) -> Arc<dyn AsyncEngineContext> {
         AsyncEngineContextProvider::context(&**self)
+    }
+}
+
+/// A type-erased `AsyncEngine`.
+///
+/// This trait is used to store heterogenous `AsyncEngine` implementations in a collection.
+/// It provides a mechanism to safely downcast back to a specific `Arc<dyn AsyncEngine<...>>`.
+pub trait AnyAsyncEngine: Send + Sync {
+    fn request_type_id(&self) -> TypeId;
+    fn response_type_id(&self) -> TypeId;
+    fn error_type_id(&self) -> TypeId;
+    fn as_any(&self) -> &dyn Any;
+}
+
+/// An internal wrapper to hold a typed `AsyncEngine` behind the `AnyAsyncEngine` trait object.
+struct AnyEngineWrapper<Req, Resp, E>
+where
+    Req: Data,
+    Resp: Data + AsyncEngineContextProvider,
+    E: Data,
+{
+    engine: Arc<dyn AsyncEngine<Req, Resp, E>>,
+    _phantom: PhantomData<fn(Req, Resp, E)>,
+}
+
+impl<Req, Resp, E> AnyAsyncEngine for AnyEngineWrapper<Req, Resp, E>
+where
+    Req: Data,
+    Resp: Data + AsyncEngineContextProvider,
+    E: Data,
+{
+    fn request_type_id(&self) -> TypeId {
+        TypeId::of::<Req>()
+    }
+
+    fn response_type_id(&self) -> TypeId {
+        TypeId::of::<Resp>()
+    }
+
+    fn error_type_id(&self) -> TypeId {
+        TypeId::of::<E>()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        &self.engine
+    }
+}
+
+/// An extension trait that provides a convenient way to type-erase an `AsyncEngine`.
+pub trait AsAnyAsyncEngine {
+    /// Converts a typed `AsyncEngine` into a type-erased `AnyAsyncEngine`.
+    fn as_any_engine(self) -> Arc<dyn AnyAsyncEngine>;
+}
+
+impl<Req, Resp, E> AsAnyAsyncEngine for Arc<dyn AsyncEngine<Req, Resp, E>>
+where
+    Req: Data,
+    Resp: Data + AsyncEngineContextProvider,
+    E: Data,
+{
+    fn as_any_engine(self) -> Arc<dyn AnyAsyncEngine> {
+        Arc::new(AnyEngineWrapper {
+            engine: self,
+            _phantom: PhantomData,
+        })
+    }
+}
+
+/// An extension trait that provides a convenient method to downcast an `AnyAsyncEngine`.
+pub trait DowncastAnyAsyncEngine {
+    /// Attempts to downcast an `AnyAsyncEngine` to a specific `AsyncEngine` type.
+    fn downcast<Req, Resp, E>(&self) -> Option<Arc<dyn AsyncEngine<Req, Resp, E>>>
+    where
+        Req: Data,
+        Resp: Data + AsyncEngineContextProvider,
+        E: Data;
+}
+
+impl DowncastAnyAsyncEngine for Arc<dyn AnyAsyncEngine> {
+    fn downcast<Req, Resp, E>(&self) -> Option<Arc<dyn AsyncEngine<Req, Resp, E>>>
+    where
+        Req: Data,
+        Resp: Data + AsyncEngineContextProvider,
+        E: Data,
+    {
+        if self.request_type_id() == TypeId::of::<Req>()
+            && self.response_type_id() == TypeId::of::<Resp>()
+            && self.error_type_id() == TypeId::of::<E>()
+        {
+            self.as_any()
+                .downcast_ref::<Arc<dyn AsyncEngine<Req, Resp, E>>>()
+                .cloned()
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    // 1. Define mock data structures
+    #[derive(Debug, PartialEq)]
+    struct Req1(String);
+
+    #[derive(Debug, PartialEq)]
+    struct Resp1(String);
+
+    // Dummy context provider implementation for the response
+    impl AsyncEngineContextProvider for Resp1 {
+        fn context(&self) -> Arc<dyn AsyncEngineContext> {
+            // For this test, we don't need a real context.
+            unimplemented!()
+        }
+    }
+
+    #[derive(Debug)]
+    struct Err1;
+
+    // A different set of types for testing failure cases
+    #[derive(Debug)]
+    struct Req2;
+    #[derive(Debug)]
+    struct Resp2;
+    impl AsyncEngineContextProvider for Resp2 {
+        fn context(&self) -> Arc<dyn AsyncEngineContext> {
+            unimplemented!()
+        }
+    }
+
+    // 2. Define a mock engine
+    struct MockEngine;
+
+    #[async_trait]
+    impl AsyncEngine<Req1, Resp1, Err1> for MockEngine {
+        async fn generate(&self, request: Req1) -> Result<Resp1, Err1> {
+            Ok(Resp1(format!("response to {}", request.0)))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_engine_type_erasure_and_downcast() {
+        // 3. Create a typed engine
+        let typed_engine: Arc<dyn AsyncEngine<Req1, Resp1, Err1>> = Arc::new(MockEngine);
+
+        // 4. Use the extension trait to erase the type
+        let any_engine = typed_engine.as_any_engine();
+
+        // Check type IDs are preserved
+        assert_eq!(any_engine.request_type_id(), TypeId::of::<Req1>());
+        assert_eq!(any_engine.response_type_id(), TypeId::of::<Resp1>());
+        assert_eq!(any_engine.error_type_id(), TypeId::of::<Err1>());
+
+        // 5. Use the new downcast method on the Arc
+        let downcasted_engine = any_engine.downcast::<Req1, Resp1, Err1>();
+
+        // 6. Assert success
+        assert!(downcasted_engine.is_some());
+
+        // We can even use the downcasted engine
+        let response = downcasted_engine
+            .unwrap()
+            .generate(Req1("hello".to_string()))
+            .await;
+        assert_eq!(response.unwrap(), Resp1("response to hello".to_string()));
+
+        // 7. Assert failure for wrong types
+        let failed_downcast = any_engine.downcast::<Req2, Resp2, Err1>();
+        assert!(failed_downcast.is_none());
+
+        // 8. HashMap usage test
+        let mut engine_map: HashMap<String, Arc<dyn AnyAsyncEngine>> = HashMap::new();
+        engine_map.insert("mock".to_string(), any_engine);
+
+        let retrieved_engine = engine_map.get("mock").unwrap();
+        let final_engine = retrieved_engine.downcast::<Req1, Resp1, Err1>().unwrap();
+        let final_response = final_engine.generate(Req1("world".to_string())).await;
+        assert_eq!(
+            final_response.unwrap(),
+            Resp1("response to world".to_string())
+        );
     }
 }
