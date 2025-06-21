@@ -7,6 +7,7 @@ This guide explains the `dynamo run` command.
 It supports these engines: mistralrs, llamacpp, sglang, vllm, and tensorrt-llm. `mistralrs` is the default.
 
 Usage:
+
 ```
 dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=2.0] [--kv-gpu-cache-usage-weight=1.0] [--kv-waiting-requests-weight=1.0] [--verbosity (-v|-vv)]
 ```
@@ -30,12 +31,14 @@ The vllm and sglang engines require [etcd](https://etcd.io/) and [nats](https://
 
 ### Use model from Hugging Face
 
-To automatically downloads Qwen3 4B from Hugging Face (16 GiB download) and starts it in interactive text mode:
+To automatically download Qwen3 4B from Hugging Face (16 GiB download) and starts it in interactive text mode:
+
 ```
 dynamo run out=vllm Qwen/Qwen3-4B
 ```
 
 The general format for HF download follows this pattern:
+
 ```
 dynamo run out=<engine> <HUGGING_FACE_ORGANIZATION/MODEL_NAME>
 ```
@@ -47,39 +50,49 @@ The parameter can be the ID of a HuggingFace repository (which will be downloade
 ### Run a model from local file
 
 To run a model from local file:
+
 - Download the model from Hugging Face
 - Run the model from local file
 
 See the following sections for details.
 
 #### Download model from Hugging Face
-One of the models available from HUgging Face should be high quality and fast on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
+
+One of the models available from Hugging Face should be high quality and fast on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
 For example, try https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/blob/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf
 
 To download model file:
+
 ```
 curl -L -o Llama-3.2-3B-Instruct-Q4_K_M.gguf "https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/resolve/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf?download=true"
 ```
+
 #### Run model from local file
+
 To run the model:
 
-*Text interface*
+_Text interface_
+
 ```
 dynamo run Llama-3.2-3B-Instruct-Q4_K_M.gguf # or path to a Hugging Face repo checkout instead of the GGUF file
 ```
 
-*HTTP interface*
+_HTTP interface_
+
 ```
 dynamo run in=http out=mistralrs Llama-3.2-3B-Instruct-Q4_K_M.gguf
 ```
+
 You can also list models or send a request:
 
-*List the models*
+_List the models_
+
 ```
 curl localhost:8080/v1/models
 ```
 
-*Send a request*
+_Send a request_
+
 ```
 curl -d '{"model": "Llama-3.2-3B-Instruct-Q4_K_M", "max_completion_tokens": 2049, "messages":[{"role":"user", "content": "What is the capital of South Africa?" }]}' -H 'Content-Type: application/json' http://localhost:8080/v1/chat/completions
 ```
@@ -112,22 +125,24 @@ Run `dynamo-run --help` for more options.
 
 The `in=dyn://` URLs have the format `dyn://namespace.component.endpoint`. For quickstart just use any string `dyn://test`, `dynamo-run` will default any missing parts for you. The pieces matter for a larger system.
 
-* *Namespace*: A pipeline. Usually a model. e.g "llama_8b". Just a name.
-* *Component*: A load balanced service needed to run that pipeline. "backend", "prefill", "decode", "preprocessor", "draft", etc. This typically has some configuration (which model to use, for example).
-* *Endpoint*: Like a URL. "generate", "load_metrics".
-* *Instance*: A process. Unique. Dynamo assigns each one a unique instance_id. The thing that is running is always an instance. Namespace/component/endpoint can refer to multiple instances.
+- _Namespace_: A pipeline. Usually a model. e.g "llama_8b". Just a name.
+- _Component_: A load balanced service needed to run that pipeline. "backend", "prefill", "decode", "preprocessor", "draft", etc. This typically has some configuration (which model to use, for example).
+- _Endpoint_: Like a URL. "generate", "load_metrics".
+- _Instance_: A process. Unique. Dynamo assigns each one a unique instance_id. The thing that is running is always an instance. Namespace/component/endpoint can refer to multiple instances.
 
 If you run two models, that is two pipelines. An exception would be if doing speculative decoding. The draft model is part of the pipeline of a bigger model.
 
 If you run two instances of the same model ("data parallel") they are the same namespace+component+endpoint but different instances. The router will spread traffic over all the instances of a namespace+component+endpoint. If you have four prefill workers in a pipeline, they all have the same namespace+component+endpoint and are automatically assigned unique instance_ids.
 
 Example 1: Data parallel load balanced, one model one pipeline two instances.
+
 ```
 Node 1: dynamo-run in=dyn://qwen3-32b.backend.generate out=sglang /data/Qwen3-32B --tensor-parallel-size 2 --base-gpu-id 0
 Node 2: dynamo-run in=dyn://qwen3-32b.backend.generate out=sglang /data/Qwen3-32B --tensor-parallel-size 2 --base-gpu-id 2
 ```
 
 Example 2: Two models, two pipelines.
+
 ```
 Node 1: dynamo-run in=dyn://qwen3-32b.backend.generate out=vllm /data/Qwen3-32B
 Node 2: dynamo-run in=dyn://llama3-1-8b.backend.generate out=vllm /data/Llama-3.1-8B-Instruct/
@@ -158,7 +173,7 @@ To set up KV-aware routing on patched vllm:
       ```
       uv pip install ai-dynamo-vllm
       ```
-       **or**
+      **or**
    1. Install upstream vllm 0.8.4:
       ```
       uv pip install vllm==0.8.4
@@ -177,7 +192,8 @@ To set up KV-aware routing on patched vllm:
    ```
    export LD_LIBRARY_PATH=$REPO_ROOT/target/debug/
    ```
-If you patched locally (instead of installing `ai-dynamo-vllm`), edit vllm's `platforms/__init__.py` to undo a patch change:
+   If you patched locally (instead of installing `ai-dynamo-vllm`), edit vllm's `platforms/__init__.py` to undo a patch change:
+
 ```
     #vllm_version = version("ai_dynamo_vllm")
     vllm_version = version("vllm")
@@ -210,17 +226,22 @@ For performance testing, compare a typical workload with `--router-mode random|r
 #### Setup
 
 ##### Step 1: Install libraries
+
 **Ubuntu:**
+
 ```
 sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libssl-dev libclang-dev protobuf-compiler python3-dev cmake
 ```
 
 **macOS:**
+
 - [Homebrew](https://brew.sh/)
+
 ```
 # if brew is not installed on your system, install it
 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
 ```
+
 - [Xcode](https://developer.apple.com/xcode/)
 
 ```
@@ -229,9 +250,11 @@ brew install cmake protobuf
 ## Check that Metal is accessible
 xcrun -sdk macosx metal
 ```
+
 If Metal is accessible, you should see an error like `metal: error: no input files`, which confirms it is installed correctly.
 
 ##### Step 2: Install Rust
+
 ```
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
@@ -240,16 +263,19 @@ source $HOME/.cargo/env
 ##### Step 3: Build
 
 - Linux with GPU and CUDA (tested on Ubuntu):
+
 ```
 cargo build --features cuda
 ```
 
 - macOS with Metal:
+
 ```
 cargo build --features metal
 ```
 
 - CPU only:
+
 ```
 cargo build
 ```
@@ -262,16 +288,17 @@ Optionally you can run `cargo build` from any location with arguments:
 ```
 
 The binary is called `dynamo-run` in `target/debug`
+
 ```
 cd target/debug
 ```
 
 Build with `--release` for a smaller binary and better performance, but longer build times. The binary will be in `target/release`.
 
-
-
 #### Defaults
+
 The input defaults to `in=text`. The output defaults to `out=mistralrs` engine, unless it is disabled with `--no-default-features` in which case vllm is used.
+
 ### Running Inference with Pre-built Engines
 
 #### mistralrs
@@ -310,6 +337,7 @@ dynamo-run out=llamacpp ~/llms/Qwen3-0.6B-Q8_0.gguf # From https://huggingface.c
 ```
 
 Note that in some cases we are unable to extract the tokenizer from the GGUF, and so a Hugging Face checkout of a matching model must also be passed. Dynamo uses the weights from the GGUF and the pre-processor (`tokenizer.json`, etc) from the `--model-config`:
+
 ```
 dynamo-run out=llamacpp ~/llms/Llama-4-Scout-17B-16E-Instruct-UD-IQ1_S.gguf --context-length 32768 --model-config ~/llms/Llama-4-Scout-17B-16E-Instruct
 ```
@@ -350,6 +378,7 @@ dynamo-run out=sglang ~/llms/Llama-4-Scout-17B-16E-Instruct/ --tensor-parallel-s
 ```
 
 To specify the GPU to start from, pass `--base-gpu-id <num>`; for example, on a shared eight GPU machine where GPUs 0–3 are already in use:
+
 ```
 dynamo-run out=sglang <model> --tensor-parallel-size 4 --base-gpu-id 4
 ```
@@ -359,11 +388,13 @@ dynamo-run out=sglang <model> --tensor-parallel-size 4 --base-gpu-id 4
 Dynamo only manages the leader node (node rank 0). The follower nodes are started in the [normal sglang way](https://docs.sglang.ai/references/deepseek.html#running-examples-on-multi-node).
 
 Leader node:
+
 ```
 dynamo-run out=sglang /data/models/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 16 --node-rank 0 --num-nodes 2 --leader-addr 10.217.98.122:5000
 ```
 
 All follower nodes. Increment `node-rank` each time:
+
 ```
 python3 -m sglang.launch_server --model-path /data/models/DeepSeek-R1-Distill-Llama-70B --tp 16 --dist-init-addr 10.217.98.122:5000 --nnodes 2 --node-rank 1 --trust-remote-code
 ```
@@ -381,6 +412,7 @@ The vllm engine requires requires [etcd](https://etcd.io/) and [nats](https://na
 We use [uv](https://docs.astral.sh/uv/) but any virtualenv manager should work.
 
 1. Setup:
+
 ```
 uv venv
 source .venv/bin/activate
@@ -393,15 +425,17 @@ If you're on Ubuntu 22.04 or earlier, you must add `--python=python3.10` to your
 ```
 
 2. Build:
+
 ```
 cargo build
 cd target/debug
 ```
 
 3. Run
-Inside that virtualenv:
+   Inside that virtualenv:
 
 **HF repo:**
+
 ```
 ./dynamo-run in=http out=vllm ~/llms/Llama-3.2-3B-Instruct/
 
@@ -422,6 +456,7 @@ To specify which GPUs to use set environment variable `CUDA_VISIBLE_DEVICES`.
 vllm uses [ray](https://docs.vllm.ai/en/latest/serving/distributed_serving.html#running-vllm-on-multiple-nodes) for pipeline parallel inference. Dynamo does not change or manage that.
 
 Here is an example on two 8x nodes:
+
 - Leader node: `ray start --head --port=6379`
 - Each follower node: `ray start --address='<HEAD_NODE_IP>:6379`
 - Leader node: `dynamo-run out=vllm ~/llms/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 16`
@@ -451,6 +486,7 @@ See instructions [here](https://github.com/ai-dynamo/dynamo/blob/main/examples/t
 ##### Step 3: Execute `dynamo run` command
 
 Execute the following to load the TensorRT-LLM model specified in the configuration.
+
 ```
 dynamo-run in=http out=trtllm TinyLlama/TinyLlama-1.1B-Chat-v1.0
 ```
@@ -468,6 +504,7 @@ dynamo-run in=http out=echo_core --model-path <hf-repo-checkout>
 ```
 
 Note that to use it with `in=http` you need to tell the post processor to ignore stop tokens from the template by adding `nvext.ignore_eos` like this:
+
 ```
 curl -N -d '{"nvext": {"ignore_eos": true}, "stream": true, "model": "Qwen2.5-3B-Instruct", "max_completion_tokens": 4096, "messages":[{"role":"user", "content": "Tell me a story" }]}' ...
 ```
@@ -502,6 +539,7 @@ dynamo-run in=batch:prompts.jsonl out=llamacpp <model>
 ```
 
 The input file should look like this:
+
 ```
 {"text": "What is the capital of France?"}
 {"text": "What is the capital of Spain?"}
@@ -509,21 +547,26 @@ The input file should look like this:
 
 Each one is passed as a prompt to the model. The output is written back to the same folder in `output.jsonl`. At the end of the run some statistics are printed.
 The output looks like this:
+
 ```
 {"text":"What is the capital of France?","response":"The capital of France is Paris.","tokens_in":7,"tokens_out":7,"elapsed_ms":1566}
 {"text":"What is the capital of Spain?","response":".The capital of Spain is Madrid.","tokens_in":7,"tokens_out":7,"elapsed_ms":855}
 ```
 
 ### Extra engine arguments
+
 The vllm and sglang backends support passing any argument the engine accepts.
 Put the arguments in a JSON file:
+
 ```
 {
     "dtype": "half",
     "trust_remote_code": true
 }
 ```
+
 Pass it like this:
+
 ```
 dynamo-run out=sglang ~/llms/Llama-3.2-3B-Instruct --extra-engine-args sglang_extra.json
 ```
@@ -537,6 +580,7 @@ kv_cache_config:
 ```
 
 Pass it like this:
+
 ```
 dynamo-run in=http out=trtllm TinyLlama/TinyLlama-1.1B-Chat-v1.0 --extra-engine-args trtllm_extra.yaml
 ```
@@ -546,6 +590,7 @@ dynamo-run in=http out=trtllm TinyLlama/TinyLlama-1.1B-Chat-v1.0 --extra-engine-
 The [dynamo](https://pypi.org/project/ai-dynamo/) Python library allows you to build your own engine and attach it to Dynamo.
 
 The Python file must do three things:
+
 1. Decorate a function to get the runtime
 2. Register on the network
 3. Attach a request handler
@@ -591,18 +636,20 @@ if __name__ == "__main__":
     asyncio.run(worker())
 ```
 
-
 The `model_path` can be:
+
 - A HuggingFace repo ID, optionally prefixed with `hf://`. It is downloaded and cached locally.
 - The path to a checkout of a HuggingFace repo - any folder containing safetensor files as well as `config.json`, `tokenizer.json` and `tokenizer_config.json`.
 - The path to a GGUF file, if your engine supports that.
 
 The `model_type` can be:
+
 - ModelType.Backend. Dynamo handles pre-processing. Your `generate` method receives a `request` dict containing a `token_ids` array of int. It must return a dict also containing a `token_ids` array and an optional `finish_reason` string.
 - ModelType.Chat. Your `generate` method receives a `request` and must return a response dict of type [OpenAI Chat Completion](https://platform.openai.com/docs/api-reference/chat). Your engine handles pre-processing.
 - ModelType.Completion. Your `generate` method receives a `request` and must return a response dict of the older [Completions](https://platform.openai.com/docs/api-reference/completions). Your engine handles pre-processing.
 
 `register_llm` can also take the following kwargs:
+
 - `model_name`: The name to call the model. Your incoming HTTP requests model name must match this. Defaults to the hugging face repo name, the folder name, or the GGUF file name.
 - `context_length`: Max model length in tokens. Defaults to the model's set max. Only set this if you need to reduce KV cache allocation to fit into VRAM.
 - `kv_cache_block_size`: Size of a KV block for the engine, in tokens. Defaults to 16.
@@ -610,12 +657,12 @@ The `model_type` can be:
 Here are some example engines:
 
 - Backend:
-    * [vllm](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_vllm.py)
-    * [sglang](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_sglang.py)
+  - [vllm](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_vllm.py)
+  - [sglang](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_sglang.py)
 - Chat:
-    * [sglang](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_sglang_tok.py)
+  - [sglang](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_sglang_tok.py)
 
 More fully-featured Backend engines (used by `dynamo-run`):
+
 - [vllm](https://github.com/ai-dynamo/dynamo/blob/main/launch/dynamo-run/src/subprocess/vllm_inc.py)
 - [sglang](https://github.com/ai-dynamo/dynamo/blob/main/launch/dynamo-run/src/subprocess/sglang_inc.py)
-
