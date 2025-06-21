@@ -21,6 +21,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from dynamo.sdk import depends, endpoint, service
+from dynamo.sdk.core.lib import liveness, readiness
 from dynamo.sdk.core.protocol.interface import DynamoTransport
 
 """
@@ -154,6 +155,16 @@ class Frontend:
 
     def __init__(self) -> None:
         print("Starting frontend")
+
+    @liveness(name="/custom/health")
+    def check_health(self):
+        """Custom liveness probe."""
+        return True
+
+    @readiness(name="/custom/ready")
+    def check_ready(self):
+        """Custom readiness probe."""
+        return True
 
     @endpoint(transports=[DynamoTransport.HTTP])
     async def generate(self, request: RequestType):
