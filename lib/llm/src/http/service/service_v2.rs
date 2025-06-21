@@ -2,8 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::env::var;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 
 use super::metrics;
 use super::Metrics;
@@ -163,42 +164,33 @@ impl HttpService {
     }
 
     /// Enable or disable chat completion endpoints
-    pub fn enable_chat_endpoints(&self, enable: bool) {
-        if let Ok(mut state_flags) = self.state.flags.write() {
-            state_flags.chat_endpoints_enabled = enable;
-            tracing::info!(
-                "Chat completion endpoints {}",
-                if enable { "enabled" } else { "disabled" }
-            );
-        } else {
-            tracing::error!("Failed to acquire write lock for enabling chat endpoints");
-        }
+    pub async fn enable_chat_endpoints(&self, enable: bool) {
+        let mut state_flags = self.state.flags.write().await;
+        state_flags.chat_endpoints_enabled = enable;
+        tracing::info!(
+            "Chat completion endpoints {}",
+            if enable { "enabled" } else { "disabled" }
+        );
     }
 
     /// Enable or disable completion endpoints
-    pub fn enable_cmpl_endpoints(&self, enable: bool) {
-        if let Ok(mut state_flags) = self.state.flags.write() {
-            state_flags.cmpl_endpoints_enabled = enable;
-            tracing::info!(
-                "Completion endpoints {}",
-                if enable { "enabled" } else { "disabled" }
-            );
-        } else {
-            tracing::error!("Failed to acquire write lock for enabling completion endpoints");
-        }
+    pub async fn enable_cmpl_endpoints(&self, enable: bool) {
+        let mut state_flags = self.state.flags.write().await;
+        state_flags.cmpl_endpoints_enabled = enable;
+        tracing::info!(
+            "Completion endpoints {}",
+            if enable { "enabled" } else { "disabled" }
+        );
     }
 
     /// Enable or disable embeddings endpoints
-    pub fn enable_embeddings_endpoints(&self, enable: bool) {
-        if let Ok(mut state_flags) = self.state.flags.write() {
-            state_flags.embeddings_endpoints_enabled = enable;
-            tracing::info!(
-                "Embeddings endpoints {}",
-                if enable { "enabled" } else { "disabled" }
-            );
-        } else {
-            tracing::error!("Failed to acquire write lock for enabling embeddings endpoints");
-        }
+    pub async fn enable_embeddings_endpoints(&self, enable: bool) {
+        let mut state_flags = self.state.flags.write().await;
+        state_flags.embeddings_endpoints_enabled = enable;
+        tracing::info!(
+            "Embeddings endpoints {}",
+            if enable { "enabled" } else { "disabled" }
+        );
     }
 }
 
@@ -227,11 +219,14 @@ impl HttpServiceConfigBuilder {
         let state = Arc::new(State::new(model_manager));
 
         // Set initial state flags based on config
-        if let Ok(mut state_flags) = state.flags.write() {
-            state_flags.chat_endpoints_enabled = config.enable_chat_endpoints;
-            state_flags.cmpl_endpoints_enabled = config.enable_cmpl_endpoints;
-            state_flags.embeddings_endpoints_enabled = config.enable_embeddings_endpoints;
-        }
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut state_flags = state.flags.write().await;
+                state_flags.chat_endpoints_enabled = config.enable_chat_endpoints;
+                state_flags.cmpl_endpoints_enabled = config.enable_cmpl_endpoints;
+                state_flags.embeddings_endpoints_enabled = config.enable_embeddings_endpoints;
+            });
+        });
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -257,13 +252,8 @@ impl HttpServiceConfigBuilder {
                 let state = state_chat_route.clone();
                 async move {
                     // Read the flag value and drop the lock before async operations
-                    let enabled = match state.flags.read() {
-                        Ok(guard) => guard.chat_endpoints_enabled,
-                        Err(e) => {
-                            tracing::error!("Failed to read feature flags: {}", e);
-                            return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-                        }
-                    };
+                    let guard = state.flags.read().await;
+                    let enabled = guard.chat_endpoints_enabled;
 
                     if enabled {
                         Ok(next.run(req).await)
@@ -285,13 +275,8 @@ impl HttpServiceConfigBuilder {
             move |req, next: axum::middleware::Next| {
                 let state_api = state_cmpl_route.clone();
                 async move {
-                    let enabled = {
-                        let guard = state_api
-                            .flags
-                            .read()
-                            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-                        guard.cmpl_endpoints_enabled
-                    };
+                    let guard = state_api.flags.read().await;
+                    let enabled = guard.cmpl_endpoints_enabled;
 
                     if enabled {
                         Ok(next.run(req).await)
@@ -310,13 +295,8 @@ impl HttpServiceConfigBuilder {
             move |req, next: axum::middleware::Next| {
                 let state_api = state_embed_route.clone();
                 async move {
-                    let enabled = {
-                        let guard = state_api
-                            .flags
-                            .read()
-                            .map_err(|_| axum::http::StatusCode::INTERNAL_SERVER_ERROR)?;
-                        guard.embeddings_endpoints_enabled
-                    };
+                    let guard = state_api.flags.read().await;
+                    let enabled = guard.embeddings_endpoints_enabled;
 
                     if enabled {
                         Ok(next.run(req).await)
