@@ -82,6 +82,13 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
         println!("{usage}");
         println!("{HELP}");
         return Ok(());
+    } else if args[0] == "--version" {
+        if let Some(describe) = option_env!("VERGEN_GIT_DESCRIBE") {
+            println!("dynamo-run {}", describe);
+        } else {
+            println!("Version not available (git describe not available)");
+        }
+        return Ok(());
     }
     for arg in env::args().skip(1).take(2) {
         let Some((in_out, val)) = arg.split_once('=') else {
