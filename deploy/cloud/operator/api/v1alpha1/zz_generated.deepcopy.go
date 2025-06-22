@@ -289,16 +289,6 @@ func (in *DynamoComponentDeploymentSharedSpec) DeepCopyInto(out *DynamoComponent
 		*out = new(common.ExtraPodSpec)
 		(*in).DeepCopyInto(*out)
 	}
-	// if in.LivenessProbe != nil {
-	// 	in, out := &in.LivenessProbe, &out.LivenessProbe
-	// 	*out = new(v1.Probe)
-	// 	(*in).DeepCopyInto(*out)
-	// }
-	// if in.ReadinessProbe != nil {
-	// 	in, out := &in.ReadinessProbe, &out.ReadinessProbe
-	// 	*out = new(v1.Probe)
-	// 	(*in).DeepCopyInto(*out)
-	// }
 	if in.Replicas != nil {
 		in, out := &in.Replicas, &out.Replicas
 		*out = new(int32)
