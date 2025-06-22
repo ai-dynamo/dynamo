@@ -999,8 +999,8 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 	return
 }
 
-func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx context.Context, opt generateResourceOption) (modified bool, err error) {
-	modified, _, err = commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1.Ingress, bool, error) {
+func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx context.Context, opt generateResourceOption) (bool, error) {
+	modified, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1.Ingress, bool, error) {
 		return r.generateIngress(ctx, opt)
 	})
 	if err != nil {
@@ -1142,9 +1142,14 @@ func (r *DynamoComponentDeploymentReconciler) getGenericServiceName(dynamoCompon
 	return r.getKubeName(dynamoComponentDeployment, dynamoComponent, false)
 }
 
-func (r *DynamoComponentDeploymentReconciler) getKubeLabels(_ *v1alpha1.DynamoComponentDeployment, dynamoComponent *v1alpha1.DynamoComponent) map[string]string {
+func (r *DynamoComponentDeploymentReconciler) getKubeLabels(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, dynamoComponent *v1alpha1.DynamoComponent) map[string]string {
 	labels := map[string]string{
 		commonconsts.KubeLabelDynamoComponent: dynamoComponent.Name,
+	}
+	if dynamoComponentDeployment != nil && dynamoComponentDeployment.Labels != nil {
+		if v, ok := dynamoComponentDeployment.Labels[commonconsts.KubeLabelDynamoComponent]; ok && v != "" {
+			labels[commonconsts.KubeLabelDynamoComponentType] = v
+		}
 	}
 	labels[commonconsts.KubeLabelDynamoComponentType] = commonconsts.DynamoApiServerComponentName
 	return labels
