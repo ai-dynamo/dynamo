@@ -197,7 +197,7 @@ class ServiceInfo(BaseModel):
 
 
 class BuildConfig(BaseModel):
-    """Configuration for building a Dynamo pipeline."""
+    """Configuration for building a Dynamo graph."""
 
     service: str
     name: t.Optional[str] = None
@@ -731,23 +731,24 @@ def build(
                     check=True,
                 )
             console.print(f"[green]Successfully built Docker image {image_name}.")
-            if push:
-                # Upload the graph to the Dynamo cloud remote API store
-                with Progress(
-                    SpinnerColumn(),
-                    TextColumn(
-                        f"[bold green]Pushing graph {image_name} to Dynamo cloud..."
-                    ),
-                    transient=True,
-                ) as progress:
-                    progress.add_task("push", total=None)
-                    entry_service = package.get_entry_service()
-                    upload_graph(endpoint, image_name, entry_service)
-                console.print(
-                    f"[green]Successfully pushed graph {image_name} to Dynamo cloud."
-                )
+
+        if push:
+            # Upload the graph to the Dynamo cloud remote API store
+            with Progress(
+                SpinnerColumn(),
+                TextColumn(
+                    f"[bold green]Pushing graph {image_name} to Dynamo cloud..."
+                ),
+                transient=True,
+            ) as progress:
+                progress.add_task("push", total=None)
+                entry_service = package.get_entry_service()
+                upload_graph(endpoint, image_name, entry_service)
+            console.print(
+                f"[green]Successfully pushed graph {image_name} to Dynamo cloud."
+            )
     except Exception as e:
-        console.print(f"[red]Error building package: {str(e)}")
+        console.print(f"[red]Error with build: {str(e)}")
         raise
 
 
