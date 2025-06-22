@@ -21,7 +21,7 @@ from enum import Enum, auto
 from typing import Any, Dict, Generic, List, Optional, Set, Tuple, Type, TypeVar
 
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .deployment import Env
 
@@ -95,13 +95,13 @@ class PortSelector(BaseModel):
     name: Optional[str] = None
     number: Optional[int] = None
 
-    # optional validation: ensure only one is set
-    def model_validate(self, *args, **kwargs):
+    @model_validator(mode="after")
+    def validate_port_selector(self) -> "PortSelector":
         if self.name and self.number:
             raise ValueError("Only one of 'name' or 'number' should be set.")
         if not self.name and not self.number:
             raise ValueError("One of 'name' or 'number' must be set.")
-        return super().model_validate(*args, **kwargs)
+        return self
 
 
 class HTTPGetAction(BaseModel):
@@ -139,7 +139,7 @@ class Probe(BaseModel):
     period_seconds: Optional[int] = 60
     success_threshold: Optional[int] = 1
     failure_threshold: Optional[int] = 10
-    termination_grace_period_seconds: Optional[int] = 30
+    termination_grace_period_seconds: Optional[int] = None  # 30
 
 
 class KubernetesOverrides(BaseModel):

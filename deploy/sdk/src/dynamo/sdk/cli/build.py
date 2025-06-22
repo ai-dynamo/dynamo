@@ -184,7 +184,7 @@ class ServiceInfo(BaseModel):
         )
 
     @classmethod
-    def find_health_probe_method(self, klass: type, check_property: str) -> t.Callable:
+    def find_health_probe_method(cls, klass: type, check_property: str) -> t.Callable:
         """Determine if the user provided @live or @health method and return the callable."""
         for attr_name in dir(klass):
             attr = getattr(klass, attr_name)
@@ -247,13 +247,6 @@ class ManifestInfo(BaseModel):
         # Convert ServiceInfo objects to dictionaries
         services_dict = []
         for service in result["services"]:
-            #
-            for attr in dir(service):
-                method = getattr(service, attr)
-                if callable(method) and getattr(method, "__is_liveness_probe__", False):
-                    decorated_method = method
-                    print(f"decorated_method {decorated_method}")
-            #
             service_dict = {
                 "name": service["name"],
                 "service": service["config"]["service"],
@@ -325,7 +318,7 @@ class Package:
         cls,
         build_config: BuildConfig,
         build_ctx: t.Optional[str] = None,
-    ) -> t.Any:
+    ) -> ServiceInterface:
         """Get a dynamo service from config."""
         build_ctx = (
             os.getcwd()
@@ -560,7 +553,7 @@ def process_kubernetes_overrides(service: dict, service_dict: dict) -> None:
             "path" not in liveness_probe_settings
             and "Path" not in liveness_probe_settings
         ):
-            main_container["livenessProbe"]["Path"] = LIVENESS_PROBE_PROP_PATH
+            main_container["livenessProbe"]["path"] = LIVENESS_PROBE_PROP_PATH
 
     readyness_probe_settings = kube_overrides.get("readyness_probe_settings")
     if readyness_probe_settings:
@@ -571,7 +564,7 @@ def process_kubernetes_overrides(service: dict, service_dict: dict) -> None:
             "path" not in readyness_probe_settings
             and "Path" not in readyness_probe_settings
         ):
-            main_container["readynesProbe"]["Path"] = READYESS_PROBE_PROP_PATH
+            main_container["readynesProbe"]["path"] = READYESS_PROBE_PROP_PATH
 
     if main_container:
         service_dict["config"]["extraPodSpec"] = {"mainContainer": main_container}

@@ -1004,16 +1004,18 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx 
 		return r.generateIngress(ctx, opt)
 	})
 	if err != nil {
-		return
+		return false, err
 	}
-	modified_, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
-		return r.generateVirtualService(ctx, opt)
-	})
-	if err != nil {
-		return
+	if r.UseVirtualService {
+		modified_, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
+			return r.generateVirtualService(ctx, opt)
+		})
+		if err != nil {
+			return false, err
+		}
+		return modified || modified_, nil
 	}
-	modified = modified || modified_
-	return
+	return modified, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateIngress(ctx context.Context, opt generateResourceOption) (*networkingv1.Ingress, bool, error) {
@@ -1417,16 +1419,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		}
 	}
 
-	// var livenessProbe *corev1.Probe
-	// if opt.dynamoComponentDeployment.Spec.LivenessProbe != nil {
-	// 	livenessProbe = opt.dynamoComponentDeployment.Spec.LivenessProbe
-	// }
-
-	// var readinessProbe *corev1.Probe
-	// if opt.dynamoComponentDeployment.Spec.ReadinessProbe != nil {
-	// 	readinessProbe = opt.dynamoComponentDeployment.Spec.ReadinessProbe
-	// }
-
 	volumes := make([]corev1.Volume, 0)
 	volumeMounts := make([]corev1.VolumeMount, 0)
 
@@ -1557,12 +1549,10 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	// TODO: Temporarily disabling probes
 	container := corev1.Container{
-		Name:    "main",
-		Image:   imageName,
-		Command: []string{"sh", "-c"},
-		Args:    []string{strings.Join(args, " ")},
-		// LivenessProbe:  livenessProbe,
-		// ReadinessProbe: readinessProbe,
+		Name:         "main",
+		Image:        imageName,
+		Command:      []string{"sh", "-c"},
+		Args:         []string{strings.Join(args, " ")},
 		Resources:    resources,
 		Env:          envs,
 		TTY:          true,
