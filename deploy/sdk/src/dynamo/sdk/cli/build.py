@@ -576,7 +576,9 @@ def process_kubernetes_overrides(service: dict, service_dict: dict) -> None:
             "path" not in liveness_probe_settings
             and "Path" not in liveness_probe_settings
         ):
-            main_container["livenessProbe"]["path"] = LIVENESS_PROBE_PROP_PATH
+            main_container["livenessProbe"]["httpGet"][
+                "path"
+            ] = LIVENESS_PROBE_PROP_PATH
 
     readyness_probe_settings = kube_overrides.get("readyness_probe_settings")
     if readyness_probe_settings:
@@ -587,7 +589,9 @@ def process_kubernetes_overrides(service: dict, service_dict: dict) -> None:
             "path" not in readyness_probe_settings
             and "Path" not in readyness_probe_settings
         ):
-            main_container["readinessProbe"]["path"] = READYESS_PROBE_PROP_PATH
+            main_container["readinessProbe"]["httpGet"][
+                "path"
+            ] = READYESS_PROBE_PROP_PATH
 
     if main_container:
         service_dict["config"]["extraPodSpec"] = {"mainContainer": main_container}

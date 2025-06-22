@@ -112,7 +112,7 @@ class HTTPGetAction(BaseModel):
     )
 
     path: Optional[str] = Field(
-        default=None, description="Path to access on the HTTP server."
+        default=None, description="Path to access on the HTTP health check."
     )
     port: PortSelector | None = None
     host: Optional[str] = Field(
