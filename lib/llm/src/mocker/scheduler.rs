@@ -173,7 +173,6 @@ impl SchedulerState {
         self.prefill_costs.remove(&uuid);
         eprintln!("Request {} will be preempted", uuid);
 
-        // Extract the ActiveSequence from the Request enum
         // Reset the sequence and get the new sequence and signal
         // Insert the new sequence back into the requests map and add to waiting queue
         let Request::Active(mut active_sequence) = request else {
@@ -370,9 +369,14 @@ impl Scheduler {
 
                             // Check completion and send notification
                             let is_complete = sequence.generated_tokens() >= sequence.max_output_tokens();
-                            let send_failed = output_tx_clone.as_ref().is_some_and(|tx| {
-                                tx.send(OutputSignal { uuid, completed: is_complete }).is_err()
-                            });
+                            let should_output = sequence.generated_tokens() > sequence.already_generated_tokens();
+
+                            let mut send_failed = false;
+                            if should_output {
+                                send_failed = output_tx_clone.as_ref().is_some_and(|tx| {
+                                    tx.send(OutputSignal { uuid, completed: is_complete }).is_err()
+                                });
+                            }
 
                             if send_failed {
                                 for signal in &sequence.free_signal() {
@@ -649,8 +653,8 @@ mod tests {
 
         // Assert that we received the expected number of tokens
         assert!(
-            received_tokens > expected_tokens,
-            "Received {} tokens but expected more than {}",
+            received_tokens == expected_tokens,
+            "Received {} tokens but expected exactly {}",
             received_tokens,
             expected_tokens
         );

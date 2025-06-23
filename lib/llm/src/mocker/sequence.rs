@@ -59,6 +59,9 @@ pub struct ActiveSequence {
     generated_tokens: usize,
 
     #[getter(copy)]
+    already_generated_tokens: usize,
+
+    #[getter(copy)]
     num_input_tokens: usize,
 
     creation_signal: Option<MoveBlock>,
@@ -81,6 +84,7 @@ impl ActiveSequence {
             block_size,
             max_output_tokens,
             generated_tokens: 0,
+            already_generated_tokens: 0,
             num_input_tokens,
             creation_signal,
         }
@@ -215,6 +219,7 @@ impl ActiveSequence {
         self.tokens.truncate(self.num_input_tokens).unwrap();
         self.unique_blocks =
             create_unique_blocks_from_sequence(&self.tokens, None, self.block_size);
+        self.already_generated_tokens = self.generated_tokens.max(self.already_generated_tokens);
         self.generated_tokens = 0;
         self.creation_signal = Some(MoveBlock::Use(self.unique_blocks.clone()));
 
@@ -358,7 +363,7 @@ mod tests {
             seq1.push(token);
         }
 
-        // Push token 47 and get the signal - this completes the block and triggers signals
+        // Push token 48 and get the signal - this completes the block and triggers signals
         let signal = seq1.push(48);
         let signal = signal.unwrap();
 
@@ -381,6 +386,9 @@ mod tests {
 
         // Reset seq1 and check that it equals the original clone
         let free_signals = seq1.reset_with_signal();
+
+        // 49 - 15 generated tokens
+        assert_eq!(seq1.already_generated_tokens, 34);
 
         // Verify the reset signals include proper cleanup events
         assert!(!free_signals.is_empty());
