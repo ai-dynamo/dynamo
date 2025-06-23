@@ -544,7 +544,7 @@ func mergeExtraPodSpec(deployment *v1alpha1.DynamoComponentDeployment, serviceCo
 		if err != nil {
 			return fmt.Errorf("failed to marshal ExtraPodSpec to JSON: %w", err)
 		}
-		fmt.Printf("ExtraPodSpec for deployment %s: %s\n", deployment.Name, string(extraPodSpecJSON))
+		fmt.Printf("!! ExtraPodSpec for deployment %s: %s\n", deployment.Name, string(extraPodSpecJSON))
 
 		if deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec == nil {
 			deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec = new(common.ExtraPodSpec)
@@ -558,6 +558,17 @@ func mergeExtraPodSpec(deployment *v1alpha1.DynamoComponentDeployment, serviceCo
 		if err != nil {
 			return err
 		}
+		// 🔍 Print the result as JSON
+		output, err := json.MarshalIndent(
+			deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec,
+			"", "  ",
+		)
+		if err != nil {
+			fmt.Println("Failed to marshal ExtraPodSpec")
+		} else {
+			fmt.Println("!!! Merged ExtraPodSpec:\n", string(output))
+		}
+		//
 	}
 	return nil
 }
