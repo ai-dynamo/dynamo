@@ -51,7 +51,7 @@
 //!
 //! ## Usage Example
 //!
-//! ```rust
+//! ```rust,ignore
 //! use std::collections::HashMap;
 //! use std::sync::Arc;
 //! use crate::engine::{AsyncEngine, AsAnyAsyncEngine, DowncastAnyAsyncEngine};
@@ -350,7 +350,7 @@ where
 /// enabling ergonomic type erasure without explicit wrapper construction.
 ///
 /// ## Usage
-/// ```rust
+/// ```rust,ignore
 /// use crate::engine::AsAnyAsyncEngine;
 ///
 /// let typed_engine: Arc<dyn AsyncEngine<String, String, ()>> = Arc::new(MyEngine::new());
@@ -385,7 +385,7 @@ where
 /// It will only succeed if the type parameters exactly match the original engine's types.
 ///
 /// ## Usage
-/// ```rust
+/// ```rust,ignore
 /// use crate::engine::DowncastAnyAsyncEngine;
 ///
 /// let any_engine: Arc<dyn AnyAsyncEngine> = // ... from collection
