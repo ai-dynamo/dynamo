@@ -66,6 +66,12 @@ Users/Clients (HTTP)
 
 ## Running the Example Locally
 
+Make sure you are running etcd and nats
+```bash
+sudo systemctl start etcd
+sudo systemctl start nats-server
+```
+
 1. Launch all three services using a single command:
 
 ```bash

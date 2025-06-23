@@ -1151,7 +1151,6 @@ func (r *DynamoComponentDeploymentReconciler) getKubeLabels(dynamoComponentDeplo
 			labels[commonconsts.KubeLabelDynamoComponentType] = v
 		}
 	}
-	labels[commonconsts.KubeLabelDynamoComponentType] = commonconsts.DynamoApiServerComponentName
 	return labels
 }
 

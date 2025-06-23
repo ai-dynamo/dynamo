@@ -30,7 +30,6 @@ import tempfile
 import typing as t
 import uuid
 from pathlib import Path
-from typing import TypeVar
 
 import typer
 import yaml
@@ -58,7 +57,7 @@ from dynamo.sdk.lib.utils import upload_graph
 
 logger = logging.getLogger(__name__)
 console = Console()
-T = TypeVar("T", bound=object)
+T = t.TypeVar("T", bound=object)
 
 DYNAMO_FIGLET = """
 ██████╗ ██╗   ██╗███╗   ██╗ █████╗ ███╗   ███╗ ██████╗
@@ -138,7 +137,7 @@ class ServiceInfo(BaseModel):
             liveliness_func = cls.find_health_probe_method(
                 klass=service_class, check_property=IS_LIVENESS_PROBE_PROP
             )
-            if not liveliness_func:
+            if liveliness_func is None:
                 # Inconsistency. Remove the kubernetes overrides if presenst.
                 logger.warning(
                     f"No @liveness decorator specified for {name}, removing liveness settings from kubernetes overrides."
@@ -148,7 +147,7 @@ class ServiceInfo(BaseModel):
             readyness_func = cls.find_health_probe_method(
                 klass=service_class, check_property=IS_READINESS_PROBE_PROP
             )
-            if not readyness_func:
+            if readyness_func is None:
                 # Inconsistency. Remove the kubernetes overrides if presenst.
                 logger.warning(
                     f"No @readiness decorator specified for {name}, removing readiness settings from kubernetes overrides."
@@ -187,7 +186,9 @@ class ServiceInfo(BaseModel):
         )
 
     @classmethod
-    def find_health_probe_method(cls, klass: type, check_property: str) -> t.Callable:
+    def find_health_probe_method(
+        cls, klass: type, check_property: str
+    ) -> t.Optional[t.Callable]:
         """Determine if the user provided @live or @health method and return the callable."""
         for attr_name in dir(klass):
             attr = getattr(klass, attr_name)
@@ -551,7 +552,7 @@ def process_kubernetes_overrides(service: dict, service_dict: dict) -> None:
         return
     # Map kubernetes_overrides fields to mainContainer if present.
     kube_overrides = service["config"]["kubernetes_overrides"]
-    main_container = {}
+    main_container: dict[str, t.Any] = {}
 
     entrypoint = kube_overrides.get("entrypoint")
     if entrypoint:
@@ -572,9 +573,9 @@ def process_kubernetes_overrides(service: dict, service_dict: dict) -> None:
         main_container["livenessProbe"] = {
             k: v for k, v in liveness_probe_settings.items() if v is not None
         }
-        if (
-            "path" not in liveness_probe_settings
-            and "Path" not in liveness_probe_settings
+        if "httpGet" in liveness_probe_settings and (
+            "path" not in liveness_probe_settings["httpGet"]
+            and "Path" not in liveness_probe_settings["httpGet"]
         ):
             main_container["livenessProbe"]["httpGet"][
                 "path"
@@ -585,9 +586,9 @@ def process_kubernetes_overrides(service: dict, service_dict: dict) -> None:
         main_container["readinessProbe"] = {
             k: v for k, v in readyness_probe_settings.items() if v is not None
         }
-        if (
-            "path" not in readyness_probe_settings
-            and "Path" not in readyness_probe_settings
+        if "httpGet" in readyness_probe_settings and (
+            "path" not in readyness_probe_settings["httpGet"]
+            and "Path" not in readyness_probe_settings["httpGet"]
         ):
             main_container["readinessProbe"]["httpGet"][
                 "path"
