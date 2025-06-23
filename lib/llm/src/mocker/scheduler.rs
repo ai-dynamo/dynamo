@@ -368,24 +368,19 @@ impl Scheduler {
                                 }
                             }
 
-                            // Send UUID notification for each generated token
-                            if let Some(tx) = &output_tx_clone {
-                                let signal = OutputSignal {
-                                    uuid,
-                                    completed: false,
-                                };
-                                let _ = tx.send(signal);
+                            // Check completion and send notification
+                            let is_complete = sequence.generated_tokens() >= sequence.max_output_tokens();
+                            let send_failed = output_tx_clone.as_ref().is_some_and(|tx| {
+                                tx.send(OutputSignal { uuid, completed: is_complete }).is_err()
+                            });
+
+                            if send_failed {
+                                for signal in &sequence.free_signal() {
+                                    kv_manager_guard.process(signal);
+                                }
                             }
 
-                            // Check if we're done after generating
-                            if sequence.generated_tokens() >= sequence.max_output_tokens() {
-                                if let Some(tx) = &output_tx_clone {
-                                    let signal = OutputSignal {
-                                        uuid,
-                                        completed: true,
-                                    };
-                                    let _ = tx.send(signal);
-                                }
+                            if send_failed || is_complete {
                                 state_guard.complete(&uuid);
                                 continue;
                             }
@@ -752,5 +747,69 @@ mod tests {
             metrics.gpu_prefix_cache_hit_rate
         );
         println!("Received {} tokens", received_tokens);
+    }
+
+    #[tokio::test]
+    async fn test_receiver_drop_cleans_up_resources() {
+        let block_size: usize = 64;
+        let input_tokens = 256;
+        let max_output_tokens = 200; // More than we'll receive
+
+        // Create channel for token output
+        let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
+
+        // Create scheduler args
+        let args = MockEngineArgs::builder()
+            .num_gpu_blocks(10) // Enough for 256 tokens (4 blocks)
+            .block_size(block_size)
+            .speedup_ratio(100.0) // Fast simulation
+            .build()
+            .unwrap();
+
+        // Create scheduler
+        let scheduler = Scheduler::new(args, None, Some(output_tx), None, None);
+
+        // Create request with 256 tokens
+        let tokens: Vec<u32> = (0..input_tokens).map(|i| i as u32).collect();
+        let request = DirectRequest {
+            tokens,
+            max_output_tokens,
+            uuid: None,
+            dp_rank: None,
+        };
+
+        scheduler.receive(request).await;
+
+        // Receive exactly 129 tokens
+        let mut received_count = 0;
+        while received_count < 129 {
+            if let Some(_signal) = output_rx.recv().await {
+                received_count += 1;
+            } else {
+                panic!("Channel closed before receiving 129 tokens");
+            }
+        }
+
+        // Drop the receiver immediately
+        drop(output_rx);
+
+        // Wait for 1 second to allow cleanup
+        tokio::time::sleep(Duration::from_secs(1)).await;
+
+        // Check forward pass metrics
+        let metrics = scheduler.get_forward_pass_metrics().await;
+
+        assert_eq!(
+            metrics.gpu_cache_usage_perc,
+            0.0,
+            "Expected GPU cache usage to be 0%, got {}%",
+            metrics.gpu_cache_usage_perc * 100.0
+        );
+
+        assert_eq!(
+            metrics.kv_active_blocks, 0,
+            "Expected 0 active blocks, got {}",
+            metrics.kv_active_blocks
+        );
     }
 }
