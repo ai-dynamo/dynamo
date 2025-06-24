@@ -293,7 +293,7 @@ class DynamoServeProcess(ManagedProcess):
             health_check_urls=health_check_urls,
             delayed_start=graph.delayed_start,
             stragglers=["http"],
-            stragger_commands=["dynamo.sdk.cli.serve_dynamo"],
+            straggler_commands=["dynamo.sdk.cli.serve_dynamo"],
             log_dir=request.node.name,
         )
 
