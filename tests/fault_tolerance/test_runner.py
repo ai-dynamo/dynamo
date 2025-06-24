@@ -152,6 +152,8 @@ async def test_worker_failure(
     logger.info("Starting test_deployment")
     deployment_graph, payload = deployment_graph_test
 
+    os.environ["HF_HUB_OFFLINE"] = "1"
+
     if respawn:
         os.environ["DYN_CIRCUS_RESPAWN"] = "1"
     else:
