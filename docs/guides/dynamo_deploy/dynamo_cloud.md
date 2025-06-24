@@ -190,3 +190,40 @@ After deploying the Dynamo cloud platform, you can:
 3. Manage your deployments using the Dynamo CLI
 
 For more detailed information about deploying inference graphs, see the [Dynamo Deploy Guide](README.md).
+
+
+### Installation using published helm chart
+
+To install Dynamo Cloud using the published Helm chart, you'll need to set the required environment variables and use Helm's `--set` flags to pass your configuration values.
+First, export your environment variables (as described in previous paragraph):
+
+```bash
+export DOCKER_SERVER=<your-docker-server>
+export DOCKER_SECRET_NAME=<your-docker-secret-name> # Allowing to pull images from DOCKER_SERVER
+export IMAGE_TAG=<TAG>  # Use the same tag you used when building the images
+export PIPELINES_DOCKER_SERVER=<your-docker-server>
+export PIPELINES_DOCKER_USERNAME=<your-docker-username>
+export PIPELINES_DOCKER_PASSWORD=<your-docker-password>
+export NAMESPACE=dynamo-cloud    # change this to whatever you want!
+```
+
+These represent the minimal required configuration values. You can override any additional properties that are defined in the chart's default `values.yaml` file by adding more `--set` flags.
+
+Once you've set your environment variables, install the chart using:
+
+```bash
+# first install CRDs
+helm install dynamo-crds dynamo-crds-helm-chart.tgz --namespace default --wait --atomic
+
+# then platform
+helm install dynamo-platform dynamo-platorm-helm-chart.tgz --namespace ${NAMESPACE} --create-namespace \
+  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
+  --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
+  --set "dynamo-operator.imagePullSecrets[0].name=${DOCKER_SECRET_NAME}" \
+  --set "dynamo-operator.dynamo.dockerRegistry.server=${PIPELINES_DOCKER_SERVER}" \
+  --set "dynamo-operator.dynamo.dockerRegistry.username=${PIPELINES_DOCKER_USERNAME}" \
+  --set "dynamo-operator.dynamo.dockerRegistry.password=${PIPELINES_DOCKER_PASSWORD}" \
+  --set "dynamo-api-store.image.repository=${DOCKER_SERVER}/dynamo-api-store" \
+  --set "dynamo-api-store.image.tag=${IMAGE_TAG}" \
+  --set "dynamo-api-store.imagePullSecrets[0].name=${DOCKER_SECRET_NAME}"
+```
