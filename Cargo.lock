@@ -1735,6 +1735,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dynamo-rust-benchmarks"
+version = "0.3.1"
+dependencies = [
+ "clap",
+ "dynamo-llm",
+ "dynamo-runtime",
+ "futures",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "uuid 1.16.0",
+]
+
+[[package]]
 name = "dynamo-tokens"
 version = "0.3.1"
 dependencies = [
