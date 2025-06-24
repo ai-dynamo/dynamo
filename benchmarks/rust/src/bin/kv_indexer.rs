@@ -1,3 +1,12 @@
+//! This benchmarks the performance of the kv indexer.
+//! It takes in a mooncake trace and runs both event and request processing.
+//! We benchmark two things:
+//! 1. Event processing: This is the rate that the indexer can ingest events.
+//!   - Currently, we only check the store and remove block events.
+//! 2. Request processing: This is the rate that the indexer can process requests.
+//!   - Requests are when we get a new inference request, and want to find the workers that already contain the blocks for the request.
+//!
+
 use clap::Parser;
 use futures::future::join_all;
 use std::{collections::HashSet, fs::read_to_string, time::Instant};
@@ -51,6 +60,7 @@ fn load_trace(args: &Args) -> (Vec<KvCacheEvent>, Vec<Vec<u64>>) {
     let mut events = Vec::new();
     let mut sequences = Vec::new();
 
+    // Track the blocks that are currently in our simulated cache.
     let mut seen_blocks = HashSet::new();
 
     let mut event_id = 0;
@@ -58,6 +68,7 @@ fn load_trace(args: &Args) -> (Vec<KvCacheEvent>, Vec<Vec<u64>>) {
     for line in lines {
         let json_value: serde_json::Value = serde_json::from_str(&line).unwrap();
 
+        // Extract hash ids from mooncake.
         let hash_ids = json_value["hash_ids"]
             .as_array()
             .unwrap()
@@ -70,6 +81,7 @@ fn load_trace(args: &Args) -> (Vec<KvCacheEvent>, Vec<Vec<u64>>) {
         let block_hashes;
         let parent_hash;
 
+        // If there are new blocks (that aren't already in our simulated cache), create a store blocks event.
         if let Some(start) = hash_ids.iter().position(|x| !seen_blocks.contains(x)) {
             block_hashes = hash_ids[start..].to_vec();
             if start == 0 {
@@ -81,6 +93,7 @@ fn load_trace(args: &Args) -> (Vec<KvCacheEvent>, Vec<Vec<u64>>) {
             continue;
         };
 
+        // Build our stored blocks event.
         let event_data = KvCacheEventData::Stored(KvCacheStoreData {
             parent_hash,
             blocks: block_hashes
@@ -99,13 +112,20 @@ fn load_trace(args: &Args) -> (Vec<KvCacheEvent>, Vec<Vec<u64>>) {
 
         event_id += 1;
 
+        // Now, we want to simulate block removal.
+        // A more accurate way to do this would be to run an LRU cache and remove blocks based on that.
+        // However, for now we just take the last fraction of stored blocks and immediately emit a remove event for them.
+
+        // Use the removal fraction to determine how many of the newly added blocks should be kept.
         let num_to_keep = (block_hashes.len() as f64 * (1.0 - args.removal_fraction)) as usize;
 
+        // For the blocks that we'll keep, add them to our simulated cache.
         for hash in block_hashes[..num_to_keep].iter() {
             assert!(!seen_blocks.contains(hash));
             seen_blocks.insert(*hash);
         }
 
+        // For the blocks that we'll remove, create a remove event for them.
         let remove_block_hashes: Vec<ExternalSequenceBlockHash> = block_hashes[num_to_keep..]
             .iter()
             .rev()
@@ -146,6 +166,7 @@ fn build_indexer(args: &Args) -> Box<dyn KvIndexerInterface + Sync + Send> {
     kv_indexer
 }
 
+/// Benchmark our event processing rate.
 async fn bench_events(
     indexer: &mut dyn KvIndexerInterface,
     events: &[KvCacheEvent],
@@ -165,6 +186,7 @@ async fn bench_events(
         }
     }
 
+    // Gather the sum of all our blocks in all events.
     let total_blocks: usize = events
         .iter()
         .map(|elem| match &elem.data {
@@ -187,6 +209,7 @@ async fn bench_events(
     );
 }
 
+/// Benchmark our request processing rate.
 async fn bench_requests(indexer: &mut dyn KvIndexerInterface, sequences: &[Vec<u64>]) {
     let total_request_blocks: usize = sequences.iter().map(|item| item.len()).sum();
 
