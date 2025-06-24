@@ -6,14 +6,20 @@ from typing import Optional
 
 import pytest
 import torch
-from vllm.multimodal.inputs import MultiModalKwargs
-from vllm.sampling_params import SamplingParams
-from vllm.v1.core.kv_cache_manager import Request
-from vllm.v1.kv_cache_interface import (
-    FullAttentionSpec,
-    KVCacheConfig,
-    KVCacheGroupSpec,
-)
+
+try:
+    from vllm.multimodal.inputs import MultiModalKwargs
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.core.kv_cache_manager import Request
+    from vllm.v1.kv_cache_interface import (
+        FullAttentionSpec,
+        KVCacheConfig,
+        KVCacheGroupSpec,
+    )
+
+    VLLM_NOT_AVAILABLE = False
+except ImportError:
+    VLLM_NOT_AVAILABLE = True
 
 from dynamo.llm import BlockManager
 from dynamo.llm.vllm_integration.kv_cache_manager import KvbmCacheManager
@@ -89,6 +95,7 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
     )
 
 
+@pytest.mark.skipif(VLLM_NOT_AVAILABLE, reason="VLLM not available")
 def test_prefill():
     """
     Tests the KvbmCacheManager's prefill functionality.
@@ -139,6 +146,7 @@ def test_prefill():
 
     for block in computed_blocks.blocks:
         assert block._block_hash is not None
+        print(block)
 
     # Clean up
     manager.free_block_hashes(req0)
@@ -169,6 +177,7 @@ def test_prefill():
     time.sleep(0.5)
 
 
+@pytest.mark.skipif(VLLM_NOT_AVAILABLE, reason="VLLM not available")
 def test_prefill_plp():
     """Test prefill with APC and some prompt logprobs (plp) requests.
 
@@ -285,6 +294,7 @@ def test_prefill_plp():
     manager.free(req2)
 
 
+@pytest.mark.skipif(VLLM_NOT_AVAILABLE, reason="VLLM not available")
 def test_decode():
     manager = new_kv_cache_manager()
 
@@ -352,6 +362,7 @@ def test_decode():
     manager.free_block_hashes(req0)
 
 
+@pytest.mark.skipif(VLLM_NOT_AVAILABLE, reason="VLLM not available")
 def test_evict():
     manager = new_kv_cache_manager()
     used_blocks = set()
@@ -417,6 +428,7 @@ def test_evict():
     # assert manager.block_pool.free_block_queue.num_free_blocks == 7
 
 
+@pytest.mark.skipif(VLLM_NOT_AVAILABLE, reason="VLLM not available")
 def test_hash_block_correct_reuse():
     """
     This tests when a previously cached block is reused as a new block,
@@ -466,6 +478,7 @@ def test_hash_block_correct_reuse():
     assert blocks.blocks[1].block_hash is None
 
 
+@pytest.mark.skipif(VLLM_NOT_AVAILABLE, reason="VLLM not available")
 def test_computed_blocks_not_evicted():
     """
     Test that the computed blocks are not evicted when getting new blocks
@@ -561,6 +574,78 @@ def _test_mm_prefix_caching():
     pass
 
 
+@pytest.mark.skipif(VLLM_NOT_AVAILABLE, reason="VLLM not available")
+def test_cache_key_salting():
+    """
+    This tests that cache salts are applied during hashing and the cache
+    is separated cache as expected.
+
+    The test is mostly the same as the one for vLLM's native KV cache manager.
+    The only difference is for KVBM we don't need a `BlockHashType` object on python
+    side, thus we don't check the value of the salt. We test the salt-ing
+    functionality by validating cache miss and cache hit with different salts.
+    """
+    block_size = 16
+    manager = new_kv_cache_manager()
+
+    # 3 complete blocks and an incomplete block with 11 tokens.
+    common_token_ids = [i for i in range(3) for _ in range(block_size)]
+    token_ids = common_token_ids + [3] * 11
+    req0 = make_request("0", token_ids, cache_salt="salt1")
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+
+    # Completed block should have hashes with extra keys.
+    assert not computed_blocks.blocks
+    assert num_computed_tokens == 0
+    """
+    block_hashes = manager.req_to_block_hashes[req0.request_id]
+    assert len(block_hashes) == 3
+    assert block_hashes[0].extra_keys == ("salt1", )
+    assert block_hashes[1].extra_keys is None
+    assert block_hashes[2].extra_keys is None
+    """
+
+    blocks = manager.allocate_slots(
+        req0, 59, len(computed_blocks.blocks) * 16, computed_blocks
+    )
+    assert blocks.get_block_ids() == [[0, 1, 2, 3]]  # [[1, 2, 3, 4]]
+    req0.num_computed_tokens = 59
+
+    # Append slots without allocating a new block.
+    for _ in range(5):
+        req0.append_output_token_ids(8)
+    new_blocks = manager.allocate_slots(
+        req0, 5, len(computed_blocks.blocks) * 16, computed_blocks
+    )
+    assert new_blocks is not None and len(new_blocks.blocks) == 0
+    print(new_blocks)
+    """
+    # Now one more block that should not have extra keys.
+    assert len(block_hashes) == 4
+    assert block_hashes[3].extra_keys is None
+    """
+    # Test cache hit with a new request that has the same salt.
+    token_ids = common_token_ids + [4] * 11
+    req1 = make_request("1", token_ids, cache_salt="salt1")
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    # Should match only a prefix of 3 blocks.
+    assert len(computed_blocks.blocks) == 3
+    assert num_computed_tokens == 3 * block_size
+
+    # Test cache miss with same content but different salt.
+    token_ids = common_token_ids + [4] * 11
+    req2 = make_request("2", token_ids, cache_salt="salt2")
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    assert len(computed_blocks.blocks) == 0
+    assert num_computed_tokens == 0
+    """
+    block_hashes = manager.req_to_block_hashes[req2.request_id]
+    assert len(block_hashes) == 3
+    assert block_hashes[0].extra_keys == ("salt2", )
+    """
+
+
+@pytest.mark.skipif(VLLM_NOT_AVAILABLE, reason="VLLM not available")
 def test_prefill_not_enough_free_blocks_with_computed_blocks():
     """
     This is a unit test that tests the correctness of the allocate_slots
