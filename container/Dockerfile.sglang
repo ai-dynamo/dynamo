@@ -134,13 +134,13 @@ RUN if [ "$ARCH" = "arm64" ]; then \
     fi
 
 # Install sglang
-# Once either 0.4.6post6 or 0.4.7 is released, we can switch back to using the published version
-# This commit references a fix to add DP attention based routing along with other perf fixes https://github.com/sgl-project/sglang/pull/6884
-ARG SGLANG_COMMIT="f1569876d54dd3b6601f5280f12652e9fbb1375c"
+# For dynamo release 0.3.1 - we've noticed a regression around ordering of descriptors in SGL
+# As a workaround, we are pinning to a side branch of SGL until we figure out a fix
+ARG SGLANG_BRANCH="nixl-sorted"
 RUN --mount=type=cache,target=/root/.cache/uv \
-    git clone https://github.com/sgl-project/sglang.git && \
+    git clone https://github.com/trevor-m/sglang.git && \
     cd sglang && \
-    git checkout ${SGLANG_COMMIT} && \
+    git checkout ${SGLANG_BRANCH} && \
     uv pip install -e "python[all]"
 
 # Common dependencies
