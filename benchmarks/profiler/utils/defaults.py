@@ -13,11 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-apiVersion: 1
-
-datasources:
-  - name: prometheus
-    type: prometheus
-    access: proxy
-    url: http://prometheus:9090
-    isDefault: true
+DECODE_NUM_REQUESTS_RANGE = [
+    1,
+    5,
+    10,
+    25,
+    50,
+    100,
+    150,
+    200,
+    250,
+    300,
+    350,
+    400,
+    450,
+    500,
+]
