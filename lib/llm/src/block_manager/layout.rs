@@ -182,7 +182,7 @@ pub struct LocalMemoryRegion {
     size: usize,
 
     #[getter(copy)]
-    storage_idx: usize,
+    storage_type: StorageType,
 }
 
 /// Core trait for block layouts
@@ -546,7 +546,7 @@ impl<S: Storage> GenericBlockLayout for FullyContiguous<S> {
         Ok(LocalMemoryRegion {
             addr: final_addr,
             size: self.config.memory_region_size,
-            storage_idx: 0,
+            storage_type: self.storage_type,
         })
     }
 }
@@ -778,7 +778,7 @@ impl<S: Storage> GenericBlockLayout for LayerSeparate<S> {
         Ok(LocalMemoryRegion {
             addr: final_addr,
             size: self.config.memory_region_size,
-            storage_idx: layer_idx,
+            storage_type: self.storages[layer_idx].storage_type(),
         })
     }
 }

@@ -212,7 +212,7 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManagerState<Lo
 }
 
 impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
-    pub fn new(config: KvBlockManagerConfig) -> Result<Arc<Self>> {
+    pub async fn new(config: KvBlockManagerConfig) -> Result<Arc<Self>> {
         let mut resources = Resources::new(config)?;
         let block_data_factories = local::LocalBlockDataFactories::new(&mut resources)?;
 
@@ -268,8 +268,10 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
             resources.cancellation_token.clone(),
         )?;
 
+        let resources = Arc::new(resources);
+
         let state = Arc::new(Self {
-            resources: Arc::new(resources),
+            resources: resources.clone(),
             disk_pool,
             host_pool,
             device_pool,
@@ -283,11 +285,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
                 block.set_manager(state.clone());
             });
 
-            state
-                .disk_pool
-                .as_ref()
-                .unwrap()
-                .add_blocks_blocking(blocks)?;
+            state.disk_pool.as_ref().unwrap().add_blocks(blocks).await?;
         }
 
         if let Some(mut blocks) = host_blocks {
@@ -295,11 +293,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
                 block.set_manager(state.clone());
             });
 
-            state
-                .host_pool
-                .as_ref()
-                .unwrap()
-                .add_blocks_blocking(blocks)?;
+            state.host_pool.as_ref().unwrap().add_blocks(blocks).await?;
         }
 
         if let Some(mut blocks) = device_blocks {
@@ -311,7 +305,8 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
                 .device_pool
                 .as_ref()
                 .unwrap()
-                .add_blocks_blocking(blocks)?;
+                .add_blocks(blocks)
+                .await?;
         }
 
         Ok(state)

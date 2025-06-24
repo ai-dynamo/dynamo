@@ -32,7 +32,7 @@ where
     }
 
     pub fn storage_type(&self) -> StorageType {
-        self.layout.storage_type().clone()
+        *self.layout.storage_type()
     }
 
     fn is_fully_contiguous(&self) -> bool {
@@ -102,7 +102,8 @@ impl<S: Storage> BlockDataViews<S> for LocalBlockData<S> {
         let mr = self
             .layout
             .memory_region(self.block_idx, layer_idx, outer_idx)?;
-        unsafe { view::LayerView::new(self, mr.addr(), mr.size()) }
+        let storage_type = mr.storage_type();
+        unsafe { view::LayerView::new(self, mr.addr(), mr.size(), storage_type) }
     }
 
     fn local_layer_view_mut(
@@ -113,7 +114,7 @@ impl<S: Storage> BlockDataViews<S> for LocalBlockData<S> {
         let mr = self
             .layout
             .memory_region(self.block_idx, layer_idx, outer_idx)?;
-        unsafe { view::LayerViewMut::new(self, mr.addr(), mr.size()) }
+        unsafe { view::LayerViewMut::new(self, mr.addr(), mr.size(), mr.storage_type()) }
     }
 
     fn local_block_view(&self) -> BlockResult<view::BlockView<S>> {
@@ -121,7 +122,8 @@ impl<S: Storage> BlockDataViews<S> for LocalBlockData<S> {
             let mr = self.layout.memory_region(self.block_idx, 0, 0)?;
             let offset = mr.addr();
             let size = mr.size() * self.num_layers();
-            unsafe { view::BlockView::new(self, offset, size) }
+            let storage_type = mr.storage_type();
+            unsafe { view::BlockView::new(self, offset, size, storage_type) }
         } else {
             Err(BlockError::InvalidState(
                 "Block is not fully contiguous".to_string(),
@@ -134,7 +136,8 @@ impl<S: Storage> BlockDataViews<S> for LocalBlockData<S> {
             let mr = self.layout.memory_region(self.block_idx, 0, 0)?;
             let offset = mr.addr();
             let size = mr.size() * self.num_layers();
-            unsafe { view::BlockViewMut::new(self, offset, size) }
+            let storage_type = mr.storage_type();
+            unsafe { view::BlockViewMut::new(self, offset, size, storage_type) }
         } else {
             Err(BlockError::InvalidState(
                 "Block is not fully contiguous".to_string(),

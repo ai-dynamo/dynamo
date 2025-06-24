@@ -99,7 +99,7 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: Blo
         }
     }
 
-    fn handle_complete(self) -> Result<()> {
+    async fn handle_complete(self) -> Result<()> {
         let Self {
             sources,
             mut targets,
@@ -112,7 +112,7 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: Blo
             transfer_metadata(source, target)?;
         }
 
-        let blocks = target_pool.register_blocks_blocking(targets)?;
+        let blocks = target_pool.register_blocks(targets).await?;
 
         if let Some(completion_indicator) = completion_indicator {
             completion_indicator
@@ -204,7 +204,7 @@ impl<
                             // Wait for the event.
                             notify.await.map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
                             // Only finalize the transfer after the event is signaled.
-                            match pending_transfer.handle_complete() {
+                            match pending_transfer.handle_complete().await {
                                 Ok(_) => {}
                                 Err(e) => {
                                     // The only case where this can fail is if the progress engine is being shutdown.
@@ -363,7 +363,7 @@ where
 
         let completion_future = async move {
             let _ = notify.await;
-            match pending_transfer.handle_complete() {
+            match pending_transfer.handle_complete().await {
                 Ok(_) => {}
                 Err(e) => {
                     // The only case where this can fail is if the progress engine is being shutdown.

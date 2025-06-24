@@ -1545,18 +1545,14 @@ pub mod test_utils {
 mod tests {
     use super::*;
 
-    use super::nixl::*;
+    
 
-    use super::super::layout::{
-        nixl::{NixlLayout, SerializedNixlBlockLayout, ToSerializedNixlBlockLayout},
-        tests::setup_layout,
-        FullyContiguous, LayoutConfig,
-    };
-    use crate::block_manager::storage::SystemAllocator;
+    use super::super::layout::tests::setup_layout;
+    
     use crate::tokens::{TokenBlockSequence, Tokens};
 
-    use dynamo_runtime::logging::init as init_logging;
-    use nixl_sys::Agent as NixlAgent;
+    
+    
 
     const BLOCK_SIZE: usize = 4;
     const SALT_HASH: SaltHash = 12345;

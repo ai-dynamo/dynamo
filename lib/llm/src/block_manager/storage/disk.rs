@@ -88,7 +88,7 @@ impl Drop for DiskStorage {
 
 impl Storage for DiskStorage {
     fn storage_type(&self) -> StorageType {
-        StorageType::Disk
+        StorageType::Disk(self.fd())
     }
 
     fn addr(&self) -> u64 {

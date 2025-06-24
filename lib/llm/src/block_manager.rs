@@ -115,7 +115,7 @@ impl<Metadata: BlockMetadata> KvBlockManager<Metadata> {
     /// The returned object is a frontend to the [KvBlockManager] which owns the cancellation
     /// tokens. When this object gets drop, the cancellation token will be cancelled and begin
     /// the gracefully shutdown of the block managers internal state.
-    pub fn new(config: KvBlockManagerConfig) -> Result<Self> {
+    pub async fn new(config: KvBlockManagerConfig) -> Result<Self> {
         let mut config = config;
 
         // The frontend of the KvBlockManager will take ownership of the cancellation token
@@ -128,7 +128,7 @@ impl<Metadata: BlockMetadata> KvBlockManager<Metadata> {
         let block_size = config.model.page_size;
 
         // Create the internal state
-        let state = state::KvBlockManagerState::new(config)?;
+        let state = state::KvBlockManagerState::new(config).await?;
 
         let _cancellation_token = Arc::new(CancelOnLastDrop { cancellation_token });
 
@@ -265,20 +265,16 @@ mod tests {
             .unwrap()
     }
 
-    pub fn create_reference_block_manager() -> ReferenceBlockManager {
-        ReferenceBlockManager::new(create_reference_block_manager_config()).unwrap()
+    pub async fn create_reference_block_manager() -> ReferenceBlockManager {
+        ReferenceBlockManager::new(create_reference_block_manager_config())
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
     async fn test_reference_block_manager_inherited_async_runtime() {
         dynamo_runtime::logging::init();
-        let _block_manager = create_reference_block_manager();
-    }
-
-    #[test]
-    fn test_reference_block_manager_blocking() {
-        dynamo_runtime::logging::init();
-        let _block_manager = create_reference_block_manager();
+        let _block_manager = create_reference_block_manager().await;
     }
 
     // This tests mimics the behavior of two unique kvbm workers exchanging blocksets
@@ -294,8 +290,8 @@ mod tests {
         dynamo_runtime::logging::init();
 
         // create two block managers - mimics two unique dynamo workers
-        let kvbm_0 = create_reference_block_manager();
-        let kvbm_1 = create_reference_block_manager();
+        let kvbm_0 = create_reference_block_manager().await;
+        let kvbm_1 = create_reference_block_manager().await;
 
         assert_ne!(kvbm_0.worker_id(), kvbm_1.worker_id());
 
@@ -361,7 +357,7 @@ mod tests {
     async fn test_offload() -> Result<()> {
         dynamo_runtime::logging::init();
 
-        let block_manager = create_reference_block_manager();
+        let block_manager = create_reference_block_manager().await;
 
         let device = block_manager.device().unwrap();
 

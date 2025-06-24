@@ -5,9 +5,6 @@ use anyhow::{Context, Result};
 
 use super::*;
 
-
-
-
 pub fn create_lw_sharded_factories(block_sets: Vec<SerializedNixlBlockSet>) -> Result<()> {
     // deserialize to block sets
     let count = block_sets.len();
@@ -34,7 +31,7 @@ pub fn create_lw_sharded_factories(block_sets: Vec<SerializedNixlBlockSet>) -> R
                 RemoteBlocks::from_serialized(block_set_layout.clone(), block_set_idx, worker_id)?;
 
             match remote_blocks.layout().storage_type() {
-                StorageType::Disk => {
+                StorageType::Disk(_) => {
                     disk_blocks.insert(worker_id, remote_blocks);
                 }
                 StorageType::Pinned => {

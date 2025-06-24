@@ -20,6 +20,7 @@
 //! and individual blocks.
 
 use super::{BlockDataExt, BlockError, Storage};
+use crate::block_manager::storage::StorageType;
 
 pub trait Kind: std::marker::Sized + std::fmt::Debug + Clone + Copy + Send + Sync {}
 
@@ -43,6 +44,7 @@ pub struct MemoryView<'a, S: Storage, K: Kind> {
     _block_data: &'a dyn BlockDataExt<S>,
     addr: usize,
     size: usize,
+    storage_type: StorageType,
     kind: std::marker::PhantomData<K>,
 }
 
@@ -61,11 +63,13 @@ where
         _block_data: &'a dyn BlockDataExt<S>,
         addr: usize,
         size: usize,
+        storage_type: StorageType,
     ) -> Result<Self, BlockError> {
         Ok(Self {
             _block_data,
             addr,
             size,
+            storage_type,
             kind: std::marker::PhantomData,
         })
     }
@@ -92,6 +96,7 @@ pub struct MemoryViewMut<'a, S: Storage, K: Kind> {
     _block_data: &'a mut dyn BlockDataExt<S>,
     addr: usize,
     size: usize,
+    storage_type: StorageType,
     kind: std::marker::PhantomData<K>,
 }
 
@@ -107,11 +112,13 @@ impl<'a, S: Storage, K: Kind> MemoryViewMut<'a, S, K> {
         _block_data: &'a mut dyn BlockDataExt<S>,
         addr: usize,
         size: usize,
+        storage_type: StorageType,
     ) -> Result<Self, BlockError> {
         Ok(Self {
             _block_data,
             addr,
             size,
+            storage_type,
             kind: std::marker::PhantomData,
         })
     }
@@ -161,9 +168,10 @@ mod nixl {
         }
 
         fn device_id(&self) -> u64 {
-            match self._block_data.storage_type() {
+            match self.storage_type {
                 StorageType::System | StorageType::Pinned => 0,
-                StorageType::Device(device_id) => *device_id as u64,
+                StorageType::Device(device_id) => device_id as u64,
+                StorageType::Disk(fd) => fd,
                 _ => panic!("Invalid storage type"),
             }
         }
@@ -189,9 +197,10 @@ mod nixl {
         }
 
         fn device_id(&self) -> u64 {
-            match self._block_data.storage_type() {
+            match self.storage_type {
                 StorageType::System | StorageType::Pinned => 0,
-                StorageType::Device(device_id) => *device_id as u64,
+                StorageType::Device(device_id) => device_id as u64,
+                StorageType::Disk(fd) => fd,
                 _ => panic!("Invalid storage type"),
             }
         }

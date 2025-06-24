@@ -308,7 +308,8 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 if let Some(block) = block {
                     // If the block is already in the target, don't offload it.
                     if let Ok(blocks) = target_pool
-                        .match_sequence_hashes_blocking(vec![request.sequence_hash].as_slice())
+                        .match_sequence_hashes(vec![request.sequence_hash].as_slice())
+                        .await
                     {
                         if !blocks.is_empty() {
                             continue;
@@ -542,7 +543,7 @@ pub mod tests {
 
     use crate::block_manager::{
         block::{
-            locality::{Local, LocalityProvider},
+            locality::Local,
             BasicMetadata, BlockDataExt, BlockDataProvider, BlockExt, Blocks, MutableBlock,
         },
         layout::{nixl::NixlLayout, FullyContiguous, LayerSeparate, LayoutType},
@@ -740,7 +741,7 @@ pub mod tests {
                         )
                         .result()?;
                     },
-                    StorageType::Disk => {
+                    StorageType::Disk(_) => {
                         let nixl_desc = layer_view.as_nixl_descriptor();
                         let mut file: ManuallyDrop<File>;
                         let data = avec![[4096] | value; layer_view.size()];
@@ -792,7 +793,7 @@ pub mod tests {
                                 .to_vec(),
                         );
                     },
-                    StorageType::Disk => {
+                    StorageType::Disk(_) => {
                         let nixl_desc = layer_view.as_nixl_descriptor();
                         let mut file: ManuallyDrop<File>;
                         let mut aligned = avec![[4096] | 0; layer_view.size()];
