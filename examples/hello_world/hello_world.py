@@ -132,7 +132,7 @@ class Middle:
         "liveness_probe_settings": {
             "http_get": {
                 "path": "/healthz",
-                "port": {"number": 5000},
+                "port": 5000,
             },  # "probe"
             "initial_delay_seconds": 1,
         },  # liveness_probe_settings
@@ -168,10 +168,14 @@ class Frontend:
 
     @liveness
     def is_alive(self):
+        print("!!! is_alive hit")
+        logger.info("!!! is_alive hit")
         return True
 
     @readiness
     def is_ready(self):
+        print("!!! is_ready hit")
+        logger.info("!!! is_ready hi")
         return True
 
     @on_shutdown

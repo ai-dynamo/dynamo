@@ -18,10 +18,10 @@ import abc
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from enum import Enum, auto
-from typing import Any, Dict, Generic, List, Optional, Set, Tuple, Type, TypeVar
+from typing import Any, Dict, Generic, List, Optional, Set, Tuple, Type, TypeVar, Union
 
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .deployment import Env
 
@@ -91,19 +91,6 @@ class HTTPHeader(BaseModel):
     value: str
 
 
-class PortSelector(BaseModel):
-    name: Optional[str] = None
-    number: Optional[int] = None
-
-    @model_validator(mode="after")
-    def validate_port_selector(self) -> "PortSelector":
-        if self.name and self.number:
-            raise ValueError("Only one of 'name' or 'number' should be set.")
-        if not self.name and not self.number:
-            raise ValueError("One of 'name' or 'number' must be set.")
-        return self
-
-
 class HTTPGetAction(BaseModel):
     """Class for HTTP health probe settings."""
 
@@ -114,7 +101,11 @@ class HTTPGetAction(BaseModel):
     path: Optional[str] = Field(
         default=None, description="Path to access on the HTTP health check."
     )
-    port: PortSelector | None = None
+
+    port: Union[int, str, None] = Field(
+        default=None, description="Port number or name to access on the container."
+    )
+
     host: Optional[str] = Field(
         default=None, description="Host name to connect to, defaults to the pod IP."
     )
