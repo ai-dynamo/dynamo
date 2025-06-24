@@ -330,8 +330,23 @@ def main(logs_dir, tablefmt):
             commands[test_prefix] = res["cmd"]
         grouped[test_prefix].append(res)
 
+    order = [
+        "none",
+        "frontend",
+        "processor",
+        "decode_worker",
+        "prefill_worker",
+        "vllm_worker",
+    ]
+
     # Print grouped tables
     for test_prefix, group in grouped.items():
+        new_group = []
+        for failure in order:
+            for res in group:
+                if failure == res["failure"]:
+                    new_group.append(res)
+        group = new_group
         headers = [
             "Failure",
             "Startup Time",

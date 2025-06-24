@@ -102,9 +102,11 @@ python3 parse_results.py
 ## Example Results
 
 The following results were obtained running on a single node with 8
-L40 GPUs.
+L40 GPUs using "deepseek-ai/DeepSeek-R1-Distill-Llama-8B".
 
 ### Aggregated
+
+Aggregated configuration running TP 2 DP 4.
 
 ```mermaid
 graph LR
@@ -151,6 +153,18 @@ graph LR
     %% Styling
     style DecodePool stroke:#000,stroke-width:2px
 ```
+
+#### Results
+
+Test Group: agg-tp-2-dp-4
+
+Test Command:  dynamo serve graphs.agg:Frontend -f /workspace/tests/fault_tolerance/configs/agg_tp_2_dp_4.yaml --Frontend.port 8000 in /workspace/examples/llm
+|    Failure    |   Startup Time |   Success |   Failed |   Latency Before |   Latency After |   Pending Before |   Pending After |   Recovery Time |
+|:-------------:|---------------:|----------:|---------:|-----------------:|----------------:|-----------------:|----------------:|----------------:|
+|     none      |          50.00 |   1000.00 |     0.00 |             1.81 |             N/A |             0.00 |             N/A |             N/A |
+|   frontend    |          51.00 |    895.00 |   105.00 |             1.82 |            1.79 |             0.00 |            0.00 |           10.89 |
+| decode_worker |          51.00 |   1000.00 |     0.00 |             1.81 |            1.82 |             0.00 |            0.00 |           36.22 |
+|  vllm_worker  |          51.00 |    793.00 |   207.00 |             1.83 |            1.83 |             0.00 |            0.00 |             N/A |
 
 
 
