@@ -134,7 +134,7 @@ graph LR
             D3GPU0["GPU 4"]
             D3GPU1["GPU 5"]
         end
-        subgraph Decode3["Decode 4"]
+        subgraph Decode4["Decode 4"]
             direction TB
             D4GPU0["GPU 6"]
             D4GPU1["GPU 7"]
