@@ -14,17 +14,24 @@
 #  limitations under the License.
 #  Modifications Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES
 
+import abc
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from enum import Enum, auto
 from typing import Any, Dict, Generic, List, Optional, Set, Tuple, Type, TypeVar
 
 from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .deployment import Env
 
 T = TypeVar("T", bound=object)
+
+
+class AbstractService(abc.ABC):
+    """Base class for Dynamo service interfaces."""
+
+    pass
 
 
 class LeaseConfig(BaseModel):
@@ -67,6 +74,24 @@ class ResourceConfig(BaseModel):
     gpu: str = Field(default="0")
 
 
+class KubernetesOverrides(BaseModel):
+    """Class for kubernetes overrides from the sdk to limit to supported fields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    entrypoint: List[str] | None = None
+    cmd: List[str] | None = None
+
+    @field_validator("entrypoint", "cmd", mode="before")
+    @classmethod
+    def _coerce_str_to_list(cls, v):
+        if v is None or isinstance(v, list):
+            return v
+        if isinstance(v, str):
+            return [v]
+        raise TypeError("Must be str or list[str]")
+
+
 class ServiceConfig(BaseModel):
     """Base service configuration that can be extended by adapters"""
 
@@ -76,6 +101,7 @@ class ServiceConfig(BaseModel):
     image: str | None = None
     envs: List[Env] | None = None
     labels: Dict[str, str] | None = None
+    kubernetes_overrides: KubernetesOverrides | None = None
 
 
 class DynamoEndpointInterface(ABC):
@@ -146,10 +172,59 @@ class ServiceInterface(Generic[T], ABC):
         """List names of all registered endpoints"""
         pass
 
-    @abstractmethod
     def link(self, next_service: "ServiceInterface") -> "ServiceInterface":
-        """Link this service to another service, creating a pipeline"""
-        pass
+        """Link this service to another service, creating a pipeline.
+
+        This method allows linking (injecting) a concrete service implementation by checking if there is a dependency that next_service implements/inherits from.
+
+        Args:
+            next_service: The concrete service implementation to link
+
+        Returns:
+            The next_service that was linked to this service
+
+        Raises:
+            ValueError: If no matching interface is found or if multiple matches are found
+        """
+        if not isinstance(next_service, ServiceInterface):
+            raise ValueError(f"link must be passed a Service, got {type(next_service)}")
+
+        # Get all the deps of the service
+        inner_deps = [
+            (dep.on.inner, dep_key, dep)
+            for dep_key, dep in self.dependencies.items()
+            if dep.on is not None
+        ]  # type: ignore
+
+        # Get the inner class of the passed in service
+        curr_inner = next_service.inner
+
+        # Find deps that next_service implements/inherits from
+        matching_deps = []
+        for dep_inner, dep_key, original_dep in inner_deps:
+            if issubclass(curr_inner, dep_inner):
+                matching_deps.append((dep_inner, dep_key, original_dep))
+
+        if not matching_deps:
+            raise ValueError(
+                f"{curr_inner.__name__} does not fulfill any dependencies required by {self.name}"
+            )
+
+        if len(matching_deps) > 1:
+            dep_names = [dep_key for _, _, dep_key in matching_deps]
+            raise ValueError(
+                f"{curr_inner.__name__} fulfills multiple dependencies required by {self.name}: {dep_names}"
+            )
+
+        # Get the matching interface, dep_key, and original dependency
+        _, _, matching_dep = matching_deps[0]
+
+        # Let's hot swap the on of the existing dependency with the new service
+        matching_dep.on = next_service
+
+        # Record the link
+        LinkedServices.add((self, next_service))
+        return next_service
 
     @abstractmethod
     def remove_unused_edges(self, used_edges: Set["ServiceInterface"]) -> None:
@@ -194,6 +269,93 @@ class ServiceInterface(Generic[T], ABC):
     def dynamo_address(self) -> tuple[str, str]:
         raise NotImplementedError()
 
+    def is_servable(self) -> bool:
+        """Check if this service is ready to be served.
+
+        A service is servable if:
+        1. It is not a subclass of AbstractService (concrete service)
+        2. If it is a subclass of AbstractService, all abstract methods are implemented
+           with @dynamo_endpoint decorators
+        """
+        # If not a AbstractService, it's servable by default
+        if not issubclass(self.inner, AbstractService):
+            return True
+
+        # For AbstractService, check implementations
+        abstract_endpoints = _get_abstract_dynamo_endpoints(self.inner)
+        if (
+            not abstract_endpoints
+        ):  # No abstract endpoints to implement, so it's servable
+            return True
+        return all(
+            _check_dynamo_endpoint_implemented(self.inner, name)
+            for name in abstract_endpoints
+        )  # type: ignore[return-value]
+
+
+def _get_abstract_dynamo_endpoints(cls: type) -> Set[str]:
+    """Get all abstract endpoint names from the class's MRO."""
+    return {
+        name
+        for base in cls.mro()
+        for name, val in base.__dict__.items()
+        if getattr(val, "__is_abstract_dynamo__", False)
+    }
+
+
+def _check_dynamo_endpoint_implemented(cls: type, name: str) -> bool:
+    """Check if an endpoint is properly implemented."""
+    impl = getattr(cls, name, None)
+    # Ensure the implementation is a callable DynamoEndpointInterface
+    return (
+        impl is not None
+        and callable(impl)
+        and isinstance(impl, DynamoEndpointInterface)
+    )
+
+
+def validate_dynamo_interfaces(cls: type) -> None:
+    """
+    Validate that *cls* fully implements every @abstract_endpoint
+    declared in its ancestors and that each implementation is
+    decorated with @dynamo_endpoint.
+    """
+    required = _get_abstract_dynamo_endpoints(cls)
+
+    missing: List[str] = []
+    undecorated: List[str] = []
+    not_callable: List[Tuple[str, str]] = []
+
+    for name in required:
+        impl = getattr(cls, name, None)
+        if impl is None:
+            missing.append(name)
+            continue
+
+        if not callable(impl):
+            not_callable.append((name, type(impl).__name__))
+            continue
+
+        if not isinstance(impl, DynamoEndpointInterface):
+            undecorated.append(name)
+
+    problems = []
+    if missing:
+        problems.append(f"missing implementation(s): {', '.join(missing)}")
+    if undecorated:
+        problems.append(
+            f"method(s) not decorated with @endpoint: {', '.join(undecorated)}"
+        )
+    if not_callable:
+        problems.append(
+            ", ".join(f"{n} must be callable, got {kind}" for n, kind in not_callable)
+        )
+
+    if problems:
+        raise TypeError(
+            f"{cls.__name__} violates Dynamo interface — " + "; ".join(problems)
+        )
+
 
 class DeploymentTarget(ABC):
     """Interface for service provider implementations"""
@@ -224,6 +386,12 @@ class DependencyInterface(Generic[T], ABC):
     @abstractmethod
     def on(self) -> Optional[ServiceInterface[T]]:
         """Get the service this dependency is on"""
+        pass
+
+    @on.setter
+    @abstractmethod
+    def on(self, value: Optional[ServiceInterface[T]]) -> None:
+        """Set the service this dependency is on"""
         pass
 
     @abstractmethod

@@ -27,7 +27,14 @@ from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
 )
 
-from dynamo.sdk import async_on_start, endpoint, service
+# Additional vLLM imports for DP worker
+from vllm.usage.usage_lib import UsageContext
+from vllm.utils import get_tcp_uri
+from vllm.v1.engine.core import EngineCoreProc
+from vllm.v1.engine.core_client import CoreEngineProcManager
+from vllm.v1.executor.abstract import Executor
+
+from dynamo.sdk import async_on_start, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -37,8 +44,8 @@ class VllmBaseWorker:
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
 
-        signal.signal(signal.SIGTERM, self.shutdown_vllm_engine)
-        signal.signal(signal.SIGINT, self.shutdown_vllm_engine)
+        signal.signal(signal.SIGTERM, self.graceful_shutdown)
+        signal.signal(signal.SIGINT, self.graceful_shutdown)
 
         self.set_side_channel_host_and_port()
 
@@ -53,9 +60,21 @@ class VllmBaseWorker:
 
         logger.info("VllmWorker has been initialized")
 
-    def shutdown_vllm_engine(self, signum, frame):
-        """Shutdown the background loop"""
-        logger.info(f"Received signal {signum}, shutting down")
+    def graceful_shutdown(self, signum, frame):
+        """
+        Gracefully shutdown the worker by shutting down the dynamo runtime.
+        This will
+            1. disable the generate endpoint so no new requests are accepted.
+            2. wait until all in-flight requests are completed.
+            3. finish the awaiting for the endpoint service.
+            4. rely on python's garbage collection to clean up the GPU.
+        """
+        logger.info("Shutting down dynamo runtime...")
+        dynamo_context["runtime"].shutdown()
+        logger.info("Dynamo runtime shutdown complete.")
+
+    def shutdown_vllm_worker(self, signum, frame):
+        """Shutdown the worker immediately by killing the background loop"""
         loop = asyncio.get_event_loop()
         try:
             self.engine_client.close()
@@ -93,7 +112,7 @@ class VllmBaseWorker:
         This sets the port number for the side channel.
         """
         if hostname is None:
-            hostname = socket.gethostname()
+            hostname = "127.0.0.1"
         if port is None:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind(("", 0))  # Bind to a free port provided by the host.
@@ -132,3 +151,45 @@ class VllmDecodeWorker(VllmBaseWorker):
     async def async_init(self):
         await super().async_init()
         logger.info("VllmDecodeWorker has been initialized")
+
+
+@service(
+    dynamo={
+        "enabled": True,
+        "namespace": "dynamo",
+    },
+    resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
+    workers=1,
+)
+class VllmDpWorker(VllmBaseWorker):
+    @async_on_start
+    async def async_init(self):
+        vllm_config = self.engine_args.create_engine_config(
+            usage_context=UsageContext.OPENAI_API_SERVER
+        )
+
+        parallel_config = vllm_config.parallel_config
+        local_engine_count = parallel_config.data_parallel_size_local
+        host = parallel_config.data_parallel_master_ip
+        port = self.engine_args.data_parallel_rpc_port  # add to config too
+        handshake_address = get_tcp_uri(host, port)
+
+        self.engine_manager = CoreEngineProcManager(
+            target_fn=EngineCoreProc.run_engine_core,
+            local_engine_count=local_engine_count,
+            start_index=self.engine_args.data_parallel_start_rank,
+            local_start_index=0,
+            vllm_config=vllm_config,
+            on_head_node=False,
+            handshake_address=handshake_address,
+            executor_class=Executor.get_class(vllm_config),
+            log_stats=not self.engine_args.disable_log_stats,
+        )
+
+    def shutdown_vllm_engine(self, signum, frame):
+        """Shutdown the engine manager"""
+        try:
+            self.engine_manager.join_first()
+        finally:
+            logger.info("Shutting down.")
+            self.engine_manager.close()

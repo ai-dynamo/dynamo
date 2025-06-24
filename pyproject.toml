@@ -15,7 +15,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.3.0"
+version = "0.3.1"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -28,9 +28,11 @@ dependencies = [
     "pytest>=8.3.4",
     "types-psutil==7.0.0.20250218",
     "kubernetes==32.0.1",
-    "ai-dynamo-runtime==0.3.0",
+    "ai-dynamo-runtime==0.3.1",
     "fastapi==0.115.6",
     "distro",
+    # filelock: required by planner
+    "filelock",
     "typer",
     "circus==0.19.0",
     "click<8.2.0",
@@ -147,6 +149,7 @@ filterwarnings = [
     "ignore:.*pkg_resources.*:DeprecationWarning",
     "ignore:.*pkg_resources.*:UserWarning",
     "ignore:.*multipart.*:PendingDeprecationWarning",
+    "ignore:.*PyType_Spec.*custom tp_new.*:DeprecationWarning", # Ignore protobuf deprecation warning
 ]
 
 
@@ -156,7 +159,16 @@ markers = [
     "pre_merge: marks tests to run before merging",
     "nightly: marks tests to run nightly",
     "weekly: marks tests to run weekly",
-    "gpu: marks tests to run on GPU"
+    "gpu_1: marks tests to run on GPU",
+    "gpu_2: marks tests to run on 2GPUs",
+    "e2e: marks tests as end-to-end tests",
+    "integration: marks tests as integration tests",
+    "unit: marks tests as unit tests",
+    "stress: marks tests as stress tests",
+    "vllm: marks tests as requiring vllm",
+    "tensorrtllm: marks tests as requiring tensorrtllm",
+    "sglang: marks tests as requiring sglang",
+    "slow: marks tests as known to be slow"
 ]
 
 # Linting/formatting

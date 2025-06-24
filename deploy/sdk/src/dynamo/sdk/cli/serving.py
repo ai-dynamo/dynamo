@@ -47,12 +47,12 @@ _DYNAMO_WORKER_SCRIPT = "dynamo.sdk.cli.serve_dynamo"
 
 
 def _get_dynamo_worker_script(
-    bento_identifier: str, svc_name: str, target: TargetEnum
+    dynamo_identifier: str, svc_name: str, target: TargetEnum
 ) -> list[str]:
     args = [
         "-m",
         _DYNAMO_WORKER_SCRIPT,
-        bento_identifier,
+        dynamo_identifier,
         "--service-name",
         svc_name,
         "--worker-id",
@@ -64,7 +64,7 @@ def _get_dynamo_worker_script(
 
 
 def create_dynamo_watcher(
-    bento_identifier: str,
+    dynamo_identifier: str,
     svc: ServiceProtocol,
     uds_path: str,
     scheduler: ResourceAllocator,
@@ -77,7 +77,7 @@ def create_dynamo_watcher(
 
     num_workers, resource_envs = scheduler.get_resource_envs(svc)
     uri, socket = _get_server_socket(svc, uds_path)
-    args = _get_dynamo_worker_script(bento_identifier, svc.name, target)
+    args = _get_dynamo_worker_script(dynamo_identifier, svc.name, target)
     if resource_envs:
         args.extend(["--worker-env", json.dumps(resource_envs)])
 
@@ -150,7 +150,7 @@ def clear_namespace(namespace: str) -> None:
 
 
 def serve_dynamo_graph(
-    dynamo_pipeline: str,
+    graph: str,
     working_dir: str | None = None,
     dependency_map: dict[str, str] | None = None,
     service_name: str = "",
@@ -171,7 +171,7 @@ def serve_dynamo_graph(
 
     namespace: str = ""
     env: dict[str, Any] = {}
-    svc = find_and_load_service(dynamo_pipeline, working_dir)
+    svc = find_and_load_service(graph, working_dir)
     dynamo_path = pathlib.Path(working_dir or ".")
 
     watchers: list[Watcher] = []
@@ -231,8 +231,12 @@ def serve_dynamo_graph(
                 for name, dep_svc in svc.all_services().items():
                     if name == svc.name or name in dependency_map:
                         continue
+                    if not dep_svc.is_servable():
+                        raise RuntimeError(
+                            f"Service {dep_svc.name} is not servable. Please use link to override with a concrete implementation."
+                        )
                     new_watcher, new_socket, uri = create_dynamo_watcher(
-                        dynamo_pipeline,
+                        graph,
                         dep_svc,
                         uds_path,
                         allocator,
@@ -250,7 +254,7 @@ def serve_dynamo_graph(
         dynamo_args = [
             "-m",
             _DYNAMO_WORKER_SCRIPT,
-            dynamo_pipeline,
+            graph,
             "--service-name",
             svc.name,
             "--worker-id",
@@ -261,7 +265,7 @@ def serve_dynamo_graph(
         # these resource_envs are passed to each individual worker's environment which is set in serve_dynamo
         if resource_envs:
             dynamo_args.extend(["--worker-env", json.dumps(resource_envs)])
-        # env is the base bentoml environment variables. We make a copy and update it to add any service configurations and additional env vars
+        # env is the base dynamlocal fault tolerence o environment variables. We make a copy and update it to add any service configurations and additional env vars
         worker_env = env.copy() if env else {}
 
         # Pass through the main service config
@@ -292,7 +296,7 @@ def serve_dynamo_graph(
         )
 
         # inject runner map now
-        inject_env = {"BENTOML_RUNNER_MAP": json.dumps(dependency_map)}
+        inject_env = {"DYNAMO_RUNNER_MAP": json.dumps(dependency_map)}
 
         for watcher in watchers:
             if watcher.env is None:
@@ -406,7 +410,7 @@ def serve_dynamo_graph(
                         hasattr(svc, "is_dynamo_component")
                         and svc.is_dynamo_component()
                     )
-                    else (dynamo_pipeline,)
+                    else (graph,)
                 ),
             ),
         )

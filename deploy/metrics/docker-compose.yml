@@ -13,28 +13,75 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+networks:
+  server:
+    driver: bridge
+  monitoring:
+    driver: bridge
+
+# Note that the images are pinned to specific versions to avoid breaking changes.
 services:
   nats-server:
-    image: nats
-    command: [ "-js", "--trace" ]
+    image: nats:2.11.4
+    command: [ "-js", "--trace", "-m", "8222" ]
     ports:
       - 4222:4222
       - 6222:6222
-      - 8222:8222
+      - 8222:8222  # the endpoints include /varz, /healthz, ...
+    networks:
+      - server
+      - monitoring
 
   etcd-server:
-    image: bitnami/etcd
+    image: bitnami/etcd:3.6.1
     environment:
       - ALLOW_NONE_AUTHENTICATION=yes
     ports:
-      - 2379:2379
+      - 2379:2379  # this port exposes the /metrics endpoint
       - 2380:2380
+    networks:
+      - server
+      - monitoring
+
+  # All the services below are part of the metrics profile and monitoring network.
+
+  # The exporter translates from /varz and other stats to Prometheus metrics
+  nats-prometheus-exporter:
+    image: natsio/prometheus-nats-exporter:0.17.3
+    command: ["-varz", "-connz", "-routez", "-subz", "-gatewayz", "-leafz", "-jsz=all", "http://nats-server:8222"]
+    ports:
+      - 7777:7777
+    networks:
+      - monitoring
+    profiles: [metrics]
+    depends_on:
+      - nats-server
+
+  dcgm-exporter:
+    image: nvidia/dcgm-exporter:4.2.3-4.1.3-ubi9
+    ports:
+      - 9401:9400  # Remap from 9400 to 9401 to avoid conflict with an existing dcgm-exporter (on dlcluster)
+    cap_add:
+      - SYS_ADMIN
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    environment:
+      # dcgm uses NVIDIA_VISIBLE_DEVICES variable but normally it is CUDA_VISIBLE_DEVICES
+      - NVIDIA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-all}
+    runtime: nvidia  # Specify the NVIDIA runtime
+    networks:
+      - monitoring
 
   prometheus:
-    image: prom/prometheus:latest
+    image: prom/prometheus:v3.4.1
     container_name: prometheus
     volumes:
-      - ./metrics/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
@@ -43,38 +90,41 @@ services:
       - '--web.console.templates=/etc/prometheus/consoles'
       - '--web.enable-lifecycle'
     restart: unless-stopped
-    # TODO: Use more explicit networking setup when metrics is containerized
-    #ports:
-    #  - "9090:9090"
-    #networks:
-    #  - monitoring
-    network_mode: "host"
+    # Example to pull from the /query endpoint:
+    # {__name__=~"DCGM.*", job="dcgm-exporter"}
+    ports:
+      - "9090:9090"
+    networks:
+      - monitoring
     profiles: [metrics]
+    depends_on:
+      - dcgm-exporter
+      - nats-prometheus-exporter
+      - etcd-server
 
+  # grafana connects to prometheus via the /query endpoint.
+  # Default credentials are dynamo/dynamo.
   grafana:
-    image: grafana/grafana-enterprise:latest
+    image: grafana/grafana-enterprise:12.0.1
     container_name: grafana
     volumes:
-      - ./metrics/grafana.json:/etc/grafana/provisioning/dashboards/llm-worker-dashboard.json
-      - ./metrics/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
-      - ./metrics/grafana-dashboard-providers.yml:/etc/grafana/provisioning/dashboards/dashboard-providers.yml
+      - ./grafana.json:/etc/grafana/provisioning/dashboards/llm-worker-dashboard.json
+      - ./grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
+      - ./grafana-dashboard-providers.yml:/etc/grafana/provisioning/dashboards/dashboard-providers.yml
     environment:
-      # Port 3000 is used by "dynamo serve", so use 3001
+      # Port 3000 is already used by "dynamo serve", so use 3001
       - GF_SERVER_HTTP_PORT=3001
-      - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_USER=dynamo
+      - GF_SECURITY_ADMIN_PASSWORD=dynamo
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_INSTALL_PLUGINS=grafana-piechart-panel
       # Default min interval is 5s, but can be configured lower
       - GF_DASHBOARDS_MIN_REFRESH_INTERVAL=2s
     restart: unless-stopped
-    # TODO: Use more explicit networking setup when metrics is containerized
-    #ports:
-    #  - "3001:3001"
-    #networks:
-    #  - monitoring
-    network_mode: "host"
+    ports:
+      - "3001:3001"
+    networks:
+      - monitoring
     profiles: [metrics]
     depends_on:
       - prometheus
-

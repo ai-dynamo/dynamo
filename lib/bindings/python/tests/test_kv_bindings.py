@@ -28,6 +28,7 @@ from dynamo.llm import (
     KvEventPublisher,
     KvIndexer,
     KvMetricsAggregator,
+    RadixTree,
     WorkerMetricsPublisher,
 )
 from dynamo.runtime import Component, DistributedRuntime
@@ -57,6 +58,56 @@ def setup_and_teardown():
 async def distributed_runtime():
     loop = asyncio.get_running_loop()
     return DistributedRuntime(loop, False)
+
+
+async def test_radix_tree_binding(distributed_runtime):
+    """Test RadixTree binding directly with store event and find matches"""
+    import json
+
+    # Create RadixTree instance
+    radix_tree = RadixTree()
+
+    # Create a store event with parent_hash=None, block_hash=0
+    # Following the KvCacheEvent format from the Rust protocols
+    store_event = {
+        "event_id": 1,
+        "data": {
+            "stored": {
+                "parent_hash": None,
+                "blocks": [
+                    {
+                        "block_hash": 0,
+                        "tokens_hash": 0,  # Using 0 for both hashes to match tokens [0]
+                    }
+                ],
+            }
+        },
+    }
+
+    # Convert to JSON bytes
+    event_bytes = json.dumps(store_event).encode("utf-8")
+
+    # Apply the event to worker_id 0
+    worker_id = 0
+    radix_tree.apply_event(worker_id, event_bytes)
+
+    # Find matches for tokens [0]
+    # The sequence parameter expects token hashes, so we use [0] to match tokens_hash=0
+    overlap_scores = radix_tree.find_matches([0])
+
+    # Verify the results
+    assert overlap_scores.scores is not None
+    assert (
+        len(overlap_scores.scores) == 1
+    ), f"Expected 1 worker in scores, got {len(overlap_scores.scores)}"
+    assert worker_id in overlap_scores.scores, f"Worker {worker_id} not found in scores"
+    assert (
+        overlap_scores.scores[worker_id] == 1
+    ), f"Expected score 1 for worker {worker_id}, got {overlap_scores.scores[worker_id]}"
+
+    print(
+        f"✓ RadixTree test passed: worker {worker_id} has score {overlap_scores.scores[worker_id]}"
+    )
 
 
 # TODO Figure out how to test with different kv_block_size

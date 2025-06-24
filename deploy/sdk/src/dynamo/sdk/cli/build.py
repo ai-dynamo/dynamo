@@ -22,6 +22,7 @@ import importlib.util
 import inspect
 import logging
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -38,12 +39,16 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from dynamo.sdk import DYNAMO_IMAGE
+from dynamo.sdk.core.protocol.deployment import Service
 from dynamo.sdk.core.protocol.interface import (
+    DynamoConfig,
     DynamoTransport,
+    KubernetesOverrides,
     LinkedServices,
     ServiceInterface,
 )
 from dynamo.sdk.core.runner import TargetEnum
+from dynamo.sdk.lib.utils import upload_graph
 
 logger = logging.getLogger(__name__)
 console = Console()
@@ -104,9 +109,10 @@ class ServiceConfig(BaseModel):
     resources: t.Dict[str, t.Any] = Field(default_factory=dict)
     workers: t.Optional[int] = None
     image: str = "dynamo:latest"
-    dynamo: t.Dict[str, t.Any] = Field(default_factory=dict)
+    dynamo: DynamoConfig = Field(default_factory=DynamoConfig)
     http_exposed: bool = False
     api_endpoints: t.List[str] = Field(default_factory=list)
+    kubernetes_overrides: KubernetesOverrides | None = None
 
 
 class ServiceInfo(BaseModel):
@@ -141,9 +147,10 @@ class ServiceInfo(BaseModel):
             resources=service.config.resources.model_dump(),
             workers=service.config.workers,
             image=image,
-            dynamo=service.config.dynamo.model_dump(),
+            dynamo=DynamoConfig(**service.config.dynamo.model_dump()),
             http_exposed=len(api_endpoints) > 0,
             api_endpoints=api_endpoints,
+            kubernetes_overrides=service.config.kubernetes_overrides,
         )
 
         return cls(
@@ -155,7 +162,7 @@ class ServiceInfo(BaseModel):
 
 
 class BuildConfig(BaseModel):
-    """Configuration for building a Dynamo pipeline."""
+    """Configuration for building a Dynamo graph."""
 
     service: str
     name: t.Optional[str] = None
@@ -218,6 +225,33 @@ class ManifestInfo(BaseModel):
                     "dynamo": service["config"]["dynamo"],
                 },
             }
+            # Add kubernetes_overrides if present.
+            if (
+                "kubernetes_overrides" in service["config"]
+                and service["config"]["kubernetes_overrides"]
+            ):
+                # Map kubernetes_overrides fields to mainContainer if present.
+                kube_overrides = service["config"]["kubernetes_overrides"]
+                main_container = {}
+
+                entrypoint = kube_overrides.get("entrypoint")
+                if entrypoint:
+                    if isinstance(entrypoint, str):
+                        main_container["command"] = shlex.split(entrypoint)
+                    else:
+                        main_container["command"] = shlex.split(entrypoint[0])
+
+                cmd = kube_overrides.get("cmd")
+                if cmd:
+                    if isinstance(cmd, str):
+                        main_container["args"] = shlex.split(cmd)
+                    else:
+                        main_container["args"] = shlex.split(cmd[0])
+
+                if main_container:
+                    service_dict["config"]["extraPodSpec"] = {
+                        "mainContainer": main_container
+                    }
 
             # Add HTTP configuration if exposed
             if service["config"]["http_exposed"]:
@@ -277,7 +311,7 @@ class Package:
         cls,
         build_config: BuildConfig,
         build_ctx: t.Optional[str] = None,
-    ) -> t.Any:
+    ) -> ServiceInterface:
         """Get a dynamo service from config."""
         build_ctx = (
             os.getcwd()
@@ -306,6 +340,7 @@ class Package:
         build_ctx: str,
         version: t.Optional[str] = None,
     ) -> Package:
+        """Create a package from a build config."""
         dyn_svc = cls.dynamo_service(build_config, build_ctx)
 
         # Get service name for package
@@ -366,6 +401,26 @@ class Package:
             manifest_dict = manifest.to_dict()
             with open(os.path.join(self.path, "dynamo.yaml"), "w") as f:
                 yaml.dump(manifest_dict, f, default_flow_style=False)
+
+    def get_entry_service(self) -> Service:
+        """Get the entry service."""
+        for service in self.info.services:
+            if service.name == self.info.entry_service:
+                entry_service = service
+                break
+        else:
+            raise ValueError(
+                f"Entry service {self.info.entry_service} not found in services"
+            )
+
+        return Service(
+            service_name=self.info.service,
+            name=self.info.entry_service,
+            namespace=entry_service.config.dynamo.namespace,
+            version=self.info.tag.version,
+            path=self.path,
+            envs=self.info.envs,
+        )
 
     @staticmethod
     def load_service(service_path: str, working_dir: str) -> t.Any:
@@ -481,6 +536,9 @@ def build(
     service: str = typer.Argument(
         ..., help="Service specification in the format module:ServiceClass"
     ),
+    endpoint: t.Optional[str] = typer.Option(
+        None, "--endpoint", "-e", help="Dynamo Cloud endpoint", envvar="DYNAMO_CLOUD"
+    ),
     output_dir: t.Optional[str] = typer.Option(
         None, "--output-dir", "-o", help="Output directory for the build"
     ),
@@ -490,13 +548,25 @@ def build(
     containerize: bool = typer.Option(
         False,
         "--containerize",
-        help="Containerize the dynamo pipeline after building.",
+        help="Containerize the dynamo graph after building.",
+    ),
+    push: bool = typer.Option(
+        False,
+        "--push",
+        help="Push the built dynamo graph to the Dynamo cloud remote API store.",
     ),
 ) -> None:
-    """Packages Dynamo service for deployment. Optionally builds a docker container."""
+    """Packages Dynamo service for deployment. Optionally builds and/or pushes a docker container."""
     from dynamo.sdk.cli.utils import configure_target_environment
 
     configure_target_environment(TargetEnum.DYNAMO)
+    if push:
+        containerize = True
+        if endpoint is None:
+            console.print(
+                "[bold red]Error: --push requires --endpoint, -e, or DYNAMO_CLOUD environment variable to be set.[/]"
+            )
+            raise typer.Exit(1)
 
     # Determine output directory
     if output_dir is None:
@@ -558,9 +628,12 @@ def build(
         next_steps = []
         if not containerize:
             next_steps.append(
-                "\n\n* Containerize your Dynamo pipeline with "
+                "\n\n* Containerize your Dynamo graph with "
                 "`dynamo build --containerize <service_name>`:\n"
                 f"    $ dynamo build --containerize {service}"
+                "\n\n* Push your Dynamo graph to the Dynamo cloud with "
+                "`dynamo build --push <service_name>`:\n"
+                f"    $ dynamo build --push {service}"
             )
 
         if next_steps:
@@ -597,13 +670,29 @@ def build(
                     check=True,
                 )
             console.print(f"[green]Successfully built Docker image {image_name}.")
+
+        if push:
+            # Upload the graph to the Dynamo cloud remote API store
+            with Progress(
+                SpinnerColumn(),
+                TextColumn(
+                    f"[bold green]Pushing graph {image_name} to Dynamo cloud..."
+                ),
+                transient=True,
+            ) as progress:
+                progress.add_task("push", total=None)
+                entry_service = package.get_entry_service()
+                upload_graph(endpoint, image_name, entry_service)
+            console.print(
+                f"[green]Successfully pushed graph {image_name} to Dynamo cloud."
+            )
     except Exception as e:
-        console.print(f"[red]Error building package: {str(e)}")
+        console.print(f"[red]Error with build: {str(e)}")
         raise
 
 
 def generate_random_tag() -> str:
-    """Generate a random tag for the Dynamo pipeline."""
+    """Generate a random tag for the Dynamo graph."""
     return f"{uuid.uuid4().hex[:8]}"
 
 

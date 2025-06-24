@@ -205,9 +205,6 @@ mod tests {
             }),
             id: Some("test_id".to_string()),
             event: None,
-            chunk_tokens: None,
-            input_tokens: None,
-            output_tokens: None,
             comment: None,
         }
     }
@@ -317,9 +314,6 @@ mod tests {
             }),
             id: Some("test_id".to_string()),
             event: None,
-            chunk_tokens: None,
-            input_tokens: None,
-            output_tokens: None,
             comment: None,
         };
 

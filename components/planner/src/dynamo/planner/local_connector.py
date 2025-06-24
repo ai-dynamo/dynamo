@@ -32,13 +32,14 @@ logger = logging.getLogger(__name__)
 
 
 class LocalConnector(PlannerConnector):
-    def __init__(self, namespace: str, runtime: DistributedRuntime):
+    def __init__(self, namespace: str, runtime: DistributedRuntime, backend: str):
         """
         Initialize LocalConnector and connect to CircusController.
 
         Args:
             namespace: The Dynamo namespace
             runtime: Optional DistributedRuntime instance
+            backend: The backend to use ("vllm_v0", "vllm_v1")
         """
         self.namespace = namespace
         self.runtime = runtime
@@ -231,10 +232,13 @@ class LocalConnector(PlannerConnector):
         target_watcher = matching_components[highest_suffix]
         logger.info(f"Removing watcher {target_watcher}")
 
-        success = await self.circus.remove_watcher(name=target_watcher)
-        logger.info(
-            f"Circus remove_watcher for {target_watcher} {'succeeded' if success else 'failed'}"
+        success = await self.circus.remove_watcher(
+            name=target_watcher, blocking=blocking
         )
+        if not blocking:
+            logger.info(
+                f"Circus remove_watcher for {target_watcher} {'succeeded' if success else 'failed'}"
+            )
 
         if success:
             if highest_suffix > 0:  # Numbered watcher - remove entire entry

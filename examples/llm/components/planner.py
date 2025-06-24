@@ -31,7 +31,7 @@ from utils.prefill_queue import PrefillQueue
 
 from dynamo.llm import KvMetricsAggregator
 from dynamo.planner import KubernetesConnector, LocalConnector
-from dynamo.planner.defaults import PlannerDefaults
+from dynamo.planner.defaults import LoadPlannerDefaults
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -405,89 +405,91 @@ async def start_planner(runtime: DistributedRuntime, args: argparse.Namespace):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    # Common planner arguments
     parser.add_argument(
         "--namespace",
         type=str,
-        default=PlannerDefaults.namespace,
+        default=LoadPlannerDefaults.namespace,
         help="Namespace planner will look at",
+    )
+    parser.add_argument(
+        "--environment",
+        type=str,
+        default=LoadPlannerDefaults.environment,
+        help="Environment to run the planner in (local, kubernetes)",
     )
     parser.add_argument(
         "--no-operation",
         action="store_true",
-        default=PlannerDefaults.no_operation,
+        default=LoadPlannerDefaults.no_operation,
         help="Do not make any adjustments, just observe the metrics",
     )
     parser.add_argument(
         "--log-dir",
         type=str,
-        default=PlannerDefaults.log_dir,
+        default=LoadPlannerDefaults.log_dir,
         help="Tensorboard logging directory",
     )
     parser.add_argument(
         "--adjustment-interval",
         type=int,
-        default=PlannerDefaults.adjustment_interval,
+        default=LoadPlannerDefaults.adjustment_interval,
         help="Interval in seconds between scaling adjustments",
-    )
-    parser.add_argument(
-        "--metric-pulling-interval",
-        type=int,
-        default=PlannerDefaults.metric_pulling_interval,
-        help="Interval in seconds between metric pulls",
     )
     parser.add_argument(
         "--max-gpu-budget",
         type=int,
-        default=PlannerDefaults.max_gpu_budget,
+        default=LoadPlannerDefaults.max_gpu_budget,
         help="Maximum number of GPUs to use",
     )
     parser.add_argument(
         "--min-endpoint",
         type=int,
-        default=PlannerDefaults.min_endpoint,
+        default=LoadPlannerDefaults.min_endpoint,
         help="Minimum number of endpoints to keep for prefill/decode workers",
     )
     parser.add_argument(
-        "--decode-kv-scale-up-threshold",
-        type=float,
-        default=PlannerDefaults.decode_kv_scale_up_threshold,
-        help="KV cache utilization threshold to scale up decode workers",
-    )
-    parser.add_argument(
-        "--decode-kv-scale-down-threshold",
-        type=float,
-        default=PlannerDefaults.decode_kv_scale_down_threshold,
-        help="KV cache utilization threshold to scale down decode workers",
-    )
-    parser.add_argument(
-        "--prefill-queue-scale-up-threshold",
-        type=float,
-        default=PlannerDefaults.prefill_queue_scale_up_threshold,
-        help="Queue utilization threshold to scale up prefill workers, this threshold is per prefill worker",
-    )
-    parser.add_argument(
-        "--prefill-queue-scale-down-threshold",
-        type=float,
-        default=PlannerDefaults.prefill_queue_scale_down_threshold,
-        help="Queue utilization threshold to scale down prefill workers, this threshold is per prefill worker",
+        "--metric-pulling-interval",
+        type=int,
+        default=LoadPlannerDefaults.metric_pulling_interval,
+        help="Interval in seconds between metric pulls",
     )
     parser.add_argument(
         "--decode-engine-num-gpu",
         type=int,
-        default=PlannerDefaults.decode_engine_num_gpu,
+        default=LoadPlannerDefaults.decode_engine_num_gpu,
         help="Number of GPUs per decode engine",
     )
     parser.add_argument(
         "--prefill-engine-num-gpu",
         type=int,
-        default=PlannerDefaults.prefill_engine_num_gpu,
+        default=LoadPlannerDefaults.prefill_engine_num_gpu,
         help="Number of GPUs per prefill engine",
     )
+    # Load-planner specific arguments
     parser.add_argument(
-        "--environment",
-        type=str,
-        default=PlannerDefaults.environment,
-        help="Environment to run the planner in (local, kubernetes)",
+        "--decode-kv-scale-up-threshold",
+        type=float,
+        default=LoadPlannerDefaults.decode_kv_scale_up_threshold,
+        help="KV cache utilization threshold to scale up decode workers",
+    )
+    parser.add_argument(
+        "--decode-kv-scale-down-threshold",
+        type=float,
+        default=LoadPlannerDefaults.decode_kv_scale_down_threshold,
+        help="KV cache utilization threshold to scale down decode workers",
+    )
+    parser.add_argument(
+        "--prefill-queue-scale-up-threshold",
+        type=float,
+        default=LoadPlannerDefaults.prefill_queue_scale_up_threshold,
+        help="Queue utilization threshold to scale up prefill workers, this threshold is per prefill worker",
+    )
+    parser.add_argument(
+        "--prefill-queue-scale-down-threshold",
+        type=float,
+        default=LoadPlannerDefaults.prefill_queue_scale_down_threshold,
+        help="Queue utilization threshold to scale down prefill workers, this threshold is per prefill worker",
     )
     args = parser.parse_args()
     asyncio.run(dynamo_worker()(start_planner)(args))

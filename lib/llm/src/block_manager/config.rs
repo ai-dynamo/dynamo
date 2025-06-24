@@ -13,7 +13,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::events::EventManager;
 use super::*;
+use prometheus::Registry;
 
 #[derive(Debug, Clone)]
 pub enum NixlOptions {
@@ -40,6 +42,9 @@ pub struct KvManagerRuntimeConfig {
 
     #[builder(default)]
     pub async_runtime: Option<Arc<tokio::runtime::Runtime>>,
+
+    #[builder(default = "Arc::new(Registry::new())")]
+    pub metrics_registry: Arc<Registry>,
 }
 
 impl KvManagerRuntimeConfig {
@@ -173,6 +178,10 @@ pub struct KvBlockManagerConfig {
     // Specific configuration for the disk layout
     #[builder(default, setter(strip_option))]
     pub disk_layout: Option<KvManagerLayoutConfig<DiskStorage>>,
+
+    /// Event manager to handle block related events
+    #[builder(default)]
+    pub event_manager: Option<Arc<dyn EventManager>>,
 }
 
 impl KvBlockManagerConfig {
