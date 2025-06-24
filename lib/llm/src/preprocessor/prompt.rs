@@ -47,7 +47,7 @@ pub enum TokenInput {
 #[derive(Debug)]
 pub enum PromptInput {
     Tokens(TokenInput),
-    Text, // Needs normal processing
+    Text,
 }
 
 /// Trait that defines a request that can map to an OpenAI-like request.
