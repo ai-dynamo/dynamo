@@ -92,13 +92,17 @@ pub async fn start(
     tokio::spawn(async move {
         let mut lines = stdout.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!("{}", strip_log_prefix(&line));
+            tracing::info!("{}", strip_log_prefix(&line));
         }
     });
     tokio::spawn(async move {
         let mut lines = stderr.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!("{}", strip_log_prefix(&line));
+            // FIXME: always logging INFO/DEBUG will hide real errors, but
+            // some libraries log non-errors to stderr, which confuses users
+            // when we log those as ERROR. Using WARN as a middle ground for
+            // now, but we can probably be smarter here.
+            tracing::warn!("{}", strip_log_prefix(&line));
         }
     });
 

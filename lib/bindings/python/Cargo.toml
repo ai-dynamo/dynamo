@@ -19,7 +19,7 @@
 
 [package]
 name = "dynamo-py3"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 authors = ["NVIDIA"]
 license = "Apache-2.0"
@@ -52,6 +52,7 @@ serde_json = { version = "1.0.138" }
 thiserror = { version = "2.0" }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0" }
+tokio-util = { version = "0.7" }
 tracing = { version = "0" }
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 

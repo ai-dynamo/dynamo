@@ -81,7 +81,7 @@ regex = "1"
 rayon = "1"
 
 # block_manager
-nixl-sys = { version = "0.3.0-rc.2", optional = true }
+nixl-sys = {git="https://github.com/ai-dynamo/nixl", rev = "a7c654d46a14cd5ce635cc8c02433d71df93dedf", optional = true }
 cudarc = { version = "0.16.2", features = ["cuda-12020"], optional = true }
 ndarray = { version = "0.16", optional = true }
 nix = { version = "0.26", optional = true }

@@ -15,7 +15,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.3.0"
+version = "0.3.1"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -28,9 +28,11 @@ dependencies = [
     "pytest>=8.3.4",
     "types-psutil==7.0.0.20250218",
     "kubernetes==32.0.1",
-    "ai-dynamo-runtime==0.3.0",
+    "ai-dynamo-runtime==0.3.1",
     "fastapi==0.115.6",
     "distro",
+    # filelock: required by planner
+    "filelock",
     "typer",
     "circus==0.19.0",
     "click<8.2.0",
@@ -147,6 +149,7 @@ filterwarnings = [
     "ignore:.*pkg_resources.*:DeprecationWarning",
     "ignore:.*pkg_resources.*:UserWarning",
     "ignore:.*multipart.*:PendingDeprecationWarning",
+    "ignore:.*PyType_Spec.*custom tp_new.*:DeprecationWarning", # Ignore protobuf deprecation warning
 ]
 
 

@@ -32,6 +32,7 @@ class ManagedProcess:
     env: Optional[dict] = None
     health_check_ports: List[int] = field(default_factory=list)
     health_check_urls: List[Any] = field(default_factory=list)
+    delayed_start: int = 0
     timeout: int = 300
     working_dir: Optional[str] = None
     display_output: bool = False
@@ -59,6 +60,7 @@ class ManagedProcess:
 
             self._terminate_existing()
             self._start_process()
+            time.sleep(self.delayed_start)
             elapsed = self._check_ports(self.timeout)
             self._check_urls(self.timeout - elapsed)
 

@@ -19,7 +19,7 @@ import logging
 from pydantic import BaseModel
 
 from components.planner import start_planner  # type: ignore[attr-defined]
-from dynamo.planner.defaults import PlannerDefaults
+from dynamo.planner.defaults import LoadPlannerDefaults
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sdk import async_on_start, dynamo_context, endpoint, service
 from dynamo.sdk.core.protocol.interface import ComponentType
@@ -56,44 +56,46 @@ class Planner:
 
         self.args = argparse.Namespace(
             namespace=self.namespace,
-            environment=config_instance.get("environment", PlannerDefaults.environment),
-            no_operation=config_instance.get(
-                "no-operation", PlannerDefaults.no_operation
+            environment=config_instance.get(
+                "environment", LoadPlannerDefaults.environment
             ),
-            log_dir=config_instance.get("log-dir", PlannerDefaults.log_dir),
+            no_operation=config_instance.get(
+                "no-operation", LoadPlannerDefaults.no_operation
+            ),
+            log_dir=config_instance.get("log-dir", LoadPlannerDefaults.log_dir),
             adjustment_interval=config_instance.get(
-                "adjustment-interval", PlannerDefaults.adjustment_interval
+                "adjustment-interval", LoadPlannerDefaults.adjustment_interval
             ),
             metric_pulling_interval=config_instance.get(
-                "metric-pulling-interval", PlannerDefaults.metric_pulling_interval
+                "metric-pulling-interval", LoadPlannerDefaults.metric_pulling_interval
             ),
             max_gpu_budget=config_instance.get(
-                "max-gpu-budget", PlannerDefaults.max_gpu_budget
+                "max-gpu-budget", LoadPlannerDefaults.max_gpu_budget
             ),
             min_endpoint=config_instance.get(
-                "min-endpoint", PlannerDefaults.min_endpoint
+                "min-endpoint", LoadPlannerDefaults.min_endpoint
             ),
             decode_kv_scale_up_threshold=config_instance.get(
                 "decode-kv-scale-up-threshold",
-                PlannerDefaults.decode_kv_scale_up_threshold,
+                LoadPlannerDefaults.decode_kv_scale_up_threshold,
             ),
             decode_kv_scale_down_threshold=config_instance.get(
                 "decode-kv-scale-down-threshold",
-                PlannerDefaults.decode_kv_scale_down_threshold,
+                LoadPlannerDefaults.decode_kv_scale_down_threshold,
             ),
             prefill_queue_scale_up_threshold=config_instance.get(
                 "prefill-queue-scale-up-threshold",
-                PlannerDefaults.prefill_queue_scale_up_threshold,
+                LoadPlannerDefaults.prefill_queue_scale_up_threshold,
             ),
             prefill_queue_scale_down_threshold=config_instance.get(
                 "prefill-queue-scale-down-threshold",
-                PlannerDefaults.prefill_queue_scale_down_threshold,
+                LoadPlannerDefaults.prefill_queue_scale_down_threshold,
             ),
             decode_engine_num_gpu=config_instance.get(
-                "decode-engine-num-gpu", PlannerDefaults.decode_engine_num_gpu
+                "decode-engine-num-gpu", LoadPlannerDefaults.decode_engine_num_gpu
             ),
             prefill_engine_num_gpu=config_instance.get(
-                "prefill-engine-num-gpu", PlannerDefaults.prefill_engine_num_gpu
+                "prefill-engine-num-gpu", LoadPlannerDefaults.prefill_engine_num_gpu
             ),
         )
 

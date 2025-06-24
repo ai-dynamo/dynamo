@@ -36,8 +36,8 @@ class Synthesizer:
         self,
         dataset_file: str,
         block_size: int = 512,
-        num_copies: int = 1,
         speedup_ratio: float = 1.0,
+        prefix_root_multiplier: int = 1,
         prefix_len_multiplier: float = 1.0,
         prompt_len_multiplier: float = 1.0,
     ):
@@ -74,7 +74,7 @@ class Synthesizer:
             as the hash ids will be relabeled.
         """
         self.block_size = block_size
-        self.num_copies = num_copies
+        self.num_copies = prefix_root_multiplier
         self.speedup_ratio = float(speedup_ratio)
         self.prefix_len_multiplier = float(prefix_len_multiplier)
         self.prompt_len_multiplier = float(prompt_len_multiplier)
@@ -334,7 +334,7 @@ def main():
     import argparse
     from pathlib import Path
 
-    from data_generator.logging import calculate_and_print_statistics
+    from data_generator.logging_utils import calculate_and_print_statistics
 
     parser = argparse.ArgumentParser(description="Synthesize Mooncake-Esque dataset")
     parser.add_argument(
@@ -410,7 +410,7 @@ def main():
         block_size=args.block_size,
         speedup_ratio=args.speedup_ratio,
         prefix_len_multiplier=args.prefix_len_multiplier,
-        num_copies=args.prefix_root_multiplier,
+        prefix_root_multiplier=args.prefix_root_multiplier,
         prompt_len_multiplier=args.prompt_len_multiplier,
     )
 
