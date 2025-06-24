@@ -65,12 +65,16 @@ class RequestHandler:
         if "batch_token_ids" in request and request["batch_token_ids"]:
             logging.debug("received batch token ids")
             gen = await self.engine_client.async_generate(
-                input_ids=request["batch_token_ids"], sampling_params=sampling_params, stream=True
+                input_ids=request["batch_token_ids"],
+                sampling_params=sampling_params,
+                stream=True,
             )
         else:
             logging.debug("received token ids")
             gen = await self.engine_client.async_generate(
-                input_ids=request["token_ids"], sampling_params=sampling_params, stream=True
+                input_ids=request["token_ids"],
+                sampling_params=sampling_params,
+                stream=True,
             )
         async for res in gen:
             # res is a dict
