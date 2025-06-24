@@ -10,6 +10,13 @@ if [[ -z ${MODEL_PATH} ]]; then
     exit 1
 fi
 
+if [[ -z ${SERVED_MODEL_NAME} ]]; then
+    echo "WARNING: SERVED_MODEL_NAME was not set. It will be derived from MODEL_PATH."
+    exit 1
+fi
+
+
+
 if [[ -z ${ENGINE_CONFIG} ]]; then
     echo "ERROR: ENGINE_CONFIG was not set."
     echo "ERROR: ENGINE_CONFIG must be set to a valid Dynamo+TRTLLM engine config file."
@@ -23,4 +30,5 @@ fi
 trtllm-llmapi-launch \
   python3 /workspace/launch/dynamo-run/src/subprocess/trtllm_inc.py \
     --model-path "${MODEL_PATH}" \
+    --model-name "${SERVED_MODEL_NAME}" \
     --extra-engine-args "${ENGINE_CONFIG}"
