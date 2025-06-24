@@ -506,10 +506,9 @@ fn process_event_converter<T: Serialize>(
         response_collector.observe_current_osl(metrics.output_tokens);
         response_collector.observe_response(metrics.input_tokens, metrics.chunk_tokens);
 
-        // Only filter out metrics if DYN_RICH_EVENT_STREAM is not set
-        if std::env::var("DYN_RICH_EVENT_STREAM").is_err()
-            && annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_LLM_METRICS)
-        {
+        // Chomp the LLMMetricAnnotation so it's not returned in the response stream
+        // TODO: add a flag to control what is returned in the SSE stream
+        if annotated.event.as_deref() == Some(crate::preprocessor::ANNOTATION_LLM_METRICS) {
             annotated.event = None;
             annotated.comment = None;
         }
