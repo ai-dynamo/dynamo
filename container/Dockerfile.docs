@@ -19,10 +19,10 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        build-essential \
-        curl \
-        doxygen \
-        pandoc \
+        build-essential=12.10ubuntu1 \
+        curl=8.5.0-2ubuntu10.6 \
+        doxygen=1.9.8+ds-2build5 \
+        pandoc=3.1.3+ds-2 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /workspace/dynamo
