@@ -26,10 +26,15 @@ import psutil
 import requests
 
 
-def terminate_process(process, logger=logging.getLogger()):
+def terminate_process(process, logger=logging.getLogger(), immediate_kill=False, timeout = 30):
     try:
         logger.info("Terminating PID: %s name: %s", process.pid, process.name())
-        process.terminate()
+        if immediate_kill:
+            logger.info("Sending Kill: %s %s",process.pid,process.name())
+            process.kill()
+        else:
+            process.terminate()
+            process.wait(timeout)
     except psutil.AccessDenied:
         logger.warning("Access denied for PID %s", process.pid)
     except psutil.NoSuchProcess:
@@ -39,12 +44,12 @@ def terminate_process(process, logger=logging.getLogger()):
         process.kill()
 
 
-def terminate_process_tree(pid, logger=logging.getLogger()):
+def terminate_process_tree(pid, logger=logging.getLogger(), immediate_kill=False, timeout = 30):
     try:
         parent = psutil.Process(pid)
         for child in parent.children(recursive=True):
-            terminate_process(child, logger)
-        terminate_process(parent, logger)
+            terminate_process(child, logger, immediate_kill, timeout)
+        terminate_process(parent, logger, immediate_kill, timeout)
     except psutil.NoSuchProcess:
         # Process already terminated
         pass

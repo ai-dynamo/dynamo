@@ -26,7 +26,8 @@ from tests.fault_tolerance.client import client
 from tests.fault_tolerance.utils.circus_controller import CircusController
 from tests.serve.test_dynamo_serve import DynamoServeProcess
 from tests.utils.managed_process import terminate_process_tree
-
+from tests.fault_tolerance.scenarios import deployment_graph_test, failures
+from tests.fault_tolerance.utils.metrics import worker_metrics, nvidia_smi
 
 def _set_deployment_args(request, max_num_seqs):
     decode_worker_name = "VllmWorker"
@@ -41,10 +42,13 @@ def _set_deployment_args(request, max_num_seqs):
 def _list_vllm_worker_processes():
     processes = []
     for ps_process in psutil.process_iter(["name", "cmdline"]):
-        if "from multiprocessing.spawn import spawn_main;" in " ".join(
-            ps_process.cmdline()
-        ):
-            processes.append(ps_process.pid)
+        try:
+            if "from multiprocessing.spawn import spawn_main;" in " ".join(
+                    ps_process.cmdline()
+            ):
+                processes.append(ps_process.pid)
+        except Exception:
+            pass
     return processes
 
 
@@ -110,7 +114,7 @@ def _inject_failures(failures, logger):
                 for x in range(number):
                     pid = result["pids"][x % num_processes]
                     logger.info(f"Terminating {component_name} Pid {pid}")
-                    terminate_process_tree(pid, logger)
+                    terminate_process_tree(pid, logger, immediate_kill=True)
             elif "vllm" in component_name:
                 vllm_processes = _list_vllm_worker_processes()
                 num_processes = len(vllm_processes)
@@ -118,7 +122,7 @@ def _inject_failures(failures, logger):
                     number = len(vllm_processes)
                 for x in range(number):
                     pid = vllm_processes[x % num_processes]
-                    terminate_process_tree(pid, logger)
+                    terminate_process_tree(pid, logger, immediate_kill=True)
 
         circus_controller.close()
 
@@ -141,6 +145,7 @@ async def test_worker_failure(
     display_dynamo_output,
     nvidia_smi,
     separate_process_logs,
+    hf_hub_offline
 ):
     """
     Test dynamo serve deployments with injected failures
@@ -152,8 +157,11 @@ async def test_worker_failure(
     logger.info("Starting test_deployment")
     deployment_graph, payload = deployment_graph_test
 
-    os.environ["HF_HUB_OFFLINE"] = "1"
-
+    if hf_hub_offline:
+        os.environ["HF_HUB_OFFLINE"] = "1"
+    else:
+        if "HF_HUB_OFFLINE" in os.environ:
+            del os.environ["HF_HUB_OFFLINE"]
     if respawn:
         os.environ["DYN_CIRCUS_RESPAWN"] = "1"
     else:
