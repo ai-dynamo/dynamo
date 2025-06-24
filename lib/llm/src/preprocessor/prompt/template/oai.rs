@@ -72,6 +72,25 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
     fn should_add_generation_prompt(&self) -> bool {
         true
     }
+
+    fn extract_token_batch(&self) -> Option<Vec<Vec<u32>>> {
+        match &self.inner.prompt {
+            async_openai::types::Prompt::IntegerArray(tokens) => {
+                // Single sequence becomes a batch of 1
+                Some(vec![tokens.iter().map(|&t| t as u32).collect()])
+            }
+            async_openai::types::Prompt::ArrayOfIntegerArray(arrays) => {
+                // Multiple sequences - preserve batch structure
+                Some(
+                    arrays
+                        .iter()
+                        .map(|arr| arr.iter().map(|&t| t as u32).collect())
+                        .collect(),
+                )
+            }
+            _ => None,
+        }
+    }
 }
 
 impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {

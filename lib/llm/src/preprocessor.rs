@@ -160,56 +160,76 @@ impl OpenAIPreprocessor {
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedRequest::builder();
 
-        let use_raw_prompt = request
-            .nvext()
-            .is_some_and(|ext| ext.use_raw_prompt.unwrap_or(false));
-
-        let formatted_prompt = if use_raw_prompt {
-            match request.raw_prompt() {
-                Some(prompt) => prompt,
-                None => {
-                    tracing::warn!("Raw prompt requested but not available");
-                    self.formatter.render(request)?
-                }
-            }
-        } else {
-            self.formatter.render(request)?
-        };
-
-        let encoding = tokio::task::block_in_place(|| self.tokenizer.encode(&formatted_prompt))?;
-
-        if request.has_annotation(ANNOTATION_FORMATTED_PROMPT) {
-            annotations.insert(ANNOTATION_FORMATTED_PROMPT.to_string(), formatted_prompt);
-        }
-
-        if request.has_annotation(ANNOTATION_TOKEN_IDS) {
-            annotations.insert(
-                ANNOTATION_TOKEN_IDS.to_string(),
-                serde_json::to_string(&encoding.token_ids)?,
+        // Check if we have a pre-tokenized batch input
+        if let Some(token_batch) = request.extract_token_batch() {
+            tracing::debug!(
+                "Using pre-tokenized batch input with {} sequences",
+                token_batch.len()
             );
-        }
 
-        let mut stop_conditions = request.extract_stop_conditions()?;
-        if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
-            for eos_token in self.model_info.eos_token_ids() {
-                if !stop_tokens.contains(&eos_token) {
-                    stop_tokens.push(eos_token);
-                }
+            if token_batch.len() == 1 {
+                // Single sequence - use the token_ids field
+                builder.token_ids(token_batch.into_iter().next().unwrap());
+            } else {
+                // Multiple sequences - use the batch_token_ids field
+                builder.batch_token_ids(Some(token_batch));
+                builder.token_ids(vec![]);
             }
         } else {
-            stop_conditions.stop_token_ids_hidden = Some(self.model_info.eos_token_ids());
+            // No pre-tokenized batch input, use the default tokenization
+            let use_raw_prompt = request
+                .nvext()
+                .is_some_and(|ext| ext.use_raw_prompt.unwrap_or(false));
+
+            let formatted_prompt = if use_raw_prompt {
+                match request.raw_prompt() {
+                    Some(prompt) => prompt,
+                    None => {
+                        tracing::warn!("Raw prompt requested but not available");
+                        self.formatter.render(request)?
+                    }
+                }
+            } else {
+                self.formatter.render(request)?
+            };
+
+            let encoding =
+                tokio::task::block_in_place(|| self.tokenizer.encode(&formatted_prompt))?;
+
+            if request.has_annotation(ANNOTATION_FORMATTED_PROMPT) {
+                annotations.insert(ANNOTATION_FORMATTED_PROMPT.to_string(), formatted_prompt);
+            }
+
+            if request.has_annotation(ANNOTATION_TOKEN_IDS) {
+                annotations.insert(
+                    ANNOTATION_TOKEN_IDS.to_string(),
+                    serde_json::to_string(&encoding.token_ids)?,
+                );
+            }
+
+            let mut stop_conditions = request.extract_stop_conditions()?;
+            if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
+                for eos_token in self.model_info.eos_token_ids() {
+                    if !stop_tokens.contains(&eos_token) {
+                        stop_tokens.push(eos_token);
+                    }
+                }
+            } else {
+                stop_conditions.stop_token_ids_hidden = Some(self.model_info.eos_token_ids());
+            }
+
+            // apply ignore eos if not already set
+            stop_conditions.apply_ignore_eos();
+
+            if !stop_conditions.ignore_eos.unwrap_or(false) {
+                builder.eos_token_ids(self.model_info.eos_token_ids());
+            }
+
+            builder.token_ids(encoding.token_ids);
+            builder.stop_conditions(stop_conditions);
         }
 
-        // apply ignore eos if not already set
-        stop_conditions.apply_ignore_eos();
-
-        if !stop_conditions.ignore_eos.unwrap_or(false) {
-            builder.eos_token_ids(self.model_info.eos_token_ids());
-        }
-
-        builder.token_ids(encoding.token_ids);
         builder.sampling_options(request.extract_sampling_options()?);
-        builder.stop_conditions(stop_conditions);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
         builder.estimated_prefix_hit_num_blocks(None);

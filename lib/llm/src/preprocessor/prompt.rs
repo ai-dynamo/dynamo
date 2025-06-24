@@ -49,6 +49,11 @@ pub trait OAIChatLikeRequest {
     }
 
     fn should_add_generation_prompt(&self) -> bool;
+
+    /// Extract token batch - returns None for string prompts, Some(vec) for token prompts
+    fn extract_token_batch(&self) -> Option<Vec<Vec<u32>>> {
+        None
+    }
 }
 
 pub trait OAIPromptFormatter: Send + Sync + 'static {
