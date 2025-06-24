@@ -63,12 +63,12 @@ class RequestHandler:
         num_output_tokens_so_far = 0
         # Handle either single token_ids or batch of token_ids
         if "batch_token_ids" in request and request["batch_token_ids"]:
-            logging.info("received batch token ids")
+            logging.debug("received batch token ids")
             gen = await self.engine_client.async_generate(
                 input_ids=request["batch_token_ids"], sampling_params=sampling_params, stream=True
             )
         else:
-            logging.info("received token ids")
+            logging.debug("received token ids")
             gen = await self.engine_client.async_generate(
                 input_ids=request["token_ids"], sampling_params=sampling_params, stream=True
             )
