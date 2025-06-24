@@ -12,14 +12,29 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-# This is a sample config for TensorRT-LLM engine.
-# The config provides smaller free_gpu_memory_fraction to ensure that the engine
-# does not use all the GPU memory and both prefill and decode workers can fit in
-# the GPU memory when running in disaggregated mode.
-# You might have to tweak this config based on your model size and GPU memory.
-
-backend: pytorch
-disable_overlap_scheduler: true
-kv_cache_config:
-  free_gpu_memory_fraction: 0.40
+kind: ClusterRole
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: pod-read
+rules:
+- apiGroups: ["inference.networking.x-k8s.io"]
+  resources: ["inferencepools"]
+  verbs: ["get", "watch", "list"]
+- apiGroups: ["inference.networking.x-k8s.io"]
+  resources: ["inferencemodels"]
+  verbs: ["get", "watch", "list"]
+- apiGroups: [""]
+  resources: ["pods"]
+  verbs: ["get", "watch", "list"]
+- apiGroups:
+  - authentication.k8s.io
+  resources:
+  - tokenreviews
+  verbs:
+  - create
+- apiGroups:
+  - authorization.k8s.io
+  resources:
+  - subjectaccessreviews
+  verbs:
+  - create
