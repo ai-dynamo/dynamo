@@ -13,8 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use derive_builder::Builder;
 use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
@@ -92,7 +90,7 @@ pub struct CompletionChoice {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
-    pub logprobs: Option<LogprobResult>,
+    pub logprobs: Option<async_openai::types::Logprobs>,
 }
 
 impl ContentProvider for CompletionChoice {
@@ -105,16 +103,6 @@ impl CompletionChoice {
     pub fn builder() -> CompletionChoiceBuilder {
         CompletionChoiceBuilder::default()
     }
-}
-
-// TODO: validate this is the correct format
-/// Legacy OpenAI LogprobResult component
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct LogprobResult {
-    pub tokens: Vec<String>,
-    pub token_logprobs: Vec<f32>,
-    pub top_logprobs: Vec<HashMap<String, f32>>,
-    pub text_offset: Vec<i32>,
 }
 
 pub fn prompt_to_string(prompt: &async_openai::types::Prompt) -> String {
