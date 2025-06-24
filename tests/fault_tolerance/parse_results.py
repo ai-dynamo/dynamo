@@ -302,8 +302,8 @@ def process_test_directory(test_dir):
         "failed_requests": failure,
         "avg_latency_before": avg_before,
         "std_latency_before": std_before,
-        "avg_latency_after": avg_after if avg_after is not None else "N/A",
-        "std_latency_after": std_after if avg_after is not None else "N/A",
+        "avg_latency_after": avg_after,
+        "std_latency_after": std_after,
         "pending_requests_before": pending_requests_before,
         "pending_requests_after": pending_requests_after,
         "recovery_time": recovery_time,
@@ -347,26 +347,30 @@ def main(logs_dir, tablefmt):
         for res in group:
             row = [
                 res["failure"],
-                f"{res['start_time']:.2f}" if res["start_time"] is not None else "N/A",
+                res["start_time"],  # if res["start_time"] is not None else "N/A",
                 res["success_requests"],
                 res["failed_requests"],
-                f"{res['avg_latency_before']:.2f} ± {res['std_latency_before']:.2f}"
-                if not isinstance(res["avg_latency_before"], str)
-                else "N/A",
-                f"{res['avg_latency_after']:.2f} ± {res['std_latency_after']:.2f}"
-                if not isinstance(res["avg_latency_after"], str)
-                else "N/A",
+                res["avg_latency_before"],
+                res["avg_latency_after"],
                 res["pending_requests_before"],
                 res["pending_requests_after"],
-                f"{res['recovery_time']:.2f}"
-                if res["recovery_time"] is not None
-                else "N/A",
+                res["recovery_time"],
             ]
             rows.append(row)
 
         print(f"\nTest Group: {test_prefix}")
         print(f"\nTest Command: {commands[test_prefix]}")
-        print(tabulate(rows, headers, tablefmt=tablefmt))
+        print(
+            tabulate(
+                rows,
+                headers,
+                tablefmt=tablefmt,
+                floatfmt=".2f",
+                missingval="N/A",
+                numalign="right",
+                stralign="center",
+            )
+        )
         print("\n" + "=" * 80)
 
 
