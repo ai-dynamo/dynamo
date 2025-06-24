@@ -3,6 +3,7 @@
 
 use super::*;
 
+use nixl_sys::NixlDescriptor;
 use utils::*;
 use zmq::*;
 
@@ -10,8 +11,9 @@ use BlockTransferPool::*;
 
 use crate::block_manager::{
     block::{
+        locality,
         transfer::{TransferContext, WriteTo, WriteToStrategy},
-        Block, BlockIdentifier, ReadableBlock, WritableBlock,
+        Block, ReadableBlock, WritableBlock,
     },
     storage::{DeviceStorage, DiskStorage, Local, PinnedStorage},
     BasicMetadata, BlockMetadata, Storage,
@@ -22,28 +24,29 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-type BlockList<S, M> = Vec<Option<Block<S, M>>>;
+type LocalBlock<S, M> = Block<S, locality::Local, M>;
+type LocalBlockList<S, M> = Vec<Option<LocalBlock<S, M>>>;
 
 /// A list of blocks that are being transferred.
 /// Ensures that blocks are returned to the pool after their transfer is complete.
 struct TransferList<S: Storage, M: BlockMetadata> {
-    blocks: Arc<Mutex<BlockList<S, M>>>,
-    list: Option<Vec<Block<S, M>>>,
+    blocks: Arc<Mutex<LocalBlockList<S, M>>>,
+    list: Option<Vec<LocalBlock<S, M>>>,
 }
 
 impl<S: Storage, M: BlockMetadata> TransferList<S, M> {
-    fn new(blocks: Arc<Mutex<BlockList<S, M>>>, list: Vec<Block<S, M>>) -> Self {
+    fn new(blocks: Arc<Mutex<LocalBlockList<S, M>>>, list: Vec<LocalBlock<S, M>>) -> Self {
         Self {
             blocks,
             list: Some(list),
         }
     }
 
-    fn get(&self) -> &Vec<Block<S, M>> {
+    fn get(&self) -> &Vec<LocalBlock<S, M>> {
         self.list.as_ref().unwrap()
     }
 
-    fn get_mut(&mut self) -> &mut Vec<Block<S, M>> {
+    fn get_mut(&mut self) -> &mut Vec<LocalBlock<S, M>> {
         self.list.as_mut().unwrap()
     }
 
@@ -76,11 +79,11 @@ impl<S: Storage, M: BlockMetadata> Drop for TransferList<S, M> {
 /// - It returns blocks to the pool after their transfer is complete.
 // TODO: This seems like a bit of an ugly workaround. Surely there's a better way to do this.
 struct BlockTransferPoolManager<S: Storage, M: BlockMetadata> {
-    blocks: Arc<Mutex<BlockList<S, M>>>,
+    blocks: Arc<Mutex<LocalBlockList<S, M>>>,
 }
 
 impl<S: Storage, M: BlockMetadata> BlockTransferPoolManager<S, M> {
-    fn new(blocks: Vec<Block<S, M>>) -> Result<Self> {
+    fn new(blocks: Vec<LocalBlock<S, M>>) -> Result<Self> {
         let blocks = blocks.into_iter().map(Some).collect();
         let blocks = Arc::new(Mutex::new(blocks));
 
@@ -111,9 +114,9 @@ pub struct BlockTransferHandler {
 
 impl BlockTransferHandler {
     pub fn new(
-        device_blocks: Option<Vec<Block<DeviceStorage, BasicMetadata>>>,
-        host_blocks: Option<Vec<Block<PinnedStorage, BasicMetadata>>>,
-        disk_blocks: Option<Vec<Block<DiskStorage, BasicMetadata>>>,
+        device_blocks: Option<Vec<LocalBlock<DeviceStorage, BasicMetadata>>>,
+        host_blocks: Option<Vec<LocalBlock<PinnedStorage, BasicMetadata>>>,
+        disk_blocks: Option<Vec<LocalBlock<DiskStorage, BasicMetadata>>>,
         context: Arc<TransferContext>,
     ) -> Result<Self> {
         Ok(Self {
@@ -132,14 +135,15 @@ impl BlockTransferHandler {
         request: BlockTransferRequest,
     ) -> Result<tokio::sync::oneshot::Receiver<()>>
     where
-        Source: Storage,
-        Target: Storage,
+        Source: Storage + NixlDescriptor,
+        Target: Storage + NixlDescriptor,
         Metadata: BlockMetadata,
         // Check that the source block is readable, local, and writable to the target block.
-        Block<Source, Metadata>:
-            ReadableBlock<StorageType = Source> + Local + WriteToStrategy<Block<Target, Metadata>>,
+        LocalBlock<Source, Metadata>: ReadableBlock<StorageType = Source>
+            + Local
+            + WriteToStrategy<LocalBlock<Target, Metadata>>,
         // Check that the target block is writable.
-        Block<Target, Metadata>: WritableBlock<StorageType = Target>,
+        LocalBlock<Target, Metadata>: WritableBlock<StorageType = Target>,
     {
         let Some(source_pool_manager) = source_pool_manager else {
             return Err(anyhow::anyhow!("Source pool manager not initialized"));

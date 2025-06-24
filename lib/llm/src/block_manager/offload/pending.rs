@@ -38,6 +38,7 @@
 //! 3. A worker thread (consuming this bounded channel and enforcing rate limiting) awaits the incoming transfers.
 //! 4. After a transfer is complete, the worker thread registers the blocks with the target pool, and returns the registered blocks to the caller.
 
+use nixl_sys::NixlDescriptor;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -46,9 +47,10 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::block_manager::block::{
-    transfer::{WriteTo, WriteToStrategy},
-    BlockError, BlockExt, BlockMetadata, BlockState, ImmutableBlock, MutableBlock, ReadableBlock,
-    TransferContext, WritableBlock,
+    locality::LocalityProvider,
+    transfer::{TransferContext, WriteTo, WriteToStrategy},
+    BlockError, BlockMetadata, BlockState, ImmutableBlock, MutableBlock, ReadableBlock,
+    WritableBlock,
 };
 use crate::block_manager::pool::BlockPoolError;
 use crate::block_manager::storage::{Local, Storage};
@@ -63,25 +65,30 @@ use super::BlockResult;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
 /// Manage a set of pending transfers.
-pub struct PendingTransfer<Source: Storage, Target: Storage, Metadata: BlockMetadata> {
+pub struct PendingTransfer<
+    Source: Storage,
+    Target: Storage,
+    Locality: LocalityProvider,
+    Metadata: BlockMetadata,
+> {
     /// The block being copied from.
-    sources: Vec<ImmutableBlock<Source, Metadata>>,
+    sources: Vec<ImmutableBlock<Source, Locality, Metadata>>,
     /// The block being copied to.
-    targets: Vec<MutableBlock<Target, Metadata>>,
+    targets: Vec<MutableBlock<Target, Locality, Metadata>>,
     /// The oneshot sender that optionally returns the registered blocks once the transfer is complete.
-    completion_indicator: Option<oneshot::Sender<BlockResult<Target, Metadata>>>,
+    completion_indicator: Option<oneshot::Sender<BlockResult<Target, Locality, Metadata>>>,
     /// The target pool that will receive the registered block.
-    target_pool: Arc<BlockPool<Target, Metadata>>,
+    target_pool: Arc<BlockPool<Target, Locality, Metadata>>,
 }
 
-impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
-    PendingTransfer<Source, Target, Metadata>
+impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: BlockMetadata>
+    PendingTransfer<Source, Target, Locality, Metadata>
 {
     pub fn new(
-        sources: Vec<ImmutableBlock<Source, Metadata>>,
-        targets: Vec<MutableBlock<Target, Metadata>>,
-        completion_indicator: Option<oneshot::Sender<BlockResult<Target, Metadata>>>,
-        target_pool: Arc<BlockPool<Target, Metadata>>,
+        sources: Vec<ImmutableBlock<Source, Locality, Metadata>>,
+        targets: Vec<MutableBlock<Target, Locality, Metadata>>,
+        completion_indicator: Option<oneshot::Sender<BlockResult<Target, Locality, Metadata>>>,
+        target_pool: Arc<BlockPool<Target, Locality, Metadata>>,
     ) -> Self {
         assert_eq!(sources.len(), targets.len());
         Self {
@@ -92,7 +99,7 @@ impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
         }
     }
 
-    fn handle_complete(self) -> Result<()> {
+    async fn handle_complete(self) -> Result<()> {
         let Self {
             sources,
             mut targets,
@@ -105,7 +112,7 @@ impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
             transfer_metadata(source, target)?;
         }
 
-        let blocks = target_pool.register_blocks_blocking(targets)?;
+        let blocks = target_pool.register_blocks(targets).await?;
 
         if let Some(completion_indicator) = completion_indicator {
             completion_indicator
@@ -117,9 +124,14 @@ impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
     }
 }
 
-fn transfer_metadata<Source: Storage, Target: Storage, Metadata: BlockMetadata>(
-    source: &ImmutableBlock<Source, Metadata>,
-    target: &mut MutableBlock<Target, Metadata>,
+fn transfer_metadata<
+    Source: Storage,
+    Target: Storage,
+    Locality: LocalityProvider,
+    Metadata: BlockMetadata,
+>(
+    source: &ImmutableBlock<Source, Locality, Metadata>,
+    target: &mut MutableBlock<Target, Locality, Metadata>,
 ) -> Result<()> {
     // Only registered blocks can be transferred. There are upstream checks for this, so this shouldn't ever fail.
     if let BlockState::Registered(reg_handle, _) = source.state() {
@@ -139,26 +151,39 @@ fn transfer_metadata<Source: Storage, Target: Storage, Metadata: BlockMetadata>(
 }
 
 #[async_trait]
-pub trait TransferManager<Source: Storage, Target: Storage, Metadata: BlockMetadata>:
-    Send + Sync
+pub trait TransferManager<
+    Source: Storage,
+    Target: Storage,
+    Locality: LocalityProvider,
+    Metadata: BlockMetadata,
+>: Send + Sync
 {
     /// Begin a transfer. Blocks if the pending queue is full.
     async fn enqueue_transfer(
         &self,
-        pending_transfer: PendingTransfer<Source, Target, Metadata>,
+        pending_transfer: PendingTransfer<Source, Target, Locality, Metadata>,
     ) -> Result<()>;
 }
 
-pub struct CudaTransferManager<Source: Storage, Target: Storage, Metadata: BlockMetadata> {
+pub struct CudaTransferManager<
+    Source: Storage,
+    Target: Storage,
+    Locality: LocalityProvider,
+    Metadata: BlockMetadata,
+> {
     pending_transfer_q: mpsc::Sender<(
-        PendingTransfer<Source, Target, Metadata>,
+        PendingTransfer<Source, Target, Locality, Metadata>,
         tokio::sync::oneshot::Receiver<()>,
     )>,
     transfer_ctx: Arc<TransferContext>,
 }
 
-impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
-    CudaTransferManager<Source, Target, Metadata>
+impl<
+        Source: Storage,
+        Target: Storage,
+        Locality: LocalityProvider + 'static,
+        Metadata: BlockMetadata,
+    > CudaTransferManager<Source, Target, Locality, Metadata>
 {
     pub fn new(
         transfer_ctx: Arc<TransferContext>,
@@ -167,7 +192,7 @@ impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
         cancellation_token: CancellationToken,
     ) -> Result<Self> {
         let (tx, mut rx) = mpsc::channel::<(
-            PendingTransfer<Source, Target, Metadata>,
+            PendingTransfer<Source, Target, Locality, Metadata>,
             tokio::sync::oneshot::Receiver<()>,
         )>(max_concurrent_transfers);
 
@@ -179,7 +204,7 @@ impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
                             // Wait for the event.
                             notify.await.map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
                             // Only finalize the transfer after the event is signaled.
-                            match pending_transfer.handle_complete() {
+                            match pending_transfer.handle_complete().await {
                                 Ok(_) => {}
                                 Err(e) => {
                                     // The only case where this can fail is if the progress engine is being shutdown.
@@ -209,22 +234,23 @@ impl<Source: Storage, Target: Storage, Metadata: BlockMetadata>
 }
 
 #[async_trait]
-impl<Source, Target, Metadata> TransferManager<Source, Target, Metadata>
-    for CudaTransferManager<Source, Target, Metadata>
+impl<Source, Target, Locality, Metadata> TransferManager<Source, Target, Locality, Metadata>
+    for CudaTransferManager<Source, Target, Locality, Metadata>
 where
-    Source: Storage,
-    Target: Storage,
+    Source: Storage + NixlDescriptor,
+    Target: Storage + NixlDescriptor,
+    Locality: LocalityProvider,
     Metadata: BlockMetadata,
     // Check that the source block is readable, local, and writable to the target block.
-    ImmutableBlock<Source, Metadata>: ReadableBlock<StorageType = Source>
+    ImmutableBlock<Source, Locality, Metadata>: ReadableBlock<StorageType = Source>
         + Local
-        + WriteToStrategy<MutableBlock<Target, Metadata>>,
+        + WriteToStrategy<MutableBlock<Target, Locality, Metadata>>,
     // Check that the target block is writable.
-    MutableBlock<Target, Metadata>: WritableBlock<StorageType = Target>,
+    MutableBlock<Target, Locality, Metadata>: WritableBlock<StorageType = Target>,
 {
     async fn enqueue_transfer(
         &self,
-        mut pending_transfer: PendingTransfer<Source, Target, Metadata>,
+        mut pending_transfer: PendingTransfer<Source, Target, Locality, Metadata>,
     ) -> Result<()> {
         let notify = pending_transfer
             .sources
@@ -304,21 +330,23 @@ impl DiskTransferManager {
 }
 
 #[async_trait]
-impl<Source, Target, Metadata> TransferManager<Source, Target, Metadata> for DiskTransferManager
+impl<Source, Target, Locality, Metadata> TransferManager<Source, Target, Locality, Metadata>
+    for DiskTransferManager
 where
-    Source: Storage,
-    Target: Storage,
+    Source: Storage + NixlDescriptor,
+    Target: Storage + NixlDescriptor,
+    Locality: LocalityProvider,
     Metadata: BlockMetadata,
     // Check that the source block is readable, local, and writable to the target block.
-    ImmutableBlock<Source, Metadata>: ReadableBlock<StorageType = Source>
+    ImmutableBlock<Source, Locality, Metadata>: ReadableBlock<StorageType = Source>
         + Local
-        + WriteToStrategy<MutableBlock<Target, Metadata>>,
+        + WriteToStrategy<MutableBlock<Target, Locality, Metadata>>,
     // Check that the target block is writable.
-    MutableBlock<Target, Metadata>: WritableBlock<StorageType = Target>,
+    MutableBlock<Target, Locality, Metadata>: WritableBlock<StorageType = Target>,
 {
     async fn enqueue_transfer(
         &self,
-        mut pending_transfer: PendingTransfer<Source, Target, Metadata>,
+        mut pending_transfer: PendingTransfer<Source, Target, Locality, Metadata>,
     ) -> Result<()> {
         let notify = pending_transfer
             .sources
@@ -335,7 +363,7 @@ where
 
         let completion_future = async move {
             let _ = notify.await;
-            match pending_transfer.handle_complete() {
+            match pending_transfer.handle_complete().await {
                 Ok(_) => {}
                 Err(e) => {
                     // The only case where this can fail is if the progress engine is being shutdown.
@@ -354,26 +382,29 @@ where
 }
 
 /// A transfer manager that enforces a max batch size for transfers.
-pub struct TransferBatcher<Source, Target, Metadata, Manager>
+pub struct TransferBatcher<Source, Target, Locality, Metadata, Manager>
 where
     Source: Storage,
     Target: Storage,
+    Locality: LocalityProvider,
     Metadata: BlockMetadata,
-    Manager: TransferManager<Source, Target, Metadata>,
+    Manager: TransferManager<Source, Target, Locality, Metadata>,
 {
     transfer_manager: Manager,
     max_transfer_batch_size: usize,
     runtime: Handle,
     cancellation_token: CancellationToken,
-    _phantom: PhantomData<(Source, Target, Metadata)>,
+    _phantom: PhantomData<(Source, Target, Locality, Metadata)>,
 }
 
-impl<Source, Target, Metadata, Manager> TransferBatcher<Source, Target, Metadata, Manager>
+impl<Source, Target, Locality, Metadata, Manager>
+    TransferBatcher<Source, Target, Locality, Metadata, Manager>
 where
     Source: Storage,
     Target: Storage,
-    Metadata: BlockMetadata,
-    Manager: TransferManager<Source, Target, Metadata>,
+    Locality: LocalityProvider + 'static,
+    Metadata: BlockMetadata + 'static,
+    Manager: TransferManager<Source, Target, Locality, Metadata> + 'static,
 {
     pub fn new(
         transfer_manager: Manager,
@@ -392,17 +423,19 @@ where
 }
 
 #[async_trait]
-impl<Source, Target, Metadata, Manager> TransferManager<Source, Target, Metadata>
-    for TransferBatcher<Source, Target, Metadata, Manager>
+impl<Source, Target, Locality, Metadata, Manager>
+    TransferManager<Source, Target, Locality, Metadata>
+    for TransferBatcher<Source, Target, Locality, Metadata, Manager>
 where
-    Source: Storage,
-    Target: Storage,
+    Source: Storage + 'static,
+    Target: Storage + 'static,
+    Locality: LocalityProvider + 'static,
     Metadata: BlockMetadata,
-    Manager: TransferManager<Source, Target, Metadata>,
+    Manager: TransferManager<Source, Target, Locality, Metadata>,
 {
     async fn enqueue_transfer(
         &self,
-        pending_transfer: PendingTransfer<Source, Target, Metadata>,
+        pending_transfer: PendingTransfer<Source, Target, Locality, Metadata>,
     ) -> Result<()> {
         // If it's smaller than the max batch size, just enqueue it.
         if pending_transfer.sources.len() < self.max_transfer_batch_size {

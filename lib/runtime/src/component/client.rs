@@ -55,8 +55,10 @@ enum EndpointEvent {
 pub struct Client {
     // This is me
     pub endpoint: Endpoint,
-    // These are the remotes I know about
+    // These are the remotes I know about from watching etcd
     pub instance_source: Arc<InstanceSource>,
+    // These are the instances that are reported as down from sending rpc
+    instance_inhibited: Arc<Mutex<HashMap<i64, std::time::Instant>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -65,12 +67,15 @@ pub enum InstanceSource {
     Dynamic(tokio::sync::watch::Receiver<Vec<Instance>>),
 }
 
+// TODO: Avoid returning a full clone of `Vec<Instance>` everytime from Client
+//       See instances() and instances_avail() methods
 impl Client {
     // Client will only talk to a single static endpoint
     pub(crate) async fn new_static(endpoint: Endpoint) -> Result<Self> {
         Ok(Client {
             endpoint,
             instance_source: Arc::new(InstanceSource::Static),
+            instance_inhibited: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -87,6 +92,7 @@ impl Client {
         Ok(Client {
             endpoint,
             instance_source,
+            instance_inhibited: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -99,6 +105,7 @@ impl Client {
         self.endpoint.etcd_root()
     }
 
+    /// Instances available from watching etcd
     pub fn instances(&self) -> Vec<Instance> {
         match self.instance_source.as_ref() {
             InstanceSource::Static => vec![],
@@ -125,6 +132,53 @@ impl Client {
             }
         }
         Ok(instances)
+    }
+
+    /// Instances available from watching etcd minus those reported as down
+    pub async fn instances_avail(&self) -> Vec<Instance> {
+        // TODO: Can we get the remaining TTL from the lease for the instance?
+        const ETCD_LEASE_TTL: u64 = 10; // seconds
+        let now = std::time::Instant::now();
+
+        let instances = self.instances();
+        let mut inhibited = self.instance_inhibited.lock().await;
+
+        // 1. Remove inhibited instances that are no longer in `self.instances()`
+        // 2. Remove inhibited instances that have expired
+        // 3. Only return instances that are not inhibited after removals
+        let mut new_inhibited = HashMap::<i64, std::time::Instant>::new();
+        let filtered = instances
+            .into_iter()
+            .filter_map(|instance| {
+                let id = instance.id();
+                if let Some(&timestamp) = inhibited.get(&id) {
+                    if now.duration_since(timestamp).as_secs() > ETCD_LEASE_TTL {
+                        tracing::debug!("instance {id} stale inhibition");
+                        Some(instance)
+                    } else {
+                        tracing::debug!("instance {id} is inhibited");
+                        new_inhibited.insert(id, timestamp);
+                        None
+                    }
+                } else {
+                    tracing::debug!("instance {id} not inhibited");
+                    Some(instance)
+                }
+            })
+            .collect();
+
+        *inhibited = new_inhibited;
+        filtered
+    }
+
+    /// Mark an instance as down/unavailable
+    pub async fn report_instance_down(&self, instance_id: i64) {
+        let now = std::time::Instant::now();
+
+        let mut inhibited = self.instance_inhibited.lock().await;
+        inhibited.insert(instance_id, now);
+
+        tracing::debug!("inhibiting instance {instance_id}");
     }
 
     /// Is this component know at startup and not discovered via etcd?

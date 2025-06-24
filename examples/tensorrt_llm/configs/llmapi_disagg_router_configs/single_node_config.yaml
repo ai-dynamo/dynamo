@@ -30,11 +30,9 @@ context_servers:
   max_batch_size: 16
   enable_chunked_prefill: false
   kv_cache_config:
-    free_gpu_memory_fraction: 0.40
+    free_gpu_memory_fraction: 0.75
     event_buffer_max_size: 1024
     enable_block_reuse: true
-  cache_transceiver_config:
-    max_num_tokens: 10240
   # NOTE: pytorch_backend_config section flattened since: https://github.com/NVIDIA/TensorRT-LLM/pull/4603
   # NOTE: This field is called 'enable_overlap_scheduler' in older TRTLLM versions
   # Overlap scheduler not currently supported in context-only
@@ -50,11 +48,9 @@ generation_servers:
   max_num_tokens: 256
   max_batch_size: 256
   kv_cache_config:
-    free_gpu_memory_fraction: 0.40
+    free_gpu_memory_fraction: 0.75
     event_buffer_max_size: 1024
     enable_block_reuse: true
-  cache_transceiver_config:
-    max_num_tokens: 256
   # NOTE: pytorch_backend_config section flattened since: https://github.com/NVIDIA/TensorRT-LLM/pull/4603
   # NOTE: This field is called 'enable_overlap_scheduler' in older TRTLLM versions
   disable_overlap_scheduler: false

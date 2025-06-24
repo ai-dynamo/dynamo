@@ -76,6 +76,7 @@ use super::events::{EventManager, NullEventManager};
 use super::metrics::{BlockManagerMetrics, PoolMetrics};
 use super::storage::Storage;
 
+use crate::block_manager::block::locality::LocalityProvider;
 use crate::tokens::{SequenceHash, TokenBlock};
 
 use prometheus::Registry;
@@ -85,9 +86,26 @@ use std::{
     sync::{Arc, Weak},
 };
 use tokio::runtime::Handle;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::Result;
+
+// Type aliases to reduce complexity across the module
+type BlockPoolResult<T> = Result<T, BlockPoolError>;
+type AsyncResponse<T> = Result<oneshot::Receiver<T>, BlockPoolError>;
+
+// Collection type aliases
+pub type MutableBlocks<S, L, M> = Vec<MutableBlock<S, L, M>>;
+pub type ImmutableBlocks<S, L, M> = Vec<ImmutableBlock<S, L, M>>;
+
+// Specific request type aliases for our use cases
+type AllocateBlocksReq<S, L, M> = RequestResponse<usize, BlockPoolResult<MutableBlocks<S, L, M>>>;
+type RegisterBlocksReq<S, L, M> =
+    RequestResponse<MutableBlocks<S, L, M>, BlockPoolResult<ImmutableBlocks<S, L, M>>>;
+type MatchHashesReq<S, L, M> =
+    RequestResponse<Vec<SequenceHash>, BlockPoolResult<ImmutableBlocks<S, L, M>>>;
+type AddBlocksReq<S, L, M> = RequestResponse<Vec<Block<S, L, M>>, ()>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlockPoolError {
@@ -112,7 +130,7 @@ pub enum BlockPoolError {
 
 #[derive(Builder, Dissolve)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
-pub struct BlockPoolArgs<S: Storage, M: BlockMetadata> {
+pub struct BlockPoolArgs<S: Storage, L: LocalityProvider, M: BlockMetadata> {
     #[builder(default = "NullEventManager::new()")]
     event_manager: Arc<dyn EventManager>,
 
@@ -120,7 +138,7 @@ pub struct BlockPoolArgs<S: Storage, M: BlockMetadata> {
     cancel_token: CancellationToken,
 
     #[builder(default)]
-    blocks: Vec<Block<S, M>>,
+    blocks: Vec<Block<S, L, M>>,
 
     #[builder(default)]
     global_registry: GlobalRegistry,
@@ -134,8 +152,8 @@ pub struct BlockPoolArgs<S: Storage, M: BlockMetadata> {
     pool_metrics: Arc<PoolMetrics>,
 }
 
-impl<S: Storage, M: BlockMetadata> BlockPoolArgsBuilder<S, M> {
-    pub fn build(self) -> anyhow::Result<BlockPool<S, M>> {
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPoolArgsBuilder<S, L, M> {
+    pub fn build(self) -> anyhow::Result<BlockPool<S, L, M>> {
         let args = self.build_internal()?;
         let (event_manager, cancel_token, blocks, global_registry, async_runtime, metrics) =
             args.dissolve();
@@ -154,14 +172,14 @@ impl<S: Storage, M: BlockMetadata> BlockPoolArgsBuilder<S, M> {
     }
 }
 /// Manages the blocks in a specific storage backenda
-pub struct BlockPool<S: Storage, M: BlockMetadata> {
-    priority_tx: tokio::sync::mpsc::UnboundedSender<PriorityRequest<S, M>>,
-    ctrl_tx: tokio::sync::mpsc::UnboundedSender<ControlRequest<S, M>>,
+pub struct BlockPool<S: Storage, L: LocalityProvider, M: BlockMetadata> {
+    priority_tx: tokio::sync::mpsc::UnboundedSender<PriorityRequest<S, L, M>>,
+    ctrl_tx: tokio::sync::mpsc::UnboundedSender<ControlRequest<S, L, M>>,
     available_blocks_counter: Arc<AtomicU64>,
     total_blocks_counter: Arc<AtomicU64>,
 }
 
-impl<S: Storage, M: BlockMetadata> Clone for BlockPool<S, M> {
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Clone for BlockPool<S, L, M> {
     fn clone(&self) -> Self {
         Self {
             priority_tx: self.priority_tx.clone(),
@@ -172,14 +190,16 @@ impl<S: Storage, M: BlockMetadata> Clone for BlockPool<S, M> {
     }
 }
 
+/// Generic request-response pattern for background task communication
 #[derive(Dissolve)]
-struct Unary<Req, Resp> {
-    request: Req,
-    response_tx: oneshot::Sender<Resp>,
+pub struct RequestResponse<Req, Resp> {
+    pub request: Req,
+    pub response_tx: oneshot::Sender<Resp>,
 }
 
-impl<Req, Resp> Unary<Req, Resp> {
-    fn make_request(request: Req) -> (Self, oneshot::Receiver<Resp>) {
+impl<Req, Resp> RequestResponse<Req, Resp> {
+    /// Create a new request-response pair
+    pub fn new(request: Req) -> (Self, oneshot::Receiver<Resp>) {
         let (response_tx, response_rx) = oneshot::channel();
         (
             Self {
@@ -191,25 +211,19 @@ impl<Req, Resp> Unary<Req, Resp> {
     }
 }
 
-type UnaryResponse<T> = Result<oneshot::Receiver<T>, BlockPoolError>;
-
-type ImmutableBlocksResult<S, M> = Result<Vec<ImmutableBlock<S, M>>, BlockPoolError>;
-
-pub type MutableBlocks<S, M> = Vec<MutableBlock<S, M>>;
-pub type ImmutableBlocks<S, M> = Vec<ImmutableBlock<S, M>>;
-
-enum PriorityRequest<S: Storage, M: BlockMetadata> {
-    AllocateBlocks(Unary<usize, Result<Vec<MutableBlock<S, M>>, BlockPoolError>>),
-    RegisterBlocks(Unary<MutableBlocks<S, M>, Result<ImmutableBlocks<S, M>, BlockPoolError>>),
-    MatchSequenceHashes(Unary<Vec<SequenceHash>, Vec<ImmutableBlock<S, M>>>),
+// Update the request enums to use the cleaner types
+enum PriorityRequest<S: Storage, L: LocalityProvider, M: BlockMetadata> {
+    AllocateBlocks(AllocateBlocksReq<S, L, M>),
+    RegisterBlocks(RegisterBlocksReq<S, L, M>),
+    MatchSequenceHashes(MatchHashesReq<S, L, M>),
 }
 
-enum ControlRequest<S: Storage, M: BlockMetadata> {
-    AddBlocks(Unary<Vec<Block<S, M>>, ()>),
+enum ControlRequest<S: Storage, L: LocalityProvider, M: BlockMetadata> {
+    AddBlocks(AddBlocksReq<S, L, M>),
 }
 
-impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
-    pub fn builder() -> BlockPoolArgsBuilder<S, M> {
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
+    pub fn builder() -> BlockPoolArgsBuilder<S, L, M> {
         BlockPoolArgsBuilder::default()
     }
 
@@ -227,7 +241,7 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
     fn new(
         event_manager: Arc<dyn EventManager>,
         cancel_token: CancellationToken,
-        blocks: Vec<Block<S, M>>,
+        blocks: Vec<Block<S, L, M>>,
         global_registry: GlobalRegistry,
         async_runtime: Handle,
         metrics: Arc<PoolMetrics>,
@@ -249,7 +263,11 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
         //     }
         // });
 
-        let thread_name = format!("block-pool-{}", short_type_name::<S>());
+        let thread_name = format!(
+            "block-pool-{}-{}",
+            short_type_name::<S>(),
+            short_type_name::<L>()
+        );
 
         std::thread::Builder::new()
             .name(thread_name)
@@ -275,15 +293,15 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
     fn with_progress_engine(
         event_manager: Arc<dyn EventManager>,
         cancel_token: CancellationToken,
-        blocks: Vec<Block<S, M>>,
+        blocks: Vec<Block<S, L, M>>,
         global_registry: GlobalRegistry,
         async_runtime: Handle,
         metrics: Arc<PoolMetrics>,
-    ) -> (Self, ProgressEngine<S, M>) {
+    ) -> (Self, ProgressEngine<S, L, M>) {
         let (priority_tx, priority_rx) = tokio::sync::mpsc::unbounded_channel();
         let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
 
-        let progress_engine = ProgressEngine::<S, M>::new(
+        let progress_engine = ProgressEngine::<S, L, M>::new(
             event_manager,
             priority_rx,
             ctrl_rx,
@@ -326,7 +344,10 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
     ///
     /// * `blocks` - A [`Vec<Block<S, M>>`] to add to the inactive pool.
     #[expect(dead_code)]
-    pub(crate) async fn add_blocks(&self, blocks: Vec<Block<S, M>>) -> Result<(), BlockPoolError> {
+    pub(crate) async fn add_blocks(
+        &self,
+        blocks: Vec<Block<S, L, M>>,
+    ) -> Result<(), BlockPoolError> {
         self._add_blocks(blocks)?
             .await
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)
@@ -335,15 +356,15 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
     /// Blocking version of [`BlockPool::add_blocks`].
     pub(crate) fn add_blocks_blocking(
         &self,
-        blocks: Vec<Block<S, M>>,
+        blocks: Vec<Block<S, L, M>>,
     ) -> Result<(), BlockPoolError> {
         self._add_blocks(blocks)?
-            .recv()
+            .blocking_recv()
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)
     }
 
-    fn _add_blocks(&self, blocks: Vec<Block<S, M>>) -> UnaryResponse<()> {
-        let (req, resp_rx) = Unary::<_, ()>::make_request(blocks);
+    fn _add_blocks(&self, blocks: Vec<Block<S, L, M>>) -> AsyncResponse<()> {
+        let (req, resp_rx) = AddBlocksReq::new(blocks);
 
         self.ctrl_tx
             .send(ControlRequest::AddBlocks(req))
@@ -370,7 +391,7 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
     pub async fn allocate_blocks(
         &self,
         count: usize,
-    ) -> Result<Vec<MutableBlock<S, M>>, BlockPoolError> {
+    ) -> Result<Vec<MutableBlock<S, L, M>>, BlockPoolError> {
         self._allocate_blocks(count)?
             .await
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
@@ -380,26 +401,22 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
     pub fn allocate_blocks_blocking(
         &self,
         count: usize,
-    ) -> Result<Vec<MutableBlock<S, M>>, BlockPoolError> {
+    ) -> Result<Vec<MutableBlock<S, L, M>>, BlockPoolError> {
         self._allocate_blocks(count)?
-            .recv()
+            .blocking_recv()
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
     }
 
     fn _allocate_blocks(
         &self,
         count: usize,
-    ) -> UnaryResponse<Result<Vec<MutableBlock<S, M>>, BlockPoolError>> {
-        // Create the request
-        let (req, resp_rx) =
-            Unary::<_, Result<Vec<MutableBlock<S, M>>, BlockPoolError>>::make_request(count);
+    ) -> AsyncResponse<BlockPoolResult<Vec<MutableBlock<S, L, M>>>> {
+        let (req, resp_rx) = AllocateBlocksReq::new(count);
 
-        // Issue the request
         self.priority_tx
             .send(PriorityRequest::AllocateBlocks(req))
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
 
-        // Await a response
         Ok(resp_rx)
     }
 
@@ -411,8 +428,8 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
     /// and the provided `block` is implicitly dropped (returned to the [`InactiveBlockPool`]).
     pub async fn register_blocks(
         &self,
-        blocks: Vec<MutableBlock<S, M>>,
-    ) -> ImmutableBlocksResult<S, M> {
+        blocks: Vec<MutableBlock<S, L, M>>,
+    ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
         self._register_blocks(blocks)?
             .await
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
@@ -421,26 +438,23 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
     /// Blocking version of [`BlockPool::register_blocks`].
     pub fn register_blocks_blocking(
         &self,
-        blocks: Vec<MutableBlock<S, M>>,
-    ) -> ImmutableBlocksResult<S, M> {
+        blocks: Vec<MutableBlock<S, L, M>>,
+    ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
         self._register_blocks(blocks)?
-            .recv()
+            .blocking_recv()
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
     }
 
     fn _register_blocks(
         &self,
-        blocks: Vec<MutableBlock<S, M>>,
-    ) -> UnaryResponse<ImmutableBlocksResult<S, M>> {
-        // Make the request
-        let (req, resp_rx) = Unary::<_, ImmutableBlocksResult<S, M>>::make_request(blocks);
+        blocks: Vec<MutableBlock<S, L, M>>,
+    ) -> AsyncResponse<BlockPoolResult<ImmutableBlocks<S, L, M>>> {
+        let (req, resp_rx) = RegisterBlocksReq::new(blocks);
 
-        // Issue the request
         self.priority_tx
             .send(PriorityRequest::RegisterBlocks(req))
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
 
-        // Await a response
         Ok(resp_rx)
     }
 
@@ -465,55 +479,51 @@ impl<S: Storage, M: BlockMetadata> BlockPool<S, M> {
     pub async fn match_sequence_hashes(
         &self,
         sequence_hashes: &[SequenceHash],
-    ) -> ImmutableBlocksResult<S, M> {
+    ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
         self._match_sequence_hashes(sequence_hashes)?
             .await
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)
+            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
     }
 
     /// Blocking version of [`BlockPool::match_sequence_hashes`].
     pub fn match_sequence_hashes_blocking(
         &self,
         sequence_hashes: &[SequenceHash],
-    ) -> ImmutableBlocksResult<S, M> {
+    ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
         self._match_sequence_hashes(sequence_hashes)?
-            .recv()
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)
+            .blocking_recv()
+            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
     }
 
     fn _match_sequence_hashes(
         &self,
         sequence_hashes: &[SequenceHash],
-    ) -> UnaryResponse<Vec<ImmutableBlock<S, M>>> {
-        // Create the request
-        let (req, resp_rx) =
-            Unary::<_, Vec<ImmutableBlock<S, M>>>::make_request(sequence_hashes.into());
+    ) -> AsyncResponse<BlockPoolResult<ImmutableBlocks<S, L, M>>> {
+        let (req, resp_rx) = MatchHashesReq::new(sequence_hashes.into());
 
-        // Issue the request
         self.priority_tx
             .send(PriorityRequest::MatchSequenceHashes(req))
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
 
-        // Await a response
         Ok(resp_rx)
     }
 }
 
-struct State<S: Storage, M: BlockMetadata> {
-    active: ActiveBlockPool<S, M>,
-    inactive: InactiveBlockPool<S, M>,
+struct State<S: Storage, L: LocalityProvider, M: BlockMetadata> {
+    active: ActiveBlockPool<S, L, M>,
+    inactive: InactiveBlockPool<S, L, M>,
     registry: BlockRegistry,
-    return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, M>>,
+    return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, L, M>>,
     event_manager: Arc<dyn EventManager>,
     metrics: Arc<PoolMetrics>,
 }
 
-struct ProgressEngine<S: Storage, M: BlockMetadata> {
-    priority_rx: tokio::sync::mpsc::UnboundedReceiver<PriorityRequest<S, M>>,
-    ctrl_rx: tokio::sync::mpsc::UnboundedReceiver<ControlRequest<S, M>>,
+struct ProgressEngine<S: Storage, L: LocalityProvider, M: BlockMetadata> {
+    priority_rx: tokio::sync::mpsc::UnboundedReceiver<PriorityRequest<S, L, M>>,
+    ctrl_rx: tokio::sync::mpsc::UnboundedReceiver<ControlRequest<S, L, M>>,
     cancel_token: CancellationToken,
-    state: State<S, M>,
-    return_rx: tokio::sync::mpsc::UnboundedReceiver<Block<S, M>>,
+    state: State<S, L, M>,
+    return_rx: tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
     metrics: Arc<PoolMetrics>,
     available_blocks_counter: Arc<AtomicU64>,
     total_blocks_counter: Arc<AtomicU64>,
@@ -525,17 +535,16 @@ mod tests {
     use super::super::layout::{tests::setup_layout, FullyContiguous, LayoutConfig};
     use super::*;
 
-    use crate::block_manager::block::BlockExt;
     use crate::block_manager::DType;
     use crate::tokens::{TokenBlockSequence, Tokens};
 
     use crate::block_manager::storage::tests::{NullDeviceAllocator, NullDeviceStorage};
 
     /// Helper method to build a [`BlockPool`] with a [`ProgressEngine`] for unit testing
-    impl<S: Storage, M: BlockMetadata> BlockPoolArgsBuilder<S, M> {
+    impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPoolArgsBuilder<S, L, M> {
         fn build_with_progress_engine(
             self,
-        ) -> anyhow::Result<(BlockPool<S, M>, ProgressEngine<S, M>)> {
+        ) -> anyhow::Result<(BlockPool<S, L, M>, ProgressEngine<S, L, M>)> {
             let args = self.build_internal()?;
             let (event_manager, cancel_token, blocks, global_registry, async_runtime, metrics) =
                 args.dissolve();
@@ -698,10 +707,10 @@ mod tests {
         assert_eq!(matched[0].sequence_hash(), sequence_hash);
     }
 
-    async fn create_blocks<S: Storage, M: BlockMetadata>(
-        pool: &BlockPool<S, M>,
+    async fn create_blocks<S: Storage, L: LocalityProvider, M: BlockMetadata>(
+        pool: &BlockPool<S, L, M>,
         num_blocks: usize,
-    ) -> anyhow::Result<(Vec<ImmutableBlock<S, M>>, Vec<SequenceHash>)> {
+    ) -> anyhow::Result<(Vec<ImmutableBlock<S, L, M>>, Vec<SequenceHash>)> {
         let tokens = vec![0; num_blocks * 4];
         let token_blocks = TokenBlockSequence::new(Tokens::from(tokens), 4, None);
         assert_eq!(token_blocks.blocks().len(), num_blocks);
@@ -723,7 +732,9 @@ mod tests {
 
     async fn make_simple_pool(
         num_blocks: usize,
-    ) -> anyhow::Result<BlockPool<NullDeviceStorage, BasicMetadata>> {
+    ) -> anyhow::Result<
+        BlockPool<NullDeviceStorage, crate::block_manager::locality::Local, BasicMetadata>,
+    > {
         let config = LayoutConfig {
             num_blocks,
             num_layers: 1,

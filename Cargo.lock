@@ -1555,7 +1555,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-llamacpp"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-stream",
  "dynamo-llm",
@@ -1567,7 +1567,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-mistralrs"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1586,7 +1586,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "akin",
  "aligned-vec",
@@ -1660,7 +1660,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-run"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1689,7 +1689,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "assert_matches",
@@ -1738,7 +1738,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "bytemuck",
  "derive-getters",
@@ -2749,7 +2749,7 @@ dependencies = [
 
 [[package]]
 name = "http"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "clap",
  "dynamo-llm",
@@ -3367,7 +3367,7 @@ checksum = "d750af042f7ef4f724306de029d18836c26c1765a54a6a3f094cbd23a7267ffa"
 
 [[package]]
 name = "libdynamo_llm"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -3480,7 +3480,7 @@ dependencies = [
 
 [[package]]
 name = "llmctl"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -3680,7 +3680,7 @@ dependencies = [
 
 [[package]]
 name = "metrics"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "axum 0.6.20",
  "clap",
@@ -4087,9 +4087,8 @@ dependencies = [
 
 [[package]]
 name = "nixl-sys"
-version = "0.3.0-rc.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6a1727039c315bf41aeadcdbea02522b8a3df69a77bd732996243502a5fb6f07"
+version = "0.3.1"
+source = "git+https://github.com/ai-dynamo/nixl?rev=a7c654d46a14cd5ce635cc8c02433d71df93dedf#a7c654d46a14cd5ce635cc8c02433d71df93dedf"
 dependencies = [
  "bindgen 0.71.1",
  "cc",
@@ -5348,7 +5347,7 @@ dependencies = [
 
 [[package]]
 name = "router"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "clap",
  "dynamo-llm",

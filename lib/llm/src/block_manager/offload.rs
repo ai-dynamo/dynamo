@@ -44,7 +44,10 @@
 //! The kind of offloads/onboards they perform is dictated by the source and target arguments
 //! of the [`OffloadManager::offload_worker`] and [`OffloadManager::onboard_worker`] methods.
 
-use super::block::{BlockError, BlockMetadata, BlockState, ImmutableBlock, TransferContext};
+use super::block::{
+    locality::LocalityProvider, transfer::TransferContext, BlockError, BlockMetadata, BlockState,
+    ImmutableBlock,
+};
 use super::metrics::{BlockManagerMetrics, PoolMetrics};
 use super::pool::BlockPoolError;
 use super::storage::{Cuda, Storage};
@@ -77,29 +80,33 @@ const MAX_CONCURRENT_TRANSFERS: usize = 4;
 const MAX_TRANSFER_BATCH_SIZE: usize = 16;
 
 /// The offload manager handles all block transfers between different cache levels.
-pub struct OffloadManager<Metadata: BlockMetadata> {
+pub struct OffloadManager<Locality: LocalityProvider, Metadata: BlockMetadata> {
     // Handles to the device, host, and disk pools.
-    disk: Option<Arc<BlockPool<DiskStorage, Metadata>>>,
-    host: Option<Arc<BlockPool<PinnedStorage, Metadata>>>,
-    device: Option<Arc<BlockPool<DeviceStorage, Metadata>>>,
+    disk: Option<Arc<BlockPool<DiskStorage, Locality, Metadata>>>,
+    host: Option<Arc<BlockPool<PinnedStorage, Locality, Metadata>>>,
+    device: Option<Arc<BlockPool<DeviceStorage, Locality, Metadata>>>,
 
     /// Queue of offloading requests.
-    device_offload_tx: mpsc::UnboundedSender<OffloadRequest<DeviceStorage, Metadata>>,
-    host_offload_tx: mpsc::UnboundedSender<OffloadRequest<PinnedStorage, Metadata>>,
+    device_offload_tx: mpsc::UnboundedSender<OffloadRequest<DeviceStorage, Locality, Metadata>>,
+    host_offload_tx: mpsc::UnboundedSender<OffloadRequest<PinnedStorage, Locality, Metadata>>,
 
     /// Queue of pending onboarding requests.
-    host_onboard_tx: mpsc::UnboundedSender<OnboardRequest<PinnedStorage, DeviceStorage, Metadata>>,
-    disk_onboard_tx: mpsc::UnboundedSender<OnboardRequest<DiskStorage, DeviceStorage, Metadata>>,
+    host_onboard_tx:
+        mpsc::UnboundedSender<OnboardRequest<PinnedStorage, DeviceStorage, Locality, Metadata>>,
+    disk_onboard_tx:
+        mpsc::UnboundedSender<OnboardRequest<DiskStorage, DeviceStorage, Locality, Metadata>>,
 
     /// An incrementing counter for offloaded blocks. Within the same priority, blocks with lower tick values are processed first.
     tick: Arc<Mutex<u64>>,
 }
 
-impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
+impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
+    OffloadManager<Locality, Metadata>
+{
     pub fn new(
-        disk: Option<Arc<BlockPool<DiskStorage, Metadata>>>,
-        host: Option<Arc<BlockPool<PinnedStorage, Metadata>>>,
-        device: Option<Arc<BlockPool<DeviceStorage, Metadata>>>,
+        disk: Option<Arc<BlockPool<DiskStorage, Locality, Metadata>>>,
+        host: Option<Arc<BlockPool<PinnedStorage, Locality, Metadata>>>,
+        device: Option<Arc<BlockPool<DeviceStorage, Locality, Metadata>>>,
         nixl_agent: Arc<Option<NixlAgent>>,
         async_rt_handle: Handle,
         metrics: Arc<BlockManagerMetrics>,
@@ -249,10 +256,10 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
     }
 
     async fn offload_worker<Source: Storage, Target: Storage>(
-        source_pool: Option<Arc<BlockPool<Source, Metadata>>>,
-        target_pool: Option<Arc<BlockPool<Target, Metadata>>>,
-        mut offload_rx: mpsc::UnboundedReceiver<OffloadRequest<Source, Metadata>>,
-        transfer_manager: Arc<dyn TransferManager<Source, Target, Metadata>>,
+        source_pool: Option<Arc<BlockPool<Source, Locality, Metadata>>>,
+        target_pool: Option<Arc<BlockPool<Target, Locality, Metadata>>>,
+        mut offload_rx: mpsc::UnboundedReceiver<OffloadRequest<Source, Locality, Metadata>>,
+        transfer_manager: Arc<dyn TransferManager<Source, Target, Locality, Metadata>>,
         pool_metrics: Arc<PoolMetrics>,
         cancellation_token: CancellationToken,
     ) -> Result<()> {
@@ -301,7 +308,8 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                 if let Some(block) = block {
                     // If the block is already in the target, don't offload it.
                     if let Ok(blocks) = target_pool
-                        .match_sequence_hashes_blocking(vec![request.sequence_hash].as_slice())
+                        .match_sequence_hashes(vec![request.sequence_hash].as_slice())
+                        .await
                     {
                         if !blocks.is_empty() {
                             continue;
@@ -345,10 +353,10 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
     }
 
     async fn onboard_worker<Source: Storage, Target: Storage>(
-        source_pool: Option<Arc<BlockPool<Source, Metadata>>>,
-        target_pool: Option<Arc<BlockPool<Target, Metadata>>>,
-        mut onboard_rx: mpsc::UnboundedReceiver<OnboardRequest<Source, Target, Metadata>>,
-        transfer_manager: Arc<dyn TransferManager<Source, Target, Metadata>>,
+        source_pool: Option<Arc<BlockPool<Source, Locality, Metadata>>>,
+        target_pool: Option<Arc<BlockPool<Target, Locality, Metadata>>>,
+        mut onboard_rx: mpsc::UnboundedReceiver<OnboardRequest<Source, Target, Locality, Metadata>>,
+        transfer_manager: Arc<dyn TransferManager<Source, Target, Locality, Metadata>>,
         pool_metrics: Arc<PoolMetrics>,
         cancellation_token: CancellationToken,
     ) -> Result<()> {
@@ -396,7 +404,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
 
     pub async fn offload<S: Storage>(
         &self,
-        block: &ImmutableBlock<S, Metadata>,
+        block: &ImmutableBlock<S, Locality, Metadata>,
         priority: u64,
     ) -> core::result::Result<(), BlockPoolError> {
         match block.state() {
@@ -423,7 +431,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
 
         // TODO: What's the performance penalty of this runtime type-checking?
         if let Some(device_block) =
-            any_block.downcast_ref::<ImmutableBlock<DeviceStorage, Metadata>>()
+            any_block.downcast_ref::<ImmutableBlock<DeviceStorage, Locality, Metadata>>()
         {
             // The host pool doesn't exist, so we can't offload to it.
             if self.device_offload_tx.is_closed() {
@@ -438,7 +446,7 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
 
             self.device_offload_tx.send(request).unwrap();
         } else if let Some(host_block) =
-            any_block.downcast_ref::<ImmutableBlock<PinnedStorage, Metadata>>()
+            any_block.downcast_ref::<ImmutableBlock<PinnedStorage, Locality, Metadata>>()
         {
             // The disk pool doesn't exist, so we can't offload to it.
             if self.host_offload_tx.is_closed() {
@@ -459,8 +467,8 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
 
     pub async fn onboard<S: Storage>(
         &self,
-        blocks: Vec<ImmutableBlock<S, Metadata>>,
-    ) -> BlockResult<DeviceStorage, Metadata> {
+        blocks: Vec<ImmutableBlock<S, Locality, Metadata>>,
+    ) -> BlockResult<DeviceStorage, Locality, Metadata> {
         for block in &blocks {
             match block.state() {
                 BlockState::Registered(_, _) => {}
@@ -482,14 +490,14 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
 
         // TODO: This is really ugly.
         if any_block
-            .downcast_ref::<ImmutableBlock<PinnedStorage, Metadata>>()
+            .downcast_ref::<ImmutableBlock<PinnedStorage, Locality, Metadata>>()
             .is_some()
         {
             let host_blocks = blocks
                 .iter()
                 .map(|b| {
                     (b as &dyn Any)
-                        .downcast_ref::<ImmutableBlock<PinnedStorage, Metadata>>()
+                        .downcast_ref::<ImmutableBlock<PinnedStorage, Locality, Metadata>>()
                         .unwrap()
                         .clone()
                 })
@@ -499,14 +507,14 @@ impl<Metadata: BlockMetadata> OffloadManager<Metadata> {
                 .send(OnboardRequest::new(host_blocks, tx))
                 .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
         } else if any_block
-            .downcast_ref::<ImmutableBlock<DiskStorage, Metadata>>()
+            .downcast_ref::<ImmutableBlock<DiskStorage, Locality, Metadata>>()
             .is_some()
         {
             let disk_blocks = blocks
                 .iter()
                 .map(|b| {
                     (b as &dyn Any)
-                        .downcast_ref::<ImmutableBlock<DiskStorage, Metadata>>()
+                        .downcast_ref::<ImmutableBlock<DiskStorage, Locality, Metadata>>()
                         .unwrap()
                         .clone()
                 })
@@ -535,8 +543,8 @@ pub mod tests {
 
     use crate::block_manager::{
         block::{
-            BasicMetadata, BlockDataExt, BlockDataProvider, BlockExt, BlockIdentifier, Blocks,
-            MutableBlock,
+            locality::Local,
+            BasicMetadata, BlockDataExt, BlockDataProvider, BlockExt, Blocks, MutableBlock,
         },
         layout::{nixl::NixlLayout, FullyContiguous, LayerSeparate, LayoutType},
         pool::BlockPool,
@@ -561,9 +569,9 @@ pub mod tests {
     const BLOCK_SIZE: usize = 4;
     const NUM_LAYERS: usize = 8;
 
-    type DevicePool = Option<Arc<BlockPool<DeviceStorage, BasicMetadata>>>;
-    type HostPool = Option<Arc<BlockPool<PinnedStorage, BasicMetadata>>>;
-    type DiskPool = Option<Arc<BlockPool<DiskStorage, BasicMetadata>>>;
+    type DevicePool = Option<Arc<BlockPool<DeviceStorage, Local, BasicMetadata>>>;
+    type HostPool = Option<Arc<BlockPool<PinnedStorage, Local, BasicMetadata>>>;
+    type DiskPool = Option<Arc<BlockPool<DiskStorage, Local, BasicMetadata>>>;
 
     lazy_static::lazy_static! {
         static ref NIXL_AGENT: Arc<Option<NixlAgent>> = {
@@ -583,7 +591,7 @@ pub mod tests {
         layout_type: LayoutType,
         agent: &NixlAgent,
         allocator: &dyn StorageAllocator<S>,
-    ) -> Result<Arc<BlockPool<S, BasicMetadata>>> {
+    ) -> Result<Arc<BlockPool<S, Local, BasicMetadata>>> {
         match layout_type {
             LayoutType::FullyContiguous => {
                 let mut pool_layout = FullyContiguous::allocate(config.clone(), allocator)?;
@@ -607,7 +615,7 @@ pub mod tests {
         disk_blocks: Option<usize>,
         inner_dim: Option<usize>,
     ) -> Result<(
-        Arc<OffloadManager<BasicMetadata>>,
+        Arc<OffloadManager<Local, BasicMetadata>>,
         DevicePool,
         HostPool,
         DiskPool,
@@ -628,7 +636,7 @@ pub mod tests {
         inner_dim: Option<usize>,
         layout_type: LayoutType,
     ) -> Result<(
-        Arc<OffloadManager<BasicMetadata>>,
+        Arc<OffloadManager<Local, BasicMetadata>>,
         DevicePool,
         HostPool,
         DiskPool,
@@ -687,11 +695,19 @@ pub mod tests {
         Ok((manager, device_pool, host_pool, disk_pool))
     }
 
+    /// Create a block in the 'RESET' state.
+    async fn get_block<S: Storage, Metadata: BlockMetadata>(
+        pool: &Arc<BlockPool<S, Local, Metadata>>,
+    ) -> Result<MutableBlock<S, Local, Metadata>> {
+        let mut blocks = pool.allocate_blocks(1).await?;
+        Ok(blocks.pop().unwrap())
+    }
+
     /// Create a block in the 'COMPLETED' state.
     async fn completed_block<S: Storage, Metadata: BlockMetadata>(
-        pool: &Arc<BlockPool<S, Metadata>>,
+        pool: &Arc<BlockPool<S, Local, Metadata>>,
         tokens: [u32; BLOCK_SIZE],
-    ) -> Result<MutableBlock<S, Metadata>> {
+    ) -> Result<MutableBlock<S, Local, Metadata>> {
         let mut block = pool
             .allocate_blocks(1)
             .await?
@@ -725,7 +741,7 @@ pub mod tests {
                         )
                         .result()?;
                     },
-                    StorageType::Disk => {
+                    StorageType::Disk(_) => {
                         let nixl_desc = layer_view.as_nixl_descriptor();
                         let mut file: ManuallyDrop<File>;
                         let data = avec![[4096] | value; layer_view.size()];
@@ -777,7 +793,7 @@ pub mod tests {
                                 .to_vec(),
                         );
                     },
-                    StorageType::Disk => {
+                    StorageType::Disk(_) => {
                         let nixl_desc = layer_view.as_nixl_descriptor();
                         let mut file: ManuallyDrop<File>;
                         let mut aligned = avec![[4096] | 0; layer_view.size()];

@@ -14,16 +14,16 @@
 // limitations under the License.
 
 use crate::block_manager::{
-    block::{registry::BlockRegistationError, BlockState, PrivateBlockExt},
+    block::{registry::BlockRegistrationError, BlockState, PrivateBlockExt},
     events::Publisher,
 };
 
 use super::*;
 
-impl<S: Storage, M: BlockMetadata> State<S, M> {
+impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M> {
     fn new(
         event_manager: Arc<dyn EventManager>,
-        return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, M>>,
+        return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, L, M>>,
         global_registry: GlobalRegistry,
         async_runtime: Handle,
         metrics: Arc<PoolMetrics>,
@@ -40,8 +40,8 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
 
     async fn handle_priority_request(
         &mut self,
-        req: PriorityRequest<S, M>,
-        return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, M>>,
+        req: PriorityRequest<S, L, M>,
+        return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
     ) {
         match req {
             PriorityRequest::AllocateBlocks(req) => {
@@ -61,14 +61,14 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
             PriorityRequest::MatchSequenceHashes(req) => {
                 let (sequence_hashes, resp_tx) = req.dissolve();
                 let immutable_blocks = self.match_sequence_hashes(sequence_hashes, return_rx).await;
-                if resp_tx.send(immutable_blocks).is_err() {
+                if resp_tx.send(Ok(immutable_blocks)).is_err() {
                     tracing::error!("failed to send response to match sequence hashes");
                 }
             }
         }
     }
 
-    fn handle_control_request(&mut self, req: ControlRequest<S, M>) {
+    fn handle_control_request(&mut self, req: ControlRequest<S, L, M>) {
         match req {
             ControlRequest::AddBlocks(blocks) => {
                 let (blocks, resp_rx) = blocks.dissolve();
@@ -80,7 +80,7 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
         }
     }
 
-    fn handle_return_block(&mut self, block: Block<S, M>) {
+    fn handle_return_block(&mut self, block: Block<S, L, M>) {
         self.return_block(block);
     }
 
@@ -89,8 +89,8 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
     async fn wait_for_returned_block(
         &mut self,
         sequence_hash: SequenceHash,
-        return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, M>>,
-    ) -> Block<S, M> {
+        return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
+    ) -> Block<S, L, M> {
         while let Some(block) = return_rx.recv().await {
             if matches!(block.state(), BlockState::Registered(handle, _) if handle.sequence_hash() == sequence_hash)
             {
@@ -105,7 +105,7 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
     pub fn allocate_blocks(
         &mut self,
         count: usize,
-    ) -> Result<Vec<MutableBlock<S, M>>, BlockPoolError> {
+    ) -> Result<Vec<MutableBlock<S, L, M>>, BlockPoolError> {
         let available_blocks = self.inactive.available_blocks() as usize;
 
         if available_blocks < count {
@@ -137,9 +137,9 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
 
     pub async fn register_blocks(
         &mut self,
-        blocks: Vec<MutableBlock<S, M>>,
-        return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, M>>,
-    ) -> Result<Vec<ImmutableBlock<S, M>>, BlockPoolError> {
+        blocks: Vec<MutableBlock<S, L, M>>,
+        return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
+    ) -> Result<Vec<ImmutableBlock<S, L, M>>, BlockPoolError> {
         let expected_len = blocks.len();
         let mut immutable_blocks = Vec::new();
 
@@ -175,7 +175,7 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
                         }
                         block
                     }
-                    Err(BlockRegistationError::BlockAlreadyRegistered(_)) => {
+                    Err(BlockRegistrationError::BlockAlreadyRegistered(_)) => {
                         // Block is already registered, wait for it to be returned
                         offload = false;
                         let raw_block =
@@ -211,8 +211,8 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
     async fn match_sequence_hashes(
         &mut self,
         sequence_hashes: Vec<SequenceHash>,
-        return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, M>>,
-    ) -> Vec<ImmutableBlock<S, M>> {
+        return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
+    ) -> Vec<ImmutableBlock<S, L, M>> {
         let mut immutable_blocks = Vec::new();
         for sequence_hash in &sequence_hashes {
             if !self.registry.is_registered(*sequence_hash) {
@@ -261,7 +261,7 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
     }
 
     /// Returns a block to the inactive pool
-    pub fn return_block(&mut self, mut block: Block<S, M>) {
+    pub fn return_block(&mut self, mut block: Block<S, L, M>) {
         self.active.remove(&mut block);
         self.inactive.return_block(block);
     }
@@ -271,20 +271,20 @@ impl<S: Storage, M: BlockMetadata> State<S, M> {
     }
 }
 
-impl<S: Storage, M: BlockMetadata> ProgressEngine<S, M> {
+impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine<S, L, M> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         event_manager: Arc<dyn EventManager>,
-        priority_rx: tokio::sync::mpsc::UnboundedReceiver<PriorityRequest<S, M>>,
-        ctrl_rx: tokio::sync::mpsc::UnboundedReceiver<ControlRequest<S, M>>,
+        priority_rx: tokio::sync::mpsc::UnboundedReceiver<PriorityRequest<S, L, M>>,
+        ctrl_rx: tokio::sync::mpsc::UnboundedReceiver<ControlRequest<S, L, M>>,
         cancel_token: CancellationToken,
-        blocks: Vec<Block<S, M>>,
+        blocks: Vec<Block<S, L, M>>,
         global_registry: GlobalRegistry,
         async_runtime: Handle,
         metrics: Arc<PoolMetrics>,
     ) -> Self {
         let (return_tx, return_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = State::<S, M>::new(
+        let mut state = State::<S, L, M>::new(
             event_manager,
             return_tx,
             global_registry,

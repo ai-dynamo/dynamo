@@ -1,4 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
@@ -10,7 +11,7 @@ use utils::*;
 use zmq::*;
 
 use crate::block_manager::{
-    block::{layout_to_blocks, transfer::TransferContext, Block},
+    block::{layout_to_blocks, locality, transfer::TransferContext, Block},
     layout::LayoutType,
     storage::{torch::TorchTensor, DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator},
     BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage,
@@ -226,7 +227,7 @@ impl KvbmWorker {
         agent: &Option<NixlAgent>,
         block_set_idx: usize,
         worker_id: usize,
-    ) -> anyhow::Result<Vec<Block<S, M>>> {
+    ) -> anyhow::Result<Vec<Block<S, locality::Local, M>>> {
         // Register with NIXL, if applicable.
         if let Some(agent) = agent {
             layout.nixl_register(agent, None)?;
@@ -261,13 +262,13 @@ impl KvbmWorker {
         tracing::info!("Worker {} waiting on barrier {}", worker_id, barrier_id);
 
         let worker_barrier =
-            WorkerBarrier::<KvbmLeaderData>::new(barrier_id, worker_id.to_string());
+            WorkerBarrier::<KvbmLeaderData, ()>::new(barrier_id, worker_id.to_string());
 
         let leader_data = tokio::select! {
             _ = cancel_token.cancelled() => {
                 return Ok(())
             }
-            leader_data = worker_barrier.sync(&drt) => {
+            leader_data = worker_barrier.sync(&drt, &()) => {
                 leader_data
             }
         }

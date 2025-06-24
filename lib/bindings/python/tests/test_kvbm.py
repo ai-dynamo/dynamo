@@ -125,7 +125,6 @@ async def test_kvbm(block_manager: KvbmCacheManager):
 
     block_ids = block_manager.get_block_ids(request_3.request_id)
     assert len(block_ids) == 1
-    print(f"block_ids: {block_ids}")
     assert block_ids[0] == [5, 6]
 
 

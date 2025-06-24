@@ -11,7 +11,8 @@ use pyo3::{prelude::*, wrap_pymodule};
 
 use dynamo_llm::{
     block_manager::{
-        block::{BlockId, BlockIdentifier, ImmutableBlock, MutableBlock},
+        block::{BlockId, ImmutableBlock, MutableBlock},
+        block::locality::{LocalityProvider, Local},
         pool::BlockPool,
         BasicMetadata, DeviceStorage, KvBlockManager, Storage,
     },
@@ -284,7 +285,7 @@ impl SlotError {
 }
 
 pub struct SlotManager<R: RequestKey> {
-    slots: HashMap<R, Slot<DeviceStorage>>,
+    slots: HashMap<R, Slot<DeviceStorage, Local>>,
     block_size: usize,
 }
 

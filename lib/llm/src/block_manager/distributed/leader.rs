@@ -88,7 +88,7 @@ impl KvbmLeader {
         });
 
         // Build our leader barrier and publish the data.
-        let leader_barrier = LeaderBarrier::new(
+        let leader_barrier: LeaderBarrier<KvbmLeaderData, ()> = LeaderBarrier::new(
             config.barrier_id,
             config.world_size,
             Some(Duration::from_secs(30)),

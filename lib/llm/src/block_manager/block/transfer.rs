@@ -19,7 +19,7 @@ mod memcpy;
 mod nixl;
 mod strategy;
 
-use super::nixl::{IsMutable, NixlBlockDataImmutable, NixlBlockDataMutable, RemoteBlock};
+use super::nixl::{IsMutable, NixlBlockDataMutable, RemoteBlock};
 use super::*;
 
 use crate::block_manager::storage::{
@@ -29,6 +29,7 @@ use crate::block_manager::storage::{
 
 use cudarc::driver::CudaStream;
 
+use nixl_sys::NixlDescriptor;
 use nixl_sys::XferOp::{Read, Write};
 use std::ops::Range;
 use tokio::sync::oneshot;
@@ -125,20 +126,21 @@ pub trait ReadFromStrategy<Source> {
 
 impl<RB: ReadableBlock, WB: WritableBlock> WriteToStrategy<WB> for RB
 where
-    <RB as ReadableBlock>::StorageType: Local + WriteToStrategy<<WB as WritableBlock>::StorageType>,
+    <RB as StorageTypeProvider>::StorageType:
+        Local + WriteToStrategy<<WB as StorageTypeProvider>::StorageType>,
 {
     #[inline(always)]
     fn write_to_strategy() -> TransferStrategy {
-        <<RB as ReadableBlock>::StorageType as WriteToStrategy<
-            <WB as WritableBlock>::StorageType,
+        <<RB as StorageTypeProvider>::StorageType as WriteToStrategy<
+            <WB as StorageTypeProvider>::StorageType,
         >>::write_to_strategy()
     }
 }
 
 impl<WB: WritableBlock, RB: ReadableBlock> ReadFromStrategy<RB> for WB
 where
-    <RB as ReadableBlock>::StorageType: Remote,
-    <WB as WritableBlock>::StorageType: NixlRegisterableStorage,
+    <RB as StorageTypeProvider>::StorageType: Remote,
+    <WB as StorageTypeProvider>::StorageType: NixlRegisterableStorage,
 {
     #[inline(always)]
     fn read_from_strategy() -> TransferStrategy {
@@ -158,6 +160,8 @@ pub trait WriteTo<Target> {
 impl<RB: ReadableBlock, WB: WritableBlock> WriteTo<WB> for Vec<RB>
 where
     RB: WriteToStrategy<WB> + Local,
+    <RB as StorageTypeProvider>::StorageType: NixlDescriptor,
+    <WB as StorageTypeProvider>::StorageType: NixlDescriptor,
 {
     fn write_to(
         &self,
@@ -348,7 +352,7 @@ pub struct TransferRequestPut<
 impl<Source> BlockTransferEngineV1<Source, RemoteBlock<IsMutable>>
     for TransferRequestPut<'_, Source, RemoteBlock<IsMutable>>
 where
-    Source: BlockDataProvider + Local, // + NixlBlockDataMutable<Source::StorageType>,
+    Source: BlockDataProvider + Local + NixlBlockDataMutable<Source::StorageType>,
     Source::StorageType: NixlRegisterableStorage,
 {
     fn execute(self) -> Result<(), TransferError> {
@@ -359,10 +363,10 @@ where
 
         for (src_block, dst_block) in self.sources.iter().zip(self.destinations.iter_mut()) {
             let src_data = src_block.block_data(private::PrivateToken);
-            let src_nixl_desc = src_data.as_block_descriptor()?;
+            let src_nixl_desc = src_data.block_view()?.as_nixl_descriptor();
 
             let dst_data = dst_block.block_data_mut(private::PrivateToken);
-            let dst_nixl_desc = dst_data.as_block_descriptor_mut()?;
+            let dst_nixl_desc = dst_data.block_view_mut()?.as_nixl_descriptor_mut();
 
             // TODO: Perform NIXL PUT operation
             // tracing::trace!(src = ?(src_data.worker_id, src_data.block_set_idx, src_data.block_idx), dst = ?(dst_data.worker_id, dst_data.block_set_idx, dst_data.block_idx), "NIXL PUT block");
@@ -402,14 +406,14 @@ where
             let dst_data = dst_block.block_data(private::PrivateToken);
 
             src_set.insert((
-                src_data.block_set_idx,
-                src_data.block_idx,
-                src_data.worker_id,
+                src_data.block_set_id(),
+                src_data.block_id(),
+                src_data.worker_id(),
             ));
             dst_set.insert((
-                dst_data.block_set_idx,
-                dst_data.block_idx,
-                dst_data.worker_id,
+                dst_data.block_set_id(),
+                dst_data.block_id(),
+                dst_data.worker_id(),
             ));
         }
 

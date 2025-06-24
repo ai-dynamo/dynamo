@@ -267,7 +267,7 @@ impl<S: NixlRegisterableStorage> ToSerializedNixlBlockLayout for FullyContiguous
             config,
             vec![base_offset],
             storage_descriptors,
-            self.storage_type(),
+            *self.storage_type(),
         );
 
         let nixl_block_layout = NixlBlockLayoutKinds::FullyContiguous(serializable_data);
@@ -291,7 +291,7 @@ impl<S: NixlRegisterableStorage> ToSerializedNixlBlockLayout for LayerSeparate<S
             config,
             base_offsets,
             storage_descriptors,
-            self.storage_type(),
+            *self.storage_type(),
         );
 
         let nixl_block_layout = NixlBlockLayoutKinds::LayerSeparate(serializable_data);

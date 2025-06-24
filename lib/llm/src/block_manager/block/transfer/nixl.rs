@@ -27,7 +27,9 @@ fn append_xfer_request<Source, Destination>(
 ) -> Result<()>
 where
     Source: BlockDataProvider,
+    Source::StorageType: NixlDescriptor,
     Destination: BlockDataProviderMut,
+    Destination::StorageType: NixlDescriptor,
 {
     let src_data = src.block_data(private::PrivateToken);
     let dst_data = dst.block_data_mut(private::PrivateToken);
@@ -91,7 +93,9 @@ pub fn write_blocks_to<Source, Destination>(
 ) -> Result<Box<dyn Future<Output = ()> + Send + Sync + Unpin>>
 where
     Source: BlockDataProvider,
+    Source::StorageType: NixlDescriptor,
     Destination: BlockDataProviderMut,
+    Destination::StorageType: NixlDescriptor,
 {
     if src.is_empty() || dst.is_empty() {
         return Ok(Box::new(std::future::ready(())));
@@ -117,8 +121,8 @@ where
         .storage_type()
         .nixl_mem_type();
 
-    let mut src_dl = XferDescList::new(src_mem_type)?;
-    let mut dst_dl = XferDescList::new(dst_mem_type)?;
+    let mut src_dl = XferDescList::new(src_mem_type, true)?;
+    let mut dst_dl = XferDescList::new(dst_mem_type, true)?;
 
     for (src, dst) in src.iter().zip(dst.iter_mut()) {
         append_xfer_request(src, dst, &mut src_dl, &mut dst_dl)?;

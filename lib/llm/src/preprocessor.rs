@@ -414,7 +414,7 @@ impl
         let (common_request, annotations) = self.preprocess_request(&request)?;
 
         // update isl
-        response_generator.update_isl(common_request.token_ids.len() as i32);
+        response_generator.update_isl(common_request.token_ids.len() as u32);
 
         // repack the common completion request
         let common_request = context.map(|_| common_request);

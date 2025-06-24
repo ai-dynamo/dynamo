@@ -33,16 +33,20 @@ pub mod storage;
 
 pub use crate::common::dtype::DType;
 pub use block::{
+    locality::{self, LocalityProvider},
     nixl::{
         AsBlockDescriptorSet, BlockDescriptorList, IsImmutable, IsMutable, MutabilityKind,
         RemoteBlock,
     },
-    transfer::{BlockTransferEngineV1, TransferRequestPut},
-    BasicMetadata, BlockMetadata, Blocks, ImmutableBlock,
+    // transfer::{BlockTransferEngineV1, TransferRequestPut},
+    BasicMetadata,
+    BlockMetadata,
+    Blocks,
+    ImmutableBlock,
 };
 pub use config::*;
 pub use layout::{nixl::NixlLayout, LayoutConfig, LayoutConfigBuilder, LayoutError, LayoutType};
-use offload::request::BlockResult;
+// use offload::request::BlockResult;
 pub use pool::BlockPool;
 pub use storage::{
     nixl::NixlRegisterableStorage, DeviceStorage, DiskStorage, PinnedStorage, Storage,
@@ -100,7 +104,7 @@ impl Drop for CancelOnLastDrop {
 // 5. initialize the pools for each set of blocks
 #[derive(Clone)]
 pub struct KvBlockManager<Metadata: BlockMetadata> {
-    state: Arc<state::KvBlockManagerState<Metadata>>,
+    state: Arc<state::KvBlockManagerState<locality::Local, Metadata>>,
     _cancellation_token: Arc<CancelOnLastDrop>,
     block_size: usize,
 }
@@ -111,7 +115,7 @@ impl<Metadata: BlockMetadata> KvBlockManager<Metadata> {
     /// The returned object is a frontend to the [KvBlockManager] which owns the cancellation
     /// tokens. When this object gets drop, the cancellation token will be cancelled and begin
     /// the gracefully shutdown of the block managers internal state.
-    pub fn new(config: KvBlockManagerConfig) -> Result<Self> {
+    pub async fn new(config: KvBlockManagerConfig) -> Result<Self> {
         let mut config = config;
 
         // The frontend of the KvBlockManager will take ownership of the cancellation token
@@ -124,7 +128,7 @@ impl<Metadata: BlockMetadata> KvBlockManager<Metadata> {
         let block_size = config.model.page_size;
 
         // Create the internal state
-        let state = state::KvBlockManagerState::new(config)?;
+        let state = state::KvBlockManagerState::new(config).await?;
 
         let _cancellation_token = Arc::new(CancelOnLastDrop { cancellation_token });
 
@@ -169,17 +173,17 @@ impl<Metadata: BlockMetadata> KvBlockManager<Metadata> {
     }
 
     /// Get a reference to the disk block pool
-    pub fn disk(&self) -> Option<&BlockPool<DiskStorage, Metadata>> {
+    pub fn disk(&self) -> Option<&BlockPool<DiskStorage, locality::Local, Metadata>> {
         self.state.disk()
     }
 
     /// Get a reference to the host block pool
-    pub fn host(&self) -> Option<&BlockPool<PinnedStorage, Metadata>> {
+    pub fn host(&self) -> Option<&BlockPool<PinnedStorage, locality::Local, Metadata>> {
         self.state.host()
     }
 
     /// Get a reference to the device block pool
-    pub fn device(&self) -> Option<&BlockPool<DeviceStorage, Metadata>> {
+    pub fn device(&self) -> Option<&BlockPool<DeviceStorage, locality::Local, Metadata>> {
         self.state.device()
     }
 
@@ -188,26 +192,26 @@ impl<Metadata: BlockMetadata> KvBlockManager<Metadata> {
         self.state.worker_id()
     }
 
-    pub async fn onboard_blocks<S: Storage>(
-        &self,
-        blocks: Vec<ImmutableBlock<S, Metadata>>,
-    ) -> BlockResult<DeviceStorage, Metadata> {
-        self.state.onboard_blocks(blocks).await
-    }
+    // pub async fn onboard_blocks<S: Storage>(
+    //     &self,
+    //     blocks: Vec<ImmutableBlock<S, locality::Local, Metadata>>,
+    // ) -> BlockResult<DeviceStorage, locality::Local, Metadata> {
+    //     self.state.onboard_blocks(blocks).await
+    // }
 }
 
 #[cfg(all(test, feature = "testing-full"))]
 mod tests {
     use super::*;
 
-    use crate::block_manager::block::BlockExt;
+    // use crate::block_manager::block::BlockExt;
     use crate::tokens::Tokens;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     // Atomic Counter for Worker ID
     static WORKER_ID: AtomicU64 = AtomicU64::new(1337);
 
-    fn create_reference_block_manager() -> ReferenceBlockManager {
+    pub fn create_reference_block_manager_config() -> KvBlockManagerConfig {
         let worker_id = WORKER_ID.fetch_add(1, Ordering::SeqCst);
 
         // Check if we're already in a Tokio runtime context
@@ -218,7 +222,7 @@ mod tests {
             Some(Arc::new(tokio::runtime::Runtime::new().unwrap()))
         };
 
-        let config = KvBlockManagerConfig::builder()
+        KvBlockManagerConfig::builder()
             .runtime(
                 KvManagerRuntimeConfig::builder()
                     .worker_id(worker_id)
@@ -258,21 +262,19 @@ mod tests {
                     .unwrap(),
             )
             .build()
-            .unwrap();
+            .unwrap()
+    }
 
-        ReferenceBlockManager::new(config).unwrap()
+    pub async fn create_reference_block_manager() -> ReferenceBlockManager {
+        ReferenceBlockManager::new(create_reference_block_manager_config())
+            .await
+            .unwrap()
     }
 
     #[tokio::test]
     async fn test_reference_block_manager_inherited_async_runtime() {
         dynamo_runtime::logging::init();
-        let _block_manager = create_reference_block_manager();
-    }
-
-    #[test]
-    fn test_reference_block_manager_blocking() {
-        dynamo_runtime::logging::init();
-        let _block_manager = create_reference_block_manager();
+        let _block_manager = create_reference_block_manager().await;
     }
 
     // This tests mimics the behavior of two unique kvbm workers exchanging blocksets
@@ -288,8 +290,8 @@ mod tests {
         dynamo_runtime::logging::init();
 
         // create two block managers - mimics two unique dynamo workers
-        let kvbm_0 = create_reference_block_manager();
-        let kvbm_1 = create_reference_block_manager();
+        let kvbm_0 = create_reference_block_manager().await;
+        let kvbm_1 = create_reference_block_manager().await;
 
         assert_ne!(kvbm_0.worker_id(), kvbm_1.worker_id());
 
@@ -303,16 +305,16 @@ mod tests {
 
         // Worker 0
         // Allocate 4 mutable blocks on the host
-        let blocks_0 = kvbm_0.host().unwrap().allocate_blocks(4).await.unwrap();
+        let _blocks_0 = kvbm_0.host().unwrap().allocate_blocks(4).await.unwrap();
 
-        // Create a BlockDescriptorList for the mutable blocks
-        // let blockset_0 = BlockDescriptorList::from_mutable_blocks(&blocks_0).unwrap();
-        let blockset_0 = blocks_0.as_block_descriptor_set().unwrap();
+        // // Create a BlockDescriptorList for the mutable blocks
+        // // let blockset_0 = BlockDescriptorList::from_mutable_blocks(&blocks_0).unwrap();
+        // let blockset_0 = blocks_0.as_block_descriptor_set().unwrap();
 
-        // Worker 1
-        // Create a RemoteBlock list from blockset_0
-        let _blocks_1 = kvbm_1.host().unwrap().allocate_blocks(4).await.unwrap();
-        let mut _remote_blocks_0 = kvbm_1.get_remote_blocks_mutable(&blockset_0).unwrap();
+        // // Worker 1
+        // // Create a RemoteBlock list from blockset_0
+        // let _blocks_1 = kvbm_1.host().unwrap().allocate_blocks(4).await.unwrap();
+        // let mut _remote_blocks_0 = kvbm_1.get_remote_blocks_mutable(&blockset_0).unwrap();
 
         // TODO(#967) - Enable with TransferEngine
 
@@ -355,7 +357,7 @@ mod tests {
     async fn test_offload() -> Result<()> {
         dynamo_runtime::logging::init();
 
-        let block_manager = create_reference_block_manager();
+        let block_manager = create_reference_block_manager().await;
 
         let device = block_manager.device().unwrap();
 

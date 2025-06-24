@@ -16,7 +16,9 @@
 use std::cmp::Ordering;
 use std::sync::Weak;
 
-use crate::block_manager::block::{BlockMetadata, ImmutableBlock, MutableBlock};
+use crate::block_manager::block::{
+    locality::LocalityProvider, BlockMetadata, ImmutableBlock, MutableBlock,
+};
 use crate::block_manager::pool::BlockPoolError;
 use crate::block_manager::storage::Storage;
 
@@ -46,49 +48,58 @@ impl Ord for OffloadRequestKey {
 /// Data needed to offload a block.
 /// While the block is in the offload queue, we hold a weak reference to it.
 /// This way, we don't prevent the block from being reused if needed.
-pub struct OffloadRequest<S: Storage, M: BlockMetadata> {
+pub struct OffloadRequest<S: Storage, L: LocalityProvider, M: BlockMetadata> {
     pub key: OffloadRequestKey,
-    pub block: Weak<MutableBlock<S, M>>,
+    pub block: Weak<MutableBlock<S, L, M>>,
     pub sequence_hash: u64,
 }
 
-impl<S: Storage, M: BlockMetadata> PartialOrd for OffloadRequest<S, M> {
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> PartialOrd for OffloadRequest<S, L, M> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 /// Order offload requests by priority, high to low.
-impl<S: Storage, M: BlockMetadata> Ord for OffloadRequest<S, M> {
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Ord for OffloadRequest<S, L, M> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.key.cmp(&other.key)
     }
 }
 
 /// Equality is based on sequence hash, priority, and location.
-impl<S: Storage, M: BlockMetadata> PartialEq for OffloadRequest<S, M> {
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> PartialEq for OffloadRequest<S, L, M> {
     fn eq(&self, other: &Self) -> bool {
         self.key == other.key
     }
 }
 
-impl<S: Storage, M: BlockMetadata> Eq for OffloadRequest<S, M> {}
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Eq for OffloadRequest<S, L, M> {}
 
-pub type BlockResult<Target, Metadata> =
-    Result<Vec<ImmutableBlock<Target, Metadata>>, BlockPoolError>;
+pub type BlockResult<Target, Locality, Metadata> =
+    Result<Vec<ImmutableBlock<Target, Locality, Metadata>>, BlockPoolError>;
 
 /// Data needed for onboarding.
 /// Unlike offloading, we need a means to return the resulting blocks to the caller.
-pub struct OnboardRequest<Source: Storage, Target: Storage, M: BlockMetadata> {
-    pub blocks: Vec<ImmutableBlock<Source, M>>,
+pub struct OnboardRequest<
+    Source: Storage,
+    Target: Storage,
+    Locality: LocalityProvider,
+    M: BlockMetadata,
+> {
+    pub blocks: Vec<ImmutableBlock<Source, Locality, M>>,
     pub response_tx:
-        oneshot::Sender<std::result::Result<Vec<ImmutableBlock<Target, M>>, BlockPoolError>>,
+        oneshot::Sender<Result<Vec<ImmutableBlock<Target, Locality, M>>, BlockPoolError>>,
 }
 
-impl<Source: Storage, Target: Storage, M: BlockMetadata> OnboardRequest<Source, Target, M> {
+impl<Source: Storage, Target: Storage, Locality: LocalityProvider, M: BlockMetadata>
+    OnboardRequest<Source, Target, Locality, M>
+{
     pub fn new(
-        blocks: Vec<ImmutableBlock<Source, M>>,
-        response_tx: oneshot::Sender<Result<Vec<ImmutableBlock<Target, M>>, BlockPoolError>>,
+        blocks: Vec<ImmutableBlock<Source, Locality, M>>,
+        response_tx: oneshot::Sender<
+            Result<Vec<ImmutableBlock<Target, Locality, M>>, BlockPoolError>,
+        >,
     ) -> Self {
         Self {
             blocks,

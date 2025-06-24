@@ -182,7 +182,7 @@ pub struct LocalMemoryRegion {
     size: usize,
 
     #[getter(copy)]
-    storage_idx: usize,
+    storage_type: StorageType,
 }
 
 /// Core trait for block layouts
@@ -203,7 +203,10 @@ pub trait BlockLayout: GenericBlockLayout {
 /// Generic trait for block layouts - type-erased on the [Storage] object.
 pub trait GenericBlockLayout: BlockLayoutConfig + Send + Sync {
     /// Storage type for the layout
-    fn storage_type(&self) -> StorageType;
+    fn storage_type(&self) -> &StorageType;
+
+    /// Full configuration for the layout
+    fn config(&self) -> &LayoutConfig;
 
     /// Get the memory region for a specific page [page_size, inner_dim]
     ///
@@ -259,7 +262,7 @@ pub trait BlockLayoutConfig: std::fmt::Debug {
 }
 
 /// Configuration for block layouts
-#[derive(Debug, Clone, Builder, Validate, Serialize, Deserialize)]
+#[derive(Debug, Clone, Builder, Validate, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LayoutConfig {
     /// Number of blocks
     #[validate(range(min = 1))]
@@ -511,8 +514,12 @@ impl<S: Storage> BlockLayout for FullyContiguous<S> {
 }
 
 impl<S: Storage> GenericBlockLayout for FullyContiguous<S> {
-    fn storage_type(&self) -> StorageType {
-        self.storage_type.clone()
+    fn storage_type(&self) -> &StorageType {
+        &self.storage_type
+    }
+
+    fn config(&self) -> &LayoutConfig {
+        &self.config.inner
     }
 
     fn memory_region(
@@ -535,7 +542,7 @@ impl<S: Storage> GenericBlockLayout for FullyContiguous<S> {
         Ok(LocalMemoryRegion {
             addr: final_addr,
             size: self.config.memory_region_size,
-            storage_idx: 0,
+            storage_type: self.storage_type,
         })
     }
 }
@@ -738,8 +745,12 @@ impl<S: Storage> LayerSeparate<S> {
 }
 
 impl<S: Storage> GenericBlockLayout for LayerSeparate<S> {
-    fn storage_type(&self) -> StorageType {
-        self.storage_type.clone()
+    fn storage_type(&self) -> &StorageType {
+        &self.storage_type
+    }
+
+    fn config(&self) -> &LayoutConfig {
+        &self.config.inner
     }
 
     fn memory_region(
@@ -762,7 +773,7 @@ impl<S: Storage> GenericBlockLayout for LayerSeparate<S> {
         Ok(LocalMemoryRegion {
             addr: final_addr,
             size: self.config.memory_region_size,
-            storage_idx: layer_idx,
+            storage_type: self.storages[layer_idx].storage_type(),
         })
     }
 }
@@ -1257,7 +1268,7 @@ pub mod tests {
         assert_eq!(layout.page_size(), PAGE_SIZE);
         assert_eq!(layout.inner_dim(), INNER_DIM);
         assert_eq!(layout.storage().len(), NUM_LAYERS);
-        assert_eq!(layout.storage_type(), StorageType::Null);
+        assert_eq!(layout.storage_type(), &StorageType::Null);
     }
 
     #[test]
