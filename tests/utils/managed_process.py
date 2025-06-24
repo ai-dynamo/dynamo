@@ -68,6 +68,7 @@ class ManagedProcess:
     data_dir: Optional[str] = None
     terminate_existing: bool = True
     stragglers: List[str] = field(default_factory=list)
+    straggler_commands: List[str] = field(default_factory=list)
     log_dir: str = os.getcwd()
 
     _logger = logging.getLogger()
@@ -116,6 +117,9 @@ class ManagedProcess:
             try:
                 if ps_process.name() in self.stragglers:
                     terminate_process_tree(ps_process.pid, self._logger)
+                for cmdline in self.straggler_commands:
+                    if cmdline in ps_process.cmdline():
+                        terminate_process_tree(ps_process.pid, self._logger)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 # Process may have terminated or become inaccessible during iteration
                 pass
@@ -238,7 +242,9 @@ class ManagedProcess:
                     )
 
                     terminate_process_tree(proc.pid, self._logger)
-
+                for cmdline in self.straggler_commands:
+                    if cmdline in proc.cmdline():
+                        terminate_process_tree(proc.pid, self._logger)
 
 def main():
     with ManagedProcess(
