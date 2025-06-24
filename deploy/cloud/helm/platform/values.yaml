@@ -108,7 +108,8 @@ minio:
   persistence:
     enabled: true
     size: 10Gi
-    storageClass:
+    # Use the cluster default storage-class or override with a named class
+    storageClass: null
     mountPath: /data
     annotations:
       helm.sh/resource-policy: keep
@@ -161,7 +162,8 @@ etcd:
   enabled: true
   persistence:
     enabled: true
-    storageClass:
+    # Use the cluster default storage-class or override with a named class
+    storageClass: null
     size: 1Gi
   preUpgrade:
     enabled: false
