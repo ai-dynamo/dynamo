@@ -38,6 +38,18 @@ mod template;
 
 pub use template::ContextMixins;
 
+#[derive(Debug)]
+pub enum TokenInput {
+    Single(Vec<u32>),
+    Batch(Vec<Vec<u32>>),
+}
+
+#[derive(Debug)]
+pub enum PromptInput {
+    Tokens(TokenInput),
+    Text, // Needs normal processing
+}
+
 /// Trait that defines a request that can map to an OpenAI-like request.
 pub trait OAIChatLikeRequest {
     fn messages(&self) -> Value;
@@ -50,8 +62,13 @@ pub trait OAIChatLikeRequest {
 
     fn should_add_generation_prompt(&self) -> bool;
 
-    /// Extract token batch - returns None for string prompts, Some(vec) for token prompts
-    fn extract_token_batch(&self) -> Option<Vec<Vec<u32>>> {
+    /// Returns the type of input for the prompt. Default is Text.
+    fn prompt_input_type(&self) -> PromptInput {
+        PromptInput::Text
+    }
+
+    /// Extract tokens if the input is pre-tokenized
+    fn extract_tokens(&self) -> Option<TokenInput> {
         None
     }
 }

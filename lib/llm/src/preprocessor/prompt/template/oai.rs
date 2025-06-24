@@ -22,6 +22,8 @@ use crate::protocols::openai::{
 };
 use tracing;
 
+use crate::preprocessor::prompt::{PromptInput, TokenInput};
+
 impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     fn messages(&self) -> Value {
         Value::from_serialize(&self.inner.messages)
@@ -73,21 +75,29 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
         true
     }
 
-    fn extract_token_batch(&self) -> Option<Vec<Vec<u32>>> {
+    fn prompt_input_type(&self) -> PromptInput {
         match &self.inner.prompt {
-            async_openai::types::Prompt::IntegerArray(tokens) => {
-                // Single sequence becomes a batch of 1
-                Some(vec![tokens.iter().map(|&t| t as u32).collect()])
+            async_openai::types::Prompt::IntegerArray(_) => {
+                PromptInput::Tokens(TokenInput::Single(vec![]))
             }
-            async_openai::types::Prompt::ArrayOfIntegerArray(arrays) => {
-                // Multiple sequences - preserve batch structure
-                Some(
-                    arrays
-                        .iter()
-                        .map(|arr| arr.iter().map(|&t| t as u32).collect())
-                        .collect(),
-                )
+            async_openai::types::Prompt::ArrayOfIntegerArray(_) => {
+                PromptInput::Tokens(TokenInput::Batch(vec![]))
             }
+            _ => PromptInput::Text,
+        }
+    }
+
+    fn extract_tokens(&self) -> Option<TokenInput> {
+        match &self.inner.prompt {
+            async_openai::types::Prompt::IntegerArray(tokens) => Some(TokenInput::Single(
+                tokens.iter().map(|&t| t as u32).collect(),
+            )),
+            async_openai::types::Prompt::ArrayOfIntegerArray(arrays) => Some(TokenInput::Batch(
+                arrays
+                    .iter()
+                    .map(|arr| arr.iter().map(|&t| t as u32).collect())
+                    .collect(),
+            )),
             _ => None,
         }
     }

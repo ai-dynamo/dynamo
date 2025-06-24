@@ -53,7 +53,7 @@ use crate::protocols::{
 };
 use crate::tokenizers::{traits::Tokenizer, HuggingFaceTokenizer};
 
-use crate::preprocessor::prompt::PromptFormatter;
+use crate::preprocessor::prompt::{PromptFormatter, PromptInput, TokenInput};
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
 
@@ -160,75 +160,82 @@ impl OpenAIPreprocessor {
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedRequest::builder();
 
-        // Check if we have a pre-tokenized batch input
-        if let Some(token_batch) = request.extract_token_batch() {
-            tracing::debug!(
-                "Using pre-tokenized batch input with {} sequences",
-                token_batch.len()
-            );
+        // match request type before any conversion/processing
+        match request.prompt_input_type() {
+            PromptInput::Tokens(_) => {
+                if let Some(token_input) = request.extract_tokens() {
+                    tracing::debug!("Using pre-tokenized input");
 
-            if token_batch.len() == 1 {
-                // Single sequence - use the token_ids field
-                builder.token_ids(token_batch.into_iter().next().unwrap());
-            } else {
-                // Multiple sequences - use the batch_token_ids field
-                builder.batch_token_ids(Some(token_batch));
-                builder.token_ids(vec![]);
-            }
-        } else {
-            // No pre-tokenized batch input, use the default tokenization
-            let use_raw_prompt = request
-                .nvext()
-                .is_some_and(|ext| ext.use_raw_prompt.unwrap_or(false));
-
-            let formatted_prompt = if use_raw_prompt {
-                match request.raw_prompt() {
-                    Some(prompt) => prompt,
-                    None => {
-                        tracing::warn!("Raw prompt requested but not available");
-                        self.formatter.render(request)?
+                    match token_input {
+                        TokenInput::Single(tokens) => {
+                            builder.token_ids(tokens);
+                        }
+                        TokenInput::Batch(token_batches) => {
+                            if token_batches.len() == 1 {
+                                builder.token_ids(token_batches[0].clone());
+                            } else {
+                                builder.batch_token_ids(Some(token_batches));
+                                builder.token_ids(vec![]);
+                            }
+                        }
                     }
                 }
-            } else {
-                self.formatter.render(request)?
-            };
-
-            let encoding =
-                tokio::task::block_in_place(|| self.tokenizer.encode(&formatted_prompt))?;
-
-            if request.has_annotation(ANNOTATION_FORMATTED_PROMPT) {
-                annotations.insert(ANNOTATION_FORMATTED_PROMPT.to_string(), formatted_prompt);
             }
+            PromptInput::Text => {
+                // No pre-tokenized batch input, use the default tokenization
+                let use_raw_prompt = request
+                    .nvext()
+                    .is_some_and(|ext| ext.use_raw_prompt.unwrap_or(false));
 
-            if request.has_annotation(ANNOTATION_TOKEN_IDS) {
-                annotations.insert(
-                    ANNOTATION_TOKEN_IDS.to_string(),
-                    serde_json::to_string(&encoding.token_ids)?,
-                );
-            }
-
-            let mut stop_conditions = request.extract_stop_conditions()?;
-            if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
-                for eos_token in self.model_info.eos_token_ids() {
-                    if !stop_tokens.contains(&eos_token) {
-                        stop_tokens.push(eos_token);
+                let formatted_prompt = if use_raw_prompt {
+                    match request.raw_prompt() {
+                        Some(prompt) => prompt,
+                        None => {
+                            tracing::warn!("Raw prompt requested but not available");
+                            self.formatter.render(request)?
+                        }
                     }
+                } else {
+                    self.formatter.render(request)?
+                };
+
+                let encoding =
+                    tokio::task::block_in_place(|| self.tokenizer.encode(&formatted_prompt))?;
+
+                if request.has_annotation(ANNOTATION_FORMATTED_PROMPT) {
+                    annotations.insert(ANNOTATION_FORMATTED_PROMPT.to_string(), formatted_prompt);
                 }
-            } else {
-                stop_conditions.stop_token_ids_hidden = Some(self.model_info.eos_token_ids());
+
+                if request.has_annotation(ANNOTATION_TOKEN_IDS) {
+                    annotations.insert(
+                        ANNOTATION_TOKEN_IDS.to_string(),
+                        serde_json::to_string(&encoding.token_ids)?,
+                    );
+                }
+
+                builder.token_ids(encoding.token_ids);
             }
-
-            // apply ignore eos if not already set
-            stop_conditions.apply_ignore_eos();
-
-            if !stop_conditions.ignore_eos.unwrap_or(false) {
-                builder.eos_token_ids(self.model_info.eos_token_ids());
-            }
-
-            builder.token_ids(encoding.token_ids);
-            builder.stop_conditions(stop_conditions);
         }
 
+        let mut stop_conditions = request.extract_stop_conditions()?;
+        if let Some(stop_tokens) = &mut stop_conditions.stop_token_ids_hidden {
+            for eos_token in self.model_info.eos_token_ids() {
+                if !stop_tokens.contains(&eos_token) {
+                    stop_tokens.push(eos_token);
+                }
+            }
+        } else {
+            stop_conditions.stop_token_ids_hidden = Some(self.model_info.eos_token_ids());
+        }
+
+        // apply ignore eos if not already set
+        stop_conditions.apply_ignore_eos();
+
+        if !stop_conditions.ignore_eos.unwrap_or(false) {
+            builder.eos_token_ids(self.model_info.eos_token_ids());
+        }
+
+        builder.stop_conditions(stop_conditions);
         builder.sampling_options(request.extract_sampling_options()?);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
