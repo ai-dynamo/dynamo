@@ -42,7 +42,7 @@ from dynamo.sdk.core.lib import (
     IS_LIVENESS_PROBE_PROP,
     IS_READINESS_PROBE_PROP,
     LIVENESS_PROBE_PROP_PATH,
-    READYESS_PROBE_PROP_PATH,
+    READINESS_PROBE_PROP_PATH,
 )
 from dynamo.sdk.core.protocol.deployment import Service
 from dynamo.sdk.core.protocol.interface import (
@@ -592,7 +592,7 @@ def process_kubernetes_overrides(service: dict, service_dict: dict) -> None:
         ):
             main_container["readinessProbe"]["httpGet"][
                 "path"
-            ] = READYESS_PROBE_PROP_PATH
+            ] = READINESS_PROBE_PROP_PATH
 
     if main_container:
         service_dict["config"]["extraPodSpec"] = {"mainContainer": main_container}

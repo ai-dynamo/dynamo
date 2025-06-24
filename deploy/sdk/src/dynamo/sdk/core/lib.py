@@ -46,7 +46,7 @@ DYNAMO_IMAGE = os.getenv("DYNAMO_IMAGE", "dynamo:latest-vllm")
 
 IS_READINESS_PROBE_PROP: Final[str] = "__is_readiness_probe__"
 IS_LIVENESS_PROBE_PROP: Final[str] = "__is_liveness_probe__"
-READYESS_PROBE_PROP_PATH: Final[str] = "/readyz"
+READINESS_PROBE_PROP_PATH: Final[str] = "/readyz"
 LIVENESS_PROBE_PROP_PATH: Final[str] = "/healthz"
 
 
