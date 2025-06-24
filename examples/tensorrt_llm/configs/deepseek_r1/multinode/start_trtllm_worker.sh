@@ -12,7 +12,6 @@ fi
 
 if [[ -z ${SERVED_MODEL_NAME} ]]; then
     echo "WARNING: SERVED_MODEL_NAME was not set. It will be derived from MODEL_PATH."
-    exit 1
 fi
 
 

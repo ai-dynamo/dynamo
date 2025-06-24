@@ -168,7 +168,7 @@ To verify the deployed model is working, send a `curl` request:
 # NOTE: $HOST assumes running on head node, but can be changed to $HEAD_NODE_IP instead.
 HOST=localhost
 PORT=8000
-# "model" here should match SERVED_MODEL_NAME, or whatever is returned by the /v1/models endpoint
+# "model" here should match the model name returned by the /v1/models endpoint
 curl -w "%{http_code}" ${HOST}:${PORT}/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
