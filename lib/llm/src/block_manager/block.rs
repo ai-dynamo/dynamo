@@ -56,10 +56,6 @@ use std::{
 };
 use thiserror::Error;
 
-mod private {
-    pub struct PrivateToken;
-}
-
 /// A unique identifier for a block
 pub type BlockId = usize;
 
@@ -403,9 +399,6 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> PrivateBlockExt for Bloc
     }
 }
 
-impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ReadableBlock for Block<S, L, M> {}
-impl<S: Storage, L: LocalityProvider, M: BlockMetadata> WritableBlock for Block<S, L, M> {}
-
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Local for Block<S, L, M> {}
 
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> StorageTypeProvider for Block<S, L, M> {
@@ -413,13 +406,13 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> StorageTypeProvider for 
 }
 
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockDataProvider for Block<S, L, M> {
-    fn block_data(&self, _: private::PrivateToken) -> &impl BlockDataExt<S> {
+    fn block_data(&self) -> &impl BlockDataExt<S> {
         &self.data
     }
 }
 
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockDataProviderMut for Block<S, L, M> {
-    fn block_data_mut(&mut self, _: private::PrivateToken) -> &mut impl BlockDataExt<S> {
+    fn block_data_mut(&mut self) -> &mut impl BlockDataExt<S> {
         &mut self.data
     }
 }
@@ -629,7 +622,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> StorageTypeProvider
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockDataProvider
     for MutableBlock<S, L, M>
 {
-    fn block_data(&self, _: private::PrivateToken) -> &impl BlockDataExt<S> {
+    fn block_data(&self) -> &impl BlockDataExt<S> {
         &self.block.as_ref().expect("block was dropped").data
     }
 }
@@ -637,13 +630,10 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockDataProvider
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockDataProviderMut
     for MutableBlock<S, L, M>
 {
-    fn block_data_mut(&mut self, _: private::PrivateToken) -> &mut impl BlockDataExt<S> {
+    fn block_data_mut(&mut self) -> &mut impl BlockDataExt<S> {
         &mut self.block.as_mut().expect("block was dropped").data
     }
 }
-
-impl<S: Storage, L: LocalityProvider, M: BlockMetadata> WritableBlock for MutableBlock<S, L, M> {}
-impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ReadableBlock for MutableBlock<S, L, M> {}
 
 // Marker trait implementations for MutableBlock
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Local for MutableBlock<S, L, M> {}
@@ -809,12 +799,10 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> StorageTypeProvider
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockDataProvider
     for ImmutableBlock<S, L, M>
 {
-    fn block_data(&self, _: private::PrivateToken) -> &impl BlockDataExt<S> {
+    fn block_data(&self) -> &impl BlockDataExt<S> {
         &self.block.block.as_ref().expect("block was dropped").data
     }
 }
-
-impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ReadableBlock for ImmutableBlock<S, L, M> {}
 
 // Marker trait implementations for ImmutableBlock
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Local for ImmutableBlock<S, L, M> {}
@@ -868,6 +856,9 @@ impl<S: Storage + 'static, L: LocalityProvider, M: BlockMetadata> ImmutableBlock
         Ok(())
     }
 }
+
+impl<B: BlockDataProvider> ReadableBlock for B {}
+impl<B: BlockDataProviderMut> WritableBlock for B {}
 
 pub mod nixl {
     use super::*;
@@ -1273,7 +1264,7 @@ pub mod nixl {
     }
 
     impl<M: MutabilityKind> BlockDataProvider for RemoteBlock<M> {
-        fn block_data(&self, _: private::PrivateToken) -> &impl BlockDataExt<NixlStorage> {
+        fn block_data(&self) -> &impl BlockDataExt<NixlStorage> {
             &self.data
         }
     }
@@ -1295,10 +1286,7 @@ pub mod nixl {
     // }
 
     impl BlockDataProviderMut for RemoteBlock<IsMutable> {
-        fn block_data_mut(
-            &mut self,
-            _: private::PrivateToken,
-        ) -> &mut impl BlockDataExt<NixlStorage> {
+        fn block_data_mut(&mut self) -> &mut impl BlockDataExt<NixlStorage> {
             &mut self.data
         }
     }
@@ -1533,26 +1521,12 @@ pub mod nixl {
 }
 
 #[cfg(test)]
-pub mod test_utils {
-    use super::private::PrivateToken;
-
-    pub fn get_private_token() -> PrivateToken {
-        PrivateToken
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
-    
-
     use super::super::layout::tests::setup_layout;
-    
-    use crate::tokens::{TokenBlockSequence, Tokens};
 
-    
-    
+    use crate::tokens::{TokenBlockSequence, Tokens};
 
     const BLOCK_SIZE: usize = 4;
     const SALT_HASH: SaltHash = 12345;

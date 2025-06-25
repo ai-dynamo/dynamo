@@ -102,12 +102,9 @@ pub trait BlockDataViews<S: Storage> {
 }
 
 pub trait BlockDataProvider: StorageTypeProvider {
-    fn block_data(&self, _: private::PrivateToken) -> &impl BlockDataExt<Self::StorageType>;
+    fn block_data(&self) -> &impl BlockDataExt<Self::StorageType>;
 }
 
 pub trait BlockDataProviderMut: BlockDataProvider {
-    fn block_data_mut(
-        &mut self,
-        _: private::PrivateToken,
-    ) -> &mut impl BlockDataExt<Self::StorageType>;
+    fn block_data_mut(&mut self) -> &mut impl BlockDataExt<Self::StorageType>;
 }

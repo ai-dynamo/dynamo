@@ -539,12 +539,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
 #[cfg(all(test, feature = "testing-cuda"))]
 pub mod tests {
     use super::*;
-    use crate::block_manager::block::test_utils::get_private_token;
 
     use crate::block_manager::{
         block::{
-            locality::Local,
-            BasicMetadata, BlockDataExt, BlockDataProvider, BlockExt, Blocks, MutableBlock,
+            locality::Local, BasicMetadata, BlockDataExt, BlockDataProvider, BlockExt, Blocks,
+            MutableBlock,
         },
         layout::{nixl::NixlLayout, FullyContiguous, LayerSeparate, LayoutType},
         pool::BlockPool,
@@ -727,7 +726,7 @@ pub mod tests {
         block: &impl BlockDataProvider<StorageType = S>,
         value: u8,
     ) -> Result<()> {
-        let block_data = block.block_data(get_private_token());
+        let block_data = block.block_data();
 
         for layer_idx in 0..block_data.num_layers() {
             for outer_idx in 0..block_data.num_outer_dims() {
@@ -766,7 +765,7 @@ pub mod tests {
     fn get_block_contents<S: Storage + NixlDescriptor>(
         block: &impl BlockDataProvider<StorageType = S>,
     ) -> Result<Vec<u8>> {
-        let block_data = block.block_data(get_private_token());
+        let block_data = block.block_data();
 
         let mut contents: Vec<u8> = Vec::new();
 

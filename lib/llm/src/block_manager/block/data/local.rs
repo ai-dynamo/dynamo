@@ -12,6 +12,17 @@ pub struct LocalBlockData<S: Storage> {
     worker_id: WorkerID,
 }
 
+impl<S: Storage> Clone for LocalBlockData<S> {
+    fn clone(&self) -> Self {
+        Self {
+            layout: self.layout.clone(),
+            block_idx: self.block_idx,
+            block_set_idx: self.block_set_idx,
+            worker_id: self.worker_id,
+        }
+    }
+}
+
 impl<S> LocalBlockData<S>
 where
     S: Storage,
@@ -151,16 +162,15 @@ impl<S: Storage> StorageTypeProvider for LocalBlockData<S> {
 }
 
 impl<S: Storage> BlockDataProvider for LocalBlockData<S> {
-    fn block_data(&self, _: private::PrivateToken) -> &impl BlockDataExt<Self::StorageType> {
+    fn block_data(&self) -> &impl BlockDataExt<Self::StorageType> {
         self
     }
 }
 
 impl<S: Storage> BlockDataProviderMut for LocalBlockData<S> {
-    fn block_data_mut(
-        &mut self,
-        _: private::PrivateToken,
-    ) -> &mut impl BlockDataExt<Self::StorageType> {
+    fn block_data_mut(&mut self) -> &mut impl BlockDataExt<Self::StorageType> {
         self
     }
 }
+
+impl<S: Storage> Local for LocalBlockData<S> {}

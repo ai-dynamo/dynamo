@@ -31,8 +31,8 @@ where
     Destination: BlockDataProviderMut,
     Destination::StorageType: NixlDescriptor,
 {
-    let src_data = src.block_data(private::PrivateToken);
-    let dst_data = dst.block_data_mut(private::PrivateToken);
+    let src_data = src.block_data();
+    let dst_data = dst.block_data_mut();
 
     if src_data.is_fully_contiguous() && dst_data.is_fully_contiguous() {
         let src_desc = src_data.block_view()?.as_nixl_descriptor();
@@ -111,13 +111,13 @@ where
     let src_mem_type = src
         .first()
         .unwrap()
-        .block_data(private::PrivateToken)
+        .block_data()
         .storage_type()
         .nixl_mem_type();
     let dst_mem_type = dst
         .first()
         .unwrap()
-        .block_data(private::PrivateToken)
+        .block_data()
         .storage_type()
         .nixl_mem_type();
 

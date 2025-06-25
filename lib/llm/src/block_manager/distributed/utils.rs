@@ -44,11 +44,11 @@ impl BlockTransferRequest {
         from_pool: BlockTransferPool,
         to_pool: BlockTransferPool,
         blocks: Vec<(usize, usize)>,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
+    ) -> Self {
+        Self {
             from_pool,
             to_pool,
             blocks,
-        })
+        }
     }
 }

@@ -24,8 +24,8 @@ where
     Source: ReadableBlock,
     Destination: WritableBlock,
 {
-    let src_data = sources.block_data(private::PrivateToken);
-    let dst_data = destinations.block_data_mut(private::PrivateToken);
+    let src_data = sources.block_data();
+    let dst_data = destinations.block_data_mut();
 
     if src_data.is_fully_contiguous() && dst_data.is_fully_contiguous() {
         let src_view = src_data.block_view()?;
@@ -53,8 +53,8 @@ where
     Destination: WritableBlock,
     // <Destination as WritableBlock>::StorageType: SystemAccessible + Local,
 {
-    let src_data = sources.block_data(private::PrivateToken);
-    let dst_data = destinations.block_data_mut(private::PrivateToken);
+    let src_data = sources.block_data();
+    let dst_data = destinations.block_data_mut();
 
     for layer_idx in layer_range {
         for outer_idx in 0..src_data.num_outer_dims() {

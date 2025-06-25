@@ -362,10 +362,10 @@ where
         // TODO: Get NixlAgent handle
 
         for (src_block, dst_block) in self.sources.iter().zip(self.destinations.iter_mut()) {
-            let src_data = src_block.block_data(private::PrivateToken);
+            let src_data = src_block.block_data();
             let src_nixl_desc = src_data.block_view()?.as_nixl_descriptor();
 
-            let dst_data = dst_block.block_data_mut(private::PrivateToken);
+            let dst_data = dst_block.block_data_mut();
             let dst_nixl_desc = dst_data.block_view_mut()?.as_nixl_descriptor_mut();
 
             // TODO: Perform NIXL PUT operation
@@ -402,8 +402,8 @@ where
         let mut dst_set = std::collections::HashSet::new();
 
         for (src_block, dst_block) in self.sources.iter().zip(self.destinations.iter()) {
-            let src_data = src_block.block_data(private::PrivateToken);
-            let dst_data = dst_block.block_data(private::PrivateToken);
+            let src_data = src_block.block_data();
+            let dst_data = dst_block.block_data();
 
             src_set.insert((
                 src_data.block_set_id(),
