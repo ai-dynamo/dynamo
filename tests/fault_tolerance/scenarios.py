@@ -84,6 +84,17 @@ deployment_graphs = {
         ),
         text_payload,
     ),
+    "agg-tp-2-dp-2": (
+        DeploymentGraph(
+            module="graphs.agg:Frontend",
+            config="/workspace/tests/fault_tolerance/configs/agg_tp_2_dp_2.yaml",
+            directory="/workspace/examples/llm",
+            endpoints=["v1/chat/completions"],
+            response_handlers=[chat_completions_response_handler],
+            marks=[pytest.mark.gpu_4, pytest.mark.vllm],
+        ),
+        text_payload,
+    ),
     "agg-tp-2-dp-4": (
         DeploymentGraph(
             module="graphs.agg:Frontend",

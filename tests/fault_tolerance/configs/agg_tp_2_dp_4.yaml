@@ -26,7 +26,11 @@ Processor:
   router: round-robin
   router-num-threads: 4
   common-configs: [model, block-size, max-model-len]
-
+  ServiceArgs:
+    workers: 2
+    resources:
+      cpu: "10"
+      memory: "20Gi"
 VllmWorker:
   enforce-eager: true
   max-num-batched-tokens: 16384

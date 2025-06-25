@@ -1,0 +1,82 @@
+[DYNAMO] [2m2025-06-25T05:00:56.028Z[0m [32m INFO[0m [2mutils.resolve_service_config[0m[2m:[0m Applying command line overrides: defaultdict(<class 'dict'>, {'Frontend': {'port': 8000}, 'VllmWorker': {'max_num_seqs': 2}})   
+[DYNAMO] [2m2025-06-25T05:00:56.028Z[0m [32m INFO[0m [2mutils.resolve_service_config[0m[2m:[0m Running dynamo serve with config: {'Common': {'model': 'deepseek-ai/DeepSeek-R1-Distill-Llama-8B', 'block-size': 64, 'max-model-len': 16384}, 'Frontend': {'served_model_name': 'deepseek-ai/DeepSeek-R1-Distill-Llama-8B', 'endpoint': 'dynamo.Processor.chat/completions', 'port': 8000}, 'Processor': {'router': 'round-robin', 'router-num-threads': 4, 'common-configs': ['model', 'block-size', 'max-model-len']}, 'VllmWorker': {'enforce-eager': True, 'max-num-batched-tokens': 16384, 'enable-prefix-caching': True, 'ServiceArgs': {'workers': 4, 'resources': {'gpu': '1'}}, 'common-configs': ['model', 'block-size', 'max-model-len'], 'max_num_seqs': 2}, 'Planner': {'environment': 'local', 'no-operation': True}}   
+[DYNAMO] [2m2025-06-25T05:01:00.918Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-25T05:01:00.920Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-25T05:01:00.922Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-25T05:01:00.927Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-25T05:01:00.928Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-25T05:01:00.930Z[0m [32m INFO[0m [2m__init__.resolve_current_platform_cls_qualname[0m[2m:[0m Automatically detected platform cuda.   
+[DYNAMO] [2m2025-06-25T05:01:01.150Z[0m [32m INFO[0m [2mnixl[0m[2m:[0m NIXL is available   
+[DYNAMO] ╭──────────────── Dynamo Serve ────────────────╮
+[DYNAMO] │ Starting Dynamo service: graphs.agg:Frontend │
+[DYNAMO] ╰──────────────────────────────────────────────╯
+[DYNAMO] [2m2025-06-25T05:01:02.164Z[0m [32m INFO[0m [2mresource._discover_gpus[0m[2m:[0m Discovered 4 GPUs   
+[DYNAMO] [2m2025-06-25T05:01:02.209Z[0m [32m INFO[0m [2mresource._discover_gpus[0m[2m:[0m Discovered 4 GPUs   
+[DYNAMO] [2m2025-06-25T05:01:02.209Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Getting resource envs for service Frontend   
+[DYNAMO] [2m2025-06-25T05:01:02.209Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Using configured worker count: 1   
+[DYNAMO] [2m2025-06-25T05:01:02.209Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Final resource allocation - workers: 1, envs: []   
+[DYNAMO] [2m2025-06-25T05:01:02.209Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Serving dynamo graph with namespace dynamo   
+[DYNAMO] [2m2025-06-25T05:01:02.209Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Clearing namespace dynamo before serving   
+[DYNAMO] [2m2025-06-25T05:01:02.209Z[0m [32m INFO[0m [2mserving.clear_namespace[0m[2m:[0m Clearing namespace dynamo using utils/clear_namespace.py   
+[DYNAMO] [2m2025-06-25T05:01:10.945Z[0m [32m INFO[0m [2mserving.clear_namespace[0m[2m:[0m Clear namespace output:    
+[DYNAMO] [2m2025-06-25T05:01:10.945Z[0m [32m INFO[0m [2mserving.clear_namespace[0m[2m:[0m Successfully cleared namespace dynamo   
+[DYNAMO] [2m2025-06-25T05:01:10.945Z[0m [32m INFO[0m [2mserving.clear_namespace[0m[2m:[0m Clear namespace stderr: [2m2025-06-25T05:01:08.308Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-25T05:01:08.310Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-25T05:01:08.312Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-25T05:01:08.317Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-25T05:01:08.318Z[0m [33m WARN[0m [2m__init__.vllm_version_matches_substr[0m[2m:[0m Using ai_dynamo_vllm   
+[DYNAMO] [2m2025-06-25T05:01:08.320Z[0m [32m INFO[0m [2m__init__.resolve_current_platform_cls_qualname[0m[2m:[0m Automatically detected platform cuda.   
+[DYNAMO] [2m2025-06-25T05:01:08.557Z[0m [32m INFO[0m [2mnixl[0m[2m:[0m NIXL is available   
+[DYNAMO] [2m2025-06-25T05:01:09.587Z[0m [32m INFO[0m [2mclear_namespace.clear_namespace[0m[2m:[0m Cleared /dynamo in EtcdKvCache   
+[DYNAMO] [2m2025-06-25T05:01:09.697Z[0m [32m INFO[0m [2mclear_namespace.clear_namespace[0m[2m:[0m Cleared 0 requests from prefill queuedynamo_prefill_queue   
+[DYNAMO] [2m2025-06-25T05:01:09.697Z[0m [32m INFO[0m [2mdynamo_runtime::transports::etcd[0m[2m:[0m KvCache watcher for prefix '/dynamo/' stopped
+[DYNAMO]    
+[DYNAMO] [2m2025-06-25T05:01:10.945Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Getting resource envs for service Planner   
+[DYNAMO] [2m2025-06-25T05:01:10.946Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Using configured worker count: 1   
+[DYNAMO] [2m2025-06-25T05:01:10.946Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Final resource allocation - workers: 1, envs: []   
+[DYNAMO] [2m2025-06-25T05:01:10.947Z[0m [32m INFO[0m [2mserving.create_dynamo_watcher[0m[2m:[0m Created watcher for Planner's in the dynamo namespace   
+[DYNAMO] [2m2025-06-25T05:01:10.947Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Getting resource envs for service Processor   
+[DYNAMO] [2m2025-06-25T05:01:10.947Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Using configured worker count: 1   
+[DYNAMO] [2m2025-06-25T05:01:10.947Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Final resource allocation - workers: 1, envs: []   
+[DYNAMO] [2m2025-06-25T05:01:10.947Z[0m [32m INFO[0m [2mserving.create_dynamo_watcher[0m[2m:[0m Created watcher for Processor's in the dynamo namespace   
+[DYNAMO] [2m2025-06-25T05:01:10.947Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Getting resource envs for service VllmWorker   
+[DYNAMO] [2m2025-06-25T05:01:10.947Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m GPU requirement found: 1   
+[DYNAMO] [2m2025-06-25T05:01:10.947Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Using configured worker count: 4   
+[DYNAMO] [2m2025-06-25T05:01:10.947Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m GPU allocation enabled   
+[DYNAMO] [2m2025-06-25T05:01:10.947Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Local deployment detected. Allocating GPUs for 4 workers of 'VllmWorker'   
+[DYNAMO] [2m2025-06-25T05:01:10.952Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m GPU 0 (NVIDIA L40): Memory: 44.3GB free / 45.0GB total, Utilization: 0%, Temperature: 29°C   
+[DYNAMO] [2m2025-06-25T05:01:10.956Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m GPU 1 (NVIDIA L40): Memory: 44.3GB free / 45.0GB total, Utilization: 0%, Temperature: 28°C   
+[DYNAMO] [2m2025-06-25T05:01:10.960Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m GPU 2 (NVIDIA L40): Memory: 44.3GB free / 45.0GB total, Utilization: 0%, Temperature: 28°C   
+[DYNAMO] [2m2025-06-25T05:01:10.963Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m GPU 3 (NVIDIA L40): Memory: 44.3GB free / 45.0GB total, Utilization: 0%, Temperature: 30°C   
+[DYNAMO] [2m2025-06-25T05:01:10.963Z[0m [32m INFO[0m [2mallocator.get_resource_envs[0m[2m:[0m Final resource allocation - workers: 4, envs: [{'CUDA_VISIBLE_DEVICES': '0'}, {'CUDA_VISIBLE_DEVICES': '1'}, {'CUDA_VISIBLE_DEVICES': '2'}, {'CUDA_VISIBLE_DEVICES': '3'}]   
+[DYNAMO] [2m2025-06-25T05:01:10.964Z[0m [32m INFO[0m [2mserving.create_dynamo_watcher[0m[2m:[0m Created watcher for VllmWorker's in the dynamo namespace   
+[DYNAMO] [2m2025-06-25T05:01:10.964Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Created watcher for Frontend with 1 workers in the dynamo namespace   
+[DYNAMO] [2m2025-06-25T05:01:10.965Z[0m [32m INFO[0m [2marbiter._ensure_ioloop[0m[2m:[0m Installing handle_callback_exception to loop   
+[DYNAMO] [2m2025-06-25T05:01:10.965Z[0m [32m INFO[0m [2msighandler.__init__[0m[2m:[0m Registering signals...   
+[DYNAMO] [2m2025-06-25T05:01:10.965Z[0m [33m WARN[0m [2mserving.serve_dynamo_graph[0m[2m:[0m arbiter: tcp://127.0.0.1:33147   
+[DYNAMO] [2m2025-06-25T05:01:10.965Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Building component resources for 4 watchers   
+[DYNAMO] [2m2025-06-25T05:01:10.965Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Processing watcher: dynamo_Planner   
+[DYNAMO] [2m2025-06-25T05:01:10.965Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Final GPU info for dynamo_Planner: {}   
+[DYNAMO] [2m2025-06-25T05:01:10.965Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Processing watcher: dynamo_Processor   
+[DYNAMO] [2m2025-06-25T05:01:10.965Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Final GPU info for dynamo_Processor: {}   
+[DYNAMO] [2m2025-06-25T05:01:10.965Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Processing watcher: dynamo_VllmWorker   
+[DYNAMO] [2m2025-06-25T05:01:10.965Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Found GPU allocation for VllmWorker in ResourceAllocator: [0, 1, 2, 3]   
+[DYNAMO] [2m2025-06-25T05:01:10.965Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Final GPU info for dynamo_VllmWorker: {'allocated_gpus': [0, 1, 2, 3]}   
+[DYNAMO] [2m2025-06-25T05:01:10.965Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Processing watcher: dynamo_Frontend   
+[DYNAMO] [2m2025-06-25T05:01:10.965Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Final GPU info for dynamo_Frontend: {}   
+[DYNAMO] [2m2025-06-25T05:01:10.965Z[0m [32m INFO[0m [2mserving.serve_dynamo_graph[0m[2m:[0m Completed component resources: {'dynamo_Planner': {}, 'dynamo_Processor': {}, 'dynamo_VllmWorker': {'allocated_gpus': [0, 1, 2, 3]}, 'dynamo_Frontend': {}}   
+[DYNAMO] [2m2025-06-25T05:01:10.965Z[0m [33m WARN[0m [2mutils.save_dynamo_state[0m[2m:[0m Saved state to /root/.dynamo/state/dynamo.json   
+[DYNAMO] [2m2025-06-25T05:01:10.966Z[0m [32m INFO[0m [2marbiter.start[0m[2m:[0m Starting master on pid 74081   
+[DYNAMO] [2m2025-06-25T05:01:10.968Z[0m [32m INFO[0m [2marbiter.initialize[0m[2m:[0m sockets started   
+[DYNAMO] [2m2025-06-25T05:01:11.010Z[0m [32m INFO[0m [2marbiter.start[0m[2m:[0m Arbiter now waiting for commands   
+[DYNAMO] [2m2025-06-25T05:01:11.010Z[0m [32m INFO[0m [2mwatcher._start[0m[2m:[0m dynamo_Planner started   
+[DYNAMO] [2m2025-06-25T05:01:11.044Z[0m [32m INFO[0m [2mwatcher._start[0m[2m:[0m dynamo_Processor started   
+[DYNAMO] [2m2025-06-25T05:01:11.189Z[0m [32m INFO[0m [2mwatcher._start[0m[2m:[0m dynamo_VllmWorker started   
+[DYNAMO] [2m2025-06-25T05:01:11.262Z[0m [32m INFO[0m [2mwatcher._start[0m[2m:[0m dynamo_Frontend started   
+[DYNAMO] [2m2025-06-25T05:01:11.262Z[0m [32m INFO[0m [2mserving.<lambda>[0m[2m:[0m Starting graphs.agg:Frontend (Press CTRL+C to quit)   
+[DYNAMO] [2m2025-06-25T05:01:15.608Z[0m [32m INFO[0m [2msighandler.signal[0m[2m:[0m Got signal SIG_WINCH   
+[DYNAMO] [2m2025-06-25T05:01:45.733Z[0m [32m INFO[0m [2msighandler.signal[0m[2m:[0m Got signal SIG_WINCH   
+[DYNAMO] [2m2025-06-25T05:02:40.372Z[0m [32m INFO[0m [2msighandler.signal[0m[2m:[0m Got signal SIG_WINCH   
+[DYNAMO] [2m2025-06-25T05:04:41.019Z[0m [33m WARN[0m [2mwatcher.spawn_process[0m[2m:[0m error in 'dynamo_VllmWorker': fd 57 added twice   
+[DYNAMO] [2m2025-06-25T05:04:41.039Z[0m [32m INFO[0m [2msighandler.signal[0m[2m:[0m Got signal SIG_TERM   
+[DYNAMO] [2m2025-06-25T05:04:41.067Z[0m [32m INFO[0m [2mserving.clear_namespace[0m[2m:[0m Clearing namespace dynamo using utils/clear_namespace.py   
