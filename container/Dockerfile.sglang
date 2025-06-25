@@ -137,10 +137,10 @@ RUN if [ "$ARCH" = "arm64" ]; then \
 # For dynamo release 0.3.1 - we've noticed a regression around ordering of descriptors in SGL
 # As a workaround, we are pinning to a side branch of SGL until we figure out a fix
 RUN --mount=type=cache,target=/root/.cache/uv \
-    git clone https://github.com/trevor-m/sglang.git && \
+    git clone https://github.com/ishandhanani/sglang.git && \
     cd sglang && \
     git fetch && \
-    git checkout nixl-sorted && \
+    git checkout dynamo-release-nixl-sort  && \
     uv pip install -e "python[all]"
 
 # Common dependencies
