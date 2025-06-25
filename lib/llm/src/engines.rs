@@ -237,7 +237,7 @@ impl AsyncEngine<SingleIn<NvCreateCompletionRequest>, ManyOut<Annotated<Completi
                 yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None };
                 id += 1;
             }
-            let response = deltas.create_choice(0, None, Some("stop".to_string()));
+            let response = deltas.create_choice(0, None, Some(async_openai::types::CompletionFinishReason::Stop));
             yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None };
 
         };

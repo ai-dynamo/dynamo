@@ -198,6 +198,9 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             Some(common::FinishReason::Stop) => Some(async_openai::types::FinishReason::Stop),
             Some(common::FinishReason::Length) => Some(async_openai::types::FinishReason::Length),
             Some(common::FinishReason::Cancelled) => Some(async_openai::types::FinishReason::Stop),
+            Some(common::FinishReason::ContentFilter) => {
+                Some(async_openai::types::FinishReason::ContentFilter)
+            }
             Some(common::FinishReason::Error(err_msg)) => {
                 return Err(anyhow::anyhow!(err_msg));
             }

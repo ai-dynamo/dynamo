@@ -49,7 +49,7 @@ pub struct CompletionResponse {
     pub id: String,
 
     /// The list of completion choices the model generated for the input prompt.
-    pub choices: Vec<CompletionChoice>,
+    pub choices: Vec<async_openai::types::Choice>,
 
     /// The Unix timestamp (in seconds) of when the completion was created.
     pub created: u64,
@@ -76,32 +76,9 @@ pub struct CompletionResponse {
     // pub nvext: Option<NimResponseExt>,
 }
 
-/// Legacy OpenAI CompletionResponse Choice component
-#[derive(Clone, Debug, Deserialize, Serialize, Builder)]
-pub struct CompletionChoice {
-    #[builder(setter(into))]
-    pub text: String,
-
-    #[builder(default = "0")]
-    pub index: u64,
-
-    #[builder(default, setter(into, strip_option))]
-    pub finish_reason: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[builder(default, setter(strip_option))]
-    pub logprobs: Option<async_openai::types::Logprobs>,
-}
-
-impl ContentProvider for CompletionChoice {
+impl ContentProvider for async_openai::types::Choice {
     fn content(&self) -> String {
         self.text.clone()
-    }
-}
-
-impl CompletionChoice {
-    pub fn builder() -> CompletionChoiceBuilder {
-        CompletionChoiceBuilder::default()
     }
 }
 
@@ -226,7 +203,7 @@ impl ResponseFactory {
 
     pub fn make_response(
         &self,
-        choice: CompletionChoice,
+        choice: async_openai::types::Choice,
         usage: Option<async_openai::types::CompletionUsage>,
     ) -> CompletionResponse {
         CompletionResponse {
@@ -294,27 +271,30 @@ impl TryFrom<NvCreateCompletionRequest> for common::CompletionRequest {
     }
 }
 
-impl TryFrom<common::StreamingCompletionResponse> for CompletionChoice {
+impl TryFrom<common::StreamingCompletionResponse> for async_openai::types::Choice {
     type Error = anyhow::Error;
 
     fn try_from(response: common::StreamingCompletionResponse) -> Result<Self, Self::Error> {
-        let choice = CompletionChoice {
-            text: response
-                .delta
-                .text
-                .ok_or(anyhow::anyhow!("No text in response"))?,
-            index: response.delta.index.unwrap_or(0) as u64,
-            logprobs: None,
-            finish_reason: match &response.delta.finish_reason {
-                Some(common::FinishReason::EoS) => Some("stop".to_string()),
-                Some(common::FinishReason::Stop) => Some("stop".to_string()),
-                Some(common::FinishReason::Length) => Some("length".to_string()),
-                Some(common::FinishReason::Error(err_msg)) => {
-                    return Err(anyhow::anyhow!("finish_reason::error = {}", err_msg));
-                }
-                Some(common::FinishReason::Cancelled) => Some("cancelled".to_string()),
-                None => None,
-            },
+        let text = response
+            .delta
+            .text
+            .ok_or(anyhow::anyhow!("No text in response"))?;
+
+        // Safety: we're downcasting from u64 to u32 here but u32::MAX is 4_294_967_295
+        // so we're fairly safe knowing we won't generate that many Choices
+        let index = response.delta.index.unwrap_or(0) as u32;
+
+        // TODO handle aggregating logprobs
+        let logprobs = None;
+
+        let finish_reason: Option<async_openai::types::CompletionFinishReason> =
+            response.delta.finish_reason.map(Into::into);
+
+        let choice = async_openai::types::Choice {
+            text,
+            index,
+            logprobs,
+            finish_reason,
         };
 
         Ok(choice)
