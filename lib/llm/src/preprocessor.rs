@@ -223,7 +223,8 @@ impl OpenAIPreprocessor {
                             let mut token_batches = Vec::new();
                             // TODO: room for optimization here
                             for text in texts {
-                                let encoding = self.tokenizer.encode(&text)?;
+                                let encoding =
+                                    tokio::task::block_in_place(|| self.tokenizer.encode(&text))?;
                                 token_batches.push(encoding.token_ids);
                             }
                             builder.batch_token_ids(Some(token_batches));
