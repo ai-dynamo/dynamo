@@ -92,7 +92,11 @@ sed -i "s/NIXL_COMMIT=\"[^\"]*\"/NIXL_COMMIT=\"${NIXL_COMMIT}\"/" docker/common/
 
 # Need to build in the Triton Devel Image for NIXL support.
 make -C docker tritondevel_build
-make -C docker wheel_build DEVEL_IMAGE=tritondevel BUILD_WHEEL_OPTS='--extra-cmake-vars NIXL_ROOT=/opt/nvidia/nvda_nixl'
+if [ "$ARCH" = "amd64" ]; then
+    make -C docker wheel_build DEVEL_IMAGE=tritondevel BUILD_WHEEL_OPTS='--extra-cmake-vars NIXL_ROOT=/opt/nvidia/nvda_nixl'
+else
+    make -C docker wheel_build DEVEL_IMAGE=tritondevel
+fi
 
 # Copy the wheel to the host
 mkdir -p $OUTPUT_DIR
