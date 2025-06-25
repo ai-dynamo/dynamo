@@ -55,6 +55,10 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
             true
         }
     }
+
+    fn extract_text(&self) -> Option<TextInput> {
+        Some(TextInput::Single(String::new()))
+    }
 }
 
 impl OAIChatLikeRequest for NvCreateCompletionRequest {
