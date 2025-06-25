@@ -79,7 +79,7 @@ WORKDIR /sgl-workspace
 
 RUN pip uninstall --break-system-packages -y sglang
 RUN rm -rf sglang
-# 0.4.8 has a bug with CUDA graphs and decode worker 
+# 0.4.8 has a bug with CUDA graphs and decode worker
 # https://github.com/sgl-project/sglang/issues/7511
 RUN pip install --break-system-packages "sglang==0.4.7.post1"
 
