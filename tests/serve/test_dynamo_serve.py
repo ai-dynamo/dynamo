@@ -159,7 +159,7 @@ deployment_graphs = {
     "multimodal_agg": (
         DeploymentGraph(
             module="graphs.agg:Frontend",
-            config="configs/agg.yaml",
+            config="configs/agg-llava.yaml",
             directory="/workspace/examples/multimodal",
             endpoints=["v1/chat/completions"],
             response_handlers=[
