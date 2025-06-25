@@ -115,6 +115,7 @@ fn delta_core(tok: u32) -> Annotated<LLMEngineOutput> {
         cum_log_probs: None,
         log_probs: None,
         finish_reason: None,
+        index: None,
     };
     Annotated::from_data(delta)
 }

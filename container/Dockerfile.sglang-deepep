@@ -35,22 +35,62 @@ ARG ARCH_ALT=x86_64
 
 WORKDIR /sgl-workspace
 
+# Install UCX dependencies
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    --reinstall libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
+    libnuma-dev librdmacm-dev ibverbs-providers \
+    autoconf libtool
+
+# Build UCX from source
+ARG NIXL_UCX_REF=v1.19.x
+RUN rm -rf /opt/hpcx/ucx && \
+    rm -rf /usr/local/ucx && \
+    cd /usr/local/src && \
+    git clone https://github.com/openucx/ucx.git && \
+    cd ucx && \
+    git checkout $NIXL_UCX_REF && \
+    ./autogen.sh && ./configure \
+    --prefix=/usr/local/ucx \
+    --enable-shared \
+    --disable-static \
+    --disable-doxygen-doc \
+    --enable-optimizations \
+    --enable-cma \
+    --enable-devel-headers \
+    --with-cuda=/usr/local/cuda \
+    --with-verbs \
+    --with-efa \
+    --with-dm \
+    --with-gdrcopy=/usr/local \
+    --enable-mt && \
+    make -j && \
+    make -j install-strip && \
+    ldconfig
+
+ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
+
 # Pinning to NIXL 0.2.1 right now
 # TODO: investigate pip install failure with 0.3.0 release
 ARG NIXL_COMMIT="5e4c179ee850d482a83cb2a211e0947e46281060"
-RUN git clone https://github.com/ai-dynamo/nixl.git && cd nixl && git checkout ${NIXL_COMMIT} &&pip install --break-system-packages . --config-settings=setup-args="-Ducx_path=/opt/hpcx/ucx"
+RUN git clone https://github.com/ai-dynamo/nixl.git && cd nixl && git checkout ${NIXL_COMMIT} && pip install --break-system-packages . --config-settings=setup-args="-Ducx_path=/usr/local/ucx"
 
 WORKDIR /sgl-workspace
 
 RUN pip uninstall --break-system-packages -y sglang
 RUN rm -rf sglang
-# 0.4.7
-RUN pip install --break-system-packages "sglang==0.4.7"
+# 0.4.8 has a bug with CUDA graphs and decode worker
+# https://github.com/sgl-project/sglang/issues/7511
+RUN pip install --break-system-packages "sglang==0.4.7.post1"
+
+# Allow forceful shutdown of inflight requests
+ENV SGL_FORCE_SHUTDOWN=1
 
 WORKDIR /sgl-workspace
 # https://github.com/ai-dynamo/dynamo/pull/1510
 ARG DYNAMO_COMMIT="382e3aedc421b3b3abc338062b332b54b5aa8529"
-RUN git clone https://github.com/ai-dynamo/dynamo.git && cd dynamo && git checkout ${DYNAMO_COMMIT}
+ARG DYNAMO_BRANCH="ishan/cmpl-token-id"
+RUN git clone https://github.com/ai-dynamo/dynamo.git && cd dynamo && git checkout ${DYNAMO_BRANCH}
 
 # install dynamo in editable mode
 WORKDIR /sgl-workspace/dynamo
