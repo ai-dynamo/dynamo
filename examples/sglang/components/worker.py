@@ -127,13 +127,15 @@ class SGLangWorker:
         # Check if we're in batch mode at the start
         is_batch = self._is_batch_request(request)
         batch_size = self._get_request_batch_size(request)
-        
+
         # TODO: maintain a mapping from SGLang's Ouput struct to LLMEngineOuput
         sampling_params = self._build_sampling_params(request)
 
         if self.engine_args.disaggregation_mode != "null":
             if is_batch:
-                bootstrap_room = [self._generate_bootstrap_room() for _ in range(batch_size)]
+                bootstrap_room = [
+                    self._generate_bootstrap_room() for _ in range(batch_size)
+                ]
                 bootstrap_host = [self.bootstrap_host] * batch_size
                 bootstrap_port = [self.bootstrap_port] * batch_size
             else:
@@ -152,7 +154,9 @@ class SGLangWorker:
 
             # prefill response is not used
             prefill = await self.engine.async_generate(
-                input_ids=request.token_ids if not is_batch else request.batch_token_ids,
+                input_ids=request.token_ids
+                if not is_batch
+                else request.batch_token_ids,
                 sampling_params=sampling_params,
                 stream=True,
                 bootstrap_host=bootstrap_host,
@@ -163,13 +167,17 @@ class SGLangWorker:
 
             decode = await self.decode_client.generate(disagg_request.model_dump_json())
 
-            async for out in self._process_stream(decode, unpack=True, is_batch=is_batch):
+            async for out in self._process_stream(
+                decode, unpack=True, is_batch=is_batch
+            ):
                 yield out
 
             await prefill_task
         else:
             g = await self.engine.async_generate(
-                input_ids=request.token_ids if not is_batch else request.batch_token_ids,
+                input_ids=request.token_ids
+                if not is_batch
+                else request.batch_token_ids,
                 sampling_params=sampling_params,
                 stream=True,
             )
