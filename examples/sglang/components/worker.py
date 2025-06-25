@@ -28,6 +28,7 @@ import asyncio
 import logging
 import random
 import socket
+from typing import Union, Dict
 
 import sglang as sgl
 from components.decode_worker import SGLangDecodeWorker
@@ -188,9 +189,9 @@ class SGLangWorker:
     async def _process_stream(self, stream_source, unpack: bool, is_batch: bool):
         # Initialize based on batch mode
         if is_batch:
-            num_output_tokens_so_far = {}
+            num_output_tokens_so_far: Dict[int, int] = {}
         else:
-            num_output_tokens_so_far = 0
+            num_output_tokens_so_far: int = 0
 
         async for res in stream_source:
             data = res.data() if unpack else res
