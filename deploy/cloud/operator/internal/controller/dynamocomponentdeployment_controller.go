@@ -21,6 +21,7 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -641,6 +642,8 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 	// In leader worker sets configurations Liveness and Readiness probes enabled on Leaders only.
 	// They are populated by default in the generatePodTemplateSpec.
 	// Disable them for workers. We only provide one configuration for the leaders through the sdk.
+	logs := log.FromContext(ctx)
+	logs.Info("Disabling  LivenessProbe and ReadinessProbe on workers.")
 	workerPodTemplateSpec.Spec.Containers[0].LivenessProbe = nil
 	workerPodTemplateSpec.Spec.Containers[0].ReadinessProbe = nil
 
@@ -1959,12 +1962,14 @@ func (r *DynamoComponentDeploymentReconciler) GetRecorder() record.EventRecorder
 
 // overrideContainerWithExtraPodSpec overrides the container's command, args, and probe settings with ExtraPodSpec
 func overrideContainerWithExtraPodSpec(container *corev1.Container, extraPodSpec *dynamoCommon.ExtraPodSpec, logs logr.Logger) {
+
 	if extraPodSpec == nil || extraPodSpec.MainContainer == nil {
+		logs.Info("!!! overrideContainerWithExtraPodSpec func: no ExtraPodSpec!" + container.Name)
 		return
 	}
 
 	extraPodSpecMainContainer := extraPodSpec.MainContainer
-
+	logs.Info("!!! overrideContainerWithExtraPodSpec there IS ExtraPodSpec" + container.Name)
 	if len(extraPodSpecMainContainer.Command) > 0 {
 		logs.Info("Overriding container '" + container.Name + "' Command with: " + strings.Join(extraPodSpecMainContainer.Command, " "))
 		container.Command = extraPodSpecMainContainer.Command
@@ -1985,12 +1990,24 @@ func overrideContainerWithExtraPodSpec(container *corev1.Container, extraPodSpec
 	// Override LivenessProbe if present in ExtraPodSpec.
 	if extraPodSpecMainContainer.LivenessProbe != nil {
 		logs.Info("Overriding container '" + container.Name + "' LivenessProbe with ExtraPodSpec configuration")
-		container.LivenessProbe = extraPodSpecMainContainer.LivenessProbe
+		container.LivenessProbe = extraPodSpecMainContainer.LivenessProbe.DeepCopy()
+
+		// 🔍 Print the full LivenessProbe
+		if data, err := json.MarshalIndent(container.LivenessProbe, "", "  "); err == nil {
+			fmt.Println("!!! LivenessProbe content for container '" + container.Name + "':\n" + string(data))
+		} else {
+			logs.Info("!!! Failed to marshal LivenessProbe")
+			logs.Info("!!! " + container.Name + " Overwrode LivenessProbe with ExtraPodSpec")
+		}
+	} else {
+		logs.Info("!!! " + container.Name + " NO LivenessProbe with ExtraPodSpec")
 	}
 
 	// Override ReadinessProbe if present in ExtraPodSpec.
 	if extraPodSpecMainContainer.ReadinessProbe != nil {
 		logs.Info("Overriding container '" + container.Name + "' ReadinessProbe with ExtraPodSpec configuration")
-		container.ReadinessProbe = extraPodSpecMainContainer.ReadinessProbe
+		container.ReadinessProbe = extraPodSpecMainContainer.ReadinessProbe.DeepCopy()
+	} else {
+		logs.Info("!!! '" + container.Name + "' NO ReadinessProbe")
 	}
 }

@@ -232,12 +232,123 @@ func GetApiStoreClient(ctx context.Context) (*apiStoreClient.ApiStoreClient, *co
 	return apiStoreClient, apiStoreConf, nil
 }
 
+//original function
+// func ParseDynamoGraphConfig(ctx context.Context, yamlContent *bytes.Buffer) (*DynamoGraphConfig, error) {
+// 	var config DynamoGraphConfig
+// 	logger := log.FromContext(ctx)
+// 	logger.Info("!! Trying to parse dynamo graph config", "yamlContent", yamlContent.String())
+
+// 	// Original code
+// 	err := yaml.Unmarshal(yamlContent.Bytes(), &config)
+// 	return &config, err
+// }
+
+// func ParseDynamoGraphConfig(ctx context.Context, yamlContent *bytes.Buffer) (*DynamoGraphConfig, error) {
+// 	logger := log.FromContext(ctx) // or fmt.Println if you prefer
+
+// 	logger.Info("!!! STEP 1  ▸ Original YAML")
+// 	logger.Info(yamlContent.String())
+
+// 	// ─────────────────────────────────────────────
+// 	// STEP 2: YAML → JSON
+// 	// ─────────────────────────────────────────────
+// 	jsonContent, err := yaml.YAMLToJSON(yamlContent.Bytes())
+// 	if err != nil {
+// 		return nil, fmt.Errorf("!!! yaml→json conversion failed: %w", err)
+// 	}
+// 	logger.Info("!!! STEP 2  ▸ Converted JSON")
+// 	logger.Info(string(jsonContent))
+
+// 	// ─────────────────────────────────────────────
+// 	// STEP 3: JSON → Go struct -  FAILURE here on the port  "error": "!!! json unmarshal failed: json: cannot unmarshal object into Go struct field HTTPGetAction.Services.Config.ExtraPodSpec.mainContainer.livenessProbe.ProbeHandler.httpGet.port of type int32"}
+
+// 	// ─────────────────────────────────────────────
+// 	var config DynamoGraphConfig
+// 	if err := json.Unmarshal(jsonContent, &config); err != nil {
+// 		return nil, fmt.Errorf("!!! json unmarshal failed: %w", err)
+// 	}
+
+// 	prettyStruct, _ := json.MarshalIndent(config, "", "  ")
+// 	logger.Info("!!! STEP 3  ▸ Parsed Go struct (pretty-printed JSON)")
+// 	logger.Info(string(prettyStruct))
+
+// 	return &config, nil
+// }
+
+// Original with debug print.
+// func ParseDynamoGraphConfig(ctx context.Context, yamlContent *bytes.Buffer) (*DynamoGraphConfig, error) {
+// 	var config DynamoGraphConfig
+// 	logger := log.FromContext(ctx)
+// 	logger.Info("!!! STEP 1: Received YAML content", "yamlContent", yamlContent.String())
+
+// 	// Attempt to unmarshal YAML content into the config struct
+// 	err := yaml.Unmarshal(yamlContent.Bytes(), &config)
+// 	if err != nil {
+// 		logger.Error(err, "!!! STEP 2: YAML unmarshal failed")
+// 		return nil, fmt.Errorf("!!! yaml unmarshal failed: %w", err)
+// 	}
+
+// 	logger.Info("!!! STEP 3: YAML unmarshal succeeded", "rawStruct", fmt.Sprintf("%+v", config))
+
+// 	// Optionally re-marshal to JSON for human-readable validation
+// 	prettyJSON, err := json.MarshalIndent(config, "", "  ")
+// 	if err != nil {
+// 		logger.Error(err, "!!! STEP 4: Failed to marshal config back to JSON")
+// 	} else {
+// 		logger.Info("!!! STEP 4: Parsed config as JSON", "parsedConfig", string(prettyJSON))
+// 	}
+
+// 	return &config, nil
+// }
+
+// Suggestion from GPT: ChatGPT parser ThroughJson . Expects port: 5000 or port: health. Call it jsonparse
 func ParseDynamoGraphConfig(ctx context.Context, yamlContent *bytes.Buffer) (*DynamoGraphConfig, error) {
-	var config DynamoGraphConfig
 	logger := log.FromContext(ctx)
-	logger.Info("trying to parse dynamo graph config", "yamlContent", yamlContent.String())
-	err := yaml.Unmarshal(yamlContent.Bytes(), &config)
-	return &config, err
+	logger.Info("!!! STEP 1: Received YAML content", "yamlContent", yamlContent.String())
+
+	// Step 1: Decode into an intermediate structure
+	var intermediate map[string]interface{}
+	if err := yaml.Unmarshal(yamlContent.Bytes(), &intermediate); err != nil {
+		logger.Error(err, "!!! STEP 2: YAML unmarshal to map failed")
+		return nil, fmt.Errorf("!!! yaml unmarshal to map failed: %w", err)
+	}
+
+	logger.Info("!!! STEP 2.5: Intermediate map unmarshalled", "mapKeys", fmt.Sprintf("%v", keys(intermediate)))
+
+	// Step 2: Convert intermediate map to JSON
+	jsonContent, err := json.Marshal(intermediate)
+	if err != nil {
+		logger.Error(err, "!!! STEP 3: JSON marshal failed")
+		return nil, fmt.Errorf("!!! json marshal failed: %w", err)
+	}
+
+	// Step 3: Decode JSON into the strongly typed config
+	var config DynamoGraphConfig
+	if err := json.Unmarshal(jsonContent, &config); err != nil {
+		logger.Error(err, "!!! STEP 4: JSON unmarshal into config failed")
+		return nil, fmt.Errorf("!!! json unmarshal failed: %w", err)
+	}
+
+	logger.Info("!!! STEP 5: JSON unmarshal succeeded", "rawStruct", fmt.Sprintf("%+v", config))
+
+	// Optional: pretty-print the JSON
+	prettyJSON, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		logger.Error(err, "!!! STEP 6: Pretty JSON marshal failed")
+	} else {
+		logger.Info("!!! STEP 6: Parsed config as JSON", "parsedConfig", string(prettyJSON))
+	}
+
+	return &config, nil
+}
+
+// helper function
+func keys(m map[string]interface{}) []string {
+	k := make([]string, 0, len(m))
+	for key := range m {
+		k = append(k, key)
+	}
+	return k
 }
 
 func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeploymentConfig, error) {
