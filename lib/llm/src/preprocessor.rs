@@ -53,7 +53,7 @@ use crate::protocols::{
 };
 use crate::tokenizers::{traits::Tokenizer, HuggingFaceTokenizer};
 
-use crate::preprocessor::prompt::{PromptFormatter, PromptInput, TokenInput};
+use crate::preprocessor::prompt::{PromptFormatter, PromptInput, TextInput, TokenInput};
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
 
@@ -181,39 +181,56 @@ impl OpenAIPreprocessor {
                     }
                 }
             }
-            PromptInput::Text => {
-                // No pre-tokenized batch input, use the default tokenization
-                let use_raw_prompt = request
-                    .nvext()
-                    .is_some_and(|ext| ext.use_raw_prompt.unwrap_or(false));
+            PromptInput::Text(_) => {
+                if let Some(text_input) = request.extract_text() {
+                    match text_input {
+                        TextInput::Single(_) => {
+                            let use_raw_prompt = request
+                                .nvext()
+                                .is_some_and(|ext| ext.use_raw_prompt.unwrap_or(false));
 
-                let formatted_prompt = if use_raw_prompt {
-                    match request.raw_prompt() {
-                        Some(prompt) => prompt,
-                        None => {
-                            tracing::warn!("Raw prompt requested but not available");
-                            self.formatter.render(request)?
+                            let formatted_prompt = if use_raw_prompt {
+                                match request.raw_prompt() {
+                                    Some(prompt) => prompt,
+                                    None => {
+                                        tracing::warn!("Raw prompt requested but not available");
+                                        self.formatter.render(request)?
+                                    }
+                                }
+                            } else {
+                                self.formatter.render(request)?
+                            };
+
+                            let encoding = self.tokenizer.encode(&formatted_prompt)?;
+
+                            if request.has_annotation(ANNOTATION_FORMATTED_PROMPT) {
+                                annotations.insert(
+                                    ANNOTATION_FORMATTED_PROMPT.to_string(),
+                                    formatted_prompt,
+                                );
+                            }
+
+                            if request.has_annotation(ANNOTATION_TOKEN_IDS) {
+                                annotations.insert(
+                                    ANNOTATION_TOKEN_IDS.to_string(),
+                                    serde_json::to_string(&encoding.token_ids)?,
+                                );
+                            }
+
+                            builder.token_ids(encoding.token_ids);
+                        }
+                        TextInput::Batch(texts) => {
+                            let mut token_batches = Vec::new();
+                            // TODO: room for optimization here
+                            for text in texts {
+                                let encoding = self.tokenizer.encode(&text)?;
+                                token_batches.push(encoding.token_ids);
+                            }
+                            builder.batch_token_ids(Some(token_batches));
+                            builder.token_ids(vec![]);
                         }
                     }
-                } else {
-                    self.formatter.render(request)?
-                };
-
-                let encoding =
-                    tokio::task::block_in_place(|| self.tokenizer.encode(&formatted_prompt))?;
-
-                if request.has_annotation(ANNOTATION_FORMATTED_PROMPT) {
-                    annotations.insert(ANNOTATION_FORMATTED_PROMPT.to_string(), formatted_prompt);
                 }
-
-                if request.has_annotation(ANNOTATION_TOKEN_IDS) {
-                    annotations.insert(
-                        ANNOTATION_TOKEN_IDS.to_string(),
-                        serde_json::to_string(&encoding.token_ids)?,
-                    );
-                }
-
-                builder.token_ids(encoding.token_ids);
             }
         }
 
@@ -384,12 +401,7 @@ impl
         let (common_request, annotations) = self.preprocess_request(&request)?;
 
         // update isl
-        if let Some(batch_token_ids) = &common_request.batch_token_ids {
-            let total_tokens: usize = batch_token_ids.iter().map(|batch| batch.len()).sum();
-            response_generator.update_isl(total_tokens as u32);
-        } else {
-            response_generator.update_isl(common_request.token_ids.len() as u32);
-        }
+        response_generator.update_isl(common_request.token_ids.len() as u32);
 
         // repack the common completion request
         let common_request = context.map(|_| common_request);

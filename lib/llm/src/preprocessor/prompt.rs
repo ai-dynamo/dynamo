@@ -45,9 +45,15 @@ pub enum TokenInput {
 }
 
 #[derive(Debug)]
+pub enum TextInput {
+    Single(String),
+    Batch(Vec<String>),
+}
+
+#[derive(Debug)]
 pub enum PromptInput {
     Tokens(TokenInput),
-    Text,
+    Text(TextInput),
 }
 
 /// Trait that defines a request that can map to an OpenAI-like request.
@@ -64,11 +70,15 @@ pub trait OAIChatLikeRequest {
 
     /// Returns the type of input for the prompt. Default is Text.
     fn prompt_input_type(&self) -> PromptInput {
-        PromptInput::Text
+        PromptInput::Text(TextInput::Single(String::new()))
     }
 
     /// Extract tokens if the input is pre-tokenized
     fn extract_tokens(&self) -> Option<TokenInput> {
+        None
+    }
+
+    fn extract_text(&self) -> Option<TextInput> {
         None
     }
 }

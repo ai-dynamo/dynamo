@@ -22,7 +22,7 @@ use crate::protocols::openai::{
 };
 use tracing;
 
-use crate::preprocessor::prompt::{PromptInput, TokenInput};
+use crate::preprocessor::prompt::{PromptInput, TextInput, TokenInput};
 
 impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     fn messages(&self) -> Value {
@@ -83,7 +83,12 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
             async_openai::types::Prompt::ArrayOfIntegerArray(_) => {
                 PromptInput::Tokens(TokenInput::Batch(vec![]))
             }
-            _ => PromptInput::Text,
+            async_openai::types::Prompt::String(_) => {
+                PromptInput::Text(TextInput::Single(String::new()))
+            }
+            async_openai::types::Prompt::StringArray(_) => {
+                PromptInput::Text(TextInput::Batch(vec![]))
+            }
         }
     }
 
@@ -98,6 +103,16 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
                     .map(|arr| arr.iter().map(|&t| t as u32).collect())
                     .collect(),
             )),
+            _ => None,
+        }
+    }
+
+    fn extract_text(&self) -> Option<TextInput> {
+        match &self.inner.prompt {
+            async_openai::types::Prompt::String(text) => Some(TextInput::Single(text)),
+            async_openai::types::Prompt::StringArray(texts) => {
+                Some(TextInput::Batch(texts.iter().map(|t| t.clone()).collect()))
+            }
             _ => None,
         }
     }
