@@ -199,7 +199,9 @@ impl OpenAIPreprocessor {
                                 self.formatter.render(request)?
                             };
 
-                            let encoding = self.tokenizer.encode(&formatted_prompt)?;
+                            let encoding = tokio::task::block_in_place(|| {
+                                self.tokenizer.encode(&formatted_prompt)
+                            })?;
 
                             if request.has_annotation(ANNOTATION_FORMATTED_PROMPT) {
                                 annotations.insert(
