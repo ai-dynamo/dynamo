@@ -11,7 +11,7 @@ for concurrency in 1 2 8192; do
     --model ${MODEL} \
     --tokenizer ${MODEL} \
     --endpoint-type completions \
-    --endpoint /v1/experimental/dynamo/completions \
+    --endpoint /v1/completions \
     --streaming \
     --url ${HEAD_PREFILL_NODE_IP}:${PORT} \
     --input-file ${INPUT_FILE} \

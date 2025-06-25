@@ -9,8 +9,6 @@ from sglang.bench_serving import sample_random_requests
 Helper script that uses SGLang's random request generator to sample ShareGPT data 
 and then converts it to a jsonl file that can be used by GenAI perf for benchmarking
 
-We specifically leverage the `/v1/experimental/dynamo/completions` endpoint to benchmark
-
 Example usage:
 python3 generate_bench_data.py --model deepseek-ai/DeepSeek-R1 --output data.jsonl
 """
