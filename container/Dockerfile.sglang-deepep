@@ -81,6 +81,9 @@ RUN pip uninstall --break-system-packages -y sglang
 RUN rm -rf sglang
 RUN pip install --break-system-packages "sglang==0.4.8"
 
+# Allow forceful shutdown of inflight requests
+ENV SGL_FORCE_SHUTDOWN=1
+
 WORKDIR /sgl-workspace
 # https://github.com/ai-dynamo/dynamo/pull/1510
 ARG DYNAMO_COMMIT="382e3aedc421b3b3abc338062b332b54b5aa8529"
