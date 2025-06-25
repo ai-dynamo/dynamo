@@ -5,8 +5,8 @@ rust based frontend that supports batch completions so we do not need to use the
 ---
 Benchmark the latency of running a single batch with a server.
 
-python3 sgl_bench_one_batch_server.py --model deepseek-ai/DeepSeek-R1 --base-url http://HEAD_PREFILL_NODE_IP:8000 --batch-size 8192 --input-len 4096 --output-len 5
-python3 sgl_bench_one_batch_server.py --model deepseek-ai/DeepSeek-R1 --base-url http://HEAD_PREFILL_NODE_IP:8000 --batch-size 40000 --input-len 2000 --output-len 100
+python3 sgl_bench_one_batch_server.py --model deepseek-ai/DeepSeek-R1 --base-url http://HEAD_PREFILL_NODE_IP:8000 --batch-size 8192 --input-len 4096 --output-len 5 --skip-warmup
+python3 sgl_bench_one_batch_server.py --model deepseek-ai/DeepSeek-R1 --base-url http://HEAD_PREFILL_NODE_IP:8000 --batch-size 40000 --input-len 2000 --output-len 100 --skip-warmup
 """
 
 import argparse
@@ -15,6 +15,7 @@ import itertools
 import json
 import multiprocessing
 import os
+import random
 import time
 from typing import Tuple
 
@@ -137,6 +138,18 @@ def run_one_case(
         return_text=False,
     )
 
+    # Dynamo uses the async-openai crate which currently does not support tokens that are greater than u16:MAX_SIZE (50256 inclusive)
+    # We have PR to increase this limit here https://github.com/64bit/async-openai/pull/392
+    # For now we simply choose a random token between 0 and 50256 if we notice a token is greater
+    U16_MAX_SIZE = 50256
+    for req in input_requests:
+        if hasattr(req, 'prompt') and isinstance(req.prompt, list):
+            # If prompt is a list of token IDs
+            req.prompt = [random.randint(0, U16_MAX_SIZE) if token > U16_MAX_SIZE else token for token in req.prompt]
+        elif hasattr(req, 'prompt') and hasattr(req.prompt, '__iter__'):
+            # Handle other iterable types
+            req.prompt = type(req.prompt)([random.randint(0, U16_MAX_SIZE) if token > U16_MAX_SIZE else token for token in req.prompt])
+
     use_structured_outputs = False
     if use_structured_outputs:
         texts = []
@@ -168,7 +181,6 @@ def run_one_case(
     response = requests.post(url + "/v1/completions", json=request_payload, stream=True)
 
     ttft = 0.0
-    seen_token = False
 
     for chunk in response.iter_lines(decode_unicode=False):
         chunk = chunk.decode("utf-8")
@@ -186,9 +198,8 @@ def run_one_case(
 
         # OpenAI-style structure
         usage = data.get("usage")
-        if usage and usage.get("completion_tokens") == 1 and not seen_token:
+        if usage and usage.get("completion_tokens") == 1:
             ttft = time.perf_counter() - tic
-            seen_token = True
 
     latency = time.perf_counter() - tic
     input_throughput = batch_size * input_len / ttft
@@ -319,7 +330,7 @@ def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
         return
 
     summary = (
-        f"\nInput lens: {bench_args.input_len}. Output lens: {bench_args.output_len}.\n"
+        f"\nInput lens: {bench_args.input_len}. Output lenses: {bench_args.output_len}.\n"
     )
     summary += "| batch size | latency (s) | input throughput (tok/s)  | output throughput (tok/s) | acc length | ITL (ms) | input cost ($/1M) | output cost ($/1M) |"
 

@@ -26,10 +26,10 @@ SGLangWorker:
   disaggregation-transfer-backend: nixl
   disaggregation-bootstrap-port: 30001
   dist-init-addr: HEAD_PREFILL_NODE_IP:29500
-  nnodes: 2
+  nnodes: 4
   node-rank: 0
-  tp-size: 16
-  dp-size: 16
+  tp-size: 32
+  dp-size: 32
   enable-dp-attention: true
   decode-log-interval: 1
   # when MoE is enabled ep-size == tp-size
@@ -69,10 +69,10 @@ SGLangDecodeWorker:
   disaggregation-transfer-backend: nixl
   disaggregation-bootstrap-port: 30001
   dist-init-addr: HEAD_DECODE_NODE_IP:29500
-  nnodes: 4
+  nnodes: 9
   node-rank: 0
-  tp-size: 32
-  dp-size: 32
+  tp-size: 72
+  dp-size: 72
   enable-dp-attention: true
   decode-log-interval: 1
   enable-deepep-moe: true
