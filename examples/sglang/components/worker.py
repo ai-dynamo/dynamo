@@ -112,56 +112,69 @@ class SGLangWorker:
             sampling_params["ignore_eos"] = request.stop_conditions.ignore_eos
         return sampling_params
 
+    def _get_request_batch_size(self, request: PreprocessedRequest):
+        """Get batch size from request, returns None for single requests"""
+        if request.batch_token_ids is not None:
+            return len(request.batch_token_ids)
+        return None
+
+    def _is_batch_request(self, request: PreprocessedRequest):
+        """Check if request is in batch mode"""
+        return request.batch_token_ids is not None
+
     @endpoint()
     async def generate(self, request: PreprocessedRequest):
+        # Check if we're in batch mode at the start
+        is_batch = self._is_batch_request(request)
+        batch_size = self._get_request_batch_size(request)
+        
         # TODO: maintain a mapping from SGLang's Ouput struct to LLMEngineOuput
         sampling_params = self._build_sampling_params(request)
 
         if self.engine_args.disaggregation_mode != "null":
-            bootstrap_room = self._generate_bootstrap_room()
+            if is_batch:
+                bootstrap_room = [self._generate_bootstrap_room() for _ in range(batch_size)]
+                bootstrap_host = [self.bootstrap_host] * batch_size
+                bootstrap_port = [self.bootstrap_port] * batch_size
+            else:
+                bootstrap_host = self.bootstrap_host
+                bootstrap_port = self.bootstrap_port
+                bootstrap_room = self._generate_bootstrap_room()
 
             # decode worker request
             disagg_request = DisaggPreprocessedRequest(
                 request=request,
                 sampling_params=sampling_params,
-                bootstrap_host=self.bootstrap_host,
-                bootstrap_port=self.bootstrap_port,
+                bootstrap_host=bootstrap_host,
+                bootstrap_port=bootstrap_port,
                 bootstrap_room=bootstrap_room,
             )
 
             # prefill response is not used
             prefill = await self.engine.async_generate(
-                input_ids=request.token_ids
-                if request.batch_token_ids is None
-                else request.batch_token_ids,
+                input_ids=request.token_ids if not is_batch else request.batch_token_ids,
                 sampling_params=sampling_params,
                 stream=True,
-                bootstrap_host=self.bootstrap_host,
-                bootstrap_port=self.bootstrap_port,
+                bootstrap_host=bootstrap_host,
+                bootstrap_port=bootstrap_port,
                 bootstrap_room=bootstrap_room,
             )
             prefill_task = asyncio.create_task(self._prefill_generator(prefill))
 
             decode = await self.decode_client.generate(disagg_request.model_dump_json())
 
-            async for out in self._process_stream(
-                decode, unpack=True, is_batch=request.batch_token_ids is not None
-            ):
+            async for out in self._process_stream(decode, unpack=True, is_batch=is_batch):
                 yield out
 
             await prefill_task
         else:
             g = await self.engine.async_generate(
-                input_ids=request.token_ids
-                if request.batch_token_ids is None
-                else request.batch_token_ids,
+                input_ids=request.token_ids if not is_batch else request.batch_token_ids,
                 sampling_params=sampling_params,
                 stream=True,
             )
 
-            async for out in self._process_stream(
-                g, unpack=False, is_batch=request.batch_token_ids is not None
-            ):
+            async for out in self._process_stream(g, unpack=False, is_batch=is_batch):
                 yield out
 
     async def _process_stream(self, stream_source, unpack: bool, is_batch: bool):
