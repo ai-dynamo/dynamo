@@ -143,6 +143,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     git checkout ${SGLANG_COMMIT} && \
     uv pip install -e "python[all]"
 
+# Set env var that allows for forceful shutdown of inflight requests in SGL's TokenizerManager
+ENV SGL_FORCE_SHUTDOWN=1
+
 # Common dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     uv pip install --requirement /tmp/requirements.txt
