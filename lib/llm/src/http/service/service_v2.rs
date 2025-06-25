@@ -142,6 +142,11 @@ impl HttpServiceConfigBuilder {
 
         let mut router = axum::Router::new();
 
+        if std::env::var("DYN_DISABLE_HTTP_BODY_LIMIT").is_ok() {
+            router = router.layer(axum::extract::DefaultBodyLimit::disable());
+            tracing::info!("Disabled HTTP body limit");
+        }
+
         let mut all_docs = Vec::new();
 
         let mut routes = vec![
