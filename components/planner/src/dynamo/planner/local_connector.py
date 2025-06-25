@@ -32,7 +32,7 @@ logger = logging.getLogger(__name__)
 
 
 class LocalConnector(PlannerConnector):
-    def __init__(self, namespace: str, runtime: DistributedRuntime, backend: str):
+    def __init__(self, namespace: str, runtime: DistributedRuntime):
         """
         Initialize LocalConnector and connect to CircusController.
 
