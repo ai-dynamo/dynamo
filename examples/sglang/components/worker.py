@@ -131,7 +131,7 @@ class SGLangWorker:
 
             # prefill response is not used
             prefill = await self.engine.async_generate(
-                input_ids=request.token_ids,
+                input_ids=request.token_ids if request.batch_token_ids is None else request.batch_token_ids,
                 sampling_params=sampling_params,
                 stream=True,
                 bootstrap_host=self.bootstrap_host,
@@ -142,33 +142,61 @@ class SGLangWorker:
 
             decode = await self.decode_client.generate(disagg_request.model_dump_json())
 
-            async for out in self._process_stream(decode, unpack=True):
+            async for out in self._process_stream(decode, unpack=True, is_batch=request.batch_token_ids is not None):
                 yield out
 
             await prefill_task
         else:
             g = await self.engine.async_generate(
-                input_ids=request.token_ids,
+                input_ids=request.token_ids if request.batch_token_ids is None else request.batch_token_ids,
                 sampling_params=sampling_params,
                 stream=True,
             )
 
-            async for out in self._process_stream(g, unpack=False):
+            async for out in self._process_stream(g, unpack=False, is_batch=request.batch_token_ids is not None):
                 yield out
 
-    async def _process_stream(self, stream_source, unpack: bool):
-        num_output_tokens_so_far = 0
+    async def _process_stream(self, stream_source, unpack: bool, is_batch: bool):
+        # Initialize based on batch mode
+        if is_batch:
+            num_output_tokens_so_far = {}
+        else:
+            num_output_tokens_so_far = 0
+            
         async for res in stream_source:
             data = res.data() if unpack else res
             finish_reason = data["meta_info"]["finish_reason"]
-            if finish_reason:
-                # Don't forward the stop token
-                out = {"token_ids": [], "finish_reason": finish_reason["type"]}
+                    
+            if is_batch:
+                # Handle batch response
+                index = data.get("index", 0)
+                if index not in num_output_tokens_so_far:
+                    num_output_tokens_so_far[index] = 0
+                    
+                if finish_reason:
+                    out = {
+                        "token_ids": [], 
+                        "finish_reason": finish_reason["type"],
+                        "index": index,
+                    }
+                else:
+                    next_total_toks = len(data["output_ids"])
+                    new_tokens = data["output_ids"][num_output_tokens_so_far[index]:]
+                    out = {
+                        "token_ids": new_tokens,
+                        "index": index,
+                    }
+                    num_output_tokens_so_far[index] = next_total_toks
             else:
-                next_total_toks = len(data["output_ids"])
-                out = {"token_ids": data["output_ids"][num_output_tokens_so_far:]}
+                # Handle single response
+                if finish_reason:
+                    out = {"token_ids": [], "finish_reason": finish_reason["type"]}
+                else:
+                    next_total_toks = len(data["output_ids"])
+                    out = {"token_ids": data["output_ids"][num_output_tokens_so_far:]}
+                    num_output_tokens_so_far = next_total_toks
+                    
             yield out
-            num_output_tokens_so_far = next_total_toks
 
     def _generate_bootstrap_room(self):
         return random.randint(0, 2**63 - 1)

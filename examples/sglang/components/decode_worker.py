@@ -45,7 +45,7 @@ class SGLangDecodeWorker:
     @endpoint()
     async def generate(self, req: DisaggPreprocessedRequest):
         g = await self.engine.async_generate(
-            input_ids=req.request.token_ids,
+            input_ids=req.request.token_ids if req.request.batch_token_ids is None else req.request.batch_token_ids,
             sampling_params=req.sampling_params,
             stream=True,
             bootstrap_host=req.bootstrap_host,
