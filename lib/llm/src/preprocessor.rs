@@ -164,8 +164,6 @@ impl OpenAIPreprocessor {
         match request.prompt_input_type() {
             PromptInput::Tokens(_) => {
                 if let Some(token_input) = request.extract_tokens() {
-                    tracing::debug!("Using pre-tokenized input");
-
                     match token_input {
                         TokenInput::Single(tokens) => {
                             builder.token_ids(tokens);
