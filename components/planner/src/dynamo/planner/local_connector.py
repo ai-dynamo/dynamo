@@ -39,7 +39,6 @@ class LocalConnector(PlannerConnector):
         Args:
             namespace: The Dynamo namespace
             runtime: Optional DistributedRuntime instance
-            backend: The backend to use ("vllm_v0", "vllm_v1")
         """
         self.namespace = namespace
         self.runtime = runtime
