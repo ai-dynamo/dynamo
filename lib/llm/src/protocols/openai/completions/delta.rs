@@ -131,8 +131,9 @@ impl crate::protocols::openai::DeltaGeneratorExt<CompletionResponse> for DeltaGe
         };
 
         // create choice
-        let index = 0;
-        Ok(self.create_choice(index, delta.text, finish_reason))
+        let index = delta.index.unwrap_or(0).into();
+        let response = self.create_choice(index, delta.text.clone(), finish_reason);
+        Ok(response)
     }
 
     fn get_isl(&self) -> Option<u32> {

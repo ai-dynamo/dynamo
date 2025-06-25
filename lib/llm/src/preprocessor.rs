@@ -384,7 +384,12 @@ impl
         let (common_request, annotations) = self.preprocess_request(&request)?;
 
         // update isl
-        response_generator.update_isl(common_request.token_ids.len() as u32);
+        if let Some(batch_token_ids) = &common_request.batch_token_ids {
+            let total_tokens: usize = batch_token_ids.iter().map(|batch| batch.len()).sum();
+            response_generator.update_isl(total_tokens as u32);
+        } else {
+            response_generator.update_isl(common_request.token_ids.len() as u32);
+        }
 
         // repack the common completion request
         let common_request = context.map(|_| common_request);
