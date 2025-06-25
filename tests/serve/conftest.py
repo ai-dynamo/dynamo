@@ -71,6 +71,10 @@ def predownload_models():
 # Automatically use the predownload fixture for all serve tests
 def pytest_collection_modifyitems(config, items):
     for item in items:
+        # Skip items that don't have fixturenames (like MypyFileItem)
+        if not hasattr(item, "fixturenames"):
+            continue
+
         # Only apply to tests in the serve directory
         if "serve" in str(item.fspath):
             # Check if the test already uses the fixture
