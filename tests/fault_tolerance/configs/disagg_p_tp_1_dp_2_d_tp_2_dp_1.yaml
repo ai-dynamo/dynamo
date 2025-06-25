@@ -26,6 +26,12 @@ Frontend:
 Processor:
   router: round-robin
   common-configs: [model, block-size]
+  ServiceArgs:
+    workers: 2
+    resources:
+      cpu: "10"
+      memory: "20Gi"
+
 
 VllmWorker:
   remote-prefill: true
