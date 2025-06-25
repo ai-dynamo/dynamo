@@ -74,6 +74,7 @@ impl TorchTensor for VllmTensor {
 #[pyclass]
 pub struct KvbmWorker {
     _impl: Arc<KvbmWorkerImpl>,
+    _rt: tokio::runtime::Runtime,
 }
 
 #[pymethods]
@@ -109,10 +110,17 @@ impl KvbmWorker {
             .build()
             .map_err(to_pyerr)?;
 
-        let worker = KvbmWorkerImpl::new(config).map_err(to_pyerr)?;
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(to_pyerr)?;
+
+        let worker =
+            rt.block_on(async move { KvbmWorkerImpl::new(config).await.map_err(to_pyerr) })?;
 
         Ok(Self {
             _impl: Arc::new(worker),
+            _rt: rt,
         })
     }
 }

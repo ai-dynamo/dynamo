@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
+use tmq::AsZmqSocket;
 
 use super::*;
 use utils::*;
@@ -28,6 +29,39 @@ struct PendingMessage {
     completion_indicator: oneshot::Sender<()>,
 }
 
+pub struct LeaderSockets {
+    pub pub_socket: Publish,
+    pub pub_url: String,
+    pub ack_socket: Pull,
+    pub ack_url: String,
+}
+
+pub async fn new_leader_sockets(url: &str) -> Result<LeaderSockets> {
+    let url = format!("{}:0", url);
+
+    let context = Context::new();
+    let pub_socket = publish(&context).bind(url.as_str())?;
+    let pub_url = pub_socket
+        .get_socket()
+        .get_last_endpoint()
+        .unwrap()
+        .unwrap();
+
+    let ack_socket = pull(&context).bind(url.as_str())?;
+    let ack_url = ack_socket
+        .get_socket()
+        .get_last_endpoint()
+        .unwrap()
+        .unwrap();
+
+    Ok(LeaderSockets {
+        pub_socket,
+        pub_url,
+        ack_socket,
+        ack_url,
+    })
+}
+
 /// The ActiveMessageLeader is responsible for sending commands to all workers.
 /// On the leader side, we use two sockets:
 /// 1. A publish socket to send messages to all workers.
@@ -45,25 +79,18 @@ pub struct ZmqActiveMessageLeader {
 
 impl ZmqActiveMessageLeader {
     pub async fn new(
-        url: &str,
-        pub_port: usize,
-        pull_port: usize,
+        leader_sockets: LeaderSockets,
         num_workers: usize,
         timeout: Duration,
         cancel_token: CancellationToken,
     ) -> Result<Self> {
-        let context = Context::new();
-
-        let pub_url = format!("tcp://{}:{}", url, pub_port);
-        let pull_url = format!("tcp://{}:{}", url, pull_port);
-
-        let pub_socket = Arc::new(Mutex::new(publish(&context).bind(pub_url.as_str())?));
-        let pull_socket = pull(&context).bind(pull_url.as_str())?;
+        let pub_socket = Arc::new(Mutex::new(leader_sockets.pub_socket));
+        let pull_socket = leader_sockets.ack_socket;
 
         tracing::info!(
             "ZmqActiveMessageLeader: Bound to pub: {} and pull: {}",
-            pub_url,
-            pull_url
+            leader_sockets.pub_url,
+            leader_sockets.ack_url
         );
 
         let pending_messages = Arc::new(Mutex::new(HashMap::new()));
@@ -310,21 +337,17 @@ pub struct ZmqActiveMessageWorker {}
 
 impl ZmqActiveMessageWorker {
     pub fn new(
-        url: &str,
-        sub_port: usize,
-        push_port: usize,
+        sub_url: &str,
+        push_url: &str,
         mut message_handlers: MessageHandlers,
         cancel_token: CancellationToken,
     ) -> Result<Self> {
         let context = Context::new();
 
-        let sub_url = format!("tcp://{}:{}", url, sub_port);
-        let push_url = format!("tcp://{}:{}", url, push_port);
-
         let sub_socket = subscribe(&context)
-            .connect(sub_url.as_str())?
+            .connect(sub_url)?
             .subscribe("".as_bytes())?;
-        let push_socket = Arc::new(Mutex::new(push(&context).connect(push_url.as_str())?));
+        let push_socket = Arc::new(Mutex::new(push(&context).connect(push_url)?));
 
         tracing::info!(
             "ZmqActiveMessageWorker: Bound to sub: {} and push: {}",

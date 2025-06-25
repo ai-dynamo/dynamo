@@ -5,9 +5,18 @@ use super::*;
 
 use llm_rs::block_manager::distributed::{KvbmLeader as KvbmLeaderImpl, KvbmLeaderConfig};
 
+fn compute_num_blocks(env_var: &str, bytes_per_block: usize) -> usize {
+    let cache_size_gb = std::env::var(env_var)
+        .unwrap_or_default()
+        .parse::<usize>()
+        .unwrap_or(0);
+    (cache_size_gb * 1_000_000_000) / bytes_per_block
+}
+
 #[pyclass]
 pub struct KvbmLeader {
     _impl: Arc<KvbmLeaderImpl>,
+    _rt: tokio::runtime::Runtime,
 }
 
 #[pymethods]
@@ -15,17 +24,28 @@ impl KvbmLeader {
     #[new]
     #[pyo3(signature = (barrier_id, bytes_per_block, world_size))]
     fn new(barrier_id: String, bytes_per_block: usize, world_size: usize) -> PyResult<Self> {
+        let num_host_blocks = compute_num_blocks("DYNAMO_KVBM_CPU_CACHE", bytes_per_block);
+        let num_disk_blocks = compute_num_blocks("DYNAMO_KVBM_DISK_CACHE", bytes_per_block);
+
         let config = KvbmLeaderConfig::builder()
             .barrier_id(barrier_id)
-            .bytes_per_block(bytes_per_block)
+            .num_host_blocks(num_host_blocks)
+            .num_disk_blocks(num_disk_blocks)
             .world_size(world_size)
             .build()
             .map_err(to_pyerr)?;
 
-        let leader = KvbmLeaderImpl::new(config).map_err(to_pyerr)?;
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(to_pyerr)?;
+
+        let leader =
+            rt.block_on(async move { KvbmLeaderImpl::new(config).await.map_err(to_pyerr) })?;
 
         Ok(Self {
             _impl: Arc::new(leader),
+            _rt: rt,
         })
     }
 }

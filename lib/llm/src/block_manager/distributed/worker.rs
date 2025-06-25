@@ -22,6 +22,8 @@ use derive_builder::Builder;
 use nixl_sys::Agent as NixlAgent;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use tokio::runtime::Handle;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
@@ -104,14 +106,25 @@ impl KvbmWorkerConfig {
     }
 }
 
+fn build_agent(worker_id: usize) -> anyhow::Result<NixlAgent> {
+    // TODO: Get GDS enabled here.
+    // There seems to be some issue with NIXL that causes errors if a large amount of GDS backends are instantiated all at once.
+
+    let agent = NixlAgent::new(&format!("kvbm-worker-{}", worker_id))?;
+    // let (_, gds_params) = agent.get_plugin_params("GDS")?;
+    let (_, posix_params) = agent.get_plugin_params("POSIX")?;
+    // agent.create_backend("GDS", &gds_params)?;
+    agent.create_backend("POSIX", &posix_params)?;
+
+    Ok(agent)
+}
+
 pub struct KvbmWorker {
-    cancel_token: CancellationToken,
-    task: Option<std::thread::JoinHandle<()>>,
+    task: Option<CriticalTaskExecutionHandle>,
 }
 
 impl KvbmWorker {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(config: KvbmWorkerConfig) -> anyhow::Result<Self> {
+    pub async fn new(config: KvbmWorkerConfig) -> anyhow::Result<Self> {
         tracing::info!(
             "Initializing KvbmWorker with params: num_device_blocks={}, page_size={}, dtype={:?}",
             config.num_device_blocks,
@@ -168,58 +181,38 @@ impl KvbmWorker {
             .build()?
             .create_layout(layout_type, device_tensors)?;
 
-        let cancel_token = CancellationToken::new();
-
-        let cancel_token_clone = cancel_token.clone();
         let layout_builder_clone = layout_builder.clone();
-        let task = std::thread::spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
 
-            let agent = NixlAgent::new(&format!("kvbm-worker-{}", config.worker_id)).unwrap();
+        let agent = build_agent(config.worker_id)?;
 
-            let transfer_context = Arc::new(TransferContext::new(
-                Arc::new(Some(agent)),
-                DeviceAllocator::new(config.device_id)
-                    .unwrap()
-                    .ctx()
-                    .new_stream()
-                    .unwrap(),
-                runtime.handle().clone(),
-            ));
-
-            runtime.block_on(async move {
-                let res = CriticalTaskExecutionHandle::new(
-                    move |cancel_token| {
-                        KvbmWorker::worker_task(
-                            device_layout,
-                            layout_builder_clone,
-                            layout_type,
-                            config.barrier_id,
-                            config.worker_id,
-                            transfer_context,
-                            cancel_token,
-                        )
-                    },
-                    cancel_token_clone,
-                    "kvbm-worker-task",
-                )
+        let transfer_context = Arc::new(TransferContext::new(
+            Arc::new(Some(agent)),
+            DeviceAllocator::new(config.device_id)
                 .unwrap()
-                .join()
-                .await;
+                .ctx()
+                .new_stream()
+                .unwrap(),
+            Handle::current(),
+        ));
 
-                if let Err(e) = res {
-                    tracing::error!("Error in worker task: {:?}", e);
-                }
-            })
-        });
-
-        Ok(Self {
+        let cancel_token = CancellationToken::new();
+        let task = CriticalTaskExecutionHandle::new(
+            move |cancel_token| {
+                KvbmWorker::worker_task(
+                    device_layout,
+                    layout_builder_clone,
+                    layout_type,
+                    config.barrier_id,
+                    config.worker_id,
+                    transfer_context,
+                    cancel_token,
+                )
+            },
             cancel_token,
-            task: Some(task),
-        })
+            "kvbm-worker-task",
+        )?;
+
+        Ok(Self { task: Some(task) })
     }
 
     fn make_layout<S: Storage, M: BlockMetadata>(
@@ -324,9 +317,8 @@ impl KvbmWorker {
         )]);
 
         let _zmq_worker = ZmqActiveMessageWorker::new(
-            &leader_data.zmq_url,
-            leader_data.broadcast_port,
-            leader_data.ack_port,
+            &leader_data.pub_url,
+            &leader_data.ack_url,
             handlers,
             cancel_token.clone(),
         )?;
@@ -341,9 +333,9 @@ impl KvbmWorker {
 
 impl Drop for KvbmWorker {
     fn drop(&mut self) {
-        self.cancel_token.cancel();
         if let Some(task) = self.task.take() {
-            task.join().unwrap();
+            task.cancel();
+            task.detach();
         }
     }
 }
