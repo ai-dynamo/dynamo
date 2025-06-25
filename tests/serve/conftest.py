@@ -81,4 +81,5 @@ def pytest_collection_modifyitems(config, items):
             if "predownload_models" not in item.fixturenames:
                 # Don't add if test explicitly marks to skip model download
                 if not item.get_closest_marker("skip_model_download"):
+                    item.fixturenames = list(item.fixturenames)
                     item.fixturenames.append("predownload_models")
