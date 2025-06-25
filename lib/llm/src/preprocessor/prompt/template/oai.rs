@@ -115,7 +115,7 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
         match &self.inner.prompt {
             async_openai::types::Prompt::String(text) => Some(TextInput::Single(text.to_string())),
             async_openai::types::Prompt::StringArray(texts) => {
-                Some(TextInput::Batch(texts.iter().cloned().collect()))
+                Some(TextInput::Batch(texts.to_vec()))
             }
             _ => None,
         }
