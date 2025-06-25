@@ -90,11 +90,14 @@ cp $MAIN_DIR/deps/tensorrt_llm/install_nixl.sh docker/common/install_nixl.sh
 sed -i "s/NIXL_COMMIT=\"[^\"]*\"/NIXL_COMMIT=\"${NIXL_COMMIT}\"/" docker/common/install_nixl.sh
 
 
-# Need to build in the Triton Devel Image for NIXL support.
+
 make -C docker tritondevel_build
 if [ "$ARCH" = "amd64" ]; then
+    # Need to build in the Triton Devel Image for NIXL support.
     make -C docker wheel_build DEVEL_IMAGE=tritondevel BUILD_WHEEL_OPTS='--extra-cmake-vars NIXL_ROOT=/opt/nvidia/nvda_nixl'
 else
+    # NIXL backend is not supported on arm64 for TensorRT-LLM.
+    # See here: https://github.com/NVIDIA/TensorRT-LLM/blob/main/docker/common/install_nixl.sh
     make -C docker wheel_build DEVEL_IMAGE=tritondevel
 fi
 
