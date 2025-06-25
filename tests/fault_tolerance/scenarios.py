@@ -164,7 +164,7 @@ deployment_graphs = {
     "disagg-p-tp-1-dp-2-d-tp-2-dp-1": (
         DeploymentGraph(
             module="graphs.disagg:Frontend",
-            config="/workspace/tests/fault_tolerance/configs/disagg_p_tp_2_dp_2_d_tp_4_dp_1.yaml",
+            config="/workspace/tests/fault_tolerance/configs/disagg_p_tp_1_dp_2_d_tp_2_dp_1.yaml",
             directory="/workspace/examples/llm",
             endpoints=["v1/chat/completions"],
             response_handlers=[chat_completions_response_handler],
@@ -172,6 +172,18 @@ deployment_graphs = {
         ),
         text_payload,
     ),
+    "disagg-p-tp-1-dp-1-d-tp-2-dp-1": (
+        DeploymentGraph(
+            module="graphs.disagg:Frontend",
+            config="/workspace/tests/fault_tolerance/configs/disagg_p_tp_1_dp_1_d_tp_2_dp_1.yaml",
+            directory="/workspace/examples/llm",
+            endpoints=["v1/chat/completions"],
+            response_handlers=[chat_completions_response_handler],
+            marks=[pytest.mark.gpu_4, pytest.mark.vllm],
+        ),
+        text_payload,
+    ),
+
 }
 
 # Each failure scenaro contains a list of failure injections
