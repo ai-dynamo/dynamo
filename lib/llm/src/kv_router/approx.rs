@@ -19,8 +19,8 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap};
 use std::hash::Hash;
 use std::sync::OnceLock;
-use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
+use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
 use crate::tokens::TokenBlockSequence;
@@ -65,7 +65,7 @@ struct TimerEntry {
 
 /// A data structure to manage a collection of timers, addressable by a key.
 #[derive(Debug)]
-pub struct TimerManager<K: Clone + Hash + Eq + Ord> {
+struct TimerManager<K: Clone + Hash + Eq + Ord> {
     /// The source of truth. Maps a key to its current expiration instant.
     timers: HashMap<K, Instant>,
     /// A min-heap of (expiration_instant, key) used to efficiently find the
@@ -106,22 +106,9 @@ impl<K: Clone + Hash + Eq + Ord> TimerManager<K> {
         }
     }
 
-    /// Removes a timer, preventing it from expiring.
-    ///
-    /// Returns true if the timer was present, false otherwise.
-    pub fn remove(&mut self, key: &K) -> bool {
-        // Just remove it from the map. The heap entry becomes stale.
-        self.timers.remove(key).is_some()
-    }
-
-    /// Returns the expiration Instant for a given key, if it exists.
-    pub fn get_expiry(&self, key: &K) -> Option<&Instant> {
-        self.timers.get(key)
-    }
-
     /// Polls for expired timers and returns a list of keys for all timers
     /// that have expired up to the current moment.
-    pub fn poll_expired(&mut self) -> Vec<K> {
+    pub fn pop_expired(&mut self) -> Vec<K> {
         let mut expired_keys = Vec::new();
         let now = Instant::now();
 
@@ -154,6 +141,13 @@ impl<K: Clone + Hash + Eq + Ord> TimerManager<K> {
 
         expired_keys
     }
+
+    /// Returns the next expiry time, if it exists.
+    pub fn peek_next_expiry(&self) -> Option<Instant> {
+        self.expirations
+            .peek()
+            .map(|Reverse((expiry_time, _))| *expiry_time)
+    }
 }
 
 pub struct ApproxKvIndexer {
@@ -179,8 +173,7 @@ impl ApproxKvIndexer {
         let cancel_clone = token.clone();
         let task = std::thread::spawn(move || {
             // create a new tokio runtime which will only perform work on a single thread
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .worker_threads(1) // Single-threaded environment
+            let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
@@ -190,32 +183,20 @@ impl ApproxKvIndexer {
                 let mut timer_manager: TimerManager<TimerEntry> = TimerManager::new(ttl);
                 let mut event_id = 0;
                 loop {
+                    // Create a future that sleeps until the next expiration time.
+                    let expiry_fut = if let Some(next_expiry) = timer_manager.peek_next_expiry() {
+                        tokio::time::sleep_until(next_expiry)
+                    } else {
+                        // If there are no timers, sleep forever.
+                        tokio::time::sleep(Duration::MAX)
+                    };
+
                     tokio::select! {
                         Some(request) = match_rx.recv() => {
-                            let expired = timer_manager.poll_expired();
-
-                            expired.iter().for_each(|e| {
-                                event_id += 1;
-
-                                let event = RouterEvent::new(
-                                    e.worker,
-                                    KvCacheEvent {
-                                        event_id,
-                                        data: KvCacheEventData::Removed(KvCacheRemoveData {
-                                            block_hashes: vec![e.key],
-                                        }),
-                                    }
-                                );
-
-                                trie.apply_event(event);
-                            });
-
                             let scores = trie.find_matches(request.sequence, false);
                             request.resp.send(scores).unwrap();
                         }
                         Some(result) = route_rx.recv() => {
-                            println!("GOT ROUTING DECISION {:?}", result);
-
                             let hashes = result.local_hashes.iter().zip(result.sequence_hashes.iter());
 
                             let stored_event = KvCacheEventData::Stored(KvCacheStoreData {
@@ -245,6 +226,27 @@ impl ApproxKvIndexer {
                         Some(worker) = remove_worker_rx.recv() => {
                             trie.remove_worker(worker);
                         }
+
+                        _ = expiry_fut => {
+                            let expired = timer_manager.pop_expired();
+
+                            expired.iter().for_each(|e| {
+                                event_id += 1;
+
+                                let event = RouterEvent::new(
+                                    e.worker,
+                                    KvCacheEvent {
+                                        event_id,
+                                        data: KvCacheEventData::Removed(KvCacheRemoveData {
+                                            block_hashes: vec![e.key],
+                                        }),
+                                    }
+                                );
+
+                                trie.apply_event(event);
+                            });
+                        }
+
                         _ = cancel_clone.cancelled() => {
                             tracing::debug!("Approximate Indexer progress loop shutting down");
                             return;
@@ -265,6 +267,37 @@ impl ApproxKvIndexer {
             task: once,
             kv_block_size,
         }
+    }
+
+    pub fn block_size(&self) -> usize {
+        self.kv_block_size
+    }
+
+    pub async fn process_routing_decision_for_request(
+        &self,
+        tokens: &[u32],
+        lora_id: u64,
+        worker_id: WorkerId,
+    ) -> Result<(), KvRouterError> {
+        let local_hashes = compute_block_hash_for_seq(tokens, self.kv_block_size);
+
+        let sequence = TokenBlockSequence::new(tokens.into(), self.kv_block_size, Some(lora_id));
+        let sequence_hashes = sequence
+            .blocks()
+            .iter()
+            .map(|b| b.sequence_hash())
+            .collect::<Vec<_>>();
+
+        self.route_tx
+            .send(RouterResult {
+                worker_id,
+                local_hashes,
+                sequence_hashes,
+            })
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+
+        Ok(())
     }
 }
 
@@ -318,33 +351,6 @@ impl KvIndexerInterface for ApproxKvIndexer {
     }
 }
 
-impl ApproxKvIndexer {
-    pub async fn process_routing_decision_for_request(
-        &self,
-        tokens: &[u32],
-        lora_id: u64,
-        worker_id: WorkerId,
-    ) {
-        let local_hashes = compute_block_hash_for_seq(tokens, self.kv_block_size);
-
-        let sequence = TokenBlockSequence::new(tokens.into(), self.kv_block_size, Some(lora_id));
-        let sequence_hashes = sequence
-            .blocks()
-            .iter()
-            .map(|b| b.sequence_hash())
-            .collect::<Vec<_>>();
-
-        self.route_tx
-            .send(RouterResult {
-                worker_id,
-                local_hashes,
-                sequence_hashes,
-            })
-            .await
-            .unwrap();
-    }
-}
-
 impl Drop for ApproxKvIndexer {
     fn drop(&mut self) {
         self.shutdown();
@@ -354,9 +360,15 @@ impl Drop for ApproxKvIndexer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::{Duration, Instant};
-    use tokio::time;
+
+    use tokio::time::{self, Duration, Instant};
     use tokio_util::sync::CancellationToken;
+
+    impl<T: Clone + Hash + Eq + Ord> TimerManager<T> {
+        pub fn get_expiry(&self, key: &T) -> Option<&Instant> {
+            self.timers.get(key)
+        }
+    }
 
     /// Helper to spin until a future evaluates to `true`, or a timeout is reached.
     async fn spin_until<F, Fut>(timeout: Duration, mut predicate: F)
@@ -390,11 +402,48 @@ mod tests {
 
         // Wait until after the TTL
         time::sleep(TTL + Duration::from_millis(20)).await;
-        let expired = tm.poll_expired();
+        let expired = tm.pop_expired();
         assert_eq!(expired.len(), 3);
         assert!(tm.get_expiry(&1).is_none());
         assert!(tm.get_expiry(&2).is_none());
         assert!(tm.get_expiry(&3).is_none());
+    }
+
+    /// Validate that reinserting an existing key extends its TTL and prevents premature expiry.
+    #[tokio::test]
+    async fn test_timer_manager_update_resets_ttl() {
+        // Validate that reinserting an existing key extends its TTL and prevents premature expiry.
+        const TTL: Duration = Duration::from_millis(50);
+        let mut tm: TimerManager<u32> = TimerManager::new(TTL);
+
+        // Initial insert and capture the original expiry.
+        tm.insert(vec![42]);
+        let first_expiry = *tm
+            .get_expiry(&42)
+            .expect("expiry missing after first insert");
+
+        // Wait for half of the original TTL before reinserting.
+        time::sleep(Duration::from_millis(25)).await;
+        tm.insert(vec![42]);
+        let second_expiry = *tm
+            .get_expiry(&42)
+            .expect("expiry missing after reinsertion");
+
+        // The expiry after reinsertion must be strictly later than the first one.
+        assert!(second_expiry > first_expiry);
+
+        // Wait until *after* the first expiry would have fired, but *before* the new expiry.
+        time::sleep(Duration::from_millis(30)).await; // 25ms already elapsed, +30ms = 55ms > first TTL
+        let expired = tm.pop_expired();
+        assert!(
+            expired.is_empty(),
+            "key expired prematurely despite TTL refresh"
+        );
+
+        // Now wait until after the second expiry should have occurred.
+        time::sleep(Duration::from_millis(30)).await; // Ensure we pass the refreshed TTL
+        let expired_after = tm.pop_expired();
+        assert_eq!(expired_after, vec![42]);
     }
 
     /// End-to-end test for [`ApproxKvIndexer`]:
@@ -422,7 +471,8 @@ mod tests {
         // 2. Inform indexer about routing decision
         indexer
             .process_routing_decision_for_request(&tokens, lora_id, worker_id)
-            .await;
+            .await
+            .unwrap();
 
         // Poll until we observe the match being registered
         spin_until(Duration::from_millis(100), || async {
@@ -450,7 +500,8 @@ mod tests {
 
         indexer
             .process_routing_decision_for_request(&tokens, 0, worker_id)
-            .await;
+            .await
+            .unwrap();
 
         // Wait until the worker is registered
         spin_until(Duration::from_millis(100), || async {
@@ -466,6 +517,48 @@ mod tests {
         spin_until(Duration::from_millis(100), || async {
             let s = indexer.find_matches_for_request(&tokens).await.unwrap();
             !s.scores.contains_key(&worker_id)
+        })
+        .await;
+    }
+
+    /// After removing one of multiple workers that share the same block, the remaining worker's entries should persist.
+    #[tokio::test]
+    async fn test_remove_worker_preserves_other_workers() {
+        const KV_BLOCK_SIZE: usize = 4;
+        const TTL: Duration = Duration::from_secs(5); // Large enough to avoid expiry during test
+
+        let cancel = CancellationToken::new();
+        let mut indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL);
+
+        let tokens: Vec<u32> = vec![100, 101, 102, 103];
+        let worker_0: WorkerId = 30;
+        let worker_1: WorkerId = 31;
+
+        // Register on both workers
+        indexer
+            .process_routing_decision_for_request(&tokens, 0, worker_0)
+            .await
+            .unwrap();
+        indexer
+            .process_routing_decision_for_request(&tokens, 0, worker_1)
+            .await
+            .unwrap();
+
+        // Ensure both workers are registered
+        spin_until(Duration::from_millis(100), || async {
+            let s = indexer.find_matches_for_request(&tokens).await.unwrap();
+            s.scores.get(&worker_0).copied() == Some(1)
+                && s.scores.get(&worker_1).copied() == Some(1)
+        })
+        .await;
+
+        // Remove one worker
+        indexer.remove_worker(worker_0).await;
+
+        // Confirm the removed worker is gone, and the other remains.
+        spin_until(Duration::from_millis(100), || async {
+            let s = indexer.find_matches_for_request(&tokens).await.unwrap();
+            !s.scores.contains_key(&worker_0) && s.scores.get(&worker_1).copied() == Some(1)
         })
         .await;
     }
@@ -486,7 +579,8 @@ mod tests {
         // Register Sequence A on worker A
         indexer
             .process_routing_decision_for_request(&seq_a, 0, worker_a)
-            .await;
+            .await
+            .unwrap();
 
         // Ensure the indexer has registered the block
         spin_until(Duration::from_millis(100), || async {
@@ -521,10 +615,12 @@ mod tests {
         // Register the same sequence on two different workers
         indexer
             .process_routing_decision_for_request(&tokens, 0, worker_0)
-            .await;
+            .await
+            .unwrap();
         indexer
             .process_routing_decision_for_request(&tokens, 0, worker_1)
-            .await;
+            .await
+            .unwrap();
 
         // Wait until both workers are reflected in overlap scores
         spin_until(Duration::from_millis(100), || async {
