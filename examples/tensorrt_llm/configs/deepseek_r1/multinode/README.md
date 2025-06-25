@@ -99,6 +99,13 @@ export MOUNTS="${PWD}:/mnt"
 # https://huggingface.co/deepseek-ai/DeepSeek-R1
 export MODEL_PATH="nvidia/DeepSeek-R1-FP4"
 
+# The name the model will be served/queried under, matching what's
+# returned by the /v1/models endpoint.
+#
+# By default this is inferred from MODEL_PATH, but when using locally downloaded
+# model weights, it can be nice to have explicit control over the name.
+export SERVED_MODEL_NAME="nvidia/DeepSeek-R1-FP4"
+
 # NOTE: This path assumes you have mounted the config file into /mnt inside
 # the container. See the MOUNTS variable in srun_script.sh
 export ENGINE_CONFIG="/mnt/agg_DEP16_dsr1.yaml"
@@ -148,7 +155,7 @@ export ENGINE_CONFIG="/mnt/agg_DEP16_dsr1.yaml"
 4. After the model fully finishes loading on all ranks, the worker will register itself,
    and the OpenAI frontend will detect it, signaled by this output:
     ```
-    0: 2025-06-13T02:46:35.040Z  INFO dynamo_llm::discovery::watcher: added model model_name="Deepseek-R1-FP4"
+    0: 2025-06-13T02:46:35.040Z  INFO dynamo_llm::discovery::watcher: added model model_name="nvidia/DeepSeek-R1-FP4"
     ```
 5. At this point, with the worker fully initialized and detected by the frontend,
    it is now ready for inference.
@@ -161,11 +168,11 @@ To verify the deployed model is working, send a `curl` request:
 # NOTE: $HOST assumes running on head node, but can be changed to $HEAD_NODE_IP instead.
 HOST=localhost
 PORT=8000
-MODEL=Deepseek-R1-FP4
+# "model" here should match the model name returned by the /v1/models endpoint
 curl -w "%{http_code}" ${HOST}:${PORT}/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-  "model": "'${MODEL}'",
+  "model": "'${SERVED_MODEL_NAME}'",
   "messages": [
   {
     "role": "user",
