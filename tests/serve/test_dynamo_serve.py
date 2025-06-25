@@ -67,14 +67,14 @@ text_payload = Payload(
         ],
         "max_tokens": 150,  # Reduced from 500
         "temperature": 0.1,
-        "seed": 0,
+        # "seed": 0,
     },
     payload_completions={
         "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         "prompt": text_prompt,
         "max_tokens": 150,
         "temperature": 0.1,
-        "seed": 0,
+        # "seed": 0,
     },
     repeat_count=10,
     expected_log=[],
