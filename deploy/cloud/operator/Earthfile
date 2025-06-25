@@ -40,8 +40,7 @@ docker:
     ARG DOCKER_SERVER=my-registry
     ARG IMAGE_TAG=latest
     ARG IMAGE_SUFFIX=dynamo-operator
-    ARG BASE_IMAGE=nvcr.io/nvidia/distroless/go:v3.1.9-dev
-    FROM $BASE_IMAGE
+    FROM nvcr.io/nvidia/distroless/go:v3.1.9-dev
     WORKDIR /
     COPY +build/manager .
     USER 65532:65532
