@@ -199,6 +199,7 @@ def calculate_recovery_time(test_dir, failure_type, fault_time):
     ]
 
     process_start_ends = {}
+    start_time = None
 
     for process in processes:
         starts, ends = parse_process_log(os.path.join(test_dir, process), process)
@@ -228,7 +229,10 @@ def calculate_recovery_time(test_dir, failure_type, fault_time):
             if "PrefillWorker:1" in x[1]
         ]
         start_time = start_times[-1][0]
-      
+
+    if not start_time:
+        return None
+    
     if fault_time > start_time:
         return None
 
