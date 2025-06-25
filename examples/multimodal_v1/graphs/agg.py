@@ -14,8 +14,8 @@
 # limitations under the License.
 
 from components.frontend import Frontend
-from components.worker import VllmDecodeWorker
+from components.worker import VllmPDWorker
 from components.processor import Processor
 from components.encode_worker import VllmEncodeWorker
 
-Frontend.link(Processor).link(VllmEncodeWorker).link(VllmDecodeWorker)
+Frontend.link(Processor).link(VllmEncodeWorker).link(VllmPDWorker)

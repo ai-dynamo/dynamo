@@ -29,7 +29,7 @@ from PIL import Image
 from utils.model import load_vision_model
 from utils.protocol import EncodeRequest, EncodeResponse, vLLMMultimodalRequest, MyRequestOutput
 from utils.args import parse_vllm_args
-from components.worker import VllmDecodeWorker
+from components.worker import VllmPDWorker
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 from utils.logging import check_required_workers
 from transformers import AutoImageProcessor, LlavaForConditionalGeneration
@@ -62,7 +62,7 @@ CACHE_SIZE_MAXIMUM = 8
     workers=1,
 )
 class VllmEncodeWorker:
-    decode_worker = depends(VllmDecodeWorker)
+    decode_worker = depends(VllmPDWorker)
 
     def __init__(self) -> None:
         class_name = self.__class__.__name__
@@ -165,7 +165,7 @@ class VllmEncodeWorker:
 
         logger.debug("Decode request: %s", decode_request.model_dump_json())
 
-        async for decode_response in await self.decode_worker_client.round_robin(
+        async for decode_response in await self.pd_worker_client.round_robin(
             decode_request.model_dump_json()
         ):
             yield MyRequestOutput.model_validate_json(decode_response.data())
@@ -246,7 +246,7 @@ class VllmEncodeWorker:
                 logger.debug(f"Request: {request.model_dump_json()}")
 
                 # Get the response generator
-                response_generator = await self.decode_worker_client.round_robin(
+                response_generator = await self.pd_worker_client.round_robin(
                     request.model_dump_json()
                 )
                 await readable.wait_for_completion()
@@ -272,15 +272,15 @@ class VllmEncodeWorker:
         # Initialize HTTP client with default limits
         self._http_client = httpx.AsyncClient(timeout=self._http_timeout)
         runtime = dynamo_context["runtime"]
-        comp_ns, comp_name = VllmDecodeWorker.dynamo_address()  # type: ignore
-        self.decode_worker_client = (
+        comp_ns, comp_name = VllmPDWorker.dynamo_address()  # type: ignore
+        self.pd_worker_client = (
             await runtime.namespace(comp_ns)
             .component(comp_name)
             .endpoint("generate")
             .client()
         )
 
-        await check_required_workers(self.decode_worker_client, self.min_workers)
+        await check_required_workers(self.pd_worker_client, self.min_workers)
 
         # Create and initialize a dynamo connector for this worker.
         # We'll needs this to move data between this worker and remote workers efficiently.

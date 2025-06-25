@@ -160,6 +160,7 @@ class MyRequestOutput(BaseModel):
     """
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
+
     request_id: str
     prompt: Optional[str] = None
     prompt_token_ids: Optional[List[int]] = None
@@ -167,6 +168,7 @@ class MyRequestOutput(BaseModel):
     outputs: List[CompletionOutput]
     finished: bool
     metrics: Optional[RequestMetrics] = None
+    kv_transfer_params: Optional[dict[str, Any]] = None
     # lora_request: Optional[LoRARequest] = None
     # encoder_prompt: Optional[str] = None
     # encoder_prompt_token_ids: Optional[List[int]] = None

@@ -1251,7 +1251,10 @@ class Remote:
         """
         Private method for releasing NIXL resources. Not intended for public use.
         """
-        pass
+        # We have to unregister the remote agent from NIXL because we cannot know if the remote worker has updated its descriptors or not, and
+        # NIXL will return an error if we attempt to register a remote agent with the same name but different descriptors (aka conn_info).
+        self._connector._nixl.remove_remote_agent(self._name)
+        logger.debug(f"dynamo.connect.{self.__class__.__name__}: Unregistered NIXL remote {{ name: \"{self._name}\" }}.")
 
     @property
     def connector(self) -> Connector:

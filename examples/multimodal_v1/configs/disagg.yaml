@@ -14,11 +14,11 @@
 # limitations under the License.
 Common:
   model: llava-hf/llava-1.5-7b-hf
+  kv-transfer-config: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
   block-size: 64
-  max-model-len: 4096
+  # max-model-len: 4096
   image-token-id: 32000
   num-patches: 576
-  kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
 
 Frontend:
   common-configs: [model]
@@ -26,26 +26,7 @@ Frontend:
 Processor:
   router: round-robin
   prompt-template: "USER: <image>\n<prompt> ASSISTANT:"
-  common-configs: [model, block-size]
-
-VllmDecodeWorker:
-  remote-prefill: true
-  conditional-disagg: true
-  max-local-prefill-length: 10
-  max-prefill-queue-size: 2
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: '1'
-  common-configs: [model, block-size, image-token-id, max-model-len, num-patches, kv-transfer-config]
-
-VllmPrefillWorker:
-  max-num-batched-tokens: 16384
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: '1'
-  common-configs: [model, block-size, image-token-id, max-model-len, num-patches, kv-transfer-config]
+  common-configs: [model]
 
 VllmEncodeWorker:
   tensor-parallel-size: 1
@@ -55,3 +36,28 @@ VllmEncodeWorker:
     resources:
       gpu: '1'
   common-configs: [model]
+
+VllmPDWorker:
+  enforce-eager: true
+  # max-num-batched-tokens: 16384
+  enable-prefix-caching: true
+  enable_disagg: true
+  router: random
+  tensor-parallel-size: 1
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: '1'
+  common-configs: [model, kv-transfer-config, image-token-id, num-patches, block-size]
+
+VllmDecodeWorker:
+  enforce-eager: true
+  # max-num-batched-tokens: 16384
+  enable-prefix-caching: true
+  router: random
+  tensor-parallel-size: 1
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: '1'
+  common-configs: [model, kv-transfer-config, image-token-id, num-patches, block-size]
