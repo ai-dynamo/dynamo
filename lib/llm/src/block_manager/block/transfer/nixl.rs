@@ -117,8 +117,8 @@ where
         .storage_type()
         .nixl_mem_type();
 
-    let mut src_dl = XferDescList::new(src_mem_type)?;
-    let mut dst_dl = XferDescList::new(dst_mem_type)?;
+    let mut src_dl = XferDescList::new(src_mem_type, true)?;
+    let mut dst_dl = XferDescList::new(dst_mem_type, true)?;
 
     for (src, dst) in src.iter().zip(dst.iter_mut()) {
         append_xfer_request(src, dst, &mut src_dl, &mut dst_dl)?;

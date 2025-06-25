@@ -21,7 +21,6 @@
 mod openai;
 mod token_completions;
 
-pub mod clear_kv_blocks;
 pub mod error;
 pub mod health;
 pub mod metrics;

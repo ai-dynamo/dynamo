@@ -27,7 +27,8 @@ We assume there is no piggy-backed prefill requests in the decode engine. Even i
 
 ```bash
 cd $DYNAMO_HOME/benchmarks/profiler/
-python -m utils.profile_sla \
+python -m profile_sla \
+  --backend <vllm_v0/vllm_v1> \
   --config <path-to-dynamo-config-file> \
   --output-dir <path-to-profile-results-dir> \
   --isl <target-isl> \

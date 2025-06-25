@@ -13,13 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This is a sample config for TensorRT-LLM engine.
-# The config provides smaller free_gpu_memory_fraction to ensure that the engine
-# does not use all the GPU memory and both prefill and decode workers can fit in
-# the GPU memory when running in disaggregated mode.
-# You might have to tweak this config based on your model size and GPU memory.
-
-backend: pytorch
-disable_overlap_scheduler: true
-kv_cache_config:
-  free_gpu_memory_fraction: 0.40
+DECODE_NUM_REQUESTS_RANGE = [
+    1,
+    5,
+    10,
+    25,
+    50,
+    100,
+    150,
+    200,
+    250,
+    300,
+    350,
+    400,
+    450,
+    500,
+]

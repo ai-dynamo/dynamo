@@ -106,10 +106,10 @@ Dynamo supports SGLang's implementation of wide expert parallelism and large sca
 
 Steps to run:
 
-1. Build the SGLang DeepEP container. We recommend using the latest official release of SGLang.
+1. Build the SGLang DeepEP container.
 
 ```bash
-git clone -b 0.4.8 https://github.com/sgl-project/sglang.git
+git clone -b v0.4.8 https://github.com/sgl-project/sglang.git
 cd sglang/docker
 docker build -f Dockerfile -t deepep .
 ```

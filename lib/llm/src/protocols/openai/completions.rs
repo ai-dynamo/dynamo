@@ -13,25 +13,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use derive_builder::Builder;
+use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
+
+use super::{
+    common::{self, SamplingOptionsProvider, StopConditionsProvider},
+    nvext::{NvExt, NvExtProvider},
+    ContentProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
+};
 
 mod aggregator;
 mod delta;
 
 pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
-
-use super::{
-    common::{self, SamplingOptionsProvider, StopConditionsProvider},
-    nvext::{NvExt, NvExtProvider},
-    CompletionUsage, ContentProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
-};
-
-use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionRequest {
@@ -64,7 +61,7 @@ pub struct CompletionResponse {
     pub object: String,
 
     /// Usage statistics for the completion request.
-    pub usage: Option<CompletionUsage>,
+    pub usage: Option<async_openai::types::CompletionUsage>,
 
     /// This fingerprint represents the backend configuration that the model runs with.
     /// Can be used in conjunction with the seed request parameter to understand when backend
@@ -93,7 +90,7 @@ pub struct CompletionChoice {
 
     #[serde(skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
-    pub logprobs: Option<LogprobResult>,
+    pub logprobs: Option<async_openai::types::Logprobs>,
 }
 
 impl ContentProvider for CompletionChoice {
@@ -106,16 +103,6 @@ impl CompletionChoice {
     pub fn builder() -> CompletionChoiceBuilder {
         CompletionChoiceBuilder::default()
     }
-}
-
-// TODO: validate this is the correct format
-/// Legacy OpenAI LogprobResult component
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct LogprobResult {
-    pub tokens: Vec<String>,
-    pub token_logprobs: Vec<f32>,
-    pub top_logprobs: Vec<HashMap<String, f32>>,
-    pub text_offset: Vec<i32>,
 }
 
 pub fn prompt_to_string(prompt: &async_openai::types::Prompt) -> String {
@@ -240,7 +227,7 @@ impl ResponseFactory {
     pub fn make_response(
         &self,
         choice: CompletionChoice,
-        usage: Option<CompletionUsage>,
+        usage: Option<async_openai::types::CompletionUsage>,
     ) -> CompletionResponse {
         CompletionResponse {
             id: self.id.clone(),

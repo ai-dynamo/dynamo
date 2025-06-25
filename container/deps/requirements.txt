@@ -31,7 +31,7 @@ pmdarima
 pre-commit
 prometheus-api-client
 prophet
-protobuf==5.27.3
+protobuf==5.29.5
 pydantic==2.7.1
 pynvml
 pyright
