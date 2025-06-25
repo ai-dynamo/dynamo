@@ -26,7 +26,7 @@ import psutil
 import requests
 
 
-def terminate_process(process, logger=logging.getLogger(), immediate_kill=False, timeout = 30):
+def terminate_process(process, logger=logging.getLogger(), immediate_kill=False, timeout = 5):
     try:
         logger.info("Terminating PID: %s name: %s", process.pid, process.name())
         if immediate_kill:
@@ -44,7 +44,7 @@ def terminate_process(process, logger=logging.getLogger(), immediate_kill=False,
         process.kill()
 
 
-def terminate_process_tree(pid, logger=logging.getLogger(), immediate_kill=False, timeout = 30):
+def terminate_process_tree(pid, logger=logging.getLogger(), immediate_kill=False, timeout = 5):
     try:
         parent = psutil.Process(pid)
         for child in parent.children(recursive=True):

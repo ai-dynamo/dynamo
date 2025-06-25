@@ -18,6 +18,7 @@ import os
 import time
 from contextlib import contextmanager
 from multiprocessing import Process
+from tests.fault_tolerance.parse_results import main as parse_results
 
 import psutil
 import pytest
@@ -114,7 +115,7 @@ def _inject_failures(failures, logger):
                 for x in range(number):
                     pid = result["pids"][x % num_processes]
                     logger.info(f"Terminating {component_name} Pid {pid}")
-                    terminate_process_tree(pid, logger, immediate_kill=True)
+                    terminate_process_tree(pid, logger,immediate_kill=True)
             elif "vllm" in component_name:
                 vllm_processes = _list_vllm_worker_processes()
                 num_processes = len(vllm_processes)
@@ -122,11 +123,23 @@ def _inject_failures(failures, logger):
                     number = len(vllm_processes)
                 for x in range(number):
                     pid = vllm_processes[x % num_processes]
-                    terminate_process_tree(pid, logger, immediate_kill=True)
+                    terminate_process_tree(pid, logger,immediate_kill=True)
 
         circus_controller.close()
 
+global_result_list = []
 
+@pytest.fixture(autouse=True)
+def results_table(request):
+    yield
+    parse_results(logs_dir=None,log_paths=[request.node.name],tablefmt="fancy")
+    global_result_list.append(request.node.name)
+
+@pytest.fixture(autouse=True,scope="session")
+def results_summary():
+    yield
+    parse_results(logs_dir=None,log_paths=global_result_list,tablefmt="fancy")
+    
 @pytest.mark.e2e
 @pytest.mark.slow
 async def test_worker_failure(

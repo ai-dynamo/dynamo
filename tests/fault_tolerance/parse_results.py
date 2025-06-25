@@ -190,7 +190,7 @@ def parse_watcher_log(test_dir, fault_time):
     return avg_before, avg_after
 
 
-def calculate_recovery_time(test_dir, failure_type):
+def calculate_recovery_time(test_dir, failure_type, fault_time):
     processes = [
         "dynamo_Frontend",
         "dynamo_Processor",
@@ -206,33 +206,10 @@ def calculate_recovery_time(test_dir, failure_type):
             process_start_ends[process] = (starts, ends)
 
     if failure_type == "processor":
-        end_times = process_start_ends["dynamo_Processor"][1]
         start_time = process_start_ends["dynamo_Processor"][0][-1][0]
-        end_time = None
-        for x in end_times:
-            if x[0] < start_time:
-                end_time = x[0]
-        if end_time is None:
-            return None
-        return (start_time - end_time).total_seconds()
-
-    if failure_type == "frontend":
-        end_times = process_start_ends["dynamo_Frontend"][1]
+    elif failure_type == "frontend":
         start_time = process_start_ends["dynamo_Frontend"][0][-1][0]
-        end_time = None
-        for x in end_times:
-            if x[0] < start_time:
-                end_time = x[0]
-        if end_time is None:
-            return None
-        return (start_time - end_time).total_seconds()
-
-    if failure_type == "decode_worker":
-        end_times = [
-            x
-            for x in process_start_ends["dynamo_VllmWorker"][1]
-            if "VllmWorker:1" in x[1]
-        ]
+    elif failure_type == "decode_worker":
         start_times = [
             x
             for x in process_start_ends["dynamo_VllmWorker"][0]
@@ -241,35 +218,21 @@ def calculate_recovery_time(test_dir, failure_type):
         if not start_times:
             return None
         start_time = start_times[-1][0]
-        end_time = None
-        for x in end_times:
-            if x[0] < start_time:
-                end_time = x[0]
-        if end_time is None:
-            return None
-        return (start_time - end_time).total_seconds()
-
-    if failure_type == "prefill_worker":
+       
+    elif failure_type == "prefill_worker":
         if "dynamo_PrefillWorker" not in process_start_ends:
             return None
-        end_times = [
-            x
-            for x in process_start_ends["dynamo_PrefillWorker"][1]
-            if "PrefillWorker:1" in x[1]
-        ]
         start_times = [
             x
             for x in process_start_ends["dynamo_PrefillWorker"][0]
             if "PrefillWorker:1" in x[1]
         ]
         start_time = start_times[-1][0]
-        end_time = None
-        for x in end_times:
-            if x[0] < start_time:
-                end_time = x[0]
-        if end_time is None:
-            return None
-        return (start_time - end_time).total_seconds()
+      
+    if fault_time > start_time:
+        return None
+
+    return (start_time - fault_time).total_seconds()
 
 
 def process_test_directory(test_dir):
@@ -291,7 +254,7 @@ def process_test_directory(test_dir):
         df, fault_time
     )
 
-    recovery_time = calculate_recovery_time(test_dir, failure_type)
+    recovery_time = calculate_recovery_time(test_dir, failure_type,fault_time)
 
     return {
         "test": test_prefix,
@@ -310,15 +273,21 @@ def process_test_directory(test_dir):
     }
 
 
-def main(logs_dir, tablefmt):
+def main(logs_dir, tablefmt, log_paths=[]):
     results = []
-    for entry in os.listdir(logs_dir):
-        if entry.startswith("test_worker_failure[") and os.path.isdir(
-            os.path.join(logs_dir, entry)
-        ):
-            result = process_test_directory(os.path.join(logs_dir, entry))
+    if log_paths:
+        for log_path in log_paths:
+            result= process_test_directory(log_path)
             if result:
                 results.append(result)
+    elif logs_dir:
+        for entry in os.listdir(logs_dir):
+            if entry.startswith("test_worker_failure[") and os.path.isdir(
+                    os.path.join(logs_dir, entry)
+            ):
+                result = process_test_directory(os.path.join(logs_dir, entry))
+                if result:
+                    results.append(result)
 
     # Group results by test prefix
     grouped = {}
