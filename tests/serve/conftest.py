@@ -76,7 +76,7 @@ def pytest_collection_modifyitems(config, items):
             continue
 
         # Only apply to tests in the serve directory
-        if "serve" in str(item.fspath):
+        if "serve" in str(item.path):
             # Check if the test already uses the fixture
             if "predownload_models" not in item.fixturenames:
                 # Don't add if test explicitly marks to skip model download
