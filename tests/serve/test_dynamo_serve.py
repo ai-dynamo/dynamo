@@ -251,7 +251,15 @@ deployment_graphs = {
 
 
 class DynamoServeProcess(ManagedProcess):
-    def __init__(self, graph: DeploymentGraph, request, port=8000, timeout=900):
+    def __init__(
+        self,
+        graph: DeploymentGraph,
+        request,
+        port=8000,
+        timeout=900,
+        display_output=True,
+        args=None,
+    ):
         command = ["dynamo", "serve", graph.module]
 
         if graph.config:
@@ -259,22 +267,28 @@ class DynamoServeProcess(ManagedProcess):
 
         command.extend(["--Frontend.port", str(port)])
 
+        if args:
+            for k, v in args.items():
+                command.extend([f"{k}", f"{v}"])
+
         health_check_urls = [(f"http://localhost:{port}/v1/models", self._check_model)]
 
         if "multimodal" in graph.directory:
             health_check_urls = []
 
         self.port = port
+        self.graph = graph
 
         super().__init__(
             command=command,
             timeout=timeout,
-            display_output=True,
+            display_output=display_output,
             working_dir=graph.directory,
             health_check_ports=[port],
             health_check_urls=health_check_urls,
             delayed_start=graph.delayed_start,
             stragglers=["http"],
+            straggler_commands=["dynamo.sdk.cli.serve_dynamo","--multiprocessing-fork"],
             log_dir=request.node.name,
         )
 
@@ -286,6 +300,72 @@ class DynamoServeProcess(ManagedProcess):
         if data.get("data") and len(data["data"]) > 0:
             return True
         return False
+
+    def wait_for_ready(self, payload, logger=logging.getLogger()):
+        url = f"http://localhost:{self.port}/{self.graph.endpoints[0]}"
+        start_time = time.time()
+        retry_delay = 5
+        elapsed = 0.0
+        logger.info("Waiting for Deployment Ready")
+        while time.time() - start_time < self.graph.timeout:
+            elapsed = time.time() - start_time
+            try:
+                response = requests.post(
+                    url,
+                    json=payload.payload_chat,
+                    timeout=self.graph.timeout - elapsed,
+                )
+            except (requests.RequestException, requests.Timeout) as e:
+                logger.warning("Retrying due to Request failed: %s", e)
+                time.sleep(retry_delay)
+                continue
+            logger.info("Response%r", response)
+            if response.status_code == 500:
+                error = response.json().get("error", "")
+                if "no instances" in error:
+                    logger.warning("Retrying due to no instances available")
+                    time.sleep(retry_delay)
+                    continue
+            if response.status_code == 404:
+                error = response.json().get("error", "")
+                if "Model not found" in error:
+                    logger.warning("Retrying due to model not found")
+                    time.sleep(retry_delay)
+                    continue
+            # Process the response
+            if response.status_code != 200:
+                logger.error(
+                    "Service returned status code %s: %s",
+                    response.status_code,
+                    response.text,
+                )
+                pytest.fail(
+                    "Service returned status code %s: %s"
+                    % (response.status_code, response.text)
+                )
+            else:
+                break
+        else:
+            logger.error(
+                "Service did not return a successful response within %s s",
+                self.graph.timeout,
+            )
+            pytest.fail(
+                "Service did not return a successful response within %s s"
+                % self.graph.timeout
+            )
+
+        content = self.graph.response_handlers[0](response)
+
+        logger.debug("Received Content: %s", content)
+
+        # Check for expected responses
+        assert content, "Empty response content"
+
+        for expected in payload.expected_response:
+            assert expected in content, "Expected '%s' not found in response" % expected
+
+        logger.info("Deployment Ready")
 
 
 @pytest.fixture(

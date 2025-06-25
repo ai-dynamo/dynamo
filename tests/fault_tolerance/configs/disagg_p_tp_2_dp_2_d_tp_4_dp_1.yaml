@@ -14,7 +14,6 @@
 # limitations under the License.
 Common:
   model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  router: kv
   block-size: 64
   max-model-len: 16384
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
@@ -25,22 +24,34 @@ Frontend:
   port: 8000
 
 Processor:
-  common-configs: [model, block-size, max-model-len, router]
-
-Router:
-  min-workers: 1
-  common-configs: [model, block-size, router]
+  router: round-robin
+  common-configs: [model, block-size]
+  ServiceArgs:
+    workers: 2
+    resources:
+      cpu: "10"
+      memory: "20Gi"
 
 VllmWorker:
-  enforce-eager: true
-  max-num-batched-tokens: 16384
-  enable-prefix-caching: true
-  tensor-parallel-size: 1
+  remote-prefill: true
+  conditional-disagg: true
+  max-local-prefill-length: 10
+  max-prefill-queue-size: 2
+  tensor-parallel-size: 4
   ServiceArgs:
     workers: 1
     resources:
-      gpu: '1'
-  common-configs: [model, block-size, max-model-len, router, kv-transfer-config]
+      gpu: '4'
+  common-configs: [model, block-size, max-model-len, kv-transfer-config]
+
+PrefillWorker:
+  max-num-batched-tokens: 16384
+  tensor-parallel-size: 2
+  ServiceArgs:
+    workers: 2
+    resources:
+      gpu: '2'
+  common-configs: [model, block-size, max-model-len, kv-transfer-config]
 
 Planner:
   environment: local
