@@ -28,7 +28,7 @@ import asyncio
 import logging
 import random
 import socket
-from typing import Union, Dict
+from typing import Dict
 
 import sglang as sgl
 from components.decode_worker import SGLangDecodeWorker
