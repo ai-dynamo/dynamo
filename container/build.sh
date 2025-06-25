@@ -58,7 +58,7 @@ BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
 TENSORRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
-TENSORRTLLM_BASE_IMAGE_TAG=25.04-py3
+TENSORRTLLM_BASE_IMAGE_TAG=25.05-py3
 
 # Important Note: Because of ABI compatibility issues between TensorRT-LLM and NGC PyTorch,
 # we need to build the TensorRT-LLM wheel from source.
@@ -94,7 +94,7 @@ TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 
 # TensorRT-LLM PyPI index URL
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==0.21.0rc0"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.0.0rc0"
 TENSORRTLLM_PIP_WHEEL=""
 
 
