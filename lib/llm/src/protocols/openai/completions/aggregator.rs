@@ -18,7 +18,7 @@ use std::{collections::HashMap, str::FromStr};
 use anyhow::Result;
 use futures::StreamExt;
 
-use super::{CompletionChoice, CompletionResponse, LogprobResult};
+use super::{CompletionChoice, CompletionResponse};
 use crate::protocols::{
     codec::{Message, SseCodecError},
     common::FinishReason,
@@ -40,7 +40,7 @@ struct DeltaChoice {
     index: u64,
     text: String,
     finish_reason: Option<FinishReason>,
-    logprobs: Option<LogprobResult>,
+    logprobs: Option<async_openai::types::Logprobs>,
 }
 
 impl Default for DeltaAggregator {
