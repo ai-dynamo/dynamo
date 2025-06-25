@@ -386,9 +386,7 @@ async fn chat_completions(
 
 // todo - abstract this to the top level lib.rs to be reused
 // todo - move the service_observer to its own state/arc
-pub fn check_ready(
-    _state: &Arc<service_v2::State>,
-) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
     // if state.service_observer.stage() != ServiceStage::Ready {
     //     return Err(ErrorResponse::service_unavailable());
     // }
@@ -456,7 +454,7 @@ struct ModelListing {
 ///
 /// If a disconnect is detected, then the context will issue a `stop_generating` call to the context which will
 /// propagate the cancellation signal to the backend.
-pub async fn monitor_for_disconnects(
+async fn monitor_for_disconnects(
     stream: Pin<
         Box<dyn Stream<Item = Result<axum::response::sse::Event, axum::Error>> + std::marker::Send>,
     >,
@@ -489,7 +487,7 @@ pub async fn monitor_for_disconnects(
     ReceiverStream::new(rx)
 }
 
-pub struct EventConverter<T>(Annotated<T>);
+struct EventConverter<T>(Annotated<T>);
 
 impl<T> From<Annotated<T>> for EventConverter<T> {
     fn from(annotated: Annotated<T>) -> Self {
@@ -497,7 +495,7 @@ impl<T> From<Annotated<T>> for EventConverter<T> {
     }
 }
 
-pub fn process_event_converter<T: Serialize>(
+fn process_event_converter<T: Serialize>(
     annotated: EventConverter<T>,
     response_collector: &mut ResponseMetricCollector,
 ) -> Result<Event, axum::Error> {

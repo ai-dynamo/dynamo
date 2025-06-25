@@ -91,7 +91,7 @@ pub struct AnnotatedDelta<R> {
     pub comment: Option<String>,
 }
 
-pub trait OpenAISamplingOptionsProvider {
+trait OpenAISamplingOptionsProvider {
     fn get_temperature(&self) -> Option<f32>;
 
     fn get_top_p(&self) -> Option<f32>;
@@ -103,7 +103,7 @@ pub trait OpenAISamplingOptionsProvider {
     fn nvext(&self) -> Option<&nvext::NvExt>;
 }
 
-pub trait OpenAIStopConditionsProvider {
+trait OpenAIStopConditionsProvider {
     fn get_max_tokens(&self) -> Option<u32>;
 
     fn get_min_tokens(&self) -> Option<u32>;

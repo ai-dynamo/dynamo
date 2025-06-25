@@ -6,7 +6,6 @@ use dynamo_runtime::component::Component;
 use crate::discovery::ModelEntry;
 
 use crate::kv_router::{scheduler::DefaultWorkerSelector, KvRouterConfig};
-use crate::types::token_completions::TokenCompletionStreamingEngine;
 use crate::{
     kv_router::KvRouter,
     types::openai::{
@@ -36,7 +35,6 @@ pub struct ModelManager {
     completion_engines: RwLock<ModelEngines<OpenAICompletionsStreamingEngine>>,
     chat_completion_engines: RwLock<ModelEngines<OpenAIChatCompletionsStreamingEngine>>,
     embeddings_engines: RwLock<ModelEngines<OpenAIEmbeddingsStreamingEngine>>,
-    token_completion_engines: RwLock<ModelEngines<TokenCompletionStreamingEngine>>,
 
     // These two are Mutex because we read and write rarely and equally
     entries: Mutex<HashMap<String, ModelEntry>>,
@@ -55,7 +53,6 @@ impl ModelManager {
             completion_engines: RwLock::new(ModelEngines::default()),
             chat_completion_engines: RwLock::new(ModelEngines::default()),
             embeddings_engines: RwLock::new(ModelEngines::default()),
-            token_completion_engines: RwLock::new(ModelEngines::default()),
             entries: Mutex::new(HashMap::new()),
             kv_choosers: Mutex::new(HashMap::new()),
         }
@@ -75,7 +72,6 @@ impl ModelManager {
             .into_iter()
             .chain(self.list_completions_models())
             .chain(self.list_embeddings_models())
-            .chain(self.list_token_completion_models())
             .collect()
     }
 
@@ -89,10 +85,6 @@ impl ModelManager {
 
     pub fn list_embeddings_models(&self) -> Vec<String> {
         self.embeddings_engines.read().unwrap().list()
-    }
-
-    pub fn list_token_completion_models(&self) -> Vec<String> {
-        self.token_completion_engines.read().unwrap().list()
     }
 
     pub fn add_completions_model(
@@ -122,15 +114,6 @@ impl ModelManager {
         clients.add(model, engine)
     }
 
-    pub fn add_token_completion_model(
-        &self,
-        model: &str,
-        engine: TokenCompletionStreamingEngine,
-    ) -> Result<(), ModelManagerError> {
-        let mut clients = self.token_completion_engines.write().unwrap();
-        clients.add(model, engine)
-    }
-
     pub fn remove_completions_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let mut clients = self.completion_engines.write().unwrap();
         clients.remove(model)
@@ -144,23 +127,6 @@ impl ModelManager {
     pub fn remove_embeddings_model(&self, model: &str) -> Result<(), ModelManagerError> {
         let mut clients = self.embeddings_engines.write().unwrap();
         clients.remove(model)
-    }
-
-    pub fn remove_token_completion_model(&self, model: &str) -> Result<(), ModelManagerError> {
-        let mut clients = self.token_completion_engines.write().unwrap();
-        clients.remove(model)
-    }
-
-    pub fn get_token_completion_engine(
-        &self,
-        model: &str,
-    ) -> Result<TokenCompletionStreamingEngine, ModelManagerError> {
-        self.token_completion_engines
-            .read()
-            .unwrap()
-            .get(model)
-            .cloned()
-            .ok_or(ModelManagerError::ModelNotFound(model.to_string()))
     }
 
     pub fn get_embeddings_engine(

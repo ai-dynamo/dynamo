@@ -17,22 +17,6 @@ use crate::protocols;
 
 pub use protocols::{Annotated, TokenIdType};
 
-pub mod token_completions {
-    use super::*;
-    use dynamo_runtime::pipeline::{ServerStreamingEngine, UnaryEngine};
-
-    pub use protocols::openai::completions::CompletionResponse;
-    pub use protocols::token_completions::DynamoTokenCompletionRequest;
-
-    /// A [`UnaryEngine`] implementation for the Dynamo Token Completion API
-    pub type TokenCompletionUnaryEngine =
-        UnaryEngine<DynamoTokenCompletionRequest, Annotated<CompletionResponse>>;
-
-    /// A [`ServerStreamingEngine`] implementation for the Dynamo Token Completion API
-    pub type TokenCompletionStreamingEngine =
-        ServerStreamingEngine<DynamoTokenCompletionRequest, Annotated<CompletionResponse>>;
-}
-
 pub mod openai {
     use super::*;
     use dynamo_runtime::pipeline::{ServerStreamingEngine, UnaryEngine};

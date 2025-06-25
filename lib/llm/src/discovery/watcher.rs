@@ -27,7 +27,6 @@ use crate::{
     },
     protocols::openai::completions::{CompletionResponse, NvCreateCompletionRequest},
     protocols::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
-    protocols::token_completions::{DynamoTokenCompletionRequest, TokenConverter},
 };
 
 use super::{ModelEntry, ModelManager, MODEL_ROOT_PATH};
@@ -154,7 +153,6 @@ impl ModelWatcher {
         let _ = self.manager.remove_chat_completions_model(&model_name);
         let _ = self.manager.remove_completions_model(&model_name);
         let _ = self.manager.remove_embeddings_model(&model_name);
-        let _ = self.manager.remove_token_completion_model(&model_name);
 
         Ok(Some(model_name))
     }
@@ -248,7 +246,7 @@ impl ModelWatcher {
                 let backend = Backend::from_mdc(card.clone()).await?.into_operator();
                 let router =
                     PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
-                        client.clone(),
+                        client,
                         self.router_mode,
                     )
                     .await?;
@@ -280,50 +278,6 @@ impl ModelWatcher {
                     .link(frontend)?;
                 self.manager
                     .add_completions_model(&model_entry.name, completions_engine)?;
-
-                let frontend = SegmentSource::<
-                    SingleIn<DynamoTokenCompletionRequest>,
-                    ManyOut<Annotated<CompletionResponse>>,
-                >::new();
-
-                let converter = Arc::new(TokenConverter).into_operator();
-                let backend = Backend::from_mdc(card.clone()).await?.into_operator();
-                let router =
-                    PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
-                        client,
-                        self.router_mode,
-                    )
-                    .await?;
-
-                let service_backend = match self.router_mode {
-                    RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
-                        ServiceBackend::from_engine(Arc::new(router))
-                    }
-                    RouterMode::KV => {
-                        let chooser = self
-                            .manager
-                            .kv_chooser_for(
-                                &model_entry.name,
-                                &component,
-                                card.kv_cache_block_size,
-                                self.kv_router_config.clone(),
-                            )
-                            .await?;
-                        let kv_push_router = KvPushRouter::new(router, chooser);
-                        ServiceBackend::from_engine(Arc::new(kv_push_router))
-                    }
-                };
-
-                let token_completions_engine = frontend
-                    .link(converter.forward_edge())?
-                    .link(backend.forward_edge())?
-                    .link(service_backend)?
-                    .link(backend.backward_edge())?
-                    .link(converter.backward_edge())?
-                    .link(frontend)?;
-
-                self.manager
-                    .add_token_completion_model(&model_entry.name, token_completions_engine)?;
             }
             ModelType::Chat => {
                 let push_router = PushRouter::<
