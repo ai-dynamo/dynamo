@@ -102,10 +102,6 @@ class HTTPGetAction(BaseModel):
         default=None, description="Path to access on the HTTP health check."
     )
 
-    # port: Optional[IntOrString] = Field(
-    #     default=None,
-    #     description="Port number or name to access on the container.",
-    # )
     port: Optional[Union[int, str]] = Field(
         default=None,
         description="Port number or name to access on the container.",
@@ -119,13 +115,6 @@ class HTTPGetAction(BaseModel):
     http_headers: Optional[List[HTTPHeader]] = Field(
         default=None, description="Custom headers to set in the request."
     )
-
-    # @field_validator("port", mode="before")
-    # @classmethod
-    # def convert_port(cls, value):
-    #     if isinstance(value, (int, str)):
-    #         return IntOrString.from_raw(value)
-    #     return value
 
 
 class Probe(BaseModel):

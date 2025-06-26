@@ -126,17 +126,17 @@ class Middle:
     dynamo={"namespace": "inference"},
     image=DYNAMO_IMAGE,
     # Example of kubernetes overrides if needed.
-    kubernetes_overrides={
-        # "entrypoint": ["sh -c"],
-        # "cmd": ["echo hello from FrontEnd!"],
-        "liveness_probe_settings": {
-            "http_get": {
-                "path": "/healthz",
-                "port": 5000,
-            },  # "probe"
-            "initial_delay_seconds": 1,
-        },  # liveness_probe_settings
-    },
+    # kubernetes_overrides={
+    #     # "entrypoint": ["sh -c"],
+    #     # "cmd": ["echo hello from FrontEnd!"],
+    #     "liveness_probe_settings": {
+    #         "http_get": {
+    #             "path": "/healthz",
+    #             "port": 5000,
+    #         },
+    #         "initial_delay_seconds": 1,
+    #     },
+    # },
 )
 class Frontend:
     """A simple frontend HTTP API that forwards requests to the dynamo graph."""
@@ -168,14 +168,10 @@ class Frontend:
 
     @liveness
     def is_alive(self):
-        print("!!! is_alive hit")
-        logger.info("!!! is_alive hit")
         return True
 
     @readiness
     def is_ready(self):
-        print("!!! is_ready hit")
-        logger.info("!!! is_ready hi")
         return True
 
     @on_shutdown

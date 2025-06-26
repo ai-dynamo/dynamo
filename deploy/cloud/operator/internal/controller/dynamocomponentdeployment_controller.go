@@ -21,7 +21,6 @@ package controller
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -1964,12 +1963,10 @@ func (r *DynamoComponentDeploymentReconciler) GetRecorder() record.EventRecorder
 func overrideContainerWithExtraPodSpec(container *corev1.Container, extraPodSpec *dynamoCommon.ExtraPodSpec, logs logr.Logger) {
 
 	if extraPodSpec == nil || extraPodSpec.MainContainer == nil {
-		logs.Info("!!! overrideContainerWithExtraPodSpec func: no ExtraPodSpec!" + container.Name)
 		return
 	}
 
 	extraPodSpecMainContainer := extraPodSpec.MainContainer
-	logs.Info("!!! overrideContainerWithExtraPodSpec there IS ExtraPodSpec" + container.Name)
 	if len(extraPodSpecMainContainer.Command) > 0 {
 		logs.Info("Overriding container '" + container.Name + "' Command with: " + strings.Join(extraPodSpecMainContainer.Command, " "))
 		container.Command = extraPodSpecMainContainer.Command
@@ -1991,23 +1988,10 @@ func overrideContainerWithExtraPodSpec(container *corev1.Container, extraPodSpec
 	if extraPodSpecMainContainer.LivenessProbe != nil {
 		logs.Info("Overriding container '" + container.Name + "' LivenessProbe with ExtraPodSpec configuration")
 		container.LivenessProbe = extraPodSpecMainContainer.LivenessProbe.DeepCopy()
-
-		// 🔍 Print the full LivenessProbe
-		if data, err := json.MarshalIndent(container.LivenessProbe, "", "  "); err == nil {
-			fmt.Println("!!! LivenessProbe content for container '" + container.Name + "':\n" + string(data))
-		} else {
-			logs.Info("!!! Failed to marshal LivenessProbe")
-			logs.Info("!!! " + container.Name + " Overwrode LivenessProbe with ExtraPodSpec")
-		}
-	} else {
-		logs.Info("!!! " + container.Name + " NO LivenessProbe with ExtraPodSpec")
 	}
-
 	// Override ReadinessProbe if present in ExtraPodSpec.
 	if extraPodSpecMainContainer.ReadinessProbe != nil {
 		logs.Info("Overriding container '" + container.Name + "' ReadinessProbe with ExtraPodSpec configuration")
 		container.ReadinessProbe = extraPodSpecMainContainer.ReadinessProbe.DeepCopy()
-	} else {
-		logs.Info("!!! '" + container.Name + "' NO ReadinessProbe")
 	}
 }
