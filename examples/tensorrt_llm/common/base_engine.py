@@ -14,7 +14,7 @@
 # limitations under the License.
 import logging
 from dataclasses import dataclass
-from typing import Optional, Any
+from typing import Any, Optional
 
 from common.protocol import DisaggregatedTypeConverter, TRTLLMWorkerRequest
 from tensorrt_llm import SamplingParams
@@ -141,12 +141,20 @@ class BaseTensorrtLLMEngine:
                 ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
             else:
                 kv_cache_config = engine_args["kv_cache_config"]
-                if hasattr(kv_cache_config, 'event_buffer_max_size') and not kv_cache_config.event_buffer_max_size:
+                if (
+                    hasattr(kv_cache_config, "event_buffer_max_size")
+                    and not kv_cache_config.event_buffer_max_size
+                ):
                     kv_cache_config.event_buffer_max_size = (
                         DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
                     )
-                elif isinstance(kv_cache_config, dict) and "event_buffer_max_size" not in kv_cache_config:
-                    kv_cache_config["event_buffer_max_size"] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+                elif (
+                    isinstance(kv_cache_config, dict)
+                    and "event_buffer_max_size" not in kv_cache_config
+                ):
+                    kv_cache_config[
+                        "event_buffer_max_size"
+                    ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
                 engine_args["kv_cache_config"] = kv_cache_config
 
             # Enable iter perf stats by default if we are publishing events and metrics.
