@@ -150,6 +150,11 @@ impl DeltaGenerator {
 
         let choices = vec![choice];
 
+        let mut usage = self.usage.clone();
+        if self.options.enable_usage {
+            usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+        }
+
         async_openai::types::CreateChatCompletionStreamResponse {
             id: self.id.clone(),
             object: self.object.clone(),
@@ -158,7 +163,7 @@ impl DeltaGenerator {
             system_fingerprint: self.system_fingerprint.clone(),
             choices,
             usage: if self.options.enable_usage {
-                Some(self.usage.clone())
+                Some(usage)
             } else {
                 None
             },
@@ -198,6 +203,9 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateChatCompletionStreamRes
             Some(common::FinishReason::Stop) => Some(async_openai::types::FinishReason::Stop),
             Some(common::FinishReason::Length) => Some(async_openai::types::FinishReason::Length),
             Some(common::FinishReason::Cancelled) => Some(async_openai::types::FinishReason::Stop),
+            Some(common::FinishReason::ContentFilter) => {
+                Some(async_openai::types::FinishReason::ContentFilter)
+            }
             Some(common::FinishReason::Error(err_msg)) => {
                 return Err(anyhow::anyhow!(err_msg));
             }

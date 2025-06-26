@@ -15,7 +15,6 @@
 
 import argparse
 
-
 def parse_tensorrt_llm_args(
     config_args,
 ) -> argparse.Namespace:

@@ -13,7 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional
+from typing import List, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -47,6 +47,7 @@ class SamplingOptions(BaseModel):
 
 class PreprocessedRequest(BaseModel):
     token_ids: List[TokenIdType]
+    batch_token_ids: Optional[List[List[TokenIdType]]] = None
     stop_conditions: StopConditions
     sampling_options: SamplingOptions
     eos_token_ids: List[TokenIdType] = Field(default_factory=list)
@@ -57,7 +58,7 @@ class PreprocessedRequest(BaseModel):
 class DisaggPreprocessedRequest(BaseModel):
     request: PreprocessedRequest
     sampling_params: dict
-    bootstrap_host: str
-    bootstrap_port: int
-    bootstrap_room: int
+    bootstrap_host: Union[str, List[str]]
+    bootstrap_port: Union[int, List[int]]
+    bootstrap_room: Union[int, List[int]]
     data_parallel_rank: Optional[int] = None

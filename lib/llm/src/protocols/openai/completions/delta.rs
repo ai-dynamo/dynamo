@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{CompletionChoice, CompletionResponse, NvCreateCompletionRequest};
+use super::{NvCreateCompletionRequest, NvCreateCompletionResponse};
 use crate::protocols::common;
 
 impl NvCreateCompletionRequest {
@@ -82,57 +82,56 @@ impl DeltaGenerator {
         &self,
         index: u64,
         text: Option<String>,
-        finish_reason: Option<String>,
-    ) -> CompletionResponse {
+        finish_reason: Option<async_openai::types::CompletionFinishReason>,
+    ) -> NvCreateCompletionResponse {
         // todo - update for tool calling
 
-        CompletionResponse {
+        let mut usage = self.usage.clone();
+        if self.options.enable_usage {
+            usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+        }
+
+        let inner = async_openai::types::CreateCompletionResponse {
             id: self.id.clone(),
             object: self.object.clone(),
-            created: self.created,
+            created: self.created as u32,
             model: self.model.clone(),
             system_fingerprint: self.system_fingerprint.clone(),
-            choices: vec![CompletionChoice {
+            choices: vec![async_openai::types::Choice {
                 text: text.unwrap_or_default(),
-                index,
+                index: index as u32,
                 finish_reason,
                 logprobs: None,
             }],
             usage: if self.options.enable_usage {
-                Some(self.usage.clone())
+                Some(usage)
             } else {
                 None
             },
-        }
+        };
+
+        NvCreateCompletionResponse { inner }
     }
 }
 
-impl crate::protocols::openai::DeltaGeneratorExt<CompletionResponse> for DeltaGenerator {
+impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for DeltaGenerator {
     fn choice_from_postprocessor(
         &mut self,
         delta: common::llm_backend::BackendOutput,
-    ) -> anyhow::Result<CompletionResponse> {
+    ) -> anyhow::Result<NvCreateCompletionResponse> {
         // aggregate usage
         if self.options.enable_usage {
             self.usage.completion_tokens += delta.token_ids.len() as u32;
         }
 
-        // todo logprobs
+        // TODO logprobs
 
-        let finish_reason = match delta.finish_reason {
-            Some(common::FinishReason::EoS) => Some("stop".to_string()),
-            Some(common::FinishReason::Stop) => Some("stop".to_string()),
-            Some(common::FinishReason::Length) => Some("length".to_string()),
-            Some(common::FinishReason::Cancelled) => Some("cancelled".to_string()),
-            Some(common::FinishReason::Error(err_msg)) => {
-                return Err(anyhow::anyhow!(err_msg));
-            }
-            None => None,
-        };
+        let finish_reason = delta.finish_reason.map(Into::into);
 
         // create choice
-        let index = 0;
-        Ok(self.create_choice(index, delta.text, finish_reason))
+        let index = delta.index.unwrap_or(0).into();
+        let response = self.create_choice(index, delta.text.clone(), finish_reason);
+        Ok(response)
     }
 
     fn get_isl(&self) -> Option<u32> {

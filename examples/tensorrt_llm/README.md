@@ -312,6 +312,8 @@ TensorRT-LLM also provides experimental support for using **NIXL** (NVIDIA Infer
 
 #### Using NIXL for KV Cache Transfer
 
+**Note:** NIXL backend for TensorRT-LLM is currently only supported on AMD64 (x86_64) architecture. If you're running on ARM64, you'll need to use the default UCX method for KV cache transfer.
+
 To enable NIXL for KV cache transfer in disaggregated serving:
 
 1. **Build the container with NIXL support:**
