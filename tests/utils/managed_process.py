@@ -39,7 +39,7 @@ def terminate_process(process, logger=logging.getLogger(), immediate_kill=False)
     except psutil.NoSuchProcess:
         logger.warning("PID %s no longer exists", process.pid)
 
-def terminate_process_tree(pid, logger=logging.getLogger(), immediate_kill=False, timeout = 5):
+def terminate_process_tree(pid, logger=logging.getLogger(), immediate_kill=False, timeout = 10):
     try:
         parent = psutil.Process(pid)
         for child in parent.children(recursive=True):
@@ -129,7 +129,7 @@ class ManagedProcess:
 
                     terminate_process_tree(ps_process.pid, self._logger)
                 for cmdline in self.straggler_commands:
-                    if cmdline in ps_process.cmdline():
+                    if cmdline in " ".join(ps_process.cmdline()):
                         self._logger.info(
                             "Terminating Straggler Cmdline %s %s %s", ps_process.name(), ps_process.pid, cmdline
                         )
@@ -257,9 +257,9 @@ class ManagedProcess:
 
                     terminate_process_tree(proc.pid, self._logger)
                 for cmdline in self.straggler_commands:
-                    if cmdline in proc.cmdline():
+                    if cmdline in " ".join(proc.cmdline()):
                         self._logger.info(
-                            "Terminating Existing %s %s", proc.name(), proc.pid
+                            "Terminating Existing CmdLine %s %s %s", proc.name(), proc.pid, proc.cmdline()
                         )
                         terminate_process_tree(proc.pid, self._logger)
 

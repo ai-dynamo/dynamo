@@ -102,6 +102,46 @@ def calculate_metrics(df, fault_time):
 
     return success, failure, avg_before, std_before, avg_after, std_after
 
+def calculate_metrics(df, fault_time, sla=2):
+    success = df["success"].sum()
+    failure = len(df) - success
+
+    if fault_time:
+        before_fault = df[df["time"] < fault_time]
+        after_fault = df[df["time"] >= fault_time]
+    else:
+        before_fault = df
+        after_fault = None
+
+    # Existing latency metrics (only successful requests)
+    successful_before = before_fault[before_fault["success"]]
+    avg_before = successful_before["request_elapsed_time"].mean()
+    std_before = successful_before["request_elapsed_time"].std()
+
+    avg_after, std_after = None, None
+    if after_fault is not None and not after_fault.empty:
+        successful_after = after_fault[after_fault["success"]]
+        avg_after = successful_after["request_elapsed_time"].mean()
+        std_after = successful_after["request_elapsed_time"].std()
+
+    # SLA violations (only successful requests exceeding the SLA)
+    violations_before = (successful_before["request_elapsed_time"] > sla).sum()
+    violations_after = (
+        (successful_after["request_elapsed_time"] > sla).sum() 
+        if after_fault is not None and not after_fault.empty 
+        else None
+    )
+
+    return (
+        success,
+        failure,
+        avg_before,
+        std_before,
+        avg_after,
+        std_after,
+        violations_before,
+        violations_after,
+    )
 
 def parse_process_log(log_dir, process_name):
     process_start_line = {
@@ -254,7 +294,7 @@ def process_test_directory(test_dir):
     pending_requests_before, pending_requests_after = parse_watcher_log(
         test_dir, fault_time
     )
-    success, failure, avg_before, std_before, avg_after, std_after = calculate_metrics(
+    success, failure, avg_before, std_before, avg_after, std_after, violations_before, violations_after = calculate_metrics(
         df, fault_time
     )
 
@@ -273,6 +313,8 @@ def process_test_directory(test_dir):
         "std_latency_after": std_after,
         "pending_requests_before": pending_requests_before,
         "pending_requests_after": pending_requests_after,
+        "violations_before": violations_before,
+        "violations_after": violations_after,
         "recovery_time": recovery_time,
     }
 
@@ -329,6 +371,8 @@ def main(logs_dir, tablefmt, log_paths=[]):
             "Latency After",
             "Pending Before",
             "Pending After",
+            "Violations Before",
+            "Violations After",
             "Recovery Time",
         ]
         rows = []
@@ -342,6 +386,8 @@ def main(logs_dir, tablefmt, log_paths=[]):
                 res["avg_latency_after"],
                 res["pending_requests_before"],
                 res["pending_requests_after"],
+                res["violations_before"],
+                res["violations_after"],
                 res["recovery_time"],
             ]
             rows.append(row)
