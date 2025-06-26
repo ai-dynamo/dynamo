@@ -19,7 +19,7 @@ from typing import Any, Dict, Tuple
 
 def parse_tensorrt_llm_args(
     config_args,
-) -> Tuple[Any, Tuple[Dict[str, Any], Dict[str, Any]]]:
+) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="A TensorRT-LLM Worker parser")
     parser.add_argument(
         "--extra-engine-args",

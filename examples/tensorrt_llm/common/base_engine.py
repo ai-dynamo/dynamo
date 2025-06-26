@@ -14,7 +14,7 @@
 # limitations under the License.
 import logging
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Any
 
 from common.protocol import DisaggregatedTypeConverter, TRTLLMWorkerRequest
 from tensorrt_llm import SamplingParams
@@ -44,7 +44,7 @@ def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
             "Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
         )
 
-    return tuple(endpoint_parts)
+    return (endpoint_parts[0], endpoint_parts[1], endpoint_parts[2])
 
 
 @dataclass
@@ -103,7 +103,7 @@ class BaseTensorrtLLMEngine:
         model_path = str(self._config.model_path)
 
         # Initialize the LLM engine
-        engine_args = {
+        engine_args: dict[str, Any] = {
             "model": model_path,
             "tensor_parallel_size": 1,
             "backend": "pytorch",
@@ -119,7 +119,7 @@ class BaseTensorrtLLMEngine:
                 engine_args, self._config.extra_engine_args
             )
         # Update the model path in the config to the model path used by the engine.
-        self._config.model_path = engine_args["model"]
+        self._config.model_path = str(engine_args["model"])
         if not self._config.model_path:
             raise ValueError(
                 "Model specification is required. Present neither in the config nor in the extra engine args."
@@ -133,7 +133,7 @@ class BaseTensorrtLLMEngine:
 
         if self._config.publish_events_and_metrics:
             # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
-            kv_cache_config = None
+            kv_cache_config: dict[str, Any] | Any = None
             if "kv_cache_config" not in engine_args:
                 kv_cache_config = {}
                 kv_cache_config[
@@ -141,10 +141,12 @@ class BaseTensorrtLLMEngine:
                 ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
             else:
                 kv_cache_config = engine_args["kv_cache_config"]
-                if not kv_cache_config.event_buffer_max_size:
+                if hasattr(kv_cache_config, 'event_buffer_max_size') and not kv_cache_config.event_buffer_max_size:
                     kv_cache_config.event_buffer_max_size = (
                         DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
                     )
+                elif isinstance(kv_cache_config, dict) and "event_buffer_max_size" not in kv_cache_config:
+                    kv_cache_config["event_buffer_max_size"] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
                 engine_args["kv_cache_config"] = kv_cache_config
 
             # Enable iter perf stats by default if we are publishing events and metrics.
@@ -164,7 +166,10 @@ class BaseTensorrtLLMEngine:
 
         # Get the engine using the asynccontextmanager
         self._llm_engine_context = get_tensorrtllm_engine(engine_args)
-        self._llm_engine = await self._llm_engine_context.__aenter__()
+        if self._llm_engine_context is not None:
+            self._llm_engine = await self._llm_engine_context.__aenter__()
+        else:
+            raise RuntimeError("Failed to create LLM engine context")
 
         if (
             self._config.publish_events_and_metrics
@@ -180,10 +185,15 @@ class BaseTensorrtLLMEngine:
                 self._config.lease_id,
                 self._config.kv_block_size,
             )
-            self._llm_publisher = await self._llm_publisher_context.__aenter__()
+            if self._llm_publisher_context is not None:
+                self._llm_publisher = await self._llm_publisher_context.__aenter__()
+            else:
+                raise RuntimeError("Failed to create LLM publisher context")
 
         # Initialize prefill client if in decode mode
         if self._config.disaggregation_mode == "decode":
+            if self._config.remote_prefill_endpoint is None:
+                raise ValueError("remote_prefill_endpoint is required for decode mode")
             logging.info(
                 f"Initializing remote prefill client for endpoint: {self._config.remote_prefill_endpoint}"
             )
@@ -192,12 +202,15 @@ class BaseTensorrtLLMEngine:
                 parsed_component_name,
                 parsed_endpoint_name,
             ) = parse_endpoint(self._config.remote_prefill_endpoint)
-            self._prefill_client = (
-                await self._runtime.namespace(parsed_namespace)
-                .component(parsed_component_name)
-                .endpoint(parsed_endpoint_name)
-                .client()
-            )
+            if self._runtime is not None:
+                self._prefill_client = (
+                    await self._runtime.namespace(parsed_namespace)
+                    .component(parsed_component_name)
+                    .endpoint(parsed_endpoint_name)
+                    .client()
+                )
+            else:
+                raise RuntimeError("Runtime not initialized")
 
     async def cleanup(self):
         """Cleanup resources"""
