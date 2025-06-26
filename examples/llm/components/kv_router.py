@@ -23,7 +23,7 @@ from typing import AsyncIterator, Tuple
 import numpy as np  # Add numpy import
 from components.worker import VllmWorker
 from utils.check_worker import check_required_workers
-from utils.protocol import LocalBlockHashes
+from utils.protocol import LocalBlockHashes, RouterDecision
 from utils.vllm import RouterType
 
 from dynamo.llm import (
@@ -160,8 +160,8 @@ class Router:
         if self.router_type == RouterType.KV:
             self.indexer = KvIndexer(kv_listener, self.args.block_size)
         elif self.router_type == RouterType.APPROX_KV:
-            # For now, hardcode the TTL to 30 seconds.
-            self.indexer = ApproxKvIndexer(kv_listener, self.args.block_size, 30.0)
+            # For now, hardcode the TTL to 2 minutes.
+            self.indexer = ApproxKvIndexer(kv_listener, self.args.block_size, 120.0)
 
         self.metrics_aggregator = KvMetricsAggregator(kv_listener)
 
@@ -378,16 +378,19 @@ class Router:
                 f"Scheduling to worker_id: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
             )
 
+        yield worker_id, prefix_hit_rate
+
+    @endpoint()
+    async def log_router_decision(self, request: RouterDecision):
+        lora_id = 0
         if self.router_type == RouterType.APPROX_KV:
             try:
                 await self.indexer.process_routing_decision_for_request(
-                    request.tokens, lora_id, worker_id
+                    request.tokens, lora_id, request.worker_id
                 )
             except Exception as e:
                 logger.exception(
                     f"Error processing routing decision: {e}. {fallback_msg}"
                 )
-                yield "", 0.0
-                return
 
-        yield worker_id, prefix_hit_rate
+        yield None

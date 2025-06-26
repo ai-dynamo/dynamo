@@ -15,6 +15,7 @@
 
 import asyncio
 import logging
+import random
 import uuid
 from enum import Enum
 from typing import Any, AsyncIterator, Dict, List, Tuple, Union
@@ -24,7 +25,7 @@ from components.worker import VllmWorker
 from transformers import AutoTokenizer
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.check_worker import check_required_workers
-from utils.protocol import LocalBlockHashes, MyRequestOutput, vLLMGenerateRequest
+from utils.protocol import LocalBlockHashes, MyRequestOutput, RouterDecision, vLLMGenerateRequest
 from utils.vllm import RouterType, parse_vllm_args
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
@@ -113,6 +114,12 @@ class Processor(ProcessMixIn):
                 await runtime.namespace(router_ns)
                 .component(router_name)
                 .endpoint("generate")
+                .client()
+            )
+            self.router_log_client = (
+                await runtime.namespace(router_ns)
+                .component(router_name)
+                .endpoint("log_router_decision")
                 .client()
             )
 
@@ -273,13 +280,36 @@ class Processor(ProcessMixIn):
 
                 if self.use_router:
                     if worker_id == "":
-                        engine_generator = await self.worker_client.generate(
-                            request_obj
-                        )
+                        # When using the APPROX_KV router, we need to know the worker that we ultimately select.
+                        if router_mode == RouterType.APPROX_KV:
+                            ids = self.worker_client.instance_ids()
+
+                            worker_id = random.choice(ids)
+
+                            engine_generator = await self.worker_client.direct(
+                                request_obj, int(worker_id)
+                            )
+                        # Otherwise, we can just use the client directly.
+                        else:
+                            engine_generator = await self.worker_client.generate(
+                                request_obj
+                            )
                     else:
                         engine_generator = await self.worker_client.direct(
                             request_obj, int(worker_id)
                         )
+
+                    # Notify the router of the worker that we selected.
+                    if router_mode == RouterType.APPROX_KV:
+                        router_log_obj = RouterDecision(
+                            worker_id=int(worker_id),
+                            tokens=engine_prompt["prompt_token_ids"],
+                        ).model_dump_json()
+
+                    await (
+                        await self.router_log_client.generate(router_log_obj)
+                    ).__anext__()
+
                 elif router_mode == RouterType.RANDOM:
                     engine_generator = await self.worker_client.generate(request_obj)
                 elif router_mode == RouterType.ROUND_ROBIN:
