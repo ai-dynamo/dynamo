@@ -139,7 +139,7 @@ def estimate_payload_size(batch_size: int, input_len: int) -> int:
     return int(token_bytes + overhead)
 
 
-def chunk_batch(input_requests, max_payload_bytes: int = 64 * 1024 * 1024):  # 64MB
+def chunk_batch(input_requests, max_payload_bytes: int = 1 * 1024 * 1024):  # 1MB
     """Split large batch into smaller chunks that fit NATS limit"""
     if not input_requests:
         return []
