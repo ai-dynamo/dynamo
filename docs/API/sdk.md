@@ -32,6 +32,7 @@ pip install ai-dynamo
 ```
 
 ## Core Concepts
+
 As you read about each concept, it is helpful to have the [basic example](../examples/hello_world.md) up as well so you can refer back to it.
 
 ### Defining a Service
@@ -49,6 +50,7 @@ A Service is a core building block for a project. You can think of it as a logic
 ```
 
 Key configuration options:
+
 1. `dynamo`: Dictionary that defines the Dynamo configuration and enables/disables it. When enabled, a dynamo worker is created under the hood which can register with the [Distributed Runtime](../architecture/architecture.md)
 2. `resources`: Dictionary defining resource requirements. The GPUs field is used for local and remote deployment. The other fields are used to determine resources when deploying to K8s.
 3. `workers`: Number of parallel instances of the service to spin up.
@@ -93,7 +95,9 @@ class ServiceA:
 ```
 
 #### Class-Based Architecture
+
 Dynamo follows a class-based architecture similar to BentoML making it intuitive for users familiar with those frameworks. Each service is defined as a Python class, with the following components:
+
 1. Class attributes for dependencies using `depends()`
 2. An `__init__` method for standard initialization
 3. Optional lifecycle hooks like `@async_on_start` and `@on_shutdown`
@@ -104,7 +108,9 @@ Dynamo follows a class-based architecture similar to BentoML making it intuitive
 This approach provides a clean separation of concerns and makes the service structure easy to understand.
 
 #### Service Dependencies with `depends()`
+
 The `depends()` function is a powerful feature that lets you create a dependency between services. When you use `depends(ServiceB)`, several things happen:
+
 1. It ensures that `ServiceB` is deployed when `ServiceA` is deployed by adding it to an internal service dependency graph
 2. It creates a client to the endpoints of `ServiceB` that is being served under the hood.
 3. You are able to access `ServiceB` endpoints as if it were a local function!
@@ -142,6 +148,7 @@ self.worker_client = (
 This is used in some of our prebuilt examples and is a powerful way to leverage the benefits of the SDK while being able to access Dynamo's core primitives.
 
 #### Lifecycle Hooks
+
 Dynamo supports key lifecycle hooks to manage service initialization and cleanup.
 
 ##### `@async_on_start`
@@ -156,11 +163,14 @@ async def async_init(self):
     self.tokenizer = await load_tokenizer()
     self.engine = await initialize_engine(self.model)
 ```
+
 This is especially useful for:
+
 - Initializing external connections
 - Setting up runtime resources that require async operations
 
 #### `@on_shutdown`
+
 The `@on_shutdown` hook is called when the service is shutdown handles cleanup.
 
 ```python
@@ -220,6 +230,7 @@ MyService:
 ```
 
 The YAML file has a hierarchical structure:
+
 - Top level keys are service class names
 - `ServiceArgs` contains parameters for the service decorator
 - Other keys are passed as arguments to the service constructor
@@ -322,13 +333,14 @@ The `ServiceArgs` section in YAML configuration allows you to override any param
 MyService:
   ServiceArgs:
     dynamo:
-      namespace: "staging"  # Override namespace
+      namespace: "staging" # Override namespace
     resources:
-      gpu: 4  # Use more GPUs
-    workers: 8  # Scale up workers
+      gpu: 4 # Use more GPUs
+    workers: 8 # Scale up workers
 ```
 
 This is particularly useful for:
+
 - Changing resource allocations between environments
 - Modifying worker counts based on expected load
 - Switching between namespaces for different deployments
@@ -345,6 +357,7 @@ def _get_service_args(self, service_name: str) -> Optional[dict]:
         return service_config.get("ServiceArgs")
     return None
 ```
+
 #### Complete Configuration Example
 
 Here's a comprehensive example showing how all these pieces fit together:
@@ -402,6 +415,7 @@ dynamo serve service:LLMService -f prod_config.yaml --LLMService.temperature=0.9
 ```
 
 The service receives the combined configuration with the command-line value taking precedence, resulting in effective configuration of:
+
 - `dynamo.namespace = "prod"`
 - `resources.gpu = 4`
 - `workers = 8`
@@ -422,21 +436,27 @@ The service receives the combined configuration with the command-line value taki
 Following these practices help create flexible and maintainable Dynamo services that can be easily configured for different environments and use cases.
 
 ### Deploying a Single Service
-You can deploy a single service for local development even if you have a dependancy graph defined using `depends()` using `dynamo serve --service-name <ClassName> <entrypoint> <configuration arguments>`. You can see an example of this in our multinode documentation [here](../examples/multinode.md).
+
+You can deploy a single service for local development even if you have a dependency graph defined using `depends()` using `dynamo serve --service-name <ClassName> <entrypoint> <configuration arguments>`. You can see an example of this in our multinode documentation [here](../examples/multinode.md).
 
 ### Composing Services into an Graph
+
 There are two main ways to compose services in Dynamo:
+
 1. Use `depends()` (Recommended)
-The depends() approach is the recommended way for production deployments:
+   The depends() approach is the recommended way for production deployments:
+
 - Automatically deploys all dependencies
 - Creates a static inference graph at deployment time
 - Provides type hints and better IDE support
 
 2. Use `.link()` (Experimental)
-Our `.link()` syntax is an flexible and experimental way to compose various services. Linking allows you to compose checks at runtime and view behavior. Under the hood - we are editing the dependency graph between various services. This is useful for experimentation and development but we suggest writing a static graph for your final production deployment.
+   Our `.link()` syntax is an flexible and experimental way to compose various services. Linking allows you to compose checks at runtime and view behavior. Under the hood - we are editing the dependency graph between various services. This is useful for experimentation and development but we suggest writing a static graph for your final production deployment.
 
 #### Understanding the `.link()` syntax
+
 Lets take the example of a `Processor` component. This component can currently do 2 things:
+
 1. Process a request and send it to a `Router` to decide what worker to send it to.
 2. Process a request and send it to a `Worker` directly.
 

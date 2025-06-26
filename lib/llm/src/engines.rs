@@ -115,6 +115,7 @@ fn delta_core(tok: u32) -> Annotated<LLMEngineOutput> {
         cum_log_probs: None,
         log_probs: None,
         finish_reason: None,
+        index: None,
     };
     Annotated::from_data(delta)
 }
@@ -237,7 +238,7 @@ impl AsyncEngine<SingleIn<NvCreateCompletionRequest>, ManyOut<Annotated<Completi
                 yield Annotated{ id: Some(id.to_string()), data: Some(response), event: None, comment: None };
                 id += 1;
             }
-            let response = deltas.create_choice(0, None, Some("stop".to_string()));
+            let response = deltas.create_choice(0, None, Some(async_openai::types::CompletionFinishReason::Stop));
             yield Annotated { id: Some(id.to_string()), data: Some(response), event: None, comment: None };
 
         };

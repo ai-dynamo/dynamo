@@ -24,13 +24,13 @@
 //! need some additional information to propagate intermediate results for improved observability.
 //! The metadata is transferred via the other arms of the `StreamingResponse` enum.
 //!
+use std::collections::HashMap;
+use std::time::SystemTime;
 
 use anyhow::Result;
 use derive_builder::Builder;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::HashMap;
-use std::time::SystemTime;
 
 use super::TokenIdType;
 
@@ -64,6 +64,9 @@ pub enum FinishReason {
 
     #[serde(rename = "cancelled")]
     Cancelled,
+
+    #[serde(rename = "content_filter")]
+    ContentFilter,
 }
 
 impl std::fmt::Display for FinishReason {
@@ -74,6 +77,7 @@ impl std::fmt::Display for FinishReason {
             FinishReason::Stop => write!(f, "stop"),
             FinishReason::Error(msg) => write!(f, "error: {}", msg),
             FinishReason::Cancelled => write!(f, "cancelled"),
+            FinishReason::ContentFilter => write!(f, "content_filter"),
         }
     }
 }
@@ -89,6 +93,33 @@ impl std::str::FromStr for FinishReason {
             "cancelled" => Ok(FinishReason::Cancelled),
             s if s.starts_with("error: ") => Ok(FinishReason::Error(s[7..].to_string())),
             _ => Err(anyhow::anyhow!("Invalid FinishReason variant: '{}'", s)),
+        }
+    }
+}
+
+impl From<FinishReason> for async_openai::types::CompletionFinishReason {
+    fn from(reason: FinishReason) -> Self {
+        match reason {
+            FinishReason::EoS | FinishReason::Stop | FinishReason::Cancelled => {
+                async_openai::types::CompletionFinishReason::Stop
+            }
+            FinishReason::ContentFilter => {
+                async_openai::types::CompletionFinishReason::ContentFilter
+            }
+            FinishReason::Length => async_openai::types::CompletionFinishReason::Length,
+            FinishReason::Error(_) => async_openai::types::CompletionFinishReason::Stop,
+        }
+    }
+}
+
+impl From<async_openai::types::CompletionFinishReason> for FinishReason {
+    fn from(reason: async_openai::types::CompletionFinishReason) -> Self {
+        match reason {
+            async_openai::types::CompletionFinishReason::Stop => FinishReason::Stop,
+            async_openai::types::CompletionFinishReason::Length => FinishReason::Length,
+            async_openai::types::CompletionFinishReason::ContentFilter => {
+                FinishReason::ContentFilter
+            }
         }
     }
 }
