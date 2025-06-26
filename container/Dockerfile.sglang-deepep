@@ -71,7 +71,8 @@ RUN rm -rf /opt/hpcx/ucx && \
 ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
 
 # Pinning to NIXL 0.2.1 right now
-# TODO: investigate pip install failure with 0.3.0 release
+# There is a fix that was merged into SGLang after 0.4.8.post1
+# TODO: Investigate perf hit of that change before we bump to up to date NIXL
 ARG NIXL_COMMIT="5e4c179ee850d482a83cb2a211e0947e46281060"
 RUN git clone https://github.com/ai-dynamo/nixl.git && cd nixl && git checkout ${NIXL_COMMIT} && pip install --break-system-packages . --config-settings=setup-args="-Ducx_path=/usr/local/ucx"
 

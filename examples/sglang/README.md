@@ -245,22 +245,37 @@ DeepGEMM kernels can sometimes take a while to warm up. Here we provide a small 
 
 ###### Benchmarking Disaggregated with WideEP
 
-In the SGLang [blog post repro instructions](https://github.com/sgl-project/sglang/issues/6017), SGL uses batch inference to benchmark their prefill and decode workers. They do this by pretokenizing the ShareGPT dataset and then creating a batch of 8192 requests with ISL 4096 and OSL 5 (for prefill) and a batch of 40000 with ISL 2000 and OSL 100 (for decode).
+In the official [blog post repro instructions](https://github.com/sgl-project/sglang/issues/6017), SGL uses batch inference to benchmark their prefill and decode workers. They do this by pretokenizing the ShareGPT dataset and then creating a batch of 8192 requests with ISL 4096 and OSL 5 (for prefill stress test) and a batch of 40000 with ISL 2000 and OSL 100 (for decode stress test). If you want to repro these benchmarks, you will need to uncomment the labeled flags in the `configs/dsr1.yaml` file inside of the container.
 
-As we continue to add better support for these sorts of large single batch workloads, we provide 2 different ways to perform an **end to end** benchmark which includes using an OpenAI compatible frontend and tokenization.
+We currently provide 2 different ways to perform an end to end benchmark which includes using our OpenAI frontend and tokenization. We will continue to add better support for these sorts of large single batch workloads in the future.
 
-1. **GenAI Perf**
-We provide a script that generates a JSONL file of the ShareGPT dataset and then use GenAI Perf to benchmark the prefill and decode workers. We use ShareGPT in order to leverage the pre-existing EPLB distributions provided by the SGLang team. However - you can use any dataset or use the built in GenAI-Perf synthetic dataset and try to benchmark the dynamic EPLB setup from the blog post instructions.
+1. **GenAI Perf to benchmark end to end performance with 8k ISL 256 OSL**
+We've found that 8k ISL 256 OSL provides a good baseline for measuring end to end disaggregated serving performance for DSR1. As WideEP allows for a higher throughput, we provide a script that runs this workload at high concurrencies. Note that you will need to warm up the model before running this benchmark to ensure that all of the DeepGEMM kernels are compiled.
 
 Example usage:
 ```bash
-python3 utils/deepseek-r1/generate_bench_data.py --output data.jsonl --num-prompts 8192 --input-len 4096 --output-len 5
-./utils/deepseek-r1/gap_bench.sh
+# warm up model a couple times
+./utils/warmup.sh HEAD_PREFILL_NODE_IP
+# run benchmark
+./utils/bench.sh HEAD_PREFILL_NODE_IP --type e2e
 ```
 
-2. Modified sglang `bench_one_batch_server.py`
-We also provide a modified version of the `bench_one_batch_server.py` script that can be used to benchmark the prefill and decode workers. This script is modified to handle the maximum NATS message size limit and to chunk the batch into smaller requests. This script is a work in progress and will be updated over time to better support batch inference as we build out this capability in dynamo.
+1. **GenAI Perf to benchmark completions with custom dataset**
+We provide a script that generates a JSONL file of the ShareGPT dataset and then use GenAI Perf to benchmark the prefill and decode workers. We use ShareGPT in order to leverage the pre-existing EPLB distributions provided by the SGLang team. If you don't want to use ShareGPT - you can also use GenAIPerf's synthetic dataset setup But note you will have to use dynamic EPLB configurations or record your own as the `init-expert-location` provided by SGLang is tuned specifically for the ShareGPT dataset at a 4096 ISL and 5 OSL.
+
+Example usage:
+```bash
+# generate data
+python3 utils/generate_bench_data.py --output data.jsonl --num-prompts 8192 --input-len 4096 --output-len 5
+# warm up model a couple times
+./utils/warmup.sh HEAD_PREFILL_NODE_IP
+# run benchmark
+./utils/bench.sh HEAD_PREFILL_NODE_IP --type custom_completions
+```
+
+2. **Modified sglang `bench_one_batch_server.py` for single batch inference**
+We also provide an **experimental** modified version of the `bench_one_batch_server.py` script that can be used to benchmark the prefill and decode workers. This script is modified to handle the maximum NATS message size limit and to chunk the batch into smaller requests. This script is a work in progress and will be updated over time to better support batch inference as we build out this capability in dynamo.
 
 ```bash
-python3 sgl_bench_one_batch_server.py --model deepseek-ai/DeepSeek-R1 --base-url http://HEAD_PREFILL_NODE_IP:8000 --batch-size 8192 --input-len 4096 --output-len 5 --skip-warmup
+python3 utils/sgl_bench_one_batch_server.py --model deepseek-ai/DeepSeek-R1 --base-url http://HEAD_PREFILL_NODE_IP:8000 --batch-size 8192 --input-len 4096 --output-len 5 --skip-warmup
 ```
