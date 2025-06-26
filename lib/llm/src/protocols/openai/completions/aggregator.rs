@@ -123,6 +123,19 @@ impl DeltaAggregator {
                             }
                             None => None,
                         };
+                        // Handle CompletionFinishReason -> FinishReason conversation
+                        state_choice.finish_reason = match choice.finish_reason {
+                            Some(async_openai::types::CompletionFinishReason::Stop) => {
+                                Some(FinishReason::Stop)
+                            }
+                            Some(async_openai::types::CompletionFinishReason::Length) => {
+                                Some(FinishReason::Length)
+                            }
+                            Some(async_openai::types::CompletionFinishReason::ContentFilter) => {
+                                Some(FinishReason::ContentFilter)
+                            }
+                            None => None,
+                        };
                     }
                 }
                 aggregator
@@ -285,6 +298,10 @@ mod tests {
             choice.finish_reason,
             Some(async_openai::types::CompletionFinishReason::Length)
         );
+        assert_eq!(
+            choice.finish_reason,
+            Some(async_openai::types::CompletionFinishReason::Length)
+        );
         assert!(choice.logprobs.is_none());
     }
 
@@ -312,6 +329,10 @@ mod tests {
         let choice = &response.inner.choices[0];
         assert_eq!(choice.index, 0);
         assert_eq!(choice.text, "Hello, world!".to_string());
+        assert_eq!(
+            choice.finish_reason,
+            Some(async_openai::types::CompletionFinishReason::Stop)
+        );
         assert_eq!(
             choice.finish_reason,
             Some(async_openai::types::CompletionFinishReason::Stop)
@@ -373,10 +394,18 @@ mod tests {
             choice0.finish_reason,
             Some(async_openai::types::CompletionFinishReason::Stop)
         );
+        assert_eq!(
+            choice0.finish_reason,
+            Some(async_openai::types::CompletionFinishReason::Stop)
+        );
 
         let choice1 = &response.inner.choices[1];
         assert_eq!(choice1.index, 1);
         assert_eq!(choice1.text, "Choice 1".to_string());
+        assert_eq!(
+            choice1.finish_reason,
+            Some(async_openai::types::CompletionFinishReason::Stop)
+        );
         assert_eq!(
             choice1.finish_reason,
             Some(async_openai::types::CompletionFinishReason::Stop)
