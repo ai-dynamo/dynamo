@@ -269,7 +269,7 @@ We provide a script that generates a JSONL file of the ShareGPT dataset and then
 Example usage:
 ```bash
 # generate data
-python3 utils/generate_bench_data.py --output data.jsonl --num-prompts 100 --input-len 40 --output-len 5 --model deepseek-ai/DeepSeek-R1
+python3 utils/generate_bench_data.py --output data.jsonl --num-prompts 8192 --input-len 4096 --output-len 5 --model deepseek-ai/DeepSeek-R1
 # run benchmark
 ./utils/bench.sh HEAD_PREFILL_NODE_IP --type custom_completions
 ```
@@ -279,5 +279,5 @@ We also provide an **experimental** modified version of the `bench_one_batch_ser
 
 Example usage:
 ```bash
-python3 utils/sgl_bench_one_batch_server.py --model deepseek-ai/DeepSeek-R1 --base-url http://HEAD_PREFILL_NODE_IP:8000 --batch-size 100 --input-len 40 --output-len 5 --skip-warmup
+python3 utils/sgl_bench_one_batch_server.py --model deepseek-ai/DeepSeek-R1 --base-url http://HEAD_PREFILL_NODE_IP:8000 --batch-size 8192 --input-len 4096 --output-len 5 --skip-warmup
 ```
