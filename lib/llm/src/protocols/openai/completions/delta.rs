@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{CompletionResponse, NvCreateCompletionRequest};
+use super::{NvCreateCompletionRequest, NvCreateCompletionResponse};
 use crate::protocols::common;
 
 impl NvCreateCompletionRequest {
@@ -83,7 +83,7 @@ impl DeltaGenerator {
         index: u64,
         text: Option<String>,
         finish_reason: Option<async_openai::types::CompletionFinishReason>,
-    ) -> CompletionResponse {
+    ) -> NvCreateCompletionResponse {
         // todo - update for tool calling
 
         let mut usage = self.usage.clone();
@@ -91,10 +91,10 @@ impl DeltaGenerator {
             usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
         }
 
-        CompletionResponse {
+        let inner = async_openai::types::CreateCompletionResponse {
             id: self.id.clone(),
             object: self.object.clone(),
-            created: self.created,
+            created: self.created as u32,
             model: self.model.clone(),
             system_fingerprint: self.system_fingerprint.clone(),
             choices: vec![async_openai::types::Choice {
@@ -108,15 +108,17 @@ impl DeltaGenerator {
             } else {
                 None
             },
-        }
+        };
+
+        NvCreateCompletionResponse { inner }
     }
 }
 
-impl crate::protocols::openai::DeltaGeneratorExt<CompletionResponse> for DeltaGenerator {
+impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for DeltaGenerator {
     fn choice_from_postprocessor(
         &mut self,
         delta: common::llm_backend::BackendOutput,
-    ) -> anyhow::Result<CompletionResponse> {
+    ) -> anyhow::Result<NvCreateCompletionResponse> {
         // aggregate usage
         if self.options.enable_usage {
             self.usage.completion_tokens += delta.token_ids.len() as u32;

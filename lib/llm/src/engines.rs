@@ -30,7 +30,7 @@ use crate::preprocessor::PreprocessedRequest;
 use crate::protocols::common::llm_backend::LLMEngineOutput;
 use crate::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-    completions::{prompt_to_string, CompletionResponse, NvCreateCompletionRequest},
+    completions::{prompt_to_string, NvCreateCompletionRequest, NvCreateCompletionResponse},
 };
 use crate::types::openai::embeddings::NvCreateEmbeddingRequest;
 use crate::types::openai::embeddings::NvCreateEmbeddingResponse;
@@ -142,7 +142,7 @@ pub trait StreamingEngine: Send + Sync {
     async fn handle_completion(
         &self,
         req: SingleIn<NvCreateCompletionRequest>,
-    ) -> Result<ManyOut<Annotated<CompletionResponse>>, Error>;
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error>;
 
     async fn handle_chat(
         &self,
@@ -219,13 +219,17 @@ impl
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<NvCreateCompletionRequest>, ManyOut<Annotated<CompletionResponse>>, Error>
-    for EchoEngineFull
+impl
+    AsyncEngine<
+        SingleIn<NvCreateCompletionRequest>,
+        ManyOut<Annotated<NvCreateCompletionResponse>>,
+        Error,
+    > for EchoEngineFull
 {
     async fn generate(
         &self,
         incoming_request: SingleIn<NvCreateCompletionRequest>,
-    ) -> Result<ManyOut<Annotated<CompletionResponse>>, Error> {
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         let (request, context) = incoming_request.transfer(());
         let deltas = request.response_generator();
         let ctx = context.context();
@@ -268,7 +272,7 @@ impl<E> StreamingEngine for EngineDispatcher<E>
 where
     E: AsyncEngine<
             SingleIn<NvCreateCompletionRequest>,
-            ManyOut<Annotated<CompletionResponse>>,
+            ManyOut<Annotated<NvCreateCompletionResponse>>,
             Error,
         > + AsyncEngine<
             SingleIn<NvCreateChatCompletionRequest>,
@@ -284,7 +288,7 @@ where
     async fn handle_completion(
         &self,
         req: SingleIn<NvCreateCompletionRequest>,
-    ) -> Result<ManyOut<Annotated<CompletionResponse>>, Error> {
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         self.inner.generate(req).await
     }
 
@@ -347,13 +351,17 @@ impl StreamingEngineAdapter {
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<NvCreateCompletionRequest>, ManyOut<Annotated<CompletionResponse>>, Error>
-    for StreamingEngineAdapter
+impl
+    AsyncEngine<
+        SingleIn<NvCreateCompletionRequest>,
+        ManyOut<Annotated<NvCreateCompletionResponse>>,
+        Error,
+    > for StreamingEngineAdapter
 {
     async fn generate(
         &self,
         req: SingleIn<NvCreateCompletionRequest>,
-    ) -> Result<ManyOut<Annotated<CompletionResponse>>, Error> {
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         self.0.handle_completion(req).await
     }
 }

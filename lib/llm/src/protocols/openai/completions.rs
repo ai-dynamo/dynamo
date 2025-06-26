@@ -39,41 +39,10 @@ pub struct NvCreateCompletionRequest {
     pub nvext: Option<NvExt>,
 }
 
-/// Legacy OpenAI CompletionResponse
-/// Represents a completion response from the API.
-/// Note: both the streamed and non-streamed response objects share the same
-/// shape (unlike the chat endpoint).
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct CompletionResponse {
-    /// A unique identifier for the completion.
-    pub id: String,
-
-    /// The list of completion choices the model generated for the input prompt.
-    pub choices: Vec<async_openai::types::Choice>,
-
-    /// The Unix timestamp (in seconds) of when the completion was created.
-    pub created: u64,
-
-    /// The model used for completion.
-    pub model: String,
-
-    /// The object type, which is always "text_completion"
-    pub object: String,
-
-    /// Usage statistics for the completion request.
-    pub usage: Option<async_openai::types::CompletionUsage>,
-
-    /// This fingerprint represents the backend configuration that the model runs with.
-    /// Can be used in conjunction with the seed request parameter to understand when backend
-    /// changes have been made that might impact determinism.
-    ///
-    /// NIM Compatibility:
-    /// This field is not supported by the NIM; however it will be added in the future.
-    /// The optional nature of this field will be relaxed when it is supported.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub system_fingerprint: Option<String>,
-    // TODO(ryan)
-    // pub nvext: Option<NimResponseExt>,
+#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+pub struct NvCreateCompletionResponse {
+    #[serde(flatten)]
+    pub inner: async_openai::types::CreateCompletionResponse,
 }
 
 impl ContentProvider for async_openai::types::Choice {
@@ -205,16 +174,17 @@ impl ResponseFactory {
         &self,
         choice: async_openai::types::Choice,
         usage: Option<async_openai::types::CompletionUsage>,
-    ) -> CompletionResponse {
-        CompletionResponse {
+    ) -> NvCreateCompletionResponse {
+        let inner = async_openai::types::CreateCompletionResponse {
             id: self.id.clone(),
             object: self.object.clone(),
-            created: self.created,
+            created: self.created as u32,
             model: self.model.clone(),
             choices: vec![choice],
             system_fingerprint: self.system_fingerprint.clone(),
             usage,
-        }
+        };
+        NvCreateCompletionResponse { inner }
     }
 }
 
