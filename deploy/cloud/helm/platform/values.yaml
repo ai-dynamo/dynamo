@@ -49,6 +49,7 @@ dynamo-operator:
       server:
       username:
       password:
+      existingSecretName: dynamo-regcred
       secure: true
       dynamoComponentsRepositoryName: dynamo-pipelines
     imageBuildEngine: buildkit

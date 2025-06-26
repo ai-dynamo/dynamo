@@ -139,7 +139,7 @@ spec:
       volumes:
       - name: docker-config
         secret:
-          secretName: dynamo-regcred
+          secretName: {{ include "dynamo-operator.componentsDockerRegistrySecretName" . }}
           items:
           - key: .dockerconfigjson
             path: config.json
