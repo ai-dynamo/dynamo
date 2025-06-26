@@ -17,35 +17,27 @@
 # https://huggingface.co/nvidia/DeepSeek-R1-FP4
 # You can also specify the full path to locally downloaded weights
 # instead of a HuggingFace ID here.
-model_name: "nvidia/DeepSeek-R1-FP4"
-backend: pytorch
 
-# TP/EP/PP/DP
+backend: pytorch
 tensor_parallel_size: 4
 moe_expert_parallel_size: 4
-pipeline_parallel_size: 1
-enable_attention_dp: false
-
-max_batch_size: 256
-# 8448 = 8192 ISL + 256 OSL
-max_num_tokens: 8448
-max_seq_len: 8448
-
+enable_attention_dp: true
+max_batch_size: 1
+max_num_tokens: 8192
+max_seq_len: 8192
 kv_cache_config:
-  # With dp attention disabled: high free_gpu_memory_fraction is fine.
-  free_gpu_memory_fraction: 0.85
-  # With dp attention enabled: large ISL at high concurrency may need
-  # free_gpu_memory_fraction low to have enough available memory.
-  # free_gpu_memory_fraction: 0.30
+  free_gpu_memory_fraction: 0.75
+print_iter_log: true
+kv_cache_dtype: fp8
+disable_overlap_scheduler: true
 
-# NOTE: pytorch_backend_config section flattened since: https://github.com/NVIDIA/TensorRT-LLM/pull/4603
-# NOTE: overlap_scheduler enabled by default since this commit and changed
-# config field from 'enable_overlap_scheduler' to 'disable_overlap_scheduler':
-# https://github.com/NVIDIA/TensorRT-LLM/commit/b4e5df0ee0024eda3eeb83a6ba822245a30ab428
+# Enable the MTP(Multi-Token Prediction) in the prefill model engine
+speculative_config:
+  decoding_type: MTP
+  num_nextn_predict_layers: 1
+
 use_cuda_graph: true
 cuda_graph_padding_enabled: true
-# NOTE: For larger max batch size, you may want to add larger cuda graph
-# batch sizes below to match.
 cuda_graph_batch_sizes:
 - 1
 - 2
@@ -56,5 +48,4 @@ cuda_graph_batch_sizes:
 - 64
 - 128
 - 256
-print_iter_log: true
-kv_cache_dtype: fp8
+
