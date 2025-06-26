@@ -46,10 +46,10 @@ if [[ "$TYPE" == "e2e" ]]; then
     ISL=8000
     OSL=256
     CONCURRENCY_ARRAY=(1 2 4 16 64 256 512 1024 2048 4096 8192)
-    
+
     for concurrency in "${CONCURRENCY_ARRAY[@]}"; do
         echo "Run e2e concurrency: $concurrency"
-        
+
         genai-perf profile \
             --model ${MODEL} \
             --tokenizer ${MODEL} \
@@ -77,16 +77,16 @@ if [[ "$TYPE" == "e2e" ]]; then
             -H 'Authorization: Bearer NOT USED' \
             -H 'Accept: text/event-stream'
     done
-    
+
 else
     # Custom completions configuration
     OSL=5
     INPUT_FILE=data.jsonl
     CONCURRENCY_ARRAY=(8192)
-    
+
     for concurrency in "${CONCURRENCY_ARRAY[@]}"; do
         echo "Run custom_completions concurrency: $concurrency"
-        
+
         genai-perf profile \
             --model ${MODEL} \
             --tokenizer ${MODEL} \
