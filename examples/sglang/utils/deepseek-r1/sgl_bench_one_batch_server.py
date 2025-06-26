@@ -186,10 +186,22 @@ def run_one_case(
         estimated_size > 64 * 1024 * 1024
     ):  # nats max payload size is 64MB but recommended size is 8MB
         chunks = chunk_batch(input_requests)
-        return run_chunked_requests(url, chunks, batch_size, input_len, output_len, 
-                                  temperature, return_logprob, input_len_step_percentage,
-                                  run_name, result_filename, tokenizer, profile, profile_by_stage)
-    
+        return run_chunked_requests(
+            url,
+            chunks,
+            batch_size,
+            input_len,
+            output_len,
+            temperature,
+            return_logprob,
+            input_len_step_percentage,
+            run_name,
+            result_filename,
+            tokenizer,
+            profile,
+            profile_by_stage,
+        )
+
     profile_link = None
     if profile:
         profile_link: str = run_profile(
@@ -478,9 +490,7 @@ def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
     if not bench_args.show_report:
         return
 
-    summary = (
-        f"\nInput length: {bench_args.input_len}. Output length: {bench_args.output_len}.\n"
-    )
+    summary = f"\nInput length: {bench_args.input_len}. Output length: {bench_args.output_len}.\n"
     summary += "| batch size | latency (s) | input throughput (tok/s)  | output throughput (tok/s) | acc length | ITL (ms) | input cost ($/1M) | output cost ($/1M) |"
 
     if bench_args.profile:
