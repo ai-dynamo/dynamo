@@ -198,6 +198,7 @@ def test_vllm_boolean_arguments_special_handling():
         "VllmWorker": {
             "enable-prefix-caching": false,
             "use-tqdm-on-load": false,
+            "multi-step-stream-outputs": false,
             "some-other-flag": false
         }
     }
@@ -214,6 +215,10 @@ def test_vllm_boolean_arguments_special_handling():
     # Check that use-tqdm-on-load false uses negative flag
     assert "--no-use-tqdm-on-load" in vllm_worker_args
     assert "--use-tqdm-on-load" not in vllm_worker_args
+
+    # Check that multi-step-stream-outputs false uses negative flag
+    assert "--no-multi-step-stream-outputs" in vllm_worker_args
+    assert "--multi-step-stream-outputs" not in vllm_worker_args
 
     # Check that other false flags are omitted (standard behavior)
     assert "--some-other-flag" not in vllm_worker_args
