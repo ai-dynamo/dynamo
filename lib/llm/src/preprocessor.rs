@@ -29,9 +29,9 @@ pub mod tools;
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{collections::HashMap, sync::Arc};
 use tracing;
-use rayon::iter::{ParallelIterator, IntoParallelRefIterator};
 
 use crate::model_card::model::{ModelDeploymentCard, ModelInfo, TokenizerKind};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
