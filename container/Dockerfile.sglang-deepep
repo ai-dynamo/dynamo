@@ -79,9 +79,9 @@ WORKDIR /sgl-workspace
 
 RUN pip uninstall --break-system-packages -y sglang
 RUN rm -rf sglang
-# 0.4.8 has a bug with CUDA graphs and decode worker
+# Pinning to 0.4.8.post1 for now which solves a TBO issue
 # https://github.com/sgl-project/sglang/issues/7511
-RUN pip install --break-system-packages "sglang==0.4.7.post1"
+RUN pip install --break-system-packages "sglang==0.4.8.post1"
 
 # Allow forceful shutdown of inflight requests
 ENV SGL_FORCE_SHUTDOWN=1

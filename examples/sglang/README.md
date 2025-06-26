@@ -109,7 +109,7 @@ Steps to run:
 1. Build the SGLang DeepEP container.
 
 ```bash
-git clone -b v0.4.8 https://github.com/sgl-project/sglang.git
+git clone -b v0.4.8.post1 https://github.com/sgl-project/sglang.git
 cd sglang/docker
 docker build -f Dockerfile -t deepep .
 ```
