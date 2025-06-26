@@ -1,17 +1,19 @@
 import argparse
 import json
 import random
+
 import numpy as np
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
 from sglang.bench_serving import sample_random_requests
+from transformers import AutoTokenizer, PreTrainedTokenizerBase
 
 """
-Helper script that uses SGLang's random request generator to sample ShareGPT data 
+Helper script that uses SGLang's random request generator to sample ShareGPT data
 and then converts it to a jsonl file that can be used by GenAI perf for benchmarking
 
 Example usage:
 python3 generate_bench_data.py --model deepseek-ai/DeepSeek-R1 --output data.jsonl
 """
+
 
 def main():
     parser = argparse.ArgumentParser(
@@ -24,7 +26,10 @@ def main():
         "--output", type=str, required=True, help="Output JSONL filename"
     )
     parser.add_argument(
-        "--model", type=str, required=True, help="Model identifier for payloads and tokenizer name"
+        "--model",
+        type=str,
+        required=True,
+        help="Model identifier for payloads and tokenizer name",
     )
     parser.add_argument(
         "--num-prompts", type=int, default=8192, help="Total number of samples"
@@ -74,6 +79,7 @@ def main():
                 "output_length": row.output_len,
             }
             fout.write(json.dumps(payload) + "\n")
+
 
 if __name__ == "__main__":
     main()

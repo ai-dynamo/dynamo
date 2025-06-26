@@ -1,5 +1,5 @@
 """
-This is a modified version of the https://github.com/sgl-project/sglang/blob/main/python/sglang/bench_one_batch_server.py script that allows for benchmarking OpenAI batch completion endpoints. Dynamo has it's own 
+This is a modified version of the https://github.com/sgl-project/sglang/blob/main/python/sglang/bench_one_batch_server.py script that allows for benchmarking OpenAI batch completion endpoints. Dynamo has it's own
 rust based frontend that supports batch completions so we do not need to use the internal engine `/generate` endpoint.
 
 ---
@@ -10,19 +10,18 @@ python3 sgl_bench_one_batch_server.py --model deepseek-ai/DeepSeek-R1 --base-url
 """
 
 import argparse
+import concurrent.futures
 import dataclasses
 import itertools
 import json
 import multiprocessing
 import os
 import random
+import threading
 import time
 from typing import Tuple
 
 import requests
-import concurrent.futures
-import threading
-
 from sglang.bench_serving import get_tokenizer, sample_random_requests
 from sglang.profiler import run_profile
 from sglang.srt.entrypoints.http_server import launch_server
@@ -127,17 +126,19 @@ def chunk_batch(input_requests, max_payload_bytes: int = 64 * 1024 * 1024):  # 6
     """Split large batch into smaller chunks that fit NATS limit"""
     if not input_requests:
         return []
-    
+
     # Estimate size of one request
     sample_size = len(json.dumps({"prompt": input_requests[0].prompt}))
     requests_per_chunk = max(1, max_payload_bytes // sample_size)
-    
+
     chunks = []
     for i in range(0, len(input_requests), requests_per_chunk):
-        chunk = input_requests[i:i + requests_per_chunk]
+        chunk = input_requests[i : i + requests_per_chunk]
         chunks.append(chunk)
-    
-    print(f"Split batch of {len(input_requests)} into {len(chunks)} chunks of ~{requests_per_chunk} each")
+
+    print(
+        f"Split batch of {len(input_requests)} into {len(chunks)} chunks of ~{requests_per_chunk} each"
+    )
     return chunks
 
 
@@ -171,19 +172,36 @@ def run_one_case(
     # For now we swap tokens that are larger with a random number between 0 and U16_MAX_SIZE
     U16_MAX_SIZE = 50256
     for req in input_requests:
-        if hasattr(req, 'prompt') and isinstance(req.prompt, list):
-            req.prompt = [random.randint(0, U16_MAX_SIZE) if token > U16_MAX_SIZE else token for token in req.prompt]
+        if hasattr(req, "prompt") and isinstance(req.prompt, list):
+            req.prompt = [
+                random.randint(0, U16_MAX_SIZE) if token > U16_MAX_SIZE else token
+                for token in req.prompt
+            ]
 
     # In order to work around the maximum NATS message size, we have to chunk the batch and then send
     estimated_size = estimate_payload_size(batch_size, input_len)
     print(f"Estimated payload size: {estimated_size / (1024*1024):.1f}MB")
-    
-    if estimated_size > 64 * 1024 * 1024:  # nats max payload size is 64MB but recommended size is 8MB
+
+    if (
+        estimated_size > 64 * 1024 * 1024
+    ):  # nats max payload size is 64MB but recommended size is 8MB
         chunks = chunk_batch(input_requests)
-        return run_chunked_requests(url, chunks, batch_size, input_len, output_len, 
-                                  temperature, return_logprob, input_len_step_percentage,
-                                  run_name, result_filename, tokenizer, profile, profile_by_stage)
-    
+        return run_chunked_requests(
+            url,
+            chunks,
+            batch_size,
+            input_len,
+            output_len,
+            temperature,
+            return_logprob,
+            input_len_step_percentage,
+            run_name,
+            result_filename,
+            tokenizer,
+            profile,
+            profile_by_stage,
+        )
+
     use_structured_outputs = False
     if use_structured_outputs:
         texts = []
@@ -223,10 +241,10 @@ def run_one_case(
         if not chunk.startswith("data:"):
             continue
 
-        data_str = chunk[len("data:"):].strip()
+        data_str = chunk[len("data:") :].strip()
         try:
             data = json.loads(data_str)
-        except Exception as e:
+        except Exception:
             print("[WARN] Failed to parse chunk:", chunk)
             continue
 
@@ -276,30 +294,46 @@ def run_one_case(
     )
 
 
-def run_chunked_requests(url, chunks, original_batch_size, input_len, output_len,
-                        temperature, return_logprob, input_len_step_percentage,
-                        run_name, result_filename, tokenizer, profile, profile_by_stage):
+def run_chunked_requests(
+    url,
+    chunks,
+    original_batch_size,
+    input_len,
+    output_len,
+    temperature,
+    return_logprob,
+    input_len_step_percentage,
+    run_name,
+    result_filename,
+    tokenizer,
+    profile,
+    profile_by_stage,
+):
     """Process large batch as multiple parallel requests"""
-    
-    print(f"Processing {len(chunks)} chunks for total batch size {original_batch_size} IN PARALLEL")
-    
+
+    print(
+        f"Processing {len(chunks)} chunks for total batch size {original_batch_size} IN PARALLEL"
+    )
+
     total_start = time.perf_counter()
     first_token_time = None
     first_token_lock = threading.Lock()
-    
+
     def process_chunk(chunk_info):
         i, chunk = chunk_info
         print(f"Starting chunk {i+1}/{len(chunks)} with {len(chunk)} requests")
-        
+
         chunk_start = time.perf_counter()
-        
+
         request_payload = {
             "model": "deepseek-ai/DeepSeek-R1",
             "prompt": [req.prompt for req in chunk],
             "stream": True,
         }
 
-        response = requests.post(url + "/v1/completions", json=request_payload, stream=True)
+        response = requests.post(
+            url + "/v1/completions", json=request_payload, stream=True
+        )
         response.raise_for_status()
 
         chunk_first_token = None
@@ -310,7 +344,7 @@ def run_chunked_requests(url, chunks, original_batch_size, input_len, output_len
             if not line.startswith("data:"):
                 continue
 
-            data_str = line[len("data:"):].strip()
+            data_str = line[len("data:") :].strip()
             try:
                 data = json.loads(data_str)
             except:
@@ -319,7 +353,7 @@ def run_chunked_requests(url, chunks, original_batch_size, input_len, output_len
             usage = data.get("usage")
             if usage and usage.get("completion_tokens") == 1:
                 chunk_first_token = time.perf_counter() - chunk_start
-                
+
                 # Thread-safe first token tracking
                 nonlocal first_token_time
                 with first_token_lock:
@@ -329,12 +363,12 @@ def run_chunked_requests(url, chunks, original_batch_size, input_len, output_len
 
         chunk_end = time.perf_counter()
         print(f"Completed chunk {i+1}/{len(chunks)} in {chunk_end - chunk_start:.2f}s")
-        
+
         return {
-            'latency': chunk_end - chunk_start,
-            'first_token': chunk_first_token,
-            'size': len(chunk),
-            'chunk_id': i
+            "latency": chunk_end - chunk_start,
+            "first_token": chunk_first_token,
+            "size": len(chunk),
+            "chunk_id": i,
         }
 
     # Process all chunks in parallel
@@ -343,15 +377,19 @@ def run_chunked_requests(url, chunks, original_batch_size, input_len, output_len
 
     total_latency = time.perf_counter() - total_start
     ttft = first_token_time or 0.0
-    
+
     # Calculate aggregated metrics
     input_throughput = original_batch_size * input_len / ttft if ttft > 0 else 0
-    output_throughput = original_batch_size * output_len / (total_latency - ttft) if total_latency > ttft else 0
+    output_throughput = (
+        original_batch_size * output_len / (total_latency - ttft)
+        if total_latency > ttft
+        else 0
+    )
     overall_throughput = original_batch_size * (input_len + output_len) / total_latency
 
-    print(f"Chunked batch results:")
+    print("Chunked batch results:")
     print(f"  Total latency: {total_latency:.2f}s")
-    print(f"  TTFT: {ttft:.2f}s") 
+    print(f"  TTFT: {ttft:.2f}s")
     print(f"  Input throughput: {input_throughput:.2f} tok/s")
     print(f"  Output throughput: {output_throughput:.2f} tok/s")
 
@@ -371,8 +409,15 @@ def run_chunked_requests(url, chunks, original_batch_size, input_len, output_len
             }
             fout.write(json.dumps(res) + "\n")
 
-    return (original_batch_size, total_latency, ttft, input_throughput, 
-            output_throughput, overall_throughput, None)
+    return (
+        original_batch_size,
+        total_latency,
+        ttft,
+        input_throughput,
+        output_throughput,
+        overall_throughput,
+        None,
+    )
 
 
 def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
@@ -458,9 +503,7 @@ def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
     if not bench_args.show_report:
         return
 
-    summary = (
-        f"\nInput lenses: {bench_args.input_len}. Output lenses: {bench_args.output_len}.\n"
-    )
+    summary = f"\nInput lenses: {bench_args.input_len}. Output lenses: {bench_args.output_len}.\n"
     summary += "| batch size | latency (s) | input throughput (tok/s)  | output throughput (tok/s) | acc length | ITL (ms) | input cost ($/1M) | output cost ($/1M) |"
 
     if bench_args.profile:

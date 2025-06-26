@@ -8,7 +8,7 @@
 # Update `dist_init_addr`, `node-rank`, `HEAD_PREFILL_NODE_IP`, `HEAD_DECODE_NODE_IP` values to match your cluster
 # ./run_sgl_servers.sh --server-type {prefill, decode, mini_lb
 
-# Example usage 
+# Example usage
 # After updating the values above, on my head prefill node I would run:
 #     ./run_sgl_servers.sh --server-type prefill &
 #     ./run_sgl_servers.sh --server-type mini_lb
@@ -49,7 +49,7 @@ case $SERVER_TYPE in
       --prefill "http://HEAD_PREFILL_NODE_IP:30000" \
       --decode  "http://HEAD_DECODE_NODE_IP:30000"
     ;;
-  
+
   prefill)
     echo "Starting prefill server..."
     MC_TE_METRIC=true \
@@ -86,7 +86,7 @@ case $SERVER_TYPE in
       --eplb-algorithm deepseek \
       --deepep-config /configs/deepep.json
     ;;
-  
+
   decode)
     echo "Starting decode server..."
     MC_TE_METRIC=true \
@@ -118,7 +118,7 @@ case $SERVER_TYPE in
       --ep-num-redundant-experts 32 \
       --cuda-graph-bs 256
     ;;
-  
+
   *)
     echo "Error: Invalid server type '$SERVER_TYPE'"
     echo "Valid options: prefill, decode, mini_lb"
