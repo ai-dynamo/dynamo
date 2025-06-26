@@ -161,8 +161,8 @@ pub struct ResponseFactory {
     #[builder(default = "\"text_completion\".to_string()")]
     pub object: String,
 
-    #[builder(default = "chrono::Utc::now().timestamp() as u64")]
-    pub created: u64,
+    #[builder(default = "chrono::Utc::now().timestamp() as u32")]
+    pub created: u32,
 }
 
 impl ResponseFactory {
@@ -178,7 +178,7 @@ impl ResponseFactory {
         let inner = async_openai::types::CreateCompletionResponse {
             id: self.id.clone(),
             object: self.object.clone(),
-            created: self.created as u32,
+            created: self.created,
             model: self.model.clone(),
             choices: vec![choice],
             system_fingerprint: self.system_fingerprint.clone(),
@@ -250,9 +250,14 @@ impl TryFrom<common::StreamingCompletionResponse> for async_openai::types::Choic
             .text
             .ok_or(anyhow::anyhow!("No text in response"))?;
 
-        // Safety: we're downcasting from u64 to u32 here but u32::MAX is 4_294_967_295
+        // SAFETY: we're downcasting from u64 to u32 here but u32::MAX is 4_294_967_295
         // so we're fairly safe knowing we won't generate that many Choices
-        let index = response.delta.index.unwrap_or(0) as u32;
+        let index: u32 = response
+            .delta
+            .index
+            .unwrap_or(0)
+            .try_into()
+            .expect("index exceeds u32::MAX");
 
         // TODO handle aggregating logprobs
         let logprobs = None;
