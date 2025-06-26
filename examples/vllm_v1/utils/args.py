@@ -25,9 +25,7 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     vllm_args = config.as_args(service_name, prefix=prefix)
     parser = FlexibleArgumentParser()
     parser.add_argument(
-        "--enable-disagg",
-        action="store_true",
-        help="Enable disaggregation",
+        "--enable-disagg", action="store_true", help="Enable disaggregation"
     )
     parser.add_argument(
         "--data-parallel-start-rank",
