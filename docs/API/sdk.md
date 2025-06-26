@@ -300,18 +300,16 @@ def setup_my_lib():
 This pattern is used in the example vLLM integration:
 
 ```python
-from dynamo.sdk.lib.utils import str_to_bool
-
 def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     config = ServiceConfig.get_instance()
     vllm_args = config.as_args(service_name, prefix=prefix)
     parser = FlexibleArgumentParser()
 
-    # Add custom arguments that need explicit false handling
+    # Add custom arguments
     parser.add_argument("--router", type=str, choices=["random", "round-robin", "kv"], default="random")
-    parser.add_argument("--remote-prefill", type=str_to_bool, default=False)
+    parser.add_argument("--remote-prefill", action="store_true", default=False)
 
-    # Add VLLM's arguments (built-in boolean args use action="store_true" and work with our hybrid format)
+    # Add VLLM's arguments (ServiceConfig handles True defaults automatically)
     parser = AsyncEngineArgs.add_cli_args(parser)
 
     # Parse both custom and VLLM arguments
@@ -329,15 +327,30 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
 
 #### Boolean Argument Handling
 
-ServiceConfig uses a hybrid approach for boolean arguments to maintain compatibility with existing argument parsers:
+ServiceConfig uses a targeted approach for boolean arguments to maintain compatibility with different argument parsers:
 
-- **For `true` values**: Outputs just the flag (e.g., `--enable-feature`)
-  - Compatible with `action="store_true"` parsers
-- **For `false` values**: Outputs flag with explicit false (e.g., `--disable-feature false`)
-  - Requires `type=str_to_bool` for explicit false handling
-  - `action="store_true"` parsers ignore the `false` value and use their default
+1. Standard Boolean Handling:
+- `true` → outputs just the flag (e.g., `--enable-feature`)
+- `false` → omitted entirely (uses parser's default)
 
-This allows seamless integration with libraries like vLLM that use `action="store_true"` while still supporting explicit false values when needed.
+2. vLLM True-Default Arguments (targeted override support):
+- Automatically detects vLLM arguments that default to `True` and need explicit `false` handling
+- `enable-prefix-caching: false` → `--no-enable-prefix-caching` (negative flag)
+- `multi-step-stream-outputs: false` → `--no-multi-step-stream-outputs` (negative flag)
+
+```yaml
+# Example YAML configuration
+VllmWorker:
+  # Standard boolean flags (action="store_true" style)
+  enforce-eager: true          # → --enforce-eager
+  disable-logging: false       # → (omitted)
+
+  # vLLM arguments with True defaults (automatically handled)
+  enable-prefix-caching: false  # → --no-enable-prefix-caching
+
+  # Non-boolean arguments
+  max-model-len: 16384         # → --max-model-len 16384
+```
 
 #### Overriding Service Decorator with ServiceArgs
 

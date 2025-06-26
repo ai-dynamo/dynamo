@@ -26,22 +26,6 @@ from dynamo.sdk.core.protocol.deployment import Service
 REQUEST_TIMEOUT = 20
 
 
-def str_to_bool(value):
-    """Convert string to boolean for ServiceConfig compatibility.
-    This helper function is specifically designed to work with Dynamo's ServiceConfig
-    system, which outputs boolean configuration values as "--arg true" or "--arg false".
-
-    Args:
-        value: The value to convert. Can be a boolean, string, or other type.
-
-    Returns:
-        bool: True if the string representation is "true" (case-insensitive), False otherwise.
-    """
-    if isinstance(value, bool):
-        return value
-    return str(value).lower() == "true"
-
-
 def get_host_port():
     """Gets host and port from environment variables. Defaults to 0.0.0.0:8000."""
     port = int(os.environ.get("DYNAMO_PORT", 8000))

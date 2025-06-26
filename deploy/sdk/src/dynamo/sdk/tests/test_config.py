@@ -143,7 +143,7 @@ def test_service_config_override_common_configs():
 
 
 def test_explicit_boolean_arguments():
-    """Test that boolean arguments are handled with explicit true/false values"""
+    """Test that boolean arguments are handled correctly with new logic"""
     # Reset singleton instance
     ServiceConfig._instance = None
 
@@ -160,21 +160,60 @@ def test_explicit_boolean_arguments():
     }
     """
 
-    # Get arguments and verify explicit boolean handling
+    # Get arguments and verify boolean handling
     service_config = ServiceConfig.get_instance()
     vllm_worker_args = service_config.as_args("VllmWorker")
 
-    # Check that true values are passed as --arg true
+    # Check that true values are passed as flags only
     assert "--enable-prefix-caching" in vllm_worker_args
+    # Should NOT have a following "true" value
     enable_idx = vllm_worker_args.index("--enable-prefix-caching")
-    assert vllm_worker_args[enable_idx + 1] == "true"
+    assert (
+        enable_idx == len(vllm_worker_args) - 1
+        or not vllm_worker_args[enable_idx + 1] == "true"
+    )
 
-    # Check that false values are passed as --arg false
-    assert "--disable-sliding-window" in vllm_worker_args
-    disable_idx = vllm_worker_args.index("--disable-sliding-window")
-    assert vllm_worker_args[disable_idx + 1] == "false"
+    # Check that false values for standard boolean flags are omitted
+    assert "--disable-sliding-window" not in vllm_worker_args
 
-    # Check that another true value works
+    # Check that another true value works as flag
     assert "--enforce-eager" in vllm_worker_args
     enforce_idx = vllm_worker_args.index("--enforce-eager")
-    assert vllm_worker_args[enforce_idx + 1] == "true"
+    assert (
+        enforce_idx == len(vllm_worker_args) - 1
+        or not vllm_worker_args[enforce_idx + 1] == "true"
+    )
+
+
+def test_vllm_boolean_arguments_special_handling():
+    """Test that vLLM boolean arguments with special defaults are handled correctly"""
+    # Reset singleton instance
+    ServiceConfig._instance = None
+
+    # Set environment variable with vLLM boolean configs
+    os.environ[
+        "DYNAMO_SERVICE_CONFIG"
+    ] = """
+    {
+        "VllmWorker": {
+            "enable-prefix-caching": false,
+            "use-tqdm-on-load": false,
+            "some-other-flag": false
+        }
+    }
+    """
+
+    # Get arguments and verify vLLM special boolean handling
+    service_config = ServiceConfig.get_instance()
+    vllm_worker_args = service_config.as_args("VllmWorker")
+
+    # Check that enable-prefix-caching false uses negative flag
+    assert "--no-enable-prefix-caching" in vllm_worker_args
+    assert "--enable-prefix-caching" not in vllm_worker_args
+
+    # Check that use-tqdm-on-load false uses negative flag
+    assert "--no-use-tqdm-on-load" in vllm_worker_args
+    assert "--use-tqdm-on-load" not in vllm_worker_args
+
+    # Check that other false flags are omitted (standard behavior)
+    assert "--some-other-flag" not in vllm_worker_args

@@ -18,7 +18,6 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 from dynamo.sdk.lib.config import ServiceConfig
-from dynamo.sdk.lib.utils import str_to_bool
 
 
 class RouterType:
@@ -52,14 +51,12 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     )
     parser.add_argument(
         "--remote-prefill",
-        type=str_to_bool,
-        default=False,
+        action="store_true",
         help="Enable remote prefill",
     )
     parser.add_argument(
         "--conditional-disagg",
-        type=str_to_bool,
-        default=False,
+        action="store_true",
         help="Use disaggregated router to decide whether to prefill locally or remotely",
     )
     parser.add_argument(

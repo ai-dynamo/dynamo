@@ -18,7 +18,6 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 from dynamo.sdk.lib.config import ServiceConfig
-from dynamo.sdk.lib.utils import str_to_bool
 
 
 def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
@@ -27,8 +26,7 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     parser = FlexibleArgumentParser()
     parser.add_argument(
         "--enable-disagg",
-        type=str_to_bool,
-        default=False,
+        action="store_true",
         help="Enable disaggregation",
     )
     parser.add_argument(
@@ -41,6 +39,6 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args(vllm_args)
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine_args.enable_disagg = args.enable_disagg  # type: ignore[misc]
-    engine_args.data_parallel_start_rank = args.data_parallel_start_rank  # type: ignore[misc]
+    engine_args.enable_disagg = args.enable_disagg
+    engine_args.data_parallel_start_rank = args.data_parallel_start_rank
     return engine_args
