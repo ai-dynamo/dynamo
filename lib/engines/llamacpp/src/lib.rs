@@ -269,6 +269,7 @@ fn run_request(
             cum_log_probs: None, // TODO output.cumulative_logprob.map(|v| v as f64),
             log_probs: None,     // TODO  output.logprobs
             finish_reason: None,
+            index: None,
         };
         work_request
             .response_channel

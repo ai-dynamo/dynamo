@@ -69,15 +69,6 @@ apt-get update && apt-get -y install git git-lfs
 ./container/build.sh --framework tensorrtllm --use-default-experimental-tensorrtllm-commit
 ```
 
-> [!NOTE]
-> Because of a known issue of C++11 ABI compatibility within the NGC pytorch container,
-> we rebuild TensorRT-LLM from source. See [here](https://nvidia.github.io/TensorRT-LLM/installation/linux.html)
-> for more information.
->
-> Hence, when running this script for the first time, the time taken by this script can be
-> quite long.
-
-
 ### Run container
 
 ```
@@ -306,13 +297,56 @@ See [close deployment](../../docs/guides/dynamo_serve.md#close-deployment) secti
 To benchmark your deployment with GenAI-Perf, see this utility script, configuring the
 `model` name and `host` based on your deployment: [perf.sh](../../benchmarks/llm/perf.sh)
 
-### Future Work
 
-Remaining tasks:
-- [x] Add support for the disaggregated serving.
-- [x] Add multi-node support.
-- [x] Add instructions for benchmarking.
-- [x] Use processor from dynamo-llm framework.
-- [ ] Add integration test coverage.
-- [ ] Merge the code base with llm example to reduce the code duplication.
-- [ ] Enable NIXL integration with TensorRT-LLM once available. Currently, TensorRT-LLM uses UCX to transfer KV cache.
+### KV Cache Transfer for Disaggregated Serving
+
+In disaggregated serving architectures, KV cache must be transferred between prefill and decode nodes. TensorRT-LLM supports two methods for this transfer:
+
+#### Default Method: UCX
+By default, TensorRT-LLM uses UCX (Unified Communication X) for KV cache transfer between prefill and decode nodes. UCX provides high-performance communication optimized for GPU-to-GPU transfers.
+
+#### Experimental Method: NIXL
+TensorRT-LLM also provides experimental support for using **NIXL** (NVIDIA Inference Xfer Library) for KV cache transfer. [NIXL](https://github.com/ai-dynamo/nixl) is NVIDIA's high-performance communication library designed for efficient data transfer in distributed GPU environments.
+
+**Note:** NIXL support in TensorRT-LLM is experimental and is not suitable for production environments yet.
+
+#### Using NIXL for KV Cache Transfer
+
+**Note:** NIXL backend for TensorRT-LLM is currently only supported on AMD64 (x86_64) architecture. If you're running on ARM64, you'll need to use the default UCX method for KV cache transfer.
+
+To enable NIXL for KV cache transfer in disaggregated serving:
+
+1. **Build the container with NIXL support:**
+   The TensorRT-LLM wheel must be built from source with NIXL support. The `./container/build.sh` script caches previously built TensorRT-LLM wheels to reduce build time. If you have previously built a TensorRT-LLM wheel without NIXL support, you must delete the cached wheel to force a rebuild with NIXL support.
+
+   **Remove cached TensorRT-LLM wheel (only if previously built without NIXL support):**
+   ```bash
+   rm -rf /tmp/trtllm_wheel
+   ```
+
+   **Build the container with NIXL support:**
+   ```bash
+   ./container/build.sh --framework tensorrtllm \
+     --use-default-experimental-tensorrtllm-commit \
+     --trtllm-use-nixl-kvcache-experimental
+   ```
+
+   **Note:** Both `--use-default-experimental-tensorrtllm-commit` and `--trtllm-use-nixl-kvcache-experimental` flags are required to enable NIXL support.
+
+2. **Run the containerized environment:**
+   See [run container](#run-container) section to learn how to start the container image built in previous step.
+
+3. **Start the disaggregated service:**
+   See [disaggregated serving](#disaggregated-serving) to see how to start the deployment.
+
+4. **Send the request:**
+   See [client](#client) section to learn how to send the request to deployment.
+
+**Important:** Ensure that ETCD and NATS services are running before starting the service.
+
+The container will automatically configure the appropriate environment variables (`TRTLLM_USE_NIXL_KVCACHE=1`) when built with the NIXL flag. The same container image can be used to use UCX for KV cache transfer.
+```bash
+unset TRTLLM_USE_NIXL_KVCACHE
+export TRTLLM_USE_UCX_KVCACHE=1
+```
+

@@ -15,14 +15,23 @@
 
 use std::env;
 use std::process::Command;
+use vergen_gitcl::{Emitter, GitclBuilder};
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     if has_cuda_toolkit() && !has_feature("cuda") && is_cuda_engine() {
         println!("cargo:warning=CUDA not enabled, re-run with `--features cuda`");
     }
     if is_mac() && !has_feature("metal") {
         println!("cargo:warning=Metal not enabled, re-run with `--features metal`");
     }
+
+    let git_config = GitclBuilder::default()
+        .describe(true, false, None)
+        .build()?;
+
+    Emitter::default().add_instructions(&git_config)?.emit()?;
+
+    Ok(())
 }
 
 fn has_feature(s: &str) -> bool {

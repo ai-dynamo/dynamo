@@ -47,7 +47,7 @@ use tokio::{runtime::Handle, sync::mpsc};
 pub type GlobalRegistry = Arc<Mutex<HashMap<SequenceHash, Weak<RegistrationHandle>>>>;
 
 #[derive(Debug, thiserror::Error)]
-pub enum BlockRegistationError {
+pub enum BlockRegistrationError {
     #[error("Block already registered")]
     BlockAlreadyRegistered(SequenceHash),
 
@@ -147,12 +147,12 @@ impl BlockRegistry {
     pub fn register_block(
         &mut self,
         block_state: &mut BlockState,
-    ) -> Result<Option<PublishHandle>, BlockRegistationError> {
+    ) -> Result<Option<PublishHandle>, BlockRegistrationError> {
         match block_state {
-            BlockState::Reset => Err(BlockRegistationError::InvalidState(
+            BlockState::Reset => Err(BlockRegistrationError::InvalidState(
                 "Block is in Reset state".to_string(),
             )),
-            BlockState::Partial(_partial) => Err(BlockRegistationError::InvalidState(
+            BlockState::Partial(_partial) => Err(BlockRegistrationError::InvalidState(
                 "Block is in Partial state".to_string(),
             )),
 
@@ -163,7 +163,9 @@ impl BlockRegistry {
                 // If an identical block already exists in this pool, return an error.
                 if let Some(handle) = blocks.get(&sequence_hash) {
                     if let Some(_handle) = handle.upgrade() {
-                        return Err(BlockRegistationError::BlockAlreadyRegistered(sequence_hash));
+                        return Err(BlockRegistrationError::BlockAlreadyRegistered(
+                            sequence_hash,
+                        ));
                     }
                 }
 
@@ -207,7 +209,7 @@ impl BlockRegistry {
                 Ok(publish_handle)
             }
             BlockState::Registered(registered, _) => Err(
-                BlockRegistationError::BlockAlreadyRegistered(registered.sequence_hash()),
+                BlockRegistrationError::BlockAlreadyRegistered(registered.sequence_hash()),
             ),
         }
     }

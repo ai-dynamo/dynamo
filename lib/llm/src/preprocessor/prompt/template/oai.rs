@@ -22,6 +22,8 @@ use crate::protocols::openai::{
 };
 use tracing;
 
+use crate::preprocessor::prompt::{PromptInput, TextInput, TokenInput};
+
 impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
     fn messages(&self) -> Value {
         Value::from_serialize(&self.inner.messages)
@@ -53,6 +55,10 @@ impl OAIChatLikeRequest for NvCreateChatCompletionRequest {
             true
         }
     }
+
+    fn extract_text(&self) -> Option<TextInput> {
+        Some(TextInput::Single(String::new()))
+    }
 }
 
 impl OAIChatLikeRequest for NvCreateCompletionRequest {
@@ -71,6 +77,48 @@ impl OAIChatLikeRequest for NvCreateCompletionRequest {
 
     fn should_add_generation_prompt(&self) -> bool {
         true
+    }
+
+    fn prompt_input_type(&self) -> PromptInput {
+        match &self.inner.prompt {
+            async_openai::types::Prompt::IntegerArray(_) => {
+                PromptInput::Tokens(TokenInput::Single(vec![]))
+            }
+            async_openai::types::Prompt::ArrayOfIntegerArray(_) => {
+                PromptInput::Tokens(TokenInput::Batch(vec![]))
+            }
+            async_openai::types::Prompt::String(_) => {
+                PromptInput::Text(TextInput::Single(String::new()))
+            }
+            async_openai::types::Prompt::StringArray(_) => {
+                PromptInput::Text(TextInput::Batch(vec![]))
+            }
+        }
+    }
+
+    fn extract_tokens(&self) -> Option<TokenInput> {
+        match &self.inner.prompt {
+            async_openai::types::Prompt::IntegerArray(tokens) => Some(TokenInput::Single(
+                tokens.iter().map(|&t| t as u32).collect(),
+            )),
+            async_openai::types::Prompt::ArrayOfIntegerArray(arrays) => Some(TokenInput::Batch(
+                arrays
+                    .iter()
+                    .map(|arr| arr.iter().map(|&t| t as u32).collect())
+                    .collect(),
+            )),
+            _ => None,
+        }
+    }
+
+    fn extract_text(&self) -> Option<TextInput> {
+        match &self.inner.prompt {
+            async_openai::types::Prompt::String(text) => Some(TextInput::Single(text.to_string())),
+            async_openai::types::Prompt::StringArray(texts) => {
+                Some(TextInput::Batch(texts.to_vec()))
+            }
+            _ => None,
+        }
     }
 }
 

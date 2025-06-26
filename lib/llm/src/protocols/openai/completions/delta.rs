@@ -13,9 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use super::{CompletionChoice, CompletionResponse, NvCreateCompletionRequest};
+use super::{CompletionResponse, NvCreateCompletionRequest};
 use crate::protocols::common;
-use crate::protocols::openai::CompletionUsage;
 
 impl NvCreateCompletionRequest {
     // put this method on the request
@@ -43,8 +42,7 @@ pub struct DeltaGenerator {
     created: u64,
     model: String,
     system_fingerprint: Option<String>,
-    usage: CompletionUsage,
-
+    usage: async_openai::types::CompletionUsage,
     options: DeltaGeneratorOptions,
 }
 
@@ -55,18 +53,28 @@ impl DeltaGenerator {
             .unwrap()
             .as_secs();
 
+        // Previously, our home-rolled CompletionUsage impl'd Default
+        // PR !387 - https://github.com/64bit/async-openai/pull/387
+        let usage = async_openai::types::CompletionUsage {
+            completion_tokens: 0,
+            prompt_tokens: 0,
+            total_tokens: 0,
+            completion_tokens_details: None,
+            prompt_tokens_details: None,
+        };
+
         Self {
             id: format!("cmpl-{}", uuid::Uuid::new_v4()),
             object: "text_completion".to_string(),
             created: now,
             model,
             system_fingerprint: None,
-            usage: CompletionUsage::default(),
+            usage,
             options,
         }
     }
 
-    pub fn update_isl(&mut self, isl: i32) {
+    pub fn update_isl(&mut self, isl: u32) {
         self.usage.prompt_tokens = isl;
     }
 
@@ -74,9 +82,14 @@ impl DeltaGenerator {
         &self,
         index: u64,
         text: Option<String>,
-        finish_reason: Option<String>,
+        finish_reason: Option<async_openai::types::CompletionFinishReason>,
     ) -> CompletionResponse {
         // todo - update for tool calling
+
+        let mut usage = self.usage.clone();
+        if self.options.enable_usage {
+            usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+        }
 
         CompletionResponse {
             id: self.id.clone(),
@@ -84,14 +97,14 @@ impl DeltaGenerator {
             created: self.created,
             model: self.model.clone(),
             system_fingerprint: self.system_fingerprint.clone(),
-            choices: vec![CompletionChoice {
+            choices: vec![async_openai::types::Choice {
                 text: text.unwrap_or_default(),
-                index,
+                index: index as u32,
                 finish_reason,
                 logprobs: None,
             }],
             usage: if self.options.enable_usage {
-                Some(self.usage.clone())
+                Some(usage)
             } else {
                 None
             },
@@ -106,29 +119,20 @@ impl crate::protocols::openai::DeltaGeneratorExt<CompletionResponse> for DeltaGe
     ) -> anyhow::Result<CompletionResponse> {
         // aggregate usage
         if self.options.enable_usage {
-            self.usage.completion_tokens += delta.token_ids.len() as i32;
+            self.usage.completion_tokens += delta.token_ids.len() as u32;
         }
 
-        // todo logprobs
+        // TODO logprobs
 
-        let finish_reason = match delta.finish_reason {
-            Some(common::FinishReason::EoS) => Some("stop".to_string()),
-            Some(common::FinishReason::Stop) => Some("stop".to_string()),
-            Some(common::FinishReason::Length) => Some("length".to_string()),
-            Some(common::FinishReason::Cancelled) => Some("cancelled".to_string()),
-            Some(common::FinishReason::Error(err_msg)) => {
-                return Err(anyhow::anyhow!(err_msg));
-            }
-            None => None,
-        };
+        let finish_reason = delta.finish_reason.map(Into::into);
 
         // create choice
-        let index = 0;
-        Ok(self.create_choice(index, delta.text, finish_reason))
+        let index = delta.index.unwrap_or(0).into();
+        let response = self.create_choice(index, delta.text.clone(), finish_reason);
+        Ok(response)
     }
 
-    // TODO: This is a hack. Change `prompt_tokens` to u32
     fn get_isl(&self) -> Option<u32> {
-        Some(self.usage.prompt_tokens as u32)
+        Some(self.usage.prompt_tokens)
     }
 }
