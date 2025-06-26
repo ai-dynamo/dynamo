@@ -380,7 +380,7 @@ class Router:
 
         if self.router_type == RouterType.APPROX_KV:
             try:
-                self.indexer.process_routing_decision_for_request(
+                await self.indexer.process_routing_decision_for_request(
                     request.tokens, lora_id, worker_id
                 )
             except Exception as e:

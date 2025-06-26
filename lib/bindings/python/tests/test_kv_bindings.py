@@ -25,6 +25,7 @@ from typing import List
 import pytest
 
 from dynamo.llm import (
+    ApproxKvIndexer,
     KvEventPublisher,
     KvIndexer,
     KvMetricsAggregator,
@@ -148,6 +149,31 @@ async def test_event_handler(distributed_runtime):
     await asyncio.sleep(1)
     scores = await indexer.find_matches_for_request(test_token, lora_id)
     assert not scores.scores
+
+
+async def test_approx_kv_indexer(distributed_runtime):
+    kv_block_size = 32
+    namespace = "kv_test"
+    component = "approx_kv"
+    kv_listener = distributed_runtime.namespace(namespace).component(component)
+    await kv_listener.create_service()
+
+    indexer = ApproxKvIndexer(kv_listener, kv_block_size, 30.0)
+
+    tokens = [0] * (kv_block_size * 2)
+    lora_id = 0
+
+    scores = await indexer.find_matches_for_request(tokens, lora_id)
+    assert not scores.scores
+
+    worker_id = 0
+
+    await indexer.process_routing_decision_for_request(tokens, lora_id, worker_id)
+
+    scores = await indexer.find_matches_for_request(tokens, lora_id)
+    assert scores.scores
+    assert worker_id in scores.scores
+    assert scores.scores[worker_id] == 2
 
 
 class EventPublisher:
