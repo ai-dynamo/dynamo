@@ -34,6 +34,7 @@ from dynamo.planner import KubernetesConnector, LocalConnector
 from dynamo.planner.defaults import LoadPlannerDefaults
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sdk.lib.utils import str_to_bool
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -420,7 +421,7 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "--no-operation",
-        action="store_true",
+        type=str_to_bool,
         default=LoadPlannerDefaults.no_operation,
         help="Do not make any adjustments, just observe the metrics",
     )

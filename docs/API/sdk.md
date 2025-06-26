@@ -300,16 +300,18 @@ def setup_my_lib():
 This pattern is used in the example vLLM integration:
 
 ```python
+from dynamo.sdk.lib.utils import str_to_bool
+
 def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     config = ServiceConfig.get_instance()
     vllm_args = config.as_args(service_name, prefix=prefix)
     parser = FlexibleArgumentParser()
 
-    # Add custom arguments
+    # Add custom arguments that need explicit false handling
     parser.add_argument("--router", type=str, choices=["random", "round-robin", "kv"], default="random")
-    parser.add_argument("--remote-prefill", action="store_true")
+    parser.add_argument("--remote-prefill", type=str_to_bool, default=False)
 
-    # Add VLLM's arguments
+    # Add VLLM's arguments (built-in boolean args use action="store_true" and work with our hybrid format)
     parser = AsyncEngineArgs.add_cli_args(parser)
 
     # Parse both custom and VLLM arguments
@@ -324,6 +326,18 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
 
     return engine_args
 ```
+
+#### Boolean Argument Handling
+
+ServiceConfig uses a hybrid approach for boolean arguments to maintain compatibility with existing argument parsers:
+
+- **For `true` values**: Outputs just the flag (e.g., `--enable-feature`)
+  - Compatible with `action="store_true"` parsers
+- **For `false` values**: Outputs flag with explicit false (e.g., `--disable-feature false`)
+  - Requires `type=str_to_bool` for explicit false handling
+  - `action="store_true"` parsers ignore the `false` value and use their default
+
+This allows seamless integration with libraries like vLLM that use `action="store_true"` while still supporting explicit false values when needed.
 
 #### Overriding Service Decorator with ServiceArgs
 

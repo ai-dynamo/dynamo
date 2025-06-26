@@ -105,8 +105,10 @@ class ServiceConfig(dict):
             # Convert to CLI format
             if isinstance(value, bool):
                 if value:
-                    args.extend([f"--{arg_key}", "true"])
+                    # For true values, just add the flag (compatible with action="store_true")
+                    args.append(f"--{arg_key}")
                 else:
+                    # For false values, add explicit false (requires type=str_to_bool handling)
                     args.extend([f"--{arg_key}", "false"])
             elif isinstance(value, dict):
                 args.extend([f"--{arg_key}", json.dumps(value)])

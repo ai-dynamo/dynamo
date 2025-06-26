@@ -18,6 +18,7 @@ from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
 
 from dynamo.sdk.lib.config import ServiceConfig
+from dynamo.sdk.lib.utils import str_to_bool
 
 
 def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
@@ -32,11 +33,15 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
         help="Router type to use for scheduling requests to workers",
     )
     parser.add_argument(
-        "--remote-prefill", action="store_true", help="Enable remote prefill"
+        "--remote-prefill",
+        type=str_to_bool,
+        default=False,
+        help="Enable remote prefill",
     )
     parser.add_argument(
         "--conditional-disagg",
-        action="store_true",
+        type=str_to_bool,
+        default=False,
         help="Use disaggregated router to decide whether to prefill locally or remotely",
     )
     parser.add_argument(
@@ -114,19 +119,19 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     parser = AsyncEngineArgs.add_cli_args(parser)
     args = parser.parse_args(vllm_args)
     engine_args = AsyncEngineArgs.from_cli_args(args)
-    engine_args.router = args.router
-    engine_args.remote_prefill = args.remote_prefill
-    engine_args.conditional_disagg = args.conditional_disagg
-    engine_args.max_local_prefill_length = args.max_local_prefill_length
-    engine_args.max_prefill_queue_size = args.max_prefill_queue_size
-    engine_args.prompt_template = args.prompt_template
-    engine_args.num_sampled_frames = args.num_sampled_frames
-    engine_args.frame_height = args.frame_height
-    engine_args.frame_width = args.frame_width
-    engine_args.frame_channels = args.frame_channels
-    engine_args.dummy_token_id = args.dummy_token_id
-    engine_args.video_token_id = args.video_token_id
-    engine_args.dummy_tokens_per_frame = args.dummy_tokens_per_frame
-    engine_args.num_patches = args.num_patches
-    engine_args.image_token_id = args.image_token_id
+    engine_args.router = args.router  # type: ignore[misc]
+    engine_args.remote_prefill = args.remote_prefill  # type: ignore[misc]
+    engine_args.conditional_disagg = args.conditional_disagg  # type: ignore[misc]
+    engine_args.max_local_prefill_length = args.max_local_prefill_length  # type: ignore[misc]
+    engine_args.max_prefill_queue_size = args.max_prefill_queue_size  # type: ignore[misc]
+    engine_args.prompt_template = args.prompt_template  # type: ignore[misc]
+    engine_args.num_sampled_frames = args.num_sampled_frames  # type: ignore[misc]
+    engine_args.frame_height = args.frame_height  # type: ignore[misc]
+    engine_args.frame_width = args.frame_width  # type: ignore[misc]
+    engine_args.frame_channels = args.frame_channels  # type: ignore[misc]
+    engine_args.dummy_token_id = args.dummy_token_id  # type: ignore[misc]
+    engine_args.video_token_id = args.video_token_id  # type: ignore[misc]
+    engine_args.dummy_tokens_per_frame = args.dummy_tokens_per_frame  # type: ignore[misc]
+    engine_args.num_patches = args.num_patches  # type: ignore[misc]
+    engine_args.image_token_id = args.image_token_id  # type: ignore[misc]
     return engine_args

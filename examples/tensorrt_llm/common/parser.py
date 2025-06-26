@@ -24,6 +24,8 @@ from tensorrt_llm._torch.pyexecutor.config import PyTorchConfig
 from tensorrt_llm.llmapi import KvCacheConfig
 from tensorrt_llm.llmapi.llm_args import DecodingBaseConfig
 
+from dynamo.sdk.lib.utils import str_to_bool
+
 
 @dataclass
 class LLMAPIConfig:
@@ -171,7 +173,8 @@ def parse_tensorrt_llm_args(
     )
     parser.add_argument(
         "--remote-prefill",
-        action="store_true",
+        type=str_to_bool,
+        default=False,
         help="Use remote prefill workers for generation server in Disaggregated mode.",
     )
 
@@ -188,7 +191,8 @@ def parse_dynamo_run_args() -> Tuple[Any, Tuple[Dict[str, Any], Dict[str, Any]]]
     )
     parser.add_argument(
         "--publish-kv-cache-events",
-        action="store_true",
+        type=str_to_bool,
+        default=False,
         help="Publish KV cache events from TensorRT-LLM. Currently, only supported for context worker in Disaggregated mode.",
     )
 
