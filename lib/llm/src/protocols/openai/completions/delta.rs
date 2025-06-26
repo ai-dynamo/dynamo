@@ -39,7 +39,7 @@ pub struct DeltaGeneratorOptions {
 pub struct DeltaGenerator {
     id: String,
     object: String,
-    created: u64,
+    created: u32,
     model: String,
     system_fingerprint: Option<String>,
     usage: async_openai::types::CompletionUsage,
@@ -52,6 +52,10 @@ impl DeltaGenerator {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
+
+        // SAFETY: Casting from `u64` to `u32` could lead to precision loss after `u32::MAX`,
+        // but this will not be an issue until 2106.
+        let now: u32 = now.try_into().expect("timestamp exceeds u32::MAX");
 
         // Previously, our home-rolled CompletionUsage impl'd Default
         // PR !387 - https://github.com/64bit/async-openai/pull/387
@@ -80,7 +84,7 @@ impl DeltaGenerator {
 
     pub fn create_choice(
         &self,
-        index: u64,
+        index: u32,
         text: Option<String>,
         finish_reason: Option<async_openai::types::CompletionFinishReason>,
     ) -> NvCreateCompletionResponse {
@@ -94,12 +98,12 @@ impl DeltaGenerator {
         let inner = async_openai::types::CreateCompletionResponse {
             id: self.id.clone(),
             object: self.object.clone(),
-            created: self.created as u32,
+            created: self.created,
             model: self.model.clone(),
             system_fingerprint: self.system_fingerprint.clone(),
             choices: vec![async_openai::types::Choice {
                 text: text.unwrap_or_default(),
-                index: index as u32,
+                index,
                 finish_reason,
                 logprobs: None,
             }],
@@ -121,7 +125,15 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
     ) -> anyhow::Result<NvCreateCompletionResponse> {
         // aggregate usage
         if self.options.enable_usage {
-            self.usage.completion_tokens += delta.token_ids.len() as u32;
+            // SAFETY: Casting from `usize` to `u32` could lead to precision loss after `u32::MAX`,
+            // but this will not be an issue until context lengths exceed 4_294_967_295.
+            let token_length: u32 = delta
+                .token_ids
+                .len()
+                .try_into()
+                .expect("token_ids length exceeds u32::MAX");
+
+            self.usage.completion_tokens += token_length;
         }
 
         // TODO logprobs
@@ -129,7 +141,7 @@ impl crate::protocols::openai::DeltaGeneratorExt<NvCreateCompletionResponse> for
         let finish_reason = delta.finish_reason.map(Into::into);
 
         // create choice
-        let index = delta.index.unwrap_or(0).into();
+        let index = delta.index.unwrap_or(0);
         let response = self.create_choice(index, delta.text.clone(), finish_reason);
         Ok(response)
     }

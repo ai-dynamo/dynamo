@@ -29,15 +29,15 @@ use crate::protocols::{
 pub struct DeltaAggregator {
     id: String,
     model: String,
-    created: u64,
+    created: u32,
     usage: Option<async_openai::types::CompletionUsage>,
     system_fingerprint: Option<String>,
-    choices: HashMap<u64, DeltaChoice>,
+    choices: HashMap<u32, DeltaChoice>,
     error: Option<String>,
 }
 
 struct DeltaChoice {
-    index: u64,
+    index: u32,
     text: String,
     finish_reason: Option<FinishReason>,
     logprobs: Option<async_openai::types::Logprobs>,
@@ -85,7 +85,7 @@ impl DeltaAggregator {
                     let delta = delta.data.unwrap();
                     aggregator.id = delta.inner.id;
                     aggregator.model = delta.inner.model;
-                    aggregator.created = delta.inner.created as u64;
+                    aggregator.created = delta.inner.created;
                     if let Some(usage) = delta.inner.usage {
                         aggregator.usage = Some(usage);
                     }
@@ -98,9 +98,9 @@ impl DeltaAggregator {
                         let state_choice =
                             aggregator
                                 .choices
-                                .entry(choice.index as u64)
+                                .entry(choice.index)
                                 .or_insert(DeltaChoice {
-                                    index: choice.index as u64,
+                                    index: choice.index,
                                     text: "".to_string(),
                                     finish_reason: None,
                                     logprobs: choice.logprobs,
@@ -147,7 +147,7 @@ impl DeltaAggregator {
 
         let inner = async_openai::types::CreateCompletionResponse {
             id: aggregator.id,
-            created: aggregator.created as u32,
+            created: aggregator.created,
             usage: aggregator.usage,
             model: aggregator.model,
             object: "text_completion".to_string(),
@@ -166,7 +166,7 @@ impl From<DeltaChoice> for async_openai::types::Choice {
         let finish_reason = delta.finish_reason.map(Into::into);
 
         async_openai::types::Choice {
-            index: delta.index as u32,
+            index: delta.index,
             text: delta.text,
             finish_reason,
             logprobs: delta.logprobs,
@@ -199,7 +199,7 @@ mod tests {
     use crate::protocols::openai::completions::NvCreateCompletionResponse;
 
     fn create_test_delta(
-        index: u64,
+        index: u32,
         text: &str,
         finish_reason: Option<String>,
     ) -> Annotated<NvCreateCompletionResponse> {
@@ -217,7 +217,7 @@ mod tests {
             usage: None,
             system_fingerprint: None,
             choices: vec![async_openai::types::Choice {
-                index: index as u32,
+                index,
                 text: text.to_string(),
                 finish_reason,
                 logprobs: None,
