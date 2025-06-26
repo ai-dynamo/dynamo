@@ -12,588 +12,356 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-
-import asyncio
-import copy
 import logging
-import os
-import signal
-import threading
-from contextlib import asynccontextmanager
-from enum import Enum
-from queue import Queue
-from typing import Any, Optional
+from dataclasses import dataclass
+from typing import Optional
 
-from common.parser import LLMAPIConfig
-from common.protocol import DisaggregatedTypeConverter
-from common.utils import ManagedThread, ServerType
-from tensorrt_llm.executor import CppExecutorError
-from tensorrt_llm.llmapi import LLM, SamplingParams
-from tensorrt_llm.llmapi.disagg_utils import (
-    CtxGenServerConfig,
-    parse_disagg_config_file,
-)
+from common.protocol import DisaggregatedTypeConverter, TRTLLMWorkerRequest
+from tensorrt_llm import SamplingParams
+from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
-from tensorrt_llm.serve.openai_protocol import DisaggregatedParams
+from tensorrt_llm.serve.openai_protocol import (
+    DisaggregatedParams as OAIDisaggregatedParams,
+)
 
-from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
-from dynamo.sdk import dynamo_context
+from dynamo.llm import get_tensorrtllm_engine, get_tensorrtllm_publisher
+from dynamo.runtime import DistributedRuntime
 
 logger = logging.getLogger(__name__)
 
 logger.setLevel(logging.DEBUG)
 
-
-class DisaggRequestType(Enum):
-    CONTEXT_ONLY = "context_only"
-    GENERATION_ONLY = "generation_only"
+# Default buffer size for kv cache events.
+DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
 
-def update_args_from_disagg_config(
-    engine_config: LLMAPIConfig, server_config: CtxGenServerConfig
-):
-    # Update the LLM API config with the disaggregated config
-    # Allows for different configs for context and generation servers
-    engine_config.extra_args.update(**server_config.other_args)
-    engine_config.update_sub_configs(server_config.other_args)
-    return engine_config
+def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
+    endpoint_str = endpoint.replace("dyn://", "", 1)
+    endpoint_parts = endpoint_str.split(".")
+    if len(endpoint_parts) != 3:
+        raise ValueError(
+            f"Invalid endpoint format: '{endpoint}'. "
+            "Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
+        )
+
+    return tuple(endpoint_parts)
 
 
-def _to_signed_i64(value: int | None) -> int | None:
-    """Convert a Python int to signed 64-bit range by two's complement."""
-    if value is None:
-        return None
+@dataclass
+class BaseEngineConfig:
+    """Base engine configuration"""
 
-    if value >= 2**63:
-        return value - 2**64
-    if value < -(2**63):
-        return ((value + 2**63) % 2**64) - 2**63
-    return value
+    namespace: str
+    component: str
+    endpoint: str
+    model_path: str
+    served_model_name: Optional[str] = None
+    kv_block_size: int = 32
+    extra_engine_args: str = ""
+    publish_events_and_metrics: bool = False
+    disaggregation_mode: str = "prefill_and_decode"
+    remote_prefill_endpoint: Optional[str] = None
+    lease_id: int = 0
 
-
-def get_sampling_params(sampling_params_dict, default_sampling_params):
-    sampling_params = copy.deepcopy(default_sampling_params)
-    for key, value in sampling_params_dict.items():
-        if value is None:
-            continue
-        if hasattr(sampling_params, key):
-            setattr(sampling_params, key, value)
-    return sampling_params
+    def __str__(self) -> str:
+        return (
+            f"Config(namespace={self.namespace}, "
+            f"component={self.component}, "
+            f"endpoint={self.endpoint}, "
+            f"model_path={self.model_path}, "
+            f"served_model_name={self.served_model_name}, "
+            f"kv_block_size={self.kv_block_size}, "
+            f"extra_engine_args={self.extra_engine_args}, "
+            f"publish_events_and_metrics={self.publish_events_and_metrics}, "
+            f"disaggregation_mode={self.disaggregation_mode}, "
+            f"remote_prefill_endpoint={self.remote_prefill_endpoint}, "
+            f"lease_id={self.lease_id})"
+        )
 
 
 class BaseTensorrtLLMEngine:
     def __init__(
         self,
-        namespace_str: str = "dynamo",
-        component_str: str = "tensorrt-llm",
-        worker_id: Optional[str] = None,
-        engine_config: LLMAPIConfig = None,
-        remote_prefill: bool = False,
-        min_workers: int = 0,
-        disagg_config_file: Optional[str] = None,
-        block_size: int = 32,
-        router: str = "round_robin",
-        server_type: ServerType = ServerType.GEN,
+        config: BaseEngineConfig,
     ):
-        self._namespace_str = namespace_str
-        self._component_str = component_str
-        self._worker_id = worker_id
-        self._remote_prefill = remote_prefill
-        self._min_workers = 0
-        self._kv_block_size = block_size
-        self._router = router
-        self._server_type = server_type
+        self._config = config
         self._prefill_client = None
-        self._error_queue: Queue = Queue()
-        self._kv_metrics_publisher = None
+        self._llm_engine = None
+        self._llm_engine_context = None
+        self._llm_publisher = None
+        self._llm_publisher_context = None
+        self._runtime = None
+        self._first_generation = True
+        # Initialize default sampling params
+        self.default_sampling_params = SamplingParams()
 
-        if self._remote_prefill or self._server_type == ServerType.CTX:
-            self._min_workers = min_workers
-            if disagg_config_file is None or not os.path.exists(disagg_config_file):
-                raise ValueError(
-                    "llmapi_disaggregated_config file does not exist or not provided"
-                )
-            disagg_config = parse_disagg_config_file(disagg_config_file)
-            server_config: CtxGenServerConfig = None
+    async def initialize(self, runtime: DistributedRuntime):
+        """Initialize the engine and prefill client if needed"""
+        self._runtime = runtime
 
-            for config in disagg_config.server_configs:
-                # Select the first context server config
-                if config.type == server_type.value:
-                    server_config = config
-                    break
+        # Convert model path to Path object if it's a local path, otherwise keep as string
+        model_path = str(self._config.model_path)
 
-            if server_config is None:
-                server_type_str = (
-                    "generation" if server_type == ServerType.GEN else "context"
-                )
-                raise ValueError(
-                    f"No {server_type_str} server config found. Please check the disaggregated config file."
-                )
+        # Initialize the LLM engine
+        engine_args = {
+            "model": model_path,
+            "tensor_parallel_size": 1,
+            "backend": "pytorch",
+            "skip_tokenizer_init": True,
+            "disable_log_requests": True,
+            "enable_prefix_caching": True,
+            "disable_log_stats": False,
+        }
 
-            engine_config = update_args_from_disagg_config(engine_config, server_config)
-
-        if router == "kv":
-            self._publish_stats = True
-            self._publish_events = True
-        else:
-            self._publish_stats = False
-            self._publish_events = False
-
-        if self._publish_stats:
-            self._kv_metrics_publisher = WorkerMetricsPublisher()
-
-        if self._publish_events:
-            if self._worker_id is None:
-                raise ValueError("Worker ID is None!")
-
-            runtime = dynamo_context["runtime"]
-            kv_listener = runtime.namespace(self._namespace_str).component(
-                self._component_str
+        if self._config.extra_engine_args:
+            # TODO: Support extra engine args from json file as well.
+            engine_args = update_llm_args_with_extra_options(
+                engine_args, self._config.extra_engine_args
             )
-            self._kv_event_publisher = KvEventPublisher(
-                kv_listener, int(self._worker_id), self._kv_block_size
+        # Update the model path in the config to the model path used by the engine.
+        self._config.model_path = engine_args["model"]
+        if not self._config.model_path:
+            raise ValueError(
+                "Model specification is required. Present neither in the config nor in the extra engine args."
             )
-            logger.info("KvEventPublisher is initialized")
-
-        self._engine_config = engine_config
-
-    def _init_engine(self):
-        logger.info("Initializing engine")
-        # Run the engine in a separate thread running the AsyncIO event loop.
-        self._llm_engine: Optional[Any] = None
-        self._llm_engine_start_cv = threading.Condition()
-        self._llm_engine_shutdown_event = asyncio.Event()
-        self._event_thread = threading.Thread(
-            target=asyncio.run, args=(self._run_llm_engine(),)
-        )
 
         # Populate default sampling params from the model
-        tokenizer = tokenizer_factory(self._engine_config.model_name)
-        self._default_sampling_params = SamplingParams()
-        self._default_sampling_params._setup(tokenizer)
-        self._default_sampling_params.stop = None
+        tokenizer = tokenizer_factory(self._config.model_path)
+        self.default_sampling_params = SamplingParams()
+        self.default_sampling_params._setup(tokenizer)
+        self.default_sampling_params.stop = None
 
-        self.publish_kv_cache_events_thread = None
-        self.publish_stats_thread = None
-
-        self._event_thread.start()
-        with self._llm_engine_start_cv:
-            while self._llm_engine is None:
-                self._llm_engine_start_cv.wait()
-
-        # The 'threading.Thread()' will not raise the exception here should the engine
-        # failed to start, so the exception is passed back via the engine variable.
-        if isinstance(self._llm_engine, Exception):
-            e = self._llm_engine
-            logger.error(f"Failed to start engine: {e}")
-            if self._event_thread is not None:
-                self._event_thread.join()
-                self._event_thread = None
-            raise e
-
-        try:
-            if self._publish_stats:
-                self._init_publish_metrics_thread()
-        except Exception as e:
-            logger.error(f"Failed to initialize publish metrics threads: {e}")
-            raise e
-
-        try:
-            if self._publish_events:
-                self._init_publish_kv_cache_events_thread()
-        except Exception as e:
-            logger.error(f"Failed to initialize publish events threads: {e}")
-            raise e
-
-    def _init_publish_metrics_thread(self):
-        # Need to publish stats once so that worker can be selected.
-        # Publishing some dummy values...
-        request_active_slots = 0
-        request_total_slots = 4
-        kv_active_block = 0
-        kv_total_blocks = 4
-        num_requests_waiting = 0
-        gpu_cache_usage_perc = 0.0
-        gpu_prefix_cache_hit_rate = 0.0
-
-        num_requests_waiting = 0
-        gpu_cache_usage_perc = 0.0
-        gpu_prefix_cache_hit_rate = 0.0
-
-        if self._kv_metrics_publisher is None:
-            logger.error("KV metrics publisher not initialized!")
-            return
-
-        self._kv_metrics_publisher.publish(
-            request_active_slots,
-            request_total_slots,
-            kv_active_block,
-            kv_total_blocks,
-            num_requests_waiting,
-            gpu_cache_usage_perc,
-            gpu_prefix_cache_hit_rate,
-        )
-
-        # Prepare threads for publishing stats but don't start them yet.
-        # TRTLLM needs to start generating tokens first before stats
-        # can be retrieved.
-        self.publish_stats_thread = ManagedThread(
-            self.publish_stats_task,
-            error_queue=self._error_queue,
-            name="publish_stats_thread",
-        )
-
-    def _init_publish_kv_cache_events_thread(self):
-        if self._kv_event_publisher is None:
-            logger.error("KV event publisher not initialized!")
-            return
-
-        # A set to store the block hash of partial block (i.e. block containing less than kv_block_size tokens) hashes.
-        # It is used to prevent sending remove event to kv router since partial blocks are not stored.
-        self._partial_block_hashes = set()
-
-        # Prepare threads for publishing kv cache events but don't start them yet.
-        # TRTLLM needs to start generating tokens first before kv cache events
-        # can be retrieved.
-        self.publish_kv_cache_events_thread = ManagedThread(
-            self.publish_kv_cache_events_task,
-            error_queue=self._error_queue,
-            name="publish_kv_cache_events_thread",
-        )
-
-    async def publish_stats_task(self):
-        """
-        Publish stats to the metrics publisher.
-        """
-        if self._llm_engine is None:
-            logger.error("LLM engine not initialized!")
-            return
-
-        if self._kv_metrics_publisher is None:
-            logger.error("KV metrics publisher not initialized!")
-            return False
-
-        stats = self._llm_engine.get_stats_async(timeout=5)
-        async for stat in stats:
-            request_active_slots = stat["numActiveRequests"]
-            request_total_slots = stat["maxNumActiveRequests"]
-            kv_active_block = stat["kvCacheStats"]["usedNumBlocks"]
-            kv_total_blocks = stat["kvCacheStats"]["maxNumBlocks"]
-            reused_blocks = stat["kvCacheStats"]["reusedBlocks"]
-            freeNumBlocks = stat["kvCacheStats"]["freeNumBlocks"]
-            allocTotalBlocks = stat["kvCacheStats"]["allocTotalBlocks"]
-            allocNewBlocks = stat["kvCacheStats"]["allocNewBlocks"]
-            # NOTE: num paused requests is always 0 when using guarantee no evict scheduler (default).
-            num_requests_waiting = (
-                stat["numQueuedRequests"]
-                + stat["inflightBatchingStats"]["numPausedRequests"]
-            )
-            gpu_cache_usage_perc = allocTotalBlocks / kv_total_blocks
-            gpu_prefix_cache_hit_rate = stat["kvCacheStats"]["cacheHitRate"]
-
-            logger.debug(
-                f"Publishing stats: request_active_slots: {request_active_slots}, request_total_slots: {request_total_slots}, kv_active_block: {kv_active_block}, kv_total_blocks: {kv_total_blocks}, num_requests_waiting: {num_requests_waiting}, reused_blocks: {reused_blocks}, freeNumBlocks: {freeNumBlocks}, allocTotalBlocks: {allocTotalBlocks}, allocNewBlocks: {allocNewBlocks}, gpu_cache_usage_perc: {gpu_cache_usage_perc}, gpu_prefix_cache_hit_rate: {gpu_prefix_cache_hit_rate}"
-            )
-
-            self._kv_metrics_publisher.publish(
-                request_active_slots,
-                request_total_slots,
-                kv_active_block,
-                kv_total_blocks,
-                num_requests_waiting,
-                gpu_cache_usage_perc,
-                gpu_prefix_cache_hit_rate,
-            )
-
-        return True
-
-    async def publish_kv_cache_events_task(self):
-        """
-        Publish kv cache events to the events publisher.
-        """
-        if self._llm_engine is None:
-            logger.error("LLM engine not initialized!")
-            return
-
-        events = self._llm_engine.get_kv_cache_events_async(timeout=5)
-        async for event in events:
-            event_id = event["event_id"]
-            data = event["data"]
-            if data["type"] == "stored":
-                parent_hash = _to_signed_i64(data["parent_hash"])
-                token_ids = []
-                num_block_tokens = []
-                block_hashes = []
-                for block in data["blocks"]:
-                    token_num_in_block = len(block["tokens"])
-                    block_hash = _to_signed_i64(block["block_hash"])
-                    if token_num_in_block > self._kv_block_size:
-                        logger.error(
-                            f"Block {block_hash} contains {token_num_in_block} tokens, which is greater than kv_block_size {self._kv_block_size}"
-                        )
-                        return
-                    if token_num_in_block < self._kv_block_size:
-                        logger.debug(
-                            f"Early stop when block {block_hash} containing {token_num_in_block} tokens not equal to kv_block_size {self._kv_block_size}"
-                        )
-                        self._partial_block_hashes.add(block_hash)
-                        break
-                    num_block_tokens.append(token_num_in_block)
-                    block_hashes.append(block_hash)
-                    for token in block["tokens"]:
-                        token_ids.append(int(token["token_id"]))
-
-                # Note: Currently data does not have lora_id.
-                # Using 0 as default value. If later data has
-                # lora_id, we need to verify if this is correct.
-                lora_id = data.get("lora_id", 0)
-
-                logger.debug(
-                    f"publish stored event: event_id: {event_id}, token_ids: {token_ids}, num_block_tokens: {num_block_tokens}, block_hashes: {block_hashes}, lora_id: {lora_id}, parent_hash: {parent_hash}"
-                )
-                self._kv_event_publisher.publish_stored(
-                    event_id,
-                    token_ids,
-                    num_block_tokens,
-                    block_hashes,
-                    lora_id,
-                    parent_hash,
-                )
-            elif data["type"] == "removed":
-                block_hashes = []
-                for block_hash in data["block_hashes"]:
-                    block_hash = _to_signed_i64(block_hash)
-                    if block_hash in self._partial_block_hashes:
-                        logger.debug(
-                            f"Skipping removing block hash {block_hash} since it is a partial block"
-                        )
-                        self._partial_block_hashes.remove(block_hash)
-                        continue
-                    block_hashes.append(block_hash)
-
-                logger.debug(
-                    f"publish removed event: event_id: {event_id}, block_hashes: {block_hashes}"
-                )
-                self._kv_event_publisher.publish_removed(event_id, block_hashes)
-        return True
-
-    def _start_threads(self):
-        if (
-            self.publish_kv_cache_events_thread
-            and not self.publish_kv_cache_events_thread.is_alive()
-        ):
-            # [NOTE:] TRTLLM needs the stats to be collected on the same loop as the request handler.
-            self._stats_loop = asyncio.get_running_loop()
-            self.publish_kv_cache_events_thread.set_loop(self._stats_loop)
-            self.publish_kv_cache_events_thread.start()
-            logger.debug("Started kv cache events thread")
-
-        if self.publish_stats_thread and not self.publish_stats_thread.is_alive():
-            self._stats_loop = asyncio.get_running_loop()
-            self.publish_stats_thread.set_loop(self._stats_loop)
-            self.publish_stats_thread.start()
-            logger.debug("Started stats thread")
-
-    async def _run_llm_engine(self):
-        # Counter to keep track of ongoing request counts.
-        self._ongoing_request_count = 0
-
-        @asynccontextmanager
-        async def async_llm_wrapper():
-            # Create LLM in a thread to avoid blocking
-            loop = asyncio.get_running_loop()
-            try:
-                llm = await loop.run_in_executor(
-                    None,
-                    lambda: LLM(
-                        model=self._engine_config.model_name,
-                        **self._engine_config.to_dict(),
-                    ),
-                )
-                yield llm
-            finally:
-                if "llm" in locals():
-                    # Run shutdown in a thread to avoid blocking
-                    await loop.run_in_executor(None, llm.shutdown)
-
-        try:
-            async with async_llm_wrapper() as engine:
-                # Capture the engine event loop and make it visible to other threads.
-                self._event_loop = asyncio.get_running_loop()
-
-                # Signal the engine is started and make it visible to other threads.
-                with self._llm_engine_start_cv:
-                    self._llm_engine = engine
-                    self._llm_engine_start_cv.notify_all()
-
-                logger.info("Engine loaded and ready to serve...")
-
-                # Wait for the engine shutdown signal.
-                await self._llm_engine_shutdown_event.wait()
-
-                # Stop the publishing threads
-                if self.publish_stats_thread and self.publish_stats_thread.is_alive():
-                    self.publish_stats_thread.stop()
-                    self.publish_stats_thread.join()
-                if (
-                    self.publish_kv_cache_events_thread
-                    and self.publish_kv_cache_events_thread.is_alive()
-                ):
-                    self.publish_kv_cache_events_thread.stop()
-                    self.publish_kv_cache_events_thread.join()
-
-                # Wait for the ongoing requests to complete.
-                while self._ongoing_request_count > 0:
-                    logger.info(
-                        "Awaiting remaining {} requests".format(
-                            self._ongoing_request_count
-                        )
+        if self._config.publish_events_and_metrics:
+            # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
+            kv_cache_config = None
+            if "kv_cache_config" not in engine_args:
+                kv_cache_config = {}
+                kv_cache_config[
+                    "event_buffer_max_size"
+                ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            else:
+                kv_cache_config = engine_args["kv_cache_config"]
+                if not kv_cache_config.event_buffer_max_size:
+                    kv_cache_config.event_buffer_max_size = (
+                        DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
                     )
-                    await asyncio.sleep(1)
+                engine_args["kv_cache_config"] = kv_cache_config
 
-                # Cancel all tasks in the event loop.
-                for task in asyncio.all_tasks(loop=self._event_loop):
-                    if task is not asyncio.current_task():
-                        task.cancel()
+            # Enable iter perf stats by default if we are publishing events and metrics.
+            if not engine_args.get("enable_iter_perf_stats"):
+                engine_args["enable_iter_perf_stats"] = True
 
-        except Exception as e:
-            # Signal and pass the exception back via the engine variable if the engine
-            # failed to start. If the engine has started, re-raise the exception.
-            with self._llm_engine_start_cv:
-                if self._llm_engine is None:
-                    self._llm_engine = e
-                    self._llm_engine_start_cv.notify_all()
-                    return
-            raise e
+            # Only pytorch backend is supported for now to publish events and metrics.
+            if engine_args.get("backend") != "pytorch":
+                logging.error(
+                    "Only pytorch backend is supported for now to publish events and metrics."
+                )
+                raise RuntimeError(
+                    "Only pytorch backend is supported for now to publish events and metrics. Hence, KV router is not supported."
+                )
 
-        self._llm_engine = None
-        logger.info("Shutdown complete")
+        logging.info(f"TRTLLM engine args: {engine_args}")
 
-    async def _get_remote_prefill_response(self, request):
-        prefill_request = copy.deepcopy(request)
+        # Get the engine using the asynccontextmanager
+        self._llm_engine_context = get_tensorrtllm_engine(engine_args)
+        self._llm_engine = await self._llm_engine_context.__aenter__()
+
+        if (
+            self._config.publish_events_and_metrics
+            and self._config.disaggregation_mode != "prefill"
+        ):
+            kv_listener = runtime.namespace(self._config.namespace).component(
+                self._config.component
+            )
+            self._llm_publisher_context = get_tensorrtllm_publisher(
+                kv_listener,
+                self._llm_engine,
+                kv_listener,
+                self._config.lease_id,
+                self._config.kv_block_size,
+            )
+            self._llm_publisher = await self._llm_publisher_context.__aenter__()
+
+        # Initialize prefill client if in decode mode
+        if self._config.disaggregation_mode == "decode":
+            logging.info(
+                f"Initializing remote prefill client for endpoint: {self._config.remote_prefill_endpoint}"
+            )
+            (
+                parsed_namespace,
+                parsed_component_name,
+                parsed_endpoint_name,
+            ) = parse_endpoint(self._config.remote_prefill_endpoint)
+            self._prefill_client = (
+                await self._runtime.namespace(parsed_namespace)
+                .component(parsed_component_name)
+                .endpoint(parsed_endpoint_name)
+                .client()
+            )
+
+    async def cleanup(self):
+        """Cleanup resources"""
+        if self._llm_publisher_context:
+            try:
+                await self._llm_publisher_context.__aexit__(None, None, None)
+            except Exception as e:
+                logging.error(f"Error during publisher cleanup: {e}")
+            finally:
+                self._llm_publisher = None
+                self._llm_publisher_context = None
+
+        if self._llm_engine_context:
+            try:
+                await self._llm_engine_context.__aexit__(None, None, None)
+            except Exception as e:
+                logging.error(f"Error during engine cleanup: {e}")
+            finally:
+                self._llm_engine = None
+                self._llm_engine_context = None
+
+        self._prefill_client = None
+
+    async def remote_prefill(self, request: TRTLLMWorkerRequest):
+        """
+        Send a prefill request to the remote prefill worker.
+
+        Args:
+            request: The original request to be sent for prefill
+
+        Returns:
+            The response from the remote prefill worker
+
+        Raises:
+            ValueError: If prefill client is not initialized or multiple responses received
+        """
+        prefill_request = request.model_copy(deep=True)
         # TRTLLM requires max_tokens to be set for prefill requests.
         prefill_request.stop_conditions.max_tokens = 1
-        prefill_request.disaggregated_params = DisaggregatedParams(
-            request_type=DisaggRequestType.CONTEXT_ONLY.value
+        prefill_request.disaggregated_params = OAIDisaggregatedParams(
+            request_type="context_only"
         )
 
         if self._prefill_client is None:
             raise ValueError("Prefill client not initialized")
+        try:
+            # TODO: Use smart KV router to determine which prefill worker to use. This would also require supporting publishing events for prefill workers.
+            remote_prefill_responses = [
+                remote_prefill_response
+                async for remote_prefill_response in await self._prefill_client.round_robin(
+                    prefill_request.model_dump_json()
+                )
+            ]
+        except Exception as e:
+            raise ValueError(f"Error in remote prefill: {e}")
 
-        # TODO: Use smart KV router to determine which prefill worker to use. This would also require supporting publishing events for prefill workers.
-        ctx_responses = [
-            ctx_response
-            async for ctx_response in await self._prefill_client.round_robin(
-                prefill_request.model_dump_json()
-            )
-        ]
-        if len(ctx_responses) > 1:
+        if len(remote_prefill_responses) > 1:
             raise ValueError(
                 "Prefill worker returned more than one response. This is currently not supported in remote prefill mode."
             )
-        logger.debug(
-            f"Received response from prefill worker: {ctx_responses[0].data()}"
-        )
-        remote_prefill_response = ctx_responses[0]
+
+        if len(remote_prefill_responses) == 0:
+            raise ValueError("No response received from remote prefill worker")
+
+        remote_prefill_response = remote_prefill_responses[0]
         return remote_prefill_response
 
-    async def generate(self, request):
+    async def generate(self, request: TRTLLMWorkerRequest):
         if self._llm_engine is None:
             raise RuntimeError("Engine not initialized")
 
-        if not self._error_queue.empty():
-            raise self._error_queue.get()
+        if self._llm_publisher:
+            publishers_error = self._llm_publisher.check_error_queue()
+            if publishers_error:
+                raise publishers_error
 
-        self._ongoing_request_count += 1
+        inputs = request.token_ids
 
-        try:
-            worker_inputs = request.token_ids
+        # Decode the disaggregated params from the request
+        disaggregated_params = DisaggregatedTypeConverter.to_llm_disaggregated_params(
+            request.disaggregated_params
+        )
+        num_output_tokens_so_far = 0
 
+        if self._config.disaggregation_mode == "decode":
+            # Run prefill/context phase remotely if disaggregation mode is decode.
+            try:
+                prefill_result = await self.remote_prefill(request)
+            except Exception as e:
+                raise ValueError(f"Error in remote prefill: {e}")
+
+            remote_prefill_response = prefill_result.data()
+            if (
+                remote_prefill_response["finish_reason"] == "stop"
+                or remote_prefill_response["finish_reason"] == "error"
+            ):
+                yield remote_prefill_response
+                return
+            num_output_tokens_so_far = len(remote_prefill_response["token_ids"])
+
+            # Decode the disaggregated params from the remote prefill response
+            # Decode the disaggregated params from the remote prefill response
             disaggregated_params = (
                 DisaggregatedTypeConverter.to_llm_disaggregated_params(
-                    request.disaggregated_params
-                )
-            )
-
-            num_output_tokens_so_far = 0
-
-            if self._remote_prefill and self._server_type == ServerType.GEN:
-                ctx_response = await self._get_remote_prefill_response(request)
-                remote_prefill_response = ctx_response.data()
-                if (
-                    remote_prefill_response["finish_reason"] == "stop"
-                    or remote_prefill_response["finish_reason"] == "error"
-                ):
-                    yield remote_prefill_response
-                    return
-                num_output_tokens_so_far = len(remote_prefill_response["token_ids"])
-
-                # Decode the disaggregated params from the remote prefill response
-                disaggregated_params = (
-                    DisaggregatedTypeConverter.to_llm_disaggregated_params(
-                        DisaggregatedParams(
-                            **remote_prefill_response["disaggregated_params"]
-                        )
+                    OAIDisaggregatedParams(
+                        **remote_prefill_response["disaggregated_params"]
                     )
                 )
-
-                # Send the first token response to the client
-                first_token_response = remote_prefill_response
-                first_token_response.pop("disaggregated_params")
-                yield first_token_response
-
-                disaggregated_params.request_type = (
-                    DisaggRequestType.GENERATION_ONLY.value
-                )
-
-            logger.debug(
-                f"Worker inputs: {worker_inputs}, disaggregated params: {disaggregated_params}"
             )
 
-            sampling_params = get_sampling_params(
-                request.sampling_options.dict(), self._default_sampling_params
-            )
-            max_tokens = request.stop_conditions.max_tokens
-            if max_tokens:
-                sampling_params.max_tokens = max_tokens
+            # Send the first token response to the client
+            first_token_response = remote_prefill_response
+            first_token_response.pop("disaggregated_params")
+            yield first_token_response
 
-            async for response in self._llm_engine.generate_async(
-                inputs=worker_inputs,
-                sampling_params=sampling_params,
-                disaggregated_params=disaggregated_params,
-                streaming=self._server_type != ServerType.CTX,
-            ):
-                if response.finished and self._server_type != ServerType.CTX:
-                    yield {"finish_reason": "stop", "token_ids": []}
-                    break
+            # Set the disaggregated params to generation_only for the rest of the generation
+            disaggregated_params.request_type = "generation_only"
 
-                if not response.outputs:
-                    yield {"finish_reason": "error", "token_ids": []}
-                    break
+        sampling_params = self.default_sampling_params
+        for key, value in request.sampling_options.model_dump().items():
+            if not value:
+                continue
+            if hasattr(sampling_params, key):
+                setattr(sampling_params, key, value)
 
-                output = response.outputs[0]
-                next_total_toks = len(output.token_ids)
-                out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
-                if output.finish_reason:
-                    out["finish_reason"] = output.finish_reason
-                if output.stop_reason:
-                    out["stop_reason"] = output.stop_reason
-                if self._server_type == ServerType.CTX:
-                    # Return the disaggregated params only when operating in prefill mode.
-                    out[
-                        "disaggregated_params"
-                    ] = DisaggregatedTypeConverter.to_oai_disaggregated_params(
-                        output.disaggregated_params
-                    ).dict()
+        max_tokens = request.stop_conditions.max_tokens
+        if max_tokens:
+            sampling_params.max_tokens = max_tokens
 
-                yield out
-                num_output_tokens_so_far = next_total_toks
+        # TODO: Disable streaming for context only requests when adding disagg support
+        async for res in self._llm_engine.llm.generate_async(
+            inputs=inputs,
+            sampling_params=sampling_params,
+            disaggregated_params=disaggregated_params,
+            streaming=(self._config.disaggregation_mode != "prefill"),
+        ):
+            # TRTLLM engine needs to start generating tokens first before stats
+            # can be retrieved.
+            if self._first_generation and self._llm_publisher:
+                self._llm_publisher.start()
+                self._first_generation = False
 
-        except CppExecutorError:
-            signal.raise_signal(signal.SIGINT)
-        except Exception as e:
-            raise RuntimeError("Failed to generate: " + str(e))
+            if res.finished and self._config.disaggregation_mode != "prefill":
+                yield {"finish_reason": "stop", "token_ids": []}
+                break
 
-        self._start_threads()
-        self._ongoing_request_count -= 1
+            if not res.outputs:
+                yield {"finish_reason": "error", "token_ids": []}
+                break
+
+            output = res.outputs[0]
+            next_total_toks = len(output.token_ids)
+            out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+            if output.finish_reason:
+                out["finish_reason"] = output.finish_reason
+            if output.stop_reason:
+                out["stop_reason"] = output.stop_reason
+            if self._config.disaggregation_mode == "prefill":
+                # Return the disaggregated params only when operating in prefill mode.
+                out[
+                    "disaggregated_params"
+                ] = DisaggregatedTypeConverter.to_oai_disaggregated_params(
+                    output.disaggregated_params
+                ).model_dump()
+
+            yield out
+            num_output_tokens_so_far = next_total_toks
