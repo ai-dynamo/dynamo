@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 MODEL=deepseek-ai/DeepSeek-R1
 OSL=5
 INPUT_FILE=<path-to-input-file>
@@ -11,7 +14,6 @@ for concurrency in 1 2 8192; do
     --model ${MODEL} \
     --tokenizer ${MODEL} \
     --endpoint-type completions \
-    --endpoint /v1/completions \
     --streaming \
     --url ${HEAD_PREFILL_NODE_IP}:${PORT} \
     --input-file ${INPUT_FILE} \

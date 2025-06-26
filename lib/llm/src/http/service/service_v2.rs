@@ -166,6 +166,8 @@ impl HttpServiceConfigBuilder {
             routes.push(super::openai::embeddings_router(state.clone(), None));
         }
 
+        // Some use cases require payloads larger that the default limit (2MB), so
+        // allow disabling the limit through an environment variable at server startup.
         let disable_limit = std::env::var("DYN_DISABLE_HTTP_BODY_LIMIT").is_ok();
         for (route_docs, mut route) in routes.into_iter() {
             if disable_limit {

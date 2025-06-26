@@ -4,28 +4,43 @@
 # Commands are from https://github.com/sgl-project/sglang/issues/6017
 # Last updated: 6/25/2025
 
-# Updating values
-# Update `dist_init_addr`, `node-rank`, `HEAD_PREFILL_NODE_IP`, `HEAD_DECODE_NODE_IP` values to match your cluster
-# ./run_sgl_servers.sh --server-type {prefill, decode, mini_lb
+# Update these values to match your cluster configuration
+HEAD_PREFILL_NODE_IP="10.52.48.42"
+HEAD_DECODE_NODE_IP="10.52.48.107"
+PREFILL_DIST_INIT_ADDR="${HEAD_PREFILL_NODE_IP}:5757"
+DECODE_DIST_INIT_ADDR="${HEAD_DECODE_NODE_IP}:5757"
+NUM_PREFILL_NODES=4
+NUM_DECODE_NODES=9
+PREFILL_TP_SIZE=32
+PREFILL_DP_SIZE=32
+DECODE_TP_SIZE=72
+DECODE_DP_SIZE=72
+
+# ./run_sgl_servers.sh --server-type {prefill, decode, mini_lb} [--node-rank N]
 
 # Example usage 
 # After updating the values above, on my head prefill node I would run:
-#     ./run_sgl_servers.sh --server-type prefill &
+#     ./run_sgl_servers.sh --server-type prefill --node-rank 0 &
 #     ./run_sgl_servers.sh --server-type mini_lb
 #
 # On every other prefill node I would run:
-#     ./run_sgl_servers.sh --server-type prefill
+#     ./run_sgl_servers.sh --server-type prefill --node-rank 1  # (or 2, 3, etc.)
 #
 # On other decode nodes I would run:
-#     ./run_sgl_servers.sh --server-type decode
+#     ./run_sgl_servers.sh --server-type decode --node-rank 1   # (or 2, 3, etc.)
 
 SERVER_TYPE=""
+NODE_RANK=""
 
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
   case $1 in
     --server-type)
       SERVER_TYPE="$2"
+      shift 2
+      ;;
+    --node-rank)
+      NODE_RANK="$2"
       shift 2
       ;;
     *)
@@ -38,7 +53,14 @@ done
 # Validate server type
 if [[ -z "$SERVER_TYPE" ]]; then
   echo "Error: --server-type is required"
-  echo "Usage: $0 --server-type {prefill, decode, mini_lb}"
+  echo "Usage: $0 --server-type {prefill, decode, mini_lb} [--node-rank N]"
+  exit 1
+fi
+
+# Validate node rank for prefill and decode
+if [[ "$SERVER_TYPE" == "prefill" || "$SERVER_TYPE" == "decode" ]] && [[ -z "$NODE_RANK" ]]; then
+  echo "Error: --node-rank is required for prefill and decode servers"
+  echo "Usage: $0 --server-type {prefill, decode} --node-rank N"
   exit 1
 fi
 
@@ -46,8 +68,8 @@ case $SERVER_TYPE in
   mini_lb)
     echo "Starting mini_lb server..."
     python3 -m sglang.srt.disaggregation.mini_lb \
-      --prefill "http://HEAD_PREFILL_NODE_IP:30000" \
-      --decode  "http://HEAD_DECODE_NODE_IP:30000"
+      --prefill "http://${HEAD_PREFILL_NODE_IP}:30000" \
+      --decode  "http://${HEAD_DECODE_NODE_IP}:30000"
     ;;
   
   prefill)
@@ -58,11 +80,11 @@ case $SERVER_TYPE in
       --model-path /model/ \
       --disaggregation-transfer-backend nixl \
       --disaggregation-mode prefill \
-      --dist-init-addr 10.52.48.42:5757 \
-      --nnodes 4 \
-      --node-rank 2 \
-      --tp-size 32 \
-      --dp-size 32 \
+      --dist-init-addr ${PREFILL_DIST_INIT_ADDR} \
+      --nnodes ${NUM_PREFILL_NODES} \
+      --node-rank ${NODE_RANK} \
+      --tp-size ${PREFILL_TP_SIZE} \
+      --dp-size ${PREFILL_DP_SIZE} \
       --enable-dp-attention \
       --decode-log-interval 1 \
       --enable-deepep-moe \
@@ -95,11 +117,11 @@ case $SERVER_TYPE in
       --model-path /model/ \
       --disaggregation-transfer-backend nixl \
       --disaggregation-mode decode \
-      --dist-init-addr 10.52.48.107:5757 \
-      --nnodes 9 \
-      --node-rank 2 \
-      --tp-size 72 \
-      --dp-size 72 \
+      --dist-init-addr ${DECODE_DIST_INIT_ADDR} \
+      --nnodes ${NUM_DECODE_NODES} \
+      --node-rank ${NODE_RANK} \
+      --tp-size ${DECODE_TP_SIZE} \
+      --dp-size ${DECODE_DP_SIZE} \
       --enable-dp-attention \
       --decode-log-interval 1 \
       --enable-deepep-moe \
