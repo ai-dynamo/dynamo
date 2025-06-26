@@ -86,6 +86,11 @@ impl DeltaGenerator {
     ) -> CompletionResponse {
         // todo - update for tool calling
 
+        let mut usage = self.usage.clone();
+        if self.options.enable_usage {
+            usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+        }
+
         CompletionResponse {
             id: self.id.clone(),
             object: self.object.clone(),
@@ -99,7 +104,7 @@ impl DeltaGenerator {
                 logprobs: None,
             }],
             usage: if self.options.enable_usage {
-                Some(self.usage.clone())
+                Some(usage)
             } else {
                 None
             },
