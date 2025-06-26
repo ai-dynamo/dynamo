@@ -1,0 +1,3 @@
+# moe_load_balancer settings for TRTLLM
+num_slots: 288
+layer_updates_per_iter: 2
