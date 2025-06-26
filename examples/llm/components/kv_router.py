@@ -130,7 +130,17 @@ class Router:
     def _update_and_get_waiting_value(
         self, worker_id: str, polled_value: float
     ) -> float:
-        """Helper routine to update waiting dict and return the desired waiting value."""
+        """Helper routine to update waiting dict and return the desired waiting value.
+
+        This method implements a predictive mechanism for tracking waiting requests:
+        - If a new polled value is detected (different from the stored old value),
+          it updates both the old and predictive values to this new measurement and returns it
+        - If no change is detected (polled value equals old value), it returns the
+          predictive value which has been incremented based on previous routing decisions
+
+        This allows the router to account for requests that have been dispatched but
+        not yet reflected in the polled metrics.
+        """
         old_value, predictive_value = self.num_requests_waiting_dict[worker_id]
 
         # Check if polled value is different from old value
@@ -243,8 +253,7 @@ class Router:
                 logger.info(message)
 
             # Increment predictive waiting for the selected worker before returning
-            predictive_value = self.num_requests_waiting_dict[best_worker_id][1]
-            self.num_requests_waiting_dict[best_worker_id][1] = predictive_value + 1
+            self.num_requests_waiting_dict[best_worker_id][1] += 1
 
         return best_worker_id, worker_scores.get(best_worker_id, 0.0)
 
