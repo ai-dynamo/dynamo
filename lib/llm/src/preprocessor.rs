@@ -31,6 +31,7 @@ use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
 use std::{collections::HashMap, sync::Arc};
 use tracing;
+use rayon::iter::{ParallelIterator, IntoParallelRefIterator};
 
 use crate::model_card::model::{ModelDeploymentCard, ModelInfo, TokenizerKind};
 use crate::preprocessor::prompt::OAIChatLikeRequest;
@@ -220,13 +221,15 @@ impl OpenAIPreprocessor {
                             builder.token_ids(encoding.token_ids);
                         }
                         TextInput::Batch(texts) => {
-                            let mut token_batches = Vec::new();
-                            // TODO: room for optimization here
-                            for text in texts {
-                                let encoding =
-                                    tokio::task::block_in_place(|| self.tokenizer.encode(&text))?;
-                                token_batches.push(encoding.token_ids);
-                            }
+                            let token_batches: Result<Vec<Vec<u32>>, _> = texts
+                                .par_iter()
+                                .map(|text| {
+                                    tokio::task::block_in_place(|| self.tokenizer.encode(text))
+                                        .map(|encoding| encoding.token_ids)
+                                })
+                                .collect();
+
+                            let token_batches = token_batches?;
                             builder.batch_token_ids(Some(token_batches));
                             builder.token_ids(vec![]);
                         }
