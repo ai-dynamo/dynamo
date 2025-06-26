@@ -28,10 +28,11 @@ description = "Dynamo LLM Library"
 # default = []
 
 # todo: enable this as default
-default = ["block-manager", "testing-full"]
+default = []
 
-testing-full  = ["testing-cuda", "testing-nixl"]
+testing-full  = ["testing-cuda", "testing-nixl", "testing-gds"]
 testing-cuda  = ["dep:cudarc"]
+testing-gds = ["testing-nixl", "testing-cuda"]
 testing-nixl  = ["dep:nixl-sys"]
 testing-etcd = []
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
