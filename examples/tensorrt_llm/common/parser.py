@@ -52,7 +52,6 @@ class LLMAPIConfig:
 
     def to_dict(self) -> Dict[str, Any]:
         data = {
-            "pytorch_backend_config": self.pytorch_backend_config,
             "kv_cache_config": self.kv_cache_config,
             "speculative_config": self.speculative_config,
             "skip_tokenizer_init": self.skip_tokenizer_init,
@@ -62,6 +61,8 @@ class LLMAPIConfig:
         return data
 
     def update_sub_configs(self, other_config: Dict[str, Any]):
+        # TODO: Consider removing pytorch_backend_config parsing as this section
+        # was collapsed to top level config fields in recent TRTLLM versions.
         if "pytorch_backend_config" in other_config:
             self.pytorch_backend_config = PyTorchConfig(
                 **other_config["pytorch_backend_config"]
