@@ -8,8 +8,7 @@ HEAD_PREFILL_NODE_IP=<ip>
 PORT=8000
 ARTIFACT_DIR=/benchmarks/
 
-# concurrency 1 and 2 are for warmup
-for concurrency in 1 2 8192; do
+for concurrency in 8192; do
   genai-perf profile \
     --model ${MODEL} \
     --tokenizer ${MODEL} \
@@ -24,6 +23,7 @@ for concurrency in 1 2 8192; do
     --request-count ${concurrency} \
     --random-seed 100 \
     --artifact-dir ${ARTIFACT_DIR} \
+    --warmup-requests 10 \
     -- \
     -v -v \
     --max-threads 256 \

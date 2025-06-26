@@ -247,10 +247,10 @@ DeepGEMM kernels can sometimes take a while to warm up. Here we provide a small 
 
 In the SGLang [blog post repro instructions](https://github.com/sgl-project/sglang/issues/6017), SGL uses batch inference to benchmark their prefill and decode workers. They do this by pretokenizing the ShareGPT dataset and then creating a batch of 8192 requests with ISL 4096 and OSL 5 (for prefill) and a batch of 40000 with ISL 2000 and OSL 100 (for decode).
 
-We provide 2 different ways to perform an end to end benchmark which includes using an OpenAI compatible frontend and tokenization
+As we continue to add better support for these sorts of large single batch workloads, we provide 2 different ways to perform an **end to end** benchmark which includes using an OpenAI compatible frontend and tokenization.
 
 1. **GenAI Perf**
-We provide a script that generates a JSONL file of the ShareGPT dataset and then use GenAI Perf to benchmark the prefill and decode workers.
+We provide a script that generates a JSONL file of the ShareGPT dataset and then use GenAI Perf to benchmark the prefill and decode workers. We use ShareGPT in order to leverage the pre-existing EPLB distributions provided by the SGLang team. However - you can use any dataset or use the built in GenAI-Perf synthetic dataset and try to benchmark the dynamic EPLB setup from the blog post instructions. 
 
 Example usage:
 ```bash
@@ -259,7 +259,7 @@ python3 utils/deepseek-r1/generate_bench_data.py --output data.jsonl --num-promp
 ```
 
 2. Modified sglang `bench_one_batch_server.py`
-We also provide a modified version of the `bench_one_batch_server.py` script that can be used to benchmark the prefill and decode workers. This script is modified to handle the maximum NATS message size limit and to chunk the batch into smaller requests.
+We also provide a modified version of the `bench_one_batch_server.py` script that can be used to benchmark the prefill and decode workers. This script is modified to handle the maximum NATS message size limit and to chunk the batch into smaller requests. This script is a work in progress and will be updated over time to better support batch inference as we build out this capability in dynamo.
 
 ```bash
 python3 sgl_bench_one_batch_server.py --model deepseek-ai/DeepSeek-R1 --base-url http://HEAD_PREFILL_NODE_IP:8000 --batch-size 8192 --input-len 4096 --output-len 5 --skip-warmup
