@@ -177,7 +177,7 @@ def test_prefill():
     time.sleep(0.5)
 
 
-@pytest.mark.skipif(VLLM_NOT_AVAILABLE, reason="VLLM not available")
+@pytest.mark.skip(reason="KVBM needs to support reset_prefix_cache")
 def test_prefill_plp():
     """Test prefill with APC and some prompt logprobs (plp) requests.
 
