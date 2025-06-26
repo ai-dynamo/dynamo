@@ -18,6 +18,7 @@
 package dynamo
 
 import (
+	"bytes"
 	"context"
 	"reflect"
 	"sort"
@@ -30,6 +31,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 )
@@ -717,9 +719,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 							},
 							ExtraPodMetadata: nil,
 							ExtraPodSpec:     nil,
-							// LivenessProbe:    nil,
-							// ReadinessProbe:   nil,
-							Replicas: nil,
+							Replicas:         nil,
 						},
 					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
@@ -801,9 +801,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 							},
 							ExtraPodMetadata: nil,
 							ExtraPodSpec:     nil,
-							// LivenessProbe:    nil,
-							// ReadinessProbe:   nil,
-							Replicas: nil,
+							Replicas:         nil,
 						},
 					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
@@ -881,9 +879,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 							},
 							ExtraPodMetadata: nil,
 							ExtraPodSpec:     nil,
-							// LivenessProbe:    nil,
-							// ReadinessProbe:   nil,
-							Replicas: nil,
+							Replicas:         nil,
 						},
 					},
 					Status: v1alpha1.DynamoComponentDeploymentStatus{
@@ -1473,7 +1469,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 				t.Errorf("GenerateDynamoComponentsDeployments() error = %v, wantErr %v", err, tt.wantErr)
 				return
 			}
-			if diff := cmp.Diff(got, tt.want); diff != "" {
+			if diff := cmp.Diff(tt.want, got); diff != "" {
 				t.Errorf("GenerateDynamoComponentsDeployments() mismatch (-want +got):\n%s", diff)
 			}
 		})
@@ -1898,6 +1894,145 @@ func Test_mergeEnvs(t *testing.T) {
 			})
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("mergeEnvs() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseDynamoGraphConfig(t *testing.T) {
+	type args struct {
+		ctx         context.Context
+		yamlContent *bytes.Buffer
+	}
+	tests := []struct {
+		name    string
+		args    args
+		want    *DynamoGraphConfig
+		wantErr bool
+	}{
+		{
+			name: "Test ParseDynamoGraphConfig with ExtraPodSpec LivenessProbe port parsing",
+			args: args{
+				ctx: context.Background(),
+				yamlContent: bytes.NewBuffer([]byte(`
+service: hello_world:Frontend
+entry_service: Frontend
+services:
+- name: Frontend
+  config:
+    dynamo:
+      enabled: true
+      name: Frontend
+      namespace: inference
+    extraPodSpec:
+      mainContainer:
+        livenessProbe:
+          failureThreshold: 10
+          httpGet:
+            path: /healthz
+            port: 5000
+            scheme: HTTP
+          initialDelaySeconds: 1
+          periodSeconds: 60
+          successThreshold: 1
+          timeoutSeconds: 5
+        readinessProbe:
+          failureThreshold: 3
+          httpGet:
+            path: /ready
+            port: 5000
+            scheme: HTTP
+          initialDelaySeconds: 5
+          periodSeconds: 10
+    resources:
+      cpu: "1"
+      memory: 500Mi
+      gpu: "0"
+    workers: 1
+`)),
+			},
+			want: &DynamoGraphConfig{
+				DynamoTag:    "hello_world:Frontend",
+				EntryService: "Frontend",
+				Services: []ServiceConfig{
+					{
+						Name: "Frontend",
+						Config: Config{
+							Dynamo: &DynamoConfig{
+								Enabled:   true,
+								Name:      "Frontend",
+								Namespace: "inference",
+							},
+							ExtraPodSpec: &common.ExtraPodSpec{
+								MainContainer: &corev1.Container{
+									LivenessProbe: &corev1.Probe{
+										ProbeHandler: corev1.ProbeHandler{
+											HTTPGet: &corev1.HTTPGetAction{
+												Path:   "/healthz",
+												Port:   intstr.FromInt(5000),
+												Scheme: corev1.URISchemeHTTP,
+											},
+										},
+										InitialDelaySeconds: 1,
+										TimeoutSeconds:      5,
+										PeriodSeconds:       60,
+										SuccessThreshold:    1,
+										FailureThreshold:    10,
+									},
+									ReadinessProbe: &corev1.Probe{
+										ProbeHandler: corev1.ProbeHandler{
+											HTTPGet: &corev1.HTTPGetAction{
+												Path:   "/ready",
+												Port:   intstr.FromInt(5000),
+												Scheme: corev1.URISchemeHTTP,
+											},
+										},
+										InitialDelaySeconds: 5,
+										TimeoutSeconds:      0,
+										PeriodSeconds:       10,
+										SuccessThreshold:    0,
+										FailureThreshold:    3,
+									},
+								},
+							},
+							Resources: &Resources{
+								CPU:    &[]string{"1"}[0],
+								Memory: &[]string{"500Mi"}[0],
+								GPU:    &[]string{"0"}[0],
+							},
+							Workers: &[]int32{1}[0],
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseDynamoGraphConfig(tt.args.ctx, tt.args.yamlContent)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("ParseDynamoGraphConfig() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			if !tt.wantErr {
+				if diff := cmp.Diff(tt.want, got); diff != "" {
+					t.Errorf("ParseDynamoGraphConfig() mismatch (-want +got):\n%s", diff)
+				}
+
+				// Additional specific check for the port value in LivenessProbe
+				if got != nil && len(got.Services) > 0 &&
+					got.Services[0].Config.ExtraPodSpec != nil &&
+					got.Services[0].Config.ExtraPodSpec.MainContainer != nil &&
+					got.Services[0].Config.ExtraPodSpec.MainContainer.LivenessProbe != nil &&
+					got.Services[0].Config.ExtraPodSpec.MainContainer.LivenessProbe.HTTPGet != nil {
+
+					portValue := got.Services[0].Config.ExtraPodSpec.MainContainer.LivenessProbe.HTTPGet.Port
+					expectedPort := intstr.FromInt(5000)
+					if portValue != expectedPort {
+						t.Errorf("ParseDynamoGraphConfig() LivenessProbe port = %v, want %v", portValue, expectedPort)
+					}
+				}
 			}
 		})
 	}

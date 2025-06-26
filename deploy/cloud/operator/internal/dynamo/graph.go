@@ -166,7 +166,7 @@ func RetrieveDynamoGraphDownloadURL(ctx context.Context, dynamoDeployment *v1alp
 type DynamoGraphConfig struct {
 	DynamoTag    string          `json:"service" yaml:"service"`
 	Services     []ServiceConfig `json:"services" yaml:"services"`
-	EntryService string          `json:"entryService" yaml:"entry_service"`
+	EntryService string          `json:"entry_service" yaml:"entry_service"`
 }
 
 type EventRecorder interface {
