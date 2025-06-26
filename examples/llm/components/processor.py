@@ -306,9 +306,9 @@ class Processor(ProcessMixIn):
                             tokens=engine_prompt["prompt_token_ids"],
                         ).model_dump_json()
 
-                    await (
-                        await self.router_log_client.generate(router_log_obj)
-                    ).__anext__()
+                        await (
+                            await self.router_log_client.generate(router_log_obj)
+                        ).__anext__()
 
                 elif router_mode == RouterType.RANDOM:
                     engine_generator = await self.worker_client.generate(request_obj)
