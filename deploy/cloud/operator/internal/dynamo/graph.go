@@ -164,9 +164,9 @@ func RetrieveDynamoGraphDownloadURL(ctx context.Context, dynamoDeployment *v1alp
 
 // ServicesConfig represents the top-level YAML structure of a dynamoComponent yaml file stored in a dynamoComponent tar file
 type DynamoGraphConfig struct {
-	DynamoTag    string          `yaml:"service"`
-	Services     []ServiceConfig `yaml:"services"`
-	EntryService string          `yaml:"entry_service"`
+	DynamoTag    string          `json:"service" yaml:"service"`
+	Services     []ServiceConfig `json:"services" yaml:"services"`
+	EntryService string          `json:"entryService" yaml:"entry_service"`
 }
 
 type EventRecorder interface {
@@ -313,9 +313,9 @@ func ParseDynamoGraphConfig(ctx context.Context, yamlContent *bytes.Buffer) (*Dy
 		return nil, fmt.Errorf("!!! yaml unmarshal to map failed: %w", err)
 	}
 
-	logger.Info("!!! STEP 2.5: Intermediate map unmarshalled", "mapKeys", fmt.Sprintf("%v", keys(intermediate)))
+	logger.Info("!!! STEP 2.52: Intermediate map unmarshalled", "mapKeys", fmt.Sprintf("%v", keys(intermediate)))
 
-	// Step 2: Convert intermediate map to JSON
+	// Step 3: Convert intermediate map to JSON
 	jsonContent, err := json.Marshal(intermediate)
 	if err != nil {
 		logger.Error(err, "!!! STEP 3: JSON marshal failed")
@@ -329,14 +329,14 @@ func ParseDynamoGraphConfig(ctx context.Context, yamlContent *bytes.Buffer) (*Dy
 		return nil, fmt.Errorf("!!! json unmarshal failed: %w", err)
 	}
 
-	logger.Info("!!! STEP 5: JSON unmarshal succeeded", "rawStruct", fmt.Sprintf("%+v", config))
+	logger.Info("!!! STEP 4: JSON unmarshal succeeded", "rawStruct", fmt.Sprintf("%+v", config))
 
 	// Optional: pretty-print the JSON
 	prettyJSON, err := json.MarshalIndent(config, "", "  ")
 	if err != nil {
-		logger.Error(err, "!!! STEP 6: Pretty JSON marshal failed")
+		logger.Error(err, "!!! STEP 5: Pretty JSON marshal failed")
 	} else {
-		logger.Info("!!! STEP 6: Parsed config as JSON", "parsedConfig", string(prettyJSON))
+		logger.Info("!!! STEP 5: Parsed config as JSON", "parsedConfig", string(prettyJSON))
 	}
 
 	return &config, nil
