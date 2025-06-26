@@ -217,7 +217,7 @@ Set the required environment variables:
 
 ```bash
 # Docker registry configuration
-export DOCKER_SERVER="your-registry.com"                    # Your Docker registry server
+export DOCKER_SERVER="your-registry.com"                    # Docker registry server where images of dynamo cloud services (api-server and operator) are available
 export IMAGE_TAG="v1.0.0"                                   # Image tag to deploy
 export NAMESPACE="dynamo-cloud"                             # Target namespace
 
@@ -233,7 +233,17 @@ export PIPELINES_DOCKER_CREDS_SECRET="my-docker-secret"     # Name of existing s
 # Note: If not specified, the chart will look for a secret named "dynamo-regcred"
 
 # Image pull secret for the operator itself
-export DOCKER_SECRET_NAME="my-pull-secret"                  # Secret for pulling operator images
+export DOCKER_SECRET_NAME="my-pull-secret"                  # Secret for pulling images of dynamo cloud services (api-server and operator) operator images
+```
+
+you can easily create an image pull secret with the following command :
+
+```bash
+kubectl create secret docker-registry ${DOCKER_SECRET_NAME} \
+  --docker-server=${DOCKER_SERVER} \
+  --docker-username=${DOCKER_USERNAME} \
+  --docker-password=${DOCKER_PASSWORD} \
+  --namespace=${NAMESPACE}
 ```
 
 #### Installation Commands
@@ -282,6 +292,6 @@ helm install dynamo-platform dynamo-platform-helm-chart.tgz \
   --set "dynamo-api-store.imagePullSecrets[0].name=${DOCKER_SECRET_NAME}"
 ```
 
-**Note:**
+[!Note]
 - If `PIPELINES_DOCKER_SERVER` is not set, it defaults to `DOCKER_SERVER`
 - If `PIPELINES_DOCKER_CREDS_SECRET` is not set, the chart will look for a secret named `dynamo-regcred`
