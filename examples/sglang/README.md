@@ -249,13 +249,16 @@ In the official [blog post repro instructions](https://github.com/sgl-project/sg
 
 We currently provide 2 different ways to perform an end to end benchmark which includes using our OpenAI frontend and tokenization. We will continue to add better support for these sorts of large single batch workloads in the future.
 
+> [!NOTE]
+> In order to use GenAI-Perf you will need to install `genai-perf`. You can find the instructions [here](https://github.com/triton-inference-server/perf_analyzer/tree/main/genai-perf). Once installed, you can run the `bench.sh` script below
+
 1. **GenAI Perf to benchmark end to end performance with 8k ISL 256 OSL**
-We've found that 8k ISL 256 OSL provides a good baseline for measuring end to end disaggregated serving performance for DSR1. As WideEP allows for a higher throughput, we provide a script that runs this workload at high concurrencies. Note that you will need to warm up the model before running this benchmark to ensure that all of the DeepGEMM kernels are compiled.
+We've found that 8k ISL 256 OSL provides a good baseline for measuring end to end disaggregated serving performance for DSR1. As WideEP allows for a higher throughput, we provide a script that runs this workload at high concurrencies. DeepGEMM kernels can sometimes take a while to warm up. We provide a short ramping warmup script that can be used.
 
 Example usage:
 ```bash
-# warm up model a couple times
-./utils/warmup.sh HEAD_PREFILL_NODE_IP
+# warmup
+./utils/bench.sh HEAD_PREFILL_NODE_IP --type warmup
 # run benchmark
 ./utils/bench.sh HEAD_PREFILL_NODE_IP --type e2e
 ```
@@ -266,9 +269,7 @@ We provide a script that generates a JSONL file of the ShareGPT dataset and then
 Example usage:
 ```bash
 # generate data
-python3 utils/generate_bench_data.py --output data.jsonl --num-prompts 8192 --input-len 4096 --output-len 5
-# warm up model a couple times
-./utils/warmup.sh HEAD_PREFILL_NODE_IP
+python3 utils/generate_bench_data.py --output data.jsonl --num-prompts 100 --input-len 40 --output-len 5 --model deepseek-ai/DeepSeek-R1
 # run benchmark
 ./utils/bench.sh HEAD_PREFILL_NODE_IP --type custom_completions
 ```

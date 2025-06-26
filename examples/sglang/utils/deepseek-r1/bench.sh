@@ -4,10 +4,10 @@
 #!/bin/bash
 
 usage() {
-    echo "Usage: $0 <ip> [port] [--type e2e|custom_completions]"
+    echo "Usage: $0 <ip> [port] [--type e2e|custom_completions|warmup]"
     echo "  ip: server IP address"
     echo "  port: server port (defaults to 8000)"
-    echo "  --type: endpoint type - 'e2e' for chat completions, 'custom_completions' for completions (defaults to e2e)"
+    echo "  --type: endpoint type - 'e2e' for chat completions, 'custom_completions' for completions, 'warmup' for warmup phases"
     exit 1
 }
 
@@ -16,25 +16,32 @@ if [ $# -lt 1 ]; then
 fi
 
 IP=$1
-PORT=${2:-8000}
+PORT=8000
 TYPE="e2e"
 
+# Check if second argument is a port number or an option
+if [[ $# -gt 1 && $2 =~ ^[0-9]+$ ]]; then
+    PORT=$2
+    shift 2
+else
+    shift 1
+fi
+
 # Parse remaining arguments
-shift 2 2>/dev/null || shift 1
 while [[ $# -gt 0 ]]; do
     case $1 in
         --type)
             TYPE="$2"
             shift 2
-            ;s
+            ;;
         *)
             usage
             ;;
     esac
 done
 
-if [[ "$TYPE" != "e2e" && "$TYPE" != "custom_completions" ]]; then
-    echo "Error: --type must be 'e2e' or 'custom_completions'"
+if [[ "$TYPE" != "e2e" && "$TYPE" != "custom_completions" && "$TYPE" != "warmup" ]]; then
+    echo "Error: --type must be 'e2e', 'custom_completions', or 'warmup'"
     usage
 fi
 
@@ -66,8 +73,7 @@ if [[ "$TYPE" == "e2e" ]]; then
             --extra-inputs ignore_eos:true \
             --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
             --concurrency ${concurrency} \
-            --request-count $(($concurrency*10)) \
-            --warmup-request-count $(($concurrency*2)) \
+            --request-count $(($concurrency)) \
             --num-dataset-entries $(($concurrency*12)) \
             --random-seed 100 \
             --artifact-dir ${ARTIFACT_DIR} \
@@ -76,6 +82,65 @@ if [[ "$TYPE" == "e2e" ]]; then
             --max-threads ${concurrency} \
             -H 'Authorization: Bearer NOT USED' \
             -H 'Accept: text/event-stream'
+    done
+
+elif [[ "$TYPE" == "warmup" ]]; then
+    echo "Starting warmup phases..."
+    
+    # Phase configurations: "ISL OSL CONCURRENCY_LIST"
+    PHASES=(
+        "500 100 1,2,4,8"
+        "2000 100 1,2,4,8" 
+        "4000 246 1,2,8,64"
+    )
+    
+    for i in "${!PHASES[@]}"; do
+        phase_num=$((i + 1))
+        phase_config=(${PHASES[$i]})
+        ISL=${phase_config[0]}
+        OSL=${phase_config[1]}
+        concurrency_list=${phase_config[2]}
+        
+        echo "Phase $phase_num: ISL=$ISL, OSL=$OSL"
+        
+        # Convert comma-separated list to array
+        IFS=',' read -ra CONCURRENCY_ARRAY <<< "$concurrency_list"
+        
+        for concurrency in "${CONCURRENCY_ARRAY[@]}"; do
+            echo "Run warmup phase $phase_num, concurrency: $concurrency, ISL: $ISL, OSL: $OSL"
+            
+            genai-perf profile \
+                --model ${MODEL} \
+                --tokenizer ${MODEL} \
+                --endpoint-type chat \
+                --endpoint /v1/chat/completions \
+                --streaming \
+                --url ${IP}:${PORT} \
+                --synthetic-input-tokens-mean ${ISL} \
+                --synthetic-input-tokens-stddev 0 \
+                --output-tokens-mean ${OSL} \
+                --output-tokens-stddev 0 \
+                --extra-inputs max_tokens:${OSL} \
+                --extra-inputs min_tokens:${OSL} \
+                --extra-inputs ignore_eos:true \
+                --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
+                --concurrency ${concurrency} \
+                --request-count $(($concurrency*2)) \
+                --warmup-request-count $(($concurrency > 1 ? $concurrency/2 : 1)) \
+                --num-dataset-entries $(($concurrency*3)) \
+                --random-seed 100 \
+                --artifact-dir ${ARTIFACT_DIR} \
+                -- \
+                -v \
+                --max-threads ${concurrency} \
+                -H 'Authorization: Bearer NOT USED' \
+                -H 'Accept: text/event-stream'
+            
+            echo "Sleeping for 5 seconds..."
+            sleep 5
+        done
+        
+        echo "Phase $phase_num complete"
     done
 
 else
@@ -103,7 +168,7 @@ else
             --artifact-dir ${ARTIFACT_DIR} \
             --warmup-requests 10 \
             -- \
-            -v -v \
+            -v \
             --max-threads 256 \
             -H 'Authorization: Bearer NOT USED' \
             -H 'Accept: text/event-stream'
