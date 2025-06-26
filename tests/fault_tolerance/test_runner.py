@@ -125,7 +125,7 @@ def _inject_failures(failures, logger):
                     pid = vllm_processes[x % num_processes]
                     terminate_process_tree(pid, logger,immediate_kill=True)
 
-        circus_controller.close()
+    circus_controller.close()
 
 global_result_list = []
 

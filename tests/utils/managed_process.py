@@ -26,7 +26,7 @@ import psutil
 import requests
 
 
-def terminate_process(process, logger=logging.getLogger(), immediate_kill=False, timeout = 5):
+def terminate_process(process, logger=logging.getLogger(), immediate_kill=False):
     try:
         logger.info("Terminating PID: %s name: %s", process.pid, process.name())
         if immediate_kill:
@@ -34,22 +34,29 @@ def terminate_process(process, logger=logging.getLogger(), immediate_kill=False,
             process.kill()
         else:
             process.terminate()
-            process.wait(timeout)
     except psutil.AccessDenied:
         logger.warning("Access denied for PID %s", process.pid)
     except psutil.NoSuchProcess:
         logger.warning("PID %s no longer exists", process.pid)
-    except psutil.TimeoutExpired:
-        logger.warning("PID %s did not terminate before timeout, killing", process.pid)
-        process.kill()
-
 
 def terminate_process_tree(pid, logger=logging.getLogger(), immediate_kill=False, timeout = 5):
     try:
         parent = psutil.Process(pid)
         for child in parent.children(recursive=True):
-            terminate_process(child, logger, immediate_kill, timeout)
-        terminate_process(parent, logger, immediate_kill, timeout)
+            terminate_process(child, logger, immediate_kill)
+
+        terminate_process(parent, logger, immediate_kill)
+
+        for child in parent.children(recursive=True):
+            try:
+                child.wait(timeout)
+            except psutil.TimeoutExpired:
+                terminate_process(child, logger, immediate_kill=True)
+        try:
+            parent.wait(timeout)
+        except psutil.TimeoutExpired:
+            terminate_process(parent,logger,immediate_kill=True)
+            
     except psutil.NoSuchProcess:
         # Process already terminated
         pass
@@ -116,9 +123,16 @@ class ManagedProcess:
         for ps_process in psutil.process_iter(["name", "cmdline"]):
             try:
                 if ps_process.name() in self.stragglers:
+                    self._logger.info(
+                        "Terminating Straggler %s %s", ps_process.name(), ps_process.pid
+                    )
+
                     terminate_process_tree(ps_process.pid, self._logger)
                 for cmdline in self.straggler_commands:
                     if cmdline in ps_process.cmdline():
+                        self._logger.info(
+                            "Terminating Straggler Cmdline %s %s %s", ps_process.name(), ps_process.pid, cmdline
+                        )
                         terminate_process_tree(ps_process.pid, self._logger)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 # Process may have terminated or become inaccessible during iteration
@@ -244,6 +258,9 @@ class ManagedProcess:
                     terminate_process_tree(proc.pid, self._logger)
                 for cmdline in self.straggler_commands:
                     if cmdline in proc.cmdline():
+                        self._logger.info(
+                            "Terminating Existing %s %s", proc.name(), proc.pid
+                        )
                         terminate_process_tree(proc.pid, self._logger)
 
 def main():
