@@ -1,4 +1,4 @@
-# ruff: noqa: F401 
+# ruff: noqa: E722, F841 
 """
 This is a modified version of the https://github.com/sgl-project/sglang/blob/main/python/sglang/bench_one_batch_server.py script that allows for benchmarking OpenAI batch completion endpoints. Dynamo has it's own
 rust based frontend that supports batch completions so we do not need to use the internal engine `/generate` endpoint.
