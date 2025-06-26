@@ -250,7 +250,7 @@ In the SGLang [blog post repro instructions](https://github.com/sgl-project/sgla
 As we continue to add better support for these sorts of large single batch workloads, we provide 2 different ways to perform an **end to end** benchmark which includes using an OpenAI compatible frontend and tokenization.
 
 1. **GenAI Perf**
-We provide a script that generates a JSONL file of the ShareGPT dataset and then use GenAI Perf to benchmark the prefill and decode workers. We use ShareGPT in order to leverage the pre-existing EPLB distributions provided by the SGLang team. However - you can use any dataset or use the built in GenAI-Perf synthetic dataset and try to benchmark the dynamic EPLB setup from the blog post instructions. 
+We provide a script that generates a JSONL file of the ShareGPT dataset and then use GenAI Perf to benchmark the prefill and decode workers. We use ShareGPT in order to leverage the pre-existing EPLB distributions provided by the SGLang team. However - you can use any dataset or use the built in GenAI-Perf synthetic dataset and try to benchmark the dynamic EPLB setup from the blog post instructions.
 
 Example usage:
 ```bash
