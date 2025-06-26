@@ -282,6 +282,6 @@ helm install dynamo-platform dynamo-platform-helm-chart.tgz \
   --set "dynamo-api-store.imagePullSecrets[0].name=${DOCKER_SECRET_NAME}"
 ```
 
-**Note:** 
+**Note:**
 - If `PIPELINES_DOCKER_SERVER` is not set, it defaults to `DOCKER_SERVER`
 - If `PIPELINES_DOCKER_CREDS_SECRET` is not set, the chart will look for a secret named `dynamo-regcred`
