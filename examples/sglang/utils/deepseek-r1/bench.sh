@@ -91,7 +91,7 @@ elif [[ "$TYPE" == "warmup" ]]; then
     PHASES=(
         "500 100 1,2,4,8"
         "2000 100 1,2,4,8"
-        "4000 246 1,2,8,64"
+        "4000 256 1,2,8,64"
     )
 
     for i in "${!PHASES[@]}"; do
@@ -125,9 +125,9 @@ elif [[ "$TYPE" == "warmup" ]]; then
                 --extra-inputs ignore_eos:true \
                 --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
                 --concurrency ${concurrency} \
-                --request-count $(($concurrency*2)) \
-                --warmup-request-count $(($concurrency > 1 ? $concurrency/2 : 1)) \
-                --num-dataset-entries $(($concurrency*3)) \
+                --request-count $(($concurrency)) \
+                --warmup-request-count $(($concurrency)) \
+                --num-dataset-entries $(($concurrency*12)) \
                 --random-seed 100 \
                 --artifact-dir ${ARTIFACT_DIR} \
                 -- \
