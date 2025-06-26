@@ -68,3 +68,40 @@ impl PreprocessedRequest {
         PreprocessedRequestBuilder::default()
     }
 }
+
+/// [`PreprocessedEmbeddingRequest`] is the internal representation of an embedding request
+/// after preprocessing. Contains tokenized input ready for embedding engines.
+#[derive(Serialize, Deserialize, Debug, Clone, Builder)]
+pub struct PreprocessedEmbeddingRequest {
+    /// Tokenized input text as token IDs (one Vec per input text)
+    pub token_ids: Vec<Vec<TokenIdType>>,
+
+    /// Model to use for embedding
+    pub model: String,
+
+    /// Encoding format preference
+    pub encoding_format: Option<String>,
+
+    /// Number of dimensions for output embeddings (if supported)
+    pub dimensions: Option<u32>,
+
+    /// The computed checksum of the Model Deployment Card (MDC)
+    #[builder(default)]
+    pub mdc_sum: Option<String>,
+
+    /// User requested annotations for the request
+    #[builder(default)]
+    pub annotations: Vec<String>,
+}
+
+impl PreprocessedEmbeddingRequest {
+    pub fn has_annotation(&self, annotation: &str) -> bool {
+        self.annotations.contains(&annotation.to_string())
+    }
+}
+
+impl PreprocessedEmbeddingRequest {
+    pub fn builder() -> PreprocessedEmbeddingRequestBuilder {
+        PreprocessedEmbeddingRequestBuilder::default()
+    }
+}
