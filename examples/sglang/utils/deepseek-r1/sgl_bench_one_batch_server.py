@@ -478,13 +478,9 @@ def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
     if not bench_args.show_report:
         return
 
-<<<<<<< HEAD
     summary = (
         f"\nInput length: {bench_args.input_len}. Output length: {bench_args.output_len}.\n"
     )
-=======
-    summary = f"\nInput lenses: {bench_args.input_len}. Output lenses: {bench_args.output_len}.\n"
->>>>>>> 5253631fcc7e3d6d0d6e3764923d6239e2d36e96
     summary += "| batch size | latency (s) | input throughput (tok/s)  | output throughput (tok/s) | acc length | ITL (ms) | input cost ($/1M) | output cost ($/1M) |"
 
     if bench_args.profile:

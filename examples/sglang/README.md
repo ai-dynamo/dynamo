@@ -252,5 +252,15 @@ We provide 2 different ways to perform an end to end benchmark which includes us
 1. **GenAI Perf**
 We provide a script that generates a JSONL file of the ShareGPT dataset and then use GenAI Perf to benchmark the prefill and decode workers.
 
+Example usage:
+```bash
+python3 utils/deepseek-r1/generate_bench_data.py --output data.jsonl --num-prompts 8192 --input-len 4096 --output-len 5
+./utils/deepseek-r1/gap_bench.sh
+```
+
 2. Modified sglang `bench_one_batch_server.py`
 We also provide a modified version of the `bench_one_batch_server.py` script that can be used to benchmark the prefill and decode workers. This script is modified to handle the maximum NATS message size limit and to chunk the batch into smaller requests.
+
+```bash
+python3 sgl_bench_one_batch_server.py --model deepseek-ai/DeepSeek-R1 --base-url http://HEAD_PREFILL_NODE_IP:8000 --batch-size 8192 --input-len 4096 --output-len 5 --skip-warmup
+```

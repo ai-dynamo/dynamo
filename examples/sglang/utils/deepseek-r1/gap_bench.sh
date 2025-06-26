@@ -3,7 +3,7 @@
 
 MODEL=deepseek-ai/DeepSeek-R1
 OSL=5
-INPUT_FILE=<path-to-input-file>
+INPUT_FILE=data.jsonl
 HEAD_PREFILL_NODE_IP=<ip>
 PORT=8000
 ARTIFACT_DIR=/benchmarks/
