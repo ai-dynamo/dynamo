@@ -86,6 +86,11 @@ impl DeltaGenerator {
     ) -> CompletionResponse {
         // todo - update for tool calling
 
+        let mut usage = self.usage.clone();
+        if self.options.enable_usage {
+            usage.total_tokens = usage.prompt_tokens + usage.completion_tokens;
+        }
+
         CompletionResponse {
             id: self.id.clone(),
             object: self.object.clone(),
@@ -99,7 +104,7 @@ impl DeltaGenerator {
                 logprobs: None,
             }],
             usage: if self.options.enable_usage {
-                Some(self.usage.clone())
+                Some(usage)
             } else {
                 None
             },
@@ -122,8 +127,9 @@ impl crate::protocols::openai::DeltaGeneratorExt<CompletionResponse> for DeltaGe
         let finish_reason = delta.finish_reason.map(Into::into);
 
         // create choice
-        let index = 0;
-        Ok(self.create_choice(index, delta.text, finish_reason))
+        let index = delta.index.unwrap_or(0).into();
+        let response = self.create_choice(index, delta.text.clone(), finish_reason);
+        Ok(response)
     }
 
     fn get_isl(&self) -> Option<u32> {

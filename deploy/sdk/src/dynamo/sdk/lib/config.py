@@ -105,7 +105,9 @@ class ServiceConfig(dict):
             # Convert to CLI format
             if isinstance(value, bool):
                 if value:
-                    args.append(f"--{arg_key}")
+                    args.extend([f"--{arg_key}", "true"])
+                else:
+                    args.extend([f"--{arg_key}", "false"])
             elif isinstance(value, dict):
                 args.extend([f"--{arg_key}", json.dumps(value)])
             else:

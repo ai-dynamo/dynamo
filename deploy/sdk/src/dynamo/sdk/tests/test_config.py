@@ -140,3 +140,41 @@ def test_service_config_override_common_configs():
         assert f"--{key}" in vllm_worker_args
 
     assert vllm_worker_args[vllm_worker_args.index("--block-size") + 1] == "128"
+
+
+def test_explicit_boolean_arguments():
+    """Test that boolean arguments are handled with explicit true/false values"""
+    # Reset singleton instance
+    ServiceConfig._instance = None
+
+    # Set environment variable with boolean configs
+    os.environ[
+        "DYNAMO_SERVICE_CONFIG"
+    ] = """
+    {
+        "VllmWorker": {
+            "enable-prefix-caching": true,
+            "disable-sliding-window": false,
+            "enforce-eager": true
+        }
+    }
+    """
+
+    # Get arguments and verify explicit boolean handling
+    service_config = ServiceConfig.get_instance()
+    vllm_worker_args = service_config.as_args("VllmWorker")
+
+    # Check that true values are passed as --arg true
+    assert "--enable-prefix-caching" in vllm_worker_args
+    enable_idx = vllm_worker_args.index("--enable-prefix-caching")
+    assert vllm_worker_args[enable_idx + 1] == "true"
+
+    # Check that false values are passed as --arg false
+    assert "--disable-sliding-window" in vllm_worker_args
+    disable_idx = vllm_worker_args.index("--disable-sliding-window")
+    assert vllm_worker_args[disable_idx + 1] == "false"
+
+    # Check that another true value works
+    assert "--enforce-eager" in vllm_worker_args
+    enforce_idx = vllm_worker_args.index("--enforce-eager")
+    assert vllm_worker_args[enforce_idx + 1] == "true"
