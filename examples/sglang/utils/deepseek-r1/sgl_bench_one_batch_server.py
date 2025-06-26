@@ -230,6 +230,7 @@ def run_one_case(
         "model": "deepseek-ai/DeepSeek-R1",
         "prompt": [req.prompt for req in input_requests],
         "stream": True,
+        "max_tokens": output_len,
     }
 
     print("==== Sending request to", url + "/v1/completions")
