@@ -54,6 +54,7 @@ def main():
 
     # this is what SGL uses in their benchmarking
     # https://github.com/sgl-project/sglang/blob/b783c1cb829ec451639d1a3ce68380fb7a7be4a3/python/sglang/bench_one_batch_server.py#L131
+    # We return text instead of returning raw tokens as GenAI Perf expects text during benchmarking
     samples = sample_random_requests(
         input_len=args.input_len,
         output_len=args.output_len,
@@ -62,7 +63,7 @@ def main():
         tokenizer=tokenizer,
         dataset_path=args.dataset_path,
         random_sample=True,
-        return_text=False,
+        return_text=True,
     )
 
     with open(args.output, "w", encoding="utf-8") as fout:

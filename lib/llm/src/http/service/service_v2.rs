@@ -142,11 +142,6 @@ impl HttpServiceConfigBuilder {
 
         let mut router = axum::Router::new();
 
-        if std::env::var("DYN_DISABLE_HTTP_BODY_LIMIT").is_ok() {
-            router = router.layer(axum::extract::DefaultBodyLimit::disable());
-            tracing::info!("Disabled HTTP body limit");
-        }
-
         let mut all_docs = Vec::new();
 
         let mut routes = vec![
@@ -171,12 +166,12 @@ impl HttpServiceConfigBuilder {
             routes.push(super::openai::embeddings_router(state.clone(), None));
         }
 
-        // for (route_docs, route) in routes.into_iter().chain(self.routes.into_iter()) {
-        //     router = router.merge(route);
-        //     all_docs.extend(route_docs);
-        // }
-
-        for (route_docs, route) in routes.into_iter() {
+        let disable_limit = std::env::var("DYN_DISABLE_HTTP_BODY_LIMIT").is_ok();
+        for (route_docs, mut route) in routes.into_iter() {
+            if disable_limit {
+                route = route.layer(axum::extract::DefaultBodyLimit::disable());
+                tracing::info!("Disabled HTTP body limit for route: {:?}", route_docs);
+            }
             router = router.merge(route);
             all_docs.extend(route_docs);
         }

@@ -20,6 +20,8 @@ import time
 from typing import Tuple
 
 import requests
+import concurrent.futures
+import threading
 
 from sglang.bench_serving import get_tokenizer, sample_random_requests
 from sglang.profiler import run_profile
@@ -112,6 +114,33 @@ def launch_server_process(server_args: ServerArgs):
     raise TimeoutError("Server failed to start within the timeout period.")
 
 
+def estimate_payload_size(batch_size: int, input_len: int) -> int:
+    """Estimate JSON payload size in bytes"""
+    # Each token ID: ~4 bytes average when JSON serialized
+    # Plus JSON structure overhead (~20% additional)
+    token_bytes = batch_size * input_len * 4
+    overhead = token_bytes * 0.2
+    return int(token_bytes + overhead)
+
+
+def chunk_batch(input_requests, max_payload_bytes: int = 64 * 1024 * 1024):  # 64MB
+    """Split large batch into smaller chunks that fit NATS limit"""
+    if not input_requests:
+        return []
+    
+    # Estimate size of one request
+    sample_size = len(json.dumps({"prompt": input_requests[0].prompt}))
+    requests_per_chunk = max(1, max_payload_bytes // sample_size)
+    
+    chunks = []
+    for i in range(0, len(input_requests), requests_per_chunk):
+        chunk = input_requests[i:i + requests_per_chunk]
+        chunks.append(chunk)
+    
+    print(f"Split batch of {len(input_requests)} into {len(chunks)} chunks of ~{requests_per_chunk} each")
+    return chunks
+
+
 def run_one_case(
     url: str,
     batch_size: int,
@@ -126,7 +155,6 @@ def run_one_case(
     profile: bool = False,
     profile_by_stage: bool = False,
 ):
-    #requests.post(url + "/flush_cache")
     input_requests = sample_random_requests(
         input_len=input_len,
         output_len=output_len,
@@ -138,18 +166,24 @@ def run_one_case(
         return_text=False,
     )
 
-    # Dynamo uses the async-openai crate which currently does not support tokens that are greater than u16:MAX_SIZE (50256 inclusive)
-    # We have PR to increase this limit here https://github.com/64bit/async-openai/pull/392
-    # For now we simply choose a random token between 0 and 50256 if we notice a token is greater
+    # In Dynamo, we use the async-openai library which has sa u16 max size limit for integer based prompt representations
+    # We have a PR to bump this to u32 to handle a larger token size https://github.com/64bit/async-openai/pull/392
+    # For now we swap tokens that are larger with a random number between 0 and U16_MAX_SIZE
     U16_MAX_SIZE = 50256
     for req in input_requests:
         if hasattr(req, 'prompt') and isinstance(req.prompt, list):
-            # If prompt is a list of token IDs
             req.prompt = [random.randint(0, U16_MAX_SIZE) if token > U16_MAX_SIZE else token for token in req.prompt]
-        elif hasattr(req, 'prompt') and hasattr(req.prompt, '__iter__'):
-            # Handle other iterable types
-            req.prompt = type(req.prompt)([random.randint(0, U16_MAX_SIZE) if token > U16_MAX_SIZE else token for token in req.prompt])
 
+    # In order to work around the maximum NATS message size, we have to chunk the batch and then send
+    estimated_size = estimate_payload_size(batch_size, input_len)
+    print(f"Estimated payload size: {estimated_size / (1024*1024):.1f}MB")
+    
+    if estimated_size > 64 * 1024 * 1024:  # nats max payload size is 64MB but recommended size is 8MB
+        chunks = chunk_batch(input_requests)
+        return run_chunked_requests(url, chunks, batch_size, input_len, output_len, 
+                                  temperature, return_logprob, input_len_step_percentage,
+                                  run_name, result_filename, tokenizer, profile, profile_by_stage)
+    
     use_structured_outputs = False
     if use_structured_outputs:
         texts = []
@@ -206,10 +240,6 @@ def run_one_case(
     output_throughput = batch_size * output_len / (latency - ttft)
     overall_throughput = batch_size * (input_len + output_len) / latency
 
-    #server_info = requests.get(url + "/get_server_info").json()
-    #acc_length = server_info["internal_states"][0].get("avg_spec_accept_length", None)
-    #last_gen_throughput = server_info["internal_states"][0]["last_gen_throughput"]
-
     print(f"batch size: {batch_size}")
     print(f"input_len: {input_len}")
     print(f"output_len: {output_len}")
@@ -244,6 +274,105 @@ def run_one_case(
         overall_throughput,
         profile_link if profile else None,
     )
+
+
+def run_chunked_requests(url, chunks, original_batch_size, input_len, output_len,
+                        temperature, return_logprob, input_len_step_percentage,
+                        run_name, result_filename, tokenizer, profile, profile_by_stage):
+    """Process large batch as multiple parallel requests"""
+    
+    print(f"Processing {len(chunks)} chunks for total batch size {original_batch_size} IN PARALLEL")
+    
+    total_start = time.perf_counter()
+    first_token_time = None
+    first_token_lock = threading.Lock()
+    
+    def process_chunk(chunk_info):
+        i, chunk = chunk_info
+        print(f"Starting chunk {i+1}/{len(chunks)} with {len(chunk)} requests")
+        
+        chunk_start = time.perf_counter()
+        
+        request_payload = {
+            "model": "deepseek-ai/DeepSeek-R1",
+            "prompt": [req.prompt for req in chunk],
+            "stream": True,
+        }
+
+        response = requests.post(url + "/v1/completions", json=request_payload, stream=True)
+        response.raise_for_status()
+
+        chunk_first_token = None
+        for line in response.iter_lines(decode_unicode=False):
+            line = line.decode("utf-8")
+            if line.startswith("data: [DONE]"):
+                break
+            if not line.startswith("data:"):
+                continue
+
+            data_str = line[len("data:"):].strip()
+            try:
+                data = json.loads(data_str)
+            except:
+                continue
+
+            usage = data.get("usage")
+            if usage and usage.get("completion_tokens") == 1:
+                chunk_first_token = time.perf_counter() - chunk_start
+                
+                # Thread-safe first token tracking
+                nonlocal first_token_time
+                with first_token_lock:
+                    if first_token_time is None:
+                        first_token_time = time.perf_counter() - total_start
+                break
+
+        chunk_end = time.perf_counter()
+        print(f"Completed chunk {i+1}/{len(chunks)} in {chunk_end - chunk_start:.2f}s")
+        
+        return {
+            'latency': chunk_end - chunk_start,
+            'first_token': chunk_first_token,
+            'size': len(chunk),
+            'chunk_id': i
+        }
+
+    # Process all chunks in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(chunks)) as executor:
+        chunk_results = list(executor.map(process_chunk, enumerate(chunks)))
+
+    total_latency = time.perf_counter() - total_start
+    ttft = first_token_time or 0.0
+    
+    # Calculate aggregated metrics
+    input_throughput = original_batch_size * input_len / ttft if ttft > 0 else 0
+    output_throughput = original_batch_size * output_len / (total_latency - ttft) if total_latency > ttft else 0
+    overall_throughput = original_batch_size * (input_len + output_len) / total_latency
+
+    print(f"Chunked batch results:")
+    print(f"  Total latency: {total_latency:.2f}s")
+    print(f"  TTFT: {ttft:.2f}s") 
+    print(f"  Input throughput: {input_throughput:.2f} tok/s")
+    print(f"  Output throughput: {output_throughput:.2f} tok/s")
+
+    # Save results
+    if result_filename:
+        with open(result_filename, "a") as fout:
+            res = {
+                "run_name": run_name,
+                "batch_size": original_batch_size,
+                "input_len": input_len,
+                "output_len": output_len,
+                "ttft": round(ttft, 4),
+                "latency": round(total_latency, 4),
+                "output_throughput": round(output_throughput, 2),
+                "overall_throughput": round(overall_throughput, 2),
+                "chunks": len(chunks),
+            }
+            fout.write(json.dumps(res) + "\n")
+
+    return (original_batch_size, total_latency, ttft, input_throughput, 
+            output_throughput, overall_throughput, None)
 
 
 def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
@@ -330,7 +459,7 @@ def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
         return
 
     summary = (
-        f"\nInput lens: {bench_args.input_len}. Output lenses: {bench_args.output_len}.\n"
+        f"\nInput lenses: {bench_args.input_len}. Output lenses: {bench_args.output_len}.\n"
     )
     summary += "| batch size | latency (s) | input throughput (tok/s)  | output throughput (tok/s) | acc length | ITL (ms) | input cost ($/1M) | output cost ($/1M) |"
 
