@@ -245,12 +245,12 @@ DeepGEMM kernels can sometimes take a while to warm up. Here we provide a small 
 
 ###### Benchmarking Disaggregated with WideEP
 
-In the SGLang [blog post repro instructions](https://github.com/sgl-project/sglang/issues/6017), SGL uses batch inference to benchmark their prefill and decode workers. They do this by pretokenizing the ShareGPT dataset and then creating a batch of 8192 requests with ISL 4096 and OSL 5 (for prefill) and a batch of 40000 with ISL 2000 and OSL 100 (for decode). 
+In the SGLang [blog post repro instructions](https://github.com/sgl-project/sglang/issues/6017), SGL uses batch inference to benchmark their prefill and decode workers. They do this by pretokenizing the ShareGPT dataset and then creating a batch of 8192 requests with ISL 4096 and OSL 5 (for prefill) and a batch of 40000 with ISL 2000 and OSL 100 (for decode).
 
 We provide 2 different ways to perform an end to end benchmark which includes using an OpenAI compatible frontend and tokenization
 
 1. **GenAI Perf**
-We provide a script that generates a JSONL file of the ShareGPT dataset and then use GenAI Perf to benchmark the prefill and decode workers. 
+We provide a script that generates a JSONL file of the ShareGPT dataset and then use GenAI Perf to benchmark the prefill and decode workers.
 
 2. Modified sglang `bench_one_batch_server.py`
 We also provide a modified version of the `bench_one_batch_server.py` script that can be used to benchmark the prefill and decode workers. This script is modified to handle the maximum NATS message size limit and to chunk the batch into smaller requests.
