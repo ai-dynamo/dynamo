@@ -184,19 +184,6 @@ def run_one_case(
                                   temperature, return_logprob, input_len_step_percentage,
                                   run_name, result_filename, tokenizer, profile, profile_by_stage)
     
-    use_structured_outputs = False
-    if use_structured_outputs:
-        texts = []
-        for _ in range(batch_size):
-            texts.append(
-                "Human: What is the capital city of france? can you give as many trivial information as possible about that city? answer in json.\n"
-                * 50
-                + "Assistant:"
-            )
-        json_schema = "$$ANY$$"
-    else:
-        json_schema = None
-
     profile_link = None
     if profile:
         profile_link: str = run_profile(
@@ -459,7 +446,7 @@ def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
         return
 
     summary = (
-        f"\nInput lenses: {bench_args.input_len}. Output lenses: {bench_args.output_len}.\n"
+        f"\nInput length: {bench_args.input_len}. Output length: {bench_args.output_len}.\n"
     )
     summary += "| batch size | latency (s) | input throughput (tok/s)  | output throughput (tok/s) | acc length | ITL (ms) | input cost ($/1M) | output cost ($/1M) |"
 
