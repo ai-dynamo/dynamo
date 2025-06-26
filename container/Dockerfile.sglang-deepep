@@ -15,7 +15,7 @@
 
 # Note this container is built from a local dockerfile
 # Please see instructions in examples/sglang/README.md
-FROM deepep:latest
+FROM lmsysorg/sglang:deepep
 
 # Add NIXL build dependencies
 RUN apt-get update -y && \

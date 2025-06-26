@@ -108,13 +108,7 @@ Steps to run:
 
 1. Build the SGLang DeepEP container.
 
-```bash
-git clone -b v0.4.8 https://github.com/sgl-project/sglang.git
-cd sglang/docker
-docker build -f Dockerfile -t deepep .
-```
-
-You will now have a `deepep:latest` image
+Currently SGLang does not provide an official Dockerfile to create SGLang DeepEP image. Please use lmsysorg/sglang:deepep, the official SGLang DeepEP image directly.
 
 2. Build the Dynamo container
 
