@@ -123,19 +123,6 @@ impl DeltaAggregator {
                             }
                             None => None,
                         };
-                        // Handle CompletionFinishReason -> FinishReason conversation
-                        state_choice.finish_reason = match choice.finish_reason {
-                            Some(async_openai::types::CompletionFinishReason::Stop) => {
-                                Some(FinishReason::Stop)
-                            }
-                            Some(async_openai::types::CompletionFinishReason::Length) => {
-                                Some(FinishReason::Length)
-                            }
-                            Some(async_openai::types::CompletionFinishReason::ContentFilter) => {
-                                Some(FinishReason::ContentFilter)
-                            }
-                            None => None,
-                        };
                     }
                 }
                 aggregator
