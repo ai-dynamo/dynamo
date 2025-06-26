@@ -199,7 +199,7 @@ deployment_graphs = {
     ),
     "trtllm_agg_router": (
         DeploymentGraph(
-            module="graphs.agg_router:Frontend",
+            module="graphs.agg:Frontend",
             config="configs/agg_router.yaml",
             directory="/workspace/examples/tensorrt_llm",
             endpoints=["v1/chat/completions", "v1/completions"],
@@ -231,7 +231,7 @@ deployment_graphs = {
     ),
     "trtllm_disagg_router": (
         DeploymentGraph(
-            module="graphs.disagg_router:Frontend",
+            module="graphs.disagg:Frontend",
             config="configs/disagg_router.yaml",
             directory="/workspace/examples/tensorrt_llm",
             endpoints=["v1/chat/completions", "v1/completions"],
