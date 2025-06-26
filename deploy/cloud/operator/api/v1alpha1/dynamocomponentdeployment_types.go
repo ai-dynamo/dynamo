@@ -40,7 +40,8 @@ const (
 type DynamoComponentDeploymentSpec struct {
 	DynamoComponent string `json:"dynamoComponent"`
 	// contains the tag of the DynamoComponent: for example, "my_package:MyService"
-	DynamoTag string `json:"dynamoTag"`
+	// DynamoTag string `json:"dynamoTag"` // TODO Anna new parsing requires that.
+	DynamoTag string `json:"dynamoTag" yaml:"service"`
 
 	DynamoComponentDeploymentSharedSpec `json:",inline"`
 }
