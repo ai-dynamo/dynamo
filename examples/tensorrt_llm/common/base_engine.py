@@ -108,9 +108,6 @@ class BaseTensorrtLLMEngine:
             "tensor_parallel_size": 1,
             "backend": "pytorch",
             "skip_tokenizer_init": True,
-            "disable_log_requests": True,
-            "enable_prefix_caching": True,
-            "disable_log_stats": False,
         }
 
         if self._config.extra_engine_args:

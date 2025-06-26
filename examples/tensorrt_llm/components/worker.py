@@ -105,9 +105,9 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
 
     @on_shutdown
     async def async_cleanup(self):
-        logger.info("Cleaning up TensorRT-LLM Prefill Worker")
+        logger.info("Cleaning up TensorRT-LLM Worker")
         await self.cleanup()
-        logger.info("TensorRT-LLM Prefill Worker cleanup completed")
+        logger.info("TensorRT-LLM Worker cleanup completed")
 
     @endpoint()
     async def generate(self, request: TRTLLMWorkerRequest):
