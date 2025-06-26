@@ -141,7 +141,7 @@ class KubernetesOverrides(BaseModel):
     entrypoint: List[str] | None = None
     cmd: List[str] | None = None
     liveness_probe_settings: Probe | None = None
-    readyness_probe_settings: Probe | None = None
+    readiness_probe_settings: Probe | None = None
 
     @field_validator("entrypoint", "cmd", mode="before")
     @classmethod

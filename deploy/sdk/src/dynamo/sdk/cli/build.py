@@ -152,7 +152,7 @@ class ServiceInfo(BaseModel):
                 logger.warning(
                     f"No @readiness decorator specified for {name}, removing readiness settings from kubernetes overrides."
                 )
-                service.config.kubernetes_overrides.readyness_probe_settings = None
+                service.config.kubernetes_overrides.readiness_probe_settings = None
 
         # Extract API endpoints if available
         api_endpoints = []
@@ -581,14 +581,14 @@ def process_kubernetes_overrides(service: dict, service_dict: dict) -> None:
                 "path"
             ] = LIVENESS_PROBE_PROP_PATH
 
-    readyness_probe_settings = kube_overrides.get("readyness_probe_settings")
-    if readyness_probe_settings:
+    readiness_probe_settings = kube_overrides.get("readiness_probe_settings")
+    if readiness_probe_settings:
         main_container["readinessProbe"] = {
-            k: v for k, v in readyness_probe_settings.items() if v is not None
+            k: v for k, v in readiness_probe_settings.items() if v is not None
         }
-        if "httpGet" in readyness_probe_settings and (
-            "path" not in readyness_probe_settings["httpGet"]
-            and "Path" not in readyness_probe_settings["httpGet"]
+        if "httpGet" in readiness_probe_settings and (
+            "path" not in readiness_probe_settings["httpGet"]
+            and "Path" not in readiness_probe_settings["httpGet"]
         ):
             main_container["readinessProbe"]["httpGet"][
                 "path"
