@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 #!/bin/bash
 
 # Helper script that allows you to run sglang servers for prefill, decode, and mini_lb. You can use this from inside of the dynamo-deepep container
