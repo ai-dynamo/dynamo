@@ -14,6 +14,10 @@
 # limitations under the License.
 import asyncio
 import logging
+import os
+import json
+from huggingface_hub import hf_hub_download
+from huggingface_hub_utils import HfHubHTTPError
 
 from common.base_engine import BaseTensorrtLLMEngine
 from common.parser import parse_tensorrt_llm_args
@@ -71,10 +75,56 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
         endpoint = runtime.namespace(comp_ns).component(comp_name).endpoint("generate")
 
         try:
+            # The model identifier from the config, e.g., a Hugging Face repo ID or a local path.
+            model_identifier = self._engine_config.model_path or self._engine_config.model_name
+
+            try:
+                # By "downloading" the file, we get the exact path to it in the central cache.
+                logger.info(f"Checking for chat_template.jinja in repo: {model_identifier}")
+                chat_template_path = hf_hub_download(
+                    repo_id=model_identifier,
+                    filename="chat_template.jinja",
+                    local_files_only=False,  # Ensure it downloads if not present
+                )
+
+                # If we found it, get the path to tokenizer_config.json and patch it in-place.
+                tokenizer_config_path = hf_hub_download(
+                    repo_id=model_identifier,
+                    filename="tokenizer_config.json",
+                    local_files_only=False,
+                )
+                logger.info(f"Found chat_template.jinja, patching: {tokenizer_config_path}")
+
+                with open(chat_template_path, "r", encoding="utf-8") as f:
+                    chat_template = f.read()
+
+                with open(tokenizer_config_path, "r", encoding="utf-8") as f:
+                    tokenizer_config = json.load(f)
+
+                # Only inject if it's not already present or is null/empty.
+                if not tokenizer_config.get("chat_template"):
+                    tokenizer_config["chat_template"] = chat_template
+                    with open(tokenizer_config_path, "w", encoding="utf-8") as f:
+                        json.dump(tokenizer_config, f, indent=2)
+                    logger.info("Successfully patched chat_template into tokenizer_config.json in the HF cache.")
+                else:
+                    logger.info("chat_template already present in cached tokenizer_config.json, skipping patch.")
+
+            except HfHubHTTPError as e:
+                # This is an expected and non-fatal error if the model is correctly configured without a separate .jinja file.
+                if e.response.status_code == 404:
+                    logger.info("No chat_template.jinja found in repo, proceeding without patching.")
+                else:
+                    logger.warning(f"A non-404 HTTP error occurred when trying to download chat template, skipping patch: {e}")
+            except Exception as e:
+                logger.warning(f"An unexpected error occurred during chat_template patching, skipping: {e}")
+
+
+            # Register the model. The frontend (dynamo-run) will now use the patched file from the cache.
             await register_llm(
                 ModelType.Backend,
                 endpoint,
-                self._engine_config.model_name,
+                model_identifier,
                 self.served_model_name,
                 kv_cache_block_size=self._kv_block_size,
             )
@@ -116,3 +166,4 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
     async def generate(self, request: TRTLLMWorkerRequest):
         async for response in super().generate(request):
             yield response
+        
