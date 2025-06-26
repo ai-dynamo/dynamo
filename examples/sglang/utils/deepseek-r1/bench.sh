@@ -86,29 +86,29 @@ if [[ "$TYPE" == "e2e" ]]; then
 
 elif [[ "$TYPE" == "warmup" ]]; then
     echo "Starting warmup phases..."
-    
+
     # Phase configurations: "ISL OSL CONCURRENCY_LIST"
     PHASES=(
         "500 100 1,2,4,8"
-        "2000 100 1,2,4,8" 
+        "2000 100 1,2,4,8"
         "4000 246 1,2,8,64"
     )
-    
+
     for i in "${!PHASES[@]}"; do
         phase_num=$((i + 1))
         phase_config=(${PHASES[$i]})
         ISL=${phase_config[0]}
         OSL=${phase_config[1]}
         concurrency_list=${phase_config[2]}
-        
+
         echo "Phase $phase_num: ISL=$ISL, OSL=$OSL"
-        
+
         # Convert comma-separated list to array
         IFS=',' read -ra CONCURRENCY_ARRAY <<< "$concurrency_list"
-        
+
         for concurrency in "${CONCURRENCY_ARRAY[@]}"; do
             echo "Run warmup phase $phase_num, concurrency: $concurrency, ISL: $ISL, OSL: $OSL"
-            
+
             genai-perf profile \
                 --model ${MODEL} \
                 --tokenizer ${MODEL} \
@@ -135,11 +135,11 @@ elif [[ "$TYPE" == "warmup" ]]; then
                 --max-threads ${concurrency} \
                 -H 'Authorization: Bearer NOT USED' \
                 -H 'Accept: text/event-stream'
-            
+
             echo "Sleeping for 5 seconds..."
             sleep 5
         done
-        
+
         echo "Phase $phase_num complete"
     done
 
