@@ -206,11 +206,7 @@ fn run_request(
     work_request: WorkRequest,
     llama_context: &mut ContextWrapper,
 ) -> Result<()> {
-    let tokens_to_process = work_request
-        .request
-        .token_ids
-        .first()
-        .unwrap();
+    let tokens_to_process = work_request.request.token_ids.first().unwrap();
     let tokens_list: Vec<LlamaToken> = tokens_to_process
         .iter()
         .map(|&u| LlamaToken::new(u as i32))

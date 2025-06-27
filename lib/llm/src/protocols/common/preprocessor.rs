@@ -27,9 +27,9 @@ pub struct PreprocessedRequest {
     /// Each inner `Vec<TokenIdType>` represents a single sequence.
     /// A single 1D sequence (e.g., `[1,2,3]`) will now be wrapped as `[[1,2,3]]` to
     /// ensure a consistent `Vec<Vec<TokenIdType>>` structure.
-    #[builder(default)] // Keep default, an empty Vec<Vec<TokenIdType>> is a valid default state
+    #[builder(default)]
+    // Keep default, an empty Vec<Vec<TokenIdType>> is a valid default state
     pub token_ids: Vec<Vec<TokenIdType>>,
-
 
     /// StopConditions are conditions that the inference engine will use to stop generation.
     pub stop_conditions: StopConditions,
