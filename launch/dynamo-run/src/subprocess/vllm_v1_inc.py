@@ -22,15 +22,6 @@ import uuid
 from typing import Optional
 
 import uvloop
-from vllm.config import VllmConfig
-from vllm.distributed.kv_events import KVEventsConfig
-from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.inputs import TokensPrompt
-from vllm.sampling_params import SamplingParams
-from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.metrics.loggers import StatLoggerBase
-from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo.llm import (
     ModelType,
@@ -41,6 +32,15 @@ from dynamo.llm import (
 )
 from dynamo.runtime import Component, DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+from vllm.config import VllmConfig
+from vllm.distributed.kv_events import KVEventsConfig
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.inputs import TokensPrompt
+from vllm.sampling_params import SamplingParams
+from vllm.usage.usage_lib import UsageContext
+from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.metrics.loggers import StatLoggerBase
+from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 # Only used if you run it manually from the command line
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
@@ -85,17 +85,29 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
                 / scheduler_stats.prefix_cache_stats.queries
             )
 
-        # TODO Manage DP Ranks in metrics aggregation.
-        self.inner.publish(
-            request_active_slots=scheduler_stats.num_running_reqs,
-            request_total_slots=0,  # TODO - remove from metrics
-            kv_active_blocks=0,  # TODO - need to calculate this
-            kv_total_blocks=0,  # TODO - remove from metrics
-            num_requests_waiting=scheduler_stats.num_waiting_reqs,  # used in current cost function
-            gpu_cache_usage_perc=scheduler_stats.gpu_cache_usage,  # used in current cost function
-            gpu_prefix_cache_hit_rate=hit_rate,
-            data_parallel_rank=self.dp_rank,
-        )
+        metrics = {
+            "request_active_slots": scheduler_stats.num_running_reqs,
+            "request_total_slots": 0,  # TODO - remove from metrics
+            "kv_active_blocks": 0,  # TODO - need to calculate this
+            "kv_total_blocks": 0,  # TODO - remove from metrics
+            "num_requests_waiting": scheduler_stats.num_waiting_reqs,  # used in current cost function
+            "gpu_cache_usage_perc": scheduler_stats.gpu_cache_usage,  # used in current cost function
+            "gpu_prefix_cache_hit_rate": hit_rate,
+            "data_parallel_rank": self.dp_rank,  # TODO Manage DP Ranks in metrics aggregation.
+        }
+
+        spec_dec_stats = scheduler_stats.spec_decoding_stats
+        if spec_dec_stats:
+            metrics.update(
+                {
+                    "spec_dec_num_spec_tokens": spec_dec_stats.num_spec_tokens,
+                    "spec_dec_num_drafts": spec_dec_stats.num_drafts,
+                    "spec_dec_num_draft_tokens": spec_dec_stats.num_draft_tokens,
+                    "spec_dec_num_accepted_tokens": spec_dec_stats.num_accepted_tokens,
+                    "spec_dec_num_accepted_tokens_per_pos": spec_dec_stats.num_accepted_tokens_per_pos,
+                }
+            )
+        self.inner.publish(**metrics)
 
     def log_engine_initialized(self) -> None:
         pass

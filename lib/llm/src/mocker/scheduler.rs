@@ -40,7 +40,7 @@
 //! ## NOTE
 //! The current prefill and decoding time simulations are not scientific at all and are WIP
 
-use crate::kv_router::protocols::ForwardPassMetrics;
+use crate::kv_router::protocols::{ForwardPassMetrics, KvStats, WorkerStats};
 use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::kv_manager::KvManager;
 use crate::mocker::protocols::DirectRequest;
@@ -392,15 +392,29 @@ impl Scheduler {
             0.0
         };
 
-        ForwardPassMetrics {
+
+
+
+       let worker_stats = WorkerStats {
             data_parallel_rank: None, // Default for backwards compatibility
             request_active_slots: state.running.len() as u64,
             request_total_slots: 420, // Dummy value as specified
+            num_requests_waiting: state.waiting.len() as u64,
+        };
+
+        let kv_stats = KvStats {
             kv_active_blocks: active_blocks_count,
             kv_total_blocks: total_capacity,
-            num_requests_waiting: state.waiting.len() as u64,
             gpu_cache_usage_perc,
             gpu_prefix_cache_hit_rate: 0.0, // Placeholder value as specified
+        };
+
+        let spec_decode_stats = None;
+
+        ForwardPassMetrics {
+            worker_stats,
+            kv_stats,
+            spec_decode_stats,
         }
     }
 }

@@ -211,10 +211,10 @@ pub fn process_worker_selection(
 
     // Update worker state predictively
     // Will be overwritten on next polling of metrics
-    worker.data.num_requests_waiting += 1;
+    worker.data.worker_stats.num_requests_waiting += 1;
     // Assumes radix attention so KV load is only incremented by uncached blocks
     // overlap_blocks can be bigger than required_blocks. I don't know if that's a bug or not.
-    worker.data.kv_active_blocks += selection
+    worker.data.kv_stats.kv_active_blocks += selection
         .required_blocks
         .saturating_sub(selection.overlap_blocks as u64);
 
@@ -269,7 +269,7 @@ impl WorkerSelector for DefaultWorkerSelector {
             }
 
             // Track max waiting requests
-            max_waiting = f64::max(max_waiting, ep.data.num_requests_waiting as f64);
+            max_waiting = f64::max(max_waiting, ep.data.worker_stats.num_requests_waiting as f64);
         }
 
         // make immutable
@@ -287,9 +287,9 @@ impl WorkerSelector for DefaultWorkerSelector {
             let score = worker_scores.get(&worker_id).copied().unwrap_or(0.0);
 
             // Calculate normalized metrics
-            let gpu_cache_usage = ep.data.gpu_cache_usage_perc as f64;
+            let gpu_cache_usage = ep.data.kv_stats.gpu_cache_usage_perc as f64;
             let normalized_waiting = if max_waiting > 0.0 {
-                ep.data.num_requests_waiting as f64 / max_waiting
+                ep.data.worker_stats.num_requests_waiting as f64 / max_waiting
             } else {
                 0.0
             };
