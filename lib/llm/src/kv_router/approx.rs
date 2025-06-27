@@ -276,12 +276,11 @@ impl ApproxKvIndexer {
     pub async fn process_routing_decision_for_request(
         &self,
         tokens: &[u32],
-        lora_id: u64,
         worker_id: WorkerId,
     ) -> Result<(), KvRouterError> {
         let local_hashes = compute_block_hash_for_seq(tokens, self.kv_block_size);
 
-        let sequence = TokenBlockSequence::new(tokens.into(), self.kv_block_size, Some(lora_id));
+        let sequence = TokenBlockSequence::new(tokens.into(), self.kv_block_size, None);
         let sequence_hashes = sequence
             .blocks()
             .iter()

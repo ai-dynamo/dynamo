@@ -546,7 +546,6 @@ impl ApproxKvIndexer {
         &self,
         py: Python<'p>,
         token_ids: Vec<u32>,
-        _lora_id: u64,
     ) -> PyResult<Bound<'p, PyAny>> {
         let indexer = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -564,13 +563,12 @@ impl ApproxKvIndexer {
         &self,
         py: Python<'p>,
         tokens: Vec<u32>,
-        lora_id: u64,
         worker_id: i64,
     ) -> PyResult<Bound<'p, PyAny>> {
         let indexer = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             indexer
-                .process_routing_decision_for_request(tokens.as_slice(), lora_id, worker_id)
+                .process_routing_decision_for_request(tokens.as_slice(), worker_id)
                 .await
                 .map_err(to_pyerr)?;
             Ok(())

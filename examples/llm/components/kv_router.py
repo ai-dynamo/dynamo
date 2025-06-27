@@ -362,7 +362,10 @@ class Router:
 
         # Existing KV routing logic
         try:
-            scores = await self.indexer.find_matches(request.hashes)
+            if self.router_type == RouterType.APPROX_KV:
+                scores = await self.indexer.find_matches_for_request(request.tokens)
+            else:
+                scores = await self.indexer.find_matches(request.hashes)
         except Exception as e:
             scores = {}
             logger.exception(f"Error finding matches: {e}. {fallback_msg}")
@@ -382,11 +385,10 @@ class Router:
 
     @endpoint()
     async def log_router_decision(self, request: RouterDecision):
-        lora_id = 0
         if self.router_type == RouterType.APPROX_KV:
             try:
                 await self.indexer.process_routing_decision_for_request(
-                    request.tokens, lora_id, request.worker_id
+                    request.tokens, request.worker_id
                 )
             except Exception as e:
                 logger.exception(

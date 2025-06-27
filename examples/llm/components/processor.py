@@ -263,6 +263,7 @@ class Processor(ProcessMixIn):
                             hashes=compute_block_hash_for_seq_py(
                                 token_ids, self.engine_args.block_size
                             ),
+                            tokens=token_ids,
                             num_tokens=len(token_ids),
                         ).model_dump_json()
                     )
