@@ -527,6 +527,18 @@ class KvIndexer:
         Create a `KvIndexer` object
         """
 
+    def find_matches(self, sequence: List[int]) -> OverlapScores:
+        """
+        Find prefix matches for the given sequence of block hashes.
+
+        Args:
+            sequence: List of block hashes to find matches for
+
+        Returns:
+            OverlapScores containing worker matching scores and frequencies
+        """
+        ...
+
     def find_matches_for_request(
         self, token_ids: List[int], lora_id: int
     ) -> OverlapScores:
