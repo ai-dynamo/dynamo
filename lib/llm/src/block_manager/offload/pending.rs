@@ -49,8 +49,8 @@ use tokio_util::sync::CancellationToken;
 use crate::block_manager::block::{
     locality::LocalityProvider,
     transfer::{TransferContext, WriteTo, WriteToStrategy},
-    BlockError, BlockMetadata, BlockState, ImmutableBlock, MutableBlock, ReadableBlock,
-    WritableBlock,
+    BlockDataProvider, BlockDataProviderMut, BlockError, BlockMetadata, BlockState, ImmutableBlock,
+    MutableBlock, ReadableBlock, WritableBlock,
 };
 use crate::block_manager::pool::BlockPoolError;
 use crate::block_manager::storage::{Local, Storage};
@@ -249,6 +249,9 @@ where
         + WriteToStrategy<MutableBlock<Target, Locality, Metadata>>,
     // Check that the target block is writable.
     MutableBlock<Target, Locality, Metadata>: WritableBlock<StorageType = Target>,
+    // Check that the source and target blocks have the same locality.
+    ImmutableBlock<Source, Locality, Metadata>: BlockDataProvider<Locality = Locality>,
+    MutableBlock<Target, Locality, Metadata>: BlockDataProviderMut<Locality = Locality>,
 {
     async fn enqueue_transfer(
         &self,
@@ -345,6 +348,9 @@ where
         + WriteToStrategy<MutableBlock<Target, Locality, Metadata>>,
     // Check that the target block is writable.
     MutableBlock<Target, Locality, Metadata>: WritableBlock<StorageType = Target>,
+    // Check that the source and target blocks have the same locality.
+    ImmutableBlock<Source, Locality, Metadata>: BlockDataProvider<Locality = Locality>,
+    MutableBlock<Target, Locality, Metadata>: BlockDataProviderMut<Locality = Locality>,
 {
     async fn enqueue_transfer(
         &self,

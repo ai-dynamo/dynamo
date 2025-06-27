@@ -17,7 +17,7 @@ mod local;
 mod logical;
 mod resources;
 
-use crate::block_manager::block::factory::{BlockFactory, IntoBlocks};
+use crate::block_manager::block::factory::IntoBlocks;
 use crate::block_manager::locality::LogicalResources;
 
 use super::*;
@@ -501,7 +501,7 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> std::fmt::Debug
 
 #[expect(clippy::type_complexity)]
 pub(crate) fn create_block_pool<S: Storage, L: LocalityProvider, M: BlockMetadata>(
-    factory: impl BlockFactory<S, L> + IntoBlocks<S, L>,
+    factory: impl IntoBlocks<S, L>,
     resources: &Resources,
     pool_name: &str,
 ) -> Result<(BlockPool<S, L, M>, Vec<Block<S, L, M>>)> {

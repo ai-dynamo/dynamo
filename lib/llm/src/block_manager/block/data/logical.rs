@@ -3,15 +3,38 @@
 
 use super::*;
 
+pub mod distributed_leader_worker;
 pub mod lw_sharded;
 pub mod null;
+
+use crate::block_manager::block::{
+    transfer::{TransferContext, TransferError, WriteToStrategy},
+    BlockDataProvider, ReadableBlock, WritableBlock,
+};
+use crate::block_manager::locality::Logical;
+use crate::block_manager::storage::{self, nixl::NixlDescriptor};
+use tokio::sync::oneshot;
 
 pub enum LogicalKinds {
     Simple,
     Sharded,
 }
 
-pub trait LogicalResources: Clone + Send + Sync + 'static + std::fmt::Debug {}
+pub trait LogicalResources: Clone + Send + Sync + 'static + std::fmt::Debug {
+    fn handle_transfer<RB, WB>(
+        &self,
+        sources: &[RB],
+        targets: &mut [WB],
+        notify: bool,
+        ctx: Arc<TransferContext>,
+    ) -> Result<Option<oneshot::Receiver<()>>, TransferError>
+    where
+        RB: ReadableBlock + WriteToStrategy<WB> + storage::Local,
+        <RB as StorageTypeProvider>::StorageType: NixlDescriptor,
+        <WB as StorageTypeProvider>::StorageType: NixlDescriptor,
+        RB: BlockDataProvider<Locality = Logical<Self>>,
+        WB: WritableBlock + BlockDataProviderMut<Locality = Logical<Self>>;
+}
 
 /// Individual block storage - cannot be cloned to ensure uniqueness
 #[derive(Debug)]
@@ -19,7 +42,7 @@ pub struct LogicalBlockData<S: Storage, R: LogicalResources> {
     block_id: BlockId,
     block_set_id: usize,
     worker_id: WorkerID,
-    resources: R,
+    resources: Arc<R>,
     storage_type: StorageType,
     storage: std::marker::PhantomData<S>,
 }
@@ -36,14 +59,14 @@ impl<S: Storage, R: LogicalResources> LogicalBlockData<S, R> {
             block_id,
             block_set_id,
             worker_id,
-            resources,
+            resources: Arc::new(resources),
             storage_type,
             storage: std::marker::PhantomData,
         }
     }
 
-    pub fn resources(&self) -> &R {
-        &self.resources
+    pub fn resources(&self) -> Arc<R> {
+        self.resources.clone()
     }
 }
 

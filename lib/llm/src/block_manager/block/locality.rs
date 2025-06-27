@@ -14,11 +14,15 @@
 // interface; however, it can also be used to directly construct block data objects
 // which can be used by leader-driven workers which do not have full block pools.
 
-use super::{
-    // transfer::{TransferStrategy, WriteToStrategy},
-    *,
+use super::*;
+use crate::block_manager::block::transfer::{
+    handle_local_transfer, TransferContext, TransferError, WriteToStrategy,
 };
+use crate::block_manager::storage::{self, nixl::NixlDescriptor};
 use crate::block_manager::{DeviceStorage, DiskStorage, PinnedStorage};
+
+use std::any::Any;
+use tokio::sync::oneshot;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocalityType {
@@ -38,6 +42,22 @@ pub trait LocalityProvider: Send + Sync + 'static + std::fmt::Debug {
     type Device: BlockDataExt<DeviceStorage>;
 
     type BlockData<S: Storage>: BlockDataExt<S>;
+
+    fn handle_transfer<RB, WB>(
+        _sources: &[RB],
+        _targets: &mut [WB],
+        _notify: bool,
+        _ctx: Arc<TransferContext>,
+    ) -> Result<Option<oneshot::Receiver<()>>, TransferError>
+    where
+        RB: ReadableBlock + WriteToStrategy<WB> + storage::Local,
+        <RB as StorageTypeProvider>::StorageType: NixlDescriptor,
+        <WB as StorageTypeProvider>::StorageType: NixlDescriptor,
+        RB: BlockDataProvider<Locality = Self>,
+        WB: WritableBlock + BlockDataProviderMut<Locality = Self>,
+    {
+        panic!("Transfers are not supported for this locality provider");
+    }
 }
 
 /// Transfer mechanism describes how transfers should be performed between locality types
@@ -63,6 +83,22 @@ impl LocalityProvider for Local {
     type Device = Self::BlockData<DeviceStorage>;
 
     type BlockData<S: Storage> = BlockData<S>;
+
+    fn handle_transfer<RB, WB>(
+        sources: &[RB],
+        targets: &mut [WB],
+        notify: bool,
+        ctx: Arc<TransferContext>,
+    ) -> Result<Option<oneshot::Receiver<()>>, TransferError>
+    where
+        RB: ReadableBlock + WriteToStrategy<WB> + storage::Local,
+        <RB as StorageTypeProvider>::StorageType: NixlDescriptor,
+        <WB as StorageTypeProvider>::StorageType: NixlDescriptor,
+        RB: BlockDataProvider<Locality = Self>,
+        WB: WritableBlock + BlockDataProviderMut<Locality = Self>,
+    {
+        handle_local_transfer(sources, targets, notify, ctx)
+    }
 }
 
 // /// Mock logical locality for testing - computes transfer sizes without moving data
@@ -98,12 +134,81 @@ pub struct Logical<R: LogicalResources> {
     _resources: std::marker::PhantomData<R>,
 }
 
+impl<R: LogicalResources> Logical<R> {
+    fn load_resources<B: BlockDataProvider<Locality = Logical<R>>>(blocks: &[B]) -> Vec<Arc<R>> {
+        blocks
+            .iter()
+            .map(|block| {
+                let any_block = block.block_data() as &dyn Any;
+
+                // TODO: Downcasting and unwrapping like this is atrocious...
+                let logical_block = any_block
+                    .downcast_ref::<LogicalBlockData<<B as StorageTypeProvider>::StorageType, R>>()
+                    .unwrap();
+
+                logical_block.resources()
+            })
+            .collect()
+    }
+
+    fn load_resources_mut<B: BlockDataProviderMut<Locality = Logical<R>>>(
+        blocks: &mut [B],
+    ) -> Vec<Arc<R>> {
+        blocks
+            .iter_mut()
+            .map(|block| {
+                let any_block = block.block_data_mut() as &mut dyn Any;
+
+                let logical_block = any_block
+                    .downcast_mut::<LogicalBlockData<<B as StorageTypeProvider>::StorageType, R>>()
+                    .unwrap();
+
+                logical_block.resources()
+            })
+            .collect()
+    }
+}
+
 impl<R: LogicalResources> LocalityProvider for Logical<R> {
     type Disk = LogicalBlockData<DiskStorage, R>;
     type Host = LogicalBlockData<PinnedStorage, R>;
     type Device = LogicalBlockData<DeviceStorage, R>;
 
     type BlockData<S: Storage> = LogicalBlockData<S, R>;
+
+    fn handle_transfer<RB, WB>(
+        sources: &[RB],
+        targets: &mut [WB],
+        notify: bool,
+        ctx: Arc<TransferContext>,
+    ) -> Result<Option<oneshot::Receiver<()>>, TransferError>
+    where
+        RB: ReadableBlock + WriteToStrategy<WB> + storage::Local,
+        <RB as StorageTypeProvider>::StorageType: NixlDescriptor,
+        <WB as StorageTypeProvider>::StorageType: NixlDescriptor,
+        RB: BlockDataProvider<Locality = Self>,
+        WB: WritableBlock + BlockDataProviderMut<Locality = Self>,
+    {
+        let source_resources = Self::load_resources(sources);
+        let target_resources = Self::load_resources_mut(targets);
+
+        let all_resources = source_resources
+            .into_iter()
+            .chain(target_resources)
+            .collect::<Vec<_>>();
+
+        // For now, assert that all resources between the source and target are the same
+        if !all_resources
+            .iter()
+            .all(|r| Arc::ptr_eq(r, &all_resources[0]))
+        {
+            return Err(anyhow::anyhow!("Resources used in a transfer must be the same!").into());
+        }
+
+        let common_resource = all_resources[0].clone();
+
+        common_resource.handle_transfer(sources, targets, notify, ctx)
+    }
 }
 
 // pub mod nixl {

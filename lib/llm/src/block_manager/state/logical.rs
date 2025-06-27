@@ -1,12 +1,6 @@
 use super::*;
 
-use crate::block_manager::{
-    block::{
-        data::logical::null::NullResources, factory::logical::LogicalBlockFactory,
-        locality::Logical,
-    },
-    storage::StorageType,
-};
+use crate::block_manager::{block::factory::logical::LogicalBlockFactory, storage::StorageType};
 
 /// The local block factories for the block manager
 ///

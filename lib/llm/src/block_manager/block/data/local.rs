@@ -162,12 +162,16 @@ impl<S: Storage> StorageTypeProvider for LocalBlockData<S> {
 }
 
 impl<S: Storage> BlockDataProvider for LocalBlockData<S> {
+    type Locality = locality::Local;
+
     fn block_data(&self) -> &impl BlockDataExt<Self::StorageType> {
         self
     }
 }
 
 impl<S: Storage> BlockDataProviderMut for LocalBlockData<S> {
+    type Locality = locality::Local;
+
     fn block_data_mut(&mut self) -> &mut impl BlockDataExt<Self::StorageType> {
         self
     }

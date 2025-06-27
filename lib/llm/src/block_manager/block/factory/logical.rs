@@ -103,6 +103,6 @@ mod tests {
             .into_blocks_with_metadata(BasicMetadata::default())
             .unwrap();
 
-        let pool = BlockPool::builder().blocks(blocks).build().unwrap();
+        BlockPool::builder().blocks(blocks).build().unwrap();
     }
 }
