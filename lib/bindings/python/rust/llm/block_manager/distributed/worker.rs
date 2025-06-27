@@ -80,18 +80,16 @@ pub struct KvbmWorker {
 #[pymethods]
 impl KvbmWorker {
     #[new]
-    #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, worker_id=0, dtype=None, barrier_id="kvbm".to_string()))]
+    #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, worker_id=0, dtype_width_bytes=2, barrier_id="kvbm".to_string()))]
     fn new(
         num_device_blocks: usize,
         page_size: usize,
         tensors: Vec<Py<PyAny>>,
         device_id: usize,
         worker_id: usize,
-        dtype: Option<String>,
+        dtype_width_bytes: usize,
         barrier_id: String,
     ) -> PyResult<Self> {
-        let dtype = map_dtype(&dtype.unwrap_or("fp16".to_string())).map_err(to_pyerr)?;
-
         let mut vllm_tensors: Vec<Box<dyn TorchTensor>> = Vec::with_capacity(tensors.len());
 
         for tensor in tensors {
@@ -105,7 +103,7 @@ impl KvbmWorker {
             .tensors(vllm_tensors)
             .device_id(device_id)
             .worker_id(worker_id)
-            .dtype(dtype)
+            .dtype_width_bytes(dtype_width_bytes)
             .barrier_id(barrier_id)
             .build()
             .map_err(to_pyerr)?;

@@ -122,7 +122,6 @@ use derive_getters::Getters;
 use thiserror::Error;
 
 use crate::block_manager::storage::{Storage, StorageAllocator};
-use crate::common::dtype::DType;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -290,8 +289,8 @@ pub struct LayoutConfig {
     pub alignment: usize,
 
     /// Data type
-    #[builder(default = "DType::FP16")]
-    pub dtype: DType,
+    #[builder(default = "2")]
+    pub dtype_width_bytes: usize,
 }
 
 impl LayoutConfig {
@@ -335,7 +334,7 @@ impl FullyContiguousConfig {
         config.validate()?;
 
         let alignment = config.alignment;
-        let memory_region_size = config.page_size * config.inner_dim * config.dtype.size_in_bytes();
+        let memory_region_size = config.page_size * config.inner_dim * config.dtype_width_bytes;
         let outer_dim_stride_in_bytes = memory_region_size;
         let layer_stride_in_bytes = outer_dim_stride_in_bytes * config.outer_dim;
         let natural_block_stride = config.num_layers * layer_stride_in_bytes;
@@ -584,7 +583,7 @@ impl LayerSeparateConfig {
         config.validate()?;
 
         let alignment = config.alignment;
-        let memory_region_size = config.page_size * config.inner_dim * config.dtype.size_in_bytes();
+        let memory_region_size = config.page_size * config.inner_dim * config.dtype_width_bytes;
 
         let outer_dim_stride_in_bytes;
         let block_stride_in_bytes;
@@ -844,7 +843,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: alignment.unwrap_or(1),
-            dtype: DTYPE,
+            dtype_width_bytes: 2,
         };
 
         FullyContiguous::allocate(config, &NullDeviceAllocator)
@@ -886,7 +885,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: 1,
-            dtype: DTYPE,
+            dtype_width_bytes: 2,
         };
         // Calculate correct size needed
         let fc_config = FullyContiguousConfig::new(config.clone()).unwrap();
@@ -1025,7 +1024,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: 1,
-            dtype: DTYPE,
+            dtype_width_bytes: 2,
         };
 
         let allocator = SystemAllocator;
@@ -1063,7 +1062,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: ALIGNMENT,
-            dtype: DTYPE,
+            dtype_width_bytes: 2,
         };
 
         // Calculate expected size needed *for the data layout itself*
@@ -1152,7 +1151,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: 1,
-            dtype: DTYPE,
+            dtype_width_bytes: 2,
         };
 
         let exact_size =
@@ -1182,7 +1181,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: alignment.unwrap_or(1),
-            dtype: DTYPE,
+            dtype_width_bytes: 2,
         };
 
         // Create one storage per layer
@@ -1241,7 +1240,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: 1,
-            dtype: DTYPE,
+            dtype_width_bytes: 2,
         };
 
         // Create wrong number of storages (should be NUM_LAYERS, but provide NUM_LAYERS - 1)
@@ -1418,7 +1417,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: ALIGNMENT,
-            dtype: DTYPE,
+            dtype_width_bytes: 2,
         };
 
         // Create storages with sufficient size
@@ -1517,7 +1516,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: 1,
-            dtype: DTYPE,
+            dtype_width_bytes: 2,
         };
 
         LayerSeparate::allocate(config, &NullDeviceAllocator, true)
@@ -1533,7 +1532,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: 1,
-            dtype: DTYPE,
+            dtype_width_bytes: 2,
         };
 
         let exact_size =
