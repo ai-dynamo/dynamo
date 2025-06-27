@@ -23,12 +23,13 @@ use crate::protocols::TokenIdType;
 /// crate is responsible for converting request from the public APIs to this internal representation.
 #[derive(Serialize, Deserialize, Debug, Clone, Builder)]
 pub struct PreprocessedRequest {
-    /// Type of prompt
-    pub token_ids: Vec<TokenIdType>,
+    /// Token IDs representing a batch of sequences for the LLM request.
+    /// Each inner `Vec<TokenIdType>` represents a single sequence.
+    /// A single 1D sequence (e.g., `[1,2,3]`) will now be wrapped as `[[1,2,3]]` to
+    /// ensure a consistent `Vec<Vec<TokenIdType>>` structure.
+    #[builder(default)] // Keep default, an empty Vec<Vec<TokenIdType>> is a valid default state
+    pub token_ids: Vec<Vec<TokenIdType>>,
 
-    /// Batch Token Ids = for batch completion requests (i.e using ArrayOfIntegerArray type from OpenAI /completions)
-    #[builder(default)]
-    pub batch_token_ids: Option<Vec<Vec<TokenIdType>>>,
 
     /// StopConditions are conditions that the inference engine will use to stop generation.
     pub stop_conditions: StopConditions,

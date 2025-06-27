@@ -206,11 +206,14 @@ fn run_request(
     work_request: WorkRequest,
     llama_context: &mut ContextWrapper,
 ) -> Result<()> {
-    let tokens_list: Vec<LlamaToken> = work_request
+    let tokens_to_process = work_request
         .request
         .token_ids
-        .into_iter()
-        .map(|u| LlamaToken::new(u as i32))
+        .first()
+        .unwrap();
+    let tokens_list: Vec<LlamaToken> = tokens_to_process
+        .iter()
+        .map(|&u| LlamaToken::new(u as i32))
         .collect();
 
     let limit = DEFAULT_MAX_TOKENS; // - prompt_tokens;
