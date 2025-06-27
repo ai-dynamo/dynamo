@@ -29,7 +29,7 @@ Processor:
 
 Router:
   min-workers: 1
-  softmax_sample: true
+  softmax-sample: true
   common-configs: [model, block-size, router]
 
 VllmWorker:

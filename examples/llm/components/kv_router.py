@@ -100,8 +100,7 @@ def parse_args(service_name, prefix) -> Namespace:
     )
     parser.add_argument(
         "--softmax-sample",
-        type=bool,
-        default=False,
+        action="store_true",
         help="Whether to do softmax sampling based on worker logits (default is to pick smallest)",
     )
     config = ServiceConfig.get_instance()
