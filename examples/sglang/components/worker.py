@@ -31,12 +31,13 @@ import socket
 from typing import Dict, Union
 
 import sglang as sgl
+import zmq
 from components.decode_worker import SGLangDecodeWorker
-from sglang.srt.utils import get_ip
+from sglang.srt.utils import get_ip, get_zmq_socket
 from utils.protocol import DisaggPreprocessedRequest, PreprocessedRequest
 from utils.sglang import parse_sglang_args
 
-from dynamo.llm import ModelType, register_llm
+from dynamo.llm import ModelType, WorkerMetricsPublisher, register_llm
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
@@ -56,11 +57,17 @@ class SGLangWorker:
         class_name = self.__class__.__name__
         self.engine_args = parse_sglang_args(class_name, "")
         self.engine = sgl.Engine(server_args=self.engine_args)
+        self.metrics_publisher = WorkerMetricsPublisher()
 
         logger.info("SGLangWorker initialized")
 
     @async_on_start
     async def async_init(self):
+        context = zmq.asyncio.Context()
+        self.receive_metrics_from_scheduler = get_zmq_socket(
+            context, zmq.PULL, self.engine.port_args.metrics_ipc_name, True
+        )
+        asyncio.create_task(self._receive_and_publish_metrics_loop())
         runtime = dynamo_context["runtime"]
         logger.info("Registering LLM for discovery")
         comp_ns, comp_name = SGLangWorker.dynamo_address()  # type: ignore
@@ -80,6 +87,24 @@ class SGLangWorker:
                 .endpoint("generate")
                 .client()
             )
+
+    async def _receive_and_publish_metrics_loop(self):
+        while True:
+            try:
+                kv_metrics = await self.receive_metrics_from_scheduler.recv_pyobj()
+                self.metrics_publisher.publish(
+                    kv_metrics.request_active_slots,
+                    kv_metrics.request_total_slots,
+                    kv_metrics.kv_active_blocks,
+                    kv_metrics.kv_total_blocks,
+                    kv_metrics.num_requests_waiting,
+                    kv_metrics.gpu_cache_usage_perc,
+                    kv_metrics.gpu_prefix_cache_hit_rate,
+                    kv_metrics.data_parallel_rank,
+                )
+
+            except Exception:
+                logger.exception("Failed to receive or publish metrics")
 
     def _get_bootstrap_info(self):
         """
