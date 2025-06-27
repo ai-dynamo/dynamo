@@ -334,6 +334,7 @@ def run_chunked_requests(
             "model": "deepseek-ai/DeepSeek-R1",
             "prompt": [req.prompt for req in chunk],
             "stream": True,
+            "max_tokens": output_len,
         }
 
         response = requests.post(
