@@ -95,14 +95,13 @@ dynamo:
   enableRestrictedSecurityContext: false
 
   dockerRegistry:
-    server: 'nvcr.io/nvidian/nim-llm-dev'
+    server: ''
     # set to true if you want to use the kubernetes secret for the registry credentials
     # if false, no secret will be created and used. Allows to use cloud provider mechanisms for authentication (e.g. Workload Identity for GKE, ...)
     useKubernetesSecret: false
     username: '$oauthtoken'
     password: ""
-    passwordExistingSecretName: ''
-    passwordExistingSecretKey: ''
+    existingSecretName: ''
     secure: true
     dynamoComponentsRepositoryName: dynamo-pipelines
 

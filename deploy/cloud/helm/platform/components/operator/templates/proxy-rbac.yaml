@@ -21,7 +21,7 @@ kind: ClusterRole
 metadata:
   name: {{ include "dynamo-operator.fullname" . }}-proxy-role
   {{- if .Values.namespaceRestriction.enabled }}
-  namespace: {{ .Values.namespaceRestriction.targetNamespace }}
+  namespace: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace }}
   {{- end }}
   labels:
     app.kubernetes.io/component: kube-rbac-proxy
@@ -51,7 +51,7 @@ kind: ClusterRoleBinding
 metadata:
   name: {{ include "dynamo-operator.fullname" . }}-proxy-rolebinding
   {{- if .Values.namespaceRestriction.enabled }}
-  namespace: {{ .Values.namespaceRestriction.targetNamespace }}
+  namespace: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace }}
   {{- end }}
   labels:
     app.kubernetes.io/component: kube-rbac-proxy

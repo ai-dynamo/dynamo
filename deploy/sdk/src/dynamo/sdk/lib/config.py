@@ -102,12 +102,28 @@ class ServiceConfig(dict):
             # Strip prefix if needed
             arg_key = key[len(prefix) :] if prefix and key.startswith(prefix) else key
 
+            # vLLM arguments that default to True and need explicit false handling
+            # Based on https://github.com/vllm-project/vllm/blob/v0.9.1/vllm/config.py
+            vllm_true_defaults = {
+                "enable_prefix_caching": "no-enable-prefix-caching",
+                "use_tqdm_on_load": "no-use-tqdm-on-load",
+                "multi_step_stream_outputs": "no-multi-step-stream-outputs",
+            }
+
+            # Normalize key for comparison (replace hyphens with underscores)
+            normalized_key = arg_key.replace("-", "_")
+
             # Convert to CLI format
             if isinstance(value, bool):
                 if value:
-                    args.extend([f"--{arg_key}", "true"])
+                    # Always output true values as flags
+                    args.append(f"--{arg_key}")
                 else:
-                    args.extend([f"--{arg_key}", "false"])
+                    # For false values, check if this is a vLLM arg that defaults to True
+                    if normalized_key in vllm_true_defaults:
+                        # Use negative flag if available
+                        args.append(f"--{vllm_true_defaults[normalized_key]}")
+                    # For other false values, omit entirely (standard action="store_true" behavior)
             elif isinstance(value, dict):
                 args.extend([f"--{arg_key}", json.dumps(value)])
             else:

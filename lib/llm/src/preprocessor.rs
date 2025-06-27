@@ -46,7 +46,7 @@ use crate::protocols::{
     common::{SamplingOptionsProvider, StopConditionsProvider},
     openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-        completions::{CompletionResponse, NvCreateCompletionRequest},
+        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         nvext::NvExtProvider,
         DeltaGeneratorExt,
     },
@@ -433,7 +433,7 @@ impl
 impl
     Operator<
         SingleIn<NvCreateCompletionRequest>,
-        ManyOut<Annotated<CompletionResponse>>,
+        ManyOut<Annotated<NvCreateCompletionResponse>>,
         SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<BackendOutput>>,
     > for OpenAIPreprocessor
@@ -448,7 +448,7 @@ impl
                 Error,
             >,
         >,
-    ) -> Result<ManyOut<Annotated<CompletionResponse>>, Error> {
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         // unpack the request
         let (request, context) = request.into_parts();
 
@@ -465,7 +465,7 @@ impl
         let common_request = context.map(|_| common_request);
 
         // create a stream of annotations this will be prepend to the response stream
-        let annotations: Vec<Annotated<CompletionResponse>> = annotations
+        let annotations: Vec<Annotated<NvCreateCompletionResponse>> = annotations
             .into_iter()
             .flat_map(|(k, v)| Annotated::from_annotation(k, &v))
             .collect();
