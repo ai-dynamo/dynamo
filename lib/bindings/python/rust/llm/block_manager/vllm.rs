@@ -434,13 +434,13 @@ impl<R: RequestKey> SlotManager<R> {
         if let Some(slot) = self.slots.get_mut(request_id) {
             slot.free_blocks();
         } else {
-            tracing::warn!(request_id, "request id {} not found in the slot manager", request_id);
+            tracing::debug!(request_id, "request id {} not found in the slot manager", request_id);
         }
     }
 
     pub fn drop_slot(&mut self, request_id: &R) {
         if self.slots.remove(request_id).is_none() {
-            tracing::warn!(request_id, "request id {} not found in the slot manager during drop", request_id);
+            tracing::debug!(request_id, "request id {} not found in the slot manager during drop", request_id);
         }
     }
 }
