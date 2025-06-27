@@ -73,7 +73,10 @@ dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
 
 #### Disaggregated
 
-SGLang uses a mini load balancer to route requests to handle disaggregated serving. The load balancer functions as follows
+<details>
+<summary>SGLang Load Balancer vs Dynamo Discovery</summary>
+
+SGLang uses a mini load balancer to route requests to handle disaggregated serving. The load balancer functions as follows:
 
 1. The load balancer receives a request from the client
 2. A random `(prefill, decode)` pair is selected from the pool of available workers
@@ -81,6 +84,8 @@ SGLang uses a mini load balancer to route requests to handle disaggregated servi
 4. Internally disaggregation is done from prefill -> decode
 
 Because Dynamo has a discovery mechanism, we do not use a load balancer. Instead, we first route to a random prefill worker, select a random decode worker, and then send the request to both. Internally, SGLang's bootstrap server (which is a part of the `tokenizer_manager`) is used in conjuction with NIXL to handle the kv transfer.
+
+</details>
 
 > [!IMPORTANT]
 > Disaggregated serving in SGLang currently requires each worker to have the same tensor parallel size [unless you are using an MLA based model](https://github.com/sgl-project/sglang/pull/5922)
@@ -98,6 +103,28 @@ SGLang also supports DP attention for MoE models. We provide an example config f
 # note this will require 4 GPUs
 cd /workspace/examples/sglang
 dynamo serve graphs.disagg:Frontend -f ./configs/disagg-dp-attention.yaml
+```
+
+In order to scale to the full DeepSeek-R1 model, you will need to make a couple changes to the `disagg-dp-attention.yaml` file. At minimum you will need 2 H100 nodes for prefill and 2 H100 nodes for decode.
+
+```yaml
+SGLangWorker:
+  ...
+  dist-init-addr: HEAD_PREFILL_NODE_IP:29500
+  nnodes: 2
+  node-rank: 0 # change this to 1 for the second node
+  tp-size: 16
+  dp-size: 16
+  ...
+
+SGLangDecodeWorker:
+  ...
+  dist-init-addr: HEAD_DECODE_NODE_IP:29500
+  nnodes: 2
+  node-rank: 0 # change this to 1 for the second node
+  tp-size: 16
+  dp-size: 16
+  ...
 ```
 
 ##### Disaggregated with WideEP
