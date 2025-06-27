@@ -460,6 +460,8 @@ def test_hash_block_correct_reuse():
 
     # Deallocate the block.
     manager.free(req)
+    # Note(oandreeva): need to fix this in the kvbm core to not depend on time.sleep()
+    time.sleep(2)
 
     # Allocate new blocks, last one is partial not full, make sure hash info on the
     # blocks are cleared.
@@ -528,6 +530,8 @@ def test_computed_blocks_not_evicted():
     # Free the blocks.
     manager.free(req0)
     manager.free(req1)
+    # Note(oandreeva): need to fix this in the kvbm core to not depend on time.sleep()
+    time.sleep(2)
 
     # Now if we have a cache hit on the block_id 0, we should evict the block_id 1
     # cached block rather than the first one.
