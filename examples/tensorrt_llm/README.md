@@ -110,7 +110,7 @@ dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
 #### Aggregated serving with KV Routing
 ```bash
 cd /workspace/examples/tensorrt_llm
-dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
+dynamo serve graphs.agg:Frontend -f ./configs/agg_router.yaml
 ```
 
 #### Disaggregated serving
@@ -122,7 +122,7 @@ dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
 #### Disaggregated serving with KV Routing
 ```bash
 cd /workspace/examples/tensorrt_llm
-dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
+dynamo serve graphs.disagg:Frontend -f ./configs/disagg_router.yaml
 ```
 
 #### Aggregated serving with Multi-Token Prediction (MTP) and DeepSeek R1

@@ -12,9 +12,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+tensor_parallel_size: 1
+moe_expert_parallel_size: 1
+enable_attention_dp: false
+max_num_tokens: 8192
+max_batch_size: 16
+trust_remote_code: true
+backend: pytorch
+enable_chunked_prefill: true
+# Overlap scheduler not currently supported in prefill only workers.
+disable_overlap_scheduler: true
+use_cuda_graph: false
 
-from components.frontend import Frontend
-from components.prefill_worker import TensorRTLLMPrefillWorker
-from components.worker import TensorRTLLMWorker
-
-Frontend.link(TensorRTLLMWorker).link(TensorRTLLMPrefillWorker)
+kv_cache_config:
+  free_gpu_memory_fraction: 0.95
