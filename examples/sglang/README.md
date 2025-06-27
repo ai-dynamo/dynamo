@@ -263,7 +263,7 @@ Example usage:
 ./utils/bench.sh HEAD_PREFILL_NODE_IP --type e2e
 ```
 
-1. **GenAI Perf to benchmark completions with custom dataset**
+2. **GenAI Perf to benchmark completions with custom dataset**
 We provide a script that generates a JSONL file of the ShareGPT dataset and then use GenAI Perf to benchmark the prefill and decode workers. We use ShareGPT in order to leverage the pre-existing EPLB distributions provided by the SGLang team. If you don't want to use ShareGPT - you can also use GenAIPerf's synthetic dataset setup But note you will have to use dynamic EPLB configurations or record your own as the `init-expert-location` provided by SGLang is tuned specifically for the ShareGPT dataset at a 4096 ISL and 5 OSL.
 
 Example usage:
@@ -274,7 +274,7 @@ python3 utils/generate_bench_data.py --output data.jsonl --num-prompts 8192 --in
 ./utils/bench.sh HEAD_PREFILL_NODE_IP --type custom_completions
 ```
 
-2. **Modified sglang `bench_one_batch_server.py` for single batch inference**
+3. **Modified sglang `bench_one_batch_server.py` for single batch inference**
 We also provide an **experimental** modified version of the `bench_one_batch_server.py` script that can be used to benchmark the prefill and decode workers. This script is modified to handle the maximum NATS message size limit and to chunk the batch into smaller requests. This script is a work in progress and will be updated over time to better support batch inference as we build out this capability in dynamo.
 
 Example usage:
