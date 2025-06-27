@@ -150,16 +150,12 @@ RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/downlo
     rm /tmp/etcd.tar.gz
 ENV PATH=/usr/local/bin/etcd/:$PATH
 
-COPY examples/sglang/configs/deepseek-r1-wideep/* /sgl-workspace/dynamo/examples/sglang/configs/
-COPY examples/sglang/utils/deepseek-r1-wideep/* /sgl-workspace/dynamo/examples/sglang/utils/
-
-# Install perf_analyzer and genai-perf from source
+# Install perf_analyzer and genai-perf
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
     rapidjson-dev \
     zlib1g-dev
 
-# Build perf_analyzer from source
 RUN git clone --depth=1 https://github.com/triton-inference-server/perf_analyzer.git && \
     mkdir perf_analyzer/build && \
     cmake -B perf_analyzer/build -S perf_analyzer && \
@@ -168,6 +164,9 @@ RUN git clone --depth=1 https://github.com/triton-inference-server/perf_analyzer
 ENV PATH=/sgl-workspace/perf_analyzer/build/perf_analyzer/src/perf-analyzer-build:$PATH
 
 RUN pip install --break-system-packages genai-perf
+
+COPY examples/sglang/configs/deepseek-r1-wideep/* /sgl-workspace/dynamo/examples/sglang/configs/
+COPY examples/sglang/utils/deepseek-r1-wideep/* /sgl-workspace/dynamo/examples/sglang/utils/
 
 WORKDIR /sgl-workspace/dynamo/examples/sglang
 
