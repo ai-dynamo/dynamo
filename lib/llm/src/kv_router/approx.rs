@@ -458,7 +458,6 @@ mod tests {
 
         let tokens: Vec<u32> = vec![1, 2, 3, 4]; // Exactly one KV block
         let worker_id: WorkerId = 0;
-        let lora_id: u64 = 42;
 
         // 1. Before routing decision there should be no matches
         let pre_scores = indexer
@@ -469,7 +468,7 @@ mod tests {
 
         // 2. Inform indexer about routing decision
         indexer
-            .process_routing_decision_for_request(&tokens, lora_id, worker_id)
+            .process_routing_decision_for_request(&tokens, worker_id)
             .await
             .unwrap();
 
@@ -498,7 +497,7 @@ mod tests {
         let worker_id: WorkerId = 7;
 
         indexer
-            .process_routing_decision_for_request(&tokens, 0, worker_id)
+            .process_routing_decision_for_request(&tokens, worker_id)
             .await
             .unwrap();
 
@@ -535,11 +534,11 @@ mod tests {
 
         // Register on both workers
         indexer
-            .process_routing_decision_for_request(&tokens, 0, worker_0)
+            .process_routing_decision_for_request(&tokens, worker_0)
             .await
             .unwrap();
         indexer
-            .process_routing_decision_for_request(&tokens, 0, worker_1)
+            .process_routing_decision_for_request(&tokens, worker_1)
             .await
             .unwrap();
 
@@ -577,7 +576,7 @@ mod tests {
 
         // Register Sequence A on worker A
         indexer
-            .process_routing_decision_for_request(&seq_a, 0, worker_a)
+            .process_routing_decision_for_request(&seq_a, worker_a)
             .await
             .unwrap();
 
@@ -613,11 +612,11 @@ mod tests {
 
         // Register the same sequence on two different workers
         indexer
-            .process_routing_decision_for_request(&tokens, 0, worker_0)
+            .process_routing_decision_for_request(&tokens, worker_0)
             .await
             .unwrap();
         indexer
-            .process_routing_decision_for_request(&tokens, 0, worker_1)
+            .process_routing_decision_for_request(&tokens, worker_1)
             .await
             .unwrap();
 
