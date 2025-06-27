@@ -242,8 +242,9 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         match self.inner.client.instance_source.as_ref() {
             InstanceSource::Static => self.inner.r#static(request).await,
             InstanceSource::Dynamic(_) => {
+                let tokens_for_lookup = request.token_ids.first().unwrap();
                 let (instance_id, overlap_amount) =
-                    self.chooser.find_best_match(&request.token_ids).await?;
+                    self.chooser.find_best_match(tokens_for_lookup).await?;
                 // Update the request with the estimated prefix hit blocks
                 let (mut backend_input, context) = request.into_parts();
                 backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);

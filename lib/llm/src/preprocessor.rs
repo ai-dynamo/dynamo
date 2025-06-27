@@ -166,15 +166,10 @@ impl OpenAIPreprocessor {
                 if let Some(token_input) = request.extract_tokens() {
                     match token_input {
                         TokenInput::Single(tokens) => {
-                            builder.token_ids(tokens);
+                            builder.token_ids(vec![tokens]);
                         }
                         TokenInput::Batch(token_batches) => {
-                            if token_batches.len() == 1 {
-                                builder.token_ids(token_batches[0].clone());
-                            } else {
-                                builder.batch_token_ids(Some(token_batches));
-                                builder.token_ids(vec![]);
-                            }
+                            builder.token_ids(token_batches);
                         }
                     }
                 }
@@ -217,7 +212,7 @@ impl OpenAIPreprocessor {
                                 );
                             }
 
-                            builder.token_ids(encoding.token_ids);
+                            builder.token_ids(vec![encoding.token_ids]);
                         }
                         TextInput::Batch(texts) => {
                             let mut token_batches = Vec::new();
@@ -227,8 +222,7 @@ impl OpenAIPreprocessor {
                                     tokio::task::block_in_place(|| self.tokenizer.encode(&text))?;
                                 token_batches.push(encoding.token_ids);
                             }
-                            builder.batch_token_ids(Some(token_batches));
-                            builder.token_ids(vec![]);
+                            builder.token_ids(token_batches);
                         }
                     }
                 }
