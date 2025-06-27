@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
     dynamo={
         "namespace": "dynamo",
     },
-    resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
+    resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
 )
 class TensorRTLLMWorker(BaseTensorrtLLMEngine):

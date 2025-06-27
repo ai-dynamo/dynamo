@@ -25,4 +25,4 @@ disable_overlap_scheduler: true
 use_cuda_graph: false
 
 kv_cache_config:
-  free_gpu_memory_fraction: 0.95
+  free_gpu_memory_fraction: 0.50
