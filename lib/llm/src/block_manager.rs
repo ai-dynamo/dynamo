@@ -33,7 +33,7 @@ pub mod storage;
 
 pub use crate::common::dtype::DType;
 pub use block::{
-    locality::{self, LocalityProvider},
+    locality::{self, LocalityProvider, LogicalResources},
     nixl::{
         AsBlockDescriptorSet, BlockDescriptorList, IsImmutable, IsMutable, MutabilityKind,
         RemoteBlock,
@@ -67,7 +67,7 @@ use validator::Validate;
 
 pub type WorkerID = u64;
 
-pub type ReferenceBlockManager = KvBlockManager<BasicMetadata>;
+pub type ReferenceBlockManager = KvBlockManager<locality::Local, BasicMetadata>;
 
 /// Represents the different cache levels for KV blocks
 #[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
@@ -103,44 +103,77 @@ impl Drop for CancelOnLastDrop {
 //    for each layout type.
 // 5. initialize the pools for each set of blocks
 #[derive(Clone)]
-pub struct KvBlockManager<Metadata: BlockMetadata> {
-    state: Arc<state::KvBlockManagerState<locality::Local, Metadata>>,
+pub struct KvBlockManager<Locality: LocalityProvider, Metadata: BlockMetadata> {
+    state: Arc<state::KvBlockManagerState<Locality, Metadata>>,
     _cancellation_token: Arc<CancelOnLastDrop>,
     block_size: usize,
 }
 
-impl<Metadata: BlockMetadata> KvBlockManager<Metadata> {
+impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManager<Locality, Metadata> {
+    /// Get the block size
+    pub fn block_size(&self) -> usize {
+        self.block_size
+    }
+
+    /// Get a reference to the disk block pool
+    pub fn disk(&self) -> Option<&BlockPool<DiskStorage, Locality, Metadata>> {
+        self.state.disk()
+    }
+
+    /// Get a reference to the host block pool
+    pub fn host(&self) -> Option<&BlockPool<PinnedStorage, Locality, Metadata>> {
+        self.state.host()
+    }
+
+    /// Get a reference to the device block pool
+    pub fn device(&self) -> Option<&BlockPool<DeviceStorage, Locality, Metadata>> {
+        self.state.device()
+    }
+
+    /// Get the worker ID
+    pub fn worker_id(&self) -> WorkerID {
+        self.state.worker_id()
+    }
+
+    /// Onboard a set of blocks to the device pool
+    pub async fn onboard_blocks<S: Storage>(
+        &self,
+        blocks: Vec<ImmutableBlock<S, Locality, Metadata>>,
+    ) -> BlockResult<DeviceStorage, Locality, Metadata> {
+        self.state.onboard_blocks(blocks).await
+    }
+}
+
+fn build_cancel_token(config: &mut KvBlockManagerConfig) -> Arc<CancelOnLastDrop> {
+    // The frontend of the KvBlockManager will take ownership of the cancellation token
+    // and will be responsible for cancelling the task when the KvBlockManager is dropped
+    let cancellation_token = config.runtime.cancellation_token.clone();
+
+    // The internal state will use a child token of the original token
+    config.runtime.cancellation_token = cancellation_token.child_token();
+
+    Arc::new(CancelOnLastDrop { cancellation_token })
+}
+
+impl<Metadata: BlockMetadata> KvBlockManager<locality::Local, Metadata> {
     /// Create a new [KvBlockManager]
     ///
     /// The returned object is a frontend to the [KvBlockManager] which owns the cancellation
     /// tokens. When this object gets drop, the cancellation token will be cancelled and begin
     /// the gracefully shutdown of the block managers internal state.
-    pub async fn new(config: KvBlockManagerConfig) -> Result<Self> {
-        let mut config = config;
-
-        // The frontend of the KvBlockManager will take ownership of the cancellation token
-        // and will be responsible for cancelling the task when the KvBlockManager is dropped
-        let cancellation_token = config.runtime.cancellation_token.clone();
-
-        // The internal state will use a child token of the original token
-        config.runtime.cancellation_token = cancellation_token.child_token();
+    pub async fn new(mut config: KvBlockManagerConfig) -> Result<Self> {
+        let _cancellation_token = build_cancel_token(&mut config);
 
         let block_size = config.model.page_size;
 
         // Create the internal state
         let state = state::KvBlockManagerState::<locality::Local, Metadata>::new(config).await?;
 
-        let _cancellation_token = Arc::new(CancelOnLastDrop { cancellation_token });
-
         Ok(Self {
             state,
             _cancellation_token,
             block_size,
         })
-    }
-
-    pub fn block_size(&self) -> usize {
-        self.block_size
     }
 
     /// Exports the local blockset configuration as a serialized object.
@@ -171,32 +204,25 @@ impl<Metadata: BlockMetadata> KvBlockManager<Metadata> {
     ) -> Result<Vec<RemoteBlock<IsMutable>>> {
         self.state.get_remote_blocks_mutable(bds)
     }
+}
 
-    /// Get a reference to the disk block pool
-    pub fn disk(&self) -> Option<&BlockPool<DiskStorage, locality::Local, Metadata>> {
-        self.state.disk()
-    }
+impl<R: LogicalResources, Metadata: BlockMetadata> KvBlockManager<locality::Logical<R>, Metadata> {
+    pub async fn new(mut config: KvBlockManagerConfig, logical_resources: R) -> Result<Self> {
+        let block_size = config.model.page_size;
 
-    /// Get a reference to the host block pool
-    pub fn host(&self) -> Option<&BlockPool<PinnedStorage, locality::Local, Metadata>> {
-        self.state.host()
-    }
+        let _cancellation_token = build_cancel_token(&mut config);
 
-    /// Get a reference to the device block pool
-    pub fn device(&self) -> Option<&BlockPool<DeviceStorage, locality::Local, Metadata>> {
-        self.state.device()
-    }
+        let state = state::KvBlockManagerState::<locality::Logical<R>, Metadata>::new(
+            config,
+            logical_resources,
+        )
+        .await?;
 
-    /// Get the worker ID
-    pub fn worker_id(&self) -> WorkerID {
-        self.state.worker_id()
-    }
-
-    pub async fn onboard_blocks<S: Storage>(
-        &self,
-        blocks: Vec<ImmutableBlock<S, locality::Local, Metadata>>,
-    ) -> BlockResult<DeviceStorage, locality::Local, Metadata> {
-        self.state.onboard_blocks(blocks).await
+        Ok(Self {
+            state,
+            _cancellation_token,
+            block_size,
+        })
     }
 }
 

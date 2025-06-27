@@ -20,11 +20,11 @@ mod tests {
     use crate::block_manager::block::BasicMetadata;
     use crate::block_manager::config::*;
     use crate::block_manager::locality::Logical;
-    use crate::block_manager::state::KvBlockManagerState;
     use crate::block_manager::storage::{
         torch::{TorchDevice, TorchTensor},
         DeviceAllocator, Storage, StorageAllocator,
     };
+    use crate::block_manager::KvBlockManager;
 
     use anyhow::Result;
     use rstest::*;
@@ -204,14 +204,14 @@ mod tests {
 
         let resources = DistributedLeaderWorkerResources::new(leader, cancel_token.child_token())?;
 
-        let state =
-            KvBlockManagerState::<Logical<DistributedLeaderWorkerResources>, BasicMetadata>::new(
-                config, resources,
-            )
-            .await
-            .unwrap();
+        let block_manager = KvBlockManager::<
+            Logical<DistributedLeaderWorkerResources>,
+            BasicMetadata,
+        >::new(config, resources)
+        .await
+        .unwrap();
 
-        let host_pool = state.host().unwrap();
+        let host_pool = block_manager.host().unwrap();
 
         let host_blocks = host_pool
             .allocate_blocks(4)
@@ -233,7 +233,7 @@ mod tests {
 
         let immutable_host_blocks = host_pool.register_blocks(host_blocks).await?;
 
-        let _ = state.onboard_blocks(immutable_host_blocks).await?;
+        let _ = block_manager.onboard_blocks(immutable_host_blocks).await?;
 
         Ok(())
     }
