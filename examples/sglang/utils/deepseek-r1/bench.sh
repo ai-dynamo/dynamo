@@ -73,7 +73,7 @@ if [[ "$TYPE" == "e2e" ]]; then
             --extra-inputs ignore_eos:true \
             --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
             --concurrency ${concurrency} \
-            --request-count $(($concurrency)) \
+            --request-count $(($concurrency*10)) \
             --num-dataset-entries $(($concurrency*12)) \
             --random-seed 100 \
             --artifact-dir ${ARTIFACT_DIR} \
