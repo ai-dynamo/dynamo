@@ -36,7 +36,7 @@ export IMAGE_TAG=<TAG>
 
 As a description of the placeholders:
 - `<CONTAINER_REGISTRY>`: Your container registry (e.g., `nvcr.io`, `docker.io/<your-username>`, etc.)
-- `<TAG>`: The tag you want to use for the image (e.g., `latest`, `0.0.1`, etc.)
+- `<TAG>`: The tag you want to use for the images of the Dynamo cloud components (e.g., `latest`, `0.0.1`, etc.)
 
 Note: Make sure you're logged in to your container registry before pushing images. For example:
 ```bash
