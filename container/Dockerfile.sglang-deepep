@@ -150,8 +150,8 @@ RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/downlo
     rm /tmp/etcd.tar.gz
 ENV PATH=/usr/local/bin/etcd/:$PATH
 
-COPY examples/sglang/configs/deepseek-r1/* /sgl-workspace/dynamo/examples/sglang/configs/
-COPY examples/sglang/utils/deepseek-r1/* /sgl-workspace/dynamo/examples/sglang/utils/
+COPY examples/sglang/configs/deepseek-r1-wideep/* /sgl-workspace/dynamo/examples/sglang/configs/
+COPY examples/sglang/utils/deepseek-r1-wideep/* /sgl-workspace/dynamo/examples/sglang/utils/
 
 # Install perf_analyzer and genai-perf from source
 RUN apt-get update -y && \

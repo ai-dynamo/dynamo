@@ -105,31 +105,11 @@ cd /workspace/examples/sglang
 dynamo serve graphs.disagg:Frontend -f ./configs/disagg-dp-attention.yaml
 ```
 
-In order to scale to the full DeepSeek-R1 model, you will need to make a couple changes to the `disagg-dp-attention.yaml` file. At minimum you will need 2 H100 nodes for prefill and 2 H100 nodes for decode.
-
-```yaml
-SGLangWorker:
-  ...
-  dist-init-addr: HEAD_PREFILL_NODE_IP:29500
-  nnodes: 2
-  node-rank: 0 # change this to 1 for the second node
-  tp-size: 16
-  dp-size: 16
-  ...
-
-SGLangDecodeWorker:
-  ...
-  dist-init-addr: HEAD_DECODE_NODE_IP:29500
-  nnodes: 2
-  node-rank: 0 # change this to 1 for the second node
-  tp-size: 16
-  dp-size: 16
-  ...
-```
+In order to scale to the full DeepSeek-R1 model, you can follow the instructions in the [multinode-examples.md](./multinode-examples.md) file.
 
 ##### Disaggregated with WideEP
 
-Dynamo supports SGLang's implementation of wide expert parallelism and large scale P/D for DeepSeek-R1! You can read their blog post [here](https://www.nvidia.com/en-us/technologies/ai/deepseek-r1-large-scale-p-d-with-wide-expert-parallelism/) for more details. We provide a Dockerfile for this in `container/Dockerfile.sglang-deepep` and configurations to deploy this at scale. In this example, we will run 1 prefill worker on 2 H100 nodes and 1 decode worker on 4 H100 nodes (48 total GPUs). You can easily scale this to 96 GPUs or more by simply changing the configuration files.
+Dynamo supports SGLang's implementation of wide expert parallelism and large scale P/D for DeepSeek-R1! You can read their blog post [here](https://www.nvidia.com/en-us/technologies/ai/deepseek-r1-large-scale-p-d-with-wide-expert-parallelism/) for more details. We provide a Dockerfile for this in `container/Dockerfile.sglang-deepep` and configurations to deploy this at scale. In this example, we will run 1 prefill worker on 4 H100 nodes and 1 decode worker on 9 H100 nodes (104 total GPUs). 
 
 Steps to run:
 
