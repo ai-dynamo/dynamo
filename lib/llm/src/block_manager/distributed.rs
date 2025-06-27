@@ -184,7 +184,7 @@ mod tests {
                 KvManagerModelConfig::builder()
                     .num_layers(1)
                     .outer_dim(1)
-                    .page_size(1)
+                    .page_size(BLOCK_SIZE)
                     .inner_dim(1)
                     .build()?,
             )

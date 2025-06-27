@@ -46,6 +46,7 @@ impl<S: Storage, R: LogicalResources> BlockFactory<S, Logical<R>> for LogicalBlo
             self.worker_id,
             self.resources.clone(),
             self.storage_type,
+            self.layout_config.page_size,
         );
         Ok(data)
     }

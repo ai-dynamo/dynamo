@@ -45,6 +45,7 @@ pub struct LogicalBlockData<S: Storage, R: LogicalResources> {
     resources: Arc<R>,
     storage_type: StorageType,
     storage: std::marker::PhantomData<S>,
+    page_size: usize,
 }
 
 impl<S: Storage, R: LogicalResources> LogicalBlockData<S, R> {
@@ -54,6 +55,7 @@ impl<S: Storage, R: LogicalResources> LogicalBlockData<S, R> {
         worker_id: WorkerID,
         resources: Arc<R>,
         storage_type: StorageType,
+        page_size: usize,
     ) -> Self {
         Self {
             block_id,
@@ -62,6 +64,7 @@ impl<S: Storage, R: LogicalResources> LogicalBlockData<S, R> {
             resources,
             storage_type,
             storage: std::marker::PhantomData,
+            page_size,
         }
     }
 
@@ -95,8 +98,9 @@ impl<S: Storage, R: LogicalResources> BlockDataExt<S> for LogicalBlockData<S, R>
         unimplemented!()
     }
 
+    /// Even though the block is logical, we still need to know this for the token block stuff.
     fn page_size(&self) -> usize {
-        4
+        self.page_size
     }
 
     fn num_outer_dims(&self) -> usize {
