@@ -54,6 +54,7 @@ Prometheus:
         - targets: ['localhost:8000']
 
 Planner:
+  backend: "vllm_v1"
   adjustment-interval: 180
   profile-results-dir: "/workspace/examples/profiling_results"
   isl: 3000
