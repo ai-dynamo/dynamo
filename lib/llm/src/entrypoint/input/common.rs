@@ -92,11 +92,11 @@ pub async fn prepare_engine(
             tracing::debug!("Model: {service_name} with engine pre-processing");
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             Ok(PreparedEngine {
-                card: Some(model.card().clone()), // TODO: take it don't clone
                 service_name,
                 engine,
                 inspect_template: false,
                 request_template: model.request_template(),
+                card: Some(model.into_card()),
             })
         }
         EngineConfig::StaticCore {
@@ -112,11 +112,11 @@ pub async fn prepare_engine(
             let service_name = model.service_name().to_string();
             tracing::debug!("Model: {service_name} with Dynamo pre-processing");
             Ok(PreparedEngine {
-                card: Some(model.card().clone()), // TODO: take it don't clone
                 service_name,
                 engine: pipeline,
                 inspect_template: true,
                 request_template: model.request_template(),
+                card: Some(model.into_card()),
             })
         }
     }

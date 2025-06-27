@@ -9,6 +9,7 @@ use pyo3::types::{PyDict, PyList, PyString};
 use pyo3::IntoPyObjectExt;
 use pyo3::{exceptions::PyException, prelude::*};
 use rs::pipeline::network::Ingress;
+use std::path::PathBuf;
 use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -117,18 +118,14 @@ fn register_llm<'p>(
     let inner_path = model_path.to_string();
     let model_name = model_name.map(|n| n.to_string());
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        let mut builder = dynamo_llm::local_model::LocalModelBuilder::default();
+        builder
+            .model_path(Some(PathBuf::from(inner_path)))
+            .model_name(model_name)
+            .context_length(context_length)
+            .kv_cache_block_size(kv_cache_block_size);
         // Download from HF, load the ModelDeploymentCard
-        let mut local_model =
-            llm_rs::local_model::LocalModel::prepare(&inner_path, None, model_name)
-                .await
-                .map_err(to_pyerr)?;
-        if let Some(context_length) = context_length {
-            local_model.set_context_length(context_length);
-        }
-        if let Some(kv_cache_block_size) = kv_cache_block_size {
-            local_model.set_kv_cache_block_size(kv_cache_block_size);
-        }
-
+        let mut local_model = builder.build().await.map_err(to_pyerr)?;
         // Advertise ourself on etcd so ingress can find us
         local_model
             .attach(&endpoint.inner, model_type_obj)

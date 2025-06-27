@@ -42,7 +42,7 @@ pub struct LocalModelBuilder {
     model_config: Option<PathBuf>,
     endpoint_id: Option<EndpointId>,
     context_length: Option<usize>,
-    template: Option<RequestTemplate>,
+    template_file: Option<PathBuf>,
     router_config: Option<RouterConfig>,
     kv_cache_block_size: usize,
     http_port: u16,
@@ -58,7 +58,7 @@ impl Default for LocalModelBuilder {
             model_config: Default::default(),
             endpoint_id: Default::default(),
             context_length: Default::default(),
-            template: Default::default(),
+            template_file: Default::default(),
             router_config: Default::default(),
         }
     }
@@ -96,11 +96,6 @@ impl LocalModelBuilder {
         self
     }
 
-    pub fn template(&mut self, template: RequestTemplate) -> &mut Self {
-        self.template = Some(template);
-        self
-    }
-
     pub fn http_port(&mut self, port: u16) -> &mut Self {
         self.http_port = port;
         self
@@ -111,12 +106,9 @@ impl LocalModelBuilder {
         self
     }
 
-    /// This one returns Result
-    pub fn request_template(&mut self, template_file: Option<&Path>) -> anyhow::Result<&mut Self> {
-        if let Some(path) = template_file {
-            self.template = Some(RequestTemplate::load(path)?);
-        };
-        Ok(self)
+    pub fn request_template(&mut self, template_file: Option<PathBuf>) -> &mut Self {
+        self.template_file = template_file;
+        self
     }
 
     /// Make an LLM ready for use:
@@ -136,6 +128,11 @@ impl LocalModelBuilder {
             .endpoint_id
             .take()
             .unwrap_or_else(|| internal_endpoint("local_model"));
+        let template = self
+            .template_file
+            .as_deref()
+            .map(RequestTemplate::load)
+            .transpose()?;
 
         // echo_full engine doesn't need a path. It's an edge case, move it out of the way.
         if self.model_path.is_none() {
@@ -145,13 +142,13 @@ impl LocalModelBuilder {
                 ),
                 full_path: PathBuf::new(),
                 endpoint_id,
-                template: self.template.take(),
+                template,
                 http_port: self.http_port,
                 // We always have one. The Option is so we can take it.
                 router_config: self
                     .router_config
                     .take()
-                    .expect("unreachabled, RouterConfig missing"),
+                    .expect("unreachable, RouterConfig missing"),
             });
         }
 
@@ -204,12 +201,12 @@ impl LocalModelBuilder {
             card,
             full_path,
             endpoint_id,
-            template: self.template.take(),
+            template,
             http_port: self.http_port,
             router_config: self
                 .router_config
                 .take()
-                .expect("unreachabled, RouterConfig missing"),
+                .expect("unreachable, RouterConfig missing"),
         })
     }
 }
@@ -262,6 +259,12 @@ impl LocalModel {
     /// An endpoint to identify this model by.
     pub fn endpoint_id(&self) -> &EndpointId {
         &self.endpoint_id
+    }
+
+    /// Drop the LocalModel returning it's ModelDeploymentCard.
+    /// For the case where we only need the card and don't want to clone it.
+    pub fn into_card(self) -> ModelDeploymentCard {
+        self.card
     }
 
     /// Attach this model the endpoint. This registers it on the network

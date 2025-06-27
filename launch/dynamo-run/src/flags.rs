@@ -164,7 +164,7 @@ impl Flags {
         match out_opt {
             Output::Dynamic => {
                 if self.context_length.is_some() {
-                    anyhow::bail!("'--content-length' flag should only be used on the worker node, not on the ingress");
+                    anyhow::bail!("'--context-length' flag should only be used on the worker node, not on the ingress");
                 }
                 if self.kv_cache_block_size.is_some() {
                     anyhow::bail!("'--kv-cache-block-size' flag should only be used on the worker node, not on the ingress");

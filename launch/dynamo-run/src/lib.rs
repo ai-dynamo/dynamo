@@ -4,6 +4,7 @@
 use std::time::Duration;
 use std::{future::Future, pin::Pin};
 
+use anyhow::Context as _;
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::EngineConfig;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
@@ -42,12 +43,12 @@ pub async fn run(
         .context_length(flags.context_length)
         .http_port(flags.http_port)
         .router_config(flags.router_config())
-        .request_template(flags.request_template.as_deref())?;
+        .request_template(flags.request_template.clone());
 
     // If `in=dyn` we want the trtllm/sglang/vllm subprocess to listen on that endpoint.
     // If not, then the endpoint isn't exposed so we let LocalModel invent one.
     if let Input::Endpoint(path) = &in_opt {
-        builder.endpoint_id(path.parse()?);
+        builder.endpoint_id(path.parse().with_context(|| path.clone())?);
     };
 
     let local_model = builder.build().await?;
