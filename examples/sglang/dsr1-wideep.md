@@ -185,11 +185,3 @@ python3 utils/generate_bench_data.py --output data.jsonl --num-prompts 8192 --in
 # run benchmark
 ./utils/bench.sh HEAD_PREFILL_NODE_IP --type custom_completions
 ```
-
-3. **Modified sglang `bench_one_batch_server.py` for single batch inference**
-We also provide an **experimental** modified version of the `bench_one_batch_server.py` script that can be used to benchmark the prefill and decode workers. This script is modified to handle the maximum NATS message size limit and to chunk the batch into smaller requests. This script is a work in progress and will be updated over time to better support batch inference as we build out this capability in dynamo.
-
-Example usage:
-```bash
-python3 utils/sgl_bench_one_batch_server.py --model deepseek-ai/DeepSeek-R1 --base-url http://HEAD_PREFILL_NODE_IP:8000 --batch-size 8192 --input-len 4096 --output-len 5 --skip-warmup
-```
