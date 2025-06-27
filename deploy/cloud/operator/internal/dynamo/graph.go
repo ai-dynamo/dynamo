@@ -164,9 +164,9 @@ func RetrieveDynamoGraphDownloadURL(ctx context.Context, dynamoDeployment *v1alp
 
 // ServicesConfig represents the top-level YAML structure of a dynamoComponent yaml file stored in a dynamoComponent tar file
 type DynamoGraphConfig struct {
-	DynamoTag    string          `yaml:"service"`
-	Services     []ServiceConfig `yaml:"services"`
-	EntryService string          `yaml:"entry_service"`
+	DynamoTag    string          `json:"service" yaml:"service"`
+	Services     []ServiceConfig `json:"services" yaml:"services"`
+	EntryService string          `json:"entry_service" yaml:"entry_service"`
 }
 
 type EventRecorder interface {
@@ -234,10 +234,29 @@ func GetApiStoreClient(ctx context.Context) (*apiStoreClient.ApiStoreClient, *co
 
 func ParseDynamoGraphConfig(ctx context.Context, yamlContent *bytes.Buffer) (*DynamoGraphConfig, error) {
 	var config DynamoGraphConfig
-	logger := log.FromContext(ctx)
-	logger.Info("trying to parse dynamo graph config", "yamlContent", yamlContent.String())
-	err := yaml.Unmarshal(yamlContent.Bytes(), &config)
+	// Due to goccy/go-yaml lib struggling with intstr.IntOrString fields like port we do the custom
+	// parsing implementation.
+	// YAML → interface{} → JSON → DynamoGraphConfig route
+	err := unmarshalYAML(yamlContent.Bytes(), &config)
 	return &config, err
+}
+
+// Custom function to convert yaml into the DynamoGraphConfig
+func unmarshalYAML(yamlData []byte, out interface{}) error {
+	// First convert YAML to a generic map
+	var rawData interface{}
+	if err := yaml.Unmarshal(yamlData, &rawData); err != nil {
+		return err
+	}
+
+	// Convert the generic map to JSON
+	jsonData, err := json.Marshal(rawData)
+	if err != nil {
+		return err
+	}
+
+	// Unmarshal JSON into the target struct
+	return json.Unmarshal(jsonData, out)
 }
 
 func ParseDynDeploymentConfig(ctx context.Context, jsonContent []byte) (DynDeploymentConfig, error) {
@@ -372,7 +391,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		}
 
 		// Override properties from the ExtraPodSpec (i.e. command and args) if provided.
-		if err := mergeExtraPodSpec(deployment, &service.Config); err != nil {
+		if err := mergeExtraPodSpec(ctx, deployment, &service.Config); err != nil {
 			return nil, err
 		}
 
@@ -537,12 +556,20 @@ func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 }
 
 // mergeExtraPodSpec merges the ExtraPodSpec from service config into the deployment spec
-func mergeExtraPodSpec(deployment *v1alpha1.DynamoComponentDeployment, serviceConfig *Config) error {
+func mergeExtraPodSpec(ctx context.Context, deployment *v1alpha1.DynamoComponentDeployment, serviceConfig *Config) error {
 	if serviceConfig.ExtraPodSpec != nil && serviceConfig.ExtraPodSpec.MainContainer != nil {
+		// Log the entire ExtraPodSpec
+		logger := log.FromContext(ctx).WithValues("deployment", deployment.Name)
+		extraPodSpecJSON, err := json.MarshalIndent(serviceConfig.ExtraPodSpec, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal ExtraPodSpec to JSON: %w", err)
+		}
+		logger.Info("Overriding PodSpec with ExtraPodSpec", "extraPodSpec", string(extraPodSpecJSON))
+
 		if deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec == nil {
 			deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec = new(common.ExtraPodSpec)
 		}
-		err := mergo.Merge(
+		err = mergo.Merge(
 			deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec,
 			serviceConfig.ExtraPodSpec,
 			mergo.WithOverride,

@@ -30,7 +30,6 @@ import tempfile
 import typing as t
 import uuid
 from pathlib import Path
-from typing import TypeVar
 
 import typer
 import yaml
@@ -39,6 +38,12 @@ from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
 
 from dynamo.sdk import DYNAMO_IMAGE
+from dynamo.sdk.core.lib import (
+    IS_LIVENESS_PROBE_PROP,
+    IS_READINESS_PROBE_PROP,
+    LIVENESS_PROBE_PROP_PATH,
+    READINESS_PROBE_PROP_PATH,
+)
 from dynamo.sdk.core.protocol.deployment import Service
 from dynamo.sdk.core.protocol.interface import (
     DynamoConfig,
@@ -52,7 +57,7 @@ from dynamo.sdk.lib.utils import upload_graph
 
 logger = logging.getLogger(__name__)
 console = Console()
-T = TypeVar("T", bound=object)
+T = t.TypeVar("T", bound=object)
 
 DYNAMO_FIGLET = """
 ██████╗ ██╗   ██╗███╗   ██╗ █████╗ ███╗   ███╗ ██████╗
@@ -128,6 +133,26 @@ class ServiceInfo(BaseModel):
         """Create ServiceInfo from a service instance."""
         service_class = service.inner
         name = getattr(service, "name", service_class.__name__)
+        if service.config.kubernetes_overrides is not None:
+            liveliness_func = cls.find_health_probe_method(
+                klass=service_class, check_property=IS_LIVENESS_PROBE_PROP
+            )
+            if liveliness_func is None:
+                # Inconsistency. Remove the kubernetes overrides if presenst.
+                logger.warning(
+                    f"No @liveness decorator specified for {name}, removing liveness settings from kubernetes overrides."
+                )
+                service.config.kubernetes_overrides.liveness_probe_settings = None
+
+            readyness_func = cls.find_health_probe_method(
+                klass=service_class, check_property=IS_READINESS_PROBE_PROP
+            )
+            if readyness_func is None:
+                # Inconsistency. Remove the kubernetes overrides if presenst.
+                logger.warning(
+                    f"No @readiness decorator specified for {name}, removing readiness settings from kubernetes overrides."
+                )
+                service.config.kubernetes_overrides.readiness_probe_settings = None
 
         # Extract API endpoints if available
         api_endpoints = []
@@ -159,6 +184,17 @@ class ServiceInfo(BaseModel):
             class_name=service_class.__name__,
             config=config,
         )
+
+    @classmethod
+    def find_health_probe_method(
+        cls, klass: type, check_property: str
+    ) -> t.Optional[t.Callable]:
+        """Determine if the user provided @live or @health method and return the callable."""
+        for attr_name in dir(klass):
+            attr = getattr(klass, attr_name)
+            if callable(attr) and hasattr(attr, check_property):
+                return attr
+        return None
 
 
 class BuildConfig(BaseModel):
@@ -211,7 +247,7 @@ class ManifestInfo(BaseModel):
 
     def to_dict(self) -> t.Dict[str, t.Any]:
         """Convert to dictionary for YAML serialization."""
-        result = self.model_dump()
+        result = self.model_dump(by_alias=True, exclude_none=True)
         # Convert ServiceInfo objects to dictionaries
         services_dict = []
         for service in result["services"]:
@@ -226,32 +262,7 @@ class ManifestInfo(BaseModel):
                 },
             }
             # Add kubernetes_overrides if present.
-            if (
-                "kubernetes_overrides" in service["config"]
-                and service["config"]["kubernetes_overrides"]
-            ):
-                # Map kubernetes_overrides fields to mainContainer if present.
-                kube_overrides = service["config"]["kubernetes_overrides"]
-                main_container = {}
-
-                entrypoint = kube_overrides.get("entrypoint")
-                if entrypoint:
-                    if isinstance(entrypoint, str):
-                        main_container["command"] = shlex.split(entrypoint)
-                    else:
-                        main_container["command"] = shlex.split(entrypoint[0])
-
-                cmd = kube_overrides.get("cmd")
-                if cmd:
-                    if isinstance(cmd, str):
-                        main_container["args"] = shlex.split(cmd)
-                    else:
-                        main_container["args"] = shlex.split(cmd[0])
-
-                if main_container:
-                    service_dict["config"]["extraPodSpec"] = {
-                        "mainContainer": main_container
-                    }
+            process_kubernetes_overrides(service, service_dict)
 
             # Add HTTP configuration if exposed
             if service["config"]["http_exposed"]:
@@ -530,6 +541,61 @@ class Package:
                 target_path = os.path.join(target_dir, rel_path)
                 os.makedirs(os.path.dirname(target_path), exist_ok=True)
                 shutil.copy2(file_path, target_path)
+
+
+def process_kubernetes_overrides(service: dict, service_dict: dict) -> None:
+    """Process kubernetes_overrides and add them to service_dict config if present."""
+    if not (
+        "kubernetes_overrides" in service["config"]
+        and service["config"]["kubernetes_overrides"]
+    ):
+        return
+    # Map kubernetes_overrides fields to mainContainer if present.
+    kube_overrides = service["config"]["kubernetes_overrides"]
+    main_container: dict[str, t.Any] = {}
+
+    entrypoint = kube_overrides.get("entrypoint")
+    if entrypoint:
+        if isinstance(entrypoint, str):
+            main_container["command"] = shlex.split(entrypoint)
+        else:
+            main_container["command"] = shlex.split(entrypoint[0])
+
+    cmd = kube_overrides.get("cmd")
+    if cmd:
+        if isinstance(cmd, str):
+            main_container["args"] = shlex.split(cmd)
+        else:
+            main_container["args"] = shlex.split(cmd[0])
+
+    liveness_probe_settings = kube_overrides.get("liveness_probe_settings")
+    if liveness_probe_settings:
+        main_container["livenessProbe"] = {
+            k: v for k, v in liveness_probe_settings.items() if v is not None
+        }
+        if "httpGet" in liveness_probe_settings and (
+            "path" not in liveness_probe_settings["httpGet"]
+            and "Path" not in liveness_probe_settings["httpGet"]
+        ):
+            main_container["livenessProbe"]["httpGet"][
+                "path"
+            ] = LIVENESS_PROBE_PROP_PATH
+
+    readiness_probe_settings = kube_overrides.get("readiness_probe_settings")
+    if readiness_probe_settings:
+        main_container["readinessProbe"] = {
+            k: v for k, v in readiness_probe_settings.items() if v is not None
+        }
+        if "httpGet" in readiness_probe_settings and (
+            "path" not in readiness_probe_settings["httpGet"]
+            and "Path" not in readiness_probe_settings["httpGet"]
+        ):
+            main_container["readinessProbe"]["httpGet"][
+                "path"
+            ] = READINESS_PROBE_PROP_PATH
+
+    if main_container:
+        service_dict["config"]["extraPodSpec"] = {"mainContainer": main_container}
 
 
 def build(

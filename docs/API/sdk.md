@@ -211,6 +211,49 @@ class MyService:
 
 This defines static configuration values in code. Note that the constructor parameters (`model_name` and `temperature`) are also configurable values that can be overridden.
 
+##### Kubernetes Overrides
+
+In addition, you can provide kubernetes overrides. At this time we support `entrypoint` (command), `cmd` (args) and overrides for liveness and readiness probes. Note the numbers below are defaults.
+
+```python
+@service(
+    dynamo={"namespace": "prod"},
+    kubernetes_overrides={
+        "entrypoint": ["sh -c"],
+        "cmd": ["echo hello"],
+        "liveness_probe_settings": {
+            "http_get": {
+                "path": "/healthz",
+                "port": 5000,
+            },
+            "initial_delay_seconds": 1,
+        },
+        "readiness_probe_settings":{
+            "http_get": {
+                "path": "/readyz",
+                "port": 5000,
+                "scheme": "HTTPS",
+                    "http_headers": [
+                    {"name": "X-Custom-Header", "value": "health-check"},
+                    {"name":"Authorization", "value": "Bearer token123"},
+                ],
+                "host":"some-host",
+            },
+            "initial_delay_seconds": 60,
+            "timeout_seconds": 5,
+            "period_seconds": 60,
+            "success_threshold": 1,
+            "failure_threshold": 10,
+            "termination_grace_period_seconds": 30,
+        }
+    },
+)
+class MyService:
+    def __init__(self, model_name="deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B", temperature=0.7):
+        self.model_name = model_name
+        self.temperature = temperature
+```
+
 #### Configuration via YAML
 
 For more flexible configuration, especially across environments, you can use YAML files:

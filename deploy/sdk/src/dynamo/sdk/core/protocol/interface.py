@@ -18,7 +18,7 @@ import abc
 from abc import ABC, abstractmethod
 from collections import defaultdict
 from enum import Enum, auto
-from typing import Any, Dict, Generic, List, Optional, Set, Tuple, Type, TypeVar
+from typing import Any, Dict, Generic, List, Optional, Set, Tuple, Type, TypeVar, Union
 
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -74,6 +74,65 @@ class ResourceConfig(BaseModel):
     gpu: str = Field(default="0")
 
 
+def to_camel(s: str) -> str:
+    """Convert to camelCase from snake_case."""
+    parts = s.split("_")
+    return parts[0] + "".join(word.capitalize() for word in parts[1:])
+
+
+class HTTPHeader(BaseModel):
+    """Class for HTTP header."""
+
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )
+
+    name: str
+    value: str
+
+
+class HTTPGetAction(BaseModel):
+    """Class for HTTP health probe settings."""
+
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )
+
+    path: Optional[str] = Field(
+        default=None, description="Path to access on the HTTP health check."
+    )
+
+    port: Optional[Union[int, str]] = Field(
+        default=None,
+        description="Port number or name to access on the container.",
+    )
+    host: Optional[str] = Field(
+        default=None, description="Host name to connect to, defaults to the pod IP."
+    )
+    scheme: Optional[str] = Field(
+        default="HTTP", description="Scheme to use for connecting to the host."
+    )
+    http_headers: Optional[List[HTTPHeader]] = Field(
+        default=None, description="Custom headers to set in the request."
+    )
+
+
+class Probe(BaseModel):
+    """Class for health probe settings."""
+
+    model_config = ConfigDict(
+        alias_generator=to_camel, populate_by_name=True, extra="forbid"
+    )
+
+    http_get: HTTPGetAction
+    initial_delay_seconds: Optional[int] = 60
+    timeout_seconds: Optional[int] = 5
+    period_seconds: Optional[int] = 60
+    success_threshold: Optional[int] = 1
+    failure_threshold: Optional[int] = 10
+    termination_grace_period_seconds: Optional[int] = None  # 30
+
+
 class KubernetesOverrides(BaseModel):
     """Class for kubernetes overrides from the sdk to limit to supported fields."""
 
@@ -81,6 +140,8 @@ class KubernetesOverrides(BaseModel):
 
     entrypoint: List[str] | None = None
     cmd: List[str] | None = None
+    liveness_probe_settings: Probe | None = None
+    readiness_probe_settings: Probe | None = None
 
     @field_validator("entrypoint", "cmd", mode="before")
     @classmethod
