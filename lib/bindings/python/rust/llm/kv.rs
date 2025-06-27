@@ -481,11 +481,7 @@ impl KvIndexer {
         self.inner.block_size()
     }
 
-    fn find_matches<'p>(
-        &self,
-        py: Python<'p>,
-        sequence: Vec<u64>,
-    ) -> PyResult<Bound<'p, PyAny>> {
+    fn find_matches<'p>(&self, py: Python<'p>, sequence: Vec<u64>) -> PyResult<Bound<'p, PyAny>> {
         let indexer = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let local_block_hashes: Vec<llm_rs::kv_router::protocols::LocalBlockHash> = sequence
