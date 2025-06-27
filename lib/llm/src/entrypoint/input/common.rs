@@ -3,13 +3,15 @@
 
 use std::pin::Pin;
 
-use dynamo_llm::{
+use crate::{
     backend::{Backend, ExecutionContext},
     discovery::{ModelManager, ModelWatcher, MODEL_ROOT_PATH},
     engines::StreamingEngineAdapter,
+    entrypoint::EngineConfig,
     model_card::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
     protocols::common::llm_backend::{BackendOutput, PreprocessedRequest},
+    request_template::RequestTemplate,
     types::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -25,12 +27,22 @@ use dynamo_runtime::{
 };
 use std::sync::Arc;
 
-use crate::EngineConfig;
-
 pub struct PreparedEngine {
     pub service_name: String,
     pub engine: OpenAIChatCompletionsStreamingEngine,
     pub inspect_template: bool,
+    pub card: Option<ModelDeploymentCard>,
+    pub request_template: Option<RequestTemplate>,
+}
+
+impl PreparedEngine {
+    pub fn has_tokenizer(&self) -> bool {
+        if let Some(card) = self.card.as_ref() {
+            card.has_tokenizer()
+        } else {
+            false
+        }
+    }
 }
 
 /// Turns an EngineConfig into an OpenAI chat-completions and completions supported StreamingEngine.
@@ -39,7 +51,7 @@ pub async fn prepare_engine(
     engine_config: EngineConfig,
 ) -> anyhow::Result<PreparedEngine> {
     match engine_config {
-        EngineConfig::Dynamic => {
+        EngineConfig::Dynamic(local_model) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
 
             let Some(etcd_client) = distributed_runtime.etcd_client() else {
@@ -71,6 +83,8 @@ pub async fn prepare_engine(
                 service_name: model_service_name,
                 engine,
                 inspect_template: false,
+                card: None,
+                request_template: local_model.request_template(),
             })
         }
         EngineConfig::StaticFull { engine, model } => {
@@ -78,9 +92,11 @@ pub async fn prepare_engine(
             tracing::debug!("Model: {service_name} with engine pre-processing");
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             Ok(PreparedEngine {
+                card: Some(model.card().clone()), // TODO: take it don't clone
                 service_name,
                 engine,
                 inspect_template: false,
+                request_template: model.request_template(),
             })
         }
         EngineConfig::StaticCore {
@@ -96,9 +112,11 @@ pub async fn prepare_engine(
             let service_name = model.service_name().to_string();
             tracing::debug!("Model: {service_name} with Dynamo pre-processing");
             Ok(PreparedEngine {
+                card: Some(model.card().clone()), // TODO: take it don't clone
                 service_name,
                 engine: pipeline,
                 inspect_template: true,
+                request_template: model.request_template(),
             })
         }
     }
@@ -137,21 +155,21 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_llm::types::openai::{
+    use crate::types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     };
 
     const HF_PATH: &str = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/../../lib/llm/tests/data/sample-models/mock-llama-3.1-8b-instruct"
+        "/tests/data/sample-models/mock-llama-3.1-8b-instruct"
     );
 
     #[tokio::test]
     async fn test_build_chat_completions_pipeline_core_engine_succeeds() -> anyhow::Result<()> {
         // Create test model card
         let card = ModelDeploymentCard::load(HF_PATH).await?;
-        let engine = dynamo_llm::engines::make_engine_core();
+        let engine = crate::engines::make_engine_core();
 
         // Build pipeline for chat completions
         let pipeline = build_pipeline::<
@@ -170,7 +188,7 @@ mod tests {
     async fn test_build_completions_pipeline_core_engine_succeeds() -> anyhow::Result<()> {
         // Create test model card
         let card = ModelDeploymentCard::load(HF_PATH).await?;
-        let engine = dynamo_llm::engines::make_engine_core();
+        let engine = crate::engines::make_engine_core();
 
         // Build pipeline for completions
         let pipeline =

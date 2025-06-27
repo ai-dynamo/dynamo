@@ -34,7 +34,6 @@ anyhow = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
-humantime = { workspace = true }
 libc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -47,7 +46,6 @@ uuid = { workspace = true }
 
 async-openai = { workspace = true }
 clap = { version = "4.5", features = ["derive", "env"] }
-dialoguer = { version = "0.11", default-features = false, features = ["editor", "history"] }
 futures-util = { version = "0.3" }
 regex = "1"
 
