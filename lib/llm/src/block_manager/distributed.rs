@@ -14,21 +14,26 @@ pub use worker::{KvbmWorker, KvbmWorkerConfig};
 
 #[cfg(all(test, feature = "testing-cuda", feature = "testing-etcd"))]
 mod tests {
+    use super::*;
+
+    use crate::block_manager::block::data::logical::distributed_leader_worker::DistributedLeaderWorkerResources;
+    use crate::block_manager::config::*;
     use crate::block_manager::storage::{
         torch::{TorchDevice, TorchTensor},
         DeviceAllocator, Storage, StorageAllocator,
     };
+    use crate::block_manager::KvBlockManager;
 
     use anyhow::Result;
     use rstest::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio_util::sync::CancellationToken;
 
     use dynamo_runtime::logging::init as init_logging;
 
-    use super::*;
-
     const NUM_DEVICE_BLOCKS: usize = 8;
     const NUM_HOST_BLOCKS: usize = 8;
+    const NUM_DISK_BLOCKS: usize = 8;
 
     #[derive(Clone, Debug)]
     struct MockTensor {
@@ -148,6 +153,56 @@ mod tests {
                 .await?
                 .await?;
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[rstest]
+    #[case(1)]
+    #[case(2)]
+    #[case(4)]
+    #[case(8)]
+    async fn test_leader_worker_transfer_e2e_with_vllm(#[case] num_workers: usize) -> Result<()> {
+        init_logging();
+
+        let (leader, workers) = build_leader_and_workers(num_workers).await?;
+
+        let cancel_token = CancellationToken::new();
+
+        let config = KvBlockManagerConfig::builder()
+            .runtime(
+                KvManagerRuntimeConfig::builder()
+                    .worker_id(0)
+                    .cancellation_token(cancel_token.clone())
+                    .build()?,
+            )
+            .model(KvManagerModelConfig::builder().build()?)
+            .device_layout(
+                KvManagerLayoutConfig::builder()
+                    .num_blocks(NUM_DEVICE_BLOCKS)
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                    .build()?,
+            )
+            .host_layout(
+                KvManagerLayoutConfig::builder()
+                    .num_blocks(NUM_HOST_BLOCKS)
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                    .build()?,
+            )
+            .disk_layout(
+                KvManagerLayoutConfig::builder()
+                    .num_blocks(NUM_DISK_BLOCKS)
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                    .build()?,
+            )
+            .build()?;
+
+        let resources = DistributedLeaderWorkerResources::new(leader, cancel_token)?;
+
+        let block_manager = KvBlockManager::new(config, resources).await?;
+
+        // let block_manager = KvBlockManager::new(config).await?;
 
         Ok(())
     }

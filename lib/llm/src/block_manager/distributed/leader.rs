@@ -88,17 +88,10 @@ impl KvbmLeader {
             Some(Duration::from_secs(30)),
         );
 
-        // Block leader initialization (and vLLM) until all workers have come online.
-        let worker_data = drt.runtime().primary().block_on(async move {
-            let worker_data = leader_barrier
-                .sync(&drt, zmq_data.as_ref())
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to sync leader barrier: {:?}", e))?;
-
-            tracing::info!("Leader barrier synced with {} workers", config.world_size);
-
-            anyhow::Ok(worker_data)
-        })?;
+        let worker_data = leader_barrier
+            .sync(&drt, zmq_data.as_ref())
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to sync leader barrier: {:?}", e))?;
 
         tracing::info!("Leader barrier synced with {} workers", config.world_size);
         tracing::debug!("Worker data: {:?}", worker_data);
