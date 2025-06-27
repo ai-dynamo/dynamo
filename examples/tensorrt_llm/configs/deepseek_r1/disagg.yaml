@@ -22,14 +22,13 @@ Frontend:
 
 TensorRTLLMWorker:
   served_model_name: "nvidia/DeepSeek-R1-FP4"
-  engine_args: "configs/deepseek_r1/agg_llm_api_config.yaml"
-  llmapi-disaggregated-config: "configs/deepseek_r1/disagg_llm_api_config.yaml"
-  remote-prefill: true
-  # NOTE: When testing/benchmarking multiple prefill workers, you can set
-  # this number to the exact amount of prefill workers if you want Dynamo to
-  # wait until all the prefill workers are ready before marking the decode
-  # worker ready.
-  min-prefill-workers: 1
+  # NOTE: FP4 only supported starting with Blackwell GPUs.
+  # https://huggingface.co/nvidia/DeepSeek-R1-FP4
+  # You can also specify the full path to locally downloaded weights
+  # instead of a HuggingFace ID here.
+  model-path: "nvidia/DeepSeek-R1-FP4"
+  extra-engine-args: "configs/deepseek_r1/engine_configs/decode_config.yaml"
+  enable-disagg: true
   router: round-robin
   ServiceArgs:
     workers: 1
@@ -37,8 +36,12 @@ TensorRTLLMWorker:
       gpu: 4
 
 TensorRTLLMPrefillWorker:
-  engine_args: "configs/deepseek_r1/agg_llm_api_config.yaml"
-  llmapi-disaggregated-config: "configs/deepseek_r1/disagg_llm_api_config.yaml"
+  # NOTE: FP4 only supported starting with Blackwell GPUs.
+  # https://huggingface.co/nvidia/DeepSeek-R1-FP4
+  # You can also specify the full path to locally downloaded weights
+  # instead of a HuggingFace ID here.
+  model-path: "nvidia/DeepSeek-R1-FP4"
+  extra-engine-args: "configs/deepseek_r1/engine_configs/prefill_config.yaml"
   router: round-robin
   ServiceArgs:
     workers: 1
