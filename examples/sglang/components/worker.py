@@ -28,7 +28,7 @@ import asyncio
 import logging
 import random
 import socket
-from typing import Dict, Union, List
+from typing import Dict, Union
 
 import sglang as sgl
 from components.decode_worker import SGLangDecodeWorker
@@ -155,9 +155,7 @@ class SGLangWorker:
 
             decode = await self.decode_client.generate(disagg_request.model_dump_json())
 
-            async for out in self._process_stream(
-                decode, unpack=True
-            ):
+            async for out in self._process_stream(decode, unpack=True):
                 yield out
 
             await prefill_task
