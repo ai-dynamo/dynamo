@@ -21,7 +21,7 @@ Frontend:
 
 TensorRTLLMWorker:
   # Path to disk model or HuggingFace model identifier to load
-  model-path: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  model-path: TinyLlama/TinyLlama-1.1B-Chat-v1.0
   # Name to serve the model under
   served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
   # Path to a YAML file containing additional keyword arguments to pass to the TRTLLM engine.
@@ -29,20 +29,12 @@ TensorRTLLMWorker:
   extra-engine-args: "configs/engine_configs/decode_config.yaml"
   enable-disagg: true
   router: round-robin
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: 1
 
 TensorRTLLMPrefillWorker:
   # Path to disk model or HuggingFace model identifier to load
-  model-path: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  model-path: TinyLlama/TinyLlama-1.1B-Chat-v1.0
   # Path to a YAML file containing additional keyword arguments to pass to the TRTLLM engine.
   # The fields in `extra-engine-args` holds higher priority than the above TRTLLM engine fields.
   extra-engine-args: "configs/engine_configs/prefill_config.yaml"
   router: round-robin
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: 1
 
