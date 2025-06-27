@@ -58,8 +58,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
-
-	"github.com/go-logr/logr"
 	leaderworkersetv1 "sigs.k8s.io/lws/api/leaderworkerset/v1"
 	volcanov1beta1 "volcano.sh/apis/pkg/apis/scheduling/v1beta1"
 )
@@ -1346,7 +1344,6 @@ func getDynamoComponentRepositoryNameAndDynamoComponentVersion(dynamoComponent *
 
 //nolint:gocyclo,nakedret
 func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption) (podTemplateSpec *corev1.PodTemplateSpec, err error) {
-	logs := log.FromContext(ctx)
 	podLabels := r.getKubeLabels(opt.dynamoComponentDeployment, opt.dynamoComponent)
 	if opt.isStealingTrafficDebugModeEnabled {
 		podLabels[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
@@ -1615,7 +1612,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	}
 
 	// For now only overwrite the command, args and readyness and liveness settings.
-	overrideContainerWithExtraPodSpec(&container, opt.dynamoComponentDeployment.Spec.ExtraPodSpec, logs)
+	overrideContainerWithExtraPodSpec(ctx, &container, opt.dynamoComponentDeployment.Spec.ExtraPodSpec)
 
 	containers = append(containers, container)
 
@@ -1960,8 +1957,9 @@ func (r *DynamoComponentDeploymentReconciler) GetRecorder() record.EventRecorder
 }
 
 // overrideContainerWithExtraPodSpec overrides the container's command, args, and probe settings with ExtraPodSpec
-func overrideContainerWithExtraPodSpec(container *corev1.Container, extraPodSpec *dynamoCommon.ExtraPodSpec, logs logr.Logger) {
+func overrideContainerWithExtraPodSpec(ctx context.Context, container *corev1.Container, extraPodSpec *dynamoCommon.ExtraPodSpec) {
 
+	logs := log.FromContext(ctx)
 	if extraPodSpec == nil || extraPodSpec.MainContainer == nil {
 		return
 	}

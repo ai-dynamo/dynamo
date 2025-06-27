@@ -138,21 +138,17 @@ class ServiceInfo(BaseModel):
                 klass=service_class, check_property=IS_LIVENESS_PROBE_PROP
             )
             if liveliness_func is None:
-                # Inconsistency. Remove the kubernetes overrides if presenst.
                 logger.warning(
-                    f"No @liveness decorator specified for {name}, removing liveness settings from kubernetes overrides."
+                    f"No @liveness decorator specified for {name}, using liveness settings on the default health check."
                 )
-                service.config.kubernetes_overrides.liveness_probe_settings = None
 
             readyness_func = cls.find_health_probe_method(
                 klass=service_class, check_property=IS_READINESS_PROBE_PROP
             )
             if readyness_func is None:
-                # Inconsistency. Remove the kubernetes overrides if presenst.
                 logger.warning(
-                    f"No @readiness decorator specified for {name}, removing readiness settings from kubernetes overrides."
+                    f"No @readiness decorator specified for {name}, using liveness settings on the default health check."
                 )
-                service.config.kubernetes_overrides.readiness_probe_settings = None
 
         # Extract API endpoints if available
         api_endpoints = []

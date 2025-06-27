@@ -234,9 +234,9 @@ func GetApiStoreClient(ctx context.Context) (*apiStoreClient.ApiStoreClient, *co
 
 func ParseDynamoGraphConfig(ctx context.Context, yamlContent *bytes.Buffer) (*DynamoGraphConfig, error) {
 	var config DynamoGraphConfig
-	// Due to goccy/go-yaml lib struggling with intstr.IntOrString fields like port we do the custom
-	// parsing implementation.
-	// YAML → interface{} → JSON → DynamoGraphConfig route
+	// IntOrString defines custom marshall/unmarshall functions for json but not for yaml fields.
+	// Due to presence of fields of this type like "port" we do the custom parsing implementation
+	// YAML → interface{} → JSON → DynamoGraphConfig.
 	err := unmarshalYAML(yamlContent.Bytes(), &config)
 	return &config, err
 }
