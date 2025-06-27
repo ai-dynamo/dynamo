@@ -537,7 +537,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
 }
 
 #[cfg(all(test, feature = "testing-cuda"))]
-pub mod tests {
+mod tests {
     use super::*;
 
     use crate::block_manager::{

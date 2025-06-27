@@ -9,22 +9,29 @@ mod leader;
 mod worker;
 
 pub use leader::{KvbmLeader, KvbmLeaderConfig};
+pub use utils::{BlockTransferPool, BlockTransferRequest};
 pub use worker::{KvbmWorker, KvbmWorkerConfig};
 
 #[cfg(all(test, feature = "testing-cuda", feature = "testing-etcd"))]
 mod tests {
+    use super::*;
+
+    use crate::block_manager::block::data::logical::distributed_leader_worker::DistributedLeaderWorkerResources;
+    use crate::block_manager::block::BasicMetadata;
+    use crate::block_manager::config::*;
+    use crate::block_manager::locality::Logical;
     use crate::block_manager::storage::{
         torch::{TorchDevice, TorchTensor},
         DeviceAllocator, Storage, StorageAllocator,
     };
+    use crate::block_manager::KvBlockManager;
 
     use anyhow::Result;
     use rstest::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio_util::sync::CancellationToken;
 
     use dynamo_runtime::logging::init as init_logging;
-
-    use super::*;
 
     const NUM_DEVICE_BLOCKS: usize = 8;
     const NUM_HOST_BLOCKS: usize = 8;
@@ -147,6 +154,86 @@ mod tests {
                 .await?
                 .await?;
         }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[rstest]
+    #[case(1)]
+    #[case(2)]
+    #[case(4)]
+    #[case(8)]
+    async fn test_leader_worker_transfer_e2e(#[case] num_workers: usize) -> Result<()> {
+        init_logging();
+
+        const BLOCK_SIZE: usize = 4;
+
+        let (leader, _workers) = build_leader_and_workers(num_workers).await?;
+
+        let cancel_token = CancellationToken::new();
+
+        let config = KvBlockManagerConfig::builder()
+            .runtime(
+                KvManagerRuntimeConfig::builder()
+                    .worker_id(0)
+                    .cancellation_token(cancel_token.clone())
+                    .build()?,
+            )
+            .model(
+                KvManagerModelConfig::builder()
+                    .num_layers(1)
+                    .outer_dim(1)
+                    .page_size(BLOCK_SIZE)
+                    .inner_dim(1)
+                    .build()?,
+            )
+            .device_layout(
+                KvManagerLayoutConfig::builder()
+                    .num_blocks(NUM_DEVICE_BLOCKS)
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                    .build()?,
+            )
+            .host_layout(
+                KvManagerLayoutConfig::builder()
+                    .num_blocks(NUM_HOST_BLOCKS)
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                    .build()?,
+            )
+            .build()?;
+
+        let resources = DistributedLeaderWorkerResources::new(leader, cancel_token.child_token())?;
+
+        let block_manager = KvBlockManager::<
+            Logical<DistributedLeaderWorkerResources>,
+            BasicMetadata,
+        >::new(config, resources)
+        .await
+        .unwrap();
+
+        let host_pool = block_manager.host().unwrap();
+
+        let host_blocks = host_pool
+            .allocate_blocks(4)
+            .await?
+            .into_iter()
+            .enumerate()
+            .map(|(i, mut b)| {
+                b.init_sequence(42).unwrap();
+
+                for _ in 0..BLOCK_SIZE {
+                    b.add_token(i as u32).unwrap();
+                }
+
+                b.commit().unwrap();
+
+                b
+            })
+            .collect::<Vec<_>>();
+
+        let immutable_host_blocks = host_pool.register_blocks(host_blocks).await?;
+
+        let _ = block_manager.onboard_blocks(immutable_host_blocks).await?;
 
         Ok(())
     }

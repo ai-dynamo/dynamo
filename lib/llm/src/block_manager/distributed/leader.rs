@@ -11,6 +11,7 @@ use dynamo_runtime::{DistributedRuntime, Runtime};
 
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -55,6 +56,7 @@ impl KvbmLeaderConfig {
 /// - Syncing the leader barrier with workers.
 /// - Sending messages to workers.
 pub struct KvbmLeader {
+    _worker_data: Arc<HashMap<String, ()>>, // TODO: Replace with KvbmLeaderData
     zmq_leader: ZmqActiveMessageLeader,
 }
 
@@ -86,15 +88,13 @@ impl KvbmLeader {
             Some(Duration::from_secs(30)),
         );
 
-        let drt_clone = drt.clone();
-        let zmq_data_clone = zmq_data.clone();
-
-        leader_barrier
-            .sync(&drt_clone, zmq_data_clone.as_ref())
+        let worker_data = leader_barrier
+            .sync(&drt, zmq_data.as_ref())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to sync leader barrier: {:?}", e))?;
 
         tracing::info!("Leader barrier synced with {} workers", config.world_size);
+        tracing::debug!("Worker data: {:?}", worker_data);
 
         // Now, create our active message leader.
         // This also blocks until a ZMQ connection has been established.
@@ -107,7 +107,10 @@ impl KvbmLeader {
         )
         .await?;
 
-        Ok(Self { zmq_leader })
+        Ok(Self {
+            _worker_data: Arc::new(worker_data),
+            zmq_leader,
+        })
     }
 
     pub async fn transfer_blocks_request(

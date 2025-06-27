@@ -410,12 +410,16 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> StorageTypeProvider for 
 }
 
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockDataProvider for Block<S, L, M> {
+    type Locality = L;
+
     fn block_data(&self) -> &impl BlockDataExt<S> {
         &self.data
     }
 }
 
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockDataProviderMut for Block<S, L, M> {
+    type Locality = L;
+
     fn block_data_mut(&mut self) -> &mut impl BlockDataExt<S> {
         &mut self.data
     }
@@ -626,6 +630,8 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> StorageTypeProvider
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockDataProvider
     for MutableBlock<S, L, M>
 {
+    type Locality = L;
+
     fn block_data(&self) -> &impl BlockDataExt<S> {
         &self.block.as_ref().expect("block was dropped").data
     }
@@ -634,6 +640,8 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockDataProvider
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockDataProviderMut
     for MutableBlock<S, L, M>
 {
+    type Locality = L;
+
     fn block_data_mut(&mut self) -> &mut impl BlockDataExt<S> {
         &mut self.block.as_mut().expect("block was dropped").data
     }
@@ -803,6 +811,8 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> StorageTypeProvider
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockDataProvider
     for ImmutableBlock<S, L, M>
 {
+    type Locality = L;
+
     fn block_data(&self) -> &impl BlockDataExt<S> {
         &self.block.block.as_ref().expect("block was dropped").data
     }
@@ -1268,6 +1278,8 @@ pub mod nixl {
     }
 
     impl<M: MutabilityKind> BlockDataProvider for RemoteBlock<M> {
+        type Locality = locality::Local;
+
         fn block_data(&self) -> &impl BlockDataExt<NixlStorage> {
             &self.data
         }
@@ -1290,6 +1302,8 @@ pub mod nixl {
     // }
 
     impl BlockDataProviderMut for RemoteBlock<IsMutable> {
+        type Locality = locality::Local;
+
         fn block_data_mut(&mut self) -> &mut impl BlockDataExt<NixlStorage> {
             &mut self.data
         }
