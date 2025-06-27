@@ -68,6 +68,12 @@ def softmax_sample_from_logits(
 def parse_args(service_name, prefix) -> Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
+        "--model",
+        type=str,
+        default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        help="Model that is being served",
+    )
+    parser.add_argument(
         "--min-workers",
         type=int,
         default=1,
@@ -79,6 +85,12 @@ def parse_args(service_name, prefix) -> Namespace:
         type=int,
         default=64,
         help="KV block size",
+    )
+    parser.add_argument(
+        "--custom-router",
+        type=bool,
+        default=False,
+        help="Whether to use custom router or not",
     )
     parser.add_argument(
         "--router",
