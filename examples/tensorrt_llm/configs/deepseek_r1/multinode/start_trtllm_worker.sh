@@ -22,6 +22,11 @@ if [[ -z ${ENGINE_CONFIG} ]]; then
     exit 1
 fi
 
+EXTRA_ARGS=""
+if [[ -n ${TASK} ]]; then
+  EXTRA_ARGS+="--task ${TASK}"
+fi
+
 # NOTE: trtllm_inc.py is a standalone python script that launches a Dynamo+TRTLLM
 # worker and registers itself with the runtime. It is currently easier to wrap
 # this standalone script with `trtllm-llmapi-launch` for MPI handling purposes,
@@ -30,4 +35,5 @@ trtllm-llmapi-launch \
   python3 /workspace/launch/dynamo-run/src/subprocess/trtllm_inc.py \
     --model-path "${MODEL_PATH}" \
     --model-name "${SERVED_MODEL_NAME}" \
-    --extra-engine-args "${ENGINE_CONFIG}"
+    --extra-engine-args "${ENGINE_CONFIG}" \
+    ${EXTRA_ARGS}

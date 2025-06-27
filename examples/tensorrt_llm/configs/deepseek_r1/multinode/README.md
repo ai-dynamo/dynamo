@@ -106,22 +106,41 @@ export MODEL_PATH="nvidia/DeepSeek-R1-FP4"
 # model weights, it can be nice to have explicit control over the name.
 export SERVED_MODEL_NAME="nvidia/DeepSeek-R1-FP4"
 
-# NOTE: This path assumes you have mounted the config file into /mnt inside
-# the container. See the MOUNTS variable in srun_script.sh
-export ENGINE_CONFIG="/mnt/agg_DEP16_dsr1.yaml"
+# Default set in srun_aggregated.sh, but can customize here.
+# export ENGINE_CONFIG="/mnt/engine_configs/wide_ep_agg.yaml"
 
 # Customize NUM_NODES to match the desired parallelism in ENGINE_CONFIG
-# The produce of NUM_NODES*NUM_GPUS_PER_NODE should match the number of
+# The product of NUM_NODES*NUM_GPUS_PER_NODE should match the number of
 # total GPUs necessary to satisfy the requested parallelism. For example,
 # 4 nodes x 4 gpus/node = 16 gpus total for TP16/EP16.
-export NUM_NODES=4
+# export NUM_NODES=4
+
+# Defaults set in srun_disaggregated.sh, but can customize here.
+# export PREFILL_ENGINE_CONFIG="/mnt/engine_configs/wide_ep_prefill.yaml"
+# export DECODE_ENGINE_CONFIG="/mnt/engine_configs/wide_ep_decode.yaml"
+
+# Customize NUM_PREFILL_NODES to match the desired parallelism in PREFILL_ENGINE_CONFIG
+# Customize NUM_DECODE_NODES to match the desired parallelism in DECODE_ENGINE_CONFIG
+# The products of NUM_PREFILL_NODES*NUM_GPUS_PER_NODE and
+# NUM_DECODE_NODES*NUM_GPUS_PER_NODE should match the respective number of
+# GPUs necessary to satisfy the requested parallelism in each config.
+# For example: 4 nodes x 4 gpus/node = 16 gpus total for TP16/EP16.
+# export NUM_PREFILL_NODES=4
+# export NUM_DECODE_NODES=4
 
 # GB200 nodes have 4 gpus per node, but for other types of nodes you can configure this.
-export NUM_GPUS_PER_NODE=4
+# export NUM_GPUS_PER_NODE=4
 
-# Launches frontend + etcd/nats on current (head) node.
-# Launches one large trtllm worker across multiple nodes via MPI tasks.
-./srun_script.sh
+# Launches:
+# - frontend + etcd/nats on current (head) node
+# - one large aggregated trtllm worker across multiple nodes via MPI tasks
+./srun_aggregated.sh
+
+# Launches:
+# - frontend + etcd/nats on current (head) node.
+# - one large prefill trtllm worker across multiple nodes via MPI tasks
+# - one large decode trtllm worker across multiple nodes via MPI tasks
+./srun_disaggregated.sh
 ```
 
 ## Understanding the Output
