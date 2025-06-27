@@ -26,7 +26,6 @@ from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMix
 from utils.check_worker import check_required_workers
 from utils.protocol import LocalBlockHashes, MyRequestOutput, vLLMGenerateRequest
 from utils.vllm import RouterType, parse_vllm_args
-
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
 from vllm.outputs import RequestOutput
