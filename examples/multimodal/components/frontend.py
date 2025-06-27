@@ -18,8 +18,9 @@ import logging
 
 from components.processor import Processor
 from fastapi import FastAPI
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from utils.protocol import MultiModalRequest
+from utils.vllm import parse_vllm_args
 
 from dynamo.sdk import DYNAMO_IMAGE, api, depends, service
 
@@ -38,8 +39,18 @@ logger = logging.getLogger(__name__)
 class Frontend:
     processor = depends(Processor)
 
+    def __init__(self):
+        class_name = self.__class__.__name__
+        self.engine_args = parse_vllm_args(class_name, "")
+
     @api(name="v1/chat/completions")
     async def generate(self, request: MultiModalRequest):
+        if self.engine_args.model != request.model:
+            return JSONResponse(
+                {"error": f"Model '{request.model}' not found"},
+                status_code=404,
+            )
+
         async def content_generator():
             async for response in self.processor.generate(request.model_dump_json()):
                 try:

@@ -20,6 +20,9 @@ Common:
   num-patches: 576
   kv-transfer-config: '{"kv_connector":"DynamoNixlConnector"}'
 
+Frontend:
+  common-configs: [model]
+
 Processor:
   router: round-robin
   prompt-template: "USER: <image>\n<prompt> ASSISTANT:"

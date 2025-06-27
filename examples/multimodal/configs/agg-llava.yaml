@@ -17,6 +17,9 @@ Common:
   block-size: 64
   max-model-len: 4096
 
+Frontend:
+  common-configs: [model]
+
 Processor:
   router: round-robin
   prompt-template: "USER: <image>\n<prompt> ASSISTANT:"

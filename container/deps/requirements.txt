@@ -23,13 +23,17 @@ kubernetes==32.0.1
 matplotlib
 msgspec
 mypy
-numpy
+numpy==1.26.4 # pmdarima is not compatible with numpy 2
 opentelemetry-api
 opentelemetry-sdk
 pip==25.0.1
+pmdarima
 pre-commit
-protobuf==5.27.3
+prometheus-api-client
+prophet
+protobuf==5.29.5
 pydantic==2.7.1
+pynvml
 pyright
 PyYAML
 scikit-learn

@@ -120,21 +120,12 @@ WORKDIR /workspace
 # Copy nixl source, and use commit hash as cache hint
 COPY --from=nixl_base /opt/nixl /opt/nixl
 COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
-RUN if [ "$ARCH" = "arm64" ]; then \
-        cd /opt/nixl && \
-        mkdir build && \
-        meson setup build/ --buildtype=release --prefix=/usr/local/nixl -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
-        cd build/ && \
-        ninja && \
-        ninja install; \
-    else \
-        cd /opt/nixl && \
-        mkdir build && \
-        meson setup build/ --buildtype=release --prefix=/usr/local/nixl && \
-        cd build/ && \
-        ninja && \
-        ninja install; \
-    fi
+RUN cd /opt/nixl && \
+    mkdir build && \
+    meson setup build/ --buildtype=release --prefix=/usr/local/nixl && \
+    cd build/ && \
+    ninja && \
+    ninja install
 
 ### NATS & ETCD SETUP ###
 # nats
@@ -161,13 +152,7 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 # Install NIXL Python module
-# TODO: Move gds_path selection based on arch into NIXL build
-RUN if [ "$ARCH" = "arm64" ]; then \
-        cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl \
-        --config-settings=setup-args="-Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
-    else \
-        cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl; \
-    fi
+RUN cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl
 
 # Install the wheel
 # TODO: Move NIXL wheel install to the wheel_builder stage
@@ -178,7 +163,7 @@ RUN uv pip install /workspace/wheels/nixl/*.whl
 ARG VLLM_REF="0.8.4"
 ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
 ARG VLLM_PATCHED_PACKAGE_NAME="ai_dynamo_vllm"
-ARG VLLM_PATCHED_PACKAGE_VERSION="0.8.4.post2"
+ARG VLLM_PATCHED_PACKAGE_VERSION="0.8.4.post3"
 ARG VLLM_MAX_JOBS=4
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
@@ -244,6 +229,23 @@ RUN pyright --help > /dev/null 2>&1
 RUN printf "[safe]\n      directory=/workspace\n" > /root/.gitconfig
 
 RUN ln -sf /bin/bash /bin/sh
+
+# Install prometheus
+ARG PROM_VERSION=3.4.1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl tar ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+        amd64) PLATFORM=linux-amd64 ;; \
+        arm64) PLATFORM=linux-arm64 ;; \
+        *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac && \
+    curl -fsSL https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PLATFORM}.tar.gz \
+    | tar -xz -C /tmp && \
+    mv /tmp/prometheus-${PROM_VERSION}.${PLATFORM}/prometheus /usr/local/bin/ && \
+    chmod +x /usr/local/bin/prometheus && \
+    rm -rf /tmp/prometheus-${PROM_VERSION}.${PLATFORM}
 
 ### BUILDS ###
 
@@ -518,8 +520,7 @@ COPY --from=base /workspace/wheels/nixl/*.whl wheelhouse/
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
     uv pip install nixl --find-links wheelhouse && \
-    ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
-    rm -r wheelhouse
+    ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"

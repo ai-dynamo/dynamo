@@ -146,7 +146,7 @@ def _handle_deploy_create(
     # TODO: hardcoding this is a hack to get the services for the deployment
     # we should find a better way to do this once build is finished/generic
     configure_target_environment(TargetEnum.DYNAMO)
-    entry_service = load_entry_service(config.pipeline)
+    entry_service = load_entry_service(config.graph)
 
     deployment_manager = get_deployment_manager(config.target, config.endpoint)
     env_dicts = _build_env_dicts(
@@ -157,10 +157,9 @@ def _handle_deploy_create(
         env_secrets_name=config.env_secrets_name,
     )
     deployment = Deployment(
-        name=config.name
-        or (config.pipeline if config.pipeline else "unnamed-deployment"),
+        name=config.name or (config.graph if config.graph else "unnamed-deployment"),
         namespace="default",
-        pipeline=config.pipeline,
+        graph=config.graph,
         entry_service=entry_service,
         envs=env_dicts,
     )
@@ -231,7 +230,7 @@ def _handle_deploy_create(
 @app.command()
 def create(
     ctx: typer.Context,
-    pipeline: str = typer.Argument(..., help="Dynamo pipeline to deploy"),
+    graph: str = typer.Argument(..., help="Dynamo graph to deploy"),
     name: t.Optional[str] = typer.Option(None, "--name", "-n", help="Deployment name"),
     config_file: t.Optional[typer.FileText] = typer.Option(
         None, "--config-file", "-f", help="Configuration file path"
@@ -248,7 +247,7 @@ def create(
     envs: t.Optional[t.List[str]] = typer.Option(
         None,
         "--env",
-        help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo pipeline.",
+        help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo graph.",
     ),
     envs_from_secret: t.Optional[t.List[str]] = typer.Option(
         None,
@@ -271,7 +270,7 @@ def create(
 ) -> DeploymentResponse:
     """Create a deployment on Dynamo Cloud."""
     config = DeploymentConfig(
-        pipeline=pipeline,
+        graph=graph,
         endpoint=endpoint,
         name=name,
         config_file=config_file,
@@ -391,7 +390,7 @@ def update(
     envs: t.Optional[t.List[str]] = typer.Option(
         None,
         "--env",
-        help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo pipeline.",
+        help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo graph.",
     ),
     envs_from_secret: t.Optional[t.List[str]] = typer.Option(
         None,
@@ -507,7 +506,7 @@ def delete(
 
 def deploy(
     ctx: typer.Context,
-    pipeline: str = typer.Argument(..., help="Dynamo pipeline to deploy"),
+    graph: str = typer.Argument(..., help="Dynamo graph to deploy"),
     name: t.Optional[str] = typer.Option(None, "--name", "-n", help="Deployment name"),
     config_file: t.Optional[typer.FileText] = typer.Option(
         None, "--config-file", "-f", help="Configuration file path"
@@ -524,7 +523,7 @@ def deploy(
     envs: t.Optional[t.List[str]] = typer.Option(
         None,
         "--env",
-        help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo pipeline.",
+        help="Environment variable(s) to set (format: KEY=VALUE). Note: These environment variables will be set on ALL services in your Dynamo graph.",
     ),
     envs_from_secret: t.Optional[t.List[str]] = typer.Option(
         None,
@@ -545,9 +544,9 @@ def deploy(
         envvar="DYNAMO_ENV_SECRETS",
     ),
 ) -> DeploymentResponse:
-    """Deploy a Dynamo pipeline (same as deployment create)."""
+    """Deploy a Dynamo graph (same as deployment create)."""
     config = DeploymentConfig(
-        pipeline=pipeline,
+        graph=graph,
         endpoint=endpoint,
         name=name,
         config_file=config_file,

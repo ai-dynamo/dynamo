@@ -156,7 +156,7 @@ impl StorageType {
             StorageType::Device(_) => MemType::Vram,
             StorageType::Nixl => MemType::Unknown,
             StorageType::Null => MemType::Unknown,
-            StorageType::Disk => MemType::File,
+            StorageType::Disk(_) => MemType::File,
         }
     }
 }

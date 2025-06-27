@@ -67,7 +67,6 @@ class GPUInfo:
         self.name = name
         self.uuid = uuid
         self.available = True  # Can be set to False if GPU is reserved/in use
-        self.temperature = 0  # in Celsius
         self.utilization = 0  # in percent (0-100)
         self.processes: list[GPUProcess] = []
 
@@ -142,14 +141,6 @@ class GPUManager:
                     index=i, total_memory=memory_info.total, name=name, uuid=uuid
                 )
 
-                # Get additional GPU information if available
-                try:
-                    gpu_info.temperature = pynvml.nvmlDeviceGetTemperature(
-                        handle, pynvml.NVML_TEMPERATURE_GPU
-                    )
-                except pynvml.NVMLError:
-                    logger.debug(f"Could not get temperature for GPU {i}")
-
                 try:
                     utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
                     gpu_info.utilization = utilization.gpu
@@ -173,7 +164,7 @@ class GPUManager:
             logger.warning(f"Error discovering GPUs: {e}")
 
     def update_gpu_stats(self):
-        """Update GPU statistics (utilization, memory, temperature, etc.)."""
+        """Update GPU statistics (utilization, memory etc.)."""
         if not self._initialized:
             return
 
@@ -184,14 +175,6 @@ class GPUManager:
                 # Update memory info
                 memory_info = pynvml.nvmlDeviceGetMemoryInfo(handle)
                 gpu.total_memory = memory_info.total
-
-                # Update temperature
-                try:
-                    gpu.temperature = pynvml.nvmlDeviceGetTemperature(
-                        handle, pynvml.NVML_TEMPERATURE_GPU
-                    )
-                except pynvml.NVMLError:
-                    pass
 
                 # Update utilization
                 try:
@@ -242,97 +225,6 @@ class GPUManager:
             logger.warning(f"Error getting GPU memory for GPU {index}: {e}")
             return (0, 0)
 
-    def get_gpu_utilization(self, index: int) -> int:
-        """
-        Return GPU utilization percentage for a specific GPU.
-
-        Args:
-            index: GPU index
-
-        Returns:
-            GPU utilization percentage (0-100)
-        """
-        if not self._initialized or index >= len(self.gpus):
-            return 0
-
-        try:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(index)
-            utilization = pynvml.nvmlDeviceGetUtilizationRates(handle)
-            return utilization.gpu  # Returns GPU utilization percentage (0-100)
-        except pynvml.NVMLError as e:
-            logger.warning(f"Error getting GPU utilization for GPU {index}: {e}")
-            return 0
-
-    def get_gpu_temperature(self, index: int) -> int:
-        """
-        Return GPU temperature for a specific GPU.
-
-        Args:
-            index: GPU index
-
-        Returns:
-            GPU temperature in Celsius
-        """
-        if not self._initialized or index >= len(self.gpus):
-            return 0
-
-        try:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(index)
-            return pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-        except pynvml.NVMLError as e:
-            logger.warning(f"Error getting GPU temperature for GPU {index}: {e}")
-            return 0
-
-    def get_gpu_processes(self, index: int) -> list[GPUProcess]:
-        """
-        Return processes running on a specific GPU.
-
-        Args:
-            index: GPU index
-
-        Returns:
-            List of processes running on the GPU
-        """
-        if not self._initialized or index >= len(self.gpus):
-            return []
-
-        try:
-            handle = pynvml.nvmlDeviceGetHandleByIndex(index)
-            processes = pynvml.nvmlDeviceGetComputeRunningProcesses(handle)
-            return [
-                GPUProcess(pid=p.pid, used_memory=p.usedGpuMemory) for p in processes
-            ]
-        except pynvml.NVMLError as e:
-            logger.warning(f"Error getting GPU processes for GPU {index}: {e}")
-            return []
-
-    def get_best_gpu_for_memory(self, required_memory: int) -> int:
-        """
-        Return the index of the GPU with the most available memory that meets the requirement.
-
-        Args:
-            required_memory: Required memory in bytes
-
-        Returns:
-            GPU index, or -1 if no suitable GPU was found
-        """
-        if not self._initialized:
-            return -1
-
-        best_gpu = -1
-        max_free = 0
-
-        for gpu in self.gpus:
-            if not gpu.available:
-                continue
-
-            _, free = self.get_gpu_memory(gpu.index)
-            if free > required_memory and free > max_free:
-                max_free = free
-                best_gpu = gpu.index
-
-        return best_gpu
-
     def reset_allocations(self):
         """Reset all GPU allocations."""
         self._gpu_fractions = []
@@ -365,7 +257,6 @@ class GPUManager:
                     if total_memory > 0
                     else 0,
                     "gpu_utilization": gpu.utilization,
-                    "temperature": gpu.temperature,
                     "process_count": len(gpu.processes),
                     "processes": [
                         {

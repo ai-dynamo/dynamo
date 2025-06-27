@@ -23,15 +23,14 @@ import json
 import logging
 import os
 import pathlib
-import random
 import socket
-from typing import Any, DefaultDict, Dict, Iterator, Optional, Protocol, TextIO, Union
+from typing import Any, DefaultDict, Dict, Iterator, Protocol, TextIO, Union
 
 import typer
 import yaml
 from rich.console import Console
 
-from dynamo.planner.defaults import PlannerDefaults  # type: ignore[attr-defined]
+from dynamo.planner.defaults import BasePlannerDefaults  # type: ignore[attr-defined]
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sdk.core.protocol.interface import ComponentType
 from dynamo.sdk.core.runner import TargetEnum
@@ -59,47 +58,46 @@ class ServiceProtocol(Protocol):
         ...
 
 
+class PortReserver:
+    def __init__(self, host: str = "localhost"):
+        self.host = host
+        self.socket: socket.socket | None = None
+        self.port: int | None = None
+
+    def __enter__(self) -> int:
+        try:
+            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            self.socket.bind((self.host, 0))
+            _, self.port = self.socket.getsockname()
+            return self.port
+        except socket.error as e:
+            self.close_socket()
+            logger.warning(f"Failed to reserve port on {self.host}: {str(e)}")
+            raise
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close_socket()
+
+    def close_socket(self):
+        try:
+            if self.socket:
+                self.socket.close()
+        except socket.error as e:
+            logger.warning(f"Error while closing socket: {str(e)}")
+            # Don't re-raise the exception as this is cleanup code
+            return True
+
+
 @contextlib.contextmanager
 def reserve_free_port(
     host: str = "localhost",
-    port: int | None = None,
-    prefix: Optional[str] = None,
-    max_retry: int = 50,
-    enable_so_reuseport: bool = False,
 ) -> Iterator[int]:
     """
-    detect free port and reserve until exit the context
+    Detect free port and reserve until exit the context.
+    Returns a context manager that yields the reserved port.
     """
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    if enable_so_reuseport:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-        if sock.getsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT) == 0:
-            raise RuntimeError("Failed to set SO_REUSEPORT.") from None
-
-    if prefix is not None:
-        prefix_num = int(prefix) * 10 ** (5 - len(prefix))
-        suffix_range = min(65535 - prefix_num, 10 ** (5 - len(prefix)))
-        for _ in range(max_retry):
-            suffix = random.randint(0, suffix_range)
-            port = int(f"{prefix_num + suffix}")
-            try:
-                sock.bind((host, port))
-                break
-            except OSError:
-                continue
-        else:
-            raise RuntimeError(
-                f"Cannot find free port with prefix {prefix} after {max_retry} retries."
-            ) from None
-    else:
-        if port:
-            sock.bind((host, port))
-        else:
-            sock.bind((host, 0))
-    try:
-        yield sock.getsockname()[1]
-    finally:
-        sock.close()
+    with PortReserver(host) as port:
+        yield port
 
 
 def save_dynamo_state(
@@ -344,7 +342,7 @@ def is_local_planner_enabled(svc: Any, service_configs: dict) -> bool:
     if planners:
         # Get the config for the planner and check environment
         planner_config = service_configs.get(PLANNER_SERVICE_NAME, {})
-        environment = planner_config.get("environment", PlannerDefaults.environment)
+        environment = planner_config.get("environment", BasePlannerDefaults.environment)
         return environment == "local"
 
     return False
@@ -360,7 +358,7 @@ def raise_local_planner_warning(svc: Any, service_configs: dict) -> None:
     planner_config = service_configs.get(PLANNER_SERVICE_NAME, {})
 
     # Resolve no-op setting
-    no_op = planner_config.get("no-operation", PlannerDefaults.no_operation)
+    no_op = planner_config.get("no-operation", BasePlannerDefaults.no_operation)
 
     # Check worker counts across nodes
     nodes = [dep for dep in svc.all_services().values()]

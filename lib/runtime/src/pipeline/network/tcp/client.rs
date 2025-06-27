@@ -72,7 +72,7 @@ impl TcpClient {
         }
     }
 
-    pub async fn create_response_steam(
+    pub async fn create_response_stream(
         context: Arc<dyn AsyncEngineContext>,
         info: ConnectionInfo,
     ) -> Result<StreamSender> {
@@ -120,7 +120,7 @@ impl TcpClient {
             Ok(hb) => hb,
             Err(err) => {
                 return Err(error!(
-                    "create_response_steam: Error converting CallHomeHandshake to JSON array: {err:#}"
+                    "create_response_stream: Error converting CallHomeHandshake to JSON array: {err:#}"
                 ));
             }
         };

@@ -182,7 +182,7 @@ pub struct LocalMemoryRegion {
     size: usize,
 
     #[getter(copy)]
-    storage_idx: usize,
+    storage_type: StorageType,
 }
 
 /// Core trait for block layouts
@@ -203,7 +203,10 @@ pub trait BlockLayout: GenericBlockLayout {
 /// Generic trait for block layouts - type-erased on the [Storage] object.
 pub trait GenericBlockLayout: BlockLayoutConfig + Send + Sync {
     /// Storage type for the layout
-    fn storage_type(&self) -> StorageType;
+    fn storage_type(&self) -> &StorageType;
+
+    /// Full configuration for the layout
+    fn config(&self) -> &LayoutConfig;
 
     /// Get the memory region for a specific page [page_size, inner_dim]
     ///
@@ -259,7 +262,7 @@ pub trait BlockLayoutConfig: std::fmt::Debug {
 }
 
 /// Configuration for block layouts
-#[derive(Debug, Clone, Builder, Validate, Serialize, Deserialize)]
+#[derive(Debug, Clone, Builder, Validate, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LayoutConfig {
     /// Number of blocks
     #[validate(range(min = 1))]
@@ -395,11 +398,7 @@ impl<S: Storage> FullyContiguous<S> {
     /// Create a new contiguous layout using the provided configuration and pre-allocated storage.
     /// Performs validation and calculates strides/offsets.
     #[instrument(level = "debug", skip(storage), fields(config = ?config))]
-    pub fn new(
-        config: LayoutConfig,
-        mut storage: Vec<S>,
-        require_exact: bool,
-    ) -> Result<Self, LayoutError> {
+    pub fn new(config: LayoutConfig, mut storage: Vec<S>) -> Result<Self, LayoutError> {
         // Calculate dimensions, which includes validation.
         let config = FullyContiguousConfig::new(config)?;
 
@@ -411,7 +410,7 @@ impl<S: Storage> FullyContiguous<S> {
         let storage = storage.remove(0);
         let storage_type = storage.storage_type();
 
-        let base_offset = validate_storage(&storage, &config, require_exact)?;
+        let base_offset = validate_storage(&storage, &config)?;
 
         tracing::debug!(
             config.memory_region_size,
@@ -494,7 +493,7 @@ impl<S: Storage> FullyContiguous<S> {
         );
 
         // Pass the config by value as Self::new takes ownership
-        Self::new(config.inner, vec![storage], false)
+        Self::new(config.inner, vec![storage])
     }
 }
 
@@ -515,8 +514,12 @@ impl<S: Storage> BlockLayout for FullyContiguous<S> {
 }
 
 impl<S: Storage> GenericBlockLayout for FullyContiguous<S> {
-    fn storage_type(&self) -> StorageType {
-        self.storage_type.clone()
+    fn storage_type(&self) -> &StorageType {
+        &self.storage_type
+    }
+
+    fn config(&self) -> &LayoutConfig {
+        &self.config.inner
     }
 
     fn memory_region(
@@ -539,7 +542,7 @@ impl<S: Storage> GenericBlockLayout for FullyContiguous<S> {
         Ok(LocalMemoryRegion {
             addr: final_addr,
             size: self.config.memory_region_size,
-            storage_idx: 0,
+            storage_type: self.storage_type,
         })
     }
 }
@@ -655,7 +658,6 @@ impl<S: Storage> LayerSeparate<S> {
         config: LayoutConfig,
         storages: Vec<S>,
         is_outer_contiguous: bool,
-        require_exact: bool,
     ) -> Result<Self, LayoutError> {
         if storages.len() != config.num_layers {
             return Err(LayoutError::InvalidConfig(
@@ -668,7 +670,7 @@ impl<S: Storage> LayerSeparate<S> {
         let storage_type = storages[0].storage_type();
         let mut base_offsets = Vec::new();
         for storage in &storages {
-            let base_offset = validate_storage(storage, &config, require_exact)?;
+            let base_offset = validate_storage(storage, &config)?;
 
             tracing::debug!(
                 config.memory_region_size,
@@ -738,13 +740,17 @@ impl<S: Storage> LayerSeparate<S> {
         );
 
         // Pass the config by value as Self::new takes ownership
-        Self::new(config.inner, storages, is_outer_contiguous, false)
+        Self::new(config.inner, storages, is_outer_contiguous)
     }
 }
 
 impl<S: Storage> GenericBlockLayout for LayerSeparate<S> {
-    fn storage_type(&self) -> StorageType {
-        self.storage_type.clone()
+    fn storage_type(&self) -> &StorageType {
+        &self.storage_type
+    }
+
+    fn config(&self) -> &LayoutConfig {
+        &self.config.inner
     }
 
     fn memory_region(
@@ -767,7 +773,7 @@ impl<S: Storage> GenericBlockLayout for LayerSeparate<S> {
         Ok(LocalMemoryRegion {
             addr: final_addr,
             size: self.config.memory_region_size,
-            storage_idx: layer_idx,
+            storage_type: self.storages[layer_idx].storage_type(),
         })
     }
 }
@@ -886,7 +892,7 @@ pub mod tests {
         let fc_config = FullyContiguousConfig::new(config.clone()).unwrap();
         let required_size = fc_config.required_allocation_size();
         let storage = NullDeviceStorage::new((required_size - 1) as u64);
-        let layout_result = FullyContiguous::new(config, vec![storage], false);
+        let layout_result = FullyContiguous::new(config, vec![storage]);
 
         assert!(layout_result.is_err());
         match layout_result.err().unwrap() {
@@ -1154,16 +1160,11 @@ pub mod tests {
                 as u64;
 
         // Require the allocation to exactly match the required size.
-        FullyContiguous::new(
-            config.clone(),
-            vec![NullDeviceStorage::new(exact_size)],
-            true,
-        )
-        .expect("Layout creation failed");
+        FullyContiguous::new(config.clone(), vec![NullDeviceStorage::new(exact_size)])
+            .expect("Layout creation failed");
 
         assert!(
-            FullyContiguous::new(config, vec![NullDeviceStorage::new(exact_size + 1)], true)
-                .is_err()
+            FullyContiguous::new(config, vec![NullDeviceStorage::new(exact_size + 1)]).is_err()
         );
     }
 
@@ -1192,7 +1193,7 @@ pub mod tests {
             storages.push(NullDeviceStorage::new(required_size as u64));
         }
 
-        LayerSeparate::new(config, storages, is_outer_contiguous, false)
+        LayerSeparate::new(config, storages, is_outer_contiguous)
     }
 
     #[test]
@@ -1249,7 +1250,7 @@ pub mod tests {
             storages.push(NullDeviceStorage::new(1000));
         }
 
-        let layout_result = LayerSeparate::new(config, storages, true, false);
+        let layout_result = LayerSeparate::new(config, storages, true);
         assert!(layout_result.is_err());
         match layout_result.err().unwrap() {
             LayoutError::InvalidConfig(_) => {} // Expected error
@@ -1267,7 +1268,7 @@ pub mod tests {
         assert_eq!(layout.page_size(), PAGE_SIZE);
         assert_eq!(layout.inner_dim(), INNER_DIM);
         assert_eq!(layout.storage().len(), NUM_LAYERS);
-        assert_eq!(layout.storage_type(), StorageType::Null);
+        assert_eq!(layout.storage_type(), &StorageType::Null);
     }
 
     #[test]
@@ -1428,7 +1429,7 @@ pub mod tests {
             storages.push(NullDeviceStorage::new(required_size as u64));
         }
 
-        let layout_result = LayerSeparate::new(config, storages, true, false);
+        let layout_result = LayerSeparate::new(config, storages, true);
         assert!(
             layout_result.is_ok(),
             "Layout creation with alignment failed"
@@ -1543,16 +1544,12 @@ pub mod tests {
             config.clone(),
             vec![NullDeviceStorage::new(exact_size)],
             true,
-            true,
         )
         .expect("Layout creation failed");
 
-        assert!(LayerSeparate::new(
-            config,
-            vec![NullDeviceStorage::new(exact_size + 1)],
-            true,
-            true
-        )
-        .is_err());
+        assert!(
+            LayerSeparate::new(config, vec![NullDeviceStorage::new(exact_size + 1)], true,)
+                .is_err()
+        );
     }
 }

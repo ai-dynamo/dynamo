@@ -16,7 +16,7 @@ pub enum SlotPosition {
     All,
 }
 
-pub struct Slot<S: Storage> {
+pub struct Slot<S: Storage, L: LocalityProvider> {
     /// Current position in the sequence of tokens that have been computed.
     /// When the slot is initialized, we populate the sequence with the prefill tokens.
     /// However, those tokens are not yet prefilled, so they are not yet represented
@@ -30,13 +30,13 @@ pub struct Slot<S: Storage> {
     sequence: TokenBlockSequence,
 
     /// The immutable blocks
-    immutable: Vec<ImmutableBlock<S, BasicMetadata>>,
+    immutable: Vec<ImmutableBlock<S, L, BasicMetadata>>,
 
     /// The mutable blocks
-    mutable: VecDeque<MutableBlock<S, BasicMetadata>>,
+    mutable: VecDeque<MutableBlock<S, L, BasicMetadata>>,
 }
 
-impl<S: Storage> Slot<S> {
+impl<S: Storage, L: LocalityProvider> Slot<S, L> {
     /// Creates a new slot.
     pub fn new(tokens: Tokens, block_size: usize, salt_hash: SaltHash) -> Self {
         let sequence = TokenBlockSequence::new(tokens, block_size, Some(salt_hash));
@@ -60,7 +60,7 @@ impl<S: Storage> Slot<S> {
     pub fn apply_computed_tokens(
         &mut self,
         tokens_to_append: Vec<u32>,
-        block_pool: &BlockPool<S, BasicMetadata>,
+        block_pool: &BlockPool<S, L, BasicMetadata>,
     ) -> Result<(), SlotError> {
         if tokens_to_append.is_empty() {
             return Ok(());
@@ -150,7 +150,7 @@ impl<S: Storage> Slot<S> {
     /// this multiple times if the slot was unable acquire blocks for the remainder of the sequence.
     pub fn apply_computed_blocks(
         &mut self,
-        computed_blocks: Vec<ImmutableBlock<S, BasicMetadata>>,
+        computed_blocks: Vec<ImmutableBlock<S, L, BasicMetadata>>,
     ) -> Result<(), SlotError> {
         assert!(self.mutable.is_empty());
 
@@ -186,7 +186,7 @@ impl<S: Storage> Slot<S> {
     pub fn allocate_blocks(
         &mut self,
         num_new_tokens: usize,
-        block_pool: &BlockPool<S, BasicMetadata>,
+        block_pool: &BlockPool<S, L, BasicMetadata>,
     ) -> Option<Vec<BlockId>> {
         let total_num_blocks =
             (self.computed_position + num_new_tokens).div_ceil(self.sequence.block_size());
@@ -263,7 +263,7 @@ impl<S: Storage> Slot<S> {
     }
 }
 
-impl<S: Storage> Drop for Slot<S> {
+impl<S: Storage, L: LocalityProvider> Drop for Slot<S, L> {
     fn drop(&mut self) {
         self.free_blocks();
     }
@@ -274,6 +274,7 @@ mod tests {
     use super::*;
     use dynamo_llm::block_manager::{
         block::{BasicMetadata, Blocks},
+        block::locality::Local,
         pool::BlockPool,
         storage::tests::{NullDeviceAllocator, NullDeviceStorage},
     };
@@ -284,7 +285,7 @@ mod tests {
 
     // Test fixture providing a pre-configured block pool for testing
     struct TestFixture {
-        pool: BlockPool<NullDeviceStorage, BasicMetadata>,
+        pool: BlockPool<NullDeviceStorage, Local, BasicMetadata>,
         _runtime: tokio::runtime::Runtime,
     }
 
@@ -323,7 +324,7 @@ mod tests {
     }
 
     // Helper function to create a slot with a given token sequence
-    fn create_slot_with_tokens(tokens: Vec<u32>) -> Slot<NullDeviceStorage> {
+    fn create_slot_with_tokens(tokens: Vec<u32>) -> Slot<NullDeviceStorage, Local> {
         let token_sequence = Tokens::from(tokens);
         Slot::new(token_sequence, BLOCK_SIZE, SALT_HASH)
     }
@@ -331,9 +332,9 @@ mod tests {
     // Helper function to allocate blocks for a slot
     // Note: We allocate extra capacity to work around debug assertion issues
     fn allocate_blocks_for_slot(
-        slot: &mut Slot<NullDeviceStorage>,
+        slot: &mut Slot<NullDeviceStorage, Local>,
         num_tokens: usize,
-        pool: &BlockPool<NullDeviceStorage, BasicMetadata>,
+        pool: &BlockPool<NullDeviceStorage, Local, BasicMetadata>,
     ) -> Option<Vec<BlockId>> {
         slot.allocate_blocks(num_tokens, pool)
     }

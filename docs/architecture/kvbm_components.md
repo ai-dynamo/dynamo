@@ -23,7 +23,7 @@ The design of the KVBM is inspired from vLLM and SGLang KV block managers but wi
 ![Internal architecture and key modules in the Dynamo KVBM. ](../images/kvbm-internal-arch.png)
 **Internal architecture and key modules in the Dynamo KVBM**
 
-#### KvBlockManager as Orchestration Layer
+## KvBlockManager as Orchestration Layer
 
 The `KvBlockManager <H, D>` acts as a coordinator across memory tiers—host (CPU), device (GPU), and remote—by managing per-backend block pools and exposing consistent block lifecycle APIs. It tracks KV block locations across device memory (G1), CPU memory within and across nodes (G2), local/pooled SSDs (G3), and remote storage (G4). G1-G4 are key tiers enabled by KVBM. Critical to note that KVBM treats G4 storage as an opaque blob store, unaware of internal layout optimizations.
 
@@ -36,12 +36,12 @@ The `KvBlockManager <H, D>` acts as a coordinator across memory tiers—host (CP
 
 Implementation-wise, `KvBlockManagerState` holds the logic: it's initialized by `KvBlockManagerConfig`, which merges runtime, model, and layout configurations. `NixlOptions` injects remote awareness.
 
-#### Block Layout and Memory Mapping
+## Block Layout and Memory Mapping
 
 Each block is a 2D array `[num_layers][page_size × inner_dim]`. `BlockLayouttrait` abstracts the memory layout. The default implementation,`FullyContiguous`, stores all layers for all blocks in one region with alignment-aware stride computation:
 
 
-```
+```none
 block_stride_in_bytes = align_up(num_layers × layer_stride, alignment);
 ```
 
@@ -55,12 +55,12 @@ Both CPU and GPU pools share this memory layout, but they use storage-specific b
 
 Each layout is constructed using a `LayoutConfig`, and storage is either passed directly or allocated using a StorageAllocator.
 
-#### BlockPool and Memory Pools (Active and Inactive)
+## BlockPool and Memory Pools (Active and Inactive)
 
 Each `BlockPool<T>` (where `T` is `DeviceStorage`, `PinnedStorage`, and so forth) tracks two sub-pools:
 
 * `ActivePool`: Contains blocks currently in use by sequences
-* `InactivePool`: Recycled blocks ready for allocation. Think free list.
+* `InactivePool`: Recycled blocks ready for allocation; think free list
 
 When a token block is requested (for example, `get_mutable_block()`), the allocator pops from `InactivePool`, transitions its state, and returns a writable handle. On sequence commit or eviction, the system resets blocks and returns them to the inactive pool.
 
@@ -93,7 +93,7 @@ Consider this example lifecycle of a block in the KVBM; in it, a sequence reques
 5. `register()` → Block is hashed and moved to Registered. Blocks can now be used to lookup.
 6. On eviction or end-of-life → `drop()` of RAII handle returns block to Reset
 
-#### Lifecycle Management using RAII and Event Plane
+## Lifecycle Management using RAII and Event Plane
 
 The system uses RAII for memory lifecycle management. Every block holds metadata and registration state, and registration is coupled with an `EventManager`. On registration and drop:
 
@@ -102,13 +102,13 @@ The system uses RAII for memory lifecycle management. Every block holds metadata
 
 This pattern ensures consistency for shared memory tracking across workers without requiring explicit deallocation logic. The events are propagated in the Dynamo Events plane. Any Dynamo component subscribed to the events plane can listen to these changes. Note that even the storage provider can subscribe to the events plane and create an internal prefix tree representation that is tailored and optimized for the specific platform.
 
-#### Remote Memory Integration using NIXL
+## Remote Memory Integration using NIXL
 
 The NIXL agent exposes remote memory buffers using `NixlBlockSet`, `RemoteBlocks`, and layout descriptors. Key operations include:
 
 * `nixl_register()`: Registers memory region with NIXL runtime
 * `serialize() / deserialize()`: Converts layout and memory into transferable descriptors
-* `import_remote_blockset()`: Loads remote node’s block layouts into the manager
+* `import_remote_blockset()`: Loads remote node's block layouts into the manager
 * `get_remote_blocks_mutable()`: Fetches transferable memory views from another node
 
 `RemoteBlocks` is a lightweight abstraction over shared memory for cross-node block usage (through UCX or other backends).
@@ -173,42 +173,27 @@ The left side of the figure in [Understanding KVBM Components](#understanding-kv
        The system can batch and publish registration events using a Publisher, optimizing performance under high concurrency
 
 
-#### Storage backends and pluggability
+## Storage backends and pluggability
 
-You can integrating KVBM with a storage backend by extending or wrapping `NixlEnabledStorage` to support cross-node RDMA registration. All layouts and block pools are generic over these backends, allowing for fine-grained control over memory tiers. We defer detailed integration guidance, since we collaborate with storage partners to simplify and standardize these integration paths.
+You can integrate KVBM with a storage backend by extending or wrapping `NixlEnabledStorage` to support cross-node RDMA registration. All layouts and block pools are generic over these backends, allowing for fine-grained control over memory tiers. We defer detailed integration guidance, since we collaborate with storage partners to simplify and standardize these integration paths.
 
-```
-An example system architecture
-                        +------------------------------+
-                        |Distributed Inference engine  |
-                        +------------------------------+
-                                  |
-                                  v
-                        +------------------------------+
-                        |  Dynamo KV Block Manager      |
-                        +------------------------------+
-                                  |
-                 +----------------+----------------+
-                 |                                 |
-                 v                                 v
-   +------------------------------+    +----------------------------+
-   |        NIXL Storage Agent     |    |        Event Plane          |
-   |  - Volume registration        |    |  - NATS-based Pub/Sub       |
-   |  - get()/put() abstraction    |    |  - StoreEvent / RemoveEvent |
-   +------------------------------+    +----------------------------+
-                 |                                 |
-                 v                                 v
-     +-----------------------------+   +-----------------------------+
-     |   G4 Storage Infrastructure  |   | Storage Provider Subscriber |
-     |  (SSD, Object store, etc.)   |   |  - Parse Events             |
-     |  - Store KV blocks           |   |  - Build fast tree/index    |
-     +-----------------------------+    |  - Optimize G4 tiering      |
-                                        +-----------------------------+
+```mermaid
+---
+title: Example KVBM System Architecture
+---
+flowchart TD
+    A["Distributed Inference Engine"] --> B["Dynamo KV Block Manager"]
+
+    B --> C["NIXL Storage Agent<br/>- Volume registration<br/>- get()/put() abstraction"]
+    B --> D["Event Plane<br/>- NATS-based Pub/Sub<br/>- StoreEvent / RemoveEvent"]
+
+    C --> E["G4 Storage Infrastructure<br/>(SSD, Object store, etc.)<br/>- Store KV blocks"]
+    D --> F["Storage Provider Subscriber<br/>- Parse Events<br/>- Build fast tree/index<br/>- Optimize G4 tiering"]
 ```
 
 For now, the following breakdown provides a high-level understanding of how KVBM interacts with external storage using the NIXL storage interface and the Dynamo Event Plane:
 
-##### NIXL Storage Interface (for Backend Integration)
+### NIXL Storage Interface (for Backend Integration)
 
 The NIXL interface abstracts volume interaction and decouples it from mounting, metadata tracking, or direct system I/O. It provides:
 
@@ -216,9 +201,9 @@ The NIXL interface abstracts volume interaction and decouples it from mounting, 
 * unregisterVolume(): Cleanly deregister and release volume mappings.
 * get() / put(): Block-level APIs used by KVBM to fetch and store token blocks.
 
-These abstractions allow backends to be integrated without tying into the host’s file system stack, enabling safe interaction with block devices, local filesystems, and RDMA-capable volumes. Please note that these APIs are still being finalized.
+These abstractions allow backends to be integrated without tying into the host's file system stack, enabling safe interaction with block devices, local filesystems, and RDMA-capable volumes. Please note that these APIs are still being finalized.
 
-##### Dynamo Event Plane (Pub/Sub Coordination Layer)
+### Dynamo Event Plane (Pub/Sub Coordination Layer)
 
 To support external storage optimizations without modifying KVBM logic, we provide an **event plane** built on NATS.io that emits lifecycle events for all block operations. Particularly there are two events emitted.
 
@@ -236,17 +221,17 @@ Each KVEvent (\~100 bytes) contains:
 
 For scalability, the system batches and publishes these events periodically (for example, every \~10s, or dynamically based on system load).
 
-##### A conceptual design of a storage advisor
+### A conceptual design of a storage advisor
 
-This section provides an overview for the storage provider who is interested in integrating as a custom backend to KVBM and providing optimized performance. ***Please note, this is optional and not required for KVBM to integrate with a backend.***
+This section provides an overview for the storage provider who is interested in integrating as a custom backend to KVBM and providing optimized performance. **Please note, this is optional for KVBM integration with a backend.**
 
-External storage systems are not tightly coupled with Dynamo’s execution pipeline. Instead, they passively observe KV block lifecycle events through a subscription model:
+External storage systems are not tightly coupled with Dynamo's execution pipeline. Instead, they passively observe KV block lifecycle events through a subscription model:
 
 * Storage volumes are pre-provisioned and mounted by the storage provider.
 * These volumes are then registered with Dynamo through the NIXL Storage Agent using registerVolume() APIs. Dynamo itself does not manage mounts or provisioning.
 * The Dynamo KV Block Manager interacts only with logical block-level APIs (that is, get() and put()).
 * In parallel, the Event Plane asynchronously broadcasts KV lifecycle events using a NATS-based pub/sub channel.
-* Storage vendors implement a lightweight subscriber process that listens to these events without interfering with the KV Manager’s runtime behavior.
+* Storage vendors implement a lightweight subscriber process that listens to these events without interfering with the KV Manager's runtime behavior.
 * This decoupling ensures that external storage systems can optimize block placement and lifecycle tracking without modifying or instrumenting the core Dynamo codebase.
 
 Now, to enable fast lookup and dynamic tiering, storage vendors may build internal data structures using the received event stream. Here is a high level conceptual design:

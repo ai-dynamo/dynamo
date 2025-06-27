@@ -163,6 +163,7 @@ class CircusController:
         waiting: bool = True,
         max_retries: int = 3,
         retry_delay: float = 2.0,
+        blocking: bool = True,
         timeout: int = 600,  # 10 minutes
     ) -> bool:
         """
@@ -185,8 +186,11 @@ class CircusController:
             response = self.client.send_message("signal", name=name, signum="SIGTERM")
             if response.get("status") != "ok":
                 logger.warning(f"Failed to send SIGTERM to {name}: {response}")
+            if not blocking:
+                return True
         except Exception as e:
             logger.warning(f"Error sending SIGTERM to {name}: {e}")
+            return False
 
         # Now wait for the process to exit gracefully
         exited = await self._wait_for_process_graceful_exit(name, timeout)

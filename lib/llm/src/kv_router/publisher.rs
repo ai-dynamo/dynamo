@@ -218,7 +218,7 @@ fn calculate_backoff_ms(consecutive_errors: u32) -> u64 {
     )
 }
 
-async fn start_zmq_listener(
+pub async fn start_zmq_listener(
     zmq_endpoint: String,
     zmq_topic: String,
     tx: mpsc::UnboundedSender<KvCacheEvent>,

@@ -24,7 +24,7 @@ RUN_PREFIX=
 # dependencies are specified in the /container/deps folder and
 # installed within framework specific sections of the Dockerfile.
 
-declare -A FRAMEWORKS=(["VLLM"]=1 ["TENSORRTLLM"]=2 ["SGLANG"]=3)
+declare -A FRAMEWORKS=(["VLLM"]=1 ["TENSORRTLLM"]=2 ["SGLANG"]=3 ["VLLM_V1"]=4)
 DEFAULT_FRAMEWORK=VLLM
 
 SOURCE_DIR=$(dirname "$(readlink -f "$0")")
@@ -50,12 +50,12 @@ get_options() {
             show_help
             exit
             ;;
-	--framework)
+        --framework)
             if [ "$2" ]; then
                 FRAMEWORK=$2
                 shift
             else
-		missing_requirement "$1"
+                missing_requirement "$1"
             fi
             ;;
         --image)
@@ -63,7 +63,7 @@ get_options() {
                 IMAGE=$2
                 shift
             else
-		missing_requirement "$1"
+                missing_requirement "$1"
             fi
             ;;
         --target)
@@ -74,93 +74,93 @@ get_options() {
                 missing_requirement "$1"
             fi
             ;;
-	--name)
+        --name)
             if [ "$2" ]; then
                 NAME=$2
                 shift
             else
-		missing_requirement "$1"
+                missing_requirement "$1"
             fi
             ;;
-	--hf-cache)
+        --hf-cache)
             if [ "$2" ]; then
                 HF_CACHE=$2
                 shift
             else
-		missing_requirement "$1"
+                missing_requirement "$1"
             fi
             ;;
 
-	--gpus)
+        --gpus)
             if [ "$2" ]; then
                 GPUS=$2
                 shift
             else
-		missing_requirement "$1"
+                missing_requirement "$1"
             fi
             ;;
-	--runtime)
+        --runtime)
             if [ "$2" ]; then
                 RUNTIME=$2
                 shift
             else
-		missing_requirement "$1"
+                missing_requirement "$1"
             fi
             ;;
-	--entrypoint)
+        --entrypoint)
             if [ "$2" ]; then
                 ENTRYPOINT=$2
                 shift
             else
-		missing_requirement "$1"
+                missing_requirement "$1"
             fi
             ;;
-	--workdir)
-	    if [ "$2" ]; then
-	        WORKDIR="$2"
-	        shift
-	    else
-	        missing_requirement "$1"
-	    fi
-	    ;;
-	--privileged)
+        --workdir)
+            if [ "$2" ]; then
+                WORKDIR="$2"
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --privileged)
             if [ "$2" ]; then
                 PRIVILEGED=$2
                 shift
             else
-		missing_requirement "$1"
+                missing_requirement "$1"
             fi
             ;;
-	--rm)
+        --rm)
             if [ "$2" ]; then
                 RM=$2
                 shift
             else
-		missing_requirement "$1"
+                missing_requirement "$1"
             fi
             ;;
-	-v)
+        -v)
             if [ "$2" ]; then
                 VOLUME_MOUNTS+=" -v $2 "
                 shift
             else
-		missing_requirement "$1"
+                missing_requirement "$1"
             fi
             ;;
-	-e)
+        -e)
             if [ "$2" ]; then
                 ENVIRONMENT_VARIABLES+=" -e $2 "
                 shift
             else
-		missing_requirement "$1"
+                missing_requirement "$1"
             fi
             ;;
-	-it)
-	    INTERACTIVE=" -it "
-	    ;;
-	--mount-workspace)
-	    MOUNT_WORKSPACE=TRUE
-	    ;;
+        -it)
+            INTERACTIVE=" -it "
+            ;;
+        --mount-workspace)
+            MOUNT_WORKSPACE=TRUE
+            ;;
         --use-nixl-gds)
             USE_NIXL_GDS=TRUE
             ;;
@@ -177,10 +177,10 @@ get_options() {
             break
             ;;
          -?*)
-	    error 'ERROR: Unknown option: ' "$1"
+            error 'ERROR: Unknown option: ' "$1"
             ;;
-	 ?*)
-	    error 'ERROR: Unknown option: ' "$1"
+         ?*)
+            error 'ERROR: Unknown option: ' "$1"
             ;;
         *)
             break
@@ -191,14 +191,14 @@ get_options() {
     done
 
     if [ -z "$FRAMEWORK" ]; then
-	FRAMEWORK=$DEFAULT_FRAMEWORK
+        FRAMEWORK=$DEFAULT_FRAMEWORK
     fi
 
     if [ -n "$FRAMEWORK" ]; then
-	FRAMEWORK=${FRAMEWORK^^}
-	if [[ -z "${FRAMEWORKS[$FRAMEWORK]}" ]]; then
-	    error 'ERROR: Unknown framework: ' "$FRAMEWORK"
-	fi
+        FRAMEWORK=${FRAMEWORK^^}
+        if [[ -z "${FRAMEWORKS[$FRAMEWORK]}" ]]; then
+            error 'ERROR: Unknown framework: ' "$FRAMEWORK"
+        fi
     fi
 
     if [ -z "$IMAGE" ]; then
@@ -209,68 +209,68 @@ get_options() {
     fi
 
     if [[ ${GPUS^^} == "NONE" ]]; then
-	GPU_STRING=""
+        GPU_STRING=""
     else
-	GPU_STRING="--gpus ${GPUS}"
+        GPU_STRING="--gpus ${GPUS}"
     fi
 
     if [[ ${NAME^^} == "" ]]; then
-	NAME_STRING=""
+        NAME_STRING=""
     else
-	NAME_STRING="--name ${NAME}"
+        NAME_STRING="--name ${NAME}"
     fi
 
     if [[ ${ENTRYPOINT^^} == "" ]]; then
-	ENTRYPOINT_STRING=""
+        ENTRYPOINT_STRING=""
     else
-	ENTRYPOINT_STRING="--entrypoint ${ENTRYPOINT}"
+        ENTRYPOINT_STRING="--entrypoint ${ENTRYPOINT}"
     fi
 
     if [ -n "$MOUNT_WORKSPACE" ]; then
-	VOLUME_MOUNTS+=" -v ${SOURCE_DIR}/..:/workspace "
-	VOLUME_MOUNTS+=" -v /tmp:/tmp "
-	VOLUME_MOUNTS+=" -v /mnt/:/mnt "
+        VOLUME_MOUNTS+=" -v ${SOURCE_DIR}/..:/workspace "
+        VOLUME_MOUNTS+=" -v /tmp:/tmp "
+        VOLUME_MOUNTS+=" -v /mnt/:/mnt "
 
-	if [ -z "$HF_CACHE" ]; then
-	    HF_CACHE=$DEFAULT_HF_CACHE
-	fi
+        if [ -z "$HF_CACHE" ]; then
+            HF_CACHE=$DEFAULT_HF_CACHE
+        fi
 
-	if [ -z "${PRIVILEGED}" ]; then
-	    PRIVILEGED="TRUE"
-	fi
+        if [ -z "${PRIVILEGED}" ]; then
+            PRIVILEGED="TRUE"
+        fi
 
-	ENVIRONMENT_VARIABLES+=" -e HF_TOKEN"
+        ENVIRONMENT_VARIABLES+=" -e HF_TOKEN"
 
-	INTERACTIVE=" -it "
+        INTERACTIVE=" -it "
     fi
 
     if [[ ${HF_CACHE^^} == "NONE" ]]; then
-	HF_CACHE=
+        HF_CACHE=
     fi
 
     if [ -n "$HF_CACHE" ]; then
-	mkdir -p "$HF_CACHE"
-	VOLUME_MOUNTS+=" -v $HF_CACHE:/root/.cache/huggingface"
+        mkdir -p "$HF_CACHE"
+        VOLUME_MOUNTS+=" -v $HF_CACHE:/root/.cache/huggingface"
     fi
 
     if [ -z "${PRIVILEGED}" ]; then
-	PRIVILEGED="FALSE"
+        PRIVILEGED="FALSE"
     fi
 
     if [ -z "${RM}" ]; then
-	RM="TRUE"
+        RM="TRUE"
     fi
 
     if [[ ${PRIVILEGED^^} == "FALSE" ]]; then
-	PRIVILEGED_STRING=""
+        PRIVILEGED_STRING=""
     else
-	PRIVILEGED_STRING="--privileged"
+        PRIVILEGED_STRING="--privileged"
     fi
 
     if [[ ${RM^^} == "FALSE" ]]; then
-	RM_STRING=""
+        RM_STRING=""
     else
-	RM_STRING=" --rm "
+        RM_STRING=" --rm "
     fi
 
     if [ -n "$USE_NIXL_GDS" ]; then
@@ -280,7 +280,7 @@ get_options() {
         NIXL_GDS_CAPS=""
     fi
     if [[ "$GPUS" == "none" || "$GPUS" == "NONE" ]]; then
-    	RUNTIME=""
+            RUNTIME=""
     fi
     REMAINING_ARGS=("$@")
 }

@@ -46,9 +46,7 @@ console = Console()
 
 def serve(
     ctx: typer.Context,
-    dynamo_pipeline: str = typer.Argument(
-        ..., help="The path to the Dynamo pipeline to serve"
-    ),
+    graph: str = typer.Argument(..., help="The path to the Dynamo graph to serve"),
     service_name: str = typer.Option(
         "",
         help="Only serve the specified service. Don't serve any dependencies of this service.",
@@ -113,9 +111,9 @@ def serve(
         case_sensitive=False,
     ),
 ):
-    """Locally serve a Dynamo pipeline.
+    """Locally serve a Dynamo graph.
 
-    Starts a local server for the specified Dynamo pipeline.
+    Starts a local server for the specified Dynamo graph.
     """
     from dynamo.runtime.logging import configure_dynamo_logging
     from dynamo.sdk.cli.utils import configure_target_environment
@@ -152,8 +150,8 @@ def serve(
         os.environ["DYNAMO_SERVICE_CONFIG"] = json.dumps(service_configs)
 
     if working_dir is None:
-        if os.path.isdir(os.path.expanduser(dynamo_pipeline)):
-            working_dir = Path(os.path.expanduser(dynamo_pipeline))
+        if os.path.isdir(os.path.expanduser(graph)):
+            working_dir = Path(os.path.expanduser(graph))
         else:
             working_dir = Path(".")
 
@@ -163,7 +161,7 @@ def serve(
     if sys.path[0] != working_dir_str:
         sys.path.insert(0, working_dir_str)
 
-    svc = find_and_load_service(dynamo_pipeline, working_dir=working_dir)
+    svc = find_and_load_service(graph, working_dir=working_dir)
     logger.debug(f"Loaded service: {svc.name}")
     logger.debug("Dependencies: %s", [dep.on.name for dep in svc.dependencies.values()])
     LinkedServices.remove_unused_edges()
@@ -181,13 +179,13 @@ def serve(
     # Start the service
     console.print(
         Panel.fit(
-            f"[bold]Starting Dynamo service:[/bold] [cyan]{dynamo_pipeline}[/cyan]",
+            f"[bold]Starting Dynamo service:[/bold] [cyan]{graph}[/cyan]",
             title="[bold green]Dynamo Serve[/bold green]",
             border_style="green",
         )
     )
     serve_dynamo_graph(
-        dynamo_pipeline,
+        graph,
         working_dir=working_dir_str,
         # host=host,
         # port=port,

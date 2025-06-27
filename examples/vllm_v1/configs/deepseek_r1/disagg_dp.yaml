@@ -1,0 +1,68 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+Common:
+  model: deepseek-ai/DeepSeek-R1
+  kv_transfer_config:
+    kv_connector: NixlConnector
+    kv_role: kv_both
+  served_model_name: deepseek-ai/DeepSeek-R1
+  enable_expert_parallel: false
+
+  # data parallel configuration, these value may need to be overridden
+  # depending on the deployment.
+  data_parallel_size: 16
+  data_parallel_size_local: 8
+  data_parallel_address: 0.0.0.0
+  data_parallel_rpc_port: 13345
+  max-model-len: 10240
+  trust-remote-code: true
+
+Frontend:
+  endpoint: dynamo.SimpleLoadBalancer.generate
+  port: 8000
+  common-configs: [served_model_name]
+
+SimpleLoadBalancer:
+  enable_disagg: true
+  common-configs: [model, kv_transfer_config, served_model_name]
+
+VllmPrefillWorker:
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: '8'
+  common-configs: [model, kv_transfer_config, served_model_name, data_parallel_size, data_parallel_size_local, data_parallel_address, data_parallel_rpc_port, max-model-len, trust-remote-code, enable_expert_parallel]
+
+
+VllmDecodeWorker:
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: '8'
+  common-configs: [model, kv_transfer_config, served_model_name, data_parallel_size, data_parallel_size_local, data_parallel_address, data_parallel_rpc_port, max-model-len, trust-remote-code, enable_expert_parallel]
+
+# VllmDpWorker is a special worker that is not part of the graph, and should be deployed separately
+# depending on the DP configuration of the VllmPrefillWorker / VllmDecodeWorker
+VllmDpWorker:
+  # [NOTE] 'data_parallel_address' and 'data_parallel_start_rank' will be set differently
+  # depending on the DP worker counts and where the DP worker is located.
+  # See README.md for more details.
+  data_parallel_start_rank: 8
+  headless: true
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: '8'
+  common-configs: [model, kv_transfer_config, served_model_name, data_parallel_size, data_parallel_size_local, data_parallel_address, data_parallel_rpc_port, max-model-len, trust-remote-code, enable_expert_parallel]
