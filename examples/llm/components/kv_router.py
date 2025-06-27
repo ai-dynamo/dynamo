@@ -164,9 +164,7 @@ class Router:
 
         logger.info("KV Router initialized")
 
-    def _update_and_get_active_blocks(
-        self, worker_id: str, polled_value: float
-    ) -> float:
+    def _update_and_get_active_blocks(self, worker_id: str, polled_value: int) -> int:
         """Helper routine to update waiting dict and return the desired waiting value.
 
         This method implements a predictive mechanism for tracking waiting requests:
@@ -239,7 +237,9 @@ class Router:
                 }
 
                 # Update waiting value using helper routine
-                polled_active_blocks = worker_metrics[worker_id]["kv_active_blocks"]
+                polled_active_blocks = int(
+                    worker_metrics[worker_id]["kv_active_blocks"]
+                )
                 worker_metrics[worker_id][
                     "kv_active_blocks"
                 ] = self._update_and_get_active_blocks(worker_id, polled_active_blocks)
