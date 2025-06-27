@@ -46,7 +46,7 @@ pub use block::{
 };
 pub use config::*;
 pub use layout::{nixl::NixlLayout, LayoutConfig, LayoutConfigBuilder, LayoutError, LayoutType};
-// use offload::request::BlockResult;
+pub use offload::request::BlockResult;
 pub use pool::BlockPool;
 pub use storage::{
     nixl::NixlRegisterableStorage, DeviceStorage, DiskStorage, PinnedStorage, Storage,
@@ -192,12 +192,12 @@ impl<Metadata: BlockMetadata> KvBlockManager<Metadata> {
         self.state.worker_id()
     }
 
-    // pub async fn onboard_blocks<S: Storage>(
-    //     &self,
-    //     blocks: Vec<ImmutableBlock<S, locality::Local, Metadata>>,
-    // ) -> BlockResult<DeviceStorage, locality::Local, Metadata> {
-    //     self.state.onboard_blocks(blocks).await
-    // }
+    pub async fn onboard_blocks<S: Storage>(
+        &self,
+        blocks: Vec<ImmutableBlock<S, locality::Local, Metadata>>,
+    ) -> BlockResult<DeviceStorage, locality::Local, Metadata> {
+        self.state.onboard_blocks(blocks).await
+    }
 }
 
 #[cfg(all(test, feature = "testing-full"))]

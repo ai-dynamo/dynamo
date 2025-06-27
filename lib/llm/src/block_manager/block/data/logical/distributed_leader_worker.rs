@@ -3,18 +3,14 @@ use super::*;
 use crate::block_manager::distributed::{BlockTransferPool, BlockTransferRequest, KvbmLeader};
 
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
-use tokio::sync::{mpsc, oneshot::Receiver};
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-type TransferRequest = (
-    BlockTransferRequest,
-    ::oneshot::Sender<Result<Receiver<()>, anyhow::Error>>,
-);
+type TransferRequest = (BlockTransferRequest, oneshot::Sender<()>);
 
 #[derive(Clone)]
 pub struct DistributedLeaderWorkerResources {
     transfer_tx: mpsc::UnboundedSender<TransferRequest>,
-    cancel_token: CancellationToken,
 }
 
 impl std::fmt::Debug for DistributedLeaderWorkerResources {
@@ -31,15 +27,12 @@ impl DistributedLeaderWorkerResources {
             move |cancel_token| async move {
                 Self::worker(leader, transfer_rx, cancel_token).await
             },
-            cancel_token.clone(),
+            cancel_token,
             "DistributedLeaderWorkerResources",
         )
         .map_err(|e| anyhow::anyhow!("Failed to create DistributedLeaderWorkerResources: {}", e))?.detach();
 
-        Ok(Self {
-            transfer_tx,
-            cancel_token,
-        })
+        Ok(Self { transfer_tx })
     }
 
     fn get_pool<S: Storage>(data: &impl BlockDataExt<S>) -> BlockTransferPool {
@@ -59,8 +52,14 @@ impl DistributedLeaderWorkerResources {
         loop {
             tokio::select! {
                 Some(request) = transfer_rx.recv() => {
-                    let (request, sender) = request;
-                    let _ = sender.send(leader.transfer_blocks_request(request).await);
+                    let (request, notify_tx) = request;
+
+                    let rx = leader.transfer_blocks_request(request).await?;
+
+                    tokio::spawn(async move {
+                        rx.await.unwrap();
+                        let _ = notify_tx.send(());
+                    });
                 }
                 _ = cancel_token.cancelled() => {
                     break;
@@ -69,12 +68,6 @@ impl DistributedLeaderWorkerResources {
         }
 
         Ok(())
-    }
-}
-
-impl Drop for DistributedLeaderWorkerResources {
-    fn drop(&mut self) {
-        self.cancel_token.cancel();
     }
 }
 
@@ -106,15 +99,11 @@ impl LogicalResources for DistributedLeaderWorkerResources {
             source_idxs.zip(target_idxs).collect(),
         );
 
-        let (tx, rx) = ::oneshot::channel();
+        let (tx, rx) = oneshot::channel();
         self.transfer_tx.send((request, tx)).unwrap();
 
         if notify {
-            Ok(Some(
-                rx.recv()
-                    .map_err(|e| anyhow::anyhow!("Failed to receive transfer result: {}", e))?
-                    .unwrap(),
-            ))
+            Ok(Some(rx))
         } else {
             Ok(None)
         }

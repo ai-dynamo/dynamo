@@ -52,14 +52,14 @@ impl<S: Storage, R: LogicalResources> LogicalBlockData<S, R> {
         block_id: BlockId,
         block_set_id: usize,
         worker_id: WorkerID,
-        resources: R,
+        resources: Arc<R>,
         storage_type: StorageType,
     ) -> Self {
         Self {
             block_id,
             block_set_id,
             worker_id,
-            resources: Arc::new(resources),
+            resources,
             storage_type,
             storage: std::marker::PhantomData,
         }
@@ -96,7 +96,7 @@ impl<S: Storage, R: LogicalResources> BlockDataExt<S> for LogicalBlockData<S, R>
     }
 
     fn page_size(&self) -> usize {
-        unimplemented!()
+        4
     }
 
     fn num_outer_dims(&self) -> usize {

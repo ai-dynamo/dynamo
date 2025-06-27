@@ -19,6 +19,7 @@ mod resources;
 
 use crate::block_manager::block::factory::IntoBlocks;
 use crate::block_manager::locality::LogicalResources;
+use crate::block_manager::offload::request::BlockResult;
 
 use super::*;
 
@@ -100,13 +101,12 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManagerState<Lo
         Ok(())
     }
 
-    // pub async fn onboard_blocks<S: Storage + 'static>(
-    //     &self,
-    //     blocks: Vec<ImmutableBlock<S, Locality, Metadata>>,
-    // ) -> BlockResult<DeviceStorage, Locality, Metadata> {
-    //     // self.offload_manager.onboard(blocks).await
-    //     unimplemented!()
-    // }
+    pub async fn onboard_blocks<S: Storage + 'static>(
+        &self,
+        blocks: Vec<ImmutableBlock<S, Locality, Metadata>>,
+    ) -> BlockResult<DeviceStorage, Locality, Metadata> {
+        self.offload_manager.onboard(blocks).await
+    }
 }
 
 impl<R: LogicalResources, Metadata: BlockMetadata>
