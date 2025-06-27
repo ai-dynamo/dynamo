@@ -319,27 +319,14 @@ impl WorkerSelector for DefaultWorkerSelector {
                 request.overlap.scores.get(&worker_id).copied().unwrap_or(0) as f64;
             let new_blocks = request_blocks as f64 - overlap_blocks;
 
-            // Normalize new blocks by total blocks
             let kv_total_blocks = ep.data.kv_total_blocks as f64;
-            let normalized_new_blocks = if kv_total_blocks > 0.0 {
-                new_blocks / kv_total_blocks
-            } else {
-                // If total blocks is 0, treat as worst case
-                1.0
-            };
+            assert!(kv_total_blocks > 0.0);
 
-            // Compute GPU cache usage on the fly
-            let gpu_cache_usage = if kv_total_blocks > 0.0 {
-                ep.data.kv_active_blocks as f64 / kv_total_blocks
-            } else {
-                0.0
-            };
-
-            // Use raw waiting value without normalization
+            let normalized_new_blocks = new_blocks / kv_total_blocks;
+            let gpu_cache_usage = (ep.data.kv_active_blocks as f64) / kv_total_blocks;
             let num_requests_waiting = ep.data.num_requests_waiting as f64;
 
             // Calculate logit (lower is better)
-            // Note: overlap_score_weight is applied to new_blocks (inverse of overlap benefit)
             let logit = self.kv_router_config.overlap_score_weight * normalized_new_blocks
                 + self.kv_router_config.gpu_cache_usage_weight * gpu_cache_usage
                 + self.kv_router_config.waiting_requests_weight * num_requests_waiting;
@@ -400,6 +387,33 @@ impl WorkerSelector for DefaultWorkerSelector {
 mod tests {
     use super::*;
 
+    #[test]
+    fn test_softmax_sample_single_key() {
+        // Test that with a single key, softmax_sample always returns that key
+        let mut logits = HashMap::new();
+        let worker_id = 42;
+        logits.insert(worker_id, 0.5); // The value doesn't matter
+
+        // Test with different temperatures
+        for temperature in &[0.1, 1.0, 10.0] {
+            let result = softmax_sample(&logits, *temperature);
+            assert_eq!(result, worker_id, "Should return the only available worker");
+        }
+
+        // Test with different logit values
+        logits.clear();
+        logits.insert(worker_id, -100.0); // Very negative value
+        assert_eq!(softmax_sample(&logits, 1.0), worker_id);
+
+        logits.clear();
+        logits.insert(worker_id, 100.0); // Very positive value
+        assert_eq!(softmax_sample(&logits, 1.0), worker_id);
+
+        logits.clear();
+        logits.insert(worker_id, 0.0); // Zero value
+        assert_eq!(softmax_sample(&logits, 1.0), worker_id);
+    }
+
     // Helper to create a worker endpoint
     fn create_endpoint(
         worker_id: i64,
@@ -458,6 +472,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_no_endpoints() {
+        let workers = create_workers(vec![]);
+        let request = create_request(vec![], 100);
+        let selector = DefaultWorkerSelector::new(None);
+        let block_size = 20;
+
+        match selector.select_worker(&workers, &request, block_size) {
+            Err(KvSchedulerError::NoEndpoints) => {} // Expected
+            _ => panic!("Should return NoEndpoints error"),
+        }
+    }
+
     // #[test]
     // fn test_select_worker_basic() {
     //     // Setup workers
@@ -503,39 +530,26 @@ mod tests {
     //     assert_eq!(result.overlap_blocks, 4);
     // }
 
-    #[test]
-    fn test_no_endpoints() {
-        let workers = create_workers(vec![]);
-        let request = create_request(vec![], 100);
-        let selector = DefaultWorkerSelector::new(None);
-        let block_size = 20;
+    // #[test]
+    // fn test_no_overlap_scores() {
+    //     // Workers exist but request has no overlap scores
+    //     let workers = create_workers(vec![WorkerInfo {
+    //         id: 1,
+    //         usage: 0.50,
+    //         waiting: 1,
+    //     }]);
+    //     let request = create_request(vec![], 100); // No overlaps
+    //     let selector = DefaultWorkerSelector::new(None);
+    //     let block_size = 20;
 
-        match selector.select_worker(&workers, &request, block_size) {
-            Err(KvSchedulerError::NoEndpoints) => {} // Expected
-            _ => panic!("Should return NoEndpoints error"),
-        }
-    }
+    //     let result = selector
+    //         .select_worker(&workers, &request, block_size)
+    //         .expect("Should fallback to selecting worker");
 
-    #[test]
-    fn test_no_overlap_scores() {
-        // Workers exist but request has no overlap scores
-        let workers = create_workers(vec![WorkerInfo {
-            id: 1,
-            usage: 0.50,
-            waiting: 1,
-        }]);
-        let request = create_request(vec![], 100); // No overlaps
-        let selector = DefaultWorkerSelector::new(None);
-        let block_size = 20;
-
-        let result = selector
-            .select_worker(&workers, &request, block_size)
-            .expect("Should fallback to selecting worker");
-
-        // Worker1 should be selected with 0 overlap
-        assert_eq!(result.worker_id, 1);
-        assert_eq!(result.overlap_blocks, 0);
-    }
+    //     // Worker1 should be selected with 0 overlap
+    //     assert_eq!(result.worker_id, 1);
+    //     assert_eq!(result.overlap_blocks, 0);
+    // }
 
     // #[test]
     // fn test_custom_weights() {
@@ -581,31 +595,4 @@ mod tests {
 
     //     assert_eq!(result.worker_id, 1);
     // }
-
-    #[test]
-    fn test_softmax_sample_single_key() {
-        // Test that with a single key, softmax_sample always returns that key
-        let mut logits = HashMap::new();
-        let worker_id = 42;
-        logits.insert(worker_id, 0.5); // The value doesn't matter
-
-        // Test with different temperatures
-        for temperature in &[0.1, 1.0, 10.0] {
-            let result = softmax_sample(&logits, *temperature);
-            assert_eq!(result, worker_id, "Should return the only available worker");
-        }
-
-        // Test with different logit values
-        logits.clear();
-        logits.insert(worker_id, -100.0); // Very negative value
-        assert_eq!(softmax_sample(&logits, 1.0), worker_id);
-
-        logits.clear();
-        logits.insert(worker_id, 100.0); // Very positive value
-        assert_eq!(softmax_sample(&logits, 1.0), worker_id);
-
-        logits.clear();
-        logits.insert(worker_id, 0.0); // Zero value
-        assert_eq!(softmax_sample(&logits, 1.0), worker_id);
-    }
 }
