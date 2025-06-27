@@ -62,3 +62,15 @@ class DisaggPreprocessedRequest(BaseModel):
     bootstrap_port: Union[int, List[int]]
     bootstrap_room: Union[int, List[int]]
     data_parallel_rank: Optional[int] = None
+
+
+EmbeddingInput = Union[str, List[str], List[int], List[List[int]]]
+
+
+class EmbeddingRequest(BaseModel):
+    model: str
+    input: EmbeddingInput
+    user: Optional[str] = None
+    dimensions: Optional[
+        int
+    ] = None  # only supported in text-embedding-3 and later models from OpenAI

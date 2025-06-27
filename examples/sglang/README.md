@@ -100,6 +100,15 @@ cd /workspace/examples/sglang
 dynamo serve graphs.disagg:Frontend -f ./configs/disagg-dp-attention.yaml
 ```
 
+#### Embedding Models
+
+We support deploying embedding models via SGLang as well! Here's an example that uses the [intfloat/e5-base-v2](https://huggingface.co/intfloat/e5-base-v2) model.
+
+```bash
+cd /workspace/examples/sglang
+dynamo serve graphs.embedding:Frontend -f ./configs/embedding.yaml
+```
+
 ##### Disaggregated with WideEP
 
 Dynamo supports SGLang's implementation of wide expert parallelism and large scale P/D for DeepSeek-R1! You can read their blog post [here](https://www.nvidia.com/en-us/technologies/ai/deepseek-r1-large-scale-p-d-with-wide-expert-parallelism/) for more details. We provide a Dockerfile for this in `container/Dockerfile.sglang-deepep` and configurations to deploy this at scale. In this example, we will run 1 prefill worker on 2 H100 nodes and 1 decode worker on 4 H100 nodes (48 total GPUs). You can easily scale this to 96 GPUs or more by simply changing the configuration files.
