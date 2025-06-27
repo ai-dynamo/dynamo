@@ -540,12 +540,12 @@ mod tests {
 
     use crate::block_manager::storage::tests::{NullDeviceAllocator, NullDeviceStorage};
 
+    type ProgressEngineBuildResult<S, L, M> =
+        anyhow::Result<(BlockPool<S, L, M>, ProgressEngine<S, L, M>)>;
+
     /// Helper method to build a [`BlockPool`] with a [`ProgressEngine`] for unit testing
     impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPoolArgsBuilder<S, L, M> {
-        #[allow(clippy::type_complexity)]
-        fn build_with_progress_engine(
-            self,
-        ) -> anyhow::Result<(BlockPool<S, L, M>, ProgressEngine<S, L, M>)> {
+        fn build_with_progress_engine(self) -> ProgressEngineBuildResult<S, L, M> {
             let args = self.build_internal()?;
             let (event_manager, cancel_token, blocks, global_registry, async_runtime, metrics) =
                 args.dissolve();

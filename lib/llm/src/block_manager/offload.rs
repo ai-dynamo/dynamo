@@ -32,8 +32,7 @@
 //! ## Transfer Managers
 //! The offload manager uses two transfer managers to handle the offloading and onboarding of blocks.
 //!
-//! The [`CudaTransferManager`] is responsible for transfers between the device and host.
-//! The [`DiskTransferManager`] is responsible for transfers from host to disk and disk to device.
+//! The [`LocalTransferManager`] is responsible for transfers involving disk, host, and device.
 //!
 //! ## Worker Threads
 //! The offload manager uses two kinds of worker threads to handle the offloading and onboarding of blocks.
@@ -69,9 +68,7 @@ use std::collections::BTreeSet;
 mod pending;
 pub mod request;
 
-use pending::{
-    CudaTransferManager, DiskTransferManager, PendingTransfer, TransferBatcher, TransferManager,
-};
+use pending::{LocalTransferManager, PendingTransfer, TransferBatcher, TransferManager};
 use request::{BlockResult, OffloadRequest, OffloadRequestKey, OnboardRequest};
 
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
@@ -144,14 +141,13 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             this.host.clone(),
             device_offload_rx,
             Arc::new(TransferBatcher::new(
-                CudaTransferManager::new(
-                    device_offload_transfer_ctx,
+                LocalTransferManager::new(
+                    device_offload_transfer_ctx.clone(),
                     MAX_CONCURRENT_TRANSFERS,
-                    &async_rt_handle,
                     cancellation_token.clone(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
-                &async_rt_handle,
+                device_offload_transfer_ctx.clone(),
                 cancellation_token.clone(),
             )),
             metrics.pool("device"),
@@ -177,14 +173,13 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             this.disk.clone(),
             host_offload_rx,
             Arc::new(TransferBatcher::new(
-                DiskTransferManager::new(
+                LocalTransferManager::new(
                     transfer_ctx.clone(),
                     MAX_CONCURRENT_TRANSFERS,
-                    &async_rt_handle,
                     cancellation_token.clone(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
-                &async_rt_handle,
+                transfer_ctx.clone(),
                 cancellation_token.clone(),
             )),
             metrics.pool("host"),
@@ -204,14 +199,13 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             this.device.clone(),
             host_onboard_rx,
             Arc::new(TransferBatcher::new(
-                CudaTransferManager::new(
+                LocalTransferManager::new(
                     transfer_ctx.clone(),
                     MAX_CONCURRENT_TRANSFERS,
-                    &async_rt_handle,
                     cancellation_token.clone(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
-                &async_rt_handle,
+                transfer_ctx.clone(),
                 cancellation_token.clone(),
             )),
             metrics.pool("host"),
@@ -231,14 +225,13 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             this.device.clone(),
             disk_onboard_rx,
             Arc::new(TransferBatcher::new(
-                DiskTransferManager::new(
+                LocalTransferManager::new(
                     transfer_ctx.clone(),
                     MAX_CONCURRENT_TRANSFERS,
-                    &async_rt_handle,
                     cancellation_token.clone(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
-                &async_rt_handle,
+                transfer_ctx.clone(),
                 cancellation_token.clone(),
             )),
             metrics.pool("disk"),
@@ -607,18 +600,19 @@ pub mod tests {
         }
     }
 
-    #[allow(clippy::type_complexity)]
+    type PoolResult = Result<(
+        Arc<OffloadManager<Local, BasicMetadata>>,
+        DevicePool,
+        HostPool,
+        DiskPool,
+    )>;
+
     fn build_pools(
         device_blocks: usize,
         host_blocks: Option<usize>,
         disk_blocks: Option<usize>,
         inner_dim: Option<usize>,
-    ) -> Result<(
-        Arc<OffloadManager<Local, BasicMetadata>>,
-        DevicePool,
-        HostPool,
-        DiskPool,
-    )> {
+    ) -> PoolResult {
         build_pools_with_layout(
             device_blocks,
             host_blocks,
@@ -635,12 +629,7 @@ pub mod tests {
         disk_blocks: Option<usize>,
         inner_dim: Option<usize>,
         layout_type: LayoutType,
-    ) -> Result<(
-        Arc<OffloadManager<Local, BasicMetadata>>,
-        DevicePool,
-        HostPool,
-        DiskPool,
-    )> {
+    ) -> PoolResult {
         let mut config = LayoutConfig {
             num_blocks: device_blocks,
             num_layers: NUM_LAYERS,
@@ -693,15 +682,6 @@ pub mod tests {
         )?;
 
         Ok((manager, device_pool, host_pool, disk_pool))
-    }
-
-    /// Create a block in the 'RESET' state.
-    #[expect(dead_code)]
-    async fn get_block<S: Storage, Metadata: BlockMetadata>(
-        pool: &Arc<BlockPool<S, Local, Metadata>>,
-    ) -> Result<MutableBlock<S, Local, Metadata>> {
-        let mut blocks = pool.allocate_blocks(1).await?;
-        Ok(blocks.pop().unwrap())
     }
 
     /// Create a block in the 'COMPLETED' state.

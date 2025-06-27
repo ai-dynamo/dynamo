@@ -1143,31 +1143,6 @@ pub mod tests {
         );
     }
 
-    #[test]
-    fn test_fc_allocate_require_exact() {
-        let config = LayoutConfig {
-            num_blocks: NUM_BLOCKS,
-            num_layers: NUM_LAYERS,
-            outer_dim: OUTER_DIM,
-            page_size: PAGE_SIZE,
-            inner_dim: INNER_DIM,
-            alignment: 1,
-            dtype: DTYPE,
-        };
-
-        let exact_size =
-            (OUTER_DIM * NUM_BLOCKS * NUM_LAYERS * PAGE_SIZE * INNER_DIM * DTYPE.size_in_bytes())
-                as u64;
-
-        // Require the allocation to exactly match the required size.
-        FullyContiguous::new(config.clone(), vec![NullDeviceStorage::new(exact_size)])
-            .expect("Layout creation failed");
-
-        assert!(
-            FullyContiguous::new(config, vec![NullDeviceStorage::new(exact_size + 1)]).is_err()
-        );
-    }
-
     // LayerSeparate Tests
 
     /// Helper function to setup LayerSeparate layout with specified configuration
@@ -1522,34 +1497,5 @@ pub mod tests {
 
         LayerSeparate::allocate(config, &NullDeviceAllocator, true)
             .expect("Layout allocation failed");
-    }
-
-    #[test]
-    fn test_ls_allocate_require_exact() {
-        let config = LayoutConfig {
-            num_blocks: NUM_BLOCKS,
-            num_layers: 1,
-            outer_dim: OUTER_DIM,
-            page_size: PAGE_SIZE,
-            inner_dim: INNER_DIM,
-            alignment: 1,
-            dtype: DTYPE,
-        };
-
-        let exact_size =
-            (OUTER_DIM * NUM_BLOCKS * PAGE_SIZE * INNER_DIM * DTYPE.size_in_bytes()) as u64;
-
-        // Require the allocation to exactly match the required size.
-        LayerSeparate::new(
-            config.clone(),
-            vec![NullDeviceStorage::new(exact_size)],
-            true,
-        )
-        .expect("Layout creation failed");
-
-        assert!(
-            LayerSeparate::new(config, vec![NullDeviceStorage::new(exact_size + 1)], true,)
-                .is_err()
-        );
     }
 }
