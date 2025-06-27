@@ -41,6 +41,7 @@ from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, servic
 
 logger = logging.getLogger(__name__)
 
+USE_ROUTER = 1
 
 @service(
     dynamo={
@@ -62,15 +63,16 @@ class SGLangWorker:
     @async_on_start
     async def async_init(self):
         runtime = dynamo_context["runtime"]
-        logger.info("Registering LLM for discovery")
-        comp_ns, comp_name = SGLangWorker.dynamo_address()  # type: ignore
-        endpoint = runtime.namespace(comp_ns).component(comp_name).endpoint("generate")
-        await register_llm(
-            ModelType.Backend,
-            endpoint,
-            self.engine_args.model_path,
-            self.engine_args.served_model_name,
-        )
+        if not USE_ROUTER:
+            logger.info("Registering LLM for discovery")
+            comp_ns, comp_name = SGLangWorker.dynamo_address()  # type: ignore
+            endpoint = runtime.namespace(comp_ns).component(comp_name).endpoint("generate")
+            await register_llm(
+                ModelType.Backend,
+                endpoint,
+                self.engine_args.model_path,
+                self.engine_args.served_model_name,
+            )
         if self.engine_args.disaggregation_mode:
             self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info()
             comp_ns, comp_name = SGLangDecodeWorker.dynamo_address()  # type: ignore
