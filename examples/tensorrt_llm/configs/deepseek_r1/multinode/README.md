@@ -110,6 +110,15 @@ export SERVED_MODEL_NAME="nvidia/DeepSeek-R1-FP4"
 # the container. See the MOUNTS variable in srun_script.sh
 export ENGINE_CONFIG="/mnt/agg_DEP16_dsr1.yaml"
 
+# Customize NUM_NODES to match the desired parallelism in ENGINE_CONFIG
+# The produce of NUM_NODES*NUM_GPUS_PER_NODE should match the number of
+# total GPUs necessary to satisfy the requested parallelism. For example,
+# 4 nodes x 4 gpus/node = 16 gpus total for TP16/EP16.
+export NUM_NODES=4
+
+# GB200 nodes have 4 gpus per node, but for other types of nodes you can configure this.
+export NUM_GPUS_PER_NODE=4
+
 # Launches frontend + etcd/nats on current (head) node.
 # Launches one large trtllm worker across multiple nodes via MPI tasks.
 ./srun_script.sh
@@ -198,3 +207,5 @@ pkill srun
   H100 nodes with FP8 weights, but this hasn't been tested yet.
 - This example only tests an aggregated model setup for now. A disaggregated
   serving example will be added in the near future.
+- WideEP configs in this directory are still being tested. A WideEP specific
+  example with documentation will be added once ready.

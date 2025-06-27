@@ -14,10 +14,6 @@
 # limitations under the License.
 
 dynamo-operator:
-  natsAddr: "nats://${RELEASE_NAME}-nats:4222"
-  etcdAddr: "${RELEASE_NAME}-etcd:2379"
-  namespaceRestriction:
-    targetNamespace: ${NAMESPACE}
   controllerManager:
     manager:
       image:
@@ -28,28 +24,20 @@ dynamo-operator:
 
   dynamo:
     enableLWS: ${ENABLE_LWS}
-    apiStore:
-      endpoint: http://${RELEASE_NAME}-dynamo-api-store
     ingress:
       enabled: ${INGRESS_ENABLED}
       className: ${INGRESS_CLASS}
-      tlsSecretName: my-tls-secret
     istio:
       enabled: ${ISTIO_ENABLED}
       gateway: ${ISTIO_GATEWAY}
     ingressHostSuffix: ${DYNAMO_INGRESS_SUFFIX}
     dockerRegistry:
-      useKubernetesSecret: true
       server: ${PIPELINES_DOCKER_SERVER}
       username: ${PIPELINES_DOCKER_USERNAME}
       password: ${PIPELINES_DOCKER_PASSWORD}
-    imageBuildEngine: buildkit
     virtualServiceSupportsHTTPS: ${VIRTUAL_SERVICE_SUPPORTS_HTTPS}
 
 dynamo-api-store:
-  namespaceRestriction:
-    enabled: true
-    targetNamespace: ${NAMESPACE}
   istio:
     enabled: ${ISTIO_ENABLED}
     gateway: ${ISTIO_GATEWAY}
@@ -57,7 +45,6 @@ dynamo-api-store:
   image:
     repository: ${DOCKER_SERVER}/dynamo-api-store
     tag: ${IMAGE_TAG}
-    pullPolicy: IfNotPresent
   imagePullSecrets:
     - name: ${DOCKER_SECRET_NAME}
   ingress:
@@ -68,28 +55,3 @@ dynamo-api-store:
         paths:
           - path: /
             pathType: Prefix
-
-postgresql:
-  enabled: true
-
-minio:
-  enabled: true
-
-etcd:
-  enabled: true
-  persistence:
-    enabled: true
-    storageClass: ""
-    size: 1Gi
-  preUpgrade:
-    enabled: false
-
-nats:
-  enabled: true
-  config:
-    jetstream:
-      enabled: true
-      fileStore:
-        pvc:
-          size: 1Gi
-          storageClassName: ""

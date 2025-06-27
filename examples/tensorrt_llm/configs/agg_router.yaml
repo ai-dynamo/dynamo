@@ -20,7 +20,13 @@ Frontend:
   router: kv
 
 TensorRTLLMWorker:
-  engine_args: "configs/llm_api_config_router.yaml"
+  # Path to disk model or HuggingFace model identifier to load
+  model-path: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  # Name to serve the model under
+  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  # Path to a YAML file containing additional keyword arguments to pass to the TRTLLM engine.
+  # The fields in `extra-engine-args` holds higher priority than the above TRTLLM engine fields.
+  extra-engine-args: "configs/engine_configs/agg_config.yaml"
   router: kv
   ServiceArgs:
     workers: 1

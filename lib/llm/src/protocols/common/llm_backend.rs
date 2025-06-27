@@ -15,13 +15,12 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use super::preprocessor::PreprocessedRequest;
+pub use super::FinishReason;
 use crate::protocols::TokenIdType;
 
 pub type TokenType = Option<String>;
 pub type LogProbs = Vec<f64>;
-
-pub use super::preprocessor::PreprocessedRequest;
-pub use super::FinishReason;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BackendOutput {
@@ -46,6 +45,9 @@ pub struct BackendOutput {
     pub finish_reason: Option<FinishReason>,
     // Model Deployment Card checksum
     //pub mdcsum: String,
+
+    // Index field for batch requests to match OpenAI format
+    pub index: Option<u32>,
 }
 
 /// The LLM engine and backnd with manage it's own state, specifically translating how a
@@ -77,6 +79,9 @@ pub struct LLMEngineOutput {
     // TODO: Enrich this with more information as can apply our first-level postprocessing
     // logic and return more detailed information
     pub finish_reason: Option<FinishReason>,
+
+    // Index field for batch requests to match OpenAI format
+    pub index: Option<u32>,
 }
 
 impl LLMEngineOutput {
@@ -88,6 +93,7 @@ impl LLMEngineOutput {
             cum_log_probs: None,
             log_probs: None,
             finish_reason: Some(FinishReason::Cancelled),
+            index: None,
         }
     }
 
@@ -99,6 +105,7 @@ impl LLMEngineOutput {
             cum_log_probs: None,
             log_probs: None,
             finish_reason: Some(FinishReason::Stop),
+            index: None,
         }
     }
 
@@ -110,6 +117,7 @@ impl LLMEngineOutput {
             cum_log_probs: None,
             log_probs: None,
             finish_reason: Some(FinishReason::Length),
+            index: None,
         }
     }
 
@@ -121,6 +129,7 @@ impl LLMEngineOutput {
             cum_log_probs: None,
             log_probs: None,
             finish_reason: Some(FinishReason::Error(err_msg)),
+            index: None,
         }
     }
 }
