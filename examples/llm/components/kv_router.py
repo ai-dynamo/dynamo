@@ -20,6 +20,7 @@ import random
 from argparse import Namespace
 from typing import AsyncIterator, Tuple
 
+import numpy as np  # Add numpy import
 from components.worker import VllmWorker
 from utils.check_worker import check_required_workers
 from utils.protocol import LocalBlockHashes
@@ -35,6 +36,35 @@ fallback_msg = "Will fallback to random routing."
 logger = logging.getLogger(__name__)
 
 
+def softmax_sample_from_logits(
+    logits: dict[str, float], temperature: float = 1.0, lower_is_better: bool = True
+) -> str:
+    if not logits:
+        raise ValueError("Empty logits dictionary")
+
+    keys = list(logits.keys())
+    values = np.array(list(logits.values()))
+
+    min_val = np.min(values)
+    max_val = np.max(values)
+
+    if min_val == max_val:
+        # All values are the same, uniform probability
+        probabilities = np.ones(len(keys)) / len(keys)
+    else:
+        normalized = values / (max_val - min_val)
+        if lower_is_better:
+            normalized = -1 * normalized
+
+        scaled = normalized / temperature
+
+        exp_values = np.exp(scaled - np.max(scaled))
+        probabilities = exp_values / np.sum(exp_values)
+
+    # Sample from the probability distribution
+    return np.random.choice(keys, p=probabilities)
+
+
 def parse_args(service_name, prefix) -> Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -42,12 +72,6 @@ def parse_args(service_name, prefix) -> Namespace:
         type=int,
         default=1,
         help="Minimum number of workers required before proceeding",
-    )
-    parser.add_argument(
-        "--model",
-        type=str,
-        default="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        help="Model that is being served",
     )
     # TODO: Read block size
     parser.add_argument(
@@ -57,16 +81,16 @@ def parse_args(service_name, prefix) -> Namespace:
         help="KV block size",
     )
     parser.add_argument(
-        "--custom-router",
-        type=bool,
-        default=False,
-        help="Whether to use custom router or not",
-    )
-    parser.add_argument(
         "--router",
         type=str,
         default="kv",
         help="The router type",
+    )
+    parser.add_argument(
+        "--softmax-sample",
+        type=bool,
+        default=False,
+        help="Whether to do softmax sampling based on worker logits (default is to pick smallest)",
     )
     config = ServiceConfig.get_instance()
     config_args = config.as_args(service_name, prefix=prefix)
@@ -94,7 +118,7 @@ class Router:
 
         self.default_metrics = {
             "kv_active_blocks": 0,
-            "kv_total_blocks": 0,
+            "kv_total_blocks": 1,
             "num_requests_waiting": 0.0,
             "gpu_cache_usage_perc": 0.0,
             "gpu_prefix_cache_hit_rate": 0.0,
@@ -226,9 +250,7 @@ class Router:
             # Have 1 metric that weights towards cache hit
             # 2 metrics that penalize overloaded worker and queuing
             worker_logits[worker_id] = (
-                # normalized_new_blocks + gpu_cache_usage + num_requests_waiting
-                gpu_cache_usage
-                + num_requests_waiting
+                normalized_new_blocks + gpu_cache_usage + num_requests_waiting
             )
             logger.info(
                 f"Formula for {worker_id}: {worker_logits[worker_id]:.3f} = {normalized_new_blocks:.3f} + {gpu_cache_usage:.3f} + {num_requests_waiting:.3f}"
@@ -239,11 +261,14 @@ class Router:
             return "", 0.0
 
         # Select the worker with the highest logit
-        min_logit = min(worker_logits.values())
-        best_workers = [
-            wid for wid, logit in worker_logits.items() if logit == min_logit
-        ]
-        best_worker_id = random.choice(best_workers)
+        if self.args.softmax_sample:
+            best_worker_id = int(softmax_sample_from_logits(worker_logits))
+        else:
+            min_logit = min(worker_logits.values())
+            best_workers = [
+                wid for wid, logit in worker_logits.items() if logit == min_logit
+            ]
+            best_worker_id = random.choice(best_workers)
 
         # Log the metrics for the selected worker
         if best_worker_id:

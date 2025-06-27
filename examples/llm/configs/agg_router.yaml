@@ -29,7 +29,8 @@ Processor:
 
 Router:
   min-workers: 1
-  common-configs: [model, block-size, router]
+  softmax_sample: false
+  common-configs: [block-size, router]
 
 VllmWorker:
   enforce-eager: true
