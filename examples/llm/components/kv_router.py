@@ -22,7 +22,7 @@ from typing import AsyncIterator, Tuple
 
 from components.worker import VllmWorker
 from utils.check_worker import check_required_workers
-from utils.protocol import Tokens
+from utils.protocol import LocalBlockHashes
 from utils.vllm import RouterType
 
 from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
@@ -93,8 +93,10 @@ class Router:
         self.args = parse_args(self.__class__.__name__, "")
 
         self.default_metrics = {
-            "gpu_cache_usage_perc": 0.0,
+            "kv_active_blocks": 0,
+            "kv_total_blocks": 0,
             "num_requests_waiting": 0.0,
+            "gpu_cache_usage_perc": 0.0,
             "gpu_prefix_cache_hit_rate": 0.0,
         }
 
@@ -118,16 +120,15 @@ class Router:
             self.indexer = KvIndexer(kv_listener, self.args.block_size)
         self.metrics_aggregator = KvMetricsAggregator(kv_listener)
 
-        # Initialize the predictive waiting requests dictionary
-        # [old_value, predictive_value]
-        self.num_requests_waiting_dict = {}
+        self.active_blocks_dict = {}
         worker_ids = self.workers_client.instance_ids()
         for worker_id in worker_ids:
-            self.num_requests_waiting_dict[worker_id] = [0.0, 0.0]
+            # [old_value, predictive_value]
+            self.active_blocks_dict[worker_id] = [0, 0]
 
         logger.info("KV Router initialized")
 
-    def _update_and_get_waiting_value(
+    def _update_and_get_active_blocks(
         self, worker_id: str, polled_value: float
     ) -> float:
         """Helper routine to update waiting dict and return the desired waiting value.
@@ -141,11 +142,11 @@ class Router:
         This allows the router to account for requests that have been dispatched but
         not yet reflected in the polled metrics.
         """
-        old_value, predictive_value = self.num_requests_waiting_dict[worker_id]
+        old_value, predictive_value = self.active_blocks_dict[worker_id]
 
         # Check if polled value is different from old value
         if polled_value != old_value:
-            self.num_requests_waiting_dict[worker_id] = [polled_value, polled_value]
+            self.active_blocks_dict[worker_id] = [polled_value, polled_value]
             return polled_value
         else:
             return predictive_value
@@ -173,14 +174,22 @@ class Router:
             (str, float): The best worker id and the corresponding score.
         """
 
-        worker_scores = {}
+        # Get all worker IDs from the client. This is needed because scores / metrics may not have values for all workers
+        # and we want all workers to be considered in the logit calculation
+        worker_ids = self.workers_client.instance_ids()
+        request_blocks = (
+            token_length + self.args.block_size - 1
+        ) // self.args.block_size
+
+        overlap_blocks_dict = {worker_id: 0 for worker_id in worker_ids}
+        new_blocks_dict = {worker_id: request_blocks for worker_id in worker_ids}
+
         if scores:
             for worker_id, score in scores.scores.items():
                 # score is number of matching blocks we multiply by block_size to get tokens
                 # and compare to token_length. The larger the cache hit the better
-                worker_scores[worker_id] = (
-                    score * self.indexer.block_size() / token_length
-                )
+                overlap_blocks_dict[worker_id] = score
+                new_blocks_dict[worker_id] = request_blocks - score
         else:
             logger.warning("Cannot get KV scores")
 
@@ -194,23 +203,22 @@ class Router:
                 }
 
                 # Update waiting value using helper routine
-                polled_waiting = worker_metrics[worker_id]["num_requests_waiting"]
+                polled_active_blocks = worker_metrics[worker_id]["kv_active_blocks"]
                 worker_metrics[worker_id][
-                    "num_requests_waiting"
-                ] = self._update_and_get_waiting_value(worker_id, polled_waiting)
+                    "kv_active_blocks"
+                ] = self._update_and_get_active_blocks(worker_id, polled_active_blocks)
         else:
             logger.warning("Cannot get metrics")
-
-        # Get all worker IDs from the client. This is needed because scores / metrics may not have values for all workers
-        # and we want all workers to be considered in the logit calculation
-        worker_ids = self.workers_client.instance_ids()
 
         worker_logits = {}
         for worker_id in worker_ids:
             # Use default values if worker not in scores or metrics
-            score = worker_scores.get(worker_id, 0.0)
             metrics_dict = worker_metrics.get(worker_id, self.default_metrics)
-            gpu_cache_usage = metrics_dict["gpu_cache_usage_perc"]
+            kv_total_blocks = metrics_dict["kv_total_blocks"]
+
+            new_blocks = new_blocks_dict[worker_id]
+            normalized_new_blocks = new_blocks / kv_total_blocks
+            gpu_cache_usage = metrics_dict["kv_active_blocks"] / kv_total_blocks
 
             # Use raw waiting value without normalization
             num_requests_waiting = metrics_dict["num_requests_waiting"]
@@ -218,10 +226,12 @@ class Router:
             # Have 1 metric that weights towards cache hit
             # 2 metrics that penalize overloaded worker and queuing
             worker_logits[worker_id] = (
-                2 * score - gpu_cache_usage - num_requests_waiting
+                # normalized_new_blocks + gpu_cache_usage + num_requests_waiting
+                gpu_cache_usage
+                + num_requests_waiting
             )
             logger.info(
-                f"Formula for {worker_id}: {worker_logits[worker_id]:.3f} = 2.0 * {score:.3f} - {gpu_cache_usage:.3f} - {num_requests_waiting:.3f}"
+                f"Formula for {worker_id}: {worker_logits[worker_id]:.3f} = {normalized_new_blocks:.3f} + {gpu_cache_usage:.3f} + {num_requests_waiting:.3f}"
             )
 
         if not worker_logits or not any(worker_logits.values()):
@@ -229,9 +239,9 @@ class Router:
             return "", 0.0
 
         # Select the worker with the highest logit
-        max_logit = max(worker_logits.values())
+        min_logit = min(worker_logits.values())
         best_workers = [
-            wid for wid, logit in worker_logits.items() if logit == max_logit
+            wid for wid, logit in worker_logits.items() if logit == min_logit
         ]
         best_worker_id = random.choice(best_workers)
 
@@ -244,7 +254,7 @@ class Router:
                 f"Selected worker: {best_worker_id}, logit: {worker_logits[best_worker_id]:.3f}",
                 f"Score: {scores.scores.get(best_worker_id, 0.0) if scores else 0.0:.3f}",
                 f"GPU Cache Hit Rate: {metrics_dict['gpu_prefix_cache_hit_rate']:.3f}",
-                f"GPU Cache Usage: {metrics_dict['gpu_cache_usage_perc']:.3f}",
+                f"GPU Cache Usage: {metrics_dict['kv_active_blocks'] / metrics_dict['kv_total_blocks']:.3f}",
                 f"Requests Waiting: {metrics_dict['num_requests_waiting']}",
             ]
 
@@ -253,9 +263,14 @@ class Router:
                 logger.info(message)
 
             # Increment predictive waiting for the selected worker before returning
-            self.num_requests_waiting_dict[best_worker_id][1] += 1
+            self.active_blocks_dict[best_worker_id][1] += new_blocks_dict[
+                best_worker_id
+            ]
 
-        return best_worker_id, worker_scores.get(best_worker_id, 0.0)
+        return (
+            best_worker_id,
+            overlap_blocks_dict[best_worker_id] * self.args.block_size / token_length,
+        )
 
     def _get_underloaded_worker(self, metrics: AggregatedMetrics | None):
         if not metrics:
@@ -283,7 +298,9 @@ class Router:
         return best_worker_id, kv_load[best_worker_id]
 
     @endpoint()
-    async def generate(self, request: Tokens) -> AsyncIterator[Tuple[WorkerId, float]]:
+    async def generate(
+        self, request: LocalBlockHashes
+    ) -> AsyncIterator[Tuple[WorkerId, float]]:
         metrics = await self.metrics_aggregator.get_metrics()
 
         # Quick return for KV_LOAD mode
@@ -298,11 +315,8 @@ class Router:
             return
 
         # Existing KV routing logic
-        lora_id = 0
         try:
-            scores = await self.indexer.find_matches_for_request(
-                request.tokens, lora_id
-            )
+            scores = await self.indexer.find_matches(request.hashes)
         except Exception as e:
             scores = {}
             logger.exception(f"Error finding matches: {e}. {fallback_msg}")
@@ -310,7 +324,7 @@ class Router:
             return
 
         worker_id, prefix_hit_rate = self._cost_function(
-            scores, metrics, len(request.tokens)
+            scores, metrics, request.num_tokens
         )
 
         if worker_id:
