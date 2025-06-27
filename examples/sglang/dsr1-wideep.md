@@ -17,7 +17,7 @@ limitations under the License.
 
 # Running DeepSeek-R1 Disaggregated with WideEP
 
-Dynamo supports SGLang's implementation of wide expert parallelism and large scale P/D for DeepSeek-R1! You can read their blog post [here](https://www.nvidia.com/en-us/technologies/ai/deepseek-r1-large-scale-p-d-with-wide-expert-parallelism/) for more details. We provide a Dockerfile for this in `container/Dockerfile.sglang-deepep` and configurations to deploy this at scale. In this example, we will run 1 prefill worker on 4 H100 nodes and 1 decode worker on 9 H100 nodes (104 total GPUs). 
+Dynamo supports SGLang's implementation of wide expert parallelism and large scale P/D for DeepSeek-R1! You can read their blog post [here](https://www.nvidia.com/en-us/technologies/ai/deepseek-r1-large-scale-p-d-with-wide-expert-parallelism/) for more details. We provide a Dockerfile for this in `container/Dockerfile.sglang-deepep` and configurations to deploy this at scale. In this example, we will run 1 prefill worker on 4 H100 nodes and 1 decode worker on 9 H100 nodes (104 total GPUs).
 
 ## Instructions
 
@@ -158,7 +158,7 @@ DeepGEMM kernels can sometimes take a while to warm up. Here we provide a small 
 ./warmup.sh HEAD_PREFILL_NODE_IP
 ```
 
-## Benchmarking 
+## Benchmarking
 
 In the official [blog post repro instructions](https://github.com/sgl-project/sglang/issues/6017), SGL uses batch inference to benchmark their prefill and decode workers. They do this by pretokenizing the ShareGPT dataset and then creating a batch of 8192 requests with ISL 4096 and OSL 5 (for prefill stress test) and a batch of 40000 with ISL 2000 and OSL 100 (for decode stress test). If you want to repro these benchmarks, you will need to uncomment the labeled flags in the `configs/dsr1.yaml` file inside of the container.
 
