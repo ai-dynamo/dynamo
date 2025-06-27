@@ -168,11 +168,9 @@ impl KvbmCacheManager {
     }
 
     pub fn free(&self, request_id: String) -> PyResult<()> {
-        self.slot_manager
-            .lock()
-            .map_err(to_pyerr)?
-            .free_blocks(&request_id)
-            .map_err(to_pyerr)
+        let mut slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
+        slot_manager.free_blocks(&request_id);
+        Ok(())
     }
 
     pub fn reset_prefix_cache(&self) -> PyResult<()> {
@@ -189,11 +187,9 @@ impl KvbmCacheManager {
 
     /// Free the entire slot for the given request ID.
     pub fn free_block_hashes(&self, request_id: String) -> PyResult<()> {
-        self.slot_manager
-            .lock()
-            .map_err(to_pyerr)?
-            .drop_slot(&request_id)
-            .map_err(to_pyerr)
+        let mut slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
+        slot_manager.drop_slot(&request_id);
+        Ok(())
     }
 
     pub fn take_events(&self) -> PyResult<Vec<KvCacheEvent>> {
@@ -562,14 +558,19 @@ impl<R: RequestKey> SlotManager<R> {
         Ok(slot.get_block_ids())
     }
 
-    pub fn free_blocks(&mut self, request_id: &R) -> Result<(), SlotError> {
-        let slot = self.slots.get_mut(request_id).ok_or(SlotError::NotFound)?;
-        slot.free_blocks();
-        Ok(())
+    pub fn free_blocks(&mut self, request_id: &R) {
+        if let Some(slot) = self.slots.get_mut(request_id) {
+            slot.free_blocks();
+        } else {
+            // Request ID may not be found if the client aborts the request.
+            tracing::debug!(request_id, "request id {} not found in the slot manager", request_id);
+        }
     }
 
-    pub fn drop_slot(&mut self, request_id: &R) -> Result<(), SlotError> {
-        self.slots.remove(request_id).ok_or(SlotError::NotFound)?;
-        Ok(())
+    pub fn drop_slot(&mut self, request_id: &R) {
+        if self.slots.remove(request_id).is_none() {
+            // Request ID may not be found if the client aborts the request.
+            tracing::debug!(request_id, "request id {} not found in the slot manager during drop", request_id);
+        }
     }
 }
