@@ -99,7 +99,8 @@ This example can be deployed to a Kubernetes cluster using [Dynamo Cloud](../../
 
 ### Prerequisites
 
-You must have first followed the instructions in [deploy/cloud/helm/README.md](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/helm/README.md) to create your Dynamo cloud deployment.
+You must have first followed the instructions in [deploy/cloud/helm/README.md](../../deploy/cloud/helm/README.md) to create your Dynamo cloud deployment.
+
 Make sure your dynamo cloud the `deploy.sh` script finished successfully and setup port forwarding in another window per its suggestion (note, you may not need that if you use ingress).
 
 ```bash
