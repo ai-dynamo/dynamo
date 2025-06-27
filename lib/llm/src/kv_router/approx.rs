@@ -25,15 +25,15 @@ use tokio_util::sync::CancellationToken;
 
 use crate::tokens::TokenBlockSequence;
 
-use super::indexer::{
+use crate::kv_router::indexer::{
     compute_block_hash_for_seq, KvIndexerInterface, KvRouterError, OverlapScores, RadixTree,
     WorkerId,
 };
-use super::protocols::{
+use crate::kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash,
 };
-use super::RouterEvent;
+use crate::kv_router::RouterEvent;
 
 #[derive(Debug)]
 struct MatchRequest {
@@ -48,10 +48,10 @@ struct RouterResult {
     /// The id of the selected worker.
     worker_id: WorkerId,
 
-    /// The local hashes of the sequence.
+    /// The local hashes of the tokens sent to the worker.
     local_hashes: Vec<LocalBlockHash>,
 
-    /// The tokens that were sent to the worker.
+    /// The sequence hashes of the tokens sent to the worker.
     sequence_hashes: Vec<u64>,
 }
 
