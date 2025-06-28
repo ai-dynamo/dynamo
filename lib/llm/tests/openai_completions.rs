@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use async_openai::types::CreateCompletionRequestArgs;
-use dynamo_llm::protocols::openai::{self, completions::NvCreateCompletionRequest};
+use dynamo_llm::protocols::openai::{completions::NvCreateCompletionRequest, validate};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -89,22 +89,22 @@ fn build_samples() -> Result<Vec<CompletionSample>, String> {
 
     samples.push(CompletionSample::new(
         "should have prompt, model, and temperature fields",
-        |builder| builder.temperature(openai::MIN_TEMPERATURE),
+        |builder| builder.temperature(validate::MIN_TEMPERATURE),
     )?);
 
     samples.push(CompletionSample::new(
         "should have prompt, model, and top_p fields",
-        |builder| builder.top_p(openai::MIN_TOP_P),
+        |builder| builder.top_p(validate::MIN_TOP_P),
     )?);
 
     samples.push(CompletionSample::new(
         "should have prompt, model, and frequency_penalty fields",
-        |builder| builder.frequency_penalty(openai::MIN_FREQUENCY_PENALTY),
+        |builder| builder.frequency_penalty(validate::MIN_FREQUENCY_PENALTY),
     )?);
 
     samples.push(CompletionSample::new(
         "should have prompt, model, and presence_penalty fields",
-        |builder| builder.presence_penalty(openai::MIN_PRESENCE_PENALTY),
+        |builder| builder.presence_penalty(validate::MIN_PRESENCE_PENALTY),
     )?);
 
     samples.push(CompletionSample::new(
