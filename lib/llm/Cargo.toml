@@ -71,7 +71,7 @@ uuid = { workspace = true }
 xxhash-rust = { workspace = true }
 
 akin = "0.4.0"
-async-openai = "0.27.2"
+async-openai = "0.28.3"
 blake3 = "1"
 bytemuck = "1.22"
 candle-core = { version = "0.8.0" }

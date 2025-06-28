@@ -223,6 +223,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-openai"
+version = "0.28.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4df839a6643e1e3248733b01f229dc4f462d7256f808bbaf04cac40739b345c2"
+dependencies = [
+ "async-openai-macros",
+ "backoff",
+ "base64 0.22.1",
+ "bytes",
+ "derive_builder",
+ "eventsource-stream",
+ "futures",
+ "rand 0.8.5",
+ "reqwest",
+ "reqwest-eventsource",
+ "secrecy",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.12",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
+name = "async-openai-macros"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0289cba6d5143bfe8251d57b4a8cac036adf158525a76533a7082ba65ec76398"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
+]
+
+[[package]]
 name = "async-stream"
 version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1570,7 +1607,7 @@ name = "dynamo-engine-mistralrs"
 version = "0.3.1"
 dependencies = [
  "anyhow",
- "async-openai",
+ "async-openai 0.27.2",
  "async-stream",
  "async-trait",
  "candle-core 0.8.4",
@@ -1593,7 +1630,7 @@ dependencies = [
  "anyhow",
  "assert_matches",
  "async-nats",
- "async-openai",
+ "async-openai 0.28.3",
  "async-stream",
  "async-trait",
  "async_zmq",
@@ -1661,7 +1698,7 @@ name = "dynamo-run"
 version = "0.3.1"
 dependencies = [
  "anyhow",
- "async-openai",
+ "async-openai 0.27.2",
  "async-stream",
  "async-trait",
  "clap",

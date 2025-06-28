@@ -1,6 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::{
+    collections::HashSet,
+    pin::Pin,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
 use axum::{
     extract::State,
     http::StatusCode,
@@ -11,14 +18,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use dynamo_runtime::pipeline::{AsyncEngineContext, Context};
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashSet,
-    pin::Pin,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
@@ -26,7 +28,6 @@ use super::{
     metrics::{Endpoint, InflightGuard, ResponseMetricCollector},
     service_v2, RouteDoc,
 };
-
 use crate::preprocessor::LLMMetricAnnotation;
 use crate::protocols::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse};
 use crate::protocols::openai::{
@@ -39,8 +40,6 @@ use crate::types::{
     },
     Annotated,
 };
-
-use dynamo_runtime::pipeline::{AsyncEngineContext, Context};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ErrorResponse {
@@ -384,6 +383,119 @@ async fn chat_completions(
     }
 }
 
+/// OpenAI Responses Request Handler
+///
+/// This method will handle the incoming request for the /v1/responses endpoint.
+#[tracing::instrument(skip_all)]
+async fn responses(
+    State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    Json(mut request): Json<NvCreateChatCompletionRequest>,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    // return a 503 if the service is not ready
+    check_ready(&state)?;
+
+    // Apply template values if present
+    if let Some(template) = template {
+        if request.inner.model.is_empty() {
+            request.inner.model = template.model.clone();
+        }
+        if request.inner.temperature.unwrap_or(0.0) == 0.0 {
+            request.inner.temperature = Some(template.temperature);
+        }
+        if request.inner.max_completion_tokens.unwrap_or(0) == 0 {
+            request.inner.max_completion_tokens = Some(template.max_completion_tokens);
+        }
+    }
+    tracing::trace!("Received chat completions request: {:?}", request.inner);
+
+    // todo - extract distributed tracing id and context id from headers
+    let request_id = uuid::Uuid::new_v4().to_string();
+
+    // todo - decide on default
+    let streaming = request.inner.stream.unwrap_or(false);
+
+    // update the request to always stream
+    let inner_request = async_openai::types::CreateChatCompletionRequest {
+        stream: Some(true),
+        ..request.inner
+    };
+
+    let request = NvCreateChatCompletionRequest {
+        inner: inner_request,
+        nvext: request.nvext,
+    };
+
+    // todo - make the protocols be optional for model name
+    // todo - when optional, if none, apply a default
+    let model = &request.inner.model;
+
+    // todo - determine the proper error code for when a request model is not present
+    tracing::trace!("Getting chat completions engine for model: {}", model);
+
+    let engine = state
+        .manager()
+        .get_chat_completions_engine(model)
+        .map_err(|_| ErrorResponse::model_not_found())?;
+
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(model, Endpoint::ChatCompletions, streaming);
+
+    let mut response_collector = state.metrics_clone().create_response_collector(model);
+
+    // setup context
+    // todo - inherit request_id from distributed trace details
+    let request = Context::with_id(request, request_id.clone());
+
+    tracing::trace!("Issuing generate call for chat completions");
+
+    // issue the generate call on the engine
+    let stream = engine
+        .generate(request)
+        .await
+        .map_err(|e| ErrorResponse::from_anyhow(e, "Failed to generate completions"))?;
+
+    // capture the context to cancel the stream if the client disconnects
+    let ctx = stream.context();
+
+    // todo - tap the stream and propagate request level metrics
+    // note - we might do this as part of the post processing set to make it more generic
+
+    if streaming {
+        let stream = stream.map(move |response| {
+            process_event_converter(EventConverter::from(response), &mut response_collector)
+        });
+        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight_guard).await;
+
+        let mut sse_stream = Sse::new(stream);
+
+        if let Some(keep_alive) = state.sse_keep_alive() {
+            sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
+        }
+
+        Ok(sse_stream.into_response())
+    } else {
+        // TODO: report ISL/OSL for non-streaming requests
+        let response = NvCreateChatCompletionResponse::from_annotated_stream(stream.into())
+            .await
+            .map_err(|e| {
+                tracing::error!(
+                    request_id,
+                    "Failed to fold chat completions stream for: {:?}",
+                    e
+                );
+                ErrorResponse::internal_server_error(&format!(
+                    "Failed to fold chat completions stream: {}",
+                    e
+                ))
+            })?;
+
+        inflight_guard.mark_ok();
+        Ok(Json(response).into_response())
+    }
+}
+
 // todo - abstract this to the top level lib.rs to be reused
 // todo - move the service_observer to its own state/arc
 fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
@@ -596,6 +708,21 @@ pub fn list_models_router(
         .with_state(state);
 
     (vec![doc_for_openai], router)
+}
+
+/// Create an Axum [`Router`] for the OpenAI API Responses endpoint
+/// If not path is provided, the default path is `/v1/responses`
+pub fn responses_router(
+    state: Arc<service_v2::State>,
+    template: Option<RequestTemplate>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/v1/responses".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(chat_completions))
+        .with_state((state, template));
+    (vec![doc], router)
 }
 
 #[cfg(test)]
