@@ -45,3 +45,4 @@ pub mod kv;
 pub mod model_card;
 pub mod nats;
 pub mod preprocessor;
+pub mod tokens;
