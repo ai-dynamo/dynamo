@@ -43,7 +43,6 @@ class Worker:
     @endpoint(name="generate")
     async def generate(self, request: RequestType):
         logger.info(f"Worker received: {request.text}")
-
         for c in request.text.split(" "):
             logger.info(f"Worker sending: {c}")
             time.sleep(0.1)

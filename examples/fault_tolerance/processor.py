@@ -55,20 +55,56 @@ class Processor:
     @endpoint(name="generate")
     async def generate(self, request: RequestType):
         logger.info(f"Processor received: {request.text}")
-
         remote_request = RequestType(
             text=request.text,
         )
+        async for response in self._generate_with_migration(remote_request):
+            yield response
 
+    async def _generate_with_migration(
+        self,
+        original_request: RequestType,
+        sent_responses: list[ResponseType] = [],
+        retry_count: int = 0,
+    ):
+        sent_responses_ = sent_responses[:]  # do not modify the default argument
+        remote_request = self._new_request_with_sent_responses(
+            original_request, sent_responses_, retry_count
+        )
+        restart = False
         try:
             remote_responses = await self._worker_client.round_robin(
                 remote_request.model_dump_json()
             )
             try:
                 async for response in remote_responses:
-                    # logger.info(f"Processor sending: {response.data()}")
+                    logger.info(f"Processor sending: {response.data()}")
+                    sent_responses_.append(response.data())
                     yield response.data()
             except Exception as e:
-                logger.error(f"Processor response stream error: {e}")
+                logger.warn(f"Processor error while streaming response: {e}")
+                restart = True
         except Exception as e:
-            logger.error(f"Processor error: {e}")
+            logger.warn(f"Processor error while making the request: {e}")
+            restart = True
+        if restart:
+            logger.info("Processor migrating the request...")
+            async for response in self._generate_with_migration(
+                original_request, sent_responses_, retry_count + 1
+            ):
+                yield response
+
+    @staticmethod
+    def _new_request_with_sent_responses(
+        original_request: RequestType,
+        sent_responses: list[ResponseType],
+        retry_count: int,
+    ) -> RequestType:
+        # stop infinite retry
+        if retry_count > 3:
+            raise RuntimeError("Processor request migration retry limit reached")
+        # instruct the worker to skip sent responses
+        original_request_text_list = original_request.text.split(" ")
+        new_request_text_list = original_request_text_list[len(sent_responses) :]
+        new_request_text = " ".join(new_request_text_list)
+        return RequestType(text=new_request_text)

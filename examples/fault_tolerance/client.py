@@ -37,9 +37,14 @@ async def client(runtime: DistributedRuntime):
         request = RequestType(text="1 2 3 4 5 6 7 8 9")
         print(f"Sending: {request.text}")
         responses = await client.generate(request.model_dump_json())
+        i = 0
         async for response in responses:
             print(f"Received: {response.data()}")
-            pass
+            if response.data() != f'{{"text":"{i + 1}"}}':
+                raise RuntimeError(f"Invalid response #{i + 1}: {response.data()}")
+            i += 1
+        if i != 9:
+            raise RuntimeError(f"Expected 9 responses, got {i}")
         time.sleep(1)
 
 
