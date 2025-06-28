@@ -450,7 +450,7 @@ async fn responses(
             ))
         })?;
 
-    // Construct NvResponse from NvCreateChatCompletionResponse
+    // Convert NvCreateChatCompletionResponse --> NvResponse
     let response: NvResponse = response.into();
 
     Ok(Json(response).into_response())
@@ -635,7 +635,7 @@ pub fn chat_completions_router(
     let path = path.unwrap_or("/v1/chat/completions".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
-        .route(&path, post(responses))
+        .route(&path, post(chat_completions))
         .with_state((state, template));
     (vec![doc], router)
 }
@@ -680,7 +680,7 @@ pub fn responses_router(
     let path = path.unwrap_or("/v1/responses".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
-        .route(&path, post(chat_completions))
+        .route(&path, post(responses))
         .with_state((state, template));
     (vec![doc], router)
 }
