@@ -1,16 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use dynamo_llm::protocols::openai::nvext::NvExt;
-use dynamo_llm::types::openai::chat_completions::{
+use crate::protocols::openai::nvext::NvExt;
+use crate::request_template::RequestTemplate;
+use crate::types::openai::chat_completions::{
     NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
 };
 use dynamo_runtime::{pipeline::Context, runtime::CancellationToken, Runtime};
 use futures::StreamExt;
 use std::io::{ErrorKind, Write};
 
-use crate::input::common;
-use crate::{EngineConfig, Flags, RequestTemplate};
+use crate::entrypoint::input::common;
+use crate::entrypoint::EngineConfig;
 
 /// Max response tokens for each single query. Must be less than model context size.
 /// TODO: Cmd line flag to overwrite this
@@ -18,20 +19,19 @@ const MAX_TOKENS: u32 = 8192;
 
 pub async fn run(
     runtime: Runtime,
-    _flags: Flags,
     single_prompt: Option<String>,
     engine_config: EngineConfig,
-    template: Option<RequestTemplate>,
 ) -> anyhow::Result<()> {
     let cancel_token = runtime.primary_token();
     let prepared_engine = common::prepare_engine(runtime, engine_config).await?;
+    // TODO: Pass prepared_engine directly
     main_loop(
         cancel_token,
         &prepared_engine.service_name,
         prepared_engine.engine,
         single_prompt,
         prepared_engine.inspect_template,
-        template,
+        prepared_engine.request_template,
     )
     .await
 }

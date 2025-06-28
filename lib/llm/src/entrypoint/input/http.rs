@@ -3,14 +3,12 @@
 
 use std::sync::Arc;
 
-use crate::input::common;
-use crate::{EngineConfig, Flags};
-use dynamo_llm::kv_router::KvRouterConfig;
-use dynamo_llm::{
+use crate::{
     discovery::{ModelManager, ModelWatcher, MODEL_ROOT_PATH},
     engines::StreamingEngineAdapter,
+    entrypoint::{input::common, EngineConfig},
     http::service::service_v2,
-    request_template::RequestTemplate,
+    kv_router::KvRouterConfig,
     types::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
@@ -23,32 +21,28 @@ use dynamo_runtime::transports::etcd;
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
 /// Build and run an HTTP service
-pub async fn run(
-    runtime: Runtime,
-    flags: Flags,
-    engine_config: EngineConfig,
-    template: Option<RequestTemplate>,
-) -> anyhow::Result<()> {
+pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Result<()> {
     let http_service = service_v2::HttpService::builder()
-        .port(flags.http_port)
+        .port(engine_config.local_model().http_port())
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
         .enable_embeddings_endpoints(true)
-        .with_request_template(template)
+        .with_request_template(engine_config.local_model().request_template())
         .build()?;
     match engine_config {
-        EngineConfig::Dynamic => {
+        EngineConfig::Dynamic(_) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
             match distributed_runtime.etcd_client() {
                 Some(etcd_client) => {
+                    let router_config = engine_config.local_model().router_config();
                     // Listen for models registering themselves in etcd, add them to HTTP service
                     run_watcher(
                         distributed_runtime,
                         http_service.state().manager_clone(),
                         etcd_client.clone(),
                         MODEL_ROOT_PATH,
-                        flags.router_mode.into(),
-                        Some(flags.kv_router_config()),
+                        router_config.router_mode,
+                        Some(router_config.kv_router_config.clone()),
                     )
                     .await?;
                 }

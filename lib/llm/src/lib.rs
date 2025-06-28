@@ -15,6 +15,7 @@ pub mod common;
 pub mod disagg_router;
 pub mod discovery;
 pub mod engines;
+pub mod entrypoint;
 pub mod gguf;
 pub mod http;
 pub mod hub;

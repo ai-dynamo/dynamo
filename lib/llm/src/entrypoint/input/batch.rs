@@ -1,14 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use anyhow::Context as _;
-use async_openai::types::FinishReason;
-use dynamo_llm::model_card::model::ModelDeploymentCard;
-use dynamo_llm::preprocessor::OpenAIPreprocessor;
-use dynamo_llm::request_template::RequestTemplate;
-use dynamo_llm::types::openai::chat_completions::{
+use crate::preprocessor::OpenAIPreprocessor;
+use crate::request_template::RequestTemplate;
+use crate::types::openai::chat_completions::{
     NvCreateChatCompletionRequest, OpenAIChatCompletionsStreamingEngine,
 };
+use anyhow::Context as _;
+use async_openai::types::FinishReason;
 use dynamo_runtime::{pipeline::Context, runtime::CancellationToken, Runtime};
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -19,8 +18,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
-use crate::input::common;
-use crate::{EngineConfig, Flags};
+use crate::entrypoint::input::common;
+use crate::entrypoint::EngineConfig;
 
 /// Max tokens in each response.
 /// TODO: For batch mode this should be the full context size of the model
@@ -53,11 +52,8 @@ struct Entry {
 
 pub async fn run(
     runtime: Runtime,
-    _flags: Flags,
-    card: ModelDeploymentCard,
     input_jsonl: PathBuf,
     engine_config: EngineConfig,
-    template: Option<RequestTemplate>,
 ) -> anyhow::Result<()> {
     let cancel_token = runtime.primary_token();
     // Check if the path exists and is a directory
@@ -68,11 +64,10 @@ pub async fn run(
         );
     }
 
-    let prepared_engine = common::prepare_engine(runtime, engine_config).await?;
-    let service_name_ref = Arc::new(prepared_engine.service_name);
+    let mut prepared_engine = common::prepare_engine(runtime, engine_config).await?;
 
-    let pre_processor = if card.has_tokenizer() {
-        Some(OpenAIPreprocessor::new(card).await?)
+    let pre_processor = if prepared_engine.has_tokenizer() {
+        Some(OpenAIPreprocessor::new(prepared_engine.card.take().unwrap()).await?)
     } else {
         None
     };
@@ -85,6 +80,7 @@ pub async fn run(
             tracing::error!(%err, "Failed writing output to {}", output_file.display());
         }
     });
+    let service_name_ref = Arc::new(prepared_engine.service_name);
 
     let tokens_in = Arc::new(AtomicU64::new(0));
     let tokens_out = Arc::new(AtomicU64::new(0));
@@ -98,7 +94,7 @@ pub async fn run(
     tracing::info!("Timer start.");
     let start = Instant::now();
     let mut lines = buffered_input.lines();
-    let template: Option<Arc<RequestTemplate>> = template.map(Arc::new);
+    let template: Option<Arc<RequestTemplate>> = prepared_engine.request_template.map(Arc::new);
     while let Ok(Some(line)) = lines.next_line().await {
         if cancel_token.is_cancelled() {
             break;
