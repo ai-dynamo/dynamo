@@ -17,6 +17,10 @@ limitations under the License.
 
 # 🚀 Deploy Dynamo Cloud to Kubernetes
 
+Dynamo Cloud acts as an orchestration layer between the end user and Kubernetes, handling the complexity of deploying your graphs for you.
+Before you can deploy your graphs you need to one-time deploy the dynamo runtime and dynamo cloud images.
+
+
 ## 🏗️ Building Docker images for Dynamo Cloud components
 
 You can build and push Docker images for the Dynamo cloud components (API server, API store, and operator) to any container registry of your choice. Here's how to build each component:
@@ -26,9 +30,23 @@ You can build and push Docker images for the Dynamo cloud components (API server
 - Docker installed and running
 - Access to a container registry of your choice
 
-### ⚙️ Building and Pushing Images
+#### 🏗️ Build Dynamo inference runtime.
+
+Make sure you have first built and pushed your registry Dynamo Base Image for Dynamo inference runtime.
+
+```bash
+./container/build.sh
+export IMAGE_TAG=<TAG>
+# the above builds the dynamo:latest-vllm image.
+docker tag dynamo:latest-vllm <your-registry>/dynamo:${IMAGE_TAG}
+docker push <your-registry>/dynamo:${IMAGE_TAG}
+```
+
+
+#### 🛠️ Build and push Dynamo Cloud platform components
 
 First, set the required environment variables:
+
 ```bash
 export DOCKER_SERVER=<CONTAINER_REGISTRY>
 export IMAGE_TAG=<TAG>
@@ -37,6 +55,13 @@ export IMAGE_TAG=<TAG>
 As a description of the placeholders:
 - `<CONTAINER_REGISTRY>`: Your container registry (e.g., `nvcr.io`, `docker.io/<your-username>`, etc.)
 - `<TAG>`: The tag you want to use for the images of the Dynamo cloud components (e.g., `latest`, `0.0.1`, etc.)
+By default if you use the `dynamo deploy` cli, this tag has to match the tag of the runtime container image.
+If the runtime image tag is not explicitly set, the default is the `dynamo:latest`.
+If you are a dynamo user, your pick whatever dynamo version you want and deploy the Dynamo Cloud once for all of your future graphs.
+
+If you are a contributor, you would need to rebuild these images if you make changes to the Operator or Api Store.
+The tag will go into the dynamo-operator:<IMAGE_TAG> image for the Operator and api-store:<IMAGE_TAG> for the API Store.  The runtime (base) image handles the inference toolchain and the sdk and built by the (`build.sh`). Use the same tags for both images if deploying with `dynamo deploy`. The tags do not have to match if you specify tags explicitly in your Helm and/or dynamo deploy config. (but the images must be compatible)
+
 
 Note: Make sure you're logged in to your container registry before pushing images. For example:
 ```bash
@@ -45,7 +70,7 @@ docker login <CONTAINER_REGISTRY>
 
 You can build each component individually or build all components at once:
 
-#### 🛠️ Build and push platform components
+
 ```bash
 earthly --push +all-docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 ```
@@ -109,7 +134,7 @@ kubectl create secret docker-registry docker-imagepullsecret \
   --namespace=$NAMESPACE
 ```
 
-3. Deploy the helm chart using the deploy script:
+3. Deploy Dynamo Cloud using the Helm chart via the provided deploy script:
 
 ```bash
 ./deploy.sh
