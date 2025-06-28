@@ -120,7 +120,7 @@ class VllmPrefillWorker:
             device=EMBEDDINGS_DEVICE,
         )
         descriptor = connect.Descriptor(embeddings)
-        # Register the descriptor w/ NIXL (this is optional, if not done here the connect subsytem will take care of this automatically).
+        # Register the descriptor w/ NIXL (this is optional, if not done here the connect subsystem will take care of this automatically).
         descriptor.register_memory(self._connector)
         self._embeddings_descriptor = (embeddings, descriptor)
 
@@ -196,7 +196,7 @@ class VllmPrefillWorker:
         )
 
         # Extract the pre-allocated, reusable image embeddings tensor and its descriptor.
-        # Doing this avoids unnessesary memory de/registration with NIXL.
+        # Doing this avoids unnecessary memory de/registration with NIXL.
         embeddings, descriptor = self._embeddings_descriptor
 
         # Create a new writable operation from the descriptor.
