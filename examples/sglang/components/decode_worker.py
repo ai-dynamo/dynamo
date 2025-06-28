@@ -19,7 +19,7 @@ import logging
 
 import sglang as sgl
 from utils.protocol import DisaggPreprocessedRequest
-from utils.sglang import parse_sglang_args
+from utils.sgl_utils import parse_sglang_args
 
 from dynamo.sdk import endpoint, service
 
@@ -45,7 +45,9 @@ class SGLangDecodeWorker:
     @endpoint()
     async def generate(self, req: DisaggPreprocessedRequest):
         g = await self.engine.async_generate(
-            input_ids=req.request.token_ids,
+            input_ids=req.request.token_ids
+            if req.request.batch_token_ids is None
+            else req.request.batch_token_ids,
             sampling_params=req.sampling_params,
             stream=True,
             bootstrap_host=req.bootstrap_host,

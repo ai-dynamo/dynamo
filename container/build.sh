@@ -58,7 +58,7 @@ BUILD_CONTEXT=$(dirname "$(readlink -f "$SOURCE_DIR")")
 
 # Base Images
 TENSORRTLLM_BASE_IMAGE=nvcr.io/nvidia/pytorch
-TENSORRTLLM_BASE_IMAGE_TAG=25.04-py3
+TENSORRTLLM_BASE_IMAGE_TAG=25.05-py3
 
 # Important Note: Because of ABI compatibility issues between TensorRT-LLM and NGC PyTorch,
 # we need to build the TensorRT-LLM wheel from source.
@@ -90,10 +90,11 @@ TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 # variables to learn how to run a pipeline with a specific commit.
 DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="137fe35539ea182f1495f5021bfda97c729e50c3"
 TRTLLM_COMMIT=""
+TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 
 # TensorRT-LLM PyPI index URL
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==0.21.0rc0"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.0.0rc0"
 TENSORRTLLM_PIP_WHEEL=""
 
 
@@ -165,6 +166,13 @@ get_options() {
                 exit 1
             fi
             USE_DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT=true
+            ;;
+        --trtllm-use-nixl-kvcache-experimental)
+            if [ -n "$2" ] && [[ "$2" != --* ]]; then
+                echo "ERROR: --trtllm-use-nixl-kvcache-experimental does not take any argument"
+                exit 1
+            fi
+            TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="1"
             ;;
         --tensorrtllm-pip-wheel)
             if [ "$2" ]; then
@@ -364,6 +372,7 @@ show_help() {
     echo "  [--build-context name=path to add build context]"
     echo "  [--release-build perform a release build]"
     echo "  [--make-efa Enables EFA support for NIXL]"
+    echo "  [--trtllm-use-nixl-kvcache-experimental Enables NIXL KVCACHE experimental support for TensorRT-LLM]"
     exit 0
 }
 
@@ -492,6 +501,10 @@ if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
         TRTLLM_COMMIT="$DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT"
     fi
 
+    if [ -n "${TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL}" ]; then
+        BUILD_ARGS+=" --build-arg TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL=${TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL} "
+    fi
+
     # If user didn't set both wheel and commit, use default tensorrt_llm pip wheel
     if [ -z "$TENSORRTLLM_PIP_WHEEL" ] && [ -z "$TRTLLM_COMMIT" ]; then
         TENSORRTLLM_PIP_WHEEL="$DEFAULT_TENSORRTLLM_PIP_WHEEL"
@@ -507,7 +520,7 @@ if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
         echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
         if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}" "${ARCH}_${TRTLLM_COMMIT}"; then
             echo "WARN: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL_DIR}, attempting to build from source"
-            if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH}; then
+            if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_COMMIT}; then
                 error "ERROR: Failed to build TensorRT-LLM wheel"
             fi
         fi

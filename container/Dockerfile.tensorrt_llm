@@ -14,7 +14,7 @@
 # limitations under the License.
 
 ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
-ARG BASE_IMAGE_TAG="25.04-py3"
+ARG BASE_IMAGE_TAG="25.05-py3"
 ARG RELEASE_BUILD
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -324,15 +324,28 @@ RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
 
 ENV DYNAMO_HOME=/workspace
 
-# Use UCX for TRTLLM KV Cache Transfer
-ENV TRTLLM_USE_UCX_KVCACHE=1
+ARG ARCH_ALT
+ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:$LD_LIBRARY_PATH
 
+# Use UCX for TRTLLM KV Cache Transfer
+ARG TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL
+
+# Create a script that sets the environment variables and source it
+RUN echo '#!/bin/bash' > /usr/local/bin/set_trtllm_env.sh && \
+    if [ "$TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL" = "1" ]; then \
+        echo 'export TRTLLM_USE_NIXL_KVCACHE=1' >> /usr/local/bin/set_trtllm_env.sh; \
+    else \
+        echo 'export TRTLLM_USE_UCX_KVCACHE=1' >> /usr/local/bin/set_trtllm_env.sh; \
+    fi && \
+    chmod +x /usr/local/bin/set_trtllm_env.sh
+
+# Source the script in bashrc
+RUN echo 'source /usr/local/bin/set_trtllm_env.sh' >> /root/.bashrc
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
-
 
 # FIXME: May want a modification with dynamo banner on entry
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]

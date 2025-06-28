@@ -50,3 +50,7 @@ clap = { version = "4.5", features = ["derive", "env"] }
 dialoguer = { version = "0.11", default-features = false, features = ["editor", "history"] }
 futures-util = { version = "0.3" }
 regex = "1"
+
+[build-dependencies]
+vergen-gitcl = "1.0"
+anyhow = { workspace = true }

@@ -45,6 +45,7 @@ class FrontendConfig(BaseModel):
     served_model_name: str
     endpoint: str
     port: int = 8080
+    router: str = "round-robin"
 
 
 @service(
@@ -81,6 +82,8 @@ class Frontend:
                 f"out={endpoint}",
                 "--http-port",
                 str(self.frontend_config.port),
+                "--router-mode",
+                str(self.frontend_config.router),
             ],
             stdout=None,
             stderr=None,
