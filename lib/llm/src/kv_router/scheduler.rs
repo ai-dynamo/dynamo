@@ -228,7 +228,7 @@ pub fn process_worker_selection(
 }
 
 // Helper function for softmax sampling
-fn softmax_sample(logits: &HashMap<i64, f64>, temperature: f64) -> i64 {
+pub fn softmax_sample(logits: &HashMap<i64, f64>, temperature: f64) -> i64 {
     if logits.is_empty() {
         panic!("Empty logits for softmax sampling");
     }
@@ -358,7 +358,7 @@ impl WorkerSelector for DefaultWorkerSelector {
         }
 
         // Use softmax sampling to select worker
-        let temperature = 1.0; // You can make this configurable if needed
+        let temperature = 0.5; // TODO: make this configurable if needed
         let best_worker_id = softmax_sample(&worker_logits, temperature);
 
         let overlap_blocks = request

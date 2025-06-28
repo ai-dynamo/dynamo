@@ -40,6 +40,7 @@ from dynamo._core import ZmqKvEventPublisher as ZmqKvEventPublisher
 from dynamo._core import ZmqKvEventPublisherConfig as ZmqKvEventPublisherConfig
 from dynamo._core import compute_block_hash_for_seq_py as compute_block_hash_for_seq_py
 from dynamo._core import register_llm as register_llm
+from dynamo._core import softmax_sample as softmax_sample
 
 try:
     from dynamo.llm.tensorrtllm import (  # noqa: F401

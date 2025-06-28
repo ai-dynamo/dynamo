@@ -58,7 +58,7 @@ pub trait WorkerSelector {
 #[derive(Debug, Clone)]
 pub struct KvRouterConfig {
     /// Weight for overlap score in worker selection.
-    /// Higher values prioritize KV cache reuse. Default: 2.0
+    /// Higher values prioritize KV cache reuse. Default: 1.0
     pub overlap_score_weight: f64,
 
     /// Weight for GPU cache usage in worker selection.

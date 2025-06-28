@@ -1057,3 +1057,20 @@ class ZmqKvEventListener:
             ValueError: If events cannot be serialized to JSON
         """
         ...
+
+def softmax_sample(logits: Dict[int, float], temperature: float) -> int:
+    """
+    Perform softmax sampling on a dictionary of logits.
+
+    Args:
+        logits: Dictionary mapping worker IDs (int) to their logit scores (float).
+                Lower logit values are better.
+        temperature: Temperature parameter for softmax. Higher values increase randomness.
+
+    Returns:
+        The selected worker ID based on softmax probability sampling.
+
+    Raises:
+        ValueError: If the logits dictionary is empty.
+    """
+    ...

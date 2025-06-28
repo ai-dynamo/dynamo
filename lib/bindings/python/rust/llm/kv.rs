@@ -24,6 +24,7 @@ use tracing;
 
 use llm_rs::kv_router::protocols::*;
 use llm_rs::kv_router::publisher::{create_stored_blocks, KvEventSourceConfig};
+use llm_rs::kv_router::scheduler::softmax_sample as rust_softmax_sample;
 
 #[pyclass]
 pub(crate) struct KvRouter {
@@ -715,4 +716,17 @@ impl KvRecorder {
         self.inner.shutdown();
         Ok(())
     }
+}
+
+#[pyfunction]
+pub fn softmax_sample(logits: HashMap<i64, f64>, temperature: f64) -> PyResult<i64> {
+    if logits.is_empty() {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            "Empty logits dictionary for softmax sampling",
+        ));
+    }
+
+    // Convert to Rust HashMap if needed (PyO3 should handle this automatically)
+    let result = rust_softmax_sample(&logits, temperature);
+    Ok(result)
 }
