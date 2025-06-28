@@ -56,11 +56,19 @@ class DynamoEndpoint(DynamoEndpointInterface):
         func: Callable,
         name: Optional[str] = None,
         transports: Optional[List[DynamoTransport]] = None,
+        http_method: Optional[str] = None,
         **kwargs,
     ):
         self.func = func
         self._name = name or func.__name__
         self._transports = transports or [DynamoTransport.DEFAULT]
+
+        if http_method is not None and DynamoTransport.HTTP not in self._transports:
+            raise ValueError(
+                "http_method can only be specified for endpoints with HTTP transport"
+            )
+        self._http_method = http_method.upper() if http_method else None
+
         # Extract request type from hints
         hints = get_type_hints(func)
         args = list(hints.items())
@@ -88,6 +96,10 @@ class DynamoEndpoint(DynamoEndpointInterface):
     def transports(self) -> List[DynamoTransport]:
         return self._transports
 
+    @property
+    def http_method(self) -> str | None:
+        return self._http_method
+
 
 # Decorator for abstract dynamo endpoints
 def abstract_endpoint(func: t.Callable) -> t.Callable:
@@ -99,24 +111,49 @@ def abstract_endpoint(func: t.Callable) -> t.Callable:
 def endpoint(
     name: Optional[str] = None,
     transports: Optional[List[DynamoTransport]] = None,
+    http_method: Optional[str] = None,
     **kwargs,
 ) -> Callable[[Callable], DynamoEndpoint]:
-    """Decorator for dynamo endpoints."""
+    """Decorator for dynamo endpoints.
+
+    Args:
+        name: Optional name for the endpoint. If not provided, uses the function name.
+        transports: List of supported transports. Defaults to [DynamoTransport.DEFAULT].
+        http_method: HTTP method for the endpoint. Only valid when HTTP transport is used.
+                    Defaults to None (which means POST).
+        **kwargs: Additional keyword arguments to pass to the endpoint.
+
+    Raises:
+        ValueError: If http_method is specified but HTTP transport is not used.
+    """
 
     def decorator(func: Callable) -> DynamoEndpoint:
-        return DynamoEndpoint(func, name, transports, **kwargs)
+        return DynamoEndpoint(func, name, transports, http_method, **kwargs)
 
     return decorator
 
 
 def api(
     name: Optional[str] = None,
+    http_method: Optional[str] = None,
     **kwargs,
 ) -> Callable[[Callable], DynamoEndpoint]:
-    """Decorator for dynamo endpoints."""
+    """Decorator for HTTP API endpoints.
+
+    Args:
+        name: Optional name for the endpoint. If not provided, uses the function name.
+        http_method: HTTP method for the endpoint. Defaults to None (which means POST).
+        **kwargs: Additional keyword arguments to pass to the endpoint.
+    """
 
     def decorator(func: Callable) -> DynamoEndpoint:
-        return DynamoEndpoint(func, name, transports=[DynamoTransport.HTTP], **kwargs)
+        return DynamoEndpoint(
+            func,
+            name,
+            transports=[DynamoTransport.HTTP],
+            http_method=http_method,
+            **kwargs,
+        )
 
     return decorator
 
