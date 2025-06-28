@@ -161,6 +161,13 @@ impl OpenAIPreprocessor {
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedRequest::builder();
 
+        // Extract KV cache retention configuration from nvext if present
+        if let Some(nvext) = request.nvext() {
+            if let Some(kv_config) = &nvext.kv_cache_retention_config {
+                builder.kv_cache_retention_config(Some(kv_config.clone()));
+            }
+        }
+
         // match request type before any conversion/processing
         match request.prompt_input_type() {
             PromptInput::Tokens(_) => {

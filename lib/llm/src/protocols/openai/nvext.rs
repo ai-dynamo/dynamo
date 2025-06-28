@@ -22,6 +22,53 @@ pub trait NvExtProvider {
     fn raw_prompt(&self) -> Option<String>;
 }
 
+// Add this new struct for KV cache retention configuration
+#[derive(Serialize, Deserialize, Debug, Clone, Builder, Validate)]
+pub struct KvCacheRetentionConfig {
+    /// Token range retention configurations
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub token_range_retention_configs: Option<Vec<TokenRangeRetentionConfig>>,
+
+    /// Decode retention priority (0-100)
+    #[builder(default, setter(strip_option))]
+    #[validate(range(min = 0, max = 100))]
+    pub decode_retention_priority: Option<u32>,
+
+    /// Decode duration in milliseconds
+    #[builder(default, setter(strip_option))]
+    pub decode_duration_ms: Option<u64>,
+
+    /// Transfer mode: "DRAM", "GDS", or "POSIX_DEBUG_FALLBACK"
+    #[builder(default, setter(strip_option))]
+    #[validate(custom(function = "validate_transfer_mode"))]
+    pub transfer_mode: Option<String>,
+
+    /// Directory for KV cache storage
+    #[builder(default, setter(strip_option))]
+    #[validate(custom(function = "validate_directory"))]
+    pub directory: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Builder, Validate)]
+#[validate(schema(function = "validate_token_range_retention_config"))]
+pub struct TokenRangeRetentionConfig {
+    /// Start token index (inclusive)
+    pub token_start: u32,
+
+    /// End token index (exclusive), None means to end of sequence
+    #[builder(default, setter(strip_option))]
+    pub token_end: Option<u32>,
+
+    /// Retention priority (0-100)
+    #[validate(range(min = 0, max = 100))]
+    pub priority: u32,
+
+    /// Duration in milliseconds
+    #[builder(default, setter(strip_option))]
+    pub duration_ms: Option<u64>,
+}
+
 /// NVIDIA LLM extensions to the OpenAI API
 #[derive(Serialize, Deserialize, Builder, Validate, Debug, Clone)]
 #[validate(schema(function = "validate_nv_ext"))]
@@ -61,6 +108,12 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub annotations: Option<Vec<String>>,
+
+    /// KV Cache retention configuration
+    /// This is only supported by the TensorRT-LLM.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub kv_cache_retention_config: Option<KvCacheRetentionConfig>,
 }
 
 impl Default for NvExt {
@@ -86,6 +139,51 @@ fn validate_top_k(top_k: i64) -> Result<(), ValidationError> {
     let mut error = ValidationError::new("top_k");
     error.message = Some("top_k must be -1 or greater than or equal to 1".into());
     Err(error)
+}
+
+fn validate_token_range_retention_config(
+    config: &TokenRangeRetentionConfig,
+) -> Result<(), ValidationError> {
+    if let Some(token_end) = config.token_end {
+        if config.token_start >= token_end {
+            let mut error = ValidationError::new("token_range");
+            error.message = Some(
+                format!(
+                    "token_start ({}) must be less than token_end ({}) when both are set",
+                    config.token_start, token_end
+                )
+                .into(),
+            );
+            return Err(error);
+        }
+    }
+    Ok(())
+}
+
+fn validate_transfer_mode(transfer_mode: &str) -> Result<(), ValidationError> {
+    match transfer_mode {
+        "DRAM" | "GDS" | "POSIX_DEBUG_FALLBACK" => Ok(()),
+        _ => {
+            let mut error = ValidationError::new("transfer_mode");
+            error.message = Some(
+                format!(
+                    "transfer_mode must be one of: DRAM, GDS, or POSIX_DEBUG_FALLBACK, got: {}",
+                    transfer_mode
+                )
+                .into(),
+            );
+            Err(error)
+        }
+    }
+}
+
+fn validate_directory(directory: &str) -> Result<(), ValidationError> {
+    if directory.trim().is_empty() {
+        let mut error = ValidationError::new("directory");
+        error.message = Some("directory cannot be empty or contain only whitespace".into());
+        return Err(error);
+    }
+    Ok(())
 }
 
 impl NvExtBuilder {

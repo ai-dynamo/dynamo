@@ -12,13 +12,18 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import datetime
 import logging
 from dataclasses import dataclass
 from typing import Any, Optional
 
 from common.protocol import DisaggregatedTypeConverter, TRTLLMWorkerRequest
 from tensorrt_llm import SamplingParams
-from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
+from tensorrt_llm.bindings import executor as trtllm
+from tensorrt_llm.llmapi.llm_utils import (
+    KvCacheRetentionConfig,
+    update_llm_args_with_extra_options,
+)
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 from tensorrt_llm.serve.openai_protocol import (
     DisaggregatedParams as OAIDisaggregatedParams,
@@ -45,6 +50,106 @@ def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
         )
 
     return (endpoint_parts[0], endpoint_parts[1], endpoint_parts[2])
+
+
+def log_kv_cache_retention_config_details(kv_cache_retention_config, logger):
+    if kv_cache_retention_config and logger.isEnabledFor(logging.DEBUG):
+        config_details = {
+            "token_range_configs_count": len(
+                kv_cache_retention_config.token_range_retention_configs
+            )
+            if kv_cache_retention_config.token_range_retention_configs
+            else 0,
+            "decode_retention_priority": kv_cache_retention_config.decode_retention_priority,
+            "decode_duration_ms": kv_cache_retention_config.decode_duration_ms.total_seconds()
+            * 1000
+            if kv_cache_retention_config.decode_duration_ms
+            else None,
+            "transfer_mode": str(kv_cache_retention_config.transfer_mode)
+            if kv_cache_retention_config.transfer_mode
+            else None,
+            "directory": kv_cache_retention_config.directory,
+        }
+        logger.debug(f"Using KV cache retention config: {config_details}")
+
+        # Log token range details if present
+        if kv_cache_retention_config.token_range_retention_configs:
+            for i, range_config in enumerate(
+                kv_cache_retention_config.token_range_retention_configs
+            ):
+                range_details = {
+                    "index": i,
+                    "token_start": range_config.token_start,
+                    "token_end": range_config.token_end,
+                    "priority": range_config.priority,
+                    "duration_ms": range_config.duration_ms.total_seconds() * 1000
+                    if range_config.duration_ms
+                    else None,
+                }
+                logger.debug(f"  Token range config {i}: {range_details}")
+    elif kv_cache_retention_config:
+        logger.info("Using KV cache retention config")
+
+
+def convert_dynamo_kv_cache_retention_config(dynamo_config):
+    if not dynamo_config:
+        return None
+
+    try:
+        # Convert token range retention configs
+        token_range_configs = []
+        if dynamo_config.token_range_retention_configs:
+            for range_config in dynamo_config.token_range_retention_configs:
+                # Convert duration from milliseconds to timedelta
+                duration_ms = None
+                if range_config.duration_ms is not None:
+                    duration_ms = datetime.timedelta(
+                        milliseconds=range_config.duration_ms
+                    )
+
+                token_range_configs.append(
+                    KvCacheRetentionConfig.TokenRangeRetentionConfig(
+                        token_start=range_config.token_start,
+                        token_end=range_config.token_end,
+                        priority=range_config.priority,
+                        duration_ms=duration_ms,
+                    )
+                )
+
+        # Convert decode duration from milliseconds to timedelta
+        decode_duration_ms = None
+        if dynamo_config.decode_duration_ms is not None:
+            decode_duration_ms = datetime.timedelta(
+                milliseconds=dynamo_config.decode_duration_ms
+            )
+
+        # Convert transfer mode string to enum
+        transfer_mode = None
+        if dynamo_config.transfer_mode:
+            transfer_mode_str = dynamo_config.transfer_mode.upper()
+            if transfer_mode_str == "DRAM":
+                transfer_mode = trtllm.KvCacheTransferMode.DRAM
+            elif transfer_mode_str == "GDS":
+                transfer_mode = trtllm.KvCacheTransferMode.GDS
+            elif transfer_mode_str == "POSIX_DEBUG_FALLBACK":
+                transfer_mode = trtllm.KvCacheTransferMode.POSIX_DEBUG_FALLBACK
+            else:
+                raise ValueError(
+                    f"Invalid transfer mode: {transfer_mode_str}. "
+                    "Expected 'DRAM', 'GDS', or 'POSIX_DEBUG_FALLBACK'."
+                )
+
+        return KvCacheRetentionConfig(
+            token_range_retention_configs=token_range_configs,
+            decode_retention_priority=dynamo_config.decode_retention_priority,
+            decode_duration_ms=decode_duration_ms,
+            transfer_mode=transfer_mode,
+            directory=dynamo_config.directory,
+        )
+    except Exception as e:
+        logger.error(f"Error converting KV cache retention config: {e}")
+        logger.error(f"Original config: {dynamo_config}")
+        return None
 
 
 @dataclass
@@ -284,6 +389,8 @@ class BaseTensorrtLLMEngine:
         return remote_prefill_response
 
     async def generate(self, request: TRTLLMWorkerRequest):
+        logging.debug(f"Received request: {request}")
+
         if self._llm_engine is None:
             raise RuntimeError("Engine not initialized")
 
@@ -345,12 +452,26 @@ class BaseTensorrtLLMEngine:
         if max_tokens:
             sampling_params.max_tokens = max_tokens
 
+        # Extract and convert KV cache retention config from the request
+        kv_cache_retention_config = None
+        if request.kv_cache_retention_config is not None:
+            kv_cache_retention_config = convert_dynamo_kv_cache_retention_config(
+                request.kv_cache_retention_config
+            )
+            # Log detailed information about the KV cache retention config only in debug mode
+            log_kv_cache_retention_config_details(kv_cache_retention_config, logger)
+            if not kv_cache_retention_config:
+                logger.debug("KV cache retention config conversion failed")
+        else:
+            logger.debug("No KV cache retention config provided in request")
+
         # TODO: Disable streaming for context only requests when adding disagg support
         async for res in self._llm_engine.llm.generate_async(
             inputs=inputs,
             sampling_params=sampling_params,
             disaggregated_params=disaggregated_params,
             streaming=(self._config.disaggregation_mode != "prefill"),
+            kv_cache_retention_config=kv_cache_retention_config,
         ):
             # TRTLLM engine needs to start generating tokens first before stats
             # can be retrieved.
