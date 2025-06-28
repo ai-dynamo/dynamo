@@ -64,6 +64,7 @@ class Planner:
             environment=config_instance.get(
                 "environment", SLAPlannerDefaults.environment
             ),
+            backend=config_instance.get("backend", SLAPlannerDefaults.backend),
             no_operation=config_instance.get(
                 "no-operation", SLAPlannerDefaults.no_operation
             ),

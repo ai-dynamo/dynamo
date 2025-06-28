@@ -140,8 +140,13 @@ SLA-planner and prometheus server are provided as common components that can be 
 - Link `Planner` and `Prometheus` in the graph.
 - Add `Planner` and `Prometheus` configurations in the config file.
 
-A `vllm_v0` example is available for reference:
+We provide examples for `vllm_v0` and `vllm_v1`:
 ```bash
+# vllm_v0
 cd $DYNAMO_HOME/examples/vllm_v0
+dynamo serve graphs.disagg_planner:Frontend -f ./configs/disagg_planner.yaml
+
+# vllm_v1
+cd $DYNAMO_HOME/examples/vllm_v1
 dynamo serve graphs.disagg_planner:Frontend -f ./configs/disagg_planner.yaml
 ```

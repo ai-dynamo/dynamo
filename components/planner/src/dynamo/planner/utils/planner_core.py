@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from dynamo.planner import KubernetesConnector, LocalConnector
-from dynamo.planner.defaults import SLAPlannerDefaults
+from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SLAPlannerDefaults
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
 from dynamo.planner.utils.perf_interpolation import (
     DecodeInterpolator,
@@ -93,8 +93,12 @@ class Planner:
             if self.prefill_client is None:
                 self.prefill_client = (
                     await self.runtime.namespace(self.namespace)
-                    .component("PrefillWorker")
-                    .endpoint("mock")
+                    .component(WORKER_COMPONENT_NAMES[self.args.backend].prefill_worker)
+                    .endpoint(
+                        WORKER_COMPONENT_NAMES[
+                            self.args.backend
+                        ].prefill_worker_endpoint
+                    )
                     .client()
                 )
                 # TODO: remove this sleep after rust client() is blocking until watching state
@@ -110,8 +114,10 @@ class Planner:
             if self.workers_client is None:
                 self.workers_client = (
                     await self.runtime.namespace(self.namespace)
-                    .component("VllmWorker")
-                    .endpoint("generate")
+                    .component(WORKER_COMPONENT_NAMES[self.args.backend].decode_worker)
+                    .endpoint(
+                        WORKER_COMPONENT_NAMES[self.args.backend].decode_worker_endpoint
+                    )
                     .client()
                 )
                 # TODO: remove this sleep after rust client() is blocking until watching state
@@ -270,17 +276,29 @@ class Planner:
             # TODO: add a check to avoid scaling before the previous scaling is completed
             if next_num_p > len(self.p_endpoints):
                 for _ in range(next_num_p - len(self.p_endpoints)):
-                    self.connector.add_component("PrefillWorker", blocking=False)
+                    self.connector.add_component(
+                        WORKER_COMPONENT_NAMES[self.args.backend].prefill_worker,
+                        blocking=False,
+                    )
             elif next_num_p < len(self.p_endpoints):
                 for _ in range(len(self.p_endpoints) - next_num_p):
-                    self.connector.remove_component("PrefillWorker", blocking=False)
+                    self.connector.remove_component(
+                        WORKER_COMPONENT_NAMES[self.args.backend].prefill_worker,
+                        blocking=False,
+                    )
 
             if next_num_d > len(self.d_endpoints):
                 for _ in range(next_num_d - len(self.d_endpoints)):
-                    self.connector.add_component("VllmWorker", blocking=False)
+                    self.connector.add_component(
+                        WORKER_COMPONENT_NAMES[self.args.backend].decode_worker,
+                        blocking=False,
+                    )
             elif next_num_d < len(self.d_endpoints):
                 for _ in range(len(self.d_endpoints) - next_num_d):
-                    self.connector.remove_component("VllmWorker", blocking=False)
+                    self.connector.remove_component(
+                        WORKER_COMPONENT_NAMES[self.args.backend].decode_worker,
+                        blocking=False,
+                    )
 
     async def run(self):
         """Main loop for the planner"""
