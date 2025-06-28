@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 pub mod codec;
 pub mod common;
 pub mod openai;
+pub mod token_completions;
 
 /// The token ID type
 pub type TokenIdType = u32;

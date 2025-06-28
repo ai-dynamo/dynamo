@@ -78,6 +78,9 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_embeddings_endpoints: bool,
 
+    #[builder(default = "true")]
+    enable_dynamo_endpoints: bool,
+
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
 }
@@ -164,6 +167,13 @@ impl HttpServiceConfigBuilder {
 
         if config.enable_embeddings_endpoints {
             routes.push(super::openai::embeddings_router(state.clone(), None));
+        }
+
+        if config.enable_dynamo_endpoints {
+            routes.push(super::token_completions::token_completions_router(
+                state.clone(),
+                None,
+            ));
         }
 
         // for (route_docs, route) in routes.into_iter().chain(self.routes.into_iter()) {
