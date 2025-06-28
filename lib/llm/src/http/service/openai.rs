@@ -28,10 +28,12 @@ use super::{
     metrics::{Endpoint, InflightGuard, ResponseMetricCollector},
     service_v2, RouteDoc,
 };
-use crate::preprocessor::LLMMetricAnnotation;
-use crate::protocols::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse};
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionResponse, completions::NvCreateCompletionResponse,
+};
+use crate::protocols::openai::{
+    embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
+    responses::NvResponse,
 };
 use crate::request_template::RequestTemplate;
 use crate::types::{
@@ -40,6 +42,7 @@ use crate::types::{
     },
     Annotated,
 };
+use crate::{preprocessor::LLMMetricAnnotation, protocols::openai::responses::NvCreateResponse};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ErrorResponse {
@@ -389,7 +392,7 @@ async fn chat_completions(
 #[tracing::instrument(skip_all)]
 async fn responses(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
-    Json(mut request): Json<NvCreateChatCompletionRequest>,
+    Json(mut request): Json<NvCreateResponse>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -402,34 +405,19 @@ async fn responses(
         if request.inner.temperature.unwrap_or(0.0) == 0.0 {
             request.inner.temperature = Some(template.temperature);
         }
-        if request.inner.max_completion_tokens.unwrap_or(0) == 0 {
-            request.inner.max_completion_tokens = Some(template.max_completion_tokens);
+        if request.inner.max_output_tokens.unwrap_or(0) == 0 {
+            request.inner.max_output_tokens = Some(template.max_completion_tokens);
         }
     }
     tracing::trace!("Received chat completions request: {:?}", request.inner);
 
-    // todo - extract distributed tracing id and context id from headers
     let request_id = uuid::Uuid::new_v4().to_string();
 
-    // todo - decide on default
-    let streaming = request.inner.stream.unwrap_or(false);
+    // Convert NvCreateResponse --> NvCreateChatCompletionRequest
+    let request: NvCreateChatCompletionRequest = request.into();
 
-    // update the request to always stream
-    let inner_request = async_openai::types::CreateChatCompletionRequest {
-        stream: Some(true),
-        ..request.inner
-    };
-
-    let request = NvCreateChatCompletionRequest {
-        inner: inner_request,
-        nvext: request.nvext,
-    };
-
-    // todo - make the protocols be optional for model name
-    // todo - when optional, if none, apply a default
     let model = &request.inner.model;
 
-    // todo - determine the proper error code for when a request model is not present
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
     let engine = state
@@ -437,15 +425,6 @@ async fn responses(
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorResponse::model_not_found())?;
 
-    let mut inflight_guard =
-        state
-            .metrics_clone()
-            .create_inflight_guard(model, Endpoint::ChatCompletions, streaming);
-
-    let mut response_collector = state.metrics_clone().create_response_collector(model);
-
-    // setup context
-    // todo - inherit request_id from distributed trace details
     let request = Context::with_id(request, request_id.clone());
 
     tracing::trace!("Issuing generate call for chat completions");
@@ -456,44 +435,25 @@ async fn responses(
         .await
         .map_err(|e| ErrorResponse::from_anyhow(e, "Failed to generate completions"))?;
 
-    // capture the context to cancel the stream if the client disconnects
-    let ctx = stream.context();
+    // TODO: handle streaming, currently just unary
+    let response = NvCreateChatCompletionResponse::from_annotated_stream(stream.into())
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                request_id,
+                "Failed to fold chat completions stream for: {:?}",
+                e
+            );
+            ErrorResponse::internal_server_error(&format!(
+                "Failed to fold chat completions stream: {}",
+                e
+            ))
+        })?;
 
-    // todo - tap the stream and propagate request level metrics
-    // note - we might do this as part of the post processing set to make it more generic
+    // Construct NvResponse from NvCreateChatCompletionResponse
+    let response: NvResponse = response.into();
 
-    if streaming {
-        let stream = stream.map(move |response| {
-            process_event_converter(EventConverter::from(response), &mut response_collector)
-        });
-        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight_guard).await;
-
-        let mut sse_stream = Sse::new(stream);
-
-        if let Some(keep_alive) = state.sse_keep_alive() {
-            sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
-        }
-
-        Ok(sse_stream.into_response())
-    } else {
-        // TODO: report ISL/OSL for non-streaming requests
-        let response = NvCreateChatCompletionResponse::from_annotated_stream(stream.into())
-            .await
-            .map_err(|e| {
-                tracing::error!(
-                    request_id,
-                    "Failed to fold chat completions stream for: {:?}",
-                    e
-                );
-                ErrorResponse::internal_server_error(&format!(
-                    "Failed to fold chat completions stream: {}",
-                    e
-                ))
-            })?;
-
-        inflight_guard.mark_ok();
-        Ok(Json(response).into_response())
-    }
+    Ok(Json(response).into_response())
 }
 
 // todo - abstract this to the top level lib.rs to be reused
@@ -675,7 +635,7 @@ pub fn chat_completions_router(
     let path = path.unwrap_or("/v1/chat/completions".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
-        .route(&path, post(chat_completions))
+        .route(&path, post(responses))
         .with_state((state, template));
     (vec![doc], router)
 }
