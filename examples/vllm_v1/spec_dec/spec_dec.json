@@ -1,0 +1,7 @@
+{
+    "speculative_config": {
+        "method": "ngram",
+        "num_speculative_tokens": 5,
+        "prompt_lookup_max": 4
+    }
+}
