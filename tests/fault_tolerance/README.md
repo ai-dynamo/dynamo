@@ -236,7 +236,15 @@ graph LR
 3. Overall failure count is roughly equal to recovery time multiplied by number of clients (as expected).
 
 
-#### Redundant Workers (Over Provisioned)
+#### Redundant Workers (Over Provisoned)
+
+To demonstrate the failure and recovery time in the case that there
+are multiple instances of each process (except for the frontend) we
+ran a simple "agg-tp-2-dp-4" configuration.
+
+In this case we also consider the system to be "over provisioned" for
+the workload as multiple workers are not needed to maintain SLA for
+the 8 clients.
 
 ```mermaid
 graph LR
@@ -278,5 +286,26 @@ graph LR
 
     style DecodePool stroke:#000,stroke-width:2px
 ```
+
+#### Results:
+
+*Test Group:* agg-tp-2-dp-4
+
+*Test Command:*  dynamo serve graphs.agg:Frontend -f /workspace/tests/fault_tolerance/configs/agg_tp_2_dp_4.yaml --Frontend.port 8000 in /workspace/examples/llm
+
+|    Failure    |   Startup Time |   Success |   Failed |   Latency Before |   Latency After |   Pending Before |   Pending After |   Violations Before |   Violations After |   Recovery Time |
+|:-------------:|---------------:|----------:|---------:|-----------------:|----------------:|-----------------:|----------------:|--------------------:|-------------------:|----------------:|
+|     none      |          57.00 |    800.00 |     0.00 |             1.76 |             N/A |             0.00 |             N/A |                0.00 |                N/A |             N/A |
+|   frontend    |          57.00 |    672.00 |   128.00 |             1.77 |            1.74 |             0.00 |            0.00 |                0.00 |               0.00 |           16.65 |
+|   processor   |          52.00 |    680.00 |   120.00 |             1.79 |            1.78 |             0.00 |            0.00 |                0.00 |               0.00 |           21.25 |
+| decode_worker |          56.00 |    796.00 |     4.00 |             1.82 |            1.78 |             0.00 |            0.00 |                0.00 |               0.00 |           44.88 |
+|  vllm_worker  |          52.00 |    634.00 |   166.00 |             1.78 |            1.78 |             0.00 |            0.00 |                0.00 |               0.00 |             N/A |
+
+#### Summary:
+
+1. Dynamo does not currently detect and recover from direct vllm worker sub process failure. (WIP)
+2. Recovery time for the decode worker itself is the largest and a decode worker failure has the largest impact (as expected)
+3. Overall failure count is roughly equal to recovery time multiplied by number of clients (as expected).
+
 
 ### Disaggregated
