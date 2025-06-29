@@ -15,6 +15,7 @@
 
 import asyncio
 import logging
+import random
 import uuid
 from enum import Enum
 from typing import Any, AsyncIterator, Dict, List, Tuple, Union
@@ -24,7 +25,12 @@ from components.worker import VllmWorker
 from transformers import AutoTokenizer
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.check_worker import check_required_workers
-from utils.protocol import LocalBlockHashes, MyRequestOutput, vLLMGenerateRequest
+from utils.protocol import (
+    LocalBlockHashes,
+    MyRequestOutput,
+    RouterDecision,
+    vLLMGenerateRequest,
+)
 from utils.vllm import RouterType, parse_vllm_args
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
@@ -102,13 +108,23 @@ class Processor(ProcessMixIn):
             .client()
         )
 
-        self.use_router = self.engine_args.router in (RouterType.KV, RouterType.KV_LOAD)
+        self.use_router = self.engine_args.router in (
+            RouterType.KV,
+            RouterType.KV_LOAD,
+            RouterType.APPROX_KV,
+        )
         if self.use_router:
             router_ns, router_name = Router.dynamo_address()  # type: ignore
             self.router_client = (
                 await runtime.namespace(router_ns)
                 .component(router_name)
                 .endpoint("generate")
+                .client()
+            )
+            self.router_log_client = (
+                await runtime.namespace(router_ns)
+                .component(router_name)
+                .endpoint("log_router_decision")
                 .client()
             )
 
@@ -238,7 +254,11 @@ class Processor(ProcessMixIn):
                 # TODO: queue request at processor when engines are full
                 router_mode = (await self.etcd_kv_cache.get("router")).decode()
 
-                self.use_router = router_mode in (RouterType.KV, RouterType.KV_LOAD)
+                self.use_router = router_mode in (
+                    RouterType.KV,
+                    RouterType.KV_LOAD,
+                    RouterType.APPROX_KV,
+                )
 
                 prefix_hit_rate = 0.0  # Default value
                 if self.use_router:
@@ -248,6 +268,7 @@ class Processor(ProcessMixIn):
                             hashes=compute_block_hash_for_seq_py(
                                 token_ids, self.engine_args.block_size
                             ),
+                            tokens=token_ids,
                             num_tokens=len(token_ids),
                         ).model_dump_json()
                     )
@@ -265,13 +286,36 @@ class Processor(ProcessMixIn):
 
                 if self.use_router:
                     if worker_id == "":
-                        engine_generator = await self.worker_client.generate(
-                            request_obj
-                        )
+                        # When using the APPROX_KV router, we need to know the worker that we ultimately select.
+                        if router_mode == RouterType.APPROX_KV:
+                            ids = self.worker_client.instance_ids()
+
+                            worker_id = random.choice(ids)
+
+                            engine_generator = await self.worker_client.direct(
+                                request_obj, int(worker_id)
+                            )
+                        # Otherwise, we can just use the client directly.
+                        else:
+                            engine_generator = await self.worker_client.generate(
+                                request_obj
+                            )
                     else:
                         engine_generator = await self.worker_client.direct(
                             request_obj, int(worker_id)
                         )
+
+                    # Notify the router of the worker that we selected.
+                    if router_mode == RouterType.APPROX_KV:
+                        router_log_obj = RouterDecision(
+                            worker_id=int(worker_id),
+                            tokens=engine_prompt["prompt_token_ids"],
+                        ).model_dump_json()
+
+                        await (
+                            await self.router_log_client.generate(router_log_obj)
+                        ).__anext__()
+
                 elif router_mode == RouterType.RANDOM:
                     engine_generator = await self.worker_client.generate(request_obj)
                 elif router_mode == RouterType.ROUND_ROBIN:

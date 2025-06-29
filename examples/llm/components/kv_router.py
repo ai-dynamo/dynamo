@@ -23,10 +23,16 @@ from typing import AsyncIterator, Tuple
 import numpy as np  # Add numpy import
 from components.worker import VllmWorker
 from utils.check_worker import check_required_workers
-from utils.protocol import LocalBlockHashes
+from utils.protocol import LocalBlockHashes, RouterDecision
 from utils.vllm import RouterType
 
-from dynamo.llm import AggregatedMetrics, KvIndexer, KvMetricsAggregator, OverlapScores
+from dynamo.llm import (
+    AggregatedMetrics,
+    ApproxKvIndexer,
+    KvIndexer,
+    KvMetricsAggregator,
+    OverlapScores,
+)
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 from dynamo.sdk.lib.config import ServiceConfig
 
@@ -153,6 +159,10 @@ class Router:
         await kv_listener.create_service()
         if self.router_type == RouterType.KV:
             self.indexer = KvIndexer(kv_listener, self.args.block_size)
+        elif self.router_type == RouterType.APPROX_KV:
+            # For now, hardcode the TTL to 2 minutes.
+            self.indexer = ApproxKvIndexer(kv_listener, self.args.block_size, 120.0)
+
         self.metrics_aggregator = KvMetricsAggregator(kv_listener)
 
         self.active_blocks_dict = {}
@@ -352,7 +362,10 @@ class Router:
 
         # Existing KV routing logic
         try:
-            scores = await self.indexer.find_matches(request.hashes)
+            if self.router_type == RouterType.APPROX_KV:
+                scores = await self.indexer.find_matches_for_request(request.tokens)
+            else:
+                scores = await self.indexer.find_matches(request.hashes)
         except Exception as e:
             scores = {}
             logger.exception(f"Error finding matches: {e}. {fallback_msg}")
@@ -369,3 +382,17 @@ class Router:
             )
 
         yield worker_id, prefix_hit_rate
+
+    @endpoint()
+    async def log_router_decision(self, request: RouterDecision):
+        if self.router_type == RouterType.APPROX_KV:
+            try:
+                await self.indexer.process_routing_decision_for_request(
+                    request.tokens, request.worker_id
+                )
+            except Exception as e:
+                logger.exception(
+                    f"Error processing routing decision: {e}. {fallback_msg}"
+                )
+
+        yield None

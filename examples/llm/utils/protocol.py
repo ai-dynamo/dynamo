@@ -38,6 +38,7 @@ class Tokens(BaseModel):
 
 class LocalBlockHashes(BaseModel):
     hashes: list[int]
+    tokens: list[int]
     num_tokens: int
 
 
@@ -119,3 +120,8 @@ class MyRequestOutput(BaseModel):
     # encoder_prompt_token_ids: Optional[List[int]] = None
     # num_cached_tokens: Optional[int] = None
     # multi_modal_placeholders: Optional[MultiModalPlaceholderDict] = None
+
+
+class RouterDecision(BaseModel):
+    worker_id: int
+    tokens: list[int]

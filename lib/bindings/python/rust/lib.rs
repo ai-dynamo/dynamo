@@ -58,6 +58,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::backend::Backend>()?;
     m.add_class::<llm::kv::OverlapScores>()?;
     m.add_class::<llm::kv::KvIndexer>()?;
+    m.add_class::<llm::kv::ApproxKvIndexer>()?;
     m.add_class::<llm::kv::EndpointKvMetrics>()?;
     m.add_class::<llm::kv::AggregatedMetrics>()?;
     m.add_class::<llm::kv::KvMetricsAggregator>()?;

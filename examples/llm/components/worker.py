@@ -75,7 +75,7 @@ class VllmWorker:
                 logger.info("Pipeline parallel size is not supported yet, setting to 1")
                 self.engine_args.pipeline_parallel_size = 1
 
-        if self.engine_args.router == RouterType.KV:
+        if self.engine_args.router in (RouterType.KV, RouterType.APPROX_KV):
             if not self.engine_args.enable_prefix_caching:
                 logger.info(
                     "When using KV router, prefix caching must be enabled, setting to True"
