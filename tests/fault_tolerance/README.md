@@ -290,6 +290,10 @@ graph LR
 
     Processor_1 --> Decode1
     Processor_1 --> Decode2
+    Processor_1 --> Decode3
+    Processor_1 --> Decode4
+    Processor_2 --> Decode1
+    Processor_2 --> Decode2
     Processor_2 --> Decode3
     Processor_2 --> Decode4
 
