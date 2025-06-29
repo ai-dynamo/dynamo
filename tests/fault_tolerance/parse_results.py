@@ -14,7 +14,7 @@ def parse_test_log(file_path):
     fault_time = None
     start_cmd = None
     if not os.path.isfile(file_path):
-        return None, None
+        return None, None, None
     with open(file_path, "r") as f:
         for line in f:
             line = line.strip()
@@ -37,7 +37,7 @@ def parse_test_log(file_path):
     return startup_time, fault_time, start_cmd
 
 
-def parse_client_logs(test_dir):
+def parse_client_logs(test_dir, expected_length=100):
     all_logs = []
     for file in os.listdir(test_dir):
         if file.startswith("client_") and file.endswith(".log.txt"):
@@ -66,7 +66,7 @@ def parse_client_logs(test_dir):
                             content = result["result"]["choices"][0]["message"][
                                 "content"
                             ]
-                            if not content:
+                            if not content or len(content) < expected_length:
                                 log_entry["success"] = False
                         else:
                             log_entry["success"] = False
@@ -79,36 +79,13 @@ def parse_client_logs(test_dir):
         return None
 
 
-def calculate_metrics(df, fault_time):
+def calculate_metrics(df, fault_time, sla=2.1):
     success = df["success"].sum()
     failure = len(df) - success
 
     if fault_time:
-        before_fault = df[df["time"] < fault_time]
-        after_fault = df[df["time"] >= fault_time]
-    else:
-        before_fault = df
-        after_fault = None
-
-    avg_before = before_fault[before_fault["success"]]["request_elapsed_time"].mean()
-    std_before = before_fault[before_fault["success"]]["request_elapsed_time"].std()
-
-    if after_fault is None or after_fault.empty:
-        avg_after = None
-        std_after = None
-    else:
-        avg_after = after_fault[after_fault["success"]]["request_elapsed_time"].mean()
-        std_after = after_fault[after_fault["success"]]["request_elapsed_time"].std()
-
-    return success, failure, avg_before, std_before, avg_after, std_after
-
-def calculate_metrics(df, fault_time, sla=2):
-    success = df["success"].sum()
-    failure = len(df) - success
-
-    if fault_time:
-        before_fault = df[df["time"] < fault_time]
-        after_fault = df[df["time"] >= fault_time]
+        before_fault = df[df["time"] <= fault_time]
+        after_fault = df[df["time"] > fault_time]
     else:
         before_fault = df
         after_fault = None
@@ -127,8 +104,8 @@ def calculate_metrics(df, fault_time, sla=2):
     # SLA violations (only successful requests exceeding the SLA)
     violations_before = (successful_before["request_elapsed_time"] > sla).sum()
     violations_after = (
-        (successful_after["request_elapsed_time"] > sla).sum() 
-        if after_fault is not None and not after_fault.empty 
+        (successful_after["request_elapsed_time"] > sla).sum()
+        if after_fault is not None and not after_fault.empty
         else None
     )
 
@@ -143,14 +120,15 @@ def calculate_metrics(df, fault_time, sla=2):
         violations_after,
     )
 
+
 def parse_process_log(log_dir, process_name):
-    process_start_line = {
+    process_ready_line = {
         "dynamo_Frontend": "added model",
-        "dynamo_VllmWorker": "Starting VllmWorker instance",
+        "dynamo_VllmWorker": "Starting VllmWorker instance with all registered endpoints",
         "dynamo_Processor": "Starting Processor instance with all registered endpoints",
         "dynamo_PrefillWorker": "Starting PrefillWorker instance with all registered endpoints",
     }
-    process_end_line = {
+    process_shutdown_line = {
         "dynamo_Frontend": "SIGTERM received, starting graceful shutdown",
         "dynamo_VllmWorker": "Received shutdown signal, shutting down DistributedRuntime",
         "dynamo_Processor": "Received signal 15, initiating graceful shutdown",
@@ -161,8 +139,10 @@ def parse_process_log(log_dir, process_name):
     if not os.path.isfile(process_log_path):
         return None, None
 
-    process_starts = []
-    process_ends = []
+    process_ready = []
+    process_shutdown = []
+
+    process_start_time = None
 
     with open(process_log_path, "r") as f:
         for line in f:
@@ -180,19 +160,24 @@ def parse_process_log(log_dir, process_name):
             except ValueError:
                 continue
 
+            if not process_start_time:
+                process_start_time = timestamp
+
             log_message = " ".join(parts[1:])
 
+            relative_time = (timestamp - process_start_time).total_seconds()
+
             # Check for process start lines
-            if process_name in process_start_line:
-                if process_start_line[process_name] in log_message:
-                    process_starts.append((timestamp, log_message))
+            if process_name in process_ready_line:
+                if process_ready_line[process_name] in log_message:
+                    process_ready.append((timestamp, log_message, relative_time))
 
             # Check for process end lines
-            if process_name in process_end_line:
-                if process_end_line[process_name] in log_message:
-                    process_ends.append((timestamp, log_message))
+            if process_name in process_shutdown_line:
+                if process_shutdown_line[process_name] in log_message:
+                    process_shutdown.append((timestamp, log_message, relative_time))
 
-    return process_starts, process_ends
+    return process_ready, process_shutdown
 
 
 def parse_watcher_log(test_dir, fault_time):
@@ -219,10 +204,11 @@ def parse_watcher_log(test_dir, fault_time):
                     and "request_active_slots" in metric_data
                     and metric_data["request_active_slots"] > 0
                 ):
-                    if fault_time is None or entry_time < fault_time:
+                    if fault_time is None or entry_time <= fault_time:
                         before_requests.append(metric_data["num_requests_waiting"])
                     else:
                         after_requests.append(metric_data["num_requests_waiting"])
+
     avg_before = (
         sum(before_requests) / len(before_requests) if before_requests else None
     )
@@ -259,7 +245,7 @@ def calculate_recovery_time(test_dir, failure_type, fault_time):
         if not start_times:
             return None
         start_time = start_times[-1][0]
-       
+
     elif failure_type == "prefill_worker":
         if "dynamo_PrefillWorker" not in process_start_ends:
             return None
@@ -272,7 +258,7 @@ def calculate_recovery_time(test_dir, failure_type, fault_time):
 
     if not start_time:
         return None
-    
+
     if fault_time > start_time:
         return None
 
@@ -294,11 +280,18 @@ def process_test_directory(test_dir):
     pending_requests_before, pending_requests_after = parse_watcher_log(
         test_dir, fault_time
     )
-    success, failure, avg_before, std_before, avg_after, std_after, violations_before, violations_after = calculate_metrics(
-        df, fault_time
-    )
+    (
+        success,
+        failure,
+        avg_before,
+        std_before,
+        avg_after,
+        std_after,
+        violations_before,
+        violations_after,
+    ) = calculate_metrics(df, fault_time)
 
-    recovery_time = calculate_recovery_time(test_dir, failure_type,fault_time)
+    recovery_time = calculate_recovery_time(test_dir, failure_type, fault_time)
 
     return {
         "test": test_prefix,
@@ -323,13 +316,13 @@ def main(logs_dir, tablefmt, log_paths=[]):
     results = []
     if log_paths:
         for log_path in log_paths:
-            result= process_test_directory(log_path)
+            result = process_test_directory(log_path)
             if result:
                 results.append(result)
     elif logs_dir:
         for entry in os.listdir(logs_dir):
             if entry.startswith("test_worker_failure[") and os.path.isdir(
-                    os.path.join(logs_dir, entry)
+                os.path.join(logs_dir, entry)
             ):
                 result = process_test_directory(os.path.join(logs_dir, entry))
                 if result:
