@@ -44,7 +44,7 @@ dynamo-runtime = { path = "../../runtime" }
 anyhow = { version = "1" }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }
-async-openai = { workspace = true }
+async-openai = { version = "0.29.0" }
 futures = { version = "0.3" }
 once_cell = { version = "1.20.3" }
 serde = { version = "1" }
