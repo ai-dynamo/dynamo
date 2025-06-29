@@ -303,9 +303,98 @@ graph LR
 
 #### Summary:
 
-1. Dynamo does not currently detect and recover from direct vllm worker sub process failure. (WIP)
-2. Recovery time for the decode worker itself is the largest and a decode worker failure has the largest impact (as expected)
-3. Overall failure count is roughly equal to recovery time multiplied by number of clients (as expected).
+1. Dynamo does not currently detect and recover from direct vllm
+   worker sub process failure. In the case of redundant workers this
+   results in roughtly 1/4 the requests failing after the initial 30
+   seconds. (WIP)
+2. By immediately detecting a decode worker failure, Dynamo can limit
+   the failures and reroute requests to healthy workers with minimal
+   impact.
+3. While the processor was configured with redundancy - the system was
+   unable to instantiate two processors successfully leading to
+   failure when the processor was terminated.
+
+
+
+#### Redundant Workers (Exact Provisioning)
+
+To demonstrate the failure and recovery time in the case that there
+are multiple instances of each process (except for the frontend) we
+ran a simple "agg-tp-2-dp-4" configuration.
+
+In this case we also consider the system to be "exact provisioned" for
+the workload as we limit the max-num-seqs for each decode worker to
+exactly 2. This artificially creates a scenario that results in queing
+when a failur occurs before a worker is recovered.
+
+
+```mermaid
+graph LR
+    Client["Client"]
+    Frontend["Frontend"]
+    Processor_1["Processor 1"]
+    Processor_2["Processor 2"]
+
+    Client --> Frontend
+    Frontend --> Processor_1
+    Frontend --> Processor_2
+
+    subgraph DecodePool["Decode Worker Pool"]
+        direction LR
+        subgraph Decode1["Decode 1"]
+            direction TB
+            D1GPU0["GPU 0"]
+            D1GPU1["GPU 1"]
+        end
+        subgraph Decode2["Decode 2"]
+            direction TB
+            D2GPU0["GPU 0"]
+            D2GPU1["GPU 1"]
+        end
+        subgraph Decode3["Decode 3"]
+            direction TB
+            D3GPU0["GPU 0"]
+            D3GPU1["GPU 1"]
+        end
+        subgraph Decode4["Decode 4"]
+            direction TB
+            D4GPU0["GPU 0"]
+            D4GPU1["GPU 1"]
+        end
+    end
+
+    Processor_1 --> DecodePool
+    Processor_2 --> DecodePool
+
+    style DecodePool stroke:#000,stroke-width:2px
+```
+
+#### Results:
+
+**Test Group:** agg-tp-2-dp-4
+
+**Test Command:**  dynamo serve graphs.agg:Frontend -f /workspace/tests/fault_tolerance/configs/agg_tp_2_dp_4.yaml --Frontend.port 8000 --VllmWorker.max_num_seqs 2 in /workspace/examples/llm
+
+|    Failure    |   Startup Time |   Success |   Failed |   Latency Before |   Latency After |   Pending Before |   Pending After |   Violations Before |   Violations After |   Recovery Time |
+|:-------------:|---------------:|----------:|---------:|-----------------:|----------------:|-----------------:|----------------:|--------------------:|-------------------:|----------------:|
+|     none      |          57.00 |    800.00 |     0.00 |             1.77 |             N/A |             0.01 |             N/A |                0.00 |                N/A |             N/A |
+|   frontend    |          56.00 |    664.00 |   136.00 |             1.80 |            1.77 |             0.00 |            0.00 |                0.00 |               0.00 |           17.22 |
+|   processor   |          56.00 |    649.00 |   151.00 |             1.76 |            1.77 |             0.01 |            0.00 |                0.00 |               0.00 |           25.79 |
+| decode_worker |          56.00 |    798.00 |     2.00 |             1.77 |            1.89 |             0.00 |            0.13 |                0.00 |              84.00 |           44.57 |
+|  vllm_worker  |          56.00 |    632.00 |   168.00 |             1.80 |            2.23 |             0.00 |            0.38 |                0.00 |             232.00 |             N/A |
+
+#### Summary:
+
+1. Dynamo does not currently detect and recover from direct vllm
+   worker sub process failure. In the case of redundant workers this
+   results in roughtly 1/4 the requests failing after the initial 30
+   seconds. (WIP)
+2. By immediately detecting a decode worker failure, Dynamo can limit
+   the failures and reroute requests to healthy workers with minimal
+   impact.
+3. While the processor was configured with redundancy - the system was
+   unable to instantiate two processors successfully leading to
+   failure when the processor was terminated.
 
 
 ### Disaggregated
