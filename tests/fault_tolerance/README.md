@@ -150,9 +150,9 @@ test_worker_failure[agg-tp-2-dp-4-none]
 
 Results are presented in table format after each test providing summary statistics.
 
-*Test Group: agg-tp-2-dp-1*
+**Test Group:** agg-tp-2-dp-1
 
-*Test Command:  dynamo serve graphs.agg:Frontend -f /workspace/tests/fault_tolerance/configs/agg_tp_2_dp_1.yaml --Frontend.port 8000 in /workspace/examples/llm*
+**Test Command:**  dynamo serve graphs.agg:Frontend -f /workspace/tests/fault_tolerance/configs/agg_tp_2_dp_1.yaml --Frontend.port 8000 in /workspace/examples/llm
 
 |    Failure    |   Startup Time |   Success |   Failed |   Latency Before |   Latency After |   Pending Before |   Pending After |   Violations Before |   Violations After |   Recovery Time |
 |:-------------:|---------------:|----------:|---------:|-----------------:|----------------:|-----------------:|----------------:|--------------------:|-------------------:|----------------:|
@@ -289,9 +289,9 @@ graph LR
 
 #### Results:
 
-*Test Group:* agg-tp-2-dp-4
+**Test Group:** agg-tp-2-dp-4
 
-*Test Command:*  dynamo serve graphs.agg:Frontend -f /workspace/tests/fault_tolerance/configs/agg_tp_2_dp_4.yaml --Frontend.port 8000 in /workspace/examples/llm
+**Test Command:**  dynamo serve graphs.agg:Frontend -f /workspace/tests/fault_tolerance/configs/agg_tp_2_dp_4.yaml --Frontend.port 8000 in /workspace/examples/llm
 
 |    Failure    |   Startup Time |   Success |   Failed |   Latency Before |   Latency After |   Pending Before |   Pending After |   Violations Before |   Violations After |   Recovery Time |
 |:-------------:|---------------:|----------:|---------:|-----------------:|----------------:|-----------------:|----------------:|--------------------:|-------------------:|----------------:|
