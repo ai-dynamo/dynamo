@@ -262,7 +262,7 @@ graph LR
     Frontend --> Processor_2
 
     subgraph DecodePool["Decode Worker Pool"]
-        direction TB
+        direction LR
         subgraph Decode1["Decode 1"]
             direction TB
             D1GPU0["GPU 0"]
