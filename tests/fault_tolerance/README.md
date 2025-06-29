@@ -214,11 +214,11 @@ graph LR
     style DecodePool stroke:#000,stroke-width:2px
 ```
 
-#### Results
+#### Results:
 
 **Test Group: agg-tp-2-dp-1**
 
-**Test Command:  dynamo serve graphs.agg:Frontend -f /workspace/tests/fault_tolerance/configs/agg_tp_2_dp_1.yaml --Frontend.port 8000 in /workspace/examples/llm**
+**Test Command:**  dynamo serve graphs.agg:Frontend -f /workspace/tests/fault_tolerance/configs/agg_tp_2_dp_1.yaml --Frontend.port 8000 in /workspace/examples/llm
 
 |    Failure    |   Startup Time |   Success |   Failed |   Latency Before |   Latency After |   Pending Before |   Pending After |   Violations Before |   Violations After |   Recovery Time |
 |:-------------:|---------------:|----------:|---------:|-----------------:|----------------:|-----------------:|----------------:|--------------------:|-------------------:|----------------:|
@@ -229,7 +229,7 @@ graph LR
 |  vllm_worker  |          58.00 |    120.00 |   680.00 |             1.98 |             nan |             0.00 |            0.00 |                0.00 |               0.00 |             N/A |
 
 
-A few summary details:
+#### Summary:
 
 1. Dynamo does not currently detect and recover from direct vllm worker sub process failure. (WIP)
 2. Recovery time for the decode worker itself is the largest and a decode worker failure has the largest impact (as expected)
