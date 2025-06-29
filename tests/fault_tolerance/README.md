@@ -217,7 +217,7 @@ graph LR
     end
 
     %% Connections
-    Processor --> Decode1
+#    Processor --> Decode1
 
     %% Styling
     style DecodePool stroke:#000,stroke-width:2px
@@ -288,14 +288,8 @@ graph LR
         end
     end
 
-    Processor_1 --> Decode1
-    Processor_1 --> Decode2
-    Processor_1 --> Decode3
-    Processor_1 --> Decode4
-    Processor_2 --> Decode1
-    Processor_2 --> Decode2
-    Processor_2 --> Decode3
-    Processor_2 --> Decode4
+    Processor_1 --> DecodePool
+    Processor_2 --> DecodePool
 
     style DecodePool stroke:#000,stroke-width:2px
 ```
