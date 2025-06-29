@@ -28,6 +28,7 @@ pub mod completions;
 pub mod embeddings;
 pub mod models;
 pub mod nvext;
+pub mod responses;
 
 /// Minimum allowed value for OpenAI's `temperature` sampling option
 pub const MIN_TEMPERATURE: f32 = 0.0;

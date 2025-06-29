@@ -45,6 +45,7 @@ dynamo-tokens = { path = "lib/tokens", version = "0.3.1" }
 
 # External dependencies
 anyhow = { version = "1" }
+async-openai = "0.28.3"
 async-nats = { version = "0.40", features = ["service"] }
 async-stream = { version = "0.3" }
 async-trait = { version = "0.1" }

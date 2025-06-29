@@ -1,6 +1,13 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::{
+    collections::HashSet,
+    pin::Pin,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
 use axum::{
     extract::State,
     http::StatusCode,
@@ -11,14 +18,9 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
+use dynamo_runtime::pipeline::{AsyncEngineContext, Context};
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::HashSet,
-    pin::Pin,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
-};
 use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
@@ -26,11 +28,12 @@ use super::{
     metrics::{Endpoint, InflightGuard, ResponseMetricCollector},
     service_v2, RouteDoc,
 };
-
-use crate::preprocessor::LLMMetricAnnotation;
-use crate::protocols::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse};
 use crate::protocols::openai::{
     chat_completions::NvCreateChatCompletionResponse, completions::NvCreateCompletionResponse,
+};
+use crate::protocols::openai::{
+    embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
+    responses::NvResponse,
 };
 use crate::request_template::RequestTemplate;
 use crate::types::{
@@ -39,8 +42,7 @@ use crate::types::{
     },
     Annotated,
 };
-
-use dynamo_runtime::pipeline::{AsyncEngineContext, Context};
+use crate::{preprocessor::LLMMetricAnnotation, protocols::openai::responses::NvCreateResponse};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ErrorResponse {
@@ -384,6 +386,76 @@ async fn chat_completions(
     }
 }
 
+/// OpenAI Responses Request Handler
+///
+/// This method will handle the incoming request for the /v1/responses endpoint.
+#[tracing::instrument(skip_all)]
+async fn responses(
+    State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    Json(mut request): Json<NvCreateResponse>,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    // return a 503 if the service is not ready
+    check_ready(&state)?;
+
+    // Apply template values if present
+    if let Some(template) = template {
+        if request.inner.model.is_empty() {
+            request.inner.model = template.model.clone();
+        }
+        if request.inner.temperature.unwrap_or(0.0) == 0.0 {
+            request.inner.temperature = Some(template.temperature);
+        }
+        if request.inner.max_output_tokens.unwrap_or(0) == 0 {
+            request.inner.max_output_tokens = Some(template.max_completion_tokens);
+        }
+    }
+    tracing::trace!("Received chat completions request: {:?}", request.inner);
+
+    let request_id = uuid::Uuid::new_v4().to_string();
+
+    // Convert NvCreateResponse --> NvCreateChatCompletionRequest
+    let request: NvCreateChatCompletionRequest = request.into();
+
+    let model = &request.inner.model;
+
+    tracing::trace!("Getting chat completions engine for model: {}", model);
+
+    let engine = state
+        .manager()
+        .get_chat_completions_engine(model)
+        .map_err(|_| ErrorResponse::model_not_found())?;
+
+    let request = Context::with_id(request, request_id.clone());
+
+    tracing::trace!("Issuing generate call for chat completions");
+
+    // issue the generate call on the engine
+    let stream = engine
+        .generate(request)
+        .await
+        .map_err(|e| ErrorResponse::from_anyhow(e, "Failed to generate completions"))?;
+
+    // TODO: handle streaming, currently just unary
+    let response = NvCreateChatCompletionResponse::from_annotated_stream(stream.into())
+        .await
+        .map_err(|e| {
+            tracing::error!(
+                request_id,
+                "Failed to fold chat completions stream for: {:?}",
+                e
+            );
+            ErrorResponse::internal_server_error(&format!(
+                "Failed to fold chat completions stream: {}",
+                e
+            ))
+        })?;
+
+    // Convert NvCreateChatCompletionResponse --> NvResponse
+    let response: NvResponse = response.into();
+
+    Ok(Json(response).into_response())
+}
+
 // todo - abstract this to the top level lib.rs to be reused
 // todo - move the service_observer to its own state/arc
 fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
@@ -596,6 +668,21 @@ pub fn list_models_router(
         .with_state(state);
 
     (vec![doc_for_openai], router)
+}
+
+/// Create an Axum [`Router`] for the OpenAI API Responses endpoint
+/// If not path is provided, the default path is `/v1/responses`
+pub fn responses_router(
+    state: Arc<service_v2::State>,
+    template: Option<RequestTemplate>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let path = path.unwrap_or("/v1/responses".to_string());
+    let doc = RouteDoc::new(axum::http::Method::POST, &path);
+    let router = Router::new()
+        .route(&path, post(responses))
+        .with_state((state, template));
+    (vec![doc], router)
 }
 
 #[cfg(test)]
