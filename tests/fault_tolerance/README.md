@@ -312,8 +312,7 @@ graph LR
    impact.
 3. While the processor was configured with redundancy - the system was
    unable to instantiate two processors successfully leading to
-   failure when the processor was terminated.
-
+   failure when the processor was terminated. (WIP)
 
 
 #### Redundant Workers (Exact Provisioning)
@@ -341,22 +340,22 @@ graph LR
 
     subgraph DecodePool["Decode Worker Pool"]
         direction LR
-        subgraph Decode1["Decode 1"]
+        subgraph Decode1["Decode 1 (max 2 seq)"]
             direction TB
             D1GPU0["GPU 0"]
             D1GPU1["GPU 1"]
         end
-        subgraph Decode2["Decode 2"]
+        subgraph Decode2["Decode 2 (max 2 seq)"]
             direction TB
             D2GPU0["GPU 0"]
             D2GPU1["GPU 1"]
         end
-        subgraph Decode3["Decode 3"]
+        subgraph Decode3["Decode 3 (max 2 seq)"]
             direction TB
             D3GPU0["GPU 0"]
             D3GPU1["GPU 1"]
         end
-        subgraph Decode4["Decode 4"]
+        subgraph Decode4["Decode 4 (max 2 seq)"]
             direction TB
             D4GPU0["GPU 0"]
             D4GPU1["GPU 1"]
@@ -388,13 +387,15 @@ graph LR
 1. Dynamo does not currently detect and recover from direct vllm
    worker sub process failure. In the case of redundant workers this
    results in roughtly 1/4 the requests failing after the initial 30
-   seconds. (WIP)
+   seconds. All requests after the initial 30 seconds would also be
+   subject to queing as a result and we see increased SLA
+   violations. (WIP)
 2. By immediately detecting a decode worker failure, Dynamo can limit
    the failures and reroute requests to healthy workers with minimal
-   impact.
+   impact. However during the recovery period requests are subject to
+   queing and as a results we see increased SLA violations.
 3. While the processor was configured with redundancy - the system was
    unable to instantiate two processors successfully leading to
-   failure when the processor was terminated.
-
+   failure when the processor was terminated. (WIP)
 
 ### Disaggregated
