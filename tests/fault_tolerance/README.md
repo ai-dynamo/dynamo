@@ -216,9 +216,6 @@ graph LR
         end
     end
 
-    %% Connections
-#    Processor --> Decode1
-
     %% Styling
     style DecodePool stroke:#000,stroke-width:2px
 ```
