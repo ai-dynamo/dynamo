@@ -449,10 +449,11 @@ graph LR
     style DecodePool stroke:#000,stroke-width:2px
 ```
 
+#### Results:
 
-Test Group: disagg-p-tp-2-dp-1-d-tp-4-dp-1
+**Test Group:** disagg-p-tp-2-dp-1-d-tp-4-dp-1
 
-Test Command:  dynamo serve graphs.disagg:Frontend -f /workspace/tests/fault_tolerance/configs/disagg_p_tp_2_dp_1_d_tp_4_dp_1.yaml --Frontend.port 8000 in /workspace/examples/llm
+**Test Command:**  dynamo serve graphs.disagg:Frontend -f /workspace/tests/fault_tolerance/configs/disagg_p_tp_2_dp_1_d_tp_4_dp_1.yaml --Frontend.port 8000 in /workspace/examples/llm
 |    Failure     |   Startup Time |   Success |   Failed |   Latency Before |   Latency After |   Pending Before |   Pending After |   Violations Before |   Violations After |   Recovery Time |
 |:--------------:|---------------:|----------:|---------:|-----------------:|----------------:|-----------------:|----------------:|--------------------:|-------------------:|----------------:|
 |      none      |          83.00 |    800.00 |     0.00 |             1.19 |             N/A |             0.01 |             N/A |                0.00 |                N/A |             N/A |
@@ -461,4 +462,7 @@ Test Command:  dynamo serve graphs.disagg:Frontend -f /workspace/tests/fault_tol
 | decode_worker  |          72.00 |    200.00 |   600.00 |             1.20 |            1.28 |             0.03 |             N/A |                0.00 |               0.00 |             N/A |
 | prefill_worker |          81.00 |    798.00 |     2.00 |             1.19 |            1.22 |             0.05 |            0.05 |                0.00 |               0.00 |           42.31 |
 |  vllm_worker   |          83.00 |    797.00 |     3.00 |             1.19 |            1.22 |             0.00 |            0.03 |                0.00 |               8.00 |             N/A |
+
+#### Summary:
+
 
