@@ -236,9 +236,6 @@ class Processor(ProcessMixIn):
             # Create an async generator function to process this request
             async def process_and_stream():
                 # TODO: queue request at processor when engines are full
-                router_mode = (await self.etcd_kv_cache.get("router")).decode()
-
-                self.use_router = router_mode in (RouterType.KV, RouterType.KV_LOAD)
 
                 prefix_hit_rate = 0.0  # Default value
                 if self.use_router:
@@ -264,7 +261,7 @@ class Processor(ProcessMixIn):
                 ).model_dump_json()
 
                 if self.use_router:
-                    if worker_id == "":
+                    if worker_id is None or worker_id == "":
                         engine_generator = await self.worker_client.generate(
                             request_obj
                         )
@@ -272,10 +269,12 @@ class Processor(ProcessMixIn):
                         engine_generator = await self.worker_client.direct(
                             request_obj, int(worker_id)
                         )
-                elif router_mode == RouterType.RANDOM:
+                elif self.engine_args.router == RouterType.RANDOM:
                     engine_generator = await self.worker_client.generate(request_obj)
-                elif router_mode == RouterType.ROUND_ROBIN:
+                elif self.engine_args.router == RouterType.ROUND_ROBIN:
                     engine_generator = await self.worker_client.round_robin(request_obj)
+                else:
+                    logger.error(f"Unknown router: '{self.engine_args.router}'")
 
                 output_generator = self._generate_responses(
                     engine_generator, request_type
