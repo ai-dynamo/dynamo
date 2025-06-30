@@ -411,8 +411,8 @@ To pass extra arguments to the vllm engine see [Extra engine arguments](#extra-e
 
 vllm attempts to allocate enough KV cache for the full context length at startup. If that does not fit in your available memory pass `--context-length <value>`.
 
-If you see error
-```
+If you see an error similar to the following:
+```text
 2025-06-28T00:32:32.507Z  WARN dynamo_run::subprocess: Traceback (most recent call last):
 2025-06-28T00:32:32.507Z  WARN dynamo_run::subprocess:   File "/tmp/.tmpYeq5qA", line 29, in <module>
 2025-06-28T00:32:32.507Z  WARN dynamo_run::subprocess:     from dynamo.llm import ModelType, WorkerMetricsPublisher, register_llm
