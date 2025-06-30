@@ -561,12 +561,13 @@ graph LR
 1. Dynamo does not currently detect and recover from direct vllm
    worker sub process failure. In this example the vllm sub process
    failure targets a prefill worker and has the same overall impact.
-   (WIP)
+   Since the prefill workers are redundant - a failure has low impact.
 
-2. Prefill worker failure causes request timeout (30 sec) and in
-   addition during recovery time prefill requests are queued in the
-   prefill queue.
+2. Redundant prefill workers are able to absorb the load and no
+   additional queing is needed.
 
 3. Decode worker failure is currently permanent in the disaggregated
    case as the prefill worker holds references to memory and which are
    not freed. This leads to total failure after fault injection.
+
+4. Redundant processors work in this case.
