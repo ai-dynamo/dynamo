@@ -34,7 +34,7 @@ dynamo-runtime = { workspace = true }
 dynamo-llm = { workspace = true }
 
 anyhow = { workspace = true }
-async-openai = "0.27.2"
+async-openai = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 candle-core = { version = "0.8.0" }
