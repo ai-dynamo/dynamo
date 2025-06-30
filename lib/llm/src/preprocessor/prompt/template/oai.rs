@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use super::*;
+use anyhow::Result;
 
 use minijinja::{context, value::Value};
 
@@ -158,5 +159,29 @@ impl OAIPromptFormatter for HfTokenizerConfigJsonFormatter {
         };
 
         Ok(tmpl.render(&ctx)?)
+    }
+}
+
+impl OAIPromptFormatter for NoOpFormatter {
+    fn supports_add_generation_prompt(&self) -> bool {
+        false
+    }
+
+    fn render(&self, req: &dyn OAIChatLikeRequest) -> Result<String> {
+        let messages = req.messages();
+
+        let first_message = messages
+            .get_item_by_index(0)
+            .map_err(|_| anyhow::Error::msg("No message at index 0 or messages array is empty"))?;
+
+        let content = first_message
+            .get_attr("content")
+            .map_err(|_| anyhow::Error::msg("First message has no 'content' field"))?;
+
+        let content_str = content
+            .as_str()
+            .ok_or_else(|| anyhow::Error::msg("Message content is not a string"))?
+            .to_string();
+        Ok(content_str)
     }
 }
