@@ -30,7 +30,7 @@ def terminate_process(process, logger=logging.getLogger(), immediate_kill=False)
     try:
         logger.info("Terminating PID: %s name: %s", process.pid, process.name())
         if immediate_kill:
-            logger.info("Sending Kill: %s %s",process.pid,process.name())
+            logger.info("Sending Kill: %s %s", process.pid, process.name())
             process.kill()
         else:
             process.terminate()
@@ -39,7 +39,10 @@ def terminate_process(process, logger=logging.getLogger(), immediate_kill=False)
     except psutil.NoSuchProcess:
         logger.warning("PID %s no longer exists", process.pid)
 
-def terminate_process_tree(pid, logger=logging.getLogger(), immediate_kill=False, timeout = 10):
+
+def terminate_process_tree(
+    pid, logger=logging.getLogger(), immediate_kill=False, timeout=10
+):
     try:
         parent = psutil.Process(pid)
         for child in parent.children(recursive=True):
@@ -55,8 +58,8 @@ def terminate_process_tree(pid, logger=logging.getLogger(), immediate_kill=False
         try:
             parent.wait(timeout)
         except psutil.TimeoutExpired:
-            terminate_process(parent,logger,immediate_kill=True)
-            
+            terminate_process(parent, logger, immediate_kill=True)
+
     except psutil.NoSuchProcess:
         # Process already terminated
         pass
@@ -131,7 +134,10 @@ class ManagedProcess:
                 for cmdline in self.straggler_commands:
                     if cmdline in " ".join(ps_process.cmdline()):
                         self._logger.info(
-                            "Terminating Straggler Cmdline %s %s %s", ps_process.name(), ps_process.pid, cmdline
+                            "Terminating Straggler Cmdline %s %s %s",
+                            ps_process.name(),
+                            ps_process.pid,
+                            cmdline,
                         )
                         terminate_process_tree(ps_process.pid, self._logger)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
@@ -259,9 +265,13 @@ class ManagedProcess:
                 for cmdline in self.straggler_commands:
                     if cmdline in " ".join(proc.cmdline()):
                         self._logger.info(
-                            "Terminating Existing CmdLine %s %s %s", proc.name(), proc.pid, proc.cmdline()
+                            "Terminating Existing CmdLine %s %s %s",
+                            proc.name(),
+                            proc.pid,
+                            proc.cmdline(),
                         )
                         terminate_process_tree(proc.pid, self._logger)
+
 
 def main():
     with ManagedProcess(

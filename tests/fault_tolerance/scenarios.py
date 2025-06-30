@@ -183,7 +183,6 @@ deployment_graphs = {
         ),
         text_payload,
     ),
-
 }
 
 # Each failure scenaro contains a list of failure injections
