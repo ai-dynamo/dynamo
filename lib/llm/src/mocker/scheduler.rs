@@ -171,7 +171,7 @@ impl SchedulerState {
             .remove(&uuid)
             .expect("Request does not exist.");
         self.prefill_costs.remove(&uuid);
-        eprintln!("Request {} will be preempted", uuid);
+        eprintln!("Request {uuid} will be preempted");
 
         // Reset the sequence and get the new sequence and signal
         // Insert the new sequence back into the requests map and add to waiting queue
@@ -623,7 +623,7 @@ mod tests {
                 // Manual debug ticker that prints forward pass metrics
                 _ = debug_interval.tick() => {
                     let _metrics = scheduler.get_forward_pass_metrics().await;
-                    println!("Forward Pass Metrics: {:#?}", _metrics);
+                    println!("Forward Pass Metrics: {_metrics:#?}");
                 }
 
                 Some(_) = output_rx.recv() => {
@@ -654,9 +654,7 @@ mod tests {
         // Assert that we received the expected number of tokens
         assert!(
             received_tokens == expected_tokens,
-            "Received {} tokens but expected exactly {}",
-            received_tokens,
-            expected_tokens
+            "Received {received_tokens} tokens but expected exactly {expected_tokens}"
         );
     }
 
@@ -715,7 +713,7 @@ mod tests {
                 // Manual debug ticker that prints forward pass metrics
                 _ = debug_interval.tick() => {
                     let _metrics = scheduler.get_forward_pass_metrics().await;
-                    println!("Forward Pass Metrics: {:#?}", _metrics);
+                    println!("Forward Pass Metrics: {_metrics:#?}");
                 }
 
                 Some(_signal) = output_rx.recv() => {
@@ -750,7 +748,7 @@ mod tests {
             "Test passed! Cache hit rate: {:.3}",
             metrics.gpu_prefix_cache_hit_rate
         );
-        println!("Received {} tokens", received_tokens);
+        println!("Received {received_tokens} tokens");
     }
 
     #[tokio::test]

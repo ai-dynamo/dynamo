@@ -188,7 +188,7 @@ impl MockVllmEngine {
                 let publisher = metrics_publisher.clone();
                 async move {
                     if let Err(e) = publisher.create_endpoint(comp.clone()).await {
-                        tracing::error!("Metrics endpoint failed: {}", e);
+                        tracing::error!("Metrics endpoint failed: {e}");
                     }
                 }
             });
@@ -216,13 +216,13 @@ impl MockVllmEngine {
 
                             // Publish metrics
                             if let Err(e) = publisher.publish(Arc::new(metrics)) {
-                                tracing::warn!("Failed to publish metrics for DP rank {}: {}", dp_rank, e);
+                                tracing::warn!("Failed to publish metrics for DP rank {dp_rank}: {e}");
                             } else {
                                 tracing::trace!("Published metrics for DP rank {}", dp_rank);
                             }
                         }
                         _ = cancel_token.cancelled() => {
-                            tracing::info!("Metrics publishing cancelled for DP rank {}", dp_rank);
+                            tracing::info!("Metrics publishing cancelled for DP rank {dp_rank}");
                             break;
                         }
                     }
@@ -256,7 +256,7 @@ impl MockVllmEngine {
             .expect("Cannot publish KV events without lease") // ← This will PANIC on static!
             .id();
         // let worker_id = 0;
-        tracing::debug!("Worker_id set to: {}", worker_id);
+        tracing::debug!("Worker_id set to: {worker_id}");
 
         tracing::info!("Creating KV event publisher");
         let kv_event_publisher = Arc::new(KvEventPublisher::new(
@@ -272,13 +272,13 @@ impl MockVllmEngine {
             kv_event_receivers.len()
         );
         for (dp_rank, mut kv_events_rx) in kv_event_receivers.into_iter().enumerate() {
-            tracing::debug!("Starting background task for DP rank {}", dp_rank);
+            tracing::debug!("Starting background task for DP rank {dp_rank}");
             let publisher = kv_event_publisher.clone();
             let dp_rank = dp_rank as u32;
             let cancel_token = cancel_token.clone();
 
             tokio::spawn(async move {
-                tracing::debug!("Background task started for DP rank {}", dp_rank);
+                tracing::debug!("Background task started for DP rank {dp_rank}");
                 loop {
                     tokio::select! {
                         // Receive actual KV events from the scheduler
@@ -291,13 +291,13 @@ impl MockVllmEngine {
 
                             // Publish the event
                             if let Err(e) = publisher.publish(event) {
-                                tracing::warn!("Failed to publish KV event for DP rank {}: {}", dp_rank, e);
+                                tracing::warn!("Failed to publish KV event for DP rank {dp_rank}: {e}");
                             } else {
-                                tracing::trace!("Published KV event for DP rank {}", dp_rank);
+                                tracing::trace!("Published KV event for DP rank {dp_rank}");
                             }
                         }
                         _ = cancel_token.cancelled() => {
-                            tracing::info!("KV events publishing cancelled for DP rank {}", dp_rank);
+                            tracing::info!("KV events publishing cancelled for DP rank {dp_rank}");
                             break;
                         }
                     }
@@ -475,7 +475,7 @@ impl AnnotatedMockEngine {
 
                 // Start the engine with the component
                 if let Err(e) = inner_clone.start(component).await {
-                    tracing::error!("Failed to start mocker engine: {}", e);
+                    tracing::error!("Failed to start mocker engine: {e}");
                 }
                 break;
             }
@@ -566,7 +566,7 @@ mod integration_tests {
         engine.start(test_component.clone()).await?;
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
         let engine = Arc::new(engine);
-        tracing::info!("✓ MockVllmEngine created with DP_SIZE: {}", DP_SIZE);
+        tracing::info!("✓ MockVllmEngine created with DP_SIZE: {DP_SIZE}");
 
         // Set up KV events subscriber
         let mut kv_events_subscriber = test_component.subscribe(KV_EVENT_SUBJECT).await?;
@@ -587,7 +587,7 @@ mod integration_tests {
                     .start()
                     .await
                 {
-                    eprintln!("❌ Generate endpoint failed: {}", e);
+                    eprintln!("❌ Generate endpoint failed: {e}");
                 }
             }
         });
@@ -612,7 +612,7 @@ mod integration_tests {
                 }
             }
             Err(e) => {
-                tracing::error!("❌ Failed to list instances: {}", e);
+                tracing::error!("❌ Failed to list instances: {e}");
             }
         }
 
@@ -638,7 +638,7 @@ mod integration_tests {
             sampling_options: SamplingOptions::default(),
             eos_token_ids: vec![],
             mdc_sum: None,
-            annotations: vec![format!("dp_rank:{}", dp_rank)],
+            annotations: vec![format!("dp_rank:{dp_rank}")],
             estimated_prefix_hit_num_blocks: None,
         };
 
@@ -712,10 +712,10 @@ mod integration_tests {
 
         match serde_json::from_slice::<RouterEvent>(&msg.payload) {
             Ok(event) => {
-                tracing::info!("✓ Received KV event: {:?}", event);
+                tracing::info!("✓ Received KV event: {event:?}");
             }
             Err(e) => {
-                return Err(Error::msg(format!("Failed to deserialize KV event: {}", e)));
+                return Err(Error::msg(format!("Failed to deserialize KV event: {e}")));
             }
         }
 

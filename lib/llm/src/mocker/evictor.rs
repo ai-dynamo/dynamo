@@ -66,7 +66,7 @@ impl<T: Clone + Eq + Hash> LRUEvictor<T> {
         self.free_table.keys()
     }
 
-    fn _update(&mut self, object: T, counter: i64) {
+    fn update(&mut self, object: T, counter: i64) {
         self.free_table.insert(object.clone(), counter);
         self.priority_queue.insert(PriorityItem {
             item: object,
@@ -87,7 +87,7 @@ impl<T: Clone + Eq + Hash> LRUEvictor<T> {
         self.positive_counter += 1;
         let counter = self.positive_counter;
 
-        self._update(object, counter);
+        self.update(object, counter);
     }
 
     /// Push an object to the front with negative counter (highest priority for eviction)
@@ -104,7 +104,7 @@ impl<T: Clone + Eq + Hash> LRUEvictor<T> {
         self.negative_counter -= 1;
         let counter = self.negative_counter;
 
-        self._update(object, counter);
+        self.update(object, counter);
     }
 
     pub fn contains(&self, object: &T) -> bool {

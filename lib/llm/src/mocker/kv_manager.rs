@@ -220,8 +220,7 @@ impl KvManager {
                 let Some(ref_count) = self.active_blocks.remove(&uuid_block) else {
                     let in_all_blocks = self.all_blocks.contains(&uuid_block);
                     panic!(
-                        "Missing active block for promotion: {:?}. Block still exists: {}",
-                        uuid_block, in_all_blocks
+                        "Missing active block for promotion: {uuid_block:?}. Block still exists: {in_all_blocks}"
                     );
                 };
 
@@ -371,7 +370,7 @@ mod tests {
         ) {
             let response = rx
                 .try_recv()
-                .unwrap_or_else(|_| panic!("Expected {} response {}", expected_type, description));
+                .unwrap_or_else(|_| panic!("Expected {expected_type} response {description}"));
 
             match (&response, expected_type) {
                 (MoveBlockResponse::Store(blocks, _parent_hash), "Store") => {
@@ -384,8 +383,7 @@ mod tests {
                     );
                     assert_eq!(
                         *blocks, expected_blocks,
-                        "Store blocks don't match expected {}",
-                        description
+                        "Store blocks don't match expected {description}"
                     );
                 }
                 (MoveBlockResponse::Remove(blocks), "Remove") => {
@@ -398,14 +396,10 @@ mod tests {
                     );
                     assert_eq!(
                         *blocks, expected_blocks,
-                        "Remove blocks don't match expected {}",
-                        description
+                        "Remove blocks don't match expected {description}"
                     );
                 }
-                _ => panic!(
-                    "Expected {} response, got {:?} {}",
-                    expected_type, response, description
-                ),
+                _ => panic!("Expected {expected_type} response, got {response:?} {description}"),
             }
         }
 
@@ -414,11 +408,7 @@ mod tests {
             rx: &mut mpsc::UnboundedReceiver<MoveBlockResponse>,
             description: &str,
         ) {
-            assert!(
-                rx.try_recv().is_err(),
-                "Expected no response {}",
-                description
-            );
+            assert!(rx.try_recv().is_err(), "Expected no response {description}",);
         }
 
         // Helper function to check if active blocks contain expected blocks with expected ref counts
@@ -433,14 +423,12 @@ mod tests {
                 let block = UniqueBlock::FullBlock(id);
                 assert!(
                     manager.active_blocks().contains_key(&block),
-                    "Block {} not found in active blocks",
-                    id
+                    "Block {id} not found in active blocks",
                 );
                 assert_eq!(
                     manager.active_blocks().get(&block),
                     Some(&ref_count),
-                    "Block {} has wrong reference count",
-                    id
+                    "Block {id} has wrong reference count",
                 );
             }
         }
@@ -463,8 +451,7 @@ mod tests {
                 let block = UniqueBlock::FullBlock(id);
                 assert!(
                     inactive_blocks.iter().any(|&b| *b == block),
-                    "Block {} not found in inactive blocks",
-                    id
+                    "Block {id} not found in inactive blocks",
                 );
             }
         }

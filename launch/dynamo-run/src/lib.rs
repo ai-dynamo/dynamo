@@ -9,6 +9,7 @@ use dynamo_llm::{backend::ExecutionContext, engines::StreamingEngine, local_mode
 use dynamo_runtime::protocols::Endpoint as EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::{CancellationToken, DistributedRuntime};
+use tokio::sync::OnceCell;
 
 mod flags;
 pub use flags::Flags;
@@ -58,12 +59,26 @@ pub async fn run(
         anyhow::bail!("Cannot use endpoint for both in and out");
     }
 
-    let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
     let cancel_token = runtime.primary_token();
     let maybe_path = flags
         .model_path_pos
         .clone()
         .or(flags.model_path_flag.clone());
+
+    // Create a OnceCell for lazy initialization of distributed runtime
+    let distributed_runtime_cell: OnceCell<DistributedRuntime> = OnceCell::new();
+    let runtime_clone = runtime.clone();
+
+    // Helper closure to get or initialize the distributed runtime
+    let get_distributed_runtime = || async {
+        distributed_runtime_cell
+            .get_or_init(|| async {
+                DistributedRuntime::from_settings(runtime_clone.clone())
+                    .await
+                    .expect("Failed to create distributed runtime")
+            })
+            .await
+    };
 
     let mut local_model: LocalModel = if is_out_dynamic(&out_opt) {
         // If output is dynamic we are ingress and don't have a local model, but making an
@@ -324,15 +339,17 @@ pub async fn run(
 
             let args = builder
                 .build()
-                .map_err(|e| anyhow::anyhow!("Failed to build MockEngineArgs: {}", e))?;
+                .map_err(|e| anyhow::anyhow!("Failed to build MockEngineArgs: {e}"))?;
 
+            // Get or initialize the distributed runtime
+            let distributed_runtime = get_distributed_runtime().await;
             let engine = dynamo_llm::mocker::engine::make_mocker_engine(
                 distributed_runtime.clone(),
                 endpoint,
                 args,
             )
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to create mocker engine: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("Failed to create mocker engine: {e}"))?;
 
             EngineConfig::StaticCore {
                 engine,
@@ -365,7 +382,9 @@ pub async fn run(
                 .await?;
         }
         Input::Endpoint(path) => {
-            crate::input::endpoint::run(distributed_runtime, path, engine_config).await?;
+            // Get or initialize the distributed runtime
+            let distributed_runtime = get_distributed_runtime().await;
+            crate::input::endpoint::run(distributed_runtime.clone(), path, engine_config).await?;
         }
     }
 
