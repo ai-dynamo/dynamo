@@ -58,18 +58,14 @@ impl<T: Clone + Eq + Hash> Default for LRUEvictor<T> {
 }
 
 impl<T: Clone + Eq + Hash> LRUEvictor<T> {
-    /// Create a new LRUEvictor
     pub fn new(_cleanup_threshold: usize) -> Self {
-        // Keep the parameter for API compatibility, but ignore it
         Self::default()
     }
 
-    /// Get an iterator over the keys in the evictor
     pub fn keys(&self) -> std::collections::hash_map::Keys<'_, T, i64> {
         self.free_table.keys()
     }
 
-    /// Private helper method to update the data structures with object and counter
     fn _update(&mut self, object: T, counter: i64) {
         self.free_table.insert(object.clone(), counter);
         self.priority_queue.insert(PriorityItem {
@@ -78,7 +74,6 @@ impl<T: Clone + Eq + Hash> LRUEvictor<T> {
         });
     }
 
-    /// Insert or update an object in the evictor with positive counter
     pub fn insert(&mut self, object: T) {
         // Remove old entry if it exists
         if let Some(&old_counter) = self.free_table.get(&object) {
@@ -112,7 +107,6 @@ impl<T: Clone + Eq + Hash> LRUEvictor<T> {
         self._update(object, counter);
     }
 
-    /// Check if the evictor contains the given object
     pub fn contains(&self, object: &T) -> bool {
         self.free_table.contains_key(object)
     }
@@ -120,34 +114,29 @@ impl<T: Clone + Eq + Hash> LRUEvictor<T> {
     /// Evict an object based on LRU policy (lowest counter value)
     /// Returns the evicted object or None if no objects are available
     pub fn evict(&mut self) -> Option<T> {
-        if let Some(item) = self.priority_queue.pop_first() {
+        self.priority_queue.pop_first().map(|item| {
             self.free_table.remove(&item.item);
-            Some(item.item)
-        } else {
-            None
-        }
+            item.item
+        })
     }
 
-    /// Remove an object from the evictor
     pub fn remove(&mut self, object: &T) -> bool {
-        if let Some(&counter) = self.free_table.get(object) {
-            self.free_table.remove(object);
-            self.priority_queue.remove(&PriorityItem {
-                item: object.clone(),
-                counter,
-            });
-            true
-        } else {
-            false
-        }
+        let Some(&counter) = self.free_table.get(object) else {
+            return false;
+        };
+
+        self.free_table.remove(object);
+        self.priority_queue.remove(&PriorityItem {
+            item: object.clone(),
+            counter,
+        });
+        true
     }
 
-    /// Get the number of objects in the evictor
     pub fn len(&self) -> usize {
         self.free_table.len()
     }
 
-    /// Check if the evictor is empty
     pub fn is_empty(&self) -> bool {
         self.free_table.is_empty()
     }
