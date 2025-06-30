@@ -21,7 +21,8 @@ RUN apt update -y && \
     protobuf-compiler \
     cmake \
     libssl-dev \
-    pkg-config
+    pkg-config \
+    libfontconfig1-dev
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
