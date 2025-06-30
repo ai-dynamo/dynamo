@@ -309,7 +309,7 @@ pub async fn run(
             };
 
             // Load mocker args from JSON file if provided
-            let mocker_args = flags.load_extra_mocker_args()?;
+            let engine_args = flags.load_extra_engine_args()?;
 
             let mut builder = dynamo_llm::mocker::protocols::MockEngineArgs::builder();
 
@@ -319,12 +319,10 @@ pub async fn run(
             }
 
             // Apply args from JSON file if provided
-            if let Some(args) = mocker_args {
-                if let Some(v) = args.get("speedup_ratio").and_then(|v| v.as_f64()) {
-                    builder = builder.speedup_ratio(v);
-                }
-                if let Some(v) = args.get("dp_size").and_then(|v| v.as_u64()) {
-                    builder = builder.dp_size(v as u32);
+            if let Some(args) = engine_args {
+                // This overwrites the kv_cache_block_size passed in
+                if let Some(v) = args.get("block_size").and_then(|v| v.as_u64()) {
+                    builder = builder.block_size(v as usize);
                 }
                 if let Some(v) = args.get("num_gpu_blocks").and_then(|v| v.as_u64()) {
                     builder = builder.num_gpu_blocks(v as usize);
@@ -332,8 +330,16 @@ pub async fn run(
                 if let Some(v) = args.get("max_num_batched_tokens").and_then(|v| v.as_u64()) {
                     builder = builder.max_num_batched_tokens(Some(v as usize));
                 }
+
+                // These are mocker-specific args
+                if let Some(v) = args.get("speedup_ratio").and_then(|v| v.as_f64()) {
+                    builder = builder.speedup_ratio(v);
+                }
                 if let Some(v) = args.get("watermark").and_then(|v| v.as_f64()) {
                     builder = builder.watermark(v);
+                }
+                if let Some(v) = args.get("dp_size").and_then(|v| v.as_u64()) {
+                    builder = builder.dp_size(v as u32);
                 }
             }
 
