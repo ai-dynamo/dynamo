@@ -29,6 +29,7 @@ pub mod tools;
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{collections::HashMap, sync::Arc};
 use tracing;
 
@@ -46,14 +47,14 @@ use crate::protocols::{
     common::{SamplingOptionsProvider, StopConditionsProvider},
     openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-        completions::{CompletionResponse, NvCreateCompletionRequest},
+        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         nvext::NvExtProvider,
         DeltaGeneratorExt,
     },
 };
 use crate::tokenizers::{traits::Tokenizer, HuggingFaceTokenizer};
 
-use crate::preprocessor::prompt::PromptFormatter;
+use crate::preprocessor::prompt::{PromptFormatter, PromptInput, TextInput, TokenInput};
 
 pub use crate::protocols::common::llm_backend::{BackendOutput, PreprocessedRequest};
 
@@ -160,33 +161,81 @@ impl OpenAIPreprocessor {
         let mut annotations = HashMap::new();
         let mut builder = PreprocessedRequest::builder();
 
-        let use_raw_prompt = request
-            .nvext()
-            .is_some_and(|ext| ext.use_raw_prompt.unwrap_or(false));
-
-        let formatted_prompt = if use_raw_prompt {
-            match request.raw_prompt() {
-                Some(prompt) => prompt,
-                None => {
-                    tracing::warn!("Raw prompt requested but not available");
-                    self.formatter.render(request)?
+        // match request type before any conversion/processing
+        match request.prompt_input_type() {
+            PromptInput::Tokens(_) => {
+                if let Some(token_input) = request.extract_tokens() {
+                    match token_input {
+                        TokenInput::Single(tokens) => {
+                            builder.token_ids(tokens);
+                        }
+                        TokenInput::Batch(token_batches) => {
+                            if token_batches.len() == 1 {
+                                builder.token_ids(token_batches[0].clone());
+                            } else {
+                                builder.batch_token_ids(Some(token_batches));
+                                builder.token_ids(vec![]);
+                            }
+                        }
+                    }
                 }
             }
-        } else {
-            self.formatter.render(request)?
-        };
+            PromptInput::Text(_) => {
+                if let Some(text_input) = request.extract_text() {
+                    match text_input {
+                        TextInput::Single(_) => {
+                            let use_raw_prompt = request
+                                .nvext()
+                                .is_some_and(|ext| ext.use_raw_prompt.unwrap_or(false));
 
-        let encoding = tokio::task::block_in_place(|| self.tokenizer.encode(&formatted_prompt))?;
+                            let formatted_prompt = if use_raw_prompt {
+                                match request.raw_prompt() {
+                                    Some(prompt) => prompt,
+                                    None => {
+                                        tracing::warn!("Raw prompt requested but not available");
+                                        self.formatter.render(request)?
+                                    }
+                                }
+                            } else {
+                                self.formatter.render(request)?
+                            };
 
-        if request.has_annotation(ANNOTATION_FORMATTED_PROMPT) {
-            annotations.insert(ANNOTATION_FORMATTED_PROMPT.to_string(), formatted_prompt);
-        }
+                            let encoding = tokio::task::block_in_place(|| {
+                                self.tokenizer.encode(&formatted_prompt)
+                            })?;
 
-        if request.has_annotation(ANNOTATION_TOKEN_IDS) {
-            annotations.insert(
-                ANNOTATION_TOKEN_IDS.to_string(),
-                serde_json::to_string(&encoding.token_ids)?,
-            );
+                            if request.has_annotation(ANNOTATION_FORMATTED_PROMPT) {
+                                annotations.insert(
+                                    ANNOTATION_FORMATTED_PROMPT.to_string(),
+                                    formatted_prompt,
+                                );
+                            }
+
+                            if request.has_annotation(ANNOTATION_TOKEN_IDS) {
+                                annotations.insert(
+                                    ANNOTATION_TOKEN_IDS.to_string(),
+                                    serde_json::to_string(&encoding.token_ids)?,
+                                );
+                            }
+
+                            builder.token_ids(encoding.token_ids);
+                        }
+                        TextInput::Batch(texts) => {
+                            let token_batches: Result<Vec<Vec<u32>>, _> = texts
+                                .par_iter()
+                                .map(|text| {
+                                    tokio::task::block_in_place(|| self.tokenizer.encode(text))
+                                        .map(|encoding| encoding.token_ids)
+                                })
+                                .collect();
+
+                            let token_batches = token_batches?;
+                            builder.batch_token_ids(Some(token_batches));
+                            builder.token_ids(vec![]);
+                        }
+                    }
+                }
+            }
         }
 
         let mut stop_conditions = request.extract_stop_conditions()?;
@@ -207,9 +256,8 @@ impl OpenAIPreprocessor {
             builder.eos_token_ids(self.model_info.eos_token_ids());
         }
 
-        builder.token_ids(encoding.token_ids);
-        builder.sampling_options(request.extract_sampling_options()?);
         builder.stop_conditions(stop_conditions);
+        builder.sampling_options(request.extract_sampling_options()?);
         builder.annotations(request.annotations().unwrap_or_default());
         builder.mdc_sum(Some(self.mdcsum.clone()));
         builder.estimated_prefix_hit_num_blocks(None);
@@ -388,7 +436,7 @@ impl
 impl
     Operator<
         SingleIn<NvCreateCompletionRequest>,
-        ManyOut<Annotated<CompletionResponse>>,
+        ManyOut<Annotated<NvCreateCompletionResponse>>,
         SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<BackendOutput>>,
     > for OpenAIPreprocessor
@@ -403,7 +451,7 @@ impl
                 Error,
             >,
         >,
-    ) -> Result<ManyOut<Annotated<CompletionResponse>>, Error> {
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         // unpack the request
         let (request, context) = request.into_parts();
 
@@ -414,13 +462,13 @@ impl
         let (common_request, annotations) = self.preprocess_request(&request)?;
 
         // update isl
-        response_generator.update_isl(common_request.token_ids.len() as i32);
+        response_generator.update_isl(common_request.token_ids.len() as u32);
 
         // repack the common completion request
         let common_request = context.map(|_| common_request);
 
         // create a stream of annotations this will be prepend to the response stream
-        let annotations: Vec<Annotated<CompletionResponse>> = annotations
+        let annotations: Vec<Annotated<NvCreateCompletionResponse>> = annotations
             .into_iter()
             .flat_map(|(k, v)| Annotated::from_annotation(k, &v))
             .collect();

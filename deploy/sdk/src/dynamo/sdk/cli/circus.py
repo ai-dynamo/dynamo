@@ -104,7 +104,7 @@ def get_env_or_reserved_port(env_var):
     if port_env:
         return int(port_env)
     else:
-        with reserve_free_port() as port:
+        with reserve_free_port() as port:  # type: ignore
             return port
 
 

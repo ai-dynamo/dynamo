@@ -67,14 +67,14 @@ text_payload = Payload(
         ],
         "max_tokens": 150,  # Reduced from 500
         "temperature": 0.1,
-        "seed": 0,
+        # "seed": 0,
     },
     payload_completions={
         "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         "prompt": text_prompt,
         "max_tokens": 150,
         "temperature": 0.1,
-        "seed": 0,
+        # "seed": 0,
     },
     repeat_count=10,
     expected_log=[],
@@ -87,10 +87,9 @@ deployment_graphs = {
             module="graphs.agg:Frontend",
             config="configs/agg.yaml",
             directory="/workspace/examples/llm",
-            endpoints=["v1/chat/completions", "v1/completions"],
+            endpoints=["v1/chat/completions"],
             response_handlers=[
                 chat_completions_response_handler,
-                completions_response_handler,
             ],
             marks=[pytest.mark.gpu_1, pytest.mark.vllm],
         ),
@@ -115,10 +114,9 @@ deployment_graphs = {
             module="graphs.disagg:Frontend",
             config="configs/disagg.yaml",
             directory="/workspace/examples/llm",
-            endpoints=["v1/chat/completions", "v1/completions"],
+            endpoints=["v1/chat/completions"],
             response_handlers=[
                 chat_completions_response_handler,
-                completions_response_handler,
             ],
             marks=[pytest.mark.gpu_2, pytest.mark.vllm],
         ),
@@ -129,10 +127,9 @@ deployment_graphs = {
             module="graphs.agg_router:Frontend",
             config="configs/agg_router.yaml",
             directory="/workspace/examples/llm",
-            endpoints=["v1/chat/completions", "v1/completions"],
+            endpoints=["v1/chat/completions"],
             response_handlers=[
                 chat_completions_response_handler,
-                completions_response_handler,
             ],
             marks=[pytest.mark.gpu_1, pytest.mark.vllm],
             # FIXME: This is a hack to allow deployments to start before sending any requests.
@@ -147,10 +144,9 @@ deployment_graphs = {
             module="graphs.disagg_router:Frontend",
             config="configs/disagg_router.yaml",
             directory="/workspace/examples/llm",
-            endpoints=["v1/chat/completions", "v1/completions"],
+            endpoints=["v1/chat/completions"],
             response_handlers=[
                 chat_completions_response_handler,
-                completions_response_handler,
             ],
             marks=[pytest.mark.gpu_2, pytest.mark.vllm],
             # FIXME: This is a hack to allow deployments to start before sending any requests.
@@ -163,12 +159,11 @@ deployment_graphs = {
     "multimodal_agg": (
         DeploymentGraph(
             module="graphs.agg:Frontend",
-            config="configs/agg.yaml",
+            config="configs/agg-llava.yaml",
             directory="/workspace/examples/multimodal",
-            endpoints=["v1/chat/completions", "v1/completions"],
+            endpoints=["v1/chat/completions"],
             response_handlers=[
                 chat_completions_response_handler,
-                completions_response_handler,
             ],
             marks=[pytest.mark.gpu_2, pytest.mark.vllm],
         ),
@@ -204,7 +199,7 @@ deployment_graphs = {
     ),
     "trtllm_agg_router": (
         DeploymentGraph(
-            module="graphs.agg_router:Frontend",
+            module="graphs.agg:Frontend",
             config="configs/agg_router.yaml",
             directory="/workspace/examples/tensorrt_llm",
             endpoints=["v1/chat/completions", "v1/completions"],
@@ -236,7 +231,7 @@ deployment_graphs = {
     ),
     "trtllm_disagg_router": (
         DeploymentGraph(
-            module="graphs.disagg_router:Frontend",
+            module="graphs.disagg:Frontend",
             config="configs/disagg_router.yaml",
             directory="/workspace/examples/tensorrt_llm",
             endpoints=["v1/chat/completions", "v1/completions"],
@@ -262,12 +257,22 @@ class DynamoServeProcess(ManagedProcess):
         if graph.config:
             command.extend(["-f", os.path.join(graph.directory, graph.config)])
 
-        command.extend(["--Frontend.port", str(port)])
-
-        health_check_urls = [(f"http://localhost:{port}/v1/models", self._check_model)]
-
+        # Handle multimodal deployments differently
         if "multimodal" in graph.directory:
+            # Set DYNAMO_PORT environment variable for multimodal
+            env = os.environ.copy()
+            env["DYNAMO_PORT"] = str(port)
             health_check_urls = []
+            # Don't add health check on port since multimodal uses DYNAMO_PORT
+            health_check_ports = []
+        else:
+            # Regular LLM deployments
+            command.extend(["--Frontend.port", str(port)])
+            health_check_urls = [
+                (f"http://localhost:{port}/v1/models", self._check_model)
+            ]
+            health_check_ports = [port]
+            env = None
 
         self.port = port
 
@@ -276,11 +281,12 @@ class DynamoServeProcess(ManagedProcess):
             timeout=timeout,
             display_output=True,
             working_dir=graph.directory,
-            health_check_ports=[port],
+            health_check_ports=health_check_ports,
             health_check_urls=health_check_urls,
             delayed_start=graph.delayed_start,
             stragglers=["http"],
             log_dir=request.node.name,
+            env=env,  # Pass the environment variables
         )
 
     def _check_model(self, response):

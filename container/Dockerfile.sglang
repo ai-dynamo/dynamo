@@ -134,14 +134,16 @@ RUN if [ "$ARCH" = "arm64" ]; then \
     fi
 
 # Install sglang
-# Once either 0.4.6post6 or 0.4.7 is released, we can switch back to using the published version
-# This commit references a fix to add DP attention based routing along with other perf fixes https://github.com/sgl-project/sglang/pull/6884
-ARG SGLANG_COMMIT="f1569876d54dd3b6601f5280f12652e9fbb1375c"
+# This commit references a NIXL fix that was releasted after the 0.4.8.post1 release https://github.com/sgl-project/sglang/pull/7330
+ARG SGLANG_COMMIT="bb9b608c86ebad7d9d01e29fe058bc184dc7285f"
 RUN --mount=type=cache,target=/root/.cache/uv \
     git clone https://github.com/sgl-project/sglang.git && \
     cd sglang && \
     git checkout ${SGLANG_COMMIT} && \
     uv pip install -e "python[all]"
+
+# Set env var that allows for forceful shutdown of inflight requests in SGL's TokenizerManager
+ENV SGL_FORCE_SHUTDOWN=1
 
 # Common dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \

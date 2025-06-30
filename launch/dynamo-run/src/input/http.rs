@@ -15,7 +15,7 @@ use dynamo_llm::{
         openai::chat_completions::{
             NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
         },
-        openai::completions::{CompletionResponse, NvCreateCompletionRequest},
+        openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
 use dynamo_runtime::pipeline::RouterMode;
@@ -29,14 +29,12 @@ pub async fn run(
     engine_config: EngineConfig,
     template: Option<RequestTemplate>,
 ) -> anyhow::Result<()> {
-    let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
     let http_service = service_v2::HttpService::builder()
         .port(flags.http_port)
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
         .enable_embeddings_endpoints(true)
         .with_request_template(template)
-        .runtime(Some(Arc::new(distributed_runtime)))
         .build()?;
     match engine_config {
         EngineConfig::Dynamic => {
@@ -80,7 +78,7 @@ pub async fn run(
 
             let cmpl_pipeline = common::build_pipeline::<
                 NvCreateCompletionRequest,
-                CompletionResponse,
+                NvCreateCompletionResponse,
             >(model.card(), inner_engine)
             .await?;
             manager.add_completions_model(model.service_name(), cmpl_pipeline)?;
