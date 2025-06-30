@@ -1,0 +1,50 @@
+# Simple Dynamo Operator Deployment
+# This is the minimal YAML that the Dynamo operator will pick up and manage
+
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoComponent
+metadata:
+  name: simple-llm-component
+  namespace: dynamo-cloud
+spec:
+  dynamoComponent: simple-llm:latest
+  # Using nginx for testing - in production this would be a Dynamo image
+  image: nginx:alpine
+
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: simple-llm-inference
+  namespace: dynamo-cloud
+  labels:
+    managed-by: dynamo-operator
+spec:
+  # This tells the operator which component to deploy
+  dynamoGraph: simple-llm:latest
+  
+  # Define the services that make up the inference pipeline
+  services:
+    Frontend:
+      replicas: 1
+      envs:
+      - name: MODEL_NAME
+        value: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+      - name: PORT
+        value: "8000"
+    
+    VllmWorker:
+      replicas: 1
+      envs:
+      - name: MODEL_NAME
+        value: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+      - name: MAX_MODEL_LEN
+        value: "16384"
+      resources:
+        limits:
+          memory: 4Gi
+          cpu: "2"
+        requests:
+          memory: 2Gi
+          cpu: "1"

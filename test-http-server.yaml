@@ -1,0 +1,122 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: dynamo-cloud
+data:
+  nginx.conf: |
+    events {
+        worker_connections 1024;
+    }
+    http {
+        server {
+            listen 8000;
+            location / {
+                return 200 '{"status": "ok", "service": "dynamo-frontend", "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "port": 8000}';
+                add_header Content-Type application/json;
+            }
+            location /health {
+                return 200 '{"healthy": true}';
+                add_header Content-Type application/json;
+            }
+            location /v1/chat/completions {
+                return 200 '{"id": "test-123", "object": "chat.completion", "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "choices": [{"message": {"role": "assistant", "content": "Hello! This is a test response from Dynamo frontend."}}]}';
+                add_header Content-Type application/json;
+            }
+        }
+        server {
+            listen 8080;
+            location / {
+                return 200 '{"status": "ok", "service": "dynamo-worker", "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", "port": 8080}';
+                add_header Content-Type application/json;
+            }
+            location /health {
+                return 200 '{"healthy": true}';
+                add_header Content-Type application/json;
+            }
+        }
+    }
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dynamo-http-frontend
+  namespace: dynamo-cloud
+  labels:
+    app: dynamo-http-frontend
+    component: frontend  
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dynamo-http-frontend
+  template:
+    metadata:
+      labels:
+        app: dynamo-http-frontend
+        component: frontend
+    spec:
+      containers:
+      - name: frontend
+        image: nginx:alpine
+        ports:
+        - containerPort: 8000
+        - containerPort: 8080
+        env:
+        - name: MODEL_NAME
+          value: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+        - name: FRONTEND_PORT
+          value: "8000"
+        - name: WORKER_PORT
+          value: "8080"
+        volumeMounts:
+        - name: nginx-config
+          mountPath: /etc/nginx/nginx.conf
+          subPath: nginx.conf
+        resources:
+          limits:
+            memory: 512Mi
+            cpu: "0.5"
+          requests:
+            memory: 256Mi
+            cpu: "0.25"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 5
+          periodSeconds: 10
+      volumes:
+      - name: nginx-config
+        configMap:
+          name: nginx-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dynamo-http-frontend-service
+  namespace: dynamo-cloud
+  labels:
+    app: dynamo-http-frontend
+spec:
+  selector:
+    app: dynamo-http-frontend
+  ports:
+  - name: frontend
+    port: 8000
+    targetPort: 8000
+    protocol: TCP
+  - name: worker
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+  type: ClusterIP

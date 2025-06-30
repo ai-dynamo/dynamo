@@ -1,0 +1,192 @@
+# Job to run the mock operator that creates pods from DynamoGraphDeployments
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mock-operator-script
+  namespace: dynamo-system
+data:
+  operator.sh: |
+    #!/bin/bash
+    
+    # Mock Dynamo Operator - Creates pods based on DynamoGraphDeployment
+    set -e
+    
+    NAMESPACE="dynamo-cloud"
+    
+    echo "🤖 Mock Dynamo Operator Starting..."
+    echo "Processing DynamoGraphDeployments in namespace: $NAMESPACE"
+    
+    # Function to create deployments based on DynamoGraphDeployment spec
+    create_deployments_for_graph() {
+        local graph_name=$1
+        echo "📋 Processing DynamoGraphDeployment: $graph_name"
+        
+        # Create deployments for each service type
+        create_service_deployment "$graph_name" "frontend" "Frontend"
+        create_service_deployment "$graph_name" "prefillworker" "PrefillWorker" 
+        create_service_deployment "$graph_name" "vllmworker" "VllmWorker"
+        create_service_deployment "$graph_name" "processor" "Processor"
+    }
+    
+    # Function to create a deployment for a specific service
+    create_service_deployment() {
+        local graph_name=$1
+        local service_lower=$2
+        local service_name=$3
+        
+        # Check if this service exists in the DynamoGraphDeployment
+        local service_exists=$(kubectl get dynamographdeployment $graph_name -n $NAMESPACE -o jsonpath="{.spec.services.$service_name}" 2>/dev/null || echo "")
+        
+        if [ -z "$service_exists" ] || [ "$service_exists" = "null" ]; then
+            echo "⏭️  Service $service_name not defined in $graph_name, skipping"
+            return
+        fi
+        
+        local deployment_name="${graph_name}-${service_lower}"
+        
+        # Check if deployment already exists
+        if kubectl get deployment $deployment_name -n $NAMESPACE &>/dev/null; then
+            echo "✅ Deployment $deployment_name already exists"
+            return
+        fi
+        
+        echo "🚀 Creating deployment for $service_name: $deployment_name"
+        
+        # Get replicas (default to 1)
+        local replicas=$(kubectl get dynamographdeployment $graph_name -n $NAMESPACE -o jsonpath="{.spec.services.$service_name.replicas}" 2>/dev/null || echo "1")
+        
+        # Create the deployment
+        cat <<EOF | kubectl apply -f -
+    apiVersion: apps/v1
+    kind: Deployment
+    metadata:
+      name: $deployment_name
+      namespace: $NAMESPACE
+      labels:
+        app: $deployment_name
+        service: $service_lower
+        managed-by: mock-dynamo-operator
+        dynamo-graph: $graph_name
+    spec:
+      replicas: $replicas
+      selector:
+        matchLabels:
+          app: $deployment_name
+      template:
+        metadata:
+          labels:
+            app: $deployment_name
+            service: $service_lower
+            dynamo-graph: $graph_name
+        spec:
+          containers:
+          - name: $service_lower
+            image: nginx:alpine
+            ports:
+            - containerPort: 8080
+            env:
+            - name: SERVICE_TYPE
+              value: "$service_lower"
+            - name: DYNAMO_GRAPH
+              value: "$graph_name"
+            command: ["/bin/sh"]
+            args:
+            - -c
+            - |
+              echo "🔥 Dynamo $service_name Worker Starting..."
+              echo "Service: $service_name (Type: $service_lower)"
+              echo "Graph: $graph_name"
+              echo "Replicas: $replicas"
+              echo ""
+              if [ "$service_lower" = "prefillworker" ]; then
+                echo "🚀 PREFILL WORKER: Processing prompt inputs and initial tokens"
+              elif [ "$service_lower" = "vllmworker" ]; then
+                echo "🔄 DECODE WORKER: Generating tokens sequentially" 
+              elif [ "$service_lower" = "frontend" ]; then
+                echo "🌐 FRONTEND: HTTP API server"
+              elif [ "$service_lower" = "processor" ]; then
+                echo "⚡ PROCESSOR: Request routing and orchestration"
+              fi
+              echo ""
+              while true; do
+                echo "\$(date): $service_name [$service_lower] running..."
+                sleep 60
+              done
+            resources:
+              limits:
+                memory: 1Gi
+                cpu: 500m
+              requests:
+                memory: 512Mi
+                cpu: 250m
+    ---
+    apiVersion: v1
+    kind: Service
+    metadata:
+      name: $deployment_name-service
+      namespace: $NAMESPACE
+      labels:
+        app: $deployment_name
+        service: $service_lower
+    spec:
+      selector:
+        app: $deployment_name
+      ports:
+      - name: http
+        port: 8080
+        targetPort: 8080
+      type: ClusterIP
+    EOF
+        
+        echo "✅ Created deployment and service for $service_name"
+    }
+    
+    # Process all DynamoGraphDeployments
+    echo "🔍 Checking for DynamoGraphDeployments..."
+    
+    graphs=$(kubectl get dynamographdeployments -n $NAMESPACE -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || echo "")
+    
+    if [ -z "$graphs" ]; then
+        echo "📭 No DynamoGraphDeployments found"
+    else
+        echo "📋 Found DynamoGraphDeployments: $graphs"
+        
+        for graph in $graphs; do
+            create_deployments_for_graph "$graph"
+        done
+    fi
+    
+    echo "🎉 Mock operator processing complete!"
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: mock-dynamo-operator
+  namespace: dynamo-system
+  labels:
+    app: mock-dynamo-operator
+spec:
+  template:
+    spec:
+      serviceAccountName: dynamo-controller-manager
+      containers:
+      - name: operator
+        image: bitnami/kubectl:latest
+        command: ["/bin/bash"]
+        args: ["/scripts/operator.sh"]
+        volumeMounts:
+        - name: script
+          mountPath: /scripts
+        env:
+        - name: NAMESPACE
+          value: "dynamo-cloud"
+      volumes:
+      - name: script
+        configMap:
+          name: mock-operator-script
+          defaultMode: 0755
+      restartPolicy: OnFailure
+  backoffLimit: 3

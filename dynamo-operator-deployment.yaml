@@ -1,0 +1,196 @@
+# Dynamo Operator Deployment - Simplified for Testing
+# This deploys the minimal operator components needed to reconcile DynamoGraphDeployments
+
+---
+# Namespace for the operator
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dynamo-system
+  labels:
+    app.kubernetes.io/name: dynamo-operator
+    app.kubernetes.io/instance: dynamo-operator
+
+---
+# ServiceAccount for the operator
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: dynamo-controller-manager
+  namespace: dynamo-system
+  labels:
+    app.kubernetes.io/name: dynamo-operator
+    app.kubernetes.io/instance: dynamo-operator
+
+---
+# ClusterRole with permissions for the operator
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: dynamo-operator-role
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "endpoints", "persistentvolumeclaims", "events", "configmaps", "secrets"]
+  verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "daemonsets", "replicasets", "statefulsets"]
+  verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamographdeployments", "dynamocomponents", "dynamocomponentdeployments"]
+  verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+- apiGroups: ["nvidia.com"]
+  resources: ["dynamographdeployments/status", "dynamocomponents/status", "dynamocomponentdeployments/status"]
+  verbs: ["get", "patch", "update"]
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+
+---
+# ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: dynamo-operator-rolebinding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: dynamo-operator-role
+subjects:
+- kind: ServiceAccount
+  name: dynamo-controller-manager
+  namespace: dynamo-system
+
+---
+# ConfigMap for operator configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dynamo-operator-config
+  namespace: dynamo-system
+data:
+  config.yaml: |
+    operator:
+      namespace: dynamo-system
+      reconcile_interval: 30s
+      enable_leader_election: true
+    
+    dynamo:
+      default_image: nginx:alpine
+      docker_registry: docker.io
+      build_timeout: 10m
+      
+    logging:
+      level: info
+      format: json
+
+---
+# Secret for operator environment variables
+apiVersion: v1
+kind: Secret
+metadata:
+  name: dynamo-deployment-env
+  namespace: dynamo-system
+type: Opaque
+stringData:
+  DOCKER_REGISTRY_SERVER: "docker.io"
+  DOCKER_REGISTRY_USERNAME: ""
+  DOCKER_REGISTRY_PASSWORD: ""
+  API_STORE_ENDPOINT: "http://dynamo-store.dynamo-cloud.svc.cluster.local"
+  DYNAMO_IMAGE_BUILDER_NAMESPACE: "dynamo-system"
+  DYNAMO_SYSTEM_NAMESPACE: "dynamo-system"
+  LOG_LEVEL: "info"
+
+---
+# Operator Deployment - Using nginx as placeholder since we don't have the operator image
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dynamo-controller-manager
+  namespace: dynamo-system
+  labels:
+    control-plane: controller-manager
+    app.kubernetes.io/name: dynamo-operator
+    app.kubernetes.io/instance: dynamo-operator
+spec:
+  selector:
+    matchLabels:
+      control-plane: controller-manager
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        control-plane: controller-manager
+    spec:
+      serviceAccountName: dynamo-controller-manager
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+      containers:
+      - name: manager
+        # NOTE: This should be the actual operator image (e.g., nvcr.io/nvidia/dynamo-operator:latest)
+        # Using nginx as placeholder for testing - won't actually reconcile resources
+        image: nginx:alpine
+        command: ["/bin/sh"]
+        args:
+        - -c
+        - |
+          echo "Dynamo Operator Placeholder - Replace with actual operator image"
+          echo "Would reconcile DynamoGraphDeployments to create pods"
+          echo "Sleeping to keep pod running..."
+          while true; do
+            echo "$(date): Operator would process DynamoGraphDeployments here"
+            sleep 60
+          done
+        envFrom:
+        - secretRef:
+            name: dynamo-deployment-env
+        - configMapRef:
+            name: dynamo-operator-config
+        resources:
+          limits:
+            cpu: 500m
+            memory: 512Mi
+          requests:
+            cpu: 250m
+            memory: 256Mi
+        # Placeholder health checks
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - "ps aux | grep nginx"
+          initialDelaySeconds: 15
+          periodSeconds: 20
+        readinessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - "ps aux | grep nginx"
+          initialDelaySeconds: 5
+          periodSeconds: 10
+      terminationGracePeriodSeconds: 10
+
+---
+# Service for the operator (optional)
+apiVersion: v1
+kind: Service
+metadata:
+  name: dynamo-controller-manager-service
+  namespace: dynamo-system
+  labels:
+    control-plane: controller-manager
+spec:
+  selector:
+    control-plane: controller-manager
+  ports:
+  - name: webhook
+    port: 9443
+    targetPort: 9443
+  - name: metrics
+    port: 8080
+    targetPort: 8080

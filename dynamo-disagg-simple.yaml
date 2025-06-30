@@ -1,0 +1,73 @@
+# Simple Dynamo Disaggregated Deployment - CRD Compatible
+# This creates separate PrefillWorker and VllmWorker pods
+
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoComponent
+metadata:
+  name: disagg-simple-component
+  namespace: dynamo-cloud
+spec:
+  dynamoComponent: disagg-simple:latest
+  image: nginx:alpine
+
+---
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: disagg-simple-llm
+  namespace: dynamo-cloud
+  labels:
+    architecture: disaggregated
+spec:
+  dynamoGraph: disagg-simple:latest
+  
+  # Global environment variables
+  envs:
+  - name: MODEL_NAME
+    value: "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+  - name: BLOCK_SIZE
+    value: "64"
+  - name: MAX_MODEL_LEN
+    value: "16384"
+  
+  services:
+    # Frontend - HTTP API endpoint
+    Frontend:
+      replicas: 1
+      envs:
+      - name: PORT
+        value: "8000"
+      - name: SERVICE_TYPE
+        value: "frontend"
+    
+    # Processor - Request routing
+    Processor:
+      replicas: 1
+      envs:
+      - name: ROUTER
+        value: "round-robin"
+      - name: SERVICE_TYPE
+        value: "processor"
+    
+    # VllmWorker - Decode worker (generation)
+    VllmWorker:
+      replicas: 2
+      envs:
+      - name: WORKER_TYPE
+        value: "decode"
+      - name: REMOTE_PREFILL
+        value: "true"
+      - name: PORT
+        value: "8080"
+    
+    # PrefillWorker - Dedicated prefill processing  
+    PrefillWorker:
+      replicas: 1
+      envs:
+      - name: WORKER_TYPE
+        value: "prefill"
+      - name: MAX_NUM_BATCHED_TOKENS
+        value: "16384"
+      - name: PORT
+        value: "8081"
