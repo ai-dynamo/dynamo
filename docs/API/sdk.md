@@ -307,9 +307,9 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
 
     # Add custom arguments
     parser.add_argument("--router", type=str, choices=["random", "round-robin", "kv"], default="random")
-    parser.add_argument("--remote-prefill", action="store_true")
+    parser.add_argument("--remote-prefill", action="store_true", default=False)
 
-    # Add VLLM's arguments
+    # Add VLLM's arguments (ServiceConfig handles True defaults automatically)
     parser = AsyncEngineArgs.add_cli_args(parser)
 
     # Parse both custom and VLLM arguments
@@ -323,6 +323,33 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
     engine_args.remote_prefill = args.remote_prefill
 
     return engine_args
+```
+
+#### Boolean Argument Handling
+
+ServiceConfig uses a targeted approach for boolean arguments to maintain compatibility with different argument parsers:
+
+1. Standard Boolean Handling:
+- `true` → outputs just the flag (e.g., `--enable-feature`)
+- `false` → omitted entirely (uses parser's default)
+
+2. vLLM True-Default Arguments (targeted override support):
+- Automatically detects vLLM arguments that default to `True` and need explicit `false` handling
+- `enable-prefix-caching: false` → `--no-enable-prefix-caching` (negative flag)
+- `multi-step-stream-outputs: false` → `--no-multi-step-stream-outputs` (negative flag)
+
+```yaml
+# Example YAML configuration
+VllmWorker:
+  # Standard boolean flags (action="store_true" style)
+  enforce-eager: true          # → --enforce-eager
+  disable-logging: false       # → (omitted)
+
+  # vLLM arguments with True defaults (automatically handled)
+  enable-prefix-caching: false  # → --no-enable-prefix-caching
+
+  # Non-boolean arguments
+  max-model-len: 16384         # → --max-model-len 16384
 ```
 
 #### Overriding Service Decorator with ServiceArgs

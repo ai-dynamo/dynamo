@@ -73,7 +73,7 @@ pub struct KvRouterConfig {
 impl Default for KvRouterConfig {
     fn default() -> Self {
         Self {
-            overlap_score_weight: 2.0,
+            overlap_score_weight: 1.0,
             gpu_cache_usage_weight: 1.0,
             waiting_requests_weight: 1.0,
         }

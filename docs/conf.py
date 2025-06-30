@@ -71,7 +71,7 @@ extensions = [
     "myst_parser",
     "sphinx_copybutton",
     "sphinx_design",
-    "sphinx-prompt",
+    "sphinx_prompt",
     # "sphinxcontrib.bibtex",
     "sphinx_tabs.tabs",
     "sphinx_sitemap",

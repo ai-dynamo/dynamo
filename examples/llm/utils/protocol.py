@@ -36,6 +36,11 @@ class Tokens(BaseModel):
     tokens: list[int]
 
 
+class LocalBlockHashes(BaseModel):
+    hashes: list[int]
+    num_tokens: int
+
+
 class PrefillRequest(Request):
     request_id: str
 
