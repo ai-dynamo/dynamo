@@ -404,6 +404,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<LLMEngineOutput>, Error>
                             cum_log_probs: None,
                             log_probs: None,
                             finish_reason: None,
+                            index: None,
                         };
 
                         if stream_tx.send(output).await.is_err() {
@@ -631,6 +632,7 @@ mod integration_tests {
         // Create test requests for both DP workers
         let create_request = |tokens: Vec<TokenIdType>, dp_rank: u32| PreprocessedRequest {
             token_ids: tokens,
+            batch_token_ids: None,
             stop_conditions: StopConditions {
                 max_tokens: Some(TOKENS_PER_REQUEST as u32),
                 ..Default::default()
