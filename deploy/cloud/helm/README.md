@@ -32,7 +32,7 @@ You can build and push Docker images for the Dynamo cloud components (API server
 
 #### 🏗️ Build Dynamo inference runtime.
 
-Make sure you have first built and pushed your registry Dynamo Base Image for Dynamo inference runtime.
+Make sure you have first built and pushed to your registry Dynamo Base Image for Dynamo inference runtime.
 
 ```bash
 ./container/build.sh
