@@ -189,6 +189,7 @@ impl From<NvCreateChatCompletionResponse> for NvResponse {
             .expect("at least one choice expected");
         let content_text = choice.message.content.unwrap_or_default();
         let message_id = format!("msg_{}", Uuid::new_v4().simple());
+        let response_id = format!("resp_{}", Uuid::new_v4().simple());
 
         let output = vec![OutputContent::Message(OutputMessage {
             id: message_id,
@@ -201,8 +202,8 @@ impl From<NvCreateChatCompletionResponse> for NvResponse {
         })];
 
         let response = Response {
-            id: chat_resp.id,
-            object: chat_resp.object,
+            id: response_id,
+            object: "response".to_string(),
             created_at: chat_resp.created as u64,
             model: chat_resp.model,
             status: Status::Completed,
