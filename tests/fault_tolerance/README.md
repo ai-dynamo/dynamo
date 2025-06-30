@@ -500,7 +500,6 @@ graph LR
     Frontend --> Processor_1
     Frontend --> Processor_2
 
-    Frontend --> Processor
     Processor_1 <--> DecodePool
 	Processor_2 <--> DecodePool
 
@@ -514,8 +513,8 @@ graph LR
 		end
         subgraph Prefill2["Prefill 2"]
             direction TB
-            P1GPU0["GPU 0"]
-            P1GPU1["GPU 1"]
+            P2GPU0["GPU 0"]
+            P2GPU1["GPU 1"]
 		end
 
     end
