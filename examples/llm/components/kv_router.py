@@ -23,7 +23,7 @@ from typing import AsyncIterator, Tuple
 import numpy as np  # Add numpy import
 from components.worker import VllmWorker
 from utils.check_worker import check_required_workers
-from utils.protocol import LocalBlockHashes, RouterDecision
+from utils.protocol import LocalBlockHashes
 from utils.vllm import RouterType
 
 from dynamo.llm import (
@@ -376,6 +376,16 @@ class Router:
             scores, metrics, request.num_tokens
         )
 
+        if self.router_type == RouterType.APPROX_KV:
+            # For the approx kv router, we need to know what worker we route to.
+            # We can't defer to the engine client to select a random worker.
+            # Because of this, we need to select a worker here.
+            if not worker_id:
+                all_workers = self.workers_client.instance_ids()
+                worker_id = random.choice(all_workers)
+
+            await self.log_router_decision(request.tokens, worker_id)
+
         if worker_id:
             logger.info(
                 f"Scheduling to worker_id: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
@@ -383,16 +393,13 @@ class Router:
 
         yield worker_id, prefix_hit_rate
 
-    @endpoint()
-    async def log_router_decision(self, request: RouterDecision):
+    async def log_router_decision(self, tokens: list[int], worker_id: str):
         if self.router_type == RouterType.APPROX_KV:
             try:
                 await self.indexer.process_routing_decision_for_request(
-                    request.tokens, request.worker_id
+                    tokens, worker_id
                 )
             except Exception as e:
                 logger.exception(
                     f"Error processing routing decision: {e}. {fallback_msg}"
                 )
-
-        yield None

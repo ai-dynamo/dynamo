@@ -59,11 +59,15 @@ struct RouterResult {
 struct TimerEntry {
     /// The key of the timer.
     key: ExternalSequenceBlockHash,
-    /// The duration from now when the timer should expire.
+    /// The worker id that stored this block.
     worker: WorkerId,
 }
 
 /// A data structure to manage a collection of timers, addressable by a key.
+/// This is structured as a sort of "priority queue" of keys, where the priority is the expiration time.
+/// It supports insertion as well as updating the expiration time of a key.
+/// The [`TimerManager::expirations`] heap is lazily updated to reflect the true expiration times in [`TimerManager::timers`]
+/// For now, we have a fixed expiration time for all keys.
 #[derive(Debug)]
 struct TimerManager<K: Clone + Hash + Eq + Ord> {
     /// The source of truth. Maps a key to its current expiration instant.
