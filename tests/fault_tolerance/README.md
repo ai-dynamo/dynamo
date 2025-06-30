@@ -424,6 +424,7 @@ graph LR
             direction TB
             P1GPU0["GPU 0"]
             P1GPU1["GPU 1"]
+		end
     end
 
     %% Decode Worker Pool (vertical layout)
