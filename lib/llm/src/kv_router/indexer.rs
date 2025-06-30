@@ -1315,21 +1315,17 @@ mod tests {
     fn test_compute_block_hash_for_seq(#[case] kv_block_size: u32) {
         setup();
         // create a sequence of 64 elements
-        let sequence = (0..kv_block_size).map(|i| i as u32).collect::<Vec<u32>>();
+        let sequence = (0..kv_block_size).collect::<Vec<u32>>();
         let hashes = compute_block_hash_for_seq(&sequence, kv_block_size);
         assert_eq!(hashes.len(), 1);
 
         // create a sequence of 65 elements
-        let sequence = (0..(kv_block_size + 1))
-            .map(|i| i as u32)
-            .collect::<Vec<u32>>();
+        let sequence = (0..(kv_block_size + 1)).collect::<Vec<u32>>();
         let hashes = compute_block_hash_for_seq(&sequence, kv_block_size);
         assert_eq!(hashes.len(), 1);
 
         // create a sequence of 129 elements
-        let sequence = (0..(2 * kv_block_size + 1))
-            .map(|i| i as u32)
-            .collect::<Vec<u32>>();
+        let sequence = (0..(2 * kv_block_size + 1)).collect::<Vec<u32>>();
         let hashes = compute_block_hash_for_seq(&sequence, kv_block_size);
         assert_eq!(hashes.len(), 2);
     }

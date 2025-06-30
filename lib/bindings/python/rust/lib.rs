@@ -105,8 +105,8 @@ fn register_llm<'p>(
     endpoint: Endpoint,
     model_path: &str,
     model_name: Option<&str>,
-    context_length: Option<usize>,
-    kv_cache_block_size: Option<usize>,
+    context_length: Option<u32>,
+    kv_cache_block_size: Option<u32>,
 ) -> PyResult<Bound<'p, PyAny>> {
     let model_type_obj = match model_type {
         ModelType::Chat => llm_rs::model_type::ModelType::Chat,
