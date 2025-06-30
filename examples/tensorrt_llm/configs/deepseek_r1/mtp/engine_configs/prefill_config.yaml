@@ -12,19 +12,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  endpoint: dynamo.SGLangWorker.generate
-  port: 8000
 
-SGLangWorker:
-  model-path: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  served-model-name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  page-size: 16
-  tp: 1
-  trust-remote-code: true
-  skip-tokenizer-init: true
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: 1
+# NOTE: FP4 only supported starting with Blackwell GPUs.
+# https://huggingface.co/nvidia/DeepSeek-R1-FP4
+# You can also specify the full path to locally downloaded weights
+# instead of a HuggingFace ID here.
+
+backend: pytorch
+tensor_parallel_size: 4
+moe_expert_parallel_size: 4
+enable_attention_dp: true
+max_batch_size: 1
+max_num_tokens: 8192
+max_seq_len: 8192
+kv_cache_config:
+  free_gpu_memory_fraction: 0.75
+print_iter_log: true
+kv_cache_dtype: fp8
+disable_overlap_scheduler: true
+
+# Enable the MTP(Multi-Token Prediction) in the prefill model engine
+speculative_config:
+  decoding_type: MTP
+  num_nextn_predict_layers: 1

@@ -14,7 +14,7 @@
 # limitations under the License.
 
 ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
-ARG BASE_IMAGE_TAG="25.04-py3"
+ARG BASE_IMAGE_TAG="25.05-py3"
 ARG RELEASE_BUILD
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.

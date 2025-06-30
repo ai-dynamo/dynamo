@@ -21,7 +21,7 @@ kind: ClusterRole
 metadata:
   name: {{ include "helm.fullname" . }}-role
   {{- if .Values.namespaceRestriction.enabled }}
-  namespace: {{ .Values.namespaceRestriction.targetNamespace }}
+  namespace: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace }}
   {{- end }}
 rules:
 - apiGroups: [""]
@@ -49,7 +49,7 @@ kind: ClusterRoleBinding
 metadata:
   name: {{ include "helm.fullname" . }}-role-binding
   {{- if .Values.namespaceRestriction.enabled }}
-  namespace: {{ .Values.namespaceRestriction.targetNamespace }}
+  namespace: {{ default .Release.Namespace .Values.namespaceRestriction.targetNamespace }}
   {{- end }}
 subjects:
 - kind: ServiceAccount

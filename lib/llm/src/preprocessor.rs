@@ -29,6 +29,7 @@ pub mod tools;
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
 use prompt::OAIPromptFormatter;
+use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
 use std::{collections::HashMap, sync::Arc};
 use tracing;
 
@@ -46,7 +47,7 @@ use crate::protocols::{
     common::{SamplingOptionsProvider, StopConditionsProvider},
     openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-        completions::{CompletionResponse, NvCreateCompletionRequest},
+        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
         nvext::NvExtProvider,
         DeltaGeneratorExt,
     },
@@ -220,13 +221,15 @@ impl OpenAIPreprocessor {
                             builder.token_ids(encoding.token_ids);
                         }
                         TextInput::Batch(texts) => {
-                            let mut token_batches = Vec::new();
-                            // TODO: room for optimization here
-                            for text in texts {
-                                let encoding =
-                                    tokio::task::block_in_place(|| self.tokenizer.encode(&text))?;
-                                token_batches.push(encoding.token_ids);
-                            }
+                            let token_batches: Result<Vec<Vec<u32>>, _> = texts
+                                .par_iter()
+                                .map(|text| {
+                                    tokio::task::block_in_place(|| self.tokenizer.encode(text))
+                                        .map(|encoding| encoding.token_ids)
+                                })
+                                .collect();
+
+                            let token_batches = token_batches?;
                             builder.batch_token_ids(Some(token_batches));
                             builder.token_ids(vec![]);
                         }
@@ -433,7 +436,7 @@ impl
 impl
     Operator<
         SingleIn<NvCreateCompletionRequest>,
-        ManyOut<Annotated<CompletionResponse>>,
+        ManyOut<Annotated<NvCreateCompletionResponse>>,
         SingleIn<PreprocessedRequest>,
         ManyOut<Annotated<BackendOutput>>,
     > for OpenAIPreprocessor
@@ -448,7 +451,7 @@ impl
                 Error,
             >,
         >,
-    ) -> Result<ManyOut<Annotated<CompletionResponse>>, Error> {
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         // unpack the request
         let (request, context) = request.into_parts();
 
@@ -465,7 +468,7 @@ impl
         let common_request = context.map(|_| common_request);
 
         // create a stream of annotations this will be prepend to the response stream
-        let annotations: Vec<Annotated<CompletionResponse>> = annotations
+        let annotations: Vec<Annotated<NvCreateCompletionResponse>> = annotations
             .into_iter()
             .flat_map(|(k, v)| Annotated::from_annotation(k, &v))
             .collect();
