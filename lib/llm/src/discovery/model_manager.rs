@@ -180,7 +180,7 @@ impl ModelManager {
         &self,
         model_name: &str,
         component: &Component,
-        kv_cache_block_size: usize,
+        kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
     ) -> anyhow::Result<Arc<KvRouter>> {
         if let Some(kv_chooser) = self.get_kv_chooser(model_name) {
@@ -209,7 +209,7 @@ impl ModelManager {
         &self,
         model_name: &str,
         component: &Component,
-        kv_cache_block_size: usize,
+        kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
     ) -> anyhow::Result<Arc<KvRouter>> {
         let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));

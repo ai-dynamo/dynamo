@@ -129,11 +129,11 @@ pub struct Flags {
     /// context length (e.g. Llama 4).
     /// Defaults to the model's max, which is usually model_max_length in tokenizer_config.json.
     #[arg(long)]
-    pub context_length: Option<usize>,
+    pub context_length: Option<u32>,
 
     /// KV cache block size (vllm only)
     #[arg(long)]
-    pub kv_cache_block_size: Option<usize>,
+    pub kv_cache_block_size: Option<u32>,
 
     /// Additional engine-specific arguments from a JSON file.
     /// Contains a mapping of parameter names to values.

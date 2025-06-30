@@ -31,7 +31,7 @@ const HF_SCHEME: &str = "hf://";
 const DEFAULT_NAME: &str = "dynamo";
 
 /// Engines don't usually provide a default, so we do.
-const DEFAULT_KV_CACHE_BLOCK_SIZE: usize = 16;
+const DEFAULT_KV_CACHE_BLOCK_SIZE: u32 = 16;
 
 /// We can't have it default to 0, so pick something
 const DEFAULT_HTTP_PORT: u16 = 8080;
@@ -41,10 +41,10 @@ pub struct LocalModelBuilder {
     model_name: Option<String>,
     model_config: Option<PathBuf>,
     endpoint_id: Option<EndpointId>,
-    context_length: Option<usize>,
+    context_length: Option<u32>,
     template_file: Option<PathBuf>,
     router_config: Option<RouterConfig>,
-    kv_cache_block_size: usize,
+    kv_cache_block_size: u32,
     http_port: u16,
 }
 
@@ -85,13 +85,13 @@ impl LocalModelBuilder {
         self
     }
 
-    pub fn context_length(&mut self, context_length: Option<usize>) -> &mut Self {
+    pub fn context_length(&mut self, context_length: Option<u32>) -> &mut Self {
         self.context_length = context_length;
         self
     }
 
     /// Passing None resets it to default
-    pub fn kv_cache_block_size(&mut self, kv_cache_block_size: Option<usize>) -> &mut Self {
+    pub fn kv_cache_block_size(&mut self, kv_cache_block_size: Option<u32>) -> &mut Self {
         self.kv_cache_block_size = kv_cache_block_size.unwrap_or(DEFAULT_KV_CACHE_BLOCK_SIZE);
         self
     }

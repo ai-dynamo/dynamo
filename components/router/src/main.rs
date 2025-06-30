@@ -47,7 +47,7 @@ struct Args {
 
     /// Block size for the router
     #[arg(long)]
-    block_size: usize,
+    block_size: u32,
 }
 
 fn main() -> Result<()> {
@@ -88,7 +88,7 @@ impl WorkerSelector for CustomWorkerSelector {
         &self,
         workers: &ProcessedEndpoints,
         request: &SchedulingRequest,
-        block_size: usize,
+        block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         // customize logic here
         // F12 into [DefaultWorkerSelector] to see the original logic

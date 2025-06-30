@@ -50,7 +50,7 @@ pub trait WorkerSelector {
         &self,
         workers: &ProcessedEndpoints,
         request: &SchedulingRequest,
-        block_size: usize,
+        block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
 }
 
@@ -104,13 +104,13 @@ impl KvRouterConfig {
 pub struct KvRouter {
     indexer: KvIndexer,
     scheduler: KvScheduler,
-    block_size: usize,
+    block_size: u32,
 }
 
 impl KvRouter {
     pub async fn new(
         component: Component,
-        block_size: usize,
+        block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
     ) -> Result<Self> {
         let cancellation_token = component
@@ -196,7 +196,7 @@ impl KvRouter {
     }
 
     /// Get the block size this router was configured with
-    pub fn block_size(&self) -> usize {
+    pub fn block_size(&self) -> u32 {
         self.block_size
     }
 }
