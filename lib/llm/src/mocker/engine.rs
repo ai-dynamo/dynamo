@@ -86,13 +86,15 @@ impl MockVllmEngine {
             .await?;
 
         // Start KV events publishing with the actual receivers from schedulers
-        Self::start_kv_events_publishing(
-            kv_event_receiver,
-            Some(component.clone()),
-            self.engine_args.block_size,
-            cancel_token.clone(),
-        )
-        .await?;
+        if self.engine_args.enable_prefix_caching {
+            Self::start_kv_events_publishing(
+                kv_event_receiver,
+                Some(component.clone()),
+                self.engine_args.block_size,
+                cancel_token.clone(),
+            )
+            .await?;
+        }
 
         Ok(())
     }
