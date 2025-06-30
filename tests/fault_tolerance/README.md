@@ -492,7 +492,7 @@ configuration.
 graph LR
     Client["Client"]
     Frontend["Frontend"]
-    Processor["Processor"]
+    Processor_1["Processor 1"]
 	Processor_2["Processor 2"]
     PrefillQueue["Remote Prefill Queue"]
 
@@ -500,7 +500,6 @@ graph LR
     Frontend --> Processor_1
     Frontend --> Processor_2
 
-    Client --> Frontend
     Frontend --> Processor
     Processor_1 <--> DecodePool
 	Processor_2 <--> DecodePool
