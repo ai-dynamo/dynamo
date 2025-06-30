@@ -79,6 +79,11 @@ uuid = { version = "1", features = ["v4", "serde"] }
 url = {version = "2.5", features = ["serde"]}
 xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
 
+# HTTP service dependencies
+axum = { version = "0.8" }
+hyper = { version = "1.0" }
+tower = { version = "0.5" }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 [profile.dev.package]
 insta.opt-level = 3

@@ -57,7 +57,7 @@ use validator::{Validate, ValidationError};
 mod client;
 #[allow(clippy::module_inception)]
 mod component;
-mod endpoint;
+pub mod endpoint;
 mod namespace;
 mod registry;
 pub mod service;
