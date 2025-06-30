@@ -40,7 +40,7 @@ Coordination and messaging support:
 - **Frontend, Processor, Planner**: Service discovery and registration
 - **Decode Worker, PrefillWorker**: NIXL metadata storage for GPU communication setup
 
-### NATS Connections (Teal, dotted)  
+### NATS Connections (Teal, dotted)
 - **PrefillQueue**: JetStream consumer group for reliable work distribution
 - **Processor**: Load balancing across workers
 
@@ -69,18 +69,18 @@ graph TD
     S1[["<b>1 DISCOVERY</b>"]]
     Frontend["<b>Frontend</b><br/><i>OpenAI Compatible Server<br/>Port 8000</i>"]
     S2[["<b>2 REQUEST</b>"]]
-    
+
     %% Processing Layer
     Processor["<b>Processor</b><br/><i>Request Handler & Router</i>"]
     S3[["<b>3 VALIDATE</b>"]]
-    
+
     %% Infrastructure - Positioned strategically to minimize crossings
     subgraph INF["<b>Infrastructure Layer</b>"]
         ETCD[("<b>ETCD</b><br/><i>Service Discovery &<br/>NIXL Metadata</i>")]
         NATS[("<b>NATS</b><br/><i>Message Broker</i>")]
         Planner["<b>Planner</b><br/><i>Resource Management<br/>Auto-scaling</i>"]
     end
-    
+
     %% Worker Layer - Main processing
     subgraph WL["<b>Worker Layer</b>"]
         %% VllmWorker section
@@ -91,10 +91,10 @@ graph TD
         S12[["<b>12 DECODE</b>"]]
         S6[["<b>6 QUEUE</b>"]]
         S13[["<b>13 RESPONSE</b>"]]
-        
+
         %% Storage positioned near workers
         LocalKVCache[("<b>Local KV Cache</b><br/><i>Pre-allocated Blocks</i>")]
-        
+
         %% Prefill System - Right side to minimize crossings
         subgraph PS["<b>Prefill System</b>"]
             PrefillQueue["<b>Prefill Queue</b><br/><i>NATS JetStream<br/>Consumer Group</i>"]
@@ -106,7 +106,7 @@ graph TD
             S11[["<b>11 NOTIFY</b>"]]
         end
     end
-    
+
     %% Main Request Flow (Blue) - Clean vertical flow
     Client -.-> S1
     S1 -->|HTTP API Call| Frontend
@@ -114,18 +114,18 @@ graph TD
     S2 -->|Process & Validate| Processor
     Processor -.-> S3
     S3 -->|Route to Worker| VllmWorker
-    
+
     %% VllmWorker Internal Flow (Orange)
     VllmWorker -.-> S4
     S4 -->|Query Prefix Cache Hit| S5
     S5 -->|Prefill Length & Queue Check| S5a
     S5a -->|Continue to Decode| S12
-    
+
     %% Allocation & Queuing (Orange) - Minimize crossings
     S5a -->|Allocate KV Cache Blocks| LocalKVCache
     VllmWorker --> S6
     S6 -->|Put RemotePrefillRequest| PrefillQueue
-    
+
     %% Prefill Worker Flow (Green) - Self-contained within PS
     PrefillQueue -.-> S7
     S7 -->|Consumer Group Pull| PrefillWorker
@@ -134,32 +134,32 @@ graph TD
     S9 -->|Execute Prefill| S10
     S10 -->|Direct GPU Transfer| LocalKVCache
     PrefillWorker --> S11
-    
+
     %% Return Flow (Purple) - Clean return path
     S11 -->|Completion Notification| S12
     S12 -->|Decode from KV Cache| S13
     S13 -->|Post-process Response| Processor
     Processor -->|HTTP Response| Frontend
     Frontend -->|Final Response| Client
-    
+
     %% Infrastructure Connections - Organized to avoid crossings
     %% ETCD Connections - Grouped by proximity
     Frontend -.->|Service Discovery| ETCD
-    Processor -.->|Service Discovery| ETCD  
+    Processor -.->|Service Discovery| ETCD
     VllmWorker -.->|NIXL Metadata| ETCD
     PrefillWorker -.->|NIXL Metadata| ETCD
     S8 -.->|Load NIXL Metadata| ETCD
     Planner -.->|Service Discovery| ETCD
-    
+
     %% NATS Connections - Direct to queue system
     PrefillQueue -.->|JetStream| NATS
     Processor -.->|Load Balancing| NATS
-    
+
     %% Planning Connections - Strategic positioning
     Frontend -.->|Metrics| Planner
     Planner -.->|Auto-scaling| VllmWorker
     Planner -.->|Auto-scaling| PrefillWorker
-    
+
     %% Styling - Each component with unique colors
     classDef client fill:#e8f5e8,stroke:#2E7D32,stroke-width:3px
     classDef frontend fill:#fff3e0,stroke:#F57C00,stroke-width:3px
@@ -175,7 +175,7 @@ graph TD
     classDef infraLayer fill:#fff9c4,stroke:#FFC107,stroke-width:3px
     classDef workerLayer fill:#e3f2fd,stroke:#2196F3,stroke-width:3px
 
-    
+
     class Client client
     class Frontend frontend
     class Processor processor
@@ -189,9 +189,9 @@ graph TD
     class PS prefillBox
     class INF infraLayer
     class WL workerLayer
-    
 
-    
+
+
     %% Flow Colors - Different line styles to reduce visual clutter
     %% Main Request Flow - Blue (solid)
     linkStyle 0 stroke:#1565C0,stroke-width:3px,stroke-dasharray: 3 3
@@ -200,18 +200,18 @@ graph TD
     linkStyle 3 stroke:#1565C0,stroke-width:4px
     linkStyle 4 stroke:#1565C0,stroke-width:3px,stroke-dasharray: 3 3
     linkStyle 5 stroke:#1565C0,stroke-width:4px
-    
+
     %% Decision & Allocation Flow - Orange (mixed)
     linkStyle 6 stroke:#E65100,stroke-width:3px,stroke-dasharray: 3 3
     linkStyle 7 stroke:#E65100,stroke-width:4px
     linkStyle 8 stroke:#E65100,stroke-width:4px
     linkStyle 9 stroke:#E65100,stroke-width:3px,stroke-dasharray: 3 3
-    
+
     %% KV Cache & Queue - Orange (solid)
     linkStyle 10 stroke:#E65100,stroke-width:4px
     linkStyle 11 stroke:#E65100,stroke-width:4px
     linkStyle 12 stroke:#E65100,stroke-width:4px
-    
+
     %% Prefill Worker Flow - Green (mixed)
     linkStyle 13 stroke:#2E7D32,stroke-width:3px,stroke-dasharray: 3 3
     linkStyle 14 stroke:#2E7D32,stroke-width:4px
@@ -220,14 +220,14 @@ graph TD
     linkStyle 17 stroke:#2E7D32,stroke-width:4px
     linkStyle 18 stroke:#2E7D32,stroke-width:4px
     linkStyle 19 stroke:#2E7D32,stroke-width:4px
-    
+
     %% Completion Flow - Purple (mixed)
     linkStyle 20 stroke:#6A1B9A,stroke-width:4px
     linkStyle 21 stroke:#6A1B9A,stroke-width:3px,stroke-dasharray: 3 3
     linkStyle 22 stroke:#6A1B9A,stroke-width:4px
     linkStyle 23 stroke:#6A1B9A,stroke-width:4px
     linkStyle 24 stroke:#6A1B9A,stroke-width:4px
-    
+
     %% Infrastructure Flows - Lighter and dotted to reduce visual noise
     %% ETCD Connections - Gray (dotted, thinner)
     linkStyle 25 stroke:#757575,stroke-width:2px,stroke-dasharray: 8 8
@@ -236,11 +236,11 @@ graph TD
     linkStyle 28 stroke:#757575,stroke-width:2px,stroke-dasharray: 8 8
     linkStyle 29 stroke:#757575,stroke-width:2px,stroke-dasharray: 8 8
     linkStyle 30 stroke:#757575,stroke-width:2px,stroke-dasharray: 8 8
-    
+
     %% NATS Connections - Teal (dotted, thinner)
     linkStyle 31 stroke:#26A69A,stroke-width:2px,stroke-dasharray: 8 8
     linkStyle 32 stroke:#26A69A,stroke-width:2px,stroke-dasharray: 8 8
-    
+
     %% Planning Connections - Gold (dotted, thinner)
     linkStyle 33 stroke:#FFA726,stroke-width:2px,stroke-dasharray: 8 8
     linkStyle 34 stroke:#FFA726,stroke-width:2px,stroke-dasharray: 8 8
