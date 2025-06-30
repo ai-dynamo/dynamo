@@ -13,14 +13,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
+mod aggregator;
 mod nvext;
 
+pub use aggregator::DeltaAggregator;
 pub use nvext::{NvExt, NvExtProvider};
-
-use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateEmbeddingRequest {
@@ -59,7 +60,7 @@ impl NvCreateEmbeddingResponse {
     }
 }
 
-/// Implements `NvExtProvider` for `NvCr    eateEmbeddingRequest`,
+/// Implements `NvExtProvider` for `NvCreateEmbeddingRequest`,
 /// providing access to NVIDIA-specific extensions.
 impl NvExtProvider for NvCreateEmbeddingRequest {
     /// Returns a reference to the optional `NvExt` extension, if available.

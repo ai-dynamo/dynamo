@@ -38,7 +38,6 @@ import (
 	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/schemas"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/config"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -595,6 +594,12 @@ func (r *DynamoComponentDeploymentReconciler) generateLeaderPodTemplateSpec(ctx 
 		return nil, fmt.Errorf("generateLeaderPodTemplateSpec: GPU limit is not set for Ray leader pod")
 	}
 
+	// TODO: Liveness and readiness probes are temporarily disabled for leader worker sets
+	// until we implement proper probe configuration that can differentiate between
+	// leader and worker pods.
+	leaderPodTemplateSpec.Spec.Containers[0].LivenessProbe = nil
+	leaderPodTemplateSpec.Spec.Containers[0].ReadinessProbe = nil
+
 	leaderPodTemplateSpec.Spec.Containers[0].Args[0] = fmt.Sprintf("ray start --head --port=6379 && %s", currentArgs)
 
 	return leaderPodTemplateSpec, nil
@@ -633,6 +638,12 @@ func (r *DynamoComponentDeploymentReconciler) generateWorkerPodTemplateSpec(ctx 
 	if opt.dynamoComponentDeployment.Spec.Resources == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits == nil || opt.dynamoComponentDeployment.Spec.Resources.Limits.GPU == "" {
 		return nil, fmt.Errorf("generateWorkerPodTemplateSpec: GPU limit is not set for Ray worker pod")
 	}
+
+	// TODO: Liveness and readiness probes are temporarily disabled for leader worker sets
+	// until we implement proper probe configuration that can differentiate between
+	// leader and worker pods.
+	workerPodTemplateSpec.Spec.Containers[0].LivenessProbe = nil
+	workerPodTemplateSpec.Spec.Containers[0].ReadinessProbe = nil
 
 	workerPodTemplateSpec.Spec.Containers[0].Args[0] = "ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"
 
@@ -989,21 +1000,23 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteServices(ctx
 	return
 }
 
-func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx context.Context, opt generateResourceOption) (modified bool, err error) {
-	modified, _, err = commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1.Ingress, bool, error) {
+func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx context.Context, opt generateResourceOption) (bool, error) {
+	modified, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1.Ingress, bool, error) {
 		return r.generateIngress(ctx, opt)
 	})
 	if err != nil {
-		return
+		return false, err
 	}
-	modified_, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
-		return r.generateVirtualService(ctx, opt)
-	})
-	if err != nil {
-		return
+	if r.UseVirtualService {
+		modified_, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
+			return r.generateVirtualService(ctx, opt)
+		})
+		if err != nil {
+			return false, err
+		}
+		return modified || modified_, nil
 	}
-	modified = modified || modified_
-	return
+	return modified, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateIngress(ctx context.Context, opt generateResourceOption) (*networkingv1.Ingress, bool, error) {
@@ -1130,11 +1143,15 @@ func (r *DynamoComponentDeploymentReconciler) getGenericServiceName(dynamoCompon
 	return r.getKubeName(dynamoComponentDeployment, dynamoComponent, false)
 }
 
-func (r *DynamoComponentDeploymentReconciler) getKubeLabels(_ *v1alpha1.DynamoComponentDeployment, dynamoComponent *v1alpha1.DynamoComponent) map[string]string {
+func (r *DynamoComponentDeploymentReconciler) getKubeLabels(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, dynamoComponent *v1alpha1.DynamoComponent) map[string]string {
 	labels := map[string]string{
 		commonconsts.KubeLabelDynamoComponent: dynamoComponent.Name,
 	}
-	labels[commonconsts.KubeLabelDynamoComponentType] = commonconsts.DynamoApiServerComponentName
+	if dynamoComponentDeployment != nil && dynamoComponentDeployment.Labels != nil {
+		if v, ok := dynamoComponentDeployment.Labels[commonconsts.KubeLabelDynamoComponent]; ok && v != "" {
+			labels[commonconsts.KubeLabelDynamoComponentType] = v
+		}
+	}
 	return labels
 }
 
@@ -1328,6 +1345,7 @@ func getDynamoComponentRepositoryNameAndDynamoComponentVersion(dynamoComponent *
 
 //nolint:gocyclo,nakedret
 func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption) (podTemplateSpec *corev1.PodTemplateSpec, err error) {
+	logs := log.FromContext(ctx)
 	podLabels := r.getKubeLabels(opt.dynamoComponentDeployment, opt.dynamoComponent)
 	if opt.isStealingTrafficDebugModeEnabled {
 		podLabels[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
@@ -1366,10 +1384,16 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 				}
 			}
 			envsSeen[env.Name] = struct{}{}
-			envs = append(envs, corev1.EnvVar{
-				Name:  env.Name,
-				Value: env.Value,
-			})
+			envVar := corev1.EnvVar{
+				Name: env.Name,
+			}
+			if env.Value != "" {
+				envVar.Value = env.Value
+			}
+			if env.ValueFrom != nil {
+				envVar.ValueFrom = env.ValueFrom
+			}
+			envs = append(envs, envVar)
 		}
 	}
 
@@ -1569,6 +1593,12 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	// Set default probes if none are provided
 	if livenessProbe == nil {
 		container.LivenessProbe = &corev1.Probe{
+			// TODO: Initial delay and other probe settings should be read off sdk, these are default settings that should cover vllm / hello-world
+			InitialDelaySeconds: 60, // 1 minute
+			PeriodSeconds:       60, // Check every 1 minute
+			TimeoutSeconds:      5,  // 5 second timeout
+			FailureThreshold:    10, // Allow 10 failures before declaring unhealthy
+			SuccessThreshold:    1,  // Need 1 success to be considered healthy
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path: "/healthz",
@@ -1580,6 +1610,12 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	if readinessProbe == nil {
 		container.ReadinessProbe = &corev1.Probe{
+			// TODO: Initial delay and other probe settings should be read off sdk, these are default settings that should cover vllm / hello-world
+			InitialDelaySeconds: 60, // 1 minute
+			PeriodSeconds:       60, // Check every 1 minute
+			TimeoutSeconds:      5,  // 5 second timeout
+			FailureThreshold:    10, // Allow 10 failures before declaring not ready
+			SuccessThreshold:    1,  // Need 1 success to be considered ready
 			ProbeHandler: corev1.ProbeHandler{
 				HTTPGet: &corev1.HTTPGetAction{
 					Path: "/readyz",
@@ -1622,6 +1658,28 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			container.SecurityContext = &corev1.SecurityContext{}
 		}
 		container.SecurityContext.RunAsUser = &[]int64{0}[0]
+	}
+
+	// For now only overwrite the command and args.
+	if opt.dynamoComponentDeployment.Spec.ExtraPodSpec != nil {
+		extraPodSpecMainContainer := opt.dynamoComponentDeployment.Spec.ExtraPodSpec.MainContainer
+		if extraPodSpecMainContainer != nil {
+			if len(extraPodSpecMainContainer.Command) > 0 {
+				logs.Info("Overriding container '" + container.Name + "' Command with: " + strings.Join(extraPodSpecMainContainer.Command, " "))
+				container.Command = extraPodSpecMainContainer.Command
+			}
+			if len(extraPodSpecMainContainer.Args) > 0 {
+				// Special case: if command is "sh -c", we must collapse args into a single string
+				if len(container.Command) == 2 && container.Command[0] == "sh" && container.Command[1] == "-c" {
+					joinedArgs := strings.Join(extraPodSpecMainContainer.Args, " ")
+					logs.Info("Special case detected for container '" + container.Name + "': Command is 'sh -c'; collapsing Args to: " + joinedArgs)
+					container.Args = []string{joinedArgs}
+				} else {
+					logs.Info("Overriding container '" + container.Name + "' Args with: " + strings.Join(extraPodSpecMainContainer.Args, " "))
+					container.Args = extraPodSpecMainContainer.Args
+				}
+			}
+		}
 	}
 
 	containers = append(containers, container)
@@ -1667,17 +1725,18 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		Volumes:    volumes,
 	}
 
-	podSpec.ImagePullSecrets = []corev1.LocalObjectReference{
-		{
-			Name: config.GetDockerRegistryConfig().SecretName,
-		},
-	}
+	imagePullSecrets := []corev1.LocalObjectReference{}
+
 	if opt.dynamoComponent.Spec.DockerConfigJSONSecretName != "" {
-		podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, corev1.LocalObjectReference{
+		imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{
 			Name: opt.dynamoComponent.Spec.DockerConfigJSONSecretName,
 		})
 	}
-	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, opt.dynamoComponent.Spec.ImagePullSecrets...)
+	imagePullSecrets = append(imagePullSecrets, opt.dynamoComponent.Spec.ImagePullSecrets...)
+
+	if len(imagePullSecrets) > 0 {
+		podSpec.ImagePullSecrets = imagePullSecrets
+	}
 
 	extraPodMetadata := opt.dynamoComponentDeployment.Spec.ExtraPodMetadata
 
@@ -1706,7 +1765,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	if podSpec.ServiceAccountName == "" {
 		serviceAccounts := &corev1.ServiceAccountList{}
 		err = r.List(ctx, serviceAccounts, client.InNamespace(opt.dynamoComponentDeployment.Namespace), client.MatchingLabels{
-			commonconsts.KubeLabelDynamoDeploymentPod: commonconsts.KubeLabelValueTrue,
+			commonconsts.KubeLabelDynamoComponentPod: commonconsts.KubeLabelValueTrue,
 		})
 		if err != nil {
 			err = errors.Wrapf(err, "failed to list service accounts in namespace %s", opt.dynamoComponentDeployment.Namespace)

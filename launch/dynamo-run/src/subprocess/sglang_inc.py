@@ -17,12 +17,13 @@ from sglang.srt.server_args import ServerArgs
 
 from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime.logging import configure_dynamo_logging
 
 # Only used if you run it manually from the command line
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
-logging.basicConfig(level=logging.DEBUG)
+configure_dynamo_logging()
 
 
 class Config:
@@ -59,22 +60,107 @@ class RequestHandler:
             # sglang defaults this to 128
             "max_new_tokens": request["stop_conditions"]["max_tokens"],
         }
-        num_output_tokens_so_far = 0
-        gen = await self.engine_client.async_generate(
-            input_ids=request["token_ids"], sampling_params=sampling_params, stream=True
-        )
+
+        # Check if this is a batch request
+        is_batch = "batch_token_ids" in request and request["batch_token_ids"]
+
+        if is_batch:
+            # Track tokens separately for each batch item
+            num_output_tokens_so_far = {}
+            logging.debug("received batch token ids")
+            gen = await self.engine_client.async_generate(
+                input_ids=request["batch_token_ids"],
+                sampling_params=sampling_params,
+                stream=True,
+            )
+        else:
+            num_output_tokens_so_far = 0
+            logging.debug("received token ids")
+            gen = await self.engine_client.async_generate(
+                input_ids=request["token_ids"],
+                sampling_params=sampling_params,
+                stream=True,
+            )
+
         async for res in gen:
             # res is a dict
-
+            logging.debug(f"res: {res}")
             finish_reason = res["meta_info"]["finish_reason"]
-            if finish_reason:
-                # Don't forward the stop token
-                out = {"token_ids": [], "finish_reason": finish_reason["type"]}
+
+            if is_batch:
+                # Handle batch response - get index from SGLang response
+                index = res.get("index", 0)
+                if index not in num_output_tokens_so_far:
+                    num_output_tokens_so_far[index] = 0
+
+                if finish_reason:
+                    logging.warning(f"finish_reason: {finish_reason}")
+                    # Final response for this batch item
+                    out = {
+                        "token_ids": [],
+                        "finish_reason": finish_reason["type"],
+                        "index": index,
+                    }
+                else:
+                    # Streaming response for this batch item
+                    next_total_toks = len(res["output_ids"])
+                    new_tokens = res["output_ids"][num_output_tokens_so_far[index] :]
+                    out = {
+                        "token_ids": new_tokens,
+                        "index": index,
+                    }
+                    num_output_tokens_so_far[index] = next_total_toks
             else:
-                next_total_toks = len(res["output_ids"])
-                out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}
+                if finish_reason:
+                    out = {
+                        "token_ids": [],
+                        "finish_reason": finish_reason["type"],
+                    }
+                else:
+                    next_total_toks = len(res["output_ids"])
+                    new_tokens = res["output_ids"][num_output_tokens_so_far:]
+                    out = {
+                        "token_ids": new_tokens,
+                    }
+                    num_output_tokens_so_far = next_total_toks
+
             yield out
-            num_output_tokens_so_far = next_total_toks
+
+
+class EmbeddingRequestHandler(RequestHandler):
+    """
+    Request handler for the embedding endpoint
+    """
+
+    def __init__(self, engine: sglang.Engine, model_name: str):
+        super().__init__(engine)
+        self._model_name = model_name
+
+    async def generate(self, request):
+        gen = await self.engine_client.async_encode(prompt=request["input"])
+        tokens = 0
+        embeddings = []
+        for idx, res in enumerate(gen):
+            embeddings.append(
+                {
+                    "index": idx,
+                    "object": "embedding",
+                    "embedding": res["embedding"],
+                }
+            )
+            tokens += res["meta_info"]["prompt_tokens"]
+
+        out = {
+            "object": "list",
+            "model": self._model_name,
+            "data": embeddings,
+            "usage": {
+                "prompt_tokens": tokens,
+                "total_tokens": tokens,
+            },
+        }
+
+        yield out
 
 
 @dynamo_worker(static=False)
@@ -129,13 +215,20 @@ async def init(runtime: DistributedRuntime, config: Config):
     await component.create_service()
 
     endpoint = component.endpoint(config.endpoint)
-    await register_llm(
-        ModelType.Backend, endpoint, config.model_path, config.model_name
+    model_type = (
+        ModelType.Backend if not engine_args.is_embedding else ModelType.Embedding
     )
+    await register_llm(model_type, endpoint, config.model_path, config.model_name)
 
     # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
     # after the lease is revoked
-    await endpoint.serve_endpoint(RequestHandler(engine_client).generate)
+    await endpoint.serve_endpoint(
+        RequestHandler(engine_client).generate
+        if not engine_args.is_embedding
+        else EmbeddingRequestHandler(
+            engine_client, model_name=config.model_name or config.model_path
+        ).generate
+    )
 
 
 def cmd_line_args():
@@ -230,7 +323,6 @@ def cmd_line_args():
     config.node_rank = args.node_rank
     config.dist_init_addr = args.dist_init_addr
     config.extra_engine_args = args.extra_engine_args
-
     return config
 
 

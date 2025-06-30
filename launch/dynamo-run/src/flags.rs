@@ -17,7 +17,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use clap::ValueEnum;
+use dynamo_llm::entrypoint::RouterConfig;
+use dynamo_llm::kv_router::KvRouterConfig;
+use dynamo_llm::local_model::LocalModel;
 use dynamo_runtime::pipeline::RouterMode as RuntimeRouterMode;
+
+use crate::Output;
 
 /// Required options depend on the in and out choices
 #[derive(clap::Parser, Debug, Clone)]
@@ -105,15 +110,30 @@ pub struct Flags {
     #[arg(long, default_value = "round-robin")]
     pub router_mode: RouterMode,
 
+    /// KV Router: Weight for overlap score in worker selection.
+    /// Higher values prioritize KV cache reuse. Default: 2.0
+    #[arg(long)]
+    pub kv_overlap_score_weight: Option<f64>,
+
+    /// KV Router: Weight for GPU cache usage in worker selection.
+    /// Higher values avoid workers with nearly full KV caches. Default: 1.0
+    #[arg(long)]
+    pub kv_gpu_cache_usage_weight: Option<f64>,
+
+    /// KV Router: Weight for waiting requests in worker selection.
+    /// Higher values avoid workers with queued requests. Default: 1.0
+    #[arg(long)]
+    pub kv_waiting_requests_weight: Option<f64>,
+
     /// Max model context length. Reduce this if you don't have enough VRAM for the full model
     /// context length (e.g. Llama 4).
     /// Defaults to the model's max, which is usually model_max_length in tokenizer_config.json.
     #[arg(long)]
-    pub context_length: Option<usize>,
+    pub context_length: Option<u32>,
 
     /// KV cache block size (vllm only)
     #[arg(long)]
-    pub kv_cache_block_size: Option<usize>,
+    pub kv_cache_block_size: Option<u32>,
 
     /// Additional engine-specific arguments from a JSON file.
     /// Contains a mapping of parameter names to values.
@@ -138,45 +158,63 @@ pub struct Flags {
 }
 
 impl Flags {
-    /// Convert the flags back to a command line. Including only the non-null values, but
-    /// include the defaults. Includes the canonicalized model path and normalized model name.
-    ///
-    /// Used to pass arguments to python engines via `pystr` and `pytok`.
-    pub fn as_vec(&self, path: &str, name: &str) -> Vec<String> {
-        let mut out = vec![
-            "--model-path".to_string(),
-            path.to_string(),
-            "--model-name".to_string(),
-            name.to_string(),
-            "--http-port".to_string(),
-            self.http_port.to_string(),
-            // Default 1
-            "--tensor-parallel-size".to_string(),
-            self.tensor_parallel_size.to_string(),
-            // Default 0
-            "--base-gpu-id".to_string(),
-            self.base_gpu_id.to_string(),
-            // Default 1
-            "--num-nodes".to_string(),
-            self.num_nodes.to_string(),
-            // Default 0
-            "--node-rank".to_string(),
-            self.node_rank.to_string(),
-        ];
-        if let Some(model_config_path) = self.model_config.as_ref() {
-            out.push("--model-config".to_string());
-            out.push(model_config_path.display().to_string());
+    /// For each Output variant, check if it would be able to run.
+    /// This takes validation out of the main engine creation path.
+    pub fn validate(&self, local_model: &LocalModel, out_opt: &Output) -> anyhow::Result<()> {
+        match out_opt {
+            Output::Dynamic => {
+                if self.context_length.is_some() {
+                    anyhow::bail!("'--context-length' flag should only be used on the worker node, not on the ingress");
+                }
+                if self.kv_cache_block_size.is_some() {
+                    anyhow::bail!("'--kv-cache-block-size' flag should only be used on the worker node, not on the ingress");
+                }
+            }
+            Output::EchoFull => {}
+            Output::EchoCore => {
+                if !local_model.card().has_tokenizer() {
+                    anyhow::bail!(
+                        "out=echo_core need to find the tokenizer. Pass flag --model-path <path>"
+                    );
+                };
+            }
+            #[cfg(feature = "mistralrs")]
+            Output::MistralRs => {}
+            Output::SgLang => {
+                if !local_model.path().is_dir() {
+                    // TODO GGUF support for sglang: https://github.com/ai-dynamo/dynamo/issues/572
+                    anyhow::bail!("`--model-path should point at a HuggingFace repo checkout");
+                }
+            }
+            Output::Vllm => {
+                if self.base_gpu_id != 0 {
+                    anyhow::bail!("vllm does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
+                }
+            }
+            Output::Trtllm => {
+                if self.base_gpu_id != 0 {
+                    anyhow::bail!("TRTLLM does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
+                }
+            }
+            #[cfg(feature = "llamacpp")]
+            Output::LlamaCpp => {
+                if !local_model.path().is_file() {
+                    anyhow::bail!("--model-path should refer to a GGUF file. llama_cpp does not support safetensors.");
+                }
+            }
         }
-        if let Some(leader) = self.leader_addr.as_ref() {
-            out.push("--leader-addr".to_string());
-            out.push(leader.to_string());
-        }
-        if let Some(extra_engine_args) = self.extra_engine_args.as_ref() {
-            out.push("--extra-engine-args".to_string());
-            out.push(extra_engine_args.display().to_string());
-        }
-        out.extend(self.last.clone());
-        out
+        Ok(())
+    }
+
+    pub fn router_config(&self) -> RouterConfig {
+        RouterConfig::new(
+            self.router_mode.into(),
+            KvRouterConfig::new(
+                self.kv_overlap_score_weight,
+                self.kv_gpu_cache_usage_weight,
+                self.kv_waiting_requests_weight,
+            ),
+        )
     }
 
     /// Load extra engine arguments from a JSON file

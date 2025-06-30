@@ -17,11 +17,17 @@ use std::env;
 
 use clap::Parser;
 
-use dynamo_run::{Input, Output};
+use dynamo_llm::entrypoint::input::Input;
+use dynamo_run::Output;
 use dynamo_runtime::logging;
 
 const HELP: &str = r#"
 dynamo-run is a single binary that wires together the various inputs (http, text, network) and workers (network, engine), that runs the services. It is the simplest way to use dynamo locally.
+
+Verbosity:
+- -v enables debug logs
+- -vv enables full trace logs
+- Default is info level logging
 
 Example:
 - cargo build --features cuda -p dynamo-run
@@ -30,7 +36,7 @@ Example:
 - OR: ./dynamo-run /data/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf
 "#;
 
-const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=ENGINE_LIST|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--kv-cache-block-size=16] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv]";
+const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=ENGINE_LIST|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--kv-cache-block-size=16] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=2.0] [--kv-gpu-cache-usage-weight=1.0] [--kv-waiting-requests-weight=1.0] [--verbosity (-v|-vv)]";
 
 fn main() -> anyhow::Result<()> {
     // Set log level based on verbosity flag
@@ -77,6 +83,13 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
         println!("{usage}");
         println!("{HELP}");
         return Ok(());
+    } else if args[0] == "--version" {
+        if let Some(describe) = option_env!("VERGEN_GIT_DESCRIBE") {
+            println!("dynamo-run {}", describe);
+        } else {
+            println!("Version not available (git describe not available)");
+        }
+        return Ok(());
     }
     for arg in env::args().skip(1).take(2) {
         let Some((in_out, val)) = arg.split_once('=') else {
@@ -115,5 +128,17 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
             .chain(env::args().skip(non_flag_params)),
     )?;
 
+    if is_in_dynamic(&in_opt) && is_out_dynamic(&out_opt) {
+        anyhow::bail!("Cannot use endpoint for both in and out");
+    }
+
     dynamo_run::run(runtime, in_opt, out_opt, flags).await
+}
+
+fn is_in_dynamic(in_opt: &Input) -> bool {
+    matches!(in_opt, Input::Endpoint(_))
+}
+
+fn is_out_dynamic(out_opt: &Option<Output>) -> bool {
+    matches!(out_opt, Some(Output::Dynamic))
 }

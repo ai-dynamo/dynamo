@@ -29,7 +29,7 @@ impl<S: Storage, M: BlockMetadata> ActiveBlockPool<S, M> {
 
     pub fn register(
         &mut self,
-        block: MutableBlock<S, M>,
+        mut block: MutableBlock<S, M>,
     ) -> Result<ImmutableBlock<S, M>, BlockPoolError> {
         if !block.state().is_registered() {
             return Err(BlockPoolError::InvalidMutableBlock(
@@ -40,6 +40,14 @@ impl<S: Storage, M: BlockMetadata> ActiveBlockPool<S, M> {
         let sequence_hash = block.sequence_hash().map_err(|_| {
             BlockPoolError::InvalidMutableBlock("block has no sequence hash".to_string())
         })?;
+
+        // Set the parent of the block if it has one.
+        // This is needed to ensure the lifetime of the parent is at least as long as the child.
+        if let Ok(Some(parent)) = block.parent_sequence_hash() {
+            if let Some(parent_block) = self.match_sequence_hash(parent) {
+                block.set_parent(parent_block.mutable_block().clone());
+            }
+        }
 
         let shared = Arc::new(block);
 

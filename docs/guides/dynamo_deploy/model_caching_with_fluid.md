@@ -1,23 +1,6 @@
-# Fluid: Cloud-Native Data Orchestration and Acceleration
+# Model Caching with Fluid: Cloud-Native Data Orchestration and Acceleration
 
 Fluid is an open-source, cloud-native data orchestration and acceleration platform for Kubernetes. It virtualizes and accelerates data access from various sources (object storage, distributed file systems, cloud storage), making it ideal for AI, machine learning, and big data workloads.
-
----
-
-## Table of Contents
-
-1. [Key Features](#key-features)
-2. [Installation](#installation)
-3. [Quick Start](#quick-start)
-4. [Mounting Data Sources](#mounting-data-sources)
-    - [WebUFS Example](#webufs-example)
-    - [S3 Example](#s3-example)
-5. [Using HuggingFace Models with Fluid](#using-huggingface-models-with-fluid)
-6. [Usage with Dynamo](#usage-with-dynamo)
-7. [Troubleshooting & FAQ](#troubleshooting--faq)
-8. [Resources](#resources)
-
----
 
 ## Key Features
 
@@ -26,11 +9,9 @@ Fluid is an open-source, cloud-native data orchestration and acceleration platfo
 - **Kubernetes Native:** Integrates with Kubernetes using CRDs for data management.
 - **Scalability:** Supports large-scale data and compute clusters.
 
----
-
 ## Installation
 
-Fluid can be installed on any Kubernetes cluster using Helm.
+You can install Fluid on any Kubernetes cluster using Helm.
 
 **Prerequisites:**
 - Kubernetes >= 1.18
@@ -46,15 +27,12 @@ helm install fluid fluid/fluid -n fluid-system
 ```
 For advanced configuration, see the [Fluid Installation Guide](https://fluid-cloudnative.github.io/docs/get-started/installation).
 
----
-
 ## Quick Start
 
-1. **Install Fluid (see above).**
-2. **Create a Dataset and Runtime (see examples below).**
-3. **Mount the resulting PVC in your workload.**
+1. Install Fluid (see [Installation](#installation)).
+2. Create a Dataset and Runtime (see [the following example](#webufs-example)).
+3. Mount the resulting PVC in your workload.
 
----
 
 ## Mounting Data Sources
 
@@ -87,9 +65,7 @@ spec:
         high: "0.95"
         low: "0.7"
 ```
-> After applying, Fluid creates a PersistentVolumeClaim (PVC) named `webufs-model` containing the files.
-
----
+After applying, Fluid creates a PersistentVolumeClaim (PVC) named `webufs-model` containing the files.
 
 ### S3 Example
 
@@ -137,9 +113,8 @@ spec:
     - path: "/"
       replicas: 1
 ```
-> The resulting PVC is named `s3-model`.
 
----
+The resulting PVC is named `s3-model`.
 
 ## Using HuggingFace Models with Fluid
 
@@ -190,9 +165,8 @@ spec:
     - name: tmp-volume
       emptyDir: {}
 ```
-> You can then use `s3://hf-models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B` as your Dataset mount.
 
----
+You can then use `s3://hf-models/deepseek-ai/DeepSeek-R1-Distill-Llama-8B` as your Dataset mount.
 
 ## Usage with Dynamo
 
@@ -221,7 +195,120 @@ spec:
         mountPoint: /model
 ```
 
+
+## Full example with llama3.3 70B
+
+### Performance
+
+When deploying LLaMA 3.3 70B using Fluid as the caching layer, we observed the best performance by configuring a single-node cache that holds 100% of the model files locally. By ensuring that the vllm worker pod is scheduled on the same node as the Fluid cache, we were able to eliminate network I/O bottlenecks, which resulted in the fastest model startup time and the highest inference efficiency during our tests.
+
+| Cache Configuration                          | vLLM Pod Placement               | Startup Time    |
+|----------------------------------------------|----------------------------------|-----------------|
+| ❌ No Cache (Download from HuggingFace)      | N/A                              | ~9 minutes      |
+| 🟡 Multi-Node Cache (100% Model Cached)      | Not on Cache Node                | ~18 minutes     |
+| 🟡 Multi-Node Cache (100% Model Cached)      | On Cache Node                    | ~10 minutes     |
+| ✅ Single-Node Cache (100% Model Cached)     | On Cache Node                    | ~80 seconds     |
+
+
+### Resources
+
+```yaml
+# dataset.yaml
+apiVersion: data.fluid.io/v1alpha1
+kind: Dataset
+metadata:
+  name: llama-3-3-70b-instruct-model
+  namespace: my-namespace
+spec:
+  mounts:
+    - mountPoint: s3://hf-models/meta-llama/Llama-3.3-70B-Instruct
+      options:
+        alluxio.underfs.s3.endpoint: http://minio:9000
+        alluxio.underfs.s3.disable.dns.buckets: "true"
+        aws.secretKey: "minioadmin"
+        aws.accessKeyId: "minioadmin"
+        alluxio.underfs.s3.streaming.upload.enabled: "true"
+        alluxio.underfs.s3.multipart.upload.threads: "20"
+        alluxio.underfs.s3.socket.timeout: "50s"
+        alluxio.underfs.s3.request.timeout: "60s"
 ---
+# runtime.yaml
+apiVersion: data.fluid.io/v1alpha1
+kind: AlluxioRuntime
+metadata:
+  name: llama-3-3-70b-instruct-model
+  namespace: my-namespace
+spec:
+  replicas: 1
+  properties:
+    alluxio.user.file.readtype.default: CACHE_PROMOTE
+    alluxio.user.file.write.type.default: CACHE_THROUGH
+    alluxio.user.block.size.bytes.default: 128MB
+  tieredstore:
+    levels:
+      - mediumtype: MEM
+        path: /dev/shm
+        quota: 300Gi
+        high: "1.0"
+        low: "0.7"
+---
+# DataLoad - Preloads the model into cache
+apiVersion: data.fluid.io/v1alpha1
+kind: DataLoad
+metadata:
+  name: llama-3-3-70b-instruct-model-loader
+spec:
+  dataset:
+    name: llama-3-3-70b-instruct-model
+    namespace: my-namespace
+  loadMetadata: true
+  target:
+    - path: "/"
+      replicas: 1
+```
+
+and the associated DynamoGraphDeployment with pod affinity to schedule the vllm worker on the same node than the Alluxio cache worker
+
+```yaml
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: my-hello-world
+spec:
+  dynamoGraph: frontend:214c1690
+  envs:
+  - name: DYN_LOG
+    value: "debug"
+  - name: DYN_DEPLOYMENT_CONFIG
+    value: '{"Common": {"model": "/model", "block-size": 64, "max-model-len": 16384},
+      "Frontend": {"served_model_name": "meta-llama/Llama-3.3-70B-Instruct", "endpoint":
+      "dynamo.Processor.chat/completions", "port": 8000}, "Processor": {"router":
+      "round-robin", "router-num-threads": 4, "common-configs": ["model", "block-size",
+      "max-model-len"]}, "VllmWorker": {"tensor-parallel-size": 4, "enforce-eager": true, "max-num-batched-tokens":
+      16384, "enable-prefix-caching": true, "ServiceArgs": {"workers": 1, "resources":
+      {"gpu": "4", "memory": "40Gi"}}, "common-configs": ["model", "block-size", "max-model-len"]},
+      "Planner": {"environment": "kubernetes", "no-operation": true}}'
+  services:
+    Processor:
+      pvc:
+        mountPoint: /model
+        name: llama-3-3-70b-instruct-model
+    VllmWorker:
+      pvc:
+        mountPoint: /model
+        name: llama-3-3-70b-instruct-model
+      extraPodSpec:
+        affinity:
+          nodeAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:
+              nodeSelectorTerms:
+                - matchExpressions:
+                  - key: fluid.io/s-alluxio-my-namespace-llama-3-3-70b-instruct-model
+                    operator: In
+                    values:
+                      - "true"
+```
+
 
 ## Troubleshooting & FAQ
 
@@ -229,12 +316,11 @@ spec:
 - **Model not found?** Ensure the model was uploaded to the correct bucket/path.
 - **Permission errors?** Verify S3/MinIO credentials and bucket policies.
 
----
-
 ## Resources
 
 - [Fluid Documentation](https://fluid-cloudnative.github.io/)
 - [Alluxio Documentation](https://docs.alluxio.io/)
 - [MinIO Documentation](https://min.io/docs/)
-- [HuggingFace Hub](https://huggingface.co/docs/hub/index)
-- [Dynamo Documentation](README.md)
+- [Hugging Face Hub](https://huggingface.co/docs/hub/index)
+- [Dynamo README](https://github.com/ai-dynamo/dynamo/blob/main/.devcontainer/README.md)
+- [Dynamo Documentation](https://docs.nvidia.com/dynamo/latest/index.html)

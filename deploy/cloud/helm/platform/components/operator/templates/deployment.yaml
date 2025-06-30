@@ -37,6 +37,10 @@ spec:
       annotations:
         kubectl.kubernetes.io/default-container: manager
     spec:
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
       - args: {{- toYaml .Values.controllerManager.kubeRbacProxy.args | nindent
           8 }}
@@ -68,9 +72,13 @@ spec:
         {{- end }}
         {{- if .Values.natsAddr }}
           - --natsAddr={{ .Values.natsAddr }}
+        {{- else }}
+          - --natsAddr=nats://{{ .Release.Name }}-nats:4222
         {{- end }}
         {{- if .Values.etcdAddr }}
           - --etcdAddr={{ .Values.etcdAddr }}
+        {{- else }}
+          - --etcdAddr={{ .Release.Name }}-etcd:2379
         {{- end }}
         {{- if and .Values.dynamo.istio.enabled .Values.dynamo.istio.gateway }}
           - --istio-virtual-service-gateway={{ .Values.dynamo.istio.gateway }}
@@ -92,12 +100,15 @@ spec:
         {{- if .Values.dynamo.enableLWS }}
           - --enable-lws
         {{- end }}
-
         command:
         - /manager
         env:
         - name: KUBERNETES_CLUSTER_DOMAIN
           value: {{ quote .Values.kubernetesClusterDomain }}
+        {{if .Values.dynamo.dockerRegistry.useKubernetesSecret}}
+        - name: DOCKER_CONFIG
+          value: /docker/.docker
+        {{end}}
         envFrom:
         - secretRef:
             name: dynamo-deployment-env
@@ -120,7 +131,19 @@ spec:
           10 }}
         securityContext: {{- toYaml .Values.controllerManager.manager.containerSecurityContext
           | nindent 10 }}
-      imagePullSecrets: {{ .Values.imagePullSecrets | default list | toJson }}
+      {{if .Values.dynamo.dockerRegistry.useKubernetesSecret}}
+        volumeMounts:
+        - name: docker-config
+          mountPath: /docker/.docker
+          readOnly: true
+      volumes:
+      - name: docker-config
+        secret:
+          secretName: {{ include "dynamo-operator.componentsDockerRegistrySecretName" . }}
+          items:
+          - key: .dockerconfigjson
+            path: config.json
+      {{end}}
       securityContext:
         runAsNonRoot: true
       serviceAccountName: {{ include "dynamo-operator.fullname" . }}-controller-manager

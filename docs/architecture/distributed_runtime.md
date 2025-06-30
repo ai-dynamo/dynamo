@@ -61,11 +61,11 @@ The hierarchy and naming in etcd and NATS may change over time, and this documen
 
 Dynamo uses `Client` object to call an endpoint. When a `Client` objected is created, it is given the name of the `Namespace`, `Component`, and `Endpoint`. It then sets up an etcd watcher to monitor the prefix `/services/{namespace}/{component}/{endpoint}`. The etcd watcher continuously updates the `Client` with the information, including `lease_id` and NATS subject of the available `Endpoint`s.
 
-The user can decide which load balancing strategy to use when calling the `Endpoint` from the `Client`, which is done in [PushRouter](/lib/runtime/src/pipeline/network/egress/push_router.rs). Dynamo supports three load balancing strategies:
+The user can decide which load balancing strategy to use when calling the `Endpoint` from the `Client`, which is done in [push_router.rs](../../lib/runtime/src/pipeline/network/egress/push_router.rs). Dynamo supports three load balancing strategies:
 
-- `random`: randomly select an endpoint to hit,
-- `round_robin`: select endpoints in round-robin order,
-- `direct`: direct the request to a specific endpoint by specifying the `lease_id` of the endpoint.
+- `random`: randomly select an endpoint to hit
+- `round_robin`: select endpoints in round-robin order
+- `direct`: direct the request to a specific endpoint by specifying the `lease_id` of the endpoint
 
 After selecting which endpoint to hit, the `Client` sends the serialized request to the NATS subject of the selected `Endpoint`. The `Endpoint` receives the request and create a TCP response stream using the connection information from the request, which establishes a direct TCP connection to the `Client`. Then, as the worker generates the response, it serializes each response chunk and sends the serialized data over the TCP connection.
 
@@ -75,3 +75,18 @@ We provide native rust and python (through binding) examples for basic usage of 
 
 - Rust: `/lib/runtime/examples/`
 - Python: `/lib/bindings/python/examples/`. We also provide a complete example of using `DistributedRuntime` for communication and Dynamo's LLM library for prompt templates and (de)tokenization to deploy a vllm-based service. Please refer to `lib/bindings/python/examples/hello_world/server_vllm.py` for details.
+
+```{note}
+Building a vLLM docker image for ARM machines currently involves building vLLM from source, which is known to be slow and requires extensive system RAM; see [vLLM Issue 8878](https://github.com/vllm-project/vllm/issues/8878).
+
+You can tune the number of parallel build jobs for building VLLM from source
+on ARM based on your available cores and system RAM with `VLLM_MAX_JOBS`.
+
+For example, on an ARM machine with low system resources:
+`./container/build.sh --framework vllm --platform linux/arm64 --build-arg VLLM_MAX_JOBS=2`
+
+For example, on a GB200 which has very high CPU cores and memory resource:
+`./container/build.sh --framework vllm --platform linux/arm64 --build-arg VLLM_MAX_JOBS=64`
+
+When vLLM has pre-built ARM wheels published, this process can be improved.
+```

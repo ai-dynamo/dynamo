@@ -34,7 +34,7 @@ from vllm.inputs import TokensPrompt
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
-from dynamo.llm import KvMetricsPublisher, ModelType, register_llm
+from dynamo.llm import ModelType, WorkerMetricsPublisher, register_llm
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
@@ -90,7 +90,7 @@ class VllmWorker:
             os.environ["VLLM_KV_NAMESPACE"] = "dynamo"
             os.environ["VLLM_KV_COMPONENT"] = class_name
 
-        self.metrics_publisher = KvMetricsPublisher()
+        self.metrics_publisher = WorkerMetricsPublisher()
 
         model_config = self.engine_args.create_model_config()
         self.default_sampling_params = model_config.get_diff_sampling_param()
@@ -212,7 +212,8 @@ class VllmWorker:
                 prefill_queue_size = await prefill_queue.get_queue_size()
             disagg_router_decision = await self.disaggregated_router.prefill_remote(
                 len(request.token_ids),
-                request.estimated_prefix_hit_num_blocks * self.engine_args.block_size,
+                (request.estimated_prefix_hit_num_blocks or 0)
+                * self.engine_args.block_size,
                 prefill_queue_size,
             )
         else:
@@ -230,7 +231,7 @@ class VllmWorker:
         else:
             remote_prefill_params = None
             logger.info(
-                f"Prefilling locally for request {request_id} with length {len(request.token_ids)} (estimated prefix hit length {request.estimated_prefix_hit_num_blocks * self.engine_args.block_size})"
+                f"Prefilling locally for request {request_id} with length {len(request.token_ids)} (estimated prefix hit length {(request.estimated_prefix_hit_num_blocks or 0) * self.engine_args.block_size})"
             )
 
         sampling_params = SamplingParams(**self.default_sampling_params)

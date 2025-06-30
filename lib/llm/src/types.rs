@@ -24,14 +24,17 @@ pub mod openai {
     pub mod completions {
         use super::*;
 
-        pub use protocols::openai::completions::{CompletionRequest, CompletionResponse};
+        pub use protocols::openai::completions::{
+            NvCreateCompletionRequest, NvCreateCompletionResponse,
+        };
 
         /// A [`UnaryEngine`] implementation for the OpenAI Completions API
-        pub type OpenAICompletionsUnaryEngine = UnaryEngine<CompletionRequest, CompletionResponse>;
+        pub type OpenAICompletionsUnaryEngine =
+            UnaryEngine<NvCreateCompletionRequest, NvCreateCompletionResponse>;
 
         /// A [`ServerStreamingEngine`] implementation for the OpenAI Completions API
         pub type OpenAICompletionsStreamingEngine =
-            ServerStreamingEngine<CompletionRequest, Annotated<CompletionResponse>>;
+            ServerStreamingEngine<NvCreateCompletionRequest, Annotated<NvCreateCompletionResponse>>;
     }
 
     pub mod chat_completions {

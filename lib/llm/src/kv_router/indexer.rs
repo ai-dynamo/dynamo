@@ -119,9 +119,9 @@ pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
 /// ### Returns
 ///
 /// A vector of `LocalBlockHash` representing the computed hashes for each chunk of tokens.
-pub fn compute_block_hash_for_seq(tokens: &[u32], kv_block_size: usize) -> Vec<LocalBlockHash> {
+pub fn compute_block_hash_for_seq(tokens: &[u32], kv_block_size: u32) -> Vec<LocalBlockHash> {
     tokens
-        .chunks_exact(kv_block_size) // Split into chunks of kv_block_size elements
+        .chunks_exact(kv_block_size as usize) // Split into chunks of kv_block_size elements
         .map(|chunk| {
             let bytes: Vec<u8> = chunk
                 .iter()
@@ -373,6 +373,9 @@ impl RadixTree {
                     worker_lookup.remove(&block);
                 }
             }
+            KvCacheEventData::Cleared => {
+                self.clear_all_blocks(worker_id);
+            }
         }
     }
 
@@ -381,6 +384,23 @@ impl RadixTree {
             blocks.iter().for_each(|(_, block)| {
                 block.borrow_mut().workers.remove(&worker);
             });
+        }
+    }
+
+    pub fn clear_all_blocks(&mut self, worker: WorkerId) {
+        // Check if the worker has any blocks to clear
+        if let Some(blocks) = self.lookup.get(&worker) {
+            let blocks_to_clear: Vec<_> = blocks.values().collect();
+
+            // Remove the worker from each block's workers set
+            blocks_to_clear.iter().for_each(|block| {
+                block.borrow_mut().workers.remove(&worker);
+            });
+
+            // Clear the worker's blocks
+            if let Some(worker_blocks) = self.lookup.get_mut(&worker) {
+                worker_blocks.clear();
+            }
         }
     }
 }
@@ -507,7 +527,7 @@ pub struct KvIndexer {
     /// A handle to the background task managing the KV store.
     task: OnceLock<std::thread::JoinHandle<()>>,
     /// The size of the KV block this indexer can handle.
-    kv_block_size: usize,
+    kv_block_size: u32,
 }
 
 impl KvIndexer {
@@ -524,7 +544,7 @@ impl KvIndexer {
     pub fn new_with_frequency(
         token: CancellationToken,
         expiration_duration: Option<Duration>,
-        kv_block_size: usize,
+        kv_block_size: u32,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel::<RouterEvent>(2048);
         let (match_tx, match_rx) = mpsc::channel::<MatchRequest>(128);
@@ -591,11 +611,11 @@ impl KvIndexer {
         }
     }
 
-    pub fn block_size(&self) -> usize {
+    pub fn block_size(&self) -> u32 {
         self.kv_block_size
     }
 
-    pub fn new(token: CancellationToken, kv_block_size: usize) -> Self {
+    pub fn new(token: CancellationToken, kv_block_size: u32) -> Self {
         Self::new_with_frequency(token, None, kv_block_size)
     }
 
@@ -677,7 +697,7 @@ pub struct KvIndexerSharded {
     /// A `CancellationToken` for managing shutdown.
     cancel: CancellationToken,
     /// The size of the KV block this indexer can handle.
-    kv_block_size: usize,
+    kv_block_size: u32,
     worker_assignments: HashMap<WorkerId, usize>,
     worker_counts: Vec<usize>,
 
@@ -703,7 +723,7 @@ impl KvIndexerSharded {
         token: CancellationToken,
         num_shards: usize,
         expiration_duration: Option<Duration>,
-        kv_block_size: usize,
+        kv_block_size: u32,
     ) -> Self {
         let worker_assignments: HashMap<WorkerId, usize> = HashMap::new();
         let worker_counts: Vec<usize> = vec![0; num_shards];
@@ -782,11 +802,11 @@ impl KvIndexerSharded {
         }
     }
 
-    pub fn block_size(&self) -> usize {
+    pub fn block_size(&self) -> u32 {
         self.kv_block_size
     }
 
-    pub fn new(token: CancellationToken, num_shards: usize, kv_block_size: usize) -> Self {
+    pub fn new(token: CancellationToken, num_shards: usize, kv_block_size: u32) -> Self {
         Self::new_with_frequency(token, num_shards, None, kv_block_size)
     }
 }
@@ -1181,6 +1201,88 @@ mod tests {
     }
 
     #[test]
+    fn test_clear_all_blocks() {
+        let mut trie = RadixTree::new();
+
+        let worker_0 = 0;
+        let worker_1 = 1;
+
+        assert!(trie
+            .find_matches(vec![LocalBlockHash(0)], false)
+            .scores
+            .is_empty());
+
+        // Test clearing an empty worker
+        trie.clear_all_blocks(worker_0);
+        assert!(!trie.lookup.contains_key(&worker_0));
+
+        // Test clearing a worker with shared blocks
+        trie.apply_event(create_store_event(worker_0, 0, vec![0, 1, 3], None));
+        trie.apply_event(create_store_event(worker_1, 0, vec![0, 2, 3], None));
+
+        let result = trie.find_matches(vec![LocalBlockHash(0)], false).scores;
+        assert!(result.len() == 2 && result[&worker_0] == 1 && result[&worker_1] == 1);
+
+        trie.clear_all_blocks(worker_0);
+
+        assert!(trie.lookup.contains_key(&worker_0));
+        assert!(trie.lookup.get(&worker_0).unwrap().is_empty());
+        let result = trie
+            .find_matches(vec![LocalBlockHash(0), LocalBlockHash(2)], false)
+            .scores;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[&worker_1], 2);
+        let result = trie
+            .find_matches(
+                vec![LocalBlockHash(0), LocalBlockHash(1), LocalBlockHash(3)],
+                false,
+            )
+            .scores;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[&worker_1], 1);
+
+        // Test re-adding blocks after clearing worker
+        trie.apply_event(create_store_event(worker_0, 0, vec![4, 5], None));
+        let result = trie
+            .find_matches(vec![LocalBlockHash(4), LocalBlockHash(5)], false)
+            .scores;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[&worker_0], 2);
+
+        // Test multiple clears
+        trie.clear_all_blocks(worker_0);
+        trie.clear_all_blocks(worker_0);
+        assert!(trie.lookup.contains_key(&worker_0));
+
+        // Test clearing all workers
+        trie.clear_all_blocks(worker_0);
+        trie.clear_all_blocks(worker_1);
+        assert!(!trie.lookup.is_empty());
+        assert!(trie.lookup.get(&worker_0).unwrap().is_empty());
+        assert!(trie.lookup.get(&worker_1).unwrap().is_empty());
+
+        // Test clearing a worker that has been removed
+        trie.apply_event(create_store_event(worker_0, 0, vec![6], None));
+        trie.apply_event(create_store_event(worker_1, 0, vec![6], None));
+        trie.remove_worker(worker_0);
+        trie.clear_all_blocks(worker_0);
+        assert!(!trie.lookup.contains_key(&worker_0));
+        let result = trie.find_matches(vec![LocalBlockHash(6)], false).scores;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[&worker_1], 1);
+
+        // Test clearing a worker that doesn't exist
+        let worker_fake = 2;
+        assert!(!trie.lookup.contains_key(&worker_fake));
+        trie.clear_all_blocks(worker_fake);
+        assert!(!trie.lookup.contains_key(&worker_fake));
+        assert!(trie.lookup.contains_key(&worker_1));
+        let result = trie.find_matches(vec![LocalBlockHash(6)], false).scores;
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[&worker_1], 1);
+    }
+
+    #[test]
     fn test_early_stopping() {
         setup();
         let mut trie = RadixTree::new();
@@ -1210,24 +1312,20 @@ mod tests {
     #[case(11)]
     #[case(32)]
     #[case(64)]
-    fn test_compute_block_hash_for_seq(#[case] kv_block_size: usize) {
+    fn test_compute_block_hash_for_seq(#[case] kv_block_size: u32) {
         setup();
         // create a sequence of 64 elements
-        let sequence = (0..kv_block_size).map(|i| i as u32).collect::<Vec<u32>>();
+        let sequence = (0..kv_block_size).collect::<Vec<u32>>();
         let hashes = compute_block_hash_for_seq(&sequence, kv_block_size);
         assert_eq!(hashes.len(), 1);
 
         // create a sequence of 65 elements
-        let sequence = (0..(kv_block_size + 1))
-            .map(|i| i as u32)
-            .collect::<Vec<u32>>();
+        let sequence = (0..(kv_block_size + 1)).collect::<Vec<u32>>();
         let hashes = compute_block_hash_for_seq(&sequence, kv_block_size);
         assert_eq!(hashes.len(), 1);
 
         // create a sequence of 129 elements
-        let sequence = (0..(2 * kv_block_size + 1))
-            .map(|i| i as u32)
-            .collect::<Vec<u32>>();
+        let sequence = (0..(2 * kv_block_size + 1)).collect::<Vec<u32>>();
         let hashes = compute_block_hash_for_seq(&sequence, kv_block_size);
         assert_eq!(hashes.len(), 2);
     }
@@ -1235,7 +1333,7 @@ mod tests {
     fn make_indexer(
         token: &CancellationToken,
         num_shards: usize,
-        kv_block_size: usize,
+        kv_block_size: u32,
     ) -> Box<dyn KvIndexerInterface> {
         if num_shards == 1 {
             Box::new(KvIndexer::new(token.clone(), kv_block_size))
@@ -1258,7 +1356,7 @@ mod tests {
 
     #[tokio::test]
     #[apply(indexer_template)]
-    async fn test_kv_indexer_new(num_shards: usize, kv_block_size: usize) {
+    async fn test_kv_indexer_new(num_shards: usize, kv_block_size: u32) {
         setup();
         let token: CancellationToken = CancellationToken::new();
         let _ = make_indexer(&token, num_shards, kv_block_size);
@@ -1266,7 +1364,7 @@ mod tests {
 
     #[tokio::test]
     #[apply(indexer_template)]
-    async fn test_find_matches(num_shards: usize, kv_block_size: usize) {
+    async fn test_find_matches(num_shards: usize, kv_block_size: u32) {
         setup();
         let token = CancellationToken::new();
         let kv_indexer = make_indexer(&token, num_shards, kv_block_size);
@@ -1279,7 +1377,7 @@ mod tests {
 
     #[tokio::test]
     #[apply(indexer_template)]
-    async fn test_find_matches_for_request(num_shards: usize, kv_block_size: usize) {
+    async fn test_find_matches_for_request(num_shards: usize, kv_block_size: u32) {
         setup();
         let token = CancellationToken::new();
         let kv_indexer = make_indexer(&token, num_shards, kv_block_size);
@@ -1292,7 +1390,7 @@ mod tests {
 
     #[tokio::test]
     #[apply(indexer_template)]
-    async fn test_apply_event(num_shards: usize, kv_block_size: usize) {
+    async fn test_apply_event(num_shards: usize, kv_block_size: u32) {
         setup();
         let worker_id = 0;
 
@@ -1307,7 +1405,7 @@ mod tests {
 
     #[tokio::test]
     #[apply(indexer_template)]
-    async fn test_shutdown(num_shards: usize, kv_block_size: usize) {
+    async fn test_shutdown(num_shards: usize, kv_block_size: u32) {
         setup();
         let token = CancellationToken::new();
         let mut kv_indexer = make_indexer(&token, num_shards, kv_block_size);
@@ -1317,7 +1415,7 @@ mod tests {
 
     #[tokio::test]
     #[apply(indexer_template)]
-    async fn test_frequency(num_shards: usize, kv_block_size: usize) {
+    async fn test_frequency(num_shards: usize, kv_block_size: u32) {
         const ONE_MILLIS: Duration = Duration::from_millis(1);
 
         setup();

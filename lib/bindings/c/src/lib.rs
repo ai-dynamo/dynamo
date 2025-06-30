@@ -96,7 +96,7 @@ pub unsafe extern "C" fn dynamo_llm_init(
 
     match result {
         Ok(_) => match KV_PUB.get_or_try_init(move || {
-            dynamo_create_kv_publisher(namespace, component, worker_id, kv_block_size as usize)
+            dynamo_create_kv_publisher(namespace, component, worker_id, kv_block_size)
         }) {
             Ok(_) => DynamoLlmResult::OK,
             Err(e) => {
@@ -139,7 +139,7 @@ fn dynamo_create_kv_publisher(
     namespace: String,
     component: String,
     worker_id: i64,
-    kv_block_size: usize,
+    kv_block_size: u32,
 ) -> Result<KvEventPublisher, anyhow::Error> {
     tracing::info!("Creating KV Publisher for model: {}", component);
     match DRT
@@ -148,7 +148,7 @@ fn dynamo_create_kv_publisher(
     {
         Ok(drt) => {
             let backend = drt.namespace(namespace)?.component(component)?;
-            KvEventPublisher::new(backend, worker_id, kv_block_size)
+            KvEventPublisher::new(backend, worker_id, kv_block_size, None)
         }
         Err(e) => Err(e),
     }
@@ -158,7 +158,7 @@ fn kv_event_create_stored_block_from_parts(
     block_hash: u64,
     token_ids: *const u32,
     num_tokens: usize,
-    kv_block_size: usize,
+    kv_block_size: u32,
     _lora_id: u64,
 ) -> KvCacheStoredBlockData {
     let tokens_hash = compute_block_hash_for_seq(
@@ -174,7 +174,7 @@ static WARN_COUNT: AtomicU32 = AtomicU32::new(0);
 
 fn kv_event_create_stored_from_parts(
     kv_params: DynamoKvStoredEventParams,
-    kv_block_size: usize,
+    kv_block_size: u32,
 ) -> KvCacheEvent {
     let mut blocks: Vec<KvCacheStoredBlockData> = Vec::new();
 
@@ -188,7 +188,7 @@ fn kv_event_create_stored_from_parts(
                 .offset(block_idx.try_into().unwrap())
         };
 
-        if num_toks != kv_block_size {
+        if num_toks != (kv_block_size as usize) {
             if WARN_COUNT
                 .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |c| {
                     if c < 3 {

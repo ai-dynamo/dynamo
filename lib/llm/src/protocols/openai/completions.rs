@@ -13,11 +13,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
-
 use derive_builder::Builder;
+use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
+
+use super::{
+    common::{self, SamplingOptionsProvider, StopConditionsProvider},
+    nvext::{NvExt, NvExtProvider},
+    ContentProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
+};
 
 mod aggregator;
 mod delta;
@@ -25,16 +30,8 @@ mod delta;
 pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
 
-use super::{
-    common::{self, SamplingOptionsProvider, StopConditionsProvider},
-    nvext::{NvExt, NvExtProvider},
-    CompletionUsage, ContentProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
-};
-
-use dynamo_runtime::protocols::annotated::AnnotationsProvider;
-
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
-pub struct CompletionRequest {
+pub struct NvCreateCompletionRequest {
     #[serde(flatten)]
     pub inner: async_openai::types::CreateCompletionRequest,
 
@@ -42,80 +39,16 @@ pub struct CompletionRequest {
     pub nvext: Option<NvExt>,
 }
 
-/// Legacy OpenAI CompletionResponse
-/// Represents a completion response from the API.
-/// Note: both the streamed and non-streamed response objects share the same
-/// shape (unlike the chat endpoint).
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct CompletionResponse {
-    /// A unique identifier for the completion.
-    pub id: String,
-
-    /// The list of completion choices the model generated for the input prompt.
-    pub choices: Vec<CompletionChoice>,
-
-    /// The Unix timestamp (in seconds) of when the completion was created.
-    pub created: u64,
-
-    /// The model used for completion.
-    pub model: String,
-
-    /// The object type, which is always "text_completion"
-    pub object: String,
-
-    /// Usage statistics for the completion request.
-    pub usage: Option<CompletionUsage>,
-
-    /// This fingerprint represents the backend configuration that the model runs with.
-    /// Can be used in conjunction with the seed request parameter to understand when backend
-    /// changes have been made that might impact determinism.
-    ///
-    /// NIM Compatibility:
-    /// This field is not supported by the NIM; however it will be added in the future.
-    /// The optional nature of this field will be relaxed when it is supported.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub system_fingerprint: Option<String>,
-    // TODO(ryan)
-    // pub nvext: Option<NimResponseExt>,
+#[derive(Serialize, Deserialize, Validate, Debug, Clone)]
+pub struct NvCreateCompletionResponse {
+    #[serde(flatten)]
+    pub inner: async_openai::types::CreateCompletionResponse,
 }
 
-/// Legacy OpenAI CompletionResponse Choice component
-#[derive(Clone, Debug, Deserialize, Serialize, Builder)]
-pub struct CompletionChoice {
-    #[builder(setter(into))]
-    pub text: String,
-
-    #[builder(default = "0")]
-    pub index: u64,
-
-    #[builder(default, setter(into, strip_option))]
-    pub finish_reason: Option<String>,
-
-    #[serde(skip_serializing_if = "Option::is_none")]
-    #[builder(default, setter(strip_option))]
-    pub logprobs: Option<LogprobResult>,
-}
-
-impl ContentProvider for CompletionChoice {
+impl ContentProvider for async_openai::types::Choice {
     fn content(&self) -> String {
         self.text.clone()
     }
-}
-
-impl CompletionChoice {
-    pub fn builder() -> CompletionChoiceBuilder {
-        CompletionChoiceBuilder::default()
-    }
-}
-
-// TODO: validate this is the correct format
-/// Legacy OpenAI LogprobResult component
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct LogprobResult {
-    pub tokens: Vec<String>,
-    pub token_logprobs: Vec<f32>,
-    pub top_logprobs: Vec<HashMap<String, f32>>,
-    pub text_offset: Vec<i32>,
 }
 
 pub fn prompt_to_string(prompt: &async_openai::types::Prompt) -> String {
@@ -141,7 +74,7 @@ pub fn prompt_to_string(prompt: &async_openai::types::Prompt) -> String {
     }
 }
 
-impl NvExtProvider for CompletionRequest {
+impl NvExtProvider for NvCreateCompletionRequest {
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
     }
@@ -158,7 +91,7 @@ impl NvExtProvider for CompletionRequest {
     }
 }
 
-impl AnnotationsProvider for CompletionRequest {
+impl AnnotationsProvider for NvCreateCompletionRequest {
     fn annotations(&self) -> Option<Vec<String>> {
         self.nvext
             .as_ref()
@@ -174,7 +107,7 @@ impl AnnotationsProvider for CompletionRequest {
     }
 }
 
-impl OpenAISamplingOptionsProvider for CompletionRequest {
+impl OpenAISamplingOptionsProvider for NvCreateCompletionRequest {
     fn get_temperature(&self) -> Option<f32> {
         self.inner.temperature
     }
@@ -196,7 +129,7 @@ impl OpenAISamplingOptionsProvider for CompletionRequest {
     }
 }
 
-impl OpenAIStopConditionsProvider for CompletionRequest {
+impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
     fn get_max_tokens(&self) -> Option<u32> {
         self.inner.max_tokens
     }
@@ -228,8 +161,8 @@ pub struct ResponseFactory {
     #[builder(default = "\"text_completion\".to_string()")]
     pub object: String,
 
-    #[builder(default = "chrono::Utc::now().timestamp() as u64")]
-    pub created: u64,
+    #[builder(default = "chrono::Utc::now().timestamp() as u32")]
+    pub created: u32,
 }
 
 impl ResponseFactory {
@@ -239,10 +172,10 @@ impl ResponseFactory {
 
     pub fn make_response(
         &self,
-        choice: CompletionChoice,
-        usage: Option<CompletionUsage>,
-    ) -> CompletionResponse {
-        CompletionResponse {
+        choice: async_openai::types::Choice,
+        usage: Option<async_openai::types::CompletionUsage>,
+    ) -> NvCreateCompletionResponse {
+        let inner = async_openai::types::CreateCompletionResponse {
             id: self.id.clone(),
             object: self.object.clone(),
             created: self.created,
@@ -250,15 +183,16 @@ impl ResponseFactory {
             choices: vec![choice],
             system_fingerprint: self.system_fingerprint.clone(),
             usage,
-        }
+        };
+        NvCreateCompletionResponse { inner }
     }
 }
 
 /// Implements TryFrom for converting an OpenAI's CompletionRequest to an Engine's CompletionRequest
-impl TryFrom<CompletionRequest> for common::CompletionRequest {
+impl TryFrom<NvCreateCompletionRequest> for common::CompletionRequest {
     type Error = anyhow::Error;
 
-    fn try_from(request: CompletionRequest) -> Result<Self, Self::Error> {
+    fn try_from(request: NvCreateCompletionRequest) -> Result<Self, Self::Error> {
         // openai_api_rs::v1::completion::CompletionRequest {
         // NA  pub model: String,
         //     pub prompt: String,
@@ -307,27 +241,35 @@ impl TryFrom<CompletionRequest> for common::CompletionRequest {
     }
 }
 
-impl TryFrom<common::StreamingCompletionResponse> for CompletionChoice {
+impl TryFrom<common::StreamingCompletionResponse> for async_openai::types::Choice {
     type Error = anyhow::Error;
 
     fn try_from(response: common::StreamingCompletionResponse) -> Result<Self, Self::Error> {
-        let choice = CompletionChoice {
-            text: response
-                .delta
-                .text
-                .ok_or(anyhow::anyhow!("No text in response"))?,
-            index: response.delta.index.unwrap_or(0) as u64,
-            logprobs: None,
-            finish_reason: match &response.delta.finish_reason {
-                Some(common::FinishReason::EoS) => Some("stop".to_string()),
-                Some(common::FinishReason::Stop) => Some("stop".to_string()),
-                Some(common::FinishReason::Length) => Some("length".to_string()),
-                Some(common::FinishReason::Error(err_msg)) => {
-                    return Err(anyhow::anyhow!("finish_reason::error = {}", err_msg));
-                }
-                Some(common::FinishReason::Cancelled) => Some("cancelled".to_string()),
-                None => None,
-            },
+        let text = response
+            .delta
+            .text
+            .ok_or(anyhow::anyhow!("No text in response"))?;
+
+        // SAFETY: we're downcasting from u64 to u32 here but u32::MAX is 4_294_967_295
+        // so we're fairly safe knowing we won't generate that many Choices
+        let index: u32 = response
+            .delta
+            .index
+            .unwrap_or(0)
+            .try_into()
+            .expect("index exceeds u32::MAX");
+
+        // TODO handle aggregating logprobs
+        let logprobs = None;
+
+        let finish_reason: Option<async_openai::types::CompletionFinishReason> =
+            response.delta.finish_reason.map(Into::into);
+
+        let choice = async_openai::types::Choice {
+            text,
+            index,
+            logprobs,
+            finish_reason,
         };
 
         Ok(choice)

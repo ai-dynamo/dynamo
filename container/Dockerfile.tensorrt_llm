@@ -14,9 +14,8 @@
 # limitations under the License.
 
 ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
-ARG BASE_IMAGE_TAG="25.04-py3"
+ARG BASE_IMAGE_TAG="25.05-py3"
 ARG RELEASE_BUILD
-ARG GENAI_PERF_VERSION=0.0.13
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -93,7 +92,7 @@ RUN cd /usr/local/src && \
     make -j install-strip &&    \
     ldconfig
 
-ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:/usr/local/cuda/compat/lib.real:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
 ENV CPATH=/usr/include:$CPATH
 ENV PATH=/usr/bin:$PATH
 ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
@@ -162,11 +161,6 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
          --extra-index-url https://pypi.org/simple \
          "${TENSORRTLLM_PIP_WHEEL}" ; \
     fi
-
-ARG GENAI_PERF_VERSION
-
-# Install genai-perf for benchmarking
-RUN pip install genai-perf==$GENAI_PERF_VERSION
 
 # Install test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
@@ -300,6 +294,9 @@ COPY --from=wheel_builder /workspace /workspace
 # Copy Cargo cache to avoid re-downloading dependencies
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
+# Copy rest of the code
+COPY . /workspace
+
 # Build C bindings, creates lib/bindings/c/include
 RUN cd /workspace/lib/bindings/c && cargo build --release --locked
 
@@ -320,10 +317,6 @@ RUN . /opt/dynamo/venv/bin/activate && \
     uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/dist/ai_dynamo*any.whl
 
-# TODO: remove kantoku as a transitive dependency
-RUN . /opt/dynamo/venv/bin/activate && \
-    uv pip uninstall kantoku circus && uv pip install circus==0.19.0
-
 # Install dynamo.runtime and dynamo.llm wheels globally in container for tests
 # TODO: In future, we may use a virtualenv for everything and remove this.
 RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
@@ -331,15 +324,28 @@ RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
 
 ENV DYNAMO_HOME=/workspace
 
-# Use UCX for TRTLLM KV Cache Transfer
-ENV TRTLLM_USE_UCX_KVCACHE=1
+ARG ARCH_ALT
+ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:$LD_LIBRARY_PATH
 
+# Use UCX for TRTLLM KV Cache Transfer
+ARG TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL
+
+# Create a script that sets the environment variables and source it
+RUN echo '#!/bin/bash' > /usr/local/bin/set_trtllm_env.sh && \
+    if [ "$TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL" = "1" ]; then \
+        echo 'export TRTLLM_USE_NIXL_KVCACHE=1' >> /usr/local/bin/set_trtllm_env.sh; \
+    else \
+        echo 'export TRTLLM_USE_UCX_KVCACHE=1' >> /usr/local/bin/set_trtllm_env.sh; \
+    fi && \
+    chmod +x /usr/local/bin/set_trtllm_env.sh
+
+# Source the script in bashrc
+RUN echo 'source /usr/local/bin/set_trtllm_env.sh' >> /root/.bashrc
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
-
 
 # FIXME: May want a modification with dynamo banner on entry
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]

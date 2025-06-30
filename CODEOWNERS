@@ -11,19 +11,25 @@ Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo 
 *.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen @ai-dynamo/Devops @jthomson04 @ishandhanani @PeaBrane
 
 # Container/Environments
-/container/ @rmccorm4 @tanmayv25 @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @ai-dynamo/Devops
+/container/ @rmccorm4 @tanmayv25 @richardhuo-nv @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @ai-dynamo/Devops
 
 # Dynamo deploy
 /deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @nnshah1 @mohammedabdulwahhab
 
-# Dynamo deploy
-/examples/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen @sshchoi @PeaBrane @mohammedabdulwahhab @ai-dynamo/Devops
-
-# Multimodal
-/examples/multimodal/ @indrajit96 @whoisj @krishung5
+# Examples
+/examples/ @ai-dynamo/Devops @nnshah1 @rmccorm4 @whoisj
+/examples/common/ @tedzhouhk
+/examples/hello_world/ @alec-flowers @biswapanda @grahamking @hhzhang16 @ishandhanani @julienmancuso @kkranen @mohammedabdulwahhab @nnshah1 @tedzhouhk
+/examples/llm/ @alec-flowers @biswapanda @grahamking @guanluo @hhzhang16 @ishandhanani @julienmancuso @kkranen @mohammedabdulwahhab @nnshah1 @piotrm-nvidia @ptarasiewiczNV @rmccorm4 @tanmayv25 @tedzhouhk @PeaBrane
+/examples/multimodal/ @indrajit96 @krishung5 @whoisj
+/examples/sglang/ @biswapanda @ishandhanani @tedzhouhk @rmccorm4
+/examples/tensorrt_llm/ @guanluo @richardhuo-nv @rmccorm4 @tanmayv25
+/examples/vllm_v0/ @alec-flowers @tedzhouhk @PeaBrane
+/examples/vllm_v1/ @biswapanda @ptarasiewiczNV @tedzhouhk @PeaBrane
 
 # CI/CD
 /.github/ @ai-dynamo/Devops @nnshah1
+/.github/workflows/*.ps1 @whoisj
 CODEOWNERS @ai-dynamo/Devops @nnshah1
 
 # Legal

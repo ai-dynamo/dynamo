@@ -11,9 +11,21 @@ from contextlib import asynccontextmanager
 from queue import Queue
 from typing import Callable, Optional, Union
 
-from dynamo.llm import KvEventPublisher, KvMetricsPublisher
+from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 
 logging.basicConfig(level=logging.DEBUG)
+
+
+def _to_signed_i64(value: int | None) -> int | None:
+    """Convert a Python int to signed 64-bit range by two's complement."""
+    if value is None:
+        return None
+
+    if value >= 2**63:
+        return value - 2**64
+    if value < -(2**63):
+        return ((value + 2**63) % 2**64) - 2**63
+    return value
 
 
 class ManagedThread(threading.Thread):
@@ -113,7 +125,7 @@ class Publisher:
 
     def initialize(self):
         # Setup the metrics publisher
-        self.metrics_publisher = KvMetricsPublisher()
+        self.metrics_publisher = WorkerMetricsPublisher()
         self._init_publish_metrics_thread()
         task = asyncio.create_task(self._create_metrics_publisher_endpoint())
         task.add_done_callback(
@@ -242,13 +254,13 @@ class Publisher:
             event_id = event["event_id"]
             data = event["data"]
             if data["type"] == "stored":
-                parent_hash = data["parent_hash"]
+                parent_hash = _to_signed_i64(data["parent_hash"])
                 token_ids = []
                 num_block_tokens = []
                 block_hashes = []
                 for block in data["blocks"]:
                     token_num_in_block = len(block["tokens"])
-                    block_hash = block["block_hash"]
+                    block_hash = _to_signed_i64(block["block_hash"])
                     if token_num_in_block > self.kv_block_size:
                         logging.error(
                             f"Block {block_hash} contains {token_num_in_block} tokens, which is greater than kv_block_size {self.kv_block_size}"
@@ -284,6 +296,7 @@ class Publisher:
             elif data["type"] == "removed":
                 block_hashes = []
                 for block_hash in data["block_hashes"]:
+                    block_hash = _to_signed_i64(block_hash)
                     if block_hash in self.partial_block_hashes:
                         logging.debug(
                             f"Skipping removing block hash {block_hash} since it is a partial block"

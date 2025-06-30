@@ -26,14 +26,15 @@ from vllm.entrypoints.openai.api_server import (
 )
 from vllm.inputs import TokensPrompt
 
-from dynamo.llm import KvMetricsPublisher, ModelType, register_llm
+from dynamo.llm import ModelType, WorkerMetricsPublisher, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime.logging import configure_dynamo_logging
 
 # Only used if you run it manually from the command line
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
-logging.basicConfig(level=logging.DEBUG)
+configure_dynamo_logging()
 
 
 class Config:
@@ -59,7 +60,7 @@ class RequestHandler:
         self.component = component
         self.engine_client = engine
         self.default_sampling_params = default_sampling_params
-        self.metrics_publisher = KvMetricsPublisher()
+        self.metrics_publisher = WorkerMetricsPublisher()
 
     def setup_kv_metrics(self):
         if not hasattr(self.engine_client, "set_metrics_publisher"):

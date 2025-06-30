@@ -23,7 +23,7 @@ The Dynamo Cloud platform is a comprehensive solution for deploying and managing
 
 The Dynamo cloud platform consists of several key components:
 
-- **Dynamo Operator**: A Kubernetes operator that manages the lifecycle of Dynamo inference graphs from build ➡️ deploy. For more information on the operator, see the [Dynamo Operator Page](dynamo_operator.md).
+- **Dynamo Operator**: A Kubernetes operator that manages the lifecycle of Dynamo inference graphs from build ➡️ deploy. For more information on the operator, see [Dynamo Kubernetes Operator Documentation](../dynamo_deploy/dynamo_operator.md)
 - **API Store**: Stores and manages service configurations and metadata related to Dynamo deployments. Needs to be exposed externally.
 - **Custom Resources**: Kubernetes custom resources for defining and managing Dynamo services
 
@@ -65,8 +65,8 @@ Where:
 - `<CONTAINER_REGISTRY>`: Your container registry (e.g., `nvcr.io`, `docker.io/<your-username>`, etc.)
 - `<TAG>`: The version tag for your images (e.g., `latest`, `0.0.1`, `v1.0.0`)
 
-```{important}
-Make sure you're logged in to your container registry before pushing images:
+**Important** Make sure you're logged in to your container registry before pushing images. For example:
+
 ```bash
 docker login <CONTAINER_REGISTRY>
 ```
@@ -99,6 +99,12 @@ kubectl get storageclass
 # NAME                 PROVISIONER             RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
 # standard (default)   kubernetes.io/gce-pd    Delete          Immediate              true                   1d
 ```
+
+### Cloud Provider-Specific deployment
+
+#### Google Kubernetes Engine (GKE) deployment
+
+You can find detailed instructions for deployment in GKE [here](../dynamo_deploy/gke_setup.md)
 
 ### Installation
 
@@ -148,22 +154,24 @@ kubectl create namespace $NAMESPACE
 kubectl config set-context --current --namespace=$NAMESPACE
 ```
 
-3. Deploy the helm chart using the deploy script:
+3. Deploy the Helm charts (install CRDs first, then platform) using the deployment script:
 
 ```bash
-./deploy.sh
+./deploy.sh --crds
 ```
 
-if you wish to be guided through the deployment process, you can run the deploy script with the `--interactive` flag:
+if you want guidance during the process, run the deployment script with the `--interactive` flag:
 
 ```bash
-./deploy.sh --interactive
+./deploy.sh --crds --interactive
 ```
+
+omitting `--crds` will skip the CRDs installation/upgrade. This is useful when installing on a shared cluster as CRDs are cluster-scoped resources.
 
 4. **Expose Dynamo Cloud Externally**
 
 ``` {note}
-The script automatically displays information about the endpoint you can use to access Dynamo Cloud. In our docs, we refer to this externally available endpoint as `DYNAMO_CLOUD`.
+The script automatically displays information about the endpoint that you can use to access Dynamo Cloud. We refer to this externally available endpoint as `DYNAMO_CLOUD`.
 ```
 
 The simplest way to expose the `dynamo-store` service within the namespace externally is to use a port-forward:
@@ -178,7 +186,112 @@ export DYNAMO_CLOUD=http://localhost:<local-port>
 After deploying the Dynamo cloud platform, you can:
 
 1. Deploy your first inference graph using the [Dynamo CLI](operator_deployment.md)
-2. Deploy Dynamo LLM pipelines to Kubernetes using the [Dynamo CLI](../../examples/llm_deployment.md)!
+2. Deploy Dynamo LLM pipelines to Kubernetes using the [Dynamo CLI](../../examples/llm_deployment.md)
 3. Manage your deployments using the Dynamo CLI
 
 For more detailed information about deploying inference graphs, see the [Dynamo Deploy Guide](README.md).
+
+
+### Installation using published helm chart
+
+To install Dynamo Cloud using the published Helm chart, you'll need to configure Docker registry credentials and image settings. The chart supports both direct credential configuration and existing Kubernetes secrets.
+
+
+
+
+#### Configuration Options
+
+You have two options for providing Docker registry credentials:
+
+**Option 1: Direct Credentials** (Simpler for testing)
+- Provide username and password directly via Helm values
+- Credentials are stored in a Kubernetes secret created by the chart
+
+**Option 2: Existing Secret** (Recommended for production)
+- Use an existing Kubernetes secret containing Docker registry credentials
+- More secure and follows Kubernetes best practices
+
+#### Environment Setup
+
+Set the required environment variables:
+
+```bash
+# Docker registry configuration
+export DOCKER_SERVER="your-registry.com"                    # Docker registry server where images of dynamo cloud services (api-server and operator) are available
+export IMAGE_TAG="v1.0.0"                                   # Image tag to deploy
+export NAMESPACE="dynamo-cloud"                             # Target namespace
+
+# Pipeline-specific Docker registry (can be different from DOCKER_SERVER)
+export PIPELINES_DOCKER_SERVER="your-pipeline-registry.com" # Registry for pipeline images
+
+# Option 1: Direct credentials
+export PIPELINES_DOCKER_USERNAME="your-username"
+export PIPELINES_DOCKER_PASSWORD="your-password"
+
+# Option 2: Existing secret (recommended)
+export PIPELINES_DOCKER_CREDS_SECRET="my-docker-secret"     # Name of existing secret
+# Note: If not specified, the chart will look for a secret named "dynamo-regcred"
+
+# Image pull secret for the operator itself
+export DOCKER_SECRET_NAME="my-pull-secret"                  # Secret for pulling images of dynamo cloud services (api-server and operator) operator images
+```
+
+you can easily create an image pull secret with the following command :
+
+```bash
+kubectl create secret docker-registry ${DOCKER_SECRET_NAME} \
+  --docker-server=${DOCKER_SERVER} \
+  --docker-username=${DOCKER_USERNAME} \
+  --docker-password=${DOCKER_PASSWORD} \
+  --namespace=${NAMESPACE}
+```
+
+#### Installation Commands
+
+**Step 1: Install Custom Resource Definitions (CRDs)**
+
+```bash
+helm install dynamo-crds dynamo-crds-helm-chart.tgz \
+  --namespace default \
+  --wait \
+  --atomic
+```
+
+**Step 2: Install Dynamo Platform**
+
+Choose one of the following approaches based on your credential configuration:
+
+**Using Direct Credentials:**
+```bash
+helm install dynamo-platform dynamo-platform-helm-chart.tgz \
+  --namespace ${NAMESPACE} \
+  --create-namespace \
+  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
+  --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
+  --set "dynamo-operator.imagePullSecrets[0].name=${DOCKER_SECRET_NAME}" \
+  --set "dynamo-operator.dynamo.dockerRegistry.server=${PIPELINES_DOCKER_SERVER:-$DOCKER_SERVER}" \
+  --set "dynamo-operator.dynamo.dockerRegistry.username=${PIPELINES_DOCKER_USERNAME}" \
+  --set "dynamo-operator.dynamo.dockerRegistry.password=${PIPELINES_DOCKER_PASSWORD}" \
+  --set "dynamo-api-store.image.repository=${DOCKER_SERVER}/dynamo-api-store" \
+  --set "dynamo-api-store.image.tag=${IMAGE_TAG}" \
+  --set "dynamo-api-store.imagePullSecrets[0].name=${DOCKER_SECRET_NAME}"
+```
+
+**Using Existing Secret (Recommended):**
+```bash
+helm install dynamo-platform dynamo-platform-helm-chart.tgz \
+  --namespace ${NAMESPACE} \
+  --create-namespace \
+  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
+  --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
+  --set "dynamo-operator.imagePullSecrets[0].name=${DOCKER_SECRET_NAME}" \
+  --set "dynamo-operator.dynamo.dockerRegistry.server=${PIPELINES_DOCKER_SERVER:-$DOCKER_SERVER}" \
+  --set "dynamo-operator.dynamo.dockerRegistry.existingSecretName=${PIPELINES_DOCKER_CREDS_SECRET:-dynamo-regcred}" \
+  --set "dynamo-api-store.image.repository=${DOCKER_SERVER}/dynamo-api-store" \
+  --set "dynamo-api-store.image.tag=${IMAGE_TAG}" \
+  --set "dynamo-api-store.imagePullSecrets[0].name=${DOCKER_SECRET_NAME}"
+```
+
+[!Note]
+- If `PIPELINES_DOCKER_SERVER` is not set, it defaults to `DOCKER_SERVER`
+- If `PIPELINES_DOCKER_CREDS_SECRET` is not set, the chart will look for a secret named `dynamo-regcred`

@@ -17,12 +17,13 @@ use std::collections::HashMap;
 use std::sync::atomic::AtomicU32;
 
 use super::*;
+use llm_rs::kv_router::indexer::compute_block_hash_for_seq;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
 use rs::traits::events::EventSubscriber;
 use tracing;
 
 use llm_rs::kv_router::protocols::*;
-use llm_rs::kv_router::publisher::create_stored_blocks;
+use llm_rs::kv_router::publisher::{create_stored_blocks, KvEventSourceConfig};
 
 #[pyclass]
 pub(crate) struct KvRouter {
@@ -33,12 +34,19 @@ pub(crate) struct KvRouter {
 impl KvRouter {
     #[new]
     fn new(component: Component, kv_block_size: usize) -> PyResult<Self> {
+        if kv_block_size == 0 {
+            return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
+        };
+
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         runtime.block_on(async {
-            let inner =
-                llm_rs::kv_router::KvRouter::new(component.inner.clone(), kv_block_size, None)
-                    .await
-                    .map_err(to_pyerr)?;
+            let inner = llm_rs::kv_router::KvRouter::new(
+                component.inner.clone(),
+                kv_block_size as u32,
+                None,
+            )
+            .await
+            .map_err(to_pyerr)?;
             Ok(Self {
                 inner: Arc::new(inner),
             })
@@ -62,16 +70,27 @@ impl KvRouter {
     }
 }
 
+#[pyfunction]
+pub fn compute_block_hash_for_seq_py(tokens: Vec<u32>, kv_block_size: usize) -> PyResult<Vec<u64>> {
+    if kv_block_size == 0 {
+        return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
+    }
+
+    let hashes = compute_block_hash_for_seq(&tokens, kv_block_size as u32);
+    Ok(hashes.into_iter().map(|h| h.0).collect())
+}
+
 #[pyclass]
-pub(crate) struct KvMetricsPublisher {
-    inner: Arc<llm_rs::kv_router::publisher::KvMetricsPublisher>,
+pub(crate) struct WorkerMetricsPublisher {
+    inner: Arc<llm_rs::kv_router::publisher::WorkerMetricsPublisher>,
 }
 
 #[pymethods]
-impl KvMetricsPublisher {
+impl WorkerMetricsPublisher {
     #[new]
     fn new() -> PyResult<Self> {
-        let inner = llm_rs::kv_router::publisher::KvMetricsPublisher::new().map_err(to_pyerr)?;
+        let inner =
+            llm_rs::kv_router::publisher::WorkerMetricsPublisher::new().map_err(to_pyerr)?;
         Ok(Self {
             inner: inner.into(),
         })
@@ -165,26 +184,97 @@ impl ZmqKvEventPublisherConfig {
 
 #[pyclass]
 pub(crate) struct ZmqKvEventPublisher {
-    inner: llm_rs::kv_router::publisher::ZmqKvEventPublisher,
+    inner: llm_rs::kv_router::publisher::KvEventPublisher,
 }
 
 #[pymethods]
 impl ZmqKvEventPublisher {
     #[new]
     fn new(component: Component, config: ZmqKvEventPublisherConfig) -> PyResult<Self> {
-        let mut inner =
-            llm_rs::kv_router::publisher::ZmqKvEventPublisher::new(config.kv_block_size);
-        inner.start_background_task(
+        let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
             component.inner,
             config.worker_id,
-            config.zmq_endpoint,
-            config.zmq_topic,
-        );
+            config.kv_block_size as u32,
+            Some(KvEventSourceConfig::Zmq {
+                endpoint: config.zmq_endpoint,
+                topic: config.zmq_topic,
+            }),
+        )
+        .map_err(to_pyerr)?;
         Ok(Self { inner })
     }
 
     fn shutdown(&mut self) {
         self.inner.shutdown()
+    }
+}
+
+/// A ZMQ-based key-value cache event listener that operates independently
+/// of the dynamo runtime or event plane infrastructure.
+#[pyclass]
+pub(crate) struct ZmqKvEventListener {
+    event_receiver: Arc<tokio::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<KvCacheEvent>>>,
+    shutdown_token: tokio_util::sync::CancellationToken,
+}
+
+#[pymethods]
+impl ZmqKvEventListener {
+    #[new]
+    fn new(zmq_endpoint: String, zmq_topic: String, kv_block_size: usize) -> PyResult<Self> {
+        if kv_block_size == 0 {
+            return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
+        }
+
+        let runtime = pyo3_async_runtimes::tokio::get_runtime();
+        runtime.block_on(async {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<KvCacheEvent>();
+            let shutdown_token = tokio_util::sync::CancellationToken::new();
+
+            tokio::spawn(llm_rs::kv_router::publisher::start_zmq_listener(
+                zmq_endpoint,
+                zmq_topic,
+                tx,
+                shutdown_token.clone(),
+                kv_block_size as u32,
+            ));
+
+            Ok(Self {
+                event_receiver: Arc::new(tokio::sync::Mutex::new(rx)),
+                shutdown_token,
+            })
+        })
+    }
+
+    fn get_events<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        let receiver = self.event_receiver.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let mut rx = receiver.lock().await;
+            let mut events = Vec::new();
+
+            // Drain all available events
+            while let Ok(event) = rx.try_recv() {
+                events.push(event);
+            }
+
+            // Convert events to JSON strings
+            let json_events: Result<Vec<String>, _> =
+                events.iter().map(serde_json::to_string).collect();
+
+            match json_events {
+                Ok(json_strings) => Ok(json_strings),
+                Err(e) => Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Failed to serialize events to JSON: {}",
+                    e
+                ))),
+            }
+        })
+    }
+}
+
+// manual shutdown needed as it's not tied to the dynamo DRT
+impl Drop for ZmqKvEventListener {
+    fn drop(&mut self) {
+        self.shutdown_token.cancel();
     }
 }
 
@@ -199,12 +289,18 @@ pub(crate) struct KvEventPublisher {
 impl KvEventPublisher {
     #[new]
     fn new(component: Component, worker_id: i64, kv_block_size: usize) -> PyResult<Self> {
+        if kv_block_size == 0 {
+            return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
+        }
+
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
             component.inner,
             worker_id,
-            kv_block_size,
+            kv_block_size as u32,
+            None,
         )
         .map_err(to_pyerr)?;
+
         Ok(Self {
             inner: inner.into(),
             kv_block_size,
@@ -229,7 +325,7 @@ impl KvEventPublisher {
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
                 blocks: create_stored_blocks(
-                    self.kv_block_size,
+                    self.kv_block_size as u32,
                     &token_ids,
                     &num_block_tokens,
                     &block_hashes,
@@ -275,6 +371,70 @@ impl OverlapScores {
     }
 }
 
+// NOTE: the user needs to guarantee that this stays single threaded in Python land
+#[pyclass(unsendable)]
+pub(crate) struct RadixTree {
+    inner: llm_rs::kv_router::indexer::RadixTree,
+}
+
+#[pymethods]
+impl RadixTree {
+    #[new]
+    #[pyo3(signature = (expiration_duration_secs=None))]
+    fn new(expiration_duration_secs: Option<f64>) -> PyResult<Self> {
+        let expiration_duration = expiration_duration_secs.map(std::time::Duration::from_secs_f64);
+        let inner = llm_rs::kv_router::indexer::RadixTree::new_with_frequency(expiration_duration);
+        Ok(Self { inner })
+    }
+
+    #[pyo3(signature = (sequence, early_exit=false))]
+    fn find_matches(
+        &self,
+        _py: Python,
+        sequence: Vec<u64>,
+        early_exit: bool,
+    ) -> PyResult<OverlapScores> {
+        let local_block_hashes: Vec<llm_rs::kv_router::protocols::LocalBlockHash> = sequence
+            .into_iter()
+            .map(llm_rs::kv_router::protocols::LocalBlockHash)
+            .collect();
+
+        let rs_overlap_scores = self.inner.find_matches(local_block_hashes, early_exit);
+        Ok(OverlapScores {
+            inner: rs_overlap_scores,
+        })
+    }
+
+    fn apply_event(
+        &mut self,
+        _py: Python,
+        worker_id: i64,
+        kv_cache_event_bytes: &[u8],
+    ) -> PyResult<()> {
+        let kv_cache_event: llm_rs::kv_router::protocols::KvCacheEvent =
+            serde_json::from_slice(kv_cache_event_bytes).map_err(|e| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Failed to deserialize KvCacheEvent: {}",
+                    e
+                ))
+            })?;
+
+        let router_event = llm_rs::kv_router::indexer::RouterEvent::new(worker_id, kv_cache_event);
+        self.inner.apply_event(router_event);
+        Ok(())
+    }
+
+    fn remove_worker(&mut self, _py: Python, worker_id: i64) -> PyResult<()> {
+        self.inner.remove_worker(worker_id);
+        Ok(())
+    }
+
+    fn clear_all_blocks(&mut self, _py: Python, worker_id: i64) -> PyResult<()> {
+        self.inner.clear_all_blocks(worker_id);
+        Ok(())
+    }
+}
+
 #[pyclass]
 pub(crate) struct KvIndexer {
     inner: Arc<llm_rs::kv_router::indexer::KvIndexer>,
@@ -289,7 +449,7 @@ impl KvIndexer {
             let inner: Arc<llm_rs::kv_router::indexer::KvIndexer> =
                 llm_rs::kv_router::indexer::KvIndexer::new(
                     component.inner.drt().runtime().child_token(),
-                    kv_block_size,
+                    kv_block_size as u32,
                 )
                 .into();
             // [gluo TODO] try subscribe_with_type::<RouterEvent>,
@@ -321,7 +481,25 @@ impl KvIndexer {
     }
 
     fn block_size(&self) -> usize {
-        self.inner.block_size()
+        self.inner.block_size() as usize
+    }
+
+    fn find_matches<'p>(&self, py: Python<'p>, sequence: Vec<u64>) -> PyResult<Bound<'p, PyAny>> {
+        let indexer = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let local_block_hashes: Vec<llm_rs::kv_router::protocols::LocalBlockHash> = sequence
+                .into_iter()
+                .map(llm_rs::kv_router::protocols::LocalBlockHash)
+                .collect();
+
+            let rs_overlap_scores = indexer
+                .find_matches(local_block_hashes)
+                .await
+                .map_err(to_pyerr)?;
+            Ok(OverlapScores {
+                inner: rs_overlap_scores,
+            })
+        })
     }
 
     fn find_matches_for_request<'p>(

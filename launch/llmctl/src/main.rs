@@ -6,7 +6,7 @@ use std::sync::Arc;
 use clap::{Parser, Subcommand};
 
 use dynamo_llm::discovery::{ModelManager, ModelWatcher};
-use dynamo_llm::local_model::{LocalModel, ModelNetworkName};
+use dynamo_llm::local_model::{LocalModelBuilder, ModelNetworkName};
 use dynamo_llm::model_type::ModelType;
 use dynamo_runtime::component::Endpoint;
 use dynamo_runtime::pipeline::RouterMode;
@@ -227,7 +227,10 @@ async fn add_model(
 
     let endpoint = endpoint_from_name(distributed, &namespace, endpoint_name)?;
 
-    let mut model = LocalModel::with_name_only(&model_name);
+    let mut model = LocalModelBuilder::default()
+        .model_name(Some(model_name))
+        .build()
+        .await?;
     model.attach(&endpoint, model_type).await?;
 
     Ok(())
@@ -258,6 +261,7 @@ async fn list_models(
         distributed.clone(),
         Arc::new(ModelManager::new()),
         RouterMode::Random,
+        None,
     );
 
     let mut models = Vec::new();
@@ -313,6 +317,7 @@ async fn remove_model(
         distributed.clone(),
         Arc::new(ModelManager::new()),
         RouterMode::Random,
+        None,
     );
     let Some(etcd_client) = distributed.etcd_client() else {
         anyhow::bail!("llmctl is only useful with dynamic workers");

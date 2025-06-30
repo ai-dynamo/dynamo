@@ -186,7 +186,7 @@ class ActiveOperation(AbstractOperation):
         notification_key: str,
     ) -> None:
         if not isinstance(remote, Remote) or remote._connector is None:
-            raise TypeError("Argument `remote` must be valid `dynamo.connect.RemoteAgent`.")
+            raise TypeError("Argument `remote` must be valid `dynamo.connect.Remote`.")
         if not isinstance(operation_kind, OperationKind):
             raise TypeError("Argument `operation_kind` must `dynamo.connect.OperationKind`.")
         if operation_kind is not OperationKind.READ and operation_kind is not OperationKind.WRITE:
@@ -208,10 +208,17 @@ class ActiveOperation(AbstractOperation):
         if isinstance(remote_descriptors, list) and len(remote_descriptors) == 1:
             remote_descriptors = remote_descriptors[0]
 
-        if (isinstance(local_descriptors, list) and isinstance(remote_descriptors, list) and len(local_descriptors) != len(remote_descriptors)):
-            raise ValueError("When `local_descriptors` and `remote_descriptors` are lists, they must have the same length.")
-        elif isinstance(local_descriptors, list) != isinstance(remote_descriptors, list):
+        if isinstance(local_descriptors, list) != isinstance(remote_descriptors, list):
             raise ValueError("Both `local_descriptors` and `remote_descriptors` must be either lists or single descriptors.")
+        # Ensure that the descriptors are of the same size here to avoid confusing errors from NIXL.
+        if isinstance(local_descriptors, list) and isinstance(remote_descriptors, list):
+            if len(local_descriptors) != len(remote_descriptors):
+                raise ValueError(f"When `local_descriptors` and `remote_descriptors` are lists, they must have the same length. {len(local_descriptors)} != {len(remote_descriptors)}.")
+            for i in range(len(local_descriptors)):
+                if local_descriptors[i].size != remote_descriptors[i].size:
+                    raise ValueError(f"Descriptor length mismatch: `local_descriptors` and `remote_descriptors` descriptor at {i} must have the same size. {local_descriptors[i].size} != {remote_descriptors[i].size}.")
+        elif (isinstance(local_descriptors, Descriptor) and isinstance(remote_descriptors, Descriptor)) and local_descriptors.size != remote_descriptors.size:
+                raise ValueError(f"Local and remote descriptors must be the same size. {local_descriptors.size} != {remote_descriptors.size}.")
         if not isinstance(notification_key, str):
             raise TypeError("Argument `notification_key` must be `str`.")
         if len(notification_key) == 0:
@@ -343,7 +350,7 @@ class ActiveOperation(AbstractOperation):
     @property
     def remote(self) -> Remote:
         """
-        Gets the remote agent associated with this operation.
+        Gets the remote worker associated with this operation.
         """
         return self._remote
 
@@ -389,8 +396,8 @@ class ActiveOperation(AbstractOperation):
 
 class Connector:
     """
-    Core class for managing the connection between agents in a distributed environment.
-    Use this class to create readable and writable operations, or read and write data to remote agents.
+    Core class for managing the connection between workers in a distributed environment.
+    Use this class to create readable and writable operations, or read and write data to remote workers.
     """
 
     def __init__(
@@ -468,14 +475,14 @@ class Connector:
     @property
     def metadata(self) -> bytes:
         """
-        Get the metadata of the agent.
+        Get the metadata of the worker.
         """
         return self._nixl.get_agent_metadata()
 
     @property
     def name(self) -> str | None:
         """
-        Get the name of the agent.
+        Get the name of the worker.
         """
         return self._worker_id
 
@@ -513,7 +520,7 @@ class Connector:
         Returns
         -------
         ReadOperation
-            Awaitable read operation that can be used to transfer data from a remote agent.
+            Awaitable read operation that can be used to transfer data from a remote worker.
 
         Raises
         ------
@@ -544,14 +551,14 @@ class Connector:
         remote_request: SerializedRequest,
     ) -> WriteOperation:
         """
-        Creates a write operation for transferring data to a remote agent.
+        Creates a write operation for transferring data to a remote worker.
 
         Parameters
         ----------
         remote_request : SerializedRequest
             Serialized request from a remote worker that has created a readable operation.
         local_descriptors : Descriptor | list[Descriptor]
-            Local descriptors of one or more data objects to be transferred to the remote agent.
+            Local descriptors of one or more data objects to be transferred to the remote worker.
         """
         if remote_request is None or not isinstance(remote_request, SerializedRequest):
             raise TypeError("Argument `remote_request` must be `SerializedRequest`.")
@@ -576,12 +583,12 @@ class Connector:
         local_descriptors: Descriptor | list[Descriptor],
     ) -> ReadableOperation:
         """
-        Creates a readable operation for transferring data from a remote agent.
+        Creates a readable operation for transferring data from a remote worker.
 
         Returns
         -------
         ReadableOperation
-            A readable operation that can be used to transfer data from a remote agent.
+            A readable operation that can be used to transfer data from a remote worker.
         """
         if not self._is_initialized:
             raise RuntimeError("Connector not initialized. Call `initialize()` before calling this method.")
@@ -594,12 +601,12 @@ class Connector:
         local_descriptors: Descriptor | list[Descriptor],
     ) -> WritableOperation:
         """
-        Creates a writable operation for transferring data to a remote agent.
+        Creates a writable operation for transferring data to a remote worker.
 
         Returns
         -------
         WritableOperation
-            A writable operation that can be used to transfer data to a remote agent.
+            A writable operation that can be used to transfer data to a remote worker.
         """
         if not self._is_initialized:
             raise RuntimeError("Connector not initialized. Call `initialize()` before calling this method.")
@@ -627,7 +634,7 @@ class Descriptor:
         data: torch.Tensor | tuple[array_module.ndarray, Device|str] | bytes | tuple[int, int, Device|str, Any],
     ) -> None:
         """
-        Memory descriptor for transferring data between agents.
+        Memory descriptor for transferring data between workers.
 
         Parameters
         ----------
@@ -1099,7 +1106,7 @@ class ReadOperation(ActiveOperation):
         remote_request : SerializedRequest
             Serialized request from the remote worker.
         local_descriptors : Descriptor | list[Descriptor]
-            Local descriptor(s) to to receive the data from the remote agent.
+            Local descriptor(s) to to receive the data from the remote worker.
         """
         if not isinstance(connector, Connector):
             raise TypeError("Argument `connector` must be `dynamo.connect.Connector`.")
@@ -1194,7 +1201,7 @@ class ReadableOperation(PassiveOperation):
 
 class Remote:
     """
-    Identifies a remote NIXL agent relative to a local NIXL agent.
+    Identifies a remote NIXL enabled worker relative to a local NIXL enabled worker.
     """
 
     def __init__(
@@ -1242,7 +1249,7 @@ class Remote:
         self._release()
 
     def __repr__(self) -> str:
-        return f"RemoteAgent(name={self._name}, connector={self._connector.name})"
+        return f"Remote(name={self._name}, connector={self._connector.name})"
 
     def __str__(self) -> str:
         return self._name
@@ -1256,14 +1263,14 @@ class Remote:
     @property
     def connector(self) -> Connector:
         """
-        Gets the local connector associated with this remote agent.
+        Gets the local connector associated with this remote worker.
         """
         return self._connector
 
     @property
     def name(self) -> str:
         """
-        Gets the name of the remote agent.
+        Gets the name of the remote worker.
         """
         return self._name
 
@@ -1414,7 +1421,7 @@ class WriteOperation(ActiveOperation):
         connector : Connector
             Connector instance to use for the operation.
         local_descriptors : Descriptor | list[Descriptor]
-            Local descriptor(s) to send from, to the remote agent.
+            Local descriptor(s) to send from, to the remote worker.
         remote_request : SerializedRequest
             Serialized request from the remote worker that describes the target(s) to send to.
 
