@@ -24,11 +24,18 @@ fn create_unique_blocks_from_sequence(
     tokens: &TokenBlockSequence,
     uuid: Option<uuid::Uuid>,
     block_size: usize,
+    enable_prefix_caching: bool,
 ) -> Vec<UniqueBlock> {
     let mut unique_blocks: Vec<UniqueBlock> = tokens
         .blocks()
         .iter()
-        .map(|block| UniqueBlock::FullBlock(block.sequence_hash()))
+        .map(|block| {
+            if enable_prefix_caching {
+                UniqueBlock::FullBlock(block.sequence_hash())
+            } else {
+                UniqueBlock::FullBlock(random::<u64>())
+            }
+        })
         .collect();
 
     // Only push the partial block if tokens count isn't a multiple of block_size
@@ -65,17 +72,26 @@ pub struct ActiveSequence {
     num_input_tokens: usize,
 
     creation_signal: Option<MoveBlock>,
+
+    #[getter(copy)]
+    enable_prefix_caching: bool,
 }
 
 impl ActiveSequence {
     /// Create a new ActiveSequence instance with the provided tokens
-    pub fn new(tokens: Vec<u32>, max_output_tokens: usize, block_size: Option<usize>) -> Self {
+    pub fn new(
+        tokens: Vec<u32>,
+        max_output_tokens: usize,
+        block_size: Option<usize>,
+        enable_prefix_caching: bool,
+    ) -> Self {
         let block_size = block_size.unwrap_or(64);
         assert!(block_size > 1, "block_size must be greater than 1");
         let num_input_tokens = tokens.len();
 
         let tokens = Tokens::from(tokens).into_sequence(block_size, None);
-        let unique_blocks = create_unique_blocks_from_sequence(&tokens, None, block_size);
+        let unique_blocks =
+            create_unique_blocks_from_sequence(&tokens, None, block_size, enable_prefix_caching);
         let creation_signal = Some(MoveBlock::Use(unique_blocks.clone()));
 
         Self {
@@ -87,6 +103,7 @@ impl ActiveSequence {
             already_generated_tokens: 0,
             num_input_tokens,
             creation_signal,
+            enable_prefix_caching,
         }
     }
 
@@ -107,8 +124,9 @@ impl ActiveSequence {
         tokens: Vec<u32>,
         max_output_tokens: usize,
         block_size: Option<usize>,
+        enable_prefix_caching: bool,
     ) -> (Self, Option<MoveBlock>) {
-        let mut sequence = Self::new(tokens, max_output_tokens, block_size);
+        let mut sequence = Self::new(tokens, max_output_tokens, block_size, enable_prefix_caching);
         let signal = sequence.creation_signal.take();
         (sequence, signal)
     }
@@ -139,7 +157,11 @@ impl ActiveSequence {
 
         // Replace last partial block with full block if it exists
         if let Some(UniqueBlock::PartialBlock(uuid)) = self.unique_blocks.last().cloned() {
-            let last_block_hash = self.tokens.last_complete_block().unwrap().sequence_hash();
+            let last_block_hash = if self.enable_prefix_caching {
+                self.tokens.last_complete_block().unwrap().sequence_hash()
+            } else {
+                random::<u64>()
+            };
             self.unique_blocks.pop();
             self.unique_blocks
                 .push(UniqueBlock::FullBlock(last_block_hash));
@@ -212,13 +234,16 @@ impl ActiveSequence {
     }
 
     /// Reset the sequence to its initial state and return the free signals from freeing current blocks
-    /// maintaining the uuid of the last partial block
     pub fn reset_with_signal(&mut self) -> Vec<MoveBlock> {
         let free_signal = self.free_signal();
 
         self.tokens.truncate(self.num_input_tokens).unwrap();
-        self.unique_blocks =
-            create_unique_blocks_from_sequence(&self.tokens, None, self.block_size);
+        self.unique_blocks = create_unique_blocks_from_sequence(
+            &self.tokens,
+            None,
+            self.block_size,
+            self.enable_prefix_caching,
+        );
         self.already_generated_tokens = self.generated_tokens.max(self.already_generated_tokens);
         self.generated_tokens = 0;
         self.creation_signal = Some(MoveBlock::Use(self.unique_blocks.clone()));
@@ -246,7 +271,8 @@ mod tests {
     fn test_active_sequence_push() {
         // Create a sequence with block size 16 initialized with tokens [0..15]
         let initial_tokens: Vec<u32> = (0..15).collect();
-        let (mut seq1, signal1) = ActiveSequence::new_with_signal(initial_tokens, 100, Some(16));
+        let (mut seq1, signal1) =
+            ActiveSequence::new_with_signal(initial_tokens, 100, Some(16), true);
         assert_eq!(seq1.num_input_tokens(), 15);
         assert_eq!(seq1.len(), 15);
 
@@ -296,7 +322,7 @@ mod tests {
 
         // Create another sequence with block size 16 initialized with tokens [0..17]
         let extended_tokens: Vec<u32> = (0..16).collect();
-        let (mut seq2, _) = ActiveSequence::new_with_signal(extended_tokens, 100, Some(16));
+        let (mut seq2, _) = ActiveSequence::new_with_signal(extended_tokens, 100, Some(16), true);
         seq2.push(16);
         seq2.pop();
         seq2.push(16);
@@ -398,7 +424,7 @@ mod tests {
     fn test_active_sequence_generate_signals() {
         // Create a sequence with block size 16, max_output_tokens 4, initialized with tokens [0..14)
         let initial_tokens: Vec<u32> = (0..14).collect();
-        let (mut seq, signal) = ActiveSequence::new_with_signal(initial_tokens, 5, Some(16));
+        let (mut seq, signal) = ActiveSequence::new_with_signal(initial_tokens, 5, Some(16), true);
 
         // Initial signal - should have received a Use signal for the partial block
         assert!(signal.is_some());

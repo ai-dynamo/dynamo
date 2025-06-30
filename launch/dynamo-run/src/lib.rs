@@ -333,6 +333,9 @@ pub async fn run(
                 if let Some(v) = args.get("max_num_batched_tokens").and_then(|v| v.as_u64()) {
                     builder = builder.max_num_batched_tokens(Some(v as usize));
                 }
+                if let Some(v) = args.get("enable_prefix_caching").and_then(|v| v.as_bool()) {
+                    builder = builder.enable_prefix_caching(v);
+                }
 
                 // These are mocker-specific args
                 if let Some(v) = args.get("speedup_ratio").and_then(|v| v.as_f64()) {

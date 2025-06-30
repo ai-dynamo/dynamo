@@ -279,7 +279,7 @@ impl Scheduler {
                         let mut current_seqs = state_guard.num_active_requests();
 
                         while let Some((uuid, request)) = state_guard.next() {
-                            let active_sequence = get_active_sequence(request, args.block_size);
+                            let active_sequence = get_active_sequence(request, args.block_size, args.enable_prefix_caching);
 
                             // Update predictive budgets
                             let prefill_cost = kv_manager_guard.get_prefill_cost(&active_sequence);
@@ -492,7 +492,11 @@ impl Scheduler {
 }
 
 /// Convert a Request to an ActiveSequence
-fn get_active_sequence(request: Request, block_size: usize) -> ActiveSequence {
+fn get_active_sequence(
+    request: Request,
+    block_size: usize,
+    enable_prefix_caching: bool,
+) -> ActiveSequence {
     if let Request::Active(active_seq) = request {
         return active_seq;
     }
@@ -505,6 +509,7 @@ fn get_active_sequence(request: Request, block_size: usize) -> ActiveSequence {
         direct_request.tokens,
         direct_request.max_output_tokens,
         Some(block_size),
+        enable_prefix_caching,
     )
 }
 
@@ -552,10 +557,15 @@ mod tests {
     use std::time::Duration;
 
     #[rstest]
-    #[case::random(false)]
-    #[case::caching(true)]
+    #[case::random_no_prefix_caching(false, false)]
+    #[case::random_with_prefix_caching(false, true)]
+    #[case::caching_no_prefix_caching(true, false)]
+    #[case::caching_with_prefix_caching(true, true)]
     #[tokio::test]
-    async fn test_scheduler_token_generation_patterns(#[case] use_shared_tokens: bool) {
+    async fn test_scheduler_token_generation_patterns(
+        #[case] use_shared_tokens: bool,
+        #[case] enable_prefix_caching: bool,
+    ) {
         std::env::set_var("RUST_LOG", "debug");
 
         let kv_capacity: usize = 500;
@@ -567,11 +577,12 @@ mod tests {
         // Create channel for token output
         let (output_tx, mut output_rx) = mpsc::unbounded_channel::<OutputSignal>();
 
-        // Create scheduler args using builder
+        // Create scheduler args using builder - now including enable_prefix_caching
         let args = MockEngineArgs::builder()
             .num_gpu_blocks(kv_capacity)
             .block_size(block_size)
             .speedup_ratio(10.0)
+            .enable_prefix_caching(enable_prefix_caching)
             .build()
             .unwrap();
 
@@ -651,13 +662,14 @@ mod tests {
         // Calculate and print elapsed time
         let elapsed = start_time.elapsed();
         println!(
-            "Test completed in: {:?} for {} case",
+            "Test completed in: {:?} for {} case with prefix_caching={}",
             elapsed,
             if use_shared_tokens {
                 "caching"
             } else {
                 "random"
-            }
+            },
+            enable_prefix_caching
         );
 
         // Assert that we received the expected number of tokens

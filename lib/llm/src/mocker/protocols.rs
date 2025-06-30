@@ -91,12 +91,16 @@ pub struct MockEngineArgs {
     #[builder(default = "64")]
     pub block_size: usize,
 
-    #[builder(default = None)]
+    // This was 1024 in the past but reverted back to 256
+    #[builder(default = Some(256))]
     pub max_num_seqs: Option<usize>,
 
     // default for open api server, for llm class it's 16384
     #[builder(default = Some(8192))]
     pub max_num_batched_tokens: Option<usize>,
+
+    #[builder(default = true)]
+    pub enable_prefix_caching: bool,
 
     #[builder(default = "0.01")]
     pub watermark: f64,
