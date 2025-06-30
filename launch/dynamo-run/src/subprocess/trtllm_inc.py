@@ -355,10 +355,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         "tensor_parallel_size": config.tensor_parallel_size,
         "backend": "pytorch",
         "skip_tokenizer_init": True,
-        "disable_log_requests": True,
-        "enable_prefix_caching": True,
-        # KV routing relies on logging KV metrics
-        "disable_log_stats": False,
     }
     if config.extra_engine_args != "":
         # TODO: Support extra engine args from json file as well.

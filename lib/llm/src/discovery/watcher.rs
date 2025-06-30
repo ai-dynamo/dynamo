@@ -25,7 +25,7 @@ use crate::{
     protocols::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
-    protocols::openai::completions::{CompletionResponse, NvCreateCompletionRequest},
+    protocols::openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     protocols::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
 };
 
@@ -240,7 +240,7 @@ impl ModelWatcher {
 
                 let frontend = SegmentSource::<
                     SingleIn<NvCreateCompletionRequest>,
-                    ManyOut<Annotated<CompletionResponse>>,
+                    ManyOut<Annotated<NvCreateCompletionResponse>>,
                 >::new();
                 let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
                 let backend = Backend::from_mdc(card.clone()).await?.into_operator();
@@ -292,7 +292,7 @@ impl ModelWatcher {
             ModelType::Completion => {
                 let push_router = PushRouter::<
                     NvCreateCompletionRequest,
-                    Annotated<CompletionResponse>,
+                    Annotated<NvCreateCompletionResponse>,
                 >::from_client(client, Default::default())
                 .await?;
                 let engine = Arc::new(push_router);

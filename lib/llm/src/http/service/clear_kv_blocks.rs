@@ -20,6 +20,8 @@ use std::sync::Arc;
 
 use dynamo_runtime::{pipeline::PushRouter, stream::StreamExt};
 
+pub const CLEAR_KV_ENDPOINT: &str = "clear_kv_blocks";
+
 pub fn clear_kv_blocks_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
@@ -68,7 +70,7 @@ async fn clear_kv_blocks_handler(
                                  message: Option<String>| {
         let mut result = json!({
             "name": name,
-            "endpoint": format!("{}/{}/clear_kv_blocks", ns, comp),
+            "endpoint": format!("{}/{}/{}", ns, comp, CLEAR_KV_ENDPOINT),
             "status": status,
         });
         if success {
@@ -123,7 +125,7 @@ async fn clear_kv_blocks_handler(
         };
 
         let endpoint: dynamo_runtime::component::Endpoint =
-            component_obj.endpoint("clear_kv_blocks");
+            component_obj.endpoint(CLEAR_KV_ENDPOINT);
 
         let client = match endpoint.client().await {
             Ok(c) => c,
@@ -190,7 +192,7 @@ async fn clear_kv_blocks_handler(
         let instances_filtered = instances
             .clone()
             .into_iter()
-            .filter(|instance| instance.endpoint == "clear_kv_blocks")
+            .filter(|instance| instance.endpoint == CLEAR_KV_ENDPOINT)
             .collect::<Vec<_>>();
 
         if instances_filtered.is_empty() {
@@ -214,7 +216,7 @@ async fn clear_kv_blocks_handler(
 
         for instance in &instances_filtered {
             let instance_name = format!("{}-instance-{}", entry.name, instance.id());
-            match router.round_robin(().into()).await {
+            match router.direct(().into(), instance.id()).await {
                 Ok(mut stream) => match stream.next().await {
                     Some(response) => {
                         add_worker_result(

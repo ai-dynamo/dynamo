@@ -24,7 +24,7 @@ use dynamo_llm::http::service::{
 use dynamo_llm::protocols::{
     openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
-        completions::{CompletionResponse, NvCreateCompletionRequest},
+        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
     Annotated,
 };
@@ -101,13 +101,17 @@ impl
 }
 
 #[async_trait]
-impl AsyncEngine<SingleIn<NvCreateCompletionRequest>, ManyOut<Annotated<CompletionResponse>>, Error>
-    for AlwaysFailEngine
+impl
+    AsyncEngine<
+        SingleIn<NvCreateCompletionRequest>,
+        ManyOut<Annotated<NvCreateCompletionResponse>>,
+        Error,
+    > for AlwaysFailEngine
 {
     async fn generate(
         &self,
         _request: SingleIn<NvCreateCompletionRequest>,
-    ) -> Result<ManyOut<Annotated<CompletionResponse>>, Error> {
+    ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
         Err(HttpError {
             code: 401,
             message: "Always fail".to_string(),
