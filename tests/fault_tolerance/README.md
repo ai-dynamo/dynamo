@@ -398,4 +398,66 @@ graph LR
    unable to instantiate two processors successfully leading to
    failure when the processor was terminated. (WIP)
 
-### Disaggregated
+### Disaggregated Workers
+
+#### No Redunancy
+
+To demonstrate the failure and recovery time in the case of a
+disaaggregated deployment with a single instance for each process in
+the graph we ran a simple `disagg-p-tp-2-dp-1-d-tp-4-dp-1` configuration.
+
+```mermaid
+graph LR
+    Client["Client"]
+    Frontend["Frontend"]
+    Processor["Processor"]
+    PrefillQueue["Remote Prefill Queue"]
+
+    Client --> Frontend
+    Frontend --> Processor
+    Processor <--> DecodePool
+
+    %% Prefill Worker Pool (horizontal layout)
+    subgraph PrefillPool["Prefill Worker Pool"]
+        direction LR
+        subgraph Prefill1["Prefill 1"]
+            direction TB
+            P1GPU0["GPU 0"]
+            P1GPU1["GPU 1"]
+    end
+
+    %% Decode Worker Pool (vertical layout)
+    subgraph DecodePool["Decode Worker Pool"]
+        direction TB
+        subgraph Decode1["Decode 1"]
+            direction TB
+            D1GPU0["GPU 0"]
+            D1GPU1["GPU 1"]
+            D1GPU2["GPU 2"]
+            D1GPU3["GPU 3"]
+        end
+    end
+
+
+	PrefillQueue --> PrefillPool
+    DecodePool --> PrefillQueue
+    PrefillPool -.-> DecodePool
+
+    %% Styling
+    style PrefillPool stroke:#0066cc,stroke-width:2px
+    style DecodePool stroke:#000,stroke-width:2px
+```
+
+
+Test Group: disagg-p-tp-2-dp-1-d-tp-4-dp-1
+
+Test Command:  dynamo serve graphs.disagg:Frontend -f /workspace/tests/fault_tolerance/configs/disagg_p_tp_2_dp_1_d_tp_4_dp_1.yaml --Frontend.port 8000 in /workspace/examples/llm
+|    Failure     |   Startup Time |   Success |   Failed |   Latency Before |   Latency After |   Pending Before |   Pending After |   Violations Before |   Violations After |   Recovery Time |
+|:--------------:|---------------:|----------:|---------:|-----------------:|----------------:|-----------------:|----------------:|--------------------:|-------------------:|----------------:|
+|      none      |          83.00 |    800.00 |     0.00 |             1.19 |             N/A |             0.01 |             N/A |                0.00 |                N/A |             N/A |
+|    frontend    |          78.00 |    664.00 |   136.00 |             1.19 |            1.19 |             0.07 |            0.02 |                0.00 |               0.00 |           17.24 |
+|   processor    |          77.00 |    576.00 |   224.00 |             1.19 |            1.19 |             0.00 |            0.00 |                0.00 |               0.00 |           26.90 |
+| decode_worker  |          72.00 |    200.00 |   600.00 |             1.20 |            1.28 |             0.03 |             N/A |                0.00 |               0.00 |             N/A |
+| prefill_worker |          81.00 |    798.00 |     2.00 |             1.19 |            1.22 |             0.05 |            0.05 |                0.00 |               0.00 |           42.31 |
+|  vllm_worker   |          83.00 |    797.00 |     3.00 |             1.19 |            1.22 |             0.00 |            0.03 |                0.00 |               8.00 |             N/A |
+
