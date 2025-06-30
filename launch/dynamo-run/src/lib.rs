@@ -327,6 +327,9 @@ pub async fn run(
                 if let Some(v) = args.get("num_gpu_blocks").and_then(|v| v.as_u64()) {
                     builder = builder.num_gpu_blocks(v as usize);
                 }
+                if let Some(v) = args.get("max_num_seqs").and_then(|v| v.as_u64()) {
+                    builder = builder.max_num_seqs(Some(v as usize));
+                }
                 if let Some(v) = args.get("max_num_batched_tokens").and_then(|v| v.as_u64()) {
                     builder = builder.max_num_batched_tokens(Some(v as usize));
                 }

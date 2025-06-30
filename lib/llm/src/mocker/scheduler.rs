@@ -138,6 +138,10 @@ impl SchedulerState {
         Some(sequence)
     }
 
+    fn num_active_requests(&self) -> usize {
+        self.prefill.len() + self.decode.len()
+    }
+
     /// Calculate the current running batched tokens
     fn num_batched_tokens(&self) -> usize {
         self.prefill_costs
@@ -272,23 +276,28 @@ impl Scheduler {
                         // schedule anymore.
                         let mut current_blocks = kv_manager_guard.num_active_blocks();
                         let mut current_tokens = state_guard.num_batched_tokens();
+                        let mut current_seqs = state_guard.num_active_requests();
+
                         while let Some((uuid, request)) = state_guard.next() {
                             let active_sequence = get_active_sequence(request, args.block_size);
 
                             // Update predictive budgets
                             let prefill_cost = kv_manager_guard.get_prefill_cost(&active_sequence);
-                            let new_tokens = active_sequence.len();
-                            let new_blocks = (new_tokens + 1) / args.block_size;  // this is conservative, assumes no cache hit
+                            let total_tokens = active_sequence.len();
+                            let new_blocks = (total_tokens + 1) / args.block_size;  // this is conservative, assumes no cache hit
                             let new_tokens = prefill_cost.new_tokens;
+
                             current_blocks += new_blocks;
                             current_tokens += new_tokens;
+                            current_seqs += 1;
 
                             // Check if it can be scheduled
                             let under_block_budget = current_blocks as f64 <= (1. - args.watermark) * kv_manager_guard.max_capacity() as f64;
                             let under_token_budget = args.max_num_batched_tokens.is_none_or(|limit| current_tokens <= limit);
+                            let under_seq_budget = args.max_num_seqs.is_none_or(|limit| current_seqs <= limit);
 
                             // Cannot schedule, put first in line instead
-                            if !(under_block_budget && under_token_budget) {
+                            if !(under_block_budget && under_token_budget && under_seq_budget) {
                                 state_guard.first_in_line(uuid, Request::Active(active_sequence));
                                 break;
                             }

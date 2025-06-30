@@ -525,7 +525,7 @@ The mocker engine is a mock vLLM implementation designed for testing and develop
 
 **Basic usage:**
 
-The `--model-path` is required but can point to any valid model path - the mocker doesn't actually load the model weights. The arguments `num-gpu-blocks`, `max-num-batched-tokens`, and `block-size` are common arguments shared with the real VLLM engine.
+The `--model-path` is required but can point to any valid model path - the mocker doesn't actually load the model weights. The arguments `num-gpu-blocks`, `max-num-seqs`, `max-num-batched-tokens`, and `block-size` are common arguments shared with the real VLLM engine.
 
 And below are arguments that are mocker-specific:
 - `speedup_ratio`: Speed multiplier for token generation (default: 1.0). Higher values make the simulation engines run faster.
