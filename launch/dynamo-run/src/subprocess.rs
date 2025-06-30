@@ -13,7 +13,6 @@ use tokio::io::AsyncBufReadExt;
 use crate::flags::RouterMode;
 use dynamo_llm::engines::MultiNodeConfig;
 use dynamo_llm::local_model::LocalModel;
-use dynamo_runtime::protocols::Endpoint as EndpointId;
 
 pub mod sglang;
 pub mod trtllm;
@@ -24,8 +23,6 @@ pub async fn start(
     py_script: &'static str,
     // Model info
     local_model: &LocalModel,
-    // Endpoint to connect the subprocess over etcd/nats
-    endpoint: &EndpointId,
     // Command line flags for user overrides
     flags: super::Flags,
     // sglang multi-node config. vllm uses `ray` externally
@@ -40,7 +37,7 @@ pub async fn start(
     let mut args = vec![
         script_path.to_string_lossy().to_string(),
         "--endpoint".to_string(),
-        endpoint.as_url(),
+        local_model.endpoint_id().as_url(),
         "--model-path".to_string(),
         local_model.path().to_string_lossy().to_string(),
         "--model-name".to_string(),
@@ -98,7 +95,11 @@ pub async fn start(
     tokio::spawn(async move {
         let mut lines = stderr.lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            tracing::error!("{}", strip_log_prefix(&line));
+            // FIXME: always logging INFO/DEBUG will hide real errors, but
+            // some libraries log non-errors to stderr, which confuses users
+            // when we log those as ERROR. Using WARN as a middle ground for
+            // now, but we can probably be smarter here.
+            tracing::warn!("{}", strip_log_prefix(&line));
         }
     });
 

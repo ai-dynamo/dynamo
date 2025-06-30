@@ -199,10 +199,11 @@ checksum = "4288f83726785267c6f2ef073a3d83dc3f9b81464e9f99898240cced85fce35a"
 
 [[package]]
 name = "async-openai"
-version = "0.27.2"
+version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d126927c78e1562d7e8473008ac8b082318c04d69e3a83e3495a563f8b84a66"
+checksum = "31acf814d6b499e33ec894bb0fd7ddaf2665b44fbdd42b858d736449271fde0c"
 dependencies = [
+ "async-openai-macros",
  "backoff",
  "base64 0.22.1",
  "bytes",
@@ -220,6 +221,17 @@ dependencies = [
  "tokio-stream",
  "tokio-util",
  "tracing",
+]
+
+[[package]]
+name = "async-openai-macros"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0289cba6d5143bfe8251d57b4a8cac036adf158525a76533a7082ba65ec76398"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -1607,6 +1619,7 @@ dependencies = [
  "cudarc 0.16.2",
  "derive-getters",
  "derive_builder",
+ "dialoguer",
  "dynamo-runtime",
  "either",
  "erased-serde",
@@ -1615,6 +1628,7 @@ dependencies = [
  "galil-seiferas",
  "ggus",
  "hf-hub",
+ "humantime",
  "insta",
  "itertools 0.14.0",
  "lazy_static",
@@ -1665,14 +1679,12 @@ dependencies = [
  "async-stream",
  "async-trait",
  "clap",
- "dialoguer",
  "dynamo-engine-llamacpp",
  "dynamo-engine-mistralrs",
  "dynamo-llm",
  "dynamo-runtime",
  "futures",
  "futures-util",
- "humantime",
  "libc",
  "regex",
  "serde",
@@ -1683,6 +1695,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid 1.16.0",
+ "vergen-gitcl",
 ]
 
 [[package]]
@@ -4085,9 +4098,8 @@ dependencies = [
 
 [[package]]
 name = "nixl-sys"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c5ed1b2b73a39516cb082cc2e0c8cf5fa9aadf7364b3b7851f43fbcda70566ee"
+version = "0.3.1"
+source = "git+https://github.com/ai-dynamo/nixl?rev=a7c654d46a14cd5ce635cc8c02433d71df93dedf#a7c654d46a14cd5ce635cc8c02433d71df93dedf"
 dependencies = [
  "bindgen 0.71.1",
  "cc",
@@ -7161,6 +7173,43 @@ dependencies = [
  "quote",
  "syn 1.0.109",
  "uuid 0.8.2",
+]
+
+[[package]]
+name = "vergen"
+version = "9.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6b2bf58be11fc9414104c6d3a2e464163db5ef74b12296bda593cac37b6e4777"
+dependencies = [
+ "anyhow",
+ "derive_builder",
+ "rustversion",
+ "vergen-lib",
+]
+
+[[package]]
+name = "vergen-gitcl"
+version = "1.0.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b9dfc1de6eb2e08a4ddf152f1b179529638bedc0ea95e6d667c014506377aefe"
+dependencies = [
+ "anyhow",
+ "derive_builder",
+ "rustversion",
+ "time",
+ "vergen",
+ "vergen-lib",
+]
+
+[[package]]
+name = "vergen-lib"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9b07e6010c0f3e59fcb164e0163834597da68d1f864e2b8ca49f74de01e9c166"
+dependencies = [
+ "anyhow",
+ "derive_builder",
+ "rustversion",
 ]
 
 [[package]]

@@ -155,11 +155,7 @@ impl Tokens {
     ///
     /// * `block_size` - The fixed size for each [`TokenBlock`].
     /// * `salt_hash` - An optional [`SaltHash`] used as the base seed for hashing. Defaults to 0.
-    pub fn into_sequence(
-        self,
-        block_size: usize,
-        salt_hash: Option<SaltHash>,
-    ) -> TokenBlockSequence {
+    pub fn into_sequence(self, block_size: u32, salt_hash: Option<SaltHash>) -> TokenBlockSequence {
         TokenBlockSequence::new(self, block_size, salt_hash)
     }
 }
@@ -191,7 +187,7 @@ pub enum TokenBlockError {
 #[derive(Debug, PartialEq)] // No Clone: intended to be unique within a sequence
 pub struct PartialTokenBlock {
     tokens: Tokens,
-    block_size: usize,
+    block_size: u32,
     salt_hash: SaltHash,
     parent_sequence_hash: Option<SequenceHash>,
 }
@@ -203,7 +199,7 @@ impl PartialTokenBlock {
     ///
     /// * `block_size` - The fixed size for blocks in this sequence.
     /// * `salt_hash` - The [`SaltHash`] for the sequence.
-    pub(crate) fn create_sequence_root(block_size: usize, salt_hash: SaltHash) -> Self {
+    pub(crate) fn create_sequence_root(block_size: u32, salt_hash: SaltHash) -> Self {
         Self {
             tokens: Tokens::default(),
             block_size,
@@ -223,7 +219,7 @@ impl PartialTokenBlock {
     /// * `Ok(())` - If the token was successfully added.
     /// * `Err(TokenBlockError::Full)` - If the block already contains `block_size` tokens.
     pub(crate) fn push_token(&mut self, token: Token) -> Result<(), TokenBlockError> {
-        if self.tokens.0.len() >= self.block_size {
+        if self.tokens.0.len() >= self.block_size as usize {
             return Err(TokenBlockError::Full);
         }
         self.tokens.0.push(token);
@@ -305,7 +301,7 @@ impl PartialTokenBlock {
     /// * `Ok(TokenBlock)` - The newly created full [`TokenBlock`].
     /// * `Err(TokenBlockError::Incomplete)` - If the block does not contain exactly `block_size` tokens.
     pub(crate) fn commit(&mut self) -> Result<TokenBlock, TokenBlockError> {
-        if self.tokens.0.len() != self.block_size {
+        if self.tokens.0.len() != self.block_size as usize {
             // Check for exact size match for committing
             return Err(TokenBlockError::Incomplete);
         }
@@ -327,7 +323,7 @@ impl PartialTokenBlock {
     /// Returns the number of additional tokens required to fill the block.
     pub fn remaining(&self) -> usize {
         // Use saturating_sub to prevent underflow if len somehow exceeds block_size
-        self.block_size.saturating_sub(self.tokens.0.len())
+        (self.block_size as usize).saturating_sub(self.tokens.0.len())
     }
 
     /// Returns the number of tokens currently in the block.
@@ -408,7 +404,7 @@ impl TokenBlock {
     pub fn next_block(&self) -> PartialTokenBlock {
         PartialTokenBlock {
             tokens: Tokens::default(),
-            block_size: self.tokens.len(), // Should be == self.block_size
+            block_size: self.tokens.len() as u32, // Should be == self.block_size
             salt_hash: self.salt_hash,
             parent_sequence_hash: Some(self.sequence_hash), // Link to this block
         }
@@ -500,7 +496,7 @@ impl TokenBlockSequence {
     /// # Panics
     ///
     /// Panics if `block_size` is 0.
-    pub fn new(tokens: Tokens, block_size: usize, salt_hash: Option<SaltHash>) -> Self {
+    pub fn new(tokens: Tokens, block_size: u32, salt_hash: Option<SaltHash>) -> Self {
         assert!(block_size > 0, "block_size must be greater than 0");
         let salt_hash = salt_hash.unwrap_or(0);
         let (blocks, current_block) = Self::split_tokens(&tokens, block_size, salt_hash);
@@ -640,7 +636,7 @@ impl TokenBlockSequence {
                 let tokens_to_pop_from_blocks = n - current_len;
 
                 // Calculate how many blocks are affected (including the one partially popped)
-                let num_blocks_to_affect = tokens_to_pop_from_blocks.div_ceil(block_size);
+                let num_blocks_to_affect = tokens_to_pop_from_blocks.div_ceil(block_size as usize);
 
                 // Check if we need to pop more blocks than available (should be prevented by initial len check)
                 if num_blocks_to_affect > self.blocks.len() {
@@ -657,10 +653,10 @@ impl TokenBlockSequence {
 
                 // Calculate how many tokens to keep from that source block
                 let num_full_blocks_completely_popped = num_blocks_to_affect - 1;
-                let num_tokens_to_pop_from_source_block =
-                    tokens_to_pop_from_blocks - num_full_blocks_completely_popped * block_size;
+                let num_tokens_to_pop_from_source_block = tokens_to_pop_from_blocks
+                    - num_full_blocks_completely_popped * block_size as usize;
                 let num_tokens_to_keep_in_new_partial =
-                    block_size.saturating_sub(num_tokens_to_pop_from_source_block);
+                    (block_size as usize).saturating_sub(num_tokens_to_pop_from_source_block);
 
                 // Get the tokens for the new partial block
                 let new_partial_tokens = if num_tokens_to_keep_in_new_partial > 0 {
@@ -789,7 +785,7 @@ impl TokenBlockSequence {
     /// Returns the total number of tokens in the sequence (sum of tokens in all completed blocks
     /// plus tokens in the current partial block).
     pub fn total_tokens(&self) -> usize {
-        let block_size = self.current_block.block_size;
+        let block_size = self.current_block.block_size as usize;
         (self.blocks.len() * block_size) + self.current_block.len()
     }
 
@@ -812,14 +808,14 @@ impl TokenBlockSequence {
     /// Panics if `block_size` is 0.
     pub fn split_tokens(
         tokens: &[Token],
-        block_size: usize,
+        block_size: u32,
         salt_hash: u64,
     ) -> (Vec<TokenBlock>, PartialTokenBlock) {
         assert!(block_size > 0, "block_size must be greater than 0");
         // Use Rayon for parallel computation of block chunks (hashes)
         let chunks: Vec<TokenBlockChunk> = tokens
             .as_ref()
-            .par_chunks_exact(block_size)
+            .par_chunks_exact(block_size as usize)
             .map(|chunk| TokenBlockChunk::from_tokens(chunk, salt_hash))
             .collect();
 
@@ -834,7 +830,10 @@ impl TokenBlockSequence {
         }
 
         // Handle any remaining tokens
-        let remainder = tokens.as_ref().chunks_exact(block_size).remainder();
+        let remainder = tokens
+            .as_ref()
+            .chunks_exact(block_size as usize)
+            .remainder();
 
         let current_block = PartialTokenBlock {
             tokens: remainder.into(),
@@ -856,7 +855,7 @@ mod tests {
     // Helper to create a sequence for testing
     fn create_test_sequence(
         initial_tokens: &[Token],
-        block_size: usize,
+        block_size: u32,
         salt_hash: Option<SaltHash>,
     ) -> TokenBlockSequence {
         TokenBlockSequence::new(Tokens::from(initial_tokens), block_size, salt_hash)

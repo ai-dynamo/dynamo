@@ -24,18 +24,23 @@ uv-base:
     COPY +uv-source/uv /bin/uv
     RUN uv venv
     ENV PATH="/app/.venv/bin:$PATH"
-    RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
     WORKDIR /app
     COPY uv.lock pyproject.toml README.md /app
     RUN uv sync --frozen --no-install-project --no-dev --no-install-workspace --no-editable
+    # Copy project files
+    COPY ai_dynamo_store ai_dynamo_store
+    RUN uv pip install .
+    # Save the entire app directory with installed packages
+    SAVE ARTIFACT /app /app
 
 docker:
     ARG DOCKER_SERVER=my-registry
     ARG IMAGE_TAG=latest
     ARG IMAGE=dynamo-api-store
-    FROM +uv-base
-    # Copy project files
-    COPY ai_dynamo_store ai_dynamo_store
-    RUN uv pip install .
+    FROM nvcr.io/nvidia/distroless/python:3.12-v3.4.13-dev
+    # Copy the entire installed environment from uv-base
+    COPY +uv-base/app /app
+    WORKDIR /app
+    ENV PATH="/app/.venv/bin:$PATH"
     ENTRYPOINT ["ai-dynamo-store"]
     SAVE IMAGE --push $DOCKER_SERVER/$IMAGE:$IMAGE_TAG

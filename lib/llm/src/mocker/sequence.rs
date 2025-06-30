@@ -23,7 +23,7 @@ use uuid;
 fn create_unique_blocks_from_sequence(
     tokens: &TokenBlockSequence,
     uuid: Option<uuid::Uuid>,
-    block_size: usize,
+    block_size: u32,
 ) -> Vec<UniqueBlock> {
     let mut unique_blocks: Vec<UniqueBlock> = tokens
         .blocks()
@@ -32,7 +32,7 @@ fn create_unique_blocks_from_sequence(
         .collect();
 
     // Only push the partial block if tokens count isn't a multiple of block_size
-    if tokens.total_tokens() % block_size != 0 {
+    if tokens.total_tokens() % (block_size as usize) != 0 {
         unique_blocks.push(match uuid {
             Some(uuid) => UniqueBlock::PartialBlock(uuid),
             None => UniqueBlock::default(),
@@ -50,7 +50,7 @@ pub struct ActiveSequence {
     tokens: TokenBlockSequence,
 
     #[getter(copy)]
-    block_size: usize,
+    block_size: u32,
 
     #[getter(copy)]
     chunk_size: usize, // TODO: not actually used
@@ -72,7 +72,7 @@ impl ActiveSequence {
     pub fn new(
         tokens: Vec<u32>,
         max_output_tokens: usize,
-        block_size: Option<usize>,
+        block_size: Option<u32>,
         chunk_size: Option<usize>,
     ) -> Self {
         let block_size = block_size.unwrap_or(64);
@@ -96,8 +96,8 @@ impl ActiveSequence {
         }
     }
 
-    pub fn extra_tokens(&self) -> usize {
-        self.len() % self.block_size
+    pub fn extra_tokens(&self) -> u32 {
+        (self.len() % self.block_size as usize) as u32
     }
 
     pub fn len(&self) -> usize {
@@ -112,7 +112,7 @@ impl ActiveSequence {
     pub fn new_with_signal(
         tokens: Vec<u32>,
         max_output_tokens: usize,
-        block_size: Option<usize>,
+        block_size: Option<u32>,
         chunk_size: Option<usize>,
     ) -> (Self, Option<MoveBlock>) {
         let mut sequence = Self::new(tokens, max_output_tokens, block_size, chunk_size);
@@ -125,7 +125,7 @@ impl ActiveSequence {
         self.tokens.append(token).expect("Token push failed.");
         self.generated_tokens += 1;
 
-        if self.len() % self.block_size != 1 {
+        if self.len() % (self.block_size as usize) != 1 {
             return None;
         }
 
@@ -223,7 +223,7 @@ impl ActiveSequence {
         self.generated_tokens = self.generated_tokens.saturating_sub(1);
 
         // Reverts to the last full block
-        if self.tokens.total_tokens() % self.block_size == 0 {
+        if self.tokens.total_tokens() % (self.block_size as usize) == 0 {
             self.unique_blocks.pop();
         }
     }
@@ -285,7 +285,7 @@ mod tests {
         // Verify state after pushing tokens
         assert_eq!(seq1.unique_blocks().len(), 2); // One full block and one partial block
         assert_eq!(seq1.len(), 17);
-        assert_eq!(seq1.len() % seq1.block_size(), 1);
+        assert_eq!(seq1.len() % (seq1.block_size() as usize), 1);
 
         // Create another sequence with block size 16 initialized with tokens [0..17]
         let extended_tokens: Vec<u32> = (0..16).collect();
@@ -335,12 +335,12 @@ mod tests {
             "seq2 should have exactly 3 blocks"
         );
         assert_eq!(
-            seq1.len() % seq1.block_size(),
+            seq1.len() % (seq1.block_size() as usize),
             1,
             "seq1 should have 1 partial token"
         );
         assert_eq!(
-            seq2.len() % seq2.block_size(),
+            seq2.len() % (seq2.block_size() as usize),
             1,
             "seq2 should have 1 partial token"
         );

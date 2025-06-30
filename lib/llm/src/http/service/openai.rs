@@ -30,7 +30,7 @@ use super::{
 use crate::preprocessor::LLMMetricAnnotation;
 use crate::protocols::openai::embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse};
 use crate::protocols::openai::{
-    chat_completions::NvCreateChatCompletionResponse, completions::CompletionResponse,
+    chat_completions::NvCreateChatCompletionResponse, completions::NvCreateCompletionResponse,
 };
 use crate::request_template::RequestTemplate;
 use crate::types::{
@@ -193,7 +193,7 @@ async fn completions(
         Ok(sse_stream.into_response())
     } else {
         // TODO: report ISL/OSL for non-streaming requests
-        let response = CompletionResponse::from_annotated_stream(stream.into())
+        let response = NvCreateCompletionResponse::from_annotated_stream(stream.into())
             .await
             .map_err(|e| {
                 tracing::error!(

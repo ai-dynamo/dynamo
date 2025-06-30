@@ -57,7 +57,7 @@ pub struct KvManager {
     max_capacity: usize,
 
     #[getter(copy)]
-    block_size: usize,
+    block_size: u32,
 
     active_blocks: HashMap<UniqueBlock, usize>,
 
@@ -67,7 +67,7 @@ pub struct KvManager {
 }
 
 impl KvManager {
-    pub fn new(max_capacity: usize, block_size: usize) -> Self {
+    pub fn new(max_capacity: usize, block_size: u32) -> Self {
         let active_blocks = HashMap::new();
         let inactive_blocks = LRUEvictor::default();
         let all_blocks = HashSet::new();
@@ -245,7 +245,7 @@ impl KvManager {
         let overlap_blocks = unique_blocks.len() - new_blocks;
 
         // Calculate new tokens
-        let new_tokens = sequence.num_input_tokens() - overlap_blocks * self.block_size;
+        let new_tokens = sequence.num_input_tokens() - overlap_blocks * (self.block_size as usize);
 
         // // Print the full equation with actual values substituted
         // println!("{} = {} - ({} * {}) (new_tokens = num_input_tokens - overlap_blocks * block_size)",
@@ -261,7 +261,7 @@ impl KvManager {
 
         // Calculate prefill compute
         let prefill_compute =
-            new_tokens as f64 * (new_tokens + overlap_blocks * self.block_size) as f64;
+            new_tokens as f64 * (new_tokens + overlap_blocks * (self.block_size as usize)) as f64;
 
         Some(PrefillCost {
             new_tokens,

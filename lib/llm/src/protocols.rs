@@ -19,9 +19,10 @@
 //! both publicly via the HTTP API and internally between Dynamo components.
 //!
 
+use std::pin::Pin;
+
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::pin::Pin;
 
 pub mod codec;
 pub mod common;
@@ -46,13 +47,6 @@ pub use dynamo_runtime::protocols::annotated::Annotated;
 /// return an empty string.
 pub trait ContentProvider {
     fn content(&self) -> String;
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Usage {
-    pub prompt_tokens: i32,
-    pub completion_tokens: i32,
-    pub total_tokens: i32,
 }
 
 /// Converts of a stream of [codec::Message]s into a stream of [Annotated]s.

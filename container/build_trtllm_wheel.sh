@@ -18,15 +18,17 @@
 
 # This script builds the TRT-LLM base image for Dynamo with TensorRT-LLM.
 
-while getopts "c:o:a:" opt; do
+while getopts "c:o:a:n:" opt; do
   case ${opt} in
     c) TRTLLM_COMMIT=$OPTARG ;;
     o) OUTPUT_DIR=$OPTARG ;;
     a) ARCH=$OPTARG ;;
-    *) echo "Usage: $(basename $0) [-c commit] [-o output_dir] [-a arch]"
+    n) NIXL_COMMIT=$OPTARG ;;
+    *) echo "Usage: $(basename $0) [-c commit] [-o output_dir] [-a arch] [-n nixl_commit]"
        echo "  -c: TensorRT-LLM commit to build"
        echo "  -o: Output directory for wheel files"
        echo "  -a: Architecture (amd64 or arm64)"
+       echo "  -n: NIXL commit"
        exit 1 ;;
   esac
 done
@@ -36,6 +38,8 @@ if [ -z "$OUTPUT_DIR" ]; then
     OUTPUT_DIR="/tmp/trtllm_wheel"
 fi
 
+# Store directory where script is being launched from
+MAIN_DIR=$(dirname "$(readlink -f "$0")")
 
 (cd /tmp && \
 # Clone the TensorRT-LLM repository.
@@ -79,8 +83,24 @@ sed -i "s/__version__ = \"\(.*\)\"/__version__ = \"\1+dev${COMMIT_VERSION}\"/" "
 echo "Updated version:"
 grep "__version__" "$VERSION_FILE"
 
+echo "Copying install_nixl.sh from $MAIN_DIR to ${PWD}/docker/common/"
+# Copy install_nixl.sh to docker/common/
+cp $MAIN_DIR/deps/tensorrt_llm/install_nixl.sh docker/common/install_nixl.sh
+# Update NIXL_COMMIT in install_nixl.sh to use the parameter passed to this script
+sed -i "s/NIXL_COMMIT=\"[^\"]*\"/NIXL_COMMIT=\"${NIXL_COMMIT}\"/" docker/common/install_nixl.sh
 
-make -C docker wheel_build
+
+
+
+if [ "$ARCH" = "amd64" ]; then
+    # Need to build in the Triton Devel Image for NIXL support.
+    make -C docker tritondevel_build
+    make -C docker wheel_build DEVEL_IMAGE=tritondevel BUILD_WHEEL_OPTS='--extra-cmake-vars NIXL_ROOT=/opt/nvidia/nvda_nixl'
+else
+    # NIXL backend is not supported on arm64 for TensorRT-LLM.
+    # See here: https://github.com/NVIDIA/TensorRT-LLM/blob/main/docker/common/install_nixl.sh
+    make -C docker wheel_build
+fi
 
 # Copy the wheel to the host
 mkdir -p $OUTPUT_DIR

@@ -17,6 +17,9 @@ Common:
   block-size: 64
   max-model-len: 4096
 
+Frontend:
+  common-configs: [model]
+
 Processor:
   router: round-robin
   prompt-template: "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|><prompt><|im_end|>\n<|im_start|>assistant\n"
