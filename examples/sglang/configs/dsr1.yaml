@@ -12,19 +12,46 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
 Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  served_model_name: deepseek-ai/DeepSeek-R1
   endpoint: dynamo.SGLangWorker.generate
   port: 8000
 
 SGLangWorker:
-  model-path: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  served-model-name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  page-size: 16
-  tp: 1
+  model-path: /model/
+  served-model-name: deepseek-ai/DeepSeek-R1
+  tp: 16
+  dp-size: 16
+  dist-init-addr: HEAD_PREFILL_NODE_IP:29500
+  nnodes: 2
+  node-rank: 0
+  enable-dp-attention: true
   trust-remote-code: true
   skip-tokenizer-init: true
+  disaggregation-mode: prefill
+  disaggregation-transfer-backend: nixl
+  mem-fraction-static: 0.82
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 1
+      gpu: 8
+
+SGLangDecodeWorker:
+  model-path: /model/
+  served-model-name: deepseek-ai/DeepSeek-R1
+  tp: 16
+  dp-size: 16
+  dist-init-addr: HEAD_DECODE_NODE_IP:29500
+  nnodes: 2
+  node-rank: 0
+  enable-dp-attention: true
+  trust-remote-code: true
+  skip-tokenizer-init: true
+  disaggregation-mode: decode
+  disaggregation-transfer-backend: nixl
+  mem-fraction-static: 0.82
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: 8
