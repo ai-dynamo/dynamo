@@ -16,22 +16,21 @@
 use std::collections::HashMap;
 
 use derive_builder::Builder;
+use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 use serde::{Deserialize, Serialize};
 use validator::Validate;
+
+use super::{
+    common::{self, SamplingOptionsProvider, StopConditionsProvider},
+    nvext::{NvExt, NvExtProvider},
+    ContentProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
+};
 
 mod aggregator;
 mod delta;
 
 pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
-
-use super::{
-    common::{self, SamplingOptionsProvider, StopConditionsProvider},
-    nvext::{NvExt, NvExtProvider},
-    CompletionUsage, ContentProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
-};
-
-use dynamo_runtime::protocols::annotated::AnnotationsProvider;
 
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateCompletionRequest {
@@ -64,7 +63,7 @@ pub struct CompletionResponse {
     pub object: String,
 
     /// Usage statistics for the completion request.
-    pub usage: Option<CompletionUsage>,
+    pub usage: Option<async_openai::types::CompletionUsage>,
 
     /// This fingerprint represents the backend configuration that the model runs with.
     /// Can be used in conjunction with the seed request parameter to understand when backend
@@ -240,7 +239,7 @@ impl ResponseFactory {
     pub fn make_response(
         &self,
         choice: CompletionChoice,
-        usage: Option<CompletionUsage>,
+        usage: Option<async_openai::types::CompletionUsage>,
     ) -> CompletionResponse {
         CompletionResponse {
             id: self.id.clone(),

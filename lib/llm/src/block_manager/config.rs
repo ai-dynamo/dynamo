@@ -95,6 +95,14 @@ impl KvManagerModelConfig {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum BlockParallelismStrategy {
+    /// KV blocks are sharded across all workers.
+    /// This reduces the memory footprint and computational cost of each worker; however,
+    /// requires extra communication between workers.
+    LeaderWorkerSharded,
+}
+
 #[derive(Builder, Validate)]
 #[builder(pattern = "owned", build_fn(validate = "Self::validate"))]
 pub struct KvManagerLayoutConfig<S: Storage + NixlRegisterableStorage> {
@@ -116,6 +124,10 @@ pub struct KvManagerLayoutConfig<S: Storage + NixlRegisterableStorage> {
     /// This option is mutually exclusive with the `storage` option
     #[builder(default, setter(custom))]
     pub allocator: Option<Arc<dyn StorageAllocator<S>>>,
+
+    /// The type of block parallelism strategy to use
+    #[builder(default)]
+    pub logical: Option<BlockParallelismStrategy>,
 }
 
 impl<S: Storage + NixlRegisterableStorage> KvManagerLayoutConfig<S> {
@@ -136,10 +148,18 @@ impl<S: Storage + NixlRegisterableStorage> KvManagerLayoutConfigBuilder<S> {
 
     // Validation function
     fn validate(&self) -> Result<(), String> {
-        match (self.storage.is_some(), self.allocator.is_some()) {
-            (true, false) | (false, true) => Ok(()), // XOR condition met
-            (true, true) => Err("Cannot provide both `storage` and `allocator`.".to_string()),
-            (false, false) => Err("Must provide either `storage` or `allocator`.".to_string()),
+        match (
+            self.storage.is_some(),
+            self.allocator.is_some(),
+            self.logical.is_some(),
+        ) {
+            (true, false, false) | (false, true, false) | (false, false, true) => Ok(()), // XOR condition met
+            (false, false, false) => {
+                Err("Must provide either `storage` or `allocator` or `logical`.".to_string())
+            }
+            _ => Err(
+                "Only one selection of either `storage` and `allocator` or `logical`.".to_string(),
+            ),
         }
     }
 }

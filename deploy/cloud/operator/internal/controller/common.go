@@ -67,3 +67,10 @@ func getIngressHost(ingressSpec v1alpha1.IngressSpec) string {
 func getK8sName(value string) string {
 	return strings.ReplaceAll(value, ":", "--")
 }
+
+func isGoogleRegistry(host string) bool {
+	return host == "gcr.io" ||
+		strings.HasSuffix(host, ".gcr.io") ||
+		strings.HasSuffix(host, ".pkg.dev") ||
+		strings.HasSuffix(host, ".google.com")
+}

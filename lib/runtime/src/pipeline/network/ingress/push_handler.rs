@@ -62,7 +62,7 @@ where
         // todo - eventually have a handler class which will returned an abstracted object, but for now,
         // we only support tcp here, so we can just unwrap the connection info
         tracing::trace!("creating tcp response stream");
-        let mut publisher = tcp::client::TcpClient::create_response_steam(
+        let mut publisher = tcp::client::TcpClient::create_response_stream(
             request.context(),
             control_msg.connection_info,
         )

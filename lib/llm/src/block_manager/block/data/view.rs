@@ -19,7 +19,8 @@
 //! and their storage. It handles the relationship between storage, layout,
 //! and individual blocks.
 
-use super::{BlockData, BlockError, Storage};
+use super::{BlockDataExt, BlockError, Storage};
+use crate::block_manager::storage::StorageType;
 
 pub trait Kind: std::marker::Sized + std::fmt::Debug + Clone + Copy + Send + Sync {}
 
@@ -40,10 +41,10 @@ pub type LayerViewMut<'a, S> = MemoryViewMut<'a, S, LayerKind>;
 /// Storage view that provides safe access to a region of storage
 #[derive(Debug)]
 pub struct MemoryView<'a, S: Storage, K: Kind> {
-    _block_data: &'a BlockData<S>,
+    _block_data: &'a dyn BlockDataExt<S>,
     addr: usize,
     size: usize,
-    storage_idx: usize,
+    storage_type: StorageType,
     kind: std::marker::PhantomData<K>,
 }
 
@@ -59,16 +60,16 @@ where
     /// - addr + size <= storage.size()
     /// - The view does not outlive the storage
     pub(crate) unsafe fn new(
-        _block_data: &'a BlockData<S>,
+        _block_data: &'a dyn BlockDataExt<S>,
         addr: usize,
         size: usize,
-        storage_idx: usize,
+        storage_type: StorageType,
     ) -> Result<Self, BlockError> {
         Ok(Self {
             _block_data,
             addr,
             size,
-            storage_idx,
+            storage_type,
             kind: std::marker::PhantomData,
         })
     }
@@ -92,10 +93,10 @@ where
 /// Mutable storage view that provides exclusive access to a region of storage
 #[derive(Debug)]
 pub struct MemoryViewMut<'a, S: Storage, K: Kind> {
-    _block_data: &'a mut BlockData<S>,
+    _block_data: &'a mut dyn BlockDataExt<S>,
     addr: usize,
     size: usize,
-    storage_idx: usize,
+    storage_type: StorageType,
     kind: std::marker::PhantomData<K>,
 }
 
@@ -108,16 +109,16 @@ impl<'a, S: Storage, K: Kind> MemoryViewMut<'a, S, K> {
     /// - The view does not outlive the storage
     /// - No other views exist for this region
     pub(crate) unsafe fn new(
-        _block_data: &'a mut BlockData<S>,
+        _block_data: &'a mut dyn BlockDataExt<S>,
         addr: usize,
         size: usize,
-        storage_idx: usize,
+        storage_type: StorageType,
     ) -> Result<Self, BlockError> {
         Ok(Self {
             _block_data,
             addr,
             size,
-            storage_idx,
+            storage_type,
             kind: std::marker::PhantomData,
         })
     }
@@ -144,6 +145,7 @@ mod nixl {
 
     use super::super::nixl::*;
 
+    pub use crate::block_manager::storage::StorageType;
     pub use nixl_sys::{MemType, MemoryRegion, NixlDescriptor};
 
     impl<S: Storage, K: Kind> MemoryRegion for MemoryView<'_, S, K> {
@@ -162,17 +164,16 @@ mod nixl {
         K: Kind,
     {
         fn mem_type(&self) -> MemType {
-            self._block_data.layout.storage_type().nixl_mem_type()
+            self._block_data.storage_type().nixl_mem_type()
         }
 
         fn device_id(&self) -> u64 {
-            self._block_data
-                .layout
-                .storage()
-                .into_iter()
-                .next()
-                .unwrap()
-                .device_id()
+            match self.storage_type {
+                StorageType::System | StorageType::Pinned => 0,
+                StorageType::Device(device_id) => device_id as u64,
+                StorageType::Disk(fd) => fd,
+                _ => panic!("Invalid storage type"),
+            }
         }
     }
 
@@ -192,17 +193,16 @@ mod nixl {
         K: Kind,
     {
         fn mem_type(&self) -> MemType {
-            self._block_data.layout.storage_type().nixl_mem_type()
+            self._block_data.storage_type().nixl_mem_type()
         }
 
         fn device_id(&self) -> u64 {
-            self._block_data
-                .layout
-                .storage()
-                .into_iter()
-                .next()
-                .unwrap()
-                .device_id()
+            match self.storage_type {
+                StorageType::System | StorageType::Pinned => 0,
+                StorageType::Device(device_id) => device_id as u64,
+                StorageType::Disk(fd) => fd,
+                _ => panic!("Invalid storage type"),
+            }
         }
     }
 
@@ -216,8 +216,8 @@ mod nixl {
             NixlMemoryDescriptor::new(
                 self.addr as u64, // Address from the view
                 self.size(),      // Size from the view
-                self._block_data.layout.storage()[self.storage_idx].mem_type(), // Delegate to self's NixlDescriptor impl
-                self._block_data.layout.storage()[self.storage_idx].device_id(),
+                self.mem_type(),
+                self.device_id(),
             )
         }
     }
@@ -234,8 +234,8 @@ mod nixl {
             NixlMemoryDescriptor::new(
                 self.addr as u64,
                 self.size(),
-                self._block_data.layout.storage()[self.storage_idx].mem_type(), // Delegate to self's NixlDescriptor impl
-                self._block_data.layout.storage()[self.storage_idx].device_id(),
+                self.mem_type(),
+                self.device_id(),
             )
         }
     }

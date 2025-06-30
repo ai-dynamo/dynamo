@@ -24,13 +24,13 @@
 //! need some additional information to propagate intermediate results for improved observability.
 //! The metadata is transferred via the other arms of the `StreamingResponse` enum.
 //!
+use std::collections::HashMap;
+use std::time::SystemTime;
 
 use anyhow::Result;
 use derive_builder::Builder;
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-use std::collections::HashMap;
-use std::time::SystemTime;
 
 use super::TokenIdType;
 

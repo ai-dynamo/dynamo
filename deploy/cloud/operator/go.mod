@@ -11,6 +11,7 @@ require (
 	github.com/awslabs/amazon-ecr-credential-helper/ecr-login v0.9.1
 	github.com/bsm/gomega v1.27.10
 	github.com/chrismellard/docker-credential-acr-env v0.0.0-20230304212654-82a0ddb27589
+	github.com/goccy/go-yaml v1.18.0
 	github.com/google/go-cmp v0.7.0
 	github.com/google/go-containerregistry v0.20.5
 	github.com/huandu/xstrings v1.4.0
@@ -22,7 +23,6 @@ require (
 	github.com/sergeymakinen/go-quote v1.1.0
 	github.com/sirupsen/logrus v1.9.3
 	go.etcd.io/etcd/client/v3 v3.5.16
-	gopkg.in/yaml.v2 v2.4.0
 	istio.io/api v1.23.1
 	istio.io/client-go v1.23.1
 	k8s.io/api v0.32.3

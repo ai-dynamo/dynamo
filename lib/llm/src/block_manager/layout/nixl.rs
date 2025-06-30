@@ -147,24 +147,19 @@ where
     }
 }
 
+// todo: move this to so that it's allocated with locality::Local
 impl LayoutConfig {
     /// Create a new NIXL-aware layout from existing NIXL-registerable storage.
     pub fn create_layout<S: Storage + NixlRegisterableStorage>(
         &self,
         layout_type: LayoutType,
         storage: Vec<S>,
-        require_exact: bool,
     ) -> Result<Box<dyn NixlLayout<StorageType = S>>, LayoutError> {
         Ok(match layout_type {
-            LayoutType::FullyContiguous => {
-                Box::new(FullyContiguous::new(self.clone(), storage, require_exact)?)
+            LayoutType::FullyContiguous => Box::new(FullyContiguous::new(self.clone(), storage)?),
+            LayoutType::LayerSeparate { outer_contiguous } => {
+                Box::new(LayerSeparate::new(self.clone(), storage, outer_contiguous)?)
             }
-            LayoutType::LayerSeparate { outer_contiguous } => Box::new(LayerSeparate::new(
-                self.clone(),
-                storage,
-                require_exact,
-                outer_contiguous,
-            )?),
         })
     }
 
@@ -273,7 +268,7 @@ impl<S: NixlRegisterableStorage> ToSerializedNixlBlockLayout for FullyContiguous
             config,
             vec![base_offset],
             storage_descriptors,
-            self.storage_type(),
+            *self.storage_type(),
         );
 
         let nixl_block_layout = NixlBlockLayoutKinds::FullyContiguous(serializable_data);
@@ -297,7 +292,7 @@ impl<S: NixlRegisterableStorage> ToSerializedNixlBlockLayout for LayerSeparate<S
             config,
             base_offsets,
             storage_descriptors,
-            self.storage_type(),
+            *self.storage_type(),
         );
 
         let nixl_block_layout = NixlBlockLayoutKinds::LayerSeparate(serializable_data);

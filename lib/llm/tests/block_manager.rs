@@ -481,7 +481,7 @@ mod tests {
             .build()
             .unwrap();
 
-        ReferenceBlockManager::new(config).unwrap()
+        ReferenceBlockManager::new(config).await.unwrap()
     }
 
     async fn setup_kvbm_component(

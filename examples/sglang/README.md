@@ -73,7 +73,7 @@ dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
 
 #### Disaggregated
 
-As of `sglang==0.4.6.post4`, SGLang uses a mini load balancer to route requests to handle disaggregated serving. The load balancer functions as follows
+SGLang uses a mini load balancer to route requests to handle disaggregated serving. The load balancer functions as follows
 
 1. The load balancer receives a request from the client
 2. A random `(prefill, decode)` pair is selected from the pool of available workers
@@ -98,4 +98,147 @@ SGLang also supports DP attention for MoE models. We provide an example config f
 # note this will require 4 GPUs
 cd /workspace/examples/sglang
 dynamo serve graphs.disagg:Frontend -f ./configs/disagg-dp-attention.yaml
+```
+
+##### Disaggregated with WideEP
+
+Dynamo supports SGLang's implementation of wide expert parallelism and large scale P/D for DeepSeek-R1! You can read their blog post [here](https://www.nvidia.com/en-us/technologies/ai/deepseek-r1-large-scale-p-d-with-wide-expert-parallelism/) for more details. We provide a Dockerfile for this in `container/Dockerfile.sglang-deepep` and configurations to deploy this at scale. In this example, we will run 1 prefill worker on 2 H100 nodes and 1 decode worker on 4 H100 nodes (48 total GPUs). You can easily scale this to 96 GPUs or more by simply changing the configuration files.
+
+Steps to run:
+
+1. Build the SGLang DeepEP container
+
+```bash
+git clone https://github.com/sgl-project/sglang.git
+cd sglang/docker
+docker build -f Dockerfile.deepep -t deepep .
+```
+
+You will now have a `deepep:latest` image
+
+2. Build the Dynamo container
+
+```bash
+cd $DYNAMO_ROOT
+docker build -f container/Dockerfile.sglang-deepep . -t dynamo-deepep --no-cache
+```
+
+3. You can run this container on each 8xH100 node using the following command.
+
+> [!IMPORTANT]
+> We recommend downloading DeepSeek-R1 and then mounting it to the container. You can find the model [here](https://huggingface.co/deepseek-ai/DeepSeek-R1)
+
+```bash
+docker run \
+    --gpus all \
+    -it \
+    --rm \
+    --network host \
+    --volume /PATH_TO_DSR1_MODEL/:/model/ \
+    --shm-size=10G \
+    --ulimit memlock=-1 \
+    --ulimit stack=67108864 \
+    --ulimit nofile=65536:65536 \
+    --cap-add CAP_SYS_PTRACE \
+    --ipc host \
+    dynamo-deepep:latest
+```
+
+In each container, you should be in the `/sgl-workspace/dynamo/examples/sglang` directory.
+
+4. On the head prefill node, start `nats-server` and `etcd` using the following commands
+
+```bash
+nats-server -js &
+etcd --listen-client-urls http://0.0.0.0:2379 \
+     --advertise-client-urls http://0.0.0.0:2379 \
+     --listen-peer-urls http://0.0.0.0:2380 \
+     --initial-cluster default=http://HEAD_PREFILL_NODE_IP:2380 &
+```
+
+5. On every other node, go ahead and export the `NATS_SERVER` and `ETCD_ENDPOINTS` environment variables
+
+> [!IMPORTANT]
+> You will need the IP address of your head prefill node and head decode node for the configuration files
+
+```bash
+# run this on every other node
+export NATS_SERVER=nats://HEAD_PREFILL_NODE_IP:4222
+export ETCD_ENDPOINTS=http://HEAD_PREFILL_NODE_IP:2379
+```
+
+6. Configure each configuration file to use the correct `dist-init-addr`, and `node-rank`
+
+Each container contains the configuration file in `configs/dsr1.yaml`. For our example, we will make the following changes:
+
+On the prefill head node, `vim` into the configs and change the following section of the `SGLangWorker`:
+
+```yaml
+SGLangWorker:
+    ...
+    dist-init-addr: HEAD_PREFILL_NODE_IP
+    nnodes: 2
+    node-rank: 0
+    ...
+```
+
+On the other prefill node (since this example has 2 prefill nodes), change the following section of the `SGLangWorker`:
+
+```yaml
+SGLangWorker:
+    ...
+    dist-init-addr: HEAD_PREFILL_NODE_IP
+    nnodes: 2
+    node-rank: 1
+    ...
+```
+
+On the decode head node, `vim` into the configs and change the following section of the `SGLangDecodeWorker`:
+
+```yaml
+SGLangDecodeWorker:
+    ...
+    dist-init-addr: HEAD_DECODE_NODE_IP
+    nnodes: 4
+    node-rank: 0
+    ...
+```
+
+On the other decode nodes (this example has 4 decode nodes), change the following section of the `SGLangDecodeWorker`:
+
+```yaml
+SGLangDecodeWorker:
+    ...
+    dist-init-addr: HEAD_DECODE_NODE_IP
+    nnodes: 4
+    # depending on which node this will be 1, 2, and 3
+    node-rank: 1
+```
+
+7. Start up the workers using the following commands
+
+On prefill head node
+
+```bash
+dynamo serve graphs.agg:Frontend -f configs/dsr1.yaml
+```
+
+On prefill child node
+
+```bash
+dynamo serve graphs.agg:Frontend -f configs/dsr1.yaml --service-name SGLangWorker
+```
+
+On all decode nodes
+
+```bash
+dynamo serve graphs.disagg:Frontend -f configs/dsr1.yaml --service-name SGLangDecodeWorker
+```
+
+8. Run the warmup script to warm up the model
+
+DeepGEMM kernels can sometimes take a while to warm up. Here we provide a small helper script that should help. You can run this as many times as you want before starting inference/benchmarking. You can exec into the head node and run this script standalone - it does not need a container.
+
+```bash
+./warmup.sh HEAD_PREFILL_NODE_IP
 ```

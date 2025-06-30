@@ -1,0 +1,5 @@
+[book]
+authors = ["Ziqi Fan"]
+language = "en"
+src = "src"
+title = "KV Block Manager"

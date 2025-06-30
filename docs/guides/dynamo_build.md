@@ -19,19 +19,25 @@ limitations under the License.s
 
 This guide explains how to use the `dynamo build` command to containerize Dynamo inference graphs (pipelines) for deployment.
 
-`dynamo build` is a command-line tool that helps containerize inference graphs created with Dynamo SDK. Run `dynamo build --containerize` to build a stand-alone Docker container that encapsulates your entire inference graph. This image can then be shared and run standalone.
+`dynamo build` is a command-line tool that helps containerize inference graphs created with Dynamo SDK.
+Run `dynamo build --containerize` to build a stand-alone Docker container that encapsulates your entire inference graph.
+The generated container-image can then be shared and/or run standalone.
 
-```{note}
-This experimental feature is tested on the examples in the `examples/` directory. You need to make some modifications. Pay particular attention if your inference graph introduces custom dependencies.
-```
+> [!Caution]
+> This experimental feature is tested on the examples in the `examples/` directory.
+> You need to make some modifications.
+> Pay particular attention if your inference graph introduces custom dependencies.
+
 
 ## Building a containerized inference graph
 
 The basic workflow for using `dynamo build` includes:
 
-#. Defining your inference graph and testing locally with `dynamo serve`
-#. Specifying a base image for your inference graph. More on this below.
-#. Running `dynamo build` to build a containerized inference graph
+  1. Defining your inference graph and testing locally with `dynamo serve`.
+
+  2. Specifying a base image for your inference graph. More on this below.
+
+  3. Running `dynamo build` to build a containerized inference graph.
 
 ### Basic Usage
 

@@ -17,7 +17,7 @@ use super::*;
 
 use std::sync::Arc;
 
-use dynamo_llm::block_manager::{self as bm, block::BlockIdentifier};
+use dynamo_llm::block_manager as bm;
 
 use crate::to_pyerr;
 
@@ -25,8 +25,8 @@ type DeviceStorageType = bm::storage::DeviceStorage;
 
 #[derive(Debug)]
 pub enum BlockListType {
-    Immutable(Vec<bm::block::ImmutableBlock<DeviceStorageType, bm::BasicMetadata>>),
-    Mutable(Vec<bm::block::MutableBlock<DeviceStorageType, bm::BasicMetadata>>),
+    Immutable(Vec<bm::block::ImmutableBlock<DeviceStorageType, bm::block::locality::Local, bm::BasicMetadata>>),
+    Mutable(Vec<bm::block::MutableBlock<DeviceStorageType, bm::block::locality::Local, bm::BasicMetadata>>),
 }
 
 #[pyclass]

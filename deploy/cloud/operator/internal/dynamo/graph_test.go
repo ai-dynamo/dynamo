@@ -1402,6 +1402,69 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 			},
 			wantErr: false,
 		},
+		{
+			name: "Test GenerateDynamoComponentsDeployments with ExtraPodSpec.MainContainer Command and Args",
+			args: args{
+				parentDynamoGraphDeployment: &v1alpha1.DynamoGraphDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dynamographdeployment",
+						Namespace: "default",
+					},
+					Spec: v1alpha1.DynamoGraphDeploymentSpec{
+						DynamoGraph: "dynamocomponent:ac4e234",
+					},
+				},
+				config: &DynamoGraphConfig{
+					DynamoTag: "dynamocomponent:MyServiceWithOverrides",
+					Services: []ServiceConfig{
+						{
+							Name:         "service1",
+							Dependencies: []map[string]string{},
+							Config: Config{
+								ExtraPodSpec: &compounaiCommon.ExtraPodSpec{
+									MainContainer: &corev1.Container{
+										Command: []string{"sh", "-c"},
+										Args:    []string{"echo hello world", "sleep 99999"},
+									},
+								},
+							},
+						},
+					},
+				},
+				ingressSpec: &v1alpha1.IngressSpec{},
+			},
+			want: map[string]*v1alpha1.DynamoComponentDeployment{
+				"service1": {
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dynamographdeployment-service1",
+						Namespace: "default",
+						Labels: map[string]string{
+							commonconsts.KubeLabelDynamoComponent: "service1",
+						},
+					},
+					Spec: v1alpha1.DynamoComponentDeploymentSpec{
+						DynamoComponent: "dynamocomponent:ac4e234",
+						DynamoTag:       "dynamocomponent:MyServiceWithOverrides",
+						DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+							ServiceName: "service1",
+							Autoscaling: &v1alpha1.Autoscaling{
+								Enabled: false,
+							},
+							Labels: map[string]string{
+								commonconsts.KubeLabelDynamoComponent: "service1",
+							},
+							ExtraPodSpec: &compounaiCommon.ExtraPodSpec{
+								MainContainer: &corev1.Container{
+									Command: []string{"sh", "-c"},
+									Args:    []string{"echo hello world", "sleep 99999"},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

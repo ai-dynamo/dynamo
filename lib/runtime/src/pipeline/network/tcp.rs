@@ -135,7 +135,7 @@ mod tests {
 
         // connect to the server socket
         let mut send_stream =
-            client::TcpClient::create_response_steam(context_rank1.context(), connection_info)
+            client::TcpClient::create_response_stream(context_rank1.context(), connection_info)
                 .await
                 .unwrap();
         println!("Client connected");

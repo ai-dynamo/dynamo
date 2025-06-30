@@ -38,6 +38,7 @@ const DEFAULT_ANNOTATED_SETTING: Option<bool> = Some(true);
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     logging::init();
+    m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
 
@@ -61,6 +62,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::kv::AggregatedMetrics>()?;
     m.add_class::<llm::kv::KvMetricsAggregator>()?;
     m.add_class::<llm::kv::KvEventPublisher>()?;
+    m.add_class::<llm::kv::RadixTree>()?;
+    m.add_class::<llm::kv::ZmqKvEventListener>()?;
     m.add_class::<llm::kv::ZmqKvEventPublisher>()?;
     m.add_class::<llm::kv::ZmqKvEventPublisherConfig>()?;
     m.add_class::<llm::kv::KvRecorder>()?;

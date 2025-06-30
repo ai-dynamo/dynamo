@@ -150,7 +150,7 @@ def clear_namespace(namespace: str) -> None:
 
 
 def serve_dynamo_graph(
-    dynamo_pipeline: str,
+    graph: str,
     working_dir: str | None = None,
     dependency_map: dict[str, str] | None = None,
     service_name: str = "",
@@ -171,7 +171,7 @@ def serve_dynamo_graph(
 
     namespace: str = ""
     env: dict[str, Any] = {}
-    svc = find_and_load_service(dynamo_pipeline, working_dir)
+    svc = find_and_load_service(graph, working_dir)
     dynamo_path = pathlib.Path(working_dir or ".")
 
     watchers: list[Watcher] = []
@@ -236,7 +236,7 @@ def serve_dynamo_graph(
                             f"Service {dep_svc.name} is not servable. Please use link to override with a concrete implementation."
                         )
                     new_watcher, new_socket, uri = create_dynamo_watcher(
-                        dynamo_pipeline,
+                        graph,
                         dep_svc,
                         uds_path,
                         allocator,
@@ -254,7 +254,7 @@ def serve_dynamo_graph(
         dynamo_args = [
             "-m",
             _DYNAMO_WORKER_SCRIPT,
-            dynamo_pipeline,
+            graph,
             "--service-name",
             svc.name,
             "--worker-id",
@@ -410,7 +410,7 @@ def serve_dynamo_graph(
                         hasattr(svc, "is_dynamo_component")
                         and svc.is_dynamo_component()
                     )
-                    else (dynamo_pipeline,)
+                    else (graph,)
                 ),
             ),
         )

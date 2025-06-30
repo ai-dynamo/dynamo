@@ -18,6 +18,9 @@ Common:
   max-model-len: 4096
   trust-remote-code: true
 
+Frontend:
+  common-configs: [model]
+
 Processor:
   router: round-robin
   prompt-template: "<|user|>\n<|image_1|>\n<prompt><|end|>\n<|assistant|>\n"

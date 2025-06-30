@@ -13,14 +13,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::block_manager::block::locality::LocalityProvider;
+
 use super::*;
 
 /// Manages active blocks being used by sequences
-pub struct ActiveBlockPool<S: Storage, M: BlockMetadata> {
-    pub(super) map: HashMap<SequenceHash, Weak<MutableBlock<S, M>>>,
+pub struct ActiveBlockPool<S: Storage, L: LocalityProvider, M: BlockMetadata> {
+    pub(super) map: HashMap<SequenceHash, Weak<MutableBlock<S, L, M>>>,
 }
 
-impl<S: Storage, M: BlockMetadata> ActiveBlockPool<S, M> {
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ActiveBlockPool<S, L, M> {
     pub fn new() -> Self {
         Self {
             map: HashMap::new(),
@@ -29,8 +31,8 @@ impl<S: Storage, M: BlockMetadata> ActiveBlockPool<S, M> {
 
     pub fn register(
         &mut self,
-        mut block: MutableBlock<S, M>,
-    ) -> Result<ImmutableBlock<S, M>, BlockPoolError> {
+        mut block: MutableBlock<S, L, M>,
+    ) -> Result<ImmutableBlock<S, L, M>, BlockPoolError> {
         if !block.state().is_registered() {
             return Err(BlockPoolError::InvalidMutableBlock(
                 "block is not registered".to_string(),
@@ -69,7 +71,7 @@ impl<S: Storage, M: BlockMetadata> ActiveBlockPool<S, M> {
         }
     }
 
-    pub fn remove(&mut self, block: &mut Block<S, M>) {
+    pub fn remove(&mut self, block: &mut Block<S, L, M>) {
         if let Ok(sequence_hash) = block.sequence_hash() {
             if let Some(weak) = self.map.get(&sequence_hash) {
                 if let Some(_arc) = weak.upgrade() {
@@ -84,7 +86,7 @@ impl<S: Storage, M: BlockMetadata> ActiveBlockPool<S, M> {
     pub fn match_sequence_hash(
         &mut self,
         sequence_hash: SequenceHash,
-    ) -> Option<ImmutableBlock<S, M>> {
+    ) -> Option<ImmutableBlock<S, L, M>> {
         if let Some(weak) = self.map.get(&sequence_hash) {
             if let Some(arc) = weak.upgrade() {
                 Some(ImmutableBlock::new(arc))

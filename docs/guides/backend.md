@@ -33,6 +33,7 @@ see the [Dynamo Serve Guide](../../docs/guides/dynamo_serve.md).
 
 When deploying a python-based worker with `dynamo serve` or `dynamo deploy`, it is
 a Python class based definition that requires a few key decorators to get going:
+
 - `@service`: used to define a worker class
 - `@endpoint`: marks methods that can be called by other workers or clients
 
@@ -64,6 +65,7 @@ class YourWorker:
 Workers in Dynamo are identified by a `namespace/component/endpoint` naming schema.
 When addressing this worker's endpoint with the `namespace/component/endpoint` schema
 based on the definitions above, it would be: `your_namespace/YourWorker/your_endpoint`:
+
 - `namespace="your_namespace"`: Defined in the `@service` decorator
 - `component="YourWorker"`: Defined by the Python Class name
 - `endpoint="your_endpoint"`: Defined by the `@endpoint` decorator, or by default the name of the function being decorated.
@@ -93,6 +95,7 @@ class ResponseType(BaseModel):
 For example, if you deploy your worker directly behind an OpenAI HTTP (`http`) service
 using `llmctl`, you can define the request and response types to correspond to
 Chat Completions objects, such as the ones specified in the OpenAI API. For example:
+
 ```python
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 
@@ -112,6 +115,7 @@ via custom RequestType/ResponseType definitions:
 # basic_worker.py
 # This can be run standalone with `dynamo serve basic_worker:YourWorker`
 
+import logging
 from pydantic import BaseModel
 from dynamo.sdk import endpoint, service
 
@@ -187,6 +191,7 @@ and internally these requests would be routed to the attached worker endpoints i
 In more advanced scenarios where your worker may operate on some other intermediate format
 that may not directly match an OpenAI-like format, you could setup a separate processor worker
 that does something like the following:
+
 - Take in OpenAI Chat Completions requests from the HTTP service
 - Convert requests from Chat Completions format to the RequestType format your worker expects
 - Forward requests to the worker(s)
@@ -324,6 +329,7 @@ an endpoint that can do arbitrary things based on your use case.
 
 For example, you can initialize the `KvMetricsAggregator` and `KvIndexer`
 in your class implementation:
+
 ```python
 @service(
     dynamo={
@@ -445,6 +451,7 @@ metrics, see the [KV Cache Routing Guide](../../docs/architecture/kv_cache_routi
 NIXL (NVIDIA Inter-process Link) enables efficient GPU memory sharing between processes. In Prefill/Decode disaggregation, we use NIXL to transfer computed KV cache blocks from prefill workers to decode workers. Here are the core concepts:
 
 1. **NIXL Agent Setup**
+
 ```python
 from nixl._api import nixl_agent
 
@@ -458,6 +465,7 @@ class NixlConnector:
 ```
 
 2. **Memory Registration and Transfer Preparation**
+
 ```python
 def register_kv_caches(self, kv_cache: torch.Tensor):
     # Get block size from the KV cache tensor
@@ -489,6 +497,7 @@ def register_kv_caches(self, kv_cache: torch.Tensor):
 ```
 
 3. **Remote Agent Communication**
+
 ```python
 def get_agent_metadata(self):
     # Get metadata for sharing with other agents
@@ -513,6 +522,7 @@ nixl_connector.add_remote_agent(decode_engine_id, decode_metadata, decode_blocks
 ```
 
 4. **KV Cache Transfer**
+
 ```python
 def write_blocks(self, local_block_ids, remote_block_ids, notify_msg):
     # Initiate asynchronous transfer using block IDs
@@ -533,6 +543,7 @@ nixl_connector.write_blocks([0, 3], [12, 16], "kv_transfer")
 ```
 
 The NIXL connector provides:
+
 - GPU memory registration for sharing between processes
 - Connection establishment between Prefill and Decode workers
 - Efficient block-based KV cache transfers
@@ -547,6 +558,7 @@ on the same concepts used for any Dynamo client<->worker or worker<->worker
 interaction over the DistributedRuntime.
 
 First you can define a worker for each as usual:
+
 ```python
 class DecodeWorker:
     # ...
@@ -561,6 +573,7 @@ In some scenarios, it may be more efficient for the Decode worker to just do the
 Prefill itself rather than do the extra communication, such as if the input
 sequence length is below some small threshold. If you wanted to disable
 disaggregation, the DecodeWorker could just always do the Prefill step as well.
+
 ```python
 @service(
     dynamo={
@@ -618,6 +631,7 @@ For more information on Disaggregated Serving, see the
 ## Best Practices
 
 1. **Resource Management**: Configure resource requirements based on your needs:
+
    ```python
    @service(
        resources={
