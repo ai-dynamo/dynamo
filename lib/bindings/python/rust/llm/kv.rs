@@ -153,6 +153,15 @@ pub struct ZmqKvEventPublisherConfig {
     pub zmq_endpoint: String,
     #[pyo3(get, set)]
     pub zmq_topic: String,
+    #[pyo3(get, set)]
+    pub sink: KvEventSink,
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub enum KvEventSink {
+    Event,
+    Echo,
 }
 
 #[pymethods]
@@ -162,19 +171,22 @@ impl ZmqKvEventPublisherConfig {
         worker_id,
         kv_block_size,
         zmq_endpoint = "tcp://127.0.0.1:5557".to_string(),
-        zmq_topic = "".to_string()
+        zmq_topic = "".to_string(),
+        sink = KvEventSink::Event
     ))]
     pub fn new(
         worker_id: i64,
         kv_block_size: usize,
         zmq_endpoint: String,
         zmq_topic: String,
+        sink: KvEventSink
     ) -> Self {
         Self {
             worker_id,
             kv_block_size,
             zmq_endpoint,
             zmq_topic,
+            sink
         }
     }
 }
@@ -188,6 +200,10 @@ pub(crate) struct ZmqKvEventPublisher {
 impl ZmqKvEventPublisher {
     #[new]
     fn new(component: Component, config: ZmqKvEventPublisherConfig) -> PyResult<Self> {
+        let sink_config = match config.sink {
+            KvEventSink::Event => Some(llm_rs::kv_router::publisher::KvEventSinkConfig::Nats),
+            KvEventSink::Echo => Some(llm_rs::kv_router::publisher::KvEventSinkConfig::Echo),
+        };
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
             component.inner,
             config.worker_id,
@@ -196,6 +212,7 @@ impl ZmqKvEventPublisher {
                 endpoint: config.zmq_endpoint,
                 topic: config.zmq_topic,
             }),
+            sink_config
         )
         .map_err(to_pyerr)?;
         Ok(Self { inner })
