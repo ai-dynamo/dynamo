@@ -102,7 +102,7 @@ Dynamo Cloud acts as an orchestration layer between the end user and Kubernetes,
 
 You must have first followed the instructions in [deploy/cloud/helm/README.md](../../deploy/cloud/helm/README.md) to create your Dynamo cloud deployment.
 
-Make sure your dynamo cloud the `deploy.sh` script finished successfully and setup port forwarding in another window per its suggestion (note, you may not need that if you use ingress).
+Make sure your dynamo cloud the `deploy_dynamo_cloud.sh --crds --interactive` script finished successfully and setup port forwarding in another window per its suggestion (note, you may not need that if you use ingress).
 
 ```bash
 kubectl port-forward svc/$DEPLOYMENT_NAME-frontend 3000:3000  -n ${KUBE_NS}

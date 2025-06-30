@@ -135,7 +135,19 @@ kubectl create secret docker-registry docker-imagepullsecret \
 ```
 
 3. Deploy Dynamo Cloud using the Helm chart via the provided deploy script:
+To deploy the Dynamo Cloud Platform on Kubernetes, run:
 
 ```bash
-./deploy.sh
+./deploy_dynamo_cloud.sh
 ```
+
+This will validate tools, configure your environment, generate generated-values.yaml, and deploy the platform using Helm.
+
+If you'd like to only generate the generated-values.yaml file without deploying to Kubernetes (e.g., for inspection, CI workflows, or dry-run testing), use:
+
+```bash
+./deploy_dynamo_cloud.py --yaml-only
+```
+
+
+

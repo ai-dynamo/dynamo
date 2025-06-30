@@ -157,13 +157,13 @@ kubectl config set-context --current --namespace=$NAMESPACE
 3. Deploy the Helm charts (install CRDs first, then platform) using the deployment script:
 
 ```bash
-./deploy.sh --crds
+./deploy_dynamo_cloud.sh --crds
 ```
 
 if you want guidance during the process, run the deployment script with the `--interactive` flag:
 
 ```bash
-./deploy.sh --crds --interactive
+./deploy_dynamo_cloud.sh --crds --interactive
 ```
 
 omitting `--crds` will skip the CRDs installation/upgrade. This is useful when installing on a shared cluster as CRDs are cluster-scoped resources.
@@ -186,7 +186,7 @@ export DYNAMO_CLOUD=http://localhost:<local-port>
 After deploying the Dynamo cloud platform, you can:
 
 1. Deploy your first inference graph using the [Dynamo CLI](operator_deployment.md)
-2. Deploy Dynamo LLM pipelines to Kubernetes using the [Dynamo CLI](../../examples/llm_deployment.md)
+2. Deploy Dynamo LLM graphs to Kubernetes using the [Dynamo CLI](../../examples/llm_deployment.md)
 3. Manage your deployments using the Dynamo CLI
 
 For more detailed information about deploying inference graphs, see the [Dynamo Deploy Guide](README.md).
