@@ -103,6 +103,32 @@ impl EndpointConfigBuilder {
             .map(|l| l.child_token())
             .unwrap_or_else(|| endpoint.drt().child_token());
 
+        // start HTTP server (only once for each component)
+        let http_server_once = endpoint.component.http_server_once.clone();
+        let host = "0.0.0.0"; // todo: make it configurable
+        let port = 0; // todo: make it configurable
+        let component_cancel_token = endpoint.component.drt().child_token();
+        http_server_once
+            .get_or_init(
+                #[allow(clippy::async_yields_async)]
+                async move {
+                    tokio::spawn(async move {
+                        if let Err(e) = super::http_server::start_http_server(
+                            host,
+                            port,
+                            component_cancel_token,
+                        )
+                        .await
+                        {
+                            tracing::error!("HTTP server startup failed: {}", e);
+                        } else {
+                            tracing::debug!("HTTP server started successfully");
+                        }
+                    })
+                },
+            )
+            .await;
+
         let push_endpoint = PushEndpoint::builder()
             .service_handler(handler)
             .cancellation_token(cancel_token.clone())
