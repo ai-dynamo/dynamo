@@ -21,19 +21,30 @@ Frontend:
 
 TensorRTLLMWorker:
   served_model_name: "nvidia/DeepSeek-R1-FP4"
-  engine_args: "configs/deepseek_r1/agg_llm_api_config.yaml"
-  llmapi-disaggregated-config: "configs/deepseek_r1/mtp/mtp_disagg_llm_api_config.yaml"
+  # NOTE: FP4 only supported starting with Blackwell GPUs.
+  # https://huggingface.co/nvidia/DeepSeek-R1-FP4
+  # You can also specify the full path to locally downloaded weights
+  # instead of a HuggingFace ID here.
+  model-path: "nvidia/DeepSeek-R1-FP4"
+  # Path to a YAML file containing additional keyword arguments to pass to the TRTLLM engine.
+  # The fields in `extra-engine-args` holds higher priority than the above TRTLLM engine fields.
+  extra-engine-args: "configs/deepseek_r1/mtp/engine_configs/decode_config.yaml"
   router: round-robin
-  remote-prefill: true
-  min-prefill-workers: 1
+  enable-disagg: true
   ServiceArgs:
     workers: 1
     resources:
       gpu: 4
 
 TensorRTLLMPrefillWorker:
-  engine_args: "configs/deepseek_r1/agg_llm_api_config.yaml"
-  llmapi-disaggregated-config: "configs/deepseek_r1/mtp/mtp_disagg_llm_api_config.yaml"
+  # NOTE: FP4 only supported starting with Blackwell GPUs.
+  # https://huggingface.co/nvidia/DeepSeek-R1-FP4
+  # You can also specify the full path to locally downloaded weights
+  # instead of a HuggingFace ID here.
+  model-path: "nvidia/DeepSeek-R1-FP4"
+  # Path to a YAML file containing additional keyword arguments to pass to the TRTLLM engine.
+  # The fields in `extra-engine-args` holds higher priority than the above TRTLLM engine fields.
+  extra-engine-args: "configs/deepseek_r1/mtp/engine_configs/prefill_config.yaml"
   router: round-robin
   ServiceArgs:
     workers: 1

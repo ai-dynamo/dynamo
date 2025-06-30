@@ -12,8 +12,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-from components.frontend import Frontend
-from components.worker import TensorRTLLMWorker
-
-Frontend.link(TensorRTLLMWorker)
+apiVersion: inference.networking.x-k8s.io/v1alpha2
+kind: InferencePool
+metadata:
+  name: dynamo-deepseek
+  namespace: default
+spec:
+  targetPortNumber: 3000
+  selector:
+    nvidia.com/dynamo-component-type: Frontend
+  extensionRef:
+    failureMode: FailClose
+    group: ""
+    kind: Service
+    name: dynamo-deepseek-epp

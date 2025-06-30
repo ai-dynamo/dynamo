@@ -22,7 +22,12 @@ Frontend:
 
 TensorRTLLMWorker:
   served_model_name: "nvidia/DeepSeek-R1-FP4"
-  engine_args: "configs/deepseek_r1/agg_llm_api_config.yaml"
+  # NOTE: FP4 only supported starting with Blackwell GPUs.
+  # https://huggingface.co/nvidia/DeepSeek-R1-FP4
+  # You can also specify the full path to locally downloaded weights
+  # instead of a HuggingFace ID here.
+  model-path: "nvidia/DeepSeek-R1-FP4"
+  extra-engine-args: "configs/deepseek_r1/engine_configs/agg_config.yaml"
   router: round-robin
   ServiceArgs:
     workers: 1

@@ -1345,6 +1345,7 @@ func getDynamoComponentRepositoryNameAndDynamoComponentVersion(dynamoComponent *
 
 //nolint:gocyclo,nakedret
 func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption) (podTemplateSpec *corev1.PodTemplateSpec, err error) {
+	logs := log.FromContext(ctx)
 	podLabels := r.getKubeLabels(opt.dynamoComponentDeployment, opt.dynamoComponent)
 	if opt.isStealingTrafficDebugModeEnabled {
 		podLabels[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
@@ -1657,6 +1658,28 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			container.SecurityContext = &corev1.SecurityContext{}
 		}
 		container.SecurityContext.RunAsUser = &[]int64{0}[0]
+	}
+
+	// For now only overwrite the command and args.
+	if opt.dynamoComponentDeployment.Spec.ExtraPodSpec != nil {
+		extraPodSpecMainContainer := opt.dynamoComponentDeployment.Spec.ExtraPodSpec.MainContainer
+		if extraPodSpecMainContainer != nil {
+			if len(extraPodSpecMainContainer.Command) > 0 {
+				logs.Info("Overriding container '" + container.Name + "' Command with: " + strings.Join(extraPodSpecMainContainer.Command, " "))
+				container.Command = extraPodSpecMainContainer.Command
+			}
+			if len(extraPodSpecMainContainer.Args) > 0 {
+				// Special case: if command is "sh -c", we must collapse args into a single string
+				if len(container.Command) == 2 && container.Command[0] == "sh" && container.Command[1] == "-c" {
+					joinedArgs := strings.Join(extraPodSpecMainContainer.Args, " ")
+					logs.Info("Special case detected for container '" + container.Name + "': Command is 'sh -c'; collapsing Args to: " + joinedArgs)
+					container.Args = []string{joinedArgs}
+				} else {
+					logs.Info("Overriding container '" + container.Name + "' Args with: " + strings.Join(extraPodSpecMainContainer.Args, " "))
+					container.Args = extraPodSpecMainContainer.Args
+				}
+			}
+		}
 	}
 
 	containers = append(containers, container)

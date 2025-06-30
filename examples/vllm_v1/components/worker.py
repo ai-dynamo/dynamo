@@ -34,7 +34,7 @@ from vllm.v1.engine.core import EngineCoreProc
 from vllm.v1.engine.core_client import CoreEngineProcManager
 from vllm.v1.executor.abstract import Executor
 
-from dynamo.sdk import async_on_start, endpoint, service
+from dynamo.sdk import async_on_start, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -44,8 +44,8 @@ class VllmBaseWorker:
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
 
-        signal.signal(signal.SIGTERM, self.shutdown_vllm_engine)
-        signal.signal(signal.SIGINT, self.shutdown_vllm_engine)
+        signal.signal(signal.SIGTERM, self.graceful_shutdown)
+        signal.signal(signal.SIGINT, self.graceful_shutdown)
 
         self.set_side_channel_host_and_port()
 
@@ -60,9 +60,21 @@ class VllmBaseWorker:
 
         logger.info("VllmWorker has been initialized")
 
-    def shutdown_vllm_engine(self, signum, frame):
-        """Shutdown the background loop"""
-        logger.info(f"Received signal {signum}, shutting down")
+    def graceful_shutdown(self, signum, frame):
+        """
+        Gracefully shutdown the worker by shutting down the dynamo runtime.
+        This will
+            1. disable the generate endpoint so no new requests are accepted.
+            2. wait until all in-flight requests are completed.
+            3. finish the awaiting for the endpoint service.
+            4. rely on python's garbage collection to clean up the GPU.
+        """
+        logger.info("Shutting down dynamo runtime...")
+        dynamo_context["runtime"].shutdown()
+        logger.info("Dynamo runtime shutdown complete.")
+
+    def shutdown_vllm_worker(self, signum, frame):
+        """Shutdown the worker immediately by killing the background loop"""
         loop = asyncio.get_event_loop()
         try:
             self.engine_client.close()
@@ -100,7 +112,7 @@ class VllmBaseWorker:
         This sets the port number for the side channel.
         """
         if hostname is None:
-            hostname = socket.gethostname()
+            hostname = "127.0.0.1"
         if port is None:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind(("", 0))  # Bind to a free port provided by the host.

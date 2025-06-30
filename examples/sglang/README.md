@@ -43,10 +43,10 @@ See [deployment architectures](../llm/README.md#deployment-architectures) to lea
 
 ### Prerequisites
 
-Start required services (etcd and NATS) using [Docker Compose](../../deploy/docker-compose.yml)
+Start required services (etcd and NATS) using [Docker Compose](../../deploy/metrics/docker-compose.yml)
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d
+docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
 ### Build docker
@@ -71,9 +71,26 @@ cd /workspace/examples/sglang
 dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
 ```
 
+#### Aggregated with router
+
+> [!NOTE]
+> The current implementation of `examples/sglang/components/worker.py` publishes _placeholder_ engine metrics to keep the Dynamo KV-router happy. Real-time metrics will be surfaced directly from the SGLang engine once the following pull requests are merged:
+> • Upstream: [sgl-project/sglang #6721](https://github.com/sgl-project/sglang/pull/6721) – _Expose runtime KV-cache & request metrics_.
+> • Dynamo: [ai-dynamo/dynamo #1465](https://github.com/ai-dynamo/dynamo/pull/1465) – _feat: receive kvmetrics from sglang scheduler_.
+>
+> After these are in, the TODOs in `worker.py` will be resolved and the placeholder logic removed.
+
+```bash
+cd /workspace/examples/sglang
+dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml --Frontend.router=kv
+```
+
 #### Disaggregated
 
-As of `sglang==0.4.6.post4`, SGLang uses a mini load balancer to route requests to handle disaggregated serving. The load balancer functions as follows
+<details>
+<summary>SGLang Load Balancer vs Dynamo Discovery</summary>
+
+SGLang uses a mini load balancer to route requests to handle disaggregated serving. The load balancer functions as follows:
 
 1. The load balancer receives a request from the client
 2. A random `(prefill, decode)` pair is selected from the pool of available workers
@@ -81,6 +98,8 @@ As of `sglang==0.4.6.post4`, SGLang uses a mini load balancer to route requests 
 4. Internally disaggregation is done from prefill -> decode
 
 Because Dynamo has a discovery mechanism, we do not use a load balancer. Instead, we first route to a random prefill worker, select a random decode worker, and then send the request to both. Internally, SGLang's bootstrap server (which is a part of the `tokenizer_manager`) is used in conjuction with NIXL to handle the kv transfer.
+
+</details>
 
 > [!IMPORTANT]
 > Disaggregated serving in SGLang currently requires each worker to have the same tensor parallel size [unless you are using an MLA based model](https://github.com/sgl-project/sglang/pull/5922)
@@ -90,7 +109,7 @@ cd /workspace/examples/sglang
 dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
 ```
 
-##### Disaggregated with MoE and DP attention
+##### Disaggregated with MoE models and DP attention
 
 SGLang also supports DP attention for MoE models. We provide an example config for this in `configs/disagg-dp-attention.yaml` which is based on the [DeepSeek-R1-Small-2layers](https://huggingface.co/silence09/DeepSeek-R1-Small-2layers) model. You can use this configuration to test out disaggregated serving on a single node before scaling to the full DeepSeek-R1 model across multiple nodes.
 
@@ -99,3 +118,9 @@ SGLang also supports DP attention for MoE models. We provide an example config f
 cd /workspace/examples/sglang
 dynamo serve graphs.disagg:Frontend -f ./configs/disagg-dp-attention.yaml
 ```
+
+In order to scale to the full DeepSeek-R1 model, you can follow the instructions in the [multinode-examples.md](./multinode-examples.md) file.
+
+##### Disaggregated with WideEP
+
+Dynamo supports SGLang's implementation of wide expert parallelism and large scale P/D for DeepSeek-R1! You can find detailed deployment and benchmarking instructions [here](./dsr1-wideep.md)
