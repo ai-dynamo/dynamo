@@ -466,3 +466,92 @@ graph LR
 #### Summary:
 
 
+1. Dynamo does not currently detect and recover from direct vllm
+   worker sub process failure. In this example the vllm sub process
+   failure targets a prefill worker and has the same overall impact.
+   (WIP)
+
+2. Prefill worker failure causes request timeout (30 sec) and in
+   addition during recovery time prefill requests are queued in the
+   prefill queue.
+
+3. Decode worker failure is currently permanent in the disaggregated
+   case as the prefill worker holds references to memory and which are
+   not freed. This leads to total failure after fault injection.
+
+
+#### Redundant Workers
+
+To demonstrate the failure and recovery time in the case that there
+are multiple instances of each process (except for the frontend and
+decode worker) we ran a simple "disagg-p-tp-2-dp-2-d-tp-4-dp-1"
+configuration.
+
+
+```mermaid
+graph LR
+    Client["Client"]
+    Frontend["Frontend"]
+    Processor["Processor"]
+	Processor_2["Processor 2"]
+    PrefillQueue["Remote Prefill Queue"]
+
+    Client --> Frontend
+    Frontend --> Processor_1
+    Frontend --> Processor_2
+
+    Client --> Frontend
+    Frontend --> Processor
+    Processor_1 <--> DecodePool
+	Processor_2 <--> DecodePool
+
+    %% Prefill Worker Pool (horizontal layout)
+    subgraph PrefillPool["Prefill Worker Pool"]
+        direction LR
+        subgraph Prefill1["Prefill 1"]
+            direction TB
+            P1GPU0["GPU 0"]
+            P1GPU1["GPU 1"]
+		end
+        subgraph Prefill2["Prefill 2"]
+            direction TB
+            P1GPU0["GPU 0"]
+            P1GPU1["GPU 1"]
+		end
+
+    end
+
+    %% Decode Worker Pool (vertical layout)
+    subgraph DecodePool["Decode Worker Pool"]
+        direction TB
+        subgraph Decode1["Decode 1"]
+            direction TB
+            D1GPU0["GPU 0"]
+            D1GPU1["GPU 1"]
+            D1GPU2["GPU 2"]
+            D1GPU3["GPU 3"]
+        end
+    end
+
+
+	PrefillQueue --> PrefillPool
+    DecodePool --> PrefillQueue
+    PrefillPool -.-> DecodePool
+
+    %% Styling
+    style PrefillPool stroke:#0066cc,stroke-width:2px
+    style DecodePool stroke:#000,stroke-width:2px
+```
+
+
+Test Group: disagg-p-tp-2-dp-2-d-tp-4-dp-1
+
+Test Command:  dynamo serve graphs.disagg:Frontend -f /workspace/tests/fault_tolerance/configs/disagg_p_tp_2_dp_2_d_tp_4_dp_1.yaml --Frontend.port 8000 in /workspace/examples/llm
+|    Failure     |   Startup Time |   Success |   Failed |   Latency Before |   Latency After |   Pending Before |   Pending After |   Violations Before |   Violations After |   Recovery Time |
+|:--------------:|---------------:|----------:|---------:|-----------------:|----------------:|-----------------:|----------------:|--------------------:|-------------------:|----------------:|
+|      none      |          83.00 |    800.00 |     0.00 |             1.19 |             N/A |             0.00 |             N/A |                1.00 |                N/A |             N/A |
+|    frontend    |          82.00 |    704.00 |    96.00 |             1.19 |            1.17 |             0.00 |            0.01 |                1.00 |               0.00 |           12.95 |
+|   processor    |          78.00 |    795.00 |     5.00 |             1.20 |            1.18 |             0.02 |            0.01 |                1.00 |               0.00 |           25.91 |
+| decode_worker  |          78.00 |    199.00 |   601.00 |             1.21 |             nan |             0.00 |             N/A |                1.00 |               0.00 |             N/A |
+| prefill_worker |          77.00 |    800.00 |     0.00 |             1.22 |            1.18 |             0.00 |            0.01 |                1.00 |               1.00 |           45.14 |
+|  vllm_worker   |          77.00 |    799.00 |     1.00 |             1.20 |            1.16 |             0.02 |            0.00 |                1.00 |               1.00 |             N/A |
