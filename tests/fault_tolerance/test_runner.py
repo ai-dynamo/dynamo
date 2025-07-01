@@ -151,7 +151,7 @@ def results_summary():
 
 @pytest.mark.e2e
 @pytest.mark.slow
-async def test_worker_failure(
+def test_worker_failure(
     deployment_graph_test,  # noqa: F811
     request,
     runtime_services,
