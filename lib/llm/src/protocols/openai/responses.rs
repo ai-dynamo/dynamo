@@ -151,6 +151,7 @@ impl OpenAIStopConditionsProvider for NvCreateResponse {
 
 impl From<NvCreateResponse> for NvCreateChatCompletionRequest {
     fn from(resp: NvCreateResponse) -> Self {
+        // Create messages from input
         let input_text = match resp.inner.input {
             Input::Text(text) => text,
             Input::Items(_) => {
@@ -168,15 +169,16 @@ impl From<NvCreateResponse> for NvCreateChatCompletionRequest {
         // TODO: See this PR for details: https://github.com/64bit/async-openai/pull/398
         let top_logprobs = convert_top_logprobs(resp.inner.top_logprobs);
 
+        // The below should encompass all of the allowed configurable parameters
         NvCreateChatCompletionRequest {
             inner: CreateChatCompletionRequest {
-                model: resp.inner.model,
                 messages,
+                model: resp.inner.model,
                 temperature: resp.inner.temperature,
                 top_p: resp.inner.top_p,
                 max_completion_tokens: resp.inner.max_output_tokens,
                 top_logprobs,
-                stream: Some(true),
+                stream: Some(true), // Set this to Some(True) by default to aggregate stream
                 ..Default::default()
             },
             nvext: resp.nvext,
@@ -218,18 +220,15 @@ impl From<NvCreateChatCompletionResponse> for NvResponse {
             status: Status::Completed,
             output,
             output_text: None,
-            parallel_tool_calls: Some(true),
-            reasoning: Some(ReasoningConfig {
-                effort: None,
-                summary: None,
-            }),
-            service_tier: Some(ServiceTier::Default),
+            parallel_tool_calls: None,
+            reasoning: None,
+            service_tier: None,
             store: None,
-            truncation: Some(Truncation::Disabled),
-            temperature: Some(1.0),
-            top_p: Some(1.0),
-            tools: Some(vec![]),
-            metadata: Some(Default::default()),
+            truncation: None,
+            temperature: None,
+            top_p: None,
+            tools: None,
+            metadata: None,
             previous_response_id: None,
             error: None,
             incomplete_details: None,
