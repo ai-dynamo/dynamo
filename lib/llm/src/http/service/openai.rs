@@ -490,7 +490,14 @@ async fn responses(
         })?;
 
     // Convert NvCreateChatCompletionResponse --> NvResponse
-    let response: NvResponse = response.into();
+    let response: NvResponse = response.try_into().map_err(|e| {
+        tracing::error!(
+            request_id,
+            "Failed to convert NvCreateChatCompletionResponse to NvResponse: {:?}",
+            e
+        );
+        ErrorResponse::internal_server_error("Failed to convert internal response")
+    })?;
 
     inflight_guard.mark_ok();
 

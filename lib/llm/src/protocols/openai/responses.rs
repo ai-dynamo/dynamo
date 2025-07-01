@@ -194,8 +194,10 @@ fn convert_top_logprobs(input: Option<u32>) -> Option<u8> {
     input.map(|x| x.min(20) as u8)
 }
 
-impl From<NvCreateChatCompletionResponse> for NvResponse {
-    fn from(nv_resp: NvCreateChatCompletionResponse) -> Self {
+impl TryFrom<NvCreateChatCompletionResponse> for NvResponse {
+    type Error = anyhow::Error;
+
+    fn try_from(nv_resp: NvCreateChatCompletionResponse) -> Result<Self, Self::Error> {
         let chat_resp = nv_resp.inner;
         let content_text = chat_resp
             .choices
@@ -247,7 +249,7 @@ impl From<NvCreateChatCompletionResponse> for NvResponse {
             user: None,
         };
 
-        NvResponse { inner: response }
+        Ok(NvResponse { inner: response })
     }
 }
 
@@ -362,7 +364,7 @@ mod tests {
             },
         };
 
-        let wrapped: NvResponse = chat_resp.into();
+        let wrapped: NvResponse = chat_resp.try_into().unwrap();
 
         assert_eq!(wrapped.inner.model, "llama-3.1-8b-instruct");
         assert_eq!(wrapped.inner.status, Status::Completed);
