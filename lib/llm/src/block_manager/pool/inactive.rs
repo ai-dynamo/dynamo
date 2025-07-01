@@ -648,7 +648,7 @@ pub(crate) mod tests {
     /// Each block is initialized to the Complete state and then Registered.
     pub fn create_blocks(
         tokens: Tokens,
-        block_size: usize,
+        block_size: u32,
         async_runtime: Handle,
     ) -> Vec<Block<NullDeviceStorage, TestMetadata>> {
         let (token_blocks, _partial_token_block) =
@@ -691,7 +691,7 @@ pub(crate) mod tests {
 
     pub fn acquire_blocks(
         tokens: Tokens,
-        block_size: usize,
+        block_size: u32,
         pool: &mut InactiveBlockPool<NullDeviceStorage, TestMetadata>,
         async_runtime: Handle,
     ) -> (Vec<Block<NullDeviceStorage, TestMetadata>>, usize) {
@@ -749,7 +749,7 @@ pub(crate) mod tests {
 
         let async_runtime = tokio::runtime::Runtime::new().unwrap();
 
-        const PAGE_SIZE: usize = 2;
+        const PAGE_SIZE: u32 = 2;
 
         let mut pool = create_block_pool(10);
         assert_eq!(pool.total_blocks(), 10);

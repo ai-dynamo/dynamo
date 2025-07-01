@@ -128,7 +128,7 @@ impl MistralRsEngine {
             .build(None)?
         };
 
-        let mut max_seq_len = model.card().context_length;
+        let mut max_seq_len = model.card().context_length as usize;
         if max_seq_len == 0 {
             tracing::info!("context_length is 0. Probably error reading from model.");
             max_seq_len = AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN;

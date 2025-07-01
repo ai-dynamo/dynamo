@@ -117,11 +117,11 @@ pub struct ModelDeploymentCard {
     pub revision: u64,
 
     /// Max context (in number of tokens) this model can handle
-    pub context_length: usize,
+    pub context_length: u32,
 
     /// Size of a KV cache block - vllm only currently
     /// Passed to the engine and the KV router.
-    pub kv_cache_block_size: usize,
+    pub kv_cache_block_size: u32,
 }
 
 impl ModelDeploymentCard {

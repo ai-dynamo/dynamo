@@ -92,7 +92,7 @@ pub struct KvScheduler {
 impl KvScheduler {
     pub async fn start(
         ns: Namespace,
-        block_size: usize,
+        block_size: u32,
         endpoints_rx: tokio::sync::watch::Receiver<ProcessedEndpoints>,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
     ) -> Result<Self, KvSchedulerError> {
@@ -299,7 +299,7 @@ impl WorkerSelector for DefaultWorkerSelector {
         &self,
         workers: &ProcessedEndpoints,
         request: &SchedulingRequest,
-        block_size: usize,
+        block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         assert!(request.isl_tokens > 0);
 
@@ -307,7 +307,7 @@ impl WorkerSelector for DefaultWorkerSelector {
             return Err(KvSchedulerError::NoEndpoints);
         }
 
-        let request_blocks = request.isl_tokens.div_ceil(block_size);
+        let request_blocks = request.isl_tokens.div_ceil(block_size as usize);
         let mut worker_logits = HashMap::new();
 
         // Calculate logits for each worker

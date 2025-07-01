@@ -25,6 +25,7 @@ class RouterType:
     ROUND_ROBIN = "round-robin"
     KV = "kv"
     KV_LOAD = "kv-load"
+    APPROX_KV = "approx-kv"
 
 
 def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
@@ -39,6 +40,7 @@ def parse_vllm_args(service_name, prefix) -> AsyncEngineArgs:
             RouterType.ROUND_ROBIN,
             RouterType.KV,
             RouterType.KV_LOAD,
+            RouterType.APPROX_KV,
         ],
         default=RouterType.RANDOM,
         help="Router type to use for scheduling requests to workers",
