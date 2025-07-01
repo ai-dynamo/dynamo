@@ -96,66 +96,11 @@ impl WorkerMetricsPublisher {
     }
 
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (request_active_slots, request_total_slots, kv_active_blocks, kv_total_blocks, num_requests_waiting, gpu_cache_usage_perc, gpu_prefix_cache_hit_rate, data_parallel_rank = 0, spec_dec_num_spec_tokens = None, spec_dec_num_drafts = None, spec_dec_num_draft_tokens = None, spec_dec_num_accepted_tokens = None, spec_dec_num_accepted_tokens_per_pos = None))]
-    fn publish(
-        &self,
-        _py: Python,
-        request_active_slots: u64,
-        request_total_slots: u64,
-        kv_active_blocks: u64,
-        kv_total_blocks: u64,
-        num_requests_waiting: u64,
-        gpu_cache_usage_perc: f32,
-        gpu_prefix_cache_hit_rate: f32,
-        data_parallel_rank: u32,
-        spec_dec_num_spec_tokens: Option<u32>,
-        spec_dec_num_drafts: Option<u32>,
-        spec_dec_num_draft_tokens: Option<u32>,
-        spec_dec_num_accepted_tokens: Option<u32>,
-        spec_dec_num_accepted_tokens_per_pos: Option<Vec<u32>>,
-    ) -> PyResult<()> {
-        let worker_stats = llm_rs::kv_router::protocols::WorkerStats {
-            data_parallel_rank: Some(data_parallel_rank),
-            request_active_slots,
-            request_total_slots,
-            num_requests_waiting,
-        };
-
-        let kv_stats = llm_rs::kv_router::protocols::KvStats {
-            kv_active_blocks,
-            kv_total_blocks,
-            gpu_cache_usage_perc,
-            gpu_prefix_cache_hit_rate,
-        };
-
-        // create spec decode stats if spec decode metrics provided
-        let spec_decode_stats = if spec_dec_num_spec_tokens.is_some()
-            || spec_dec_num_drafts.is_some()
-            || spec_dec_num_draft_tokens.is_some()
-            || spec_dec_num_accepted_tokens.is_some()
-            || spec_dec_num_accepted_tokens_per_pos.is_some()
-        {
-            Some(llm_rs::kv_router::protocols::SpecDecodeStats {
-                num_spec_tokens: spec_dec_num_spec_tokens,
-                num_drafts: spec_dec_num_drafts,
-                num_draft_tokens: spec_dec_num_draft_tokens,
-                num_accepted_tokens: spec_dec_num_accepted_tokens,
-                num_accepted_tokens_per_pos: spec_dec_num_accepted_tokens_per_pos,
-            })
-        } else {
-            None
-        };
-
+    #[pyo3(signature = (metrics))]
+    fn publish(&self, _py: Python, metrics: &PyForwardPassMetrics) -> PyResult<()> {
         // Create and publish the complete metrics
         self.inner
-            .publish(
-                llm_rs::kv_router::protocols::ForwardPassMetrics {
-                    worker_stats,
-                    kv_stats,
-                    spec_decode_stats,
-                }
-                .into(),
-            )
+            .publish(metrics.0.clone().into())
             .map_err(to_pyerr)
     }
 }
@@ -577,5 +522,105 @@ impl KvRecorder {
     fn shutdown(&self) -> PyResult<()> {
         self.inner.shutdown();
         Ok(())
+    }
+}
+
+#[pyclass]
+#[repr(transparent)]
+pub struct PyForwardPassMetrics(
+    pub llm_rs::kv_router::protocols::ForwardPassMetrics
+);
+
+#[pyclass]
+#[repr(transparent)]
+pub struct PyWorkerStats(
+    pub llm_rs::kv_router::protocols::WorkerStats
+);
+
+#[pyclass]
+#[repr(transparent)]
+pub struct PyKvStats(
+    pub llm_rs::kv_router::protocols::KvStats
+);
+
+#[pyclass]
+#[repr(transparent)]
+pub struct PySpecDecodeStats(
+    pub llm_rs::kv_router::protocols::SpecDecodeStats
+);
+
+#[pymethods]
+impl PyForwardPassMetrics {
+    #[new]
+    #[pyo3(signature = (worker_stats, kv_stats, spec_decode_stats = None))]
+    fn new(
+        worker_stats: &PyWorkerStats,
+        kv_stats: &PyKvStats,
+        spec_decode_stats: Option<&PySpecDecodeStats>,
+    ) -> Self {
+        Self(ForwardPassMetrics {
+            worker_stats: worker_stats.0.clone(),
+            kv_stats: kv_stats.0.clone(),
+            spec_decode_stats: spec_decode_stats.map(|s| s.0.clone()),
+        })
+    }
+}
+
+#[pymethods]
+impl PyWorkerStats {
+    #[new]
+    #[pyo3(signature = (data_parallel_rank, request_active_slots, request_total_slots, num_requests_waiting))]
+    fn new(
+        data_parallel_rank: Option<u32>,
+        request_active_slots: u64,
+        request_total_slots: u64,
+        num_requests_waiting: u64,
+    ) -> Self {
+        Self(WorkerStats {
+            data_parallel_rank,
+            request_active_slots,
+            request_total_slots,
+            num_requests_waiting,
+        })
+    }
+}
+
+#[pymethods]
+impl PyKvStats {
+    #[new]
+    #[pyo3(signature = (kv_active_blocks, kv_total_blocks, gpu_cache_usage_perc, gpu_prefix_cache_hit_rate))]
+    fn new(
+        kv_active_blocks: u64,
+        kv_total_blocks: u64,
+        gpu_cache_usage_perc: f32,
+        gpu_prefix_cache_hit_rate: f32,
+    ) -> Self {
+        Self(KvStats {
+            kv_active_blocks,
+            kv_total_blocks,
+            gpu_cache_usage_perc,
+            gpu_prefix_cache_hit_rate,
+        })
+    }
+}
+
+#[pymethods]
+impl PySpecDecodeStats {
+    #[new]
+    #[pyo3(signature = (num_spec_tokens, num_drafts, num_draft_tokens, num_accepted_tokens, num_accepted_tokens_per_pos))]
+    fn new(
+        num_spec_tokens: Option<u32>,
+        num_drafts: Option<u32>,
+        num_draft_tokens: Option<u32>,
+        num_accepted_tokens: Option<u32>,
+        num_accepted_tokens_per_pos: Option<Vec<u32>>,
+    ) -> Self {
+        Self(SpecDecodeStats {
+            num_spec_tokens,
+            num_drafts,
+            num_draft_tokens,
+            num_accepted_tokens,
+            num_accepted_tokens_per_pos,
+        })
     }
 }

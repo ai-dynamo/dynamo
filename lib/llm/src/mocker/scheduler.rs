@@ -392,10 +392,7 @@ impl Scheduler {
             0.0
         };
 
-
-
-
-       let worker_stats = WorkerStats {
+        let worker_stats = WorkerStats {
             data_parallel_rank: None, // Default for backwards compatibility
             request_active_slots: state.running.len() as u64,
             request_total_slots: 420, // Dummy value as specified

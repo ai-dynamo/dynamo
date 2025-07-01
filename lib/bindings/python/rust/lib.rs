@@ -70,6 +70,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<http::HttpAsyncEngine>()?;
     m.add_class::<EtcdKvCache>()?;
     m.add_class::<ModelType>()?;
+    m.add_class::<llm::kv::PyForwardPassMetrics>()?;
+    m.add_class::<llm::kv::PyWorkerStats>()?;
+    m.add_class::<llm::kv::PyKvStats>()?;
+    m.add_class::<llm::kv::PySpecDecodeStats>()?;
 
     engine::add_to_module(m)?;
 

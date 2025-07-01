@@ -269,7 +269,10 @@ impl WorkerSelector for DefaultWorkerSelector {
             }
 
             // Track max waiting requests
-            max_waiting = f64::max(max_waiting, ep.data.worker_stats.num_requests_waiting as f64);
+            max_waiting = f64::max(
+                max_waiting,
+                ep.data.worker_stats.num_requests_waiting as f64,
+            );
         }
 
         // make immutable

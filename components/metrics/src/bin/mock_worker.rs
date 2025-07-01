@@ -14,7 +14,9 @@
 // limitations under the License.
 
 use dynamo_llm::kv_router::{
-    protocols::{ForwardPassMetrics, KvStats, WorkerStats}, scheduler::KVHitRateEvent, KV_HIT_RATE_SUBJECT,
+    protocols::{ForwardPassMetrics, KvStats, WorkerStats},
+    scheduler::KVHitRateEvent,
+    KV_HIT_RATE_SUBJECT,
 };
 use dynamo_runtime::{
     component::{service::EndpointStats, Namespace},

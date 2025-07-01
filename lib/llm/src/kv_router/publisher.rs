@@ -475,7 +475,6 @@ impl WorkerMetricsPublisher {
         &self,
         metrics: Arc<ForwardPassMetrics>,
     ) -> Result<(), tokio::sync::watch::error::SendError<Arc<ForwardPassMetrics>>> {
-        println!("Publish metrics: {metrics:?}");
         tracing::trace!("Publish metrics: {metrics:?}");
         self.tx.send(metrics)
     }
