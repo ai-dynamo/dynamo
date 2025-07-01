@@ -206,6 +206,35 @@ impl KvbmCacheManager {
         let usage: f64 = inuse as f64 / pool.total_blocks() as f64;
         Ok(usage)
     }
+
+    #[pyo3(signature = (host_blocks=None, disk_blocks=None))]
+    pub fn onboard_blocks(&self, host_blocks: Option<KvbmBlockList>, disk_blocks: Option<KvbmBlockList>) -> PyResult<(Option<KvbmBlockList>, Option<KvbmBlockList>)> {
+        let host_onboard_blocks = if let Some(host_blocks) = host_blocks {
+            let host_blocks = host_blocks.take_blocks().ok_or(to_pyerr("host_blocks has already been taken"))?;
+            let BlockListType::ImmutableHost(blocks) = host_blocks else {
+                return Err(to_pyerr("Blocks are not immutable host blocks"));
+            };
+
+            let device_blocks = self.block_manager().onboard_blocks(blocks).blocking_recv().map_err(to_pyerr)?.map_err(to_pyerr)?;
+            Some(KvbmBlockList::new(BlockListType::ImmutableDevice(device_blocks)))
+        } else {
+            None
+        };
+
+        let disk_onboard_blocks = if let Some(disk_blocks) = disk_blocks {
+            let disk_blocks = disk_blocks.take_blocks().ok_or(to_pyerr("disk_blocks has already been taken"))?;
+            let BlockListType::ImmutableDisk(blocks) = disk_blocks else {
+                return Err(to_pyerr("Blocks are not immutable disk blocks"));
+            };
+
+            let device_blocks = self.block_manager().onboard_blocks(blocks).blocking_recv().map_err(to_pyerr)?.map_err(to_pyerr)?;
+            Some(KvbmBlockList::new(BlockListType::ImmutableDevice(device_blocks)))
+        } else {
+            None
+        };
+
+        Ok((host_onboard_blocks, disk_onboard_blocks))
+    }
 }
 
 #[derive(Debug, Clone, Dissolve)]

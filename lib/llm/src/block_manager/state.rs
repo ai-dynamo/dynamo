@@ -37,6 +37,7 @@ use super::{
 use derive_getters::Dissolve;
 use std::sync::Arc;
 use tokio::runtime::Handle;
+use tokio::sync::oneshot;
 
 pub(crate) struct Resources {
     pub worker_id: WorkerID,
@@ -101,11 +102,11 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManagerState<Lo
         Ok(())
     }
 
-    pub async fn onboard_blocks<S: Storage + 'static>(
+    pub fn onboard_blocks<S: Storage + 'static>(
         &self,
         blocks: Vec<ImmutableBlock<S, Locality, Metadata>>,
-    ) -> BlockResult<DeviceStorage, Locality, Metadata> {
-        self.offload_manager.onboard(blocks).await
+    ) -> oneshot::Receiver<BlockResult<DeviceStorage, Locality, Metadata>> {
+        self.offload_manager.onboard(blocks)
     }
 }
 

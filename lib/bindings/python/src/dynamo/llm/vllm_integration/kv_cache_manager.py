@@ -122,6 +122,12 @@ class KvbmCacheManager:
 
         return KvbmCacheBlocks(host_owned_blocks), num_host_computed_tokens, KvbmCacheBlocks(disk_owned_blocks), num_disk_computed_tokens
 
+    def onboard_computed_blocks(self, host_blocks: KvbmCacheBlocks, disk_blocks: KvbmCacheBlocks) -> KvbmCacheBlocks:
+        """
+        Onboard the computed blocks to the block manager.
+        """
+        return self.cache_manager.onboard_blocks(host_blocks, disk_blocks)
+
     def _create_slot(self, request: Request) -> list[int]:
         """Create a slot for the request."""
         if bool(request.mm_positions):

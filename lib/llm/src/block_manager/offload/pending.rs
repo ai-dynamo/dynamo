@@ -43,7 +43,7 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::block_manager::block::{
@@ -503,7 +503,7 @@ where
                                     Ok(result) => result,
                                     Err(e) => {
                                         tracing::error!("Error receiving transfer results: {:?}", e);
-                                        completion_indicator.send(Err(e)).unwrap();
+                                        let _ = completion_indicator.send(Err(e));
                                         return Ok(());
                                     }
                                 };
@@ -513,7 +513,7 @@ where
                     }
 
                     // Send the final results to the top-level completion indicator.
-                    completion_indicator.send(Ok(results))?;
+                    let _ = completion_indicator.send(Ok(results));
 
                     Ok(())
                 },
