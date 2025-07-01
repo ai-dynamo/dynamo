@@ -85,6 +85,20 @@ impl ErrorResponse {
         )
     }
 
+    /// Not Implemented Error
+    /// Return this error when the service encounters an internal error.
+    /// We should return a generic message to the client instead of the real error.
+    /// Internal Services errors are the result of misconfiguration or bugs in the service.
+    pub fn not_implemented_error(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
+        tracing::error!("Not Implemented error: {msg}");
+        (
+            StatusCode::NOT_IMPLEMENTED,
+            Json(ErrorResponse {
+                error: msg.to_string(),
+            }),
+        )
+    }
+
     /// The OAI endpoints call an [`dynamo.runtime::engine::AsyncEngine`] which are specialized to return
     /// an [`anyhow::Error`]. This method will convert the [`anyhow::Error`] into an [`HttpError`].
     /// If successful, it will return the [`HttpError`] as an [`ErrorResponse::internal_server_error`]
@@ -410,6 +424,21 @@ async fn responses(
         }
     }
     tracing::trace!("Received chat completions request: {:?}", request.inner);
+
+    // Handle scenario where stream is set to true (we only support unary)
+    if request.inner.stream == Some(true) {
+        tracing::error!("Not Implemented error: Received unsupported request with `stream: true`");
+        let response = ErrorResponse::not_implemented_error("Streaming mode is not yet supported.");
+        return Ok(response.into_response());
+    }
+
+    // Handle scenario where previous_response_id is used
+    if let Some(id) = &request.inner.previous_response_id {
+        tracing::error!("Not Implemented error: Received unsupported `previous_response_id`: {id}");
+        let response =
+            ErrorResponse::not_implemented_error("`previous_response_id` is not supported.");
+        return Ok(response.into_response());
+    }
 
     let request_id = uuid::Uuid::new_v4().to_string();
 

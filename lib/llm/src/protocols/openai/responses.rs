@@ -165,6 +165,9 @@ impl From<NvCreateResponse> for NvCreateChatCompletionRequest {
             },
         )];
 
+        // TODO: See this PR for details: https://github.com/64bit/async-openai/pull/398
+        let top_logprobs = convert_top_logprobs(resp.inner.top_logprobs);
+
         NvCreateChatCompletionRequest {
             inner: CreateChatCompletionRequest {
                 model: resp.inner.model,
@@ -172,11 +175,17 @@ impl From<NvCreateResponse> for NvCreateChatCompletionRequest {
                 temperature: resp.inner.temperature,
                 top_p: resp.inner.top_p,
                 max_completion_tokens: resp.inner.max_output_tokens,
+                top_logprobs,
+                stream: Some(true),
                 ..Default::default()
             },
             nvext: resp.nvext,
         }
     }
+}
+
+fn convert_top_logprobs(input: Option<u32>) -> Option<u8> {
+    input.map(|x| x.min(20) as u8)
 }
 
 impl From<NvCreateChatCompletionResponse> for NvResponse {
@@ -233,5 +242,18 @@ impl From<NvCreateChatCompletionResponse> for NvResponse {
         };
 
         NvResponse { inner: response }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_convert_top_logprobs_clamped() {
+        assert_eq!(convert_top_logprobs(Some(5)), Some(5));
+        assert_eq!(convert_top_logprobs(Some(21)), Some(20));
+        assert_eq!(convert_top_logprobs(Some(1000)), Some(20));
+        assert_eq!(convert_top_logprobs(None), None);
     }
 }
