@@ -14,9 +14,9 @@ DEFAULT_MOUNT="${PWD}:/mnt"
 MOUNTS="${MOUNTS:-${DEFAULT_MOUNT}}"
 
 # Example values, assuming 4 nodes with 4 GPUs on each node, such as 4xGB200 nodes.
-# For 8xH100 nodes as an example, you may set this to 2 nodes x 16 gpus, or 4 nodes x 32 gpus instead.
-NUM_NODES=4
-NUM_GPUS_TOTAL=16
+# For 8xH100 nodes as an example, you may set this to 2 nodes x 8 gpus/node instead.
+NUM_NODES=${NUM_NODES:-4}
+NUM_GPUS_PER_NODE=${NUM_GPUS_PER_NODE:-4}
 
 # Automate settings of certain variables for convenience, but you are free
 # to manually set these for more control as well.
@@ -66,6 +66,6 @@ srun \
   -A "${ACCOUNT}" \
   -J "${ACCOUNT}-dynamo.trtllm" \
   --nodes "${NUM_NODES}" \
-  --ntasks "${NUM_GPUS_TOTAL}" \
+  --ntasks-per-node "${NUM_GPUS_PER_NODE}" \
   --jobid "${SLURM_JOB_ID}" \
   /mnt/start_trtllm_worker.sh &

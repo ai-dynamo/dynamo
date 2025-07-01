@@ -527,6 +527,18 @@ class KvIndexer:
         Create a `KvIndexer` object
         """
 
+    def find_matches(self, sequence: List[int]) -> OverlapScores:
+        """
+        Find prefix matches for the given sequence of block hashes.
+
+        Args:
+            sequence: List of block hashes to find matches for
+
+        Returns:
+            OverlapScores containing worker matching scores and frequencies
+        """
+        ...
+
     def find_matches_for_request(
         self, token_ids: List[int], lora_id: int
     ) -> OverlapScores:
@@ -538,6 +550,35 @@ class KvIndexer:
     def block_size(self) -> int:
         """
         Return the block size of the KV Indexer.
+        """
+        ...
+
+class ApproxKvIndexer:
+    """
+    A KV Indexer that doesn't use KV cache events. It instead relies solely on the input tokens.
+    """
+
+    def __init__(self, component: Component, kv_block_size: int, ttl_secs: float) -> None:
+        """
+        Create a `ApproxKvIndexer` object
+        """
+        ...
+
+    def find_matches_for_request(self, token_ids: List[int], lora_id: int) -> OverlapScores:
+        """
+        Return the overlapping scores of workers for the given token ids.
+        """
+        ...
+
+    def block_size(self) -> int:
+        """
+        Return the block size of the ApproxKvIndexer.
+        """
+        ...
+
+    def process_routing_decision_for_request(self, tokens: List[int], lora_id: int, worker_id: int) -> None:
+        """
+        Notify the indexer that a token sequence has been sent to a specific worker.
         """
         ...
 
@@ -736,7 +777,13 @@ class ModelType:
     """What type of request this model needs: Chat, Component or Backend (pre-processed)"""
     ...
 
-async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str] = None, context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None) -> None:
+class RouterMode:
+    """Router mode for load balancing requests across workers"""
+    RoundRobin: 'RouterMode'
+    Random: 'RouterMode'
+    KV: 'RouterMode'
+
+async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str] = None, context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None, router_mode: Optional[RouterMode] = None) -> None:
     """Attach the model at path to the given endpoint, and advertise it as model_type"""
     ...
 

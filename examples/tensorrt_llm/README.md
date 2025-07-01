@@ -110,7 +110,7 @@ dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
 #### Aggregated serving with KV Routing
 ```bash
 cd /workspace/examples/tensorrt_llm
-dynamo serve graphs.agg_router:Frontend -f ./configs/agg_router.yaml
+dynamo serve graphs.agg:Frontend -f ./configs/agg_router.yaml
 ```
 
 #### Disaggregated serving
@@ -122,7 +122,7 @@ dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
 #### Disaggregated serving with KV Routing
 ```bash
 cd /workspace/examples/tensorrt_llm
-dynamo serve graphs.disagg_router:Frontend -f ./configs/disagg_router.yaml
+dynamo serve graphs.disagg:Frontend -f ./configs/disagg_router.yaml
 ```
 
 #### Aggregated serving with Multi-Token Prediction (MTP) and DeepSeek R1
@@ -311,6 +311,8 @@ TensorRT-LLM also provides experimental support for using **NIXL** (NVIDIA Infer
 **Note:** NIXL support in TensorRT-LLM is experimental and is not suitable for production environments yet.
 
 #### Using NIXL for KV Cache Transfer
+
+**Note:** NIXL backend for TensorRT-LLM is currently only supported on AMD64 (x86_64) architecture. If you're running on ARM64, you'll need to use the default UCX method for KV cache transfer.
 
 To enable NIXL for KV cache transfer in disaggregated serving:
 

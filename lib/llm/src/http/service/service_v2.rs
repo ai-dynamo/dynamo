@@ -11,7 +11,6 @@ use crate::discovery::ModelManager;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
-use dynamo_runtime::DistributedRuntime;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -19,7 +18,6 @@ use tokio_util::sync::CancellationToken;
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
-    runtime: Option<Arc<DistributedRuntime>>,
 }
 
 impl State {
@@ -27,15 +25,6 @@ impl State {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            runtime: None,
-        }
-    }
-
-    pub fn with_runtime(manager: Arc<ModelManager>, runtime: Arc<DistributedRuntime>) -> Self {
-        Self {
-            manager,
-            metrics: Arc::new(Metrics::default()),
-            runtime: Some(runtime),
         }
     }
 
@@ -50,11 +39,6 @@ impl State {
 
     pub fn manager_clone(&self) -> Arc<ModelManager> {
         self.manager.clone()
-    }
-
-    /// Get the DistributedRuntime if available
-    pub fn runtime(&self) -> Option<&DistributedRuntime> {
-        self.runtime.as_ref().map(|r| r.as_ref())
     }
 
     // TODO
@@ -94,11 +78,11 @@ pub struct HttpServiceConfig {
     #[builder(default = "true")]
     enable_embeddings_endpoints: bool,
 
-    #[builder(default = "None")]
-    request_template: Option<RequestTemplate>,
+    #[builder(default = "true")]
+    enable_responses_endpoints: bool,
 
     #[builder(default = "None")]
-    runtime: Option<Arc<DistributedRuntime>>,
+    request_template: Option<RequestTemplate>,
 }
 
 impl HttpService {
@@ -153,11 +137,7 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let state = if let Some(runtime) = config.runtime {
-            Arc::new(State::with_runtime(model_manager, runtime))
-        } else {
-            Arc::new(State::new(model_manager))
-        };
+        let state = Arc::new(State::new(model_manager));
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -171,13 +151,12 @@ impl HttpServiceConfigBuilder {
             metrics::router(registry, None),
             super::openai::list_models_router(state.clone(), None),
             super::health::health_check_router(state.clone(), None),
-            super::clear_kv_blocks::clear_kv_blocks_router(state.clone(), None),
         ];
 
         if config.enable_chat_endpoints {
             routes.push(super::openai::chat_completions_router(
                 state.clone(),
-                config.request_template,
+                config.request_template.clone(), // TODO clone()? reference?
                 None,
             ));
         }
@@ -188,6 +167,14 @@ impl HttpServiceConfigBuilder {
 
         if config.enable_embeddings_endpoints {
             routes.push(super::openai::embeddings_router(state.clone(), None));
+        }
+
+        if config.enable_responses_endpoints {
+            routes.push(super::openai::responses_router(
+                state.clone(),
+                config.request_template,
+                None,
+            ));
         }
 
         // for (route_docs, route) in routes.into_iter().chain(self.routes.into_iter()) {
