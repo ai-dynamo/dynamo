@@ -14,8 +14,8 @@
 // limitations under the License.
 
 use async_openai::types::responses::{
-    Content, Input, OutputContent, OutputMessage, OutputStatus, OutputText, ReasoningConfig,
-    Response, Role as ResponseRole, ServiceTier, Status, Truncation,
+    Content, Input, OutputContent, OutputMessage, OutputStatus, OutputText, Response,
+    Role as ResponseRole, Status,
 };
 use async_openai::types::{
     ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
