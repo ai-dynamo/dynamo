@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use super::protocols::WorkerSelectionResult;
 use super::WorkerSelector;
 use crate::kv_router::indexer::OverlapScores;
-pub use crate::kv_router::protocols::ForwardPassMetrics;
+use crate::kv_router::protocols::ForwardPassMetrics;
 use crate::kv_router::scoring::ProcessedEndpoints;
 use crate::kv_router::KvRouterConfig;
 use crate::kv_router::KV_HIT_RATE_SUBJECT;
@@ -425,8 +425,14 @@ mod tests {
             name: format!("worker-{}", worker_id),
             subject: format!("worker-subject-{:x}", worker_id),
             data: ForwardPassMetrics {
-                gpu_cache_usage_perc,
-                num_requests_waiting,
+                kv_stats: KvStats {
+                    gpu_cache_usage_perc,
+                    ..Default::default()
+                },
+                worker_stats: WorkerStats {
+                    num_requests_waiting,
+                    ..Default::default()
+                },
                 // Other fields can be default initialized for this test
                 ..Default::default()
             },
