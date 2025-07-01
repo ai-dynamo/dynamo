@@ -175,7 +175,7 @@ RUN uv pip install /workspace/wheels/nixl/*.whl
 
 # Install patched vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
-ARG VLLM_REF="7e8d97dd3f0aaf05265f947997310ca3827d3c06"
+ARG VLLM_REF="3c545c0c3b98ee642373a308197d750d0e449403"
 ENV CUDA_HOME=/usr/local/cuda
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \

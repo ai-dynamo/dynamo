@@ -15,6 +15,7 @@ use dynamo_runtime::{
 };
 use futures::stream::{self, StreamExt};
 
+pub mod approx;
 pub mod indexer;
 pub mod metrics_aggregator;
 pub mod protocols;

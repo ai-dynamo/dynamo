@@ -38,6 +38,7 @@ class Tokens(BaseModel):
 
 class LocalBlockHashes(BaseModel):
     hashes: list[int]
+    tokens: list[int]
     num_tokens: int
 
 
