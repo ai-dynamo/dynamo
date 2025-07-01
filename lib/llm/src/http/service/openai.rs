@@ -411,6 +411,13 @@ async fn responses(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
+    // Handle unsupported fields - if Some(resp) is returned by from validate_unsupported_fields,
+    // then a field was used that is unsupported. We will log an error message
+    // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceeed.
+    if let Some(resp) = validate_unsupported_fields(&request) {
+        return Ok(resp.into_response());
+    }
+
     // Apply template values if present
     if let Some(template) = template {
         if request.inner.model.is_empty() {
@@ -424,21 +431,6 @@ async fn responses(
         }
     }
     tracing::trace!("Received chat completions request: {:?}", request.inner);
-
-    // Handle scenario where stream is set to true (we only support unary)
-    if request.inner.stream == Some(true) {
-        tracing::error!("Not Implemented error: Received unsupported request with `stream: true`");
-        let response = ErrorResponse::not_implemented_error("Streaming mode is not yet supported.");
-        return Ok(response.into_response());
-    }
-
-    // Handle scenario where previous_response_id is used
-    if let Some(id) = &request.inner.previous_response_id {
-        tracing::error!("Not Implemented error: Received unsupported `previous_response_id`: {id}");
-        let response =
-            ErrorResponse::not_implemented_error("`previous_response_id` is not supported.");
-        return Ok(response.into_response());
-    }
 
     let request_id = uuid::Uuid::new_v4().to_string();
 
@@ -483,6 +475,73 @@ async fn responses(
     let response: NvResponse = response.into();
 
     Ok(Json(response).into_response())
+}
+
+/// Checks for unsupported fields in the request.
+/// Returns Some(response) if unsupported fields are present.
+pub fn validate_unsupported_fields(request: &NvCreateResponse) -> Option<impl IntoResponse> {
+    let inner = &request.inner;
+
+    if inner.background == Some(true) {
+        return Some(error_response("`background: true` is not supported."));
+    }
+    if inner.include.is_some() {
+        return Some(error_response("`include` is not supported."));
+    }
+    if inner.instructions.is_some() {
+        return Some(error_response("`instructions` is not supported."));
+    }
+    if inner.max_tool_calls.is_some() {
+        return Some(error_response("`max_tool_calls` is not supported."));
+    }
+    if inner.metadata.clone().is_some_and(|m| !m.is_empty()) {
+        return Some(error_response("`metadata` is not supported."));
+    }
+    if inner.parallel_tool_calls == Some(true) {
+        return Some(error_response(
+            "`parallel_tool_calls: true` is not supported.",
+        ));
+    }
+    if inner.previous_response_id.is_some() {
+        return Some(error_response("`previous_response_id` is not supported."));
+    }
+    if inner.prompt.is_some() {
+        return Some(error_response("`prompt` is not supported."));
+    }
+    if inner.reasoning.is_some() {
+        return Some(error_response("`reasoning` is not supported."));
+    }
+    if inner.service_tier.is_some() {
+        return Some(error_response("`service_tier` is not supported."));
+    }
+    if inner.store == Some(true) {
+        return Some(error_response("`store: true` is not supported."));
+    }
+    if inner.stream == Some(true) {
+        return Some(error_response("`stream: true` is not supported."));
+    }
+    if inner.text.is_some() {
+        return Some(error_response("`text` is not supported."));
+    }
+    if inner.tool_choice.is_some() {
+        return Some(error_response("`tool_choice` is not supported."));
+    }
+    if inner.tools.clone().is_some_and(|t| !t.is_empty()) {
+        return Some(error_response("`tools` is not supported."));
+    }
+    if inner.truncation.is_some() {
+        return Some(error_response("`truncation` is not supported."));
+    }
+    if inner.user.is_some() {
+        return Some(error_response("`user` is not supported."));
+    }
+
+    None
+}
+
+fn error_response(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
+    tracing::error!("Not Implemented error: {msg}");
+    ErrorResponse::not_implemented_error(msg)
 }
 
 // todo - abstract this to the top level lib.rs to be reused
