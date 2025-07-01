@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 import asyncio
 import logging
 import random
@@ -17,6 +20,8 @@ from dynamo.llm import (
     register_llm,
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
+import uvloop
+from dynamo.runtime.logging import configure_dynamo_logging
 
 
 class RequestHandler:
@@ -24,9 +29,12 @@ class RequestHandler:
         self,
         engine: sgl.Engine,
         server_args: ServerArgs,
+        component,
         decode_client: Optional[Any] = None,
     ):
         self.engine = engine
+        self.component = component
+        self.metrics_publisher = WorkerMetricsPublisher()
 
         if server_args.disaggregation_mode != "null":
             self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info()
@@ -40,6 +48,26 @@ class RequestHandler:
             )
 
         logging.info("Request handler initialized")
+
+    def setup_metrics(self):
+        """Set up metrics publisher - call this after handler creation"""
+        self.metrics_publisher.publish(
+            request_active_slots=0,
+            request_total_slots=1024,
+            kv_active_blocks=0,
+            kv_total_blocks=1024,
+            num_requests_waiting=0,
+            gpu_cache_usage_perc=0.0,
+            gpu_prefix_cache_hit_rate=0.0,
+        )
+        task = asyncio.create_task(self.create_metrics_publisher_endpoint())
+        task.add_done_callback(
+            lambda _: logging.debug("metrics publisher endpoint created")
+        )
+
+    async def create_metrics_publisher_endpoint(self):
+        logging.debug("Creating metrics publisher endpoint")
+        await self.metrics_publisher.create_endpoint(self.component)
 
     def _update_metrics(self):
         """Update metrics with current engine state"""
@@ -100,6 +128,9 @@ class RequestHandler:
 
     async def generate(self, request: PreprocessedRequest):
         # Check if we're in batch mode at the start
+        print(f"Received request: {request}")
+        print(f"Request type: {type(request)}")
+
         is_batch = self._is_batch_request(request)
         batch_size = self._get_request_batch_size(request)
 
@@ -233,18 +264,6 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
         kv_cache_block_size=server_args.page_size,
     )
 
-    metrics_publisher = WorkerMetricsPublisher()
-    await metrics_publisher.publish(
-        request_active_slots=0,
-        request_total_slots=1024,
-        kv_active_blocks=0,
-        kv_total_blocks=1024,
-        num_requests_waiting=0,
-        gpu_cache_usage_perc=0.0,
-        gpu_prefix_cache_hit_rate=0.0,
-    )
-    asyncio.create_task(metrics_publisher.create_endpoint(component))
-
     if server_args.disaggregation_mode != "null":
         decode_client = (
             await runtime.namespace("dynamo")
@@ -252,8 +271,19 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
             .endpoint("generate")
             .client()
         )
-        handler = RequestHandler(engine, server_args, decode_client)
+        handler = RequestHandler(engine, server_args, component, decode_client)
     else:
-        handler = RequestHandler(engine, server_args)
+        handler = RequestHandler(engine, server_args, component)
 
+    # Set up metrics in background
+    handler.setup_metrics()
+
+    # This is the final blocking call
     await endpoint.serve_endpoint(handler.generate)
+
+
+configure_dynamo_logging()
+
+if __name__ == "__main__":
+    uvloop.install()
+    asyncio.run(worker())
