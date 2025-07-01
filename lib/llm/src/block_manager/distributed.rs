@@ -268,7 +268,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // Now, onboard them back to the device.
-        let new_device_blocks = block_manager.onboard_blocks(host_blocks).await??;
+        let new_device_blocks = block_manager.onboard_blocks(host_blocks, None).await??;
 
         assert_eq!(new_device_blocks.len(), NUM_DEVICE_BLOCKS);
 

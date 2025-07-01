@@ -46,7 +46,7 @@
 
 use super::block::{
     locality::LocalityProvider, transfer::TransferContext, BlockError, BlockMetadata, BlockState,
-    ImmutableBlock,
+    ImmutableBlock, MutableBlock,
 };
 use super::metrics::{BlockManagerMetrics, PoolMetrics};
 use super::pool::BlockPoolError;
@@ -379,11 +379,15 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                         .set(onboard_rx.len() as i64);
 
                     // Try to allocate blocks on the device.
-                    let target_blocks = match target_pool.allocate_blocks(request.blocks.len()).await {
-                        Ok(blocks) => blocks,
-                        Err(err) => {
-                            let _ = request.response_tx.send(Err(err));
-                            continue;
+                    let target_blocks = if let Some(targets) = request.targets {
+                        targets
+                    } else {
+                            match target_pool.allocate_blocks(request.blocks.len()).await {
+                            Ok(blocks) => blocks,
+                            Err(err) => {
+                                let _ = request.response_tx.send(Err(err));
+                                continue;
+                            }
                         }
                     };
 
@@ -474,6 +478,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
     pub fn onboard<S: Storage>(
         &self,
         blocks: Vec<ImmutableBlock<S, Locality, Metadata>>,
+        targets: Option<Vec<MutableBlock<DeviceStorage, Locality, Metadata>>>,
     ) -> oneshot::Receiver<BlockResult<DeviceStorage, Locality, Metadata>> {
         let (tx, rx) = oneshot::channel();
         for block in &blocks {
@@ -486,6 +491,16 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                     .unwrap();
                     return rx;
                 }
+            }
+        }
+
+        if let Some(targets) = targets.as_ref() {
+            if targets.len() != blocks.len() {
+                tx.send(Err(BlockPoolError::BlockError(BlockError::Other(
+                    anyhow::anyhow!("Number of targets does not match number of blocks."),
+                ))))
+                .unwrap();
+                return rx;
             }
         }
 
@@ -513,7 +528,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
 
             if let Err(e) = self
                 .host_onboard_tx
-                .send(OnboardRequest::new(host_blocks, tx))
+                .send(OnboardRequest::new(host_blocks, tx, targets))
             {
                 e.0.response_tx
                     .send(Err(BlockPoolError::ProgressEngineShutdown))
@@ -535,7 +550,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
 
             if let Err(e) = self
                 .disk_onboard_tx
-                .send(OnboardRequest::new(disk_blocks, tx))
+                .send(OnboardRequest::new(disk_blocks, tx, targets))
             {
                 e.0.response_tx
                     .send(Err(BlockPoolError::ProgressEngineShutdown))
@@ -988,7 +1003,7 @@ mod tests {
 
         // Onboard the block.
         let onboarded_blocks = offload_manager
-            .onboard(vec![immutable_host_block.clone()])
+            .onboard(vec![immutable_host_block.clone()], None)
             .await??;
 
         assert_eq!(onboarded_blocks.len(), 1);
@@ -1079,7 +1094,7 @@ mod tests {
 
         // Onboard the block back to the device pool.
         let onboarded_blocks = offload_manager
-            .onboard(vec![immutable_host_block.clone()])
+            .onboard(vec![immutable_host_block.clone()], None)
             .await??;
         assert_eq!(onboarded_blocks.len(), 1);
         assert_eq!(
@@ -1115,7 +1130,7 @@ mod tests {
         assert_eq!(device_blocks.len(), 4);
 
         let res = offload_manager
-            .onboard(vec![immutable_host_block.clone()])
+            .onboard(vec![immutable_host_block.clone()], None)
             .await?;
         assert!(matches!(
             res.err().unwrap(),
@@ -1207,7 +1222,7 @@ mod tests {
         populate_block(&immutable_disk_block, 42)?;
 
         let device_block = offload_manager
-            .onboard(vec![immutable_disk_block.clone()])
+            .onboard(vec![immutable_disk_block.clone()], None)
             .await??;
 
         check_block_contents(&immutable_disk_block, &device_block[0], 42)?;
@@ -1268,7 +1283,7 @@ mod tests {
             disk_blocks.push(blocks[0].clone());
         }
 
-        let device_blocks = offload_manager.onboard(disk_blocks.clone()).await??;
+        let device_blocks = offload_manager.onboard(disk_blocks.clone(), None).await??;
         assert_eq!(device_blocks.len(), disk_blocks.len());
 
         for (i, disk_block) in disk_blocks.iter().enumerate() {
@@ -1305,7 +1320,7 @@ mod tests {
         let immutable_disk_blocks = disk_pool.register_blocks(disk_blocks).await?;
 
         let device_blocks = offload_manager
-            .onboard(immutable_disk_blocks.clone())
+            .onboard(immutable_disk_blocks.clone(), None)
             .await??;
         assert_eq!(device_blocks.len(), 2 * MAX_TRANSFER_BATCH_SIZE + 1);
 
@@ -1335,7 +1350,9 @@ mod tests {
             .next()
             .unwrap();
 
-        let onboarded_blocks = offload_manager.onboard(vec![registered_block]).await?;
+        let onboarded_blocks = offload_manager
+            .onboard(vec![registered_block], None)
+            .await?;
         assert!(matches!(
             onboarded_blocks,
             Err(BlockPoolError::BlockError(BlockError::Other(_)))
@@ -1406,7 +1423,7 @@ mod tests {
         assert_eq!(host_blocks.len(), 1);
 
         let onboarded_blocks = offload_manager
-            .onboard(vec![host_blocks[0].clone()])
+            .onboard(vec![host_blocks[0].clone()], None)
             .await??;
         assert_eq!(onboarded_blocks.len(), 1);
         check_block_contents(&host_blocks[0], &onboarded_blocks[0], 42)?;
@@ -1468,7 +1485,7 @@ mod tests {
         check_block_contents(&host_blocks[0], &disk_blocks[0], 42)?;
 
         // Onboard to device.
-        let device_blocks = offload_manager.onboard(disk_blocks.clone()).await??;
+        let device_blocks = offload_manager.onboard(disk_blocks.clone(), None).await??;
         assert_eq!(device_blocks.len(), 1);
         check_block_contents(&disk_blocks[0], &device_blocks[0], 42)?;
 
@@ -1564,7 +1581,7 @@ mod tests {
 
         let immutable_blocks = host_pool.register_blocks(mutable_blocks).await?;
 
-        let _ = offload_manager.onboard(immutable_blocks).await?;
+        let _ = offload_manager.onboard(immutable_blocks, None).await?;
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
