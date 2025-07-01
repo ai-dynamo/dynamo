@@ -5,12 +5,24 @@
 Implementation of vLLM KV cache manager protocol.
 """
 
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
+import torch
 from vllm.distributed.kv_events import KVCacheEvent
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1,
+    KVConnectorMetadata,
+)
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, PrefixCacheStats
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request
+
+if TYPE_CHECKING:
+    from vllm.attention.backends.abstract import AttentionMetadata
+    from vllm.forward_context import ForwardContext
+    from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.request import Request
 
 from dynamo.llm import BlockManager
 from dynamo.llm.vllm_integration.kv_cache_utils import KvbmCacheBlocks
@@ -18,7 +30,7 @@ from dynamo.llm.vllm_integration.rust import KvbmCacheManager as RustKvbmCacheMa
 from dynamo.llm.vllm_integration.rust import KvbmRequest, SlotUpdate
 
 
-class KvbmCacheManager:
+class KvbmCacheManager(KVConnectorBase_V1):
     """
     Implements the vLLM KV cache manager protocol.
 
@@ -88,12 +100,12 @@ class KvbmCacheManager:
             self.prefix_cache_stats.hits += num_computed_tokens
 
         return KvbmCacheBlocks(owned_blocks), num_computed_tokens
-    
+
     def get_offloaded_computed_blocks(
-            self,
-            request: Request,
-            num_computed_tokens: int,
-    ) -> tuple[int, KvbmCacheBlocks, int, KvbmCacheBlocks, int]:
+        self,
+        request: Request,
+        num_computed_tokens: int,
+    ) -> tuple[int, KvbmCacheBlocks, KvbmCacheBlocks]:
         """
         Get the offloaded computed blocks for the request.
 
@@ -101,14 +113,12 @@ class KvbmCacheManager:
             request (Request): the request object.
             num_computed_tokens (int): the number of locally
                 computed tokens for this request
-        
+
         Returns:
-            tuple[need_to_allocate, KvbmCacheBlocks, int, KvbmCacheBlocks, int]:
+            tuple[need_to_allocate, KvbmCacheBlocks, KvbmCacheBlocks]:
                 - the number of tokens that can be loaded from the offloaded kv blocks.
                 - The offloaded computed blocks for the request in G2.
-                - The number of offloaded computed tokens in G2.
                 - The offloaded computed blocks for the request in G3.
-                - The number of offloaded computed tokens in G3.
         """
         # TODO: add stats for offloaded computed tokens
         # if self.log_stats:
@@ -117,21 +127,26 @@ class KvbmCacheManager:
 
         sequence_hashes = self._create_slot(request)
 
-        host_owned_blocks, disk_owned_blocks = self.cache_manager.get_offloaded_computed_blocks(sequence_hashes)
+        (
+            host_owned_blocks,
+            disk_owned_blocks,
+        ) = self.cache_manager.get_offloaded_computed_blocks(sequence_hashes)
         host_block_count = host_owned_blocks.block_count()
         disk_block_count = disk_owned_blocks.block_count()
 
         num_host_computed_tokens = host_block_count * self.block_size
         num_disk_computed_tokens = disk_block_count * self.block_size
 
-        num_external_hit_tokens = max(num_disk_computed_tokens, num_host_computed_tokens)
+        num_external_hit_tokens = max(
+            num_disk_computed_tokens, num_host_computed_tokens
+        )
 
         need_to_allocate = num_external_hit_tokens - num_computed_tokens
 
         # In a full-prompt-hit case, we need to recompute the last token
         if num_external_hit_tokens == request.num_tokens:
             need_to_allocate -= 1
-        
+
         # TODO: add stats for offloaded computed tokens
         # if self.log_stats:
         #     assert self.prefix_cache_stats is not None
@@ -139,11 +154,17 @@ class KvbmCacheManager:
         #     self.prefix_cache_stats.hits += num_computed_tokens
 
         if need_to_allocate > 0:
-            return need_to_allocate, KvbmCacheBlocks(host_owned_blocks), num_host_computed_tokens, KvbmCacheBlocks(disk_owned_blocks), num_disk_computed_tokens
-        
-        return 0, KvbmCacheBlocks(host_owned_blocks), num_host_computed_tokens, KvbmCacheBlocks(disk_owned_blocks), num_disk_computed_tokens
+            return (
+                need_to_allocate,
+                KvbmCacheBlocks(host_owned_blocks),
+                KvbmCacheBlocks(disk_owned_blocks),
+            )
 
-    def onboard_computed_blocks(self, host_blocks: KvbmCacheBlocks, disk_blocks: KvbmCacheBlocks) -> KvbmCacheBlocks:
+        return 0, KvbmCacheBlocks(host_owned_blocks), KvbmCacheBlocks(disk_owned_blocks)
+
+    def onboard_computed_blocks(
+        self, host_blocks: KvbmCacheBlocks, disk_blocks: KvbmCacheBlocks
+    ) -> KvbmCacheBlocks:
         """
         Onboard the computed blocks to the block manager.
         """
@@ -344,3 +365,113 @@ class KvbmCacheManager:
     def get_block_ids(self, request_id: str) -> list[list[int]]:
         """Get the block ids of a request."""
         return [self.cache_manager.get_block_ids(request_id)]
+
+    # KV Connector
+
+    def get_num_new_matched_tokens(
+        self,
+        request: "Request",
+        num_computed_tokens: int,
+    ) -> tuple[int, bool]:
+        """
+        Get number of new tokens that can be loaded from the
+        external KV cache beyond the num_computed_tokens.
+
+        Args:
+            request (Request): the request object.
+            num_computed_tokens (int): the number of locally
+                computed tokens for this request
+
+        Returns:
+            A tuple with the following elements:
+                - The number of tokens that can be loaded from the
+                  external KV cache beyond what is already computed.
+                - `True` if external KV cache tokens will be loaded
+                  asynchronously (between scheduler steps).
+        """
+        return 0, False
+
+    def update_state_after_alloc(
+        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+    ):
+        """
+        Update KVConnector state after block allocation.
+        """
+        pass
+
+    # Unused KV connector methods
+
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+        """
+        Start loading the KV cache from the connector to vLLM's paged
+        KV buffer. This is called from the forward context before the
+        forward pass to enable async loading during model execution.
+
+        Args:
+            forward_context (ForwardContext): the forward context.
+            **kwargs: additional arguments for the load operation
+
+        Note:
+            The number of elements in kv_caches and layer_names should be
+            the same.
+
+        """
+        pass
+
+    def wait_for_layer_load(self, layer_name: str) -> None:
+        """
+        Block until the KV for a specific layer is loaded into vLLM's
+        paged buffer. This is called from within attention layer to ensure
+        async copying from start_load_kv is complete.
+
+        This interface will be useful for layer-by-layer pipelining.
+
+        Args:
+            layer_name: the name of that layer
+        """
+        pass
+
+    def save_kv_layer(
+        self,
+        layer_name: str,
+        kv_layer: torch.Tensor,
+        attn_metadata: "AttentionMetadata",
+        **kwargs,
+    ) -> None:
+        """
+        Start saving a layer of KV cache from vLLM's paged buffer
+        to the connector. This is called from within attention layer to
+        enable async copying during execution.
+
+        Args:
+            layer_name (str): the name of the layer.
+            kv_layer (torch.Tensor): the paged KV buffer of the current
+                layer in vLLM.
+            attn_metadata (AttentionMetadata): the attention metadata.
+            **kwargs: additional arguments for the save operation.
+        """
+        pass
+
+    def wait_for_save(self):
+        """
+        Block until all the save operations is done. This is called
+        as the forward context exits to ensure that the async saving
+        from save_kv_layer is complete before finishing the forward.
+
+        This prevents overwrites of paged KV buffer before saving done.
+        """
+        pass
+
+    def build_connector_meta(
+        self, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
+        """
+        Build the connector metadata for this step.
+
+        This function should NOT modify fields in the scheduler_output.
+        Also, calling this function will reset the state of the connector.
+
+        Args:
+            scheduler_output (SchedulerOutput): the scheduler output object.
+        """
+        return KVConnectorMetadata()
