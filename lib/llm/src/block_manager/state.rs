@@ -17,7 +17,7 @@ mod local;
 mod logical;
 mod resources;
 
-use crate::block_manager::block::factory::IntoBlocks;
+use crate::block_manager::block::{factory::IntoBlocks, MutableBlock};
 use crate::block_manager::locality::LogicalResources;
 use crate::block_manager::offload::request::BlockResult;
 
@@ -105,8 +105,9 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManagerState<Lo
     pub fn onboard_blocks<S: Storage + 'static>(
         &self,
         blocks: Vec<ImmutableBlock<S, Locality, Metadata>>,
+        targets: Option<Vec<MutableBlock<DeviceStorage, Locality, Metadata>>>,
     ) -> oneshot::Receiver<BlockResult<DeviceStorage, Locality, Metadata>> {
-        self.offload_manager.onboard(blocks)
+        self.offload_manager.onboard(blocks, targets)
     }
 }
 

@@ -93,6 +93,7 @@ pub struct OnboardRequest<
 > {
     pub blocks: Vec<ImmutableBlock<Source, Locality, M>>,
     pub response_tx: ResponseSender<Target, Locality, M>,
+    pub targets: Option<Vec<MutableBlock<Target, Locality, M>>>,
 }
 
 impl<Source: Storage, Target: Storage, Locality: LocalityProvider, M: BlockMetadata>
@@ -101,10 +102,12 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, M: BlockMetad
     pub fn new(
         blocks: Vec<ImmutableBlock<Source, Locality, M>>,
         response_tx: ResponseSender<Target, Locality, M>,
+        targets: Option<Vec<MutableBlock<Target, Locality, M>>>,
     ) -> Self {
         Self {
             blocks,
             response_tx,
+            targets,
         }
     }
 }

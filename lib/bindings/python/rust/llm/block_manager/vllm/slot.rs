@@ -148,6 +148,7 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
     /// Note: We should only apply computed blocks once at the beginning.
     /// Here we clear the list of immutable blocks before applying them because vLLM can try to apply
     /// this multiple times if the slot was unable acquire blocks for the remainder of the sequence.
+    // TODO: What about something like chunked prefill?
     pub fn apply_computed_blocks(
         &mut self,
         computed_blocks: Vec<ImmutableBlock<S, L, BasicMetadata>>,
@@ -256,6 +257,34 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
                 .map(|b| b.sequence_hash())
                 .collect(),
         }
+    }
+}
+
+impl<L: LocalityProvider> Slot<DeviceStorage, L> {
+    pub fn onboard_blocks_to_slot<T: Storage>(
+        &mut self,
+        offloaded_blocks: Vec<ImmutableBlock<T, L, BasicMetadata>>,
+        bm: &dynamo_llm::block_manager::KvBlockManager<L, BasicMetadata>,
+    ) -> Result<(), SlotError> {
+        if offloaded_blocks.len() > self.mutable.len() {
+            return Err(SlotError::from_str(
+                "insufficient mutable blocks to onboard",
+            ));
+        }
+
+        self.computed_position += offloaded_blocks.len() * self.sequence.block_size();
+
+        let target_device_blocks = self.mutable.drain(0..offloaded_blocks.len()).collect();
+
+        let immutable_device_blocks = bm
+            .onboard_blocks(offloaded_blocks, Some(target_device_blocks))
+            .blocking_recv()
+            .unwrap()
+            .map_err(|e| SlotError::from_str(&format!("failed to onboard blocks: {:?}", e)))?;
+
+        self.immutable.extend(immutable_device_blocks);
+
+        Ok(())
     }
 }
 
