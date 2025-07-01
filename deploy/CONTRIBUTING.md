@@ -39,12 +39,22 @@ deploy/
 - Configure settings for Go formatting and linting
 - Add workspace settings for consistent formatting
 
-### Contribution Workflow
+### Contribution Workflow Caveats
 
-We do signed commits
+- We do signed commits
 
 ```bash
 commit -S
+```
+
+- Every time you modify deploy/cloud/helm/crds/templates/*.yaml please bump up the version of the CRD helm chart in
+    1. deploy/cloud/helm/platform/components/operator/Chart.yaml
+    2. deploy/cloud/helm/platform/Chart.yaml
+then
+
+```bash
+deploy/cloud/helm/platform
+helm dependency update
 ```
 
 #### Commit Message Guidelines
