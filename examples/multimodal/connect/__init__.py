@@ -208,10 +208,17 @@ class ActiveOperation(AbstractOperation):
         if isinstance(remote_descriptors, list) and len(remote_descriptors) == 1:
             remote_descriptors = remote_descriptors[0]
 
-        if (isinstance(local_descriptors, list) and isinstance(remote_descriptors, list) and len(local_descriptors) != len(remote_descriptors)):
-            raise ValueError("When `local_descriptors` and `remote_descriptors` are lists, they must have the same length.")
-        elif isinstance(local_descriptors, list) != isinstance(remote_descriptors, list):
+        if isinstance(local_descriptors, list) != isinstance(remote_descriptors, list):
             raise ValueError("Both `local_descriptors` and `remote_descriptors` must be either lists or single descriptors.")
+        # Ensure that the descriptors are of the same size here to avoid confusing errors from NIXL.
+        if isinstance(local_descriptors, list) and isinstance(remote_descriptors, list):
+            if len(local_descriptors) != len(remote_descriptors):
+                raise ValueError(f"When `local_descriptors` and `remote_descriptors` are lists, they must have the same length. {len(local_descriptors)} != {len(remote_descriptors)}.")
+            for i in range(len(local_descriptors)):
+                if local_descriptors[i].size != remote_descriptors[i].size:
+                    raise ValueError(f"Descriptor length mismatch: `local_descriptors` and `remote_descriptors` descriptor at {i} must have the same size. {local_descriptors[i].size} != {remote_descriptors[i].size}.")
+        elif (isinstance(local_descriptors, Descriptor) and isinstance(remote_descriptors, Descriptor)) and local_descriptors.size != remote_descriptors.size:
+                raise ValueError(f"Local and remote descriptors must be the same size. {local_descriptors.size} != {remote_descriptors.size}.")
         if not isinstance(notification_key, str):
             raise TypeError("Argument `notification_key` must be `str`.")
         if len(notification_key) == 0:

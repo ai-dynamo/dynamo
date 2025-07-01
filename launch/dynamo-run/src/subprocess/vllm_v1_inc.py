@@ -151,7 +151,7 @@ class RequestHandler:
 
     async def clear_kv_blocks(self, request=None):
         try:
-            self.engine_client.reset_prefix_cache()
+            await self.engine_client.reset_prefix_cache()
             yield {"status": "success", "message": "KV cache cleared"}
         except Exception as e:
             yield {"status": "error", "message": str(e)}

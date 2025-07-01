@@ -42,7 +42,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/archive"
-	"gopkg.in/yaml.v2"
+	"github.com/goccy/go-yaml"
 )
 
 const (
@@ -75,14 +75,15 @@ type Autoscaling struct {
 }
 
 type Config struct {
-	Dynamo       *DynamoConfig `yaml:"dynamo,omitempty"`
-	Resources    *Resources    `yaml:"resources,omitempty"`
-	Traffic      *Traffic      `yaml:"traffic,omitempty"`
-	Autoscaling  *Autoscaling  `yaml:"autoscaling,omitempty"`
-	HttpExposed  bool          `yaml:"http_exposed,omitempty"`
-	ApiEndpoints []string      `yaml:"api_endpoints,omitempty"`
-	Workers      *int32        `yaml:"workers,omitempty"`
-	TotalGpus    *int32        `yaml:"total_gpus,omitempty"`
+	Dynamo       *DynamoConfig        `yaml:"dynamo,omitempty"`
+	Resources    *Resources           `yaml:"resources,omitempty"`
+	Traffic      *Traffic             `yaml:"traffic,omitempty"`
+	Autoscaling  *Autoscaling         `yaml:"autoscaling,omitempty"`
+	HttpExposed  bool                 `yaml:"http_exposed,omitempty"`
+	ApiEndpoints []string             `yaml:"api_endpoints,omitempty"`
+	Workers      *int32               `yaml:"workers,omitempty"`
+	TotalGpus    *int32               `yaml:"total_gpus,omitempty"`
+	ExtraPodSpec *common.ExtraPodSpec `yaml:"extraPodSpec,omitempty"`
 }
 
 type ServiceConfig struct {
@@ -360,6 +361,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 				return nil, err
 			}
 		}
+
 		deployment.Spec.Autoscaling = &v1alpha1.Autoscaling{
 			Enabled: false,
 		}
@@ -368,6 +370,12 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			deployment.Spec.Autoscaling.MinReplicas = service.Config.Autoscaling.MinReplicas
 			deployment.Spec.Autoscaling.MaxReplicas = service.Config.Autoscaling.MaxReplicas
 		}
+
+		// Override properties from the ExtraPodSpec (i.e. command and args) if provided.
+		if err := mergeExtraPodSpec(deployment, &service.Config); err != nil {
+			return nil, err
+		}
+
 		// override the component config with the component config that is in the parent deployment
 		if configOverride, ok := parentDynamoGraphDeployment.Spec.Services[service.Name]; ok {
 			err := mergo.Merge(&deployment.Spec.DynamoComponentDeploymentSharedSpec, configOverride.DynamoComponentDeploymentSharedSpec, mergo.WithOverride)
@@ -526,4 +534,23 @@ func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 		merged = append(merged, env)
 	}
 	return merged
+}
+
+// mergeExtraPodSpec merges the ExtraPodSpec from service config into the deployment spec
+func mergeExtraPodSpec(deployment *v1alpha1.DynamoComponentDeployment, serviceConfig *Config) error {
+	if serviceConfig.ExtraPodSpec != nil && serviceConfig.ExtraPodSpec.MainContainer != nil {
+		if deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec == nil {
+			deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec = new(common.ExtraPodSpec)
+		}
+		err := mergo.Merge(
+			deployment.Spec.DynamoComponentDeploymentSharedSpec.ExtraPodSpec,
+			serviceConfig.ExtraPodSpec,
+			mergo.WithOverride,
+			mergo.WithOverwriteWithEmptyValue,
+		)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }

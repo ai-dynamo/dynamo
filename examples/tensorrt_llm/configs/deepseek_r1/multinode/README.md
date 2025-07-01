@@ -99,9 +99,25 @@ export MOUNTS="${PWD}:/mnt"
 # https://huggingface.co/deepseek-ai/DeepSeek-R1
 export MODEL_PATH="nvidia/DeepSeek-R1-FP4"
 
+# The name the model will be served/queried under, matching what's
+# returned by the /v1/models endpoint.
+#
+# By default this is inferred from MODEL_PATH, but when using locally downloaded
+# model weights, it can be nice to have explicit control over the name.
+export SERVED_MODEL_NAME="nvidia/DeepSeek-R1-FP4"
+
 # NOTE: This path assumes you have mounted the config file into /mnt inside
 # the container. See the MOUNTS variable in srun_script.sh
 export ENGINE_CONFIG="/mnt/agg_DEP16_dsr1.yaml"
+
+# Customize NUM_NODES to match the desired parallelism in ENGINE_CONFIG
+# The produce of NUM_NODES*NUM_GPUS_PER_NODE should match the number of
+# total GPUs necessary to satisfy the requested parallelism. For example,
+# 4 nodes x 4 gpus/node = 16 gpus total for TP16/EP16.
+export NUM_NODES=4
+
+# GB200 nodes have 4 gpus per node, but for other types of nodes you can configure this.
+export NUM_GPUS_PER_NODE=4
 
 # Launches frontend + etcd/nats on current (head) node.
 # Launches one large trtllm worker across multiple nodes via MPI tasks.
@@ -148,7 +164,7 @@ export ENGINE_CONFIG="/mnt/agg_DEP16_dsr1.yaml"
 4. After the model fully finishes loading on all ranks, the worker will register itself,
    and the OpenAI frontend will detect it, signaled by this output:
     ```
-    0: 2025-06-13T02:46:35.040Z  INFO dynamo_llm::discovery::watcher: added model model_name="Deepseek-R1-FP4"
+    0: 2025-06-13T02:46:35.040Z  INFO dynamo_llm::discovery::watcher: added model model_name="nvidia/DeepSeek-R1-FP4"
     ```
 5. At this point, with the worker fully initialized and detected by the frontend,
    it is now ready for inference.
@@ -161,11 +177,11 @@ To verify the deployed model is working, send a `curl` request:
 # NOTE: $HOST assumes running on head node, but can be changed to $HEAD_NODE_IP instead.
 HOST=localhost
 PORT=8000
-MODEL=Deepseek-R1-FP4
+# "model" here should match the model name returned by the /v1/models endpoint
 curl -w "%{http_code}" ${HOST}:${PORT}/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-  "model": "'${MODEL}'",
+  "model": "'${SERVED_MODEL_NAME}'",
   "messages": [
   {
     "role": "user",
@@ -191,3 +207,5 @@ pkill srun
   H100 nodes with FP8 weights, but this hasn't been tested yet.
 - This example only tests an aggregated model setup for now. A disaggregated
   serving example will be added in the near future.
+- WideEP configs in this directory are still being tested. A WideEP specific
+  example with documentation will be added once ready.

@@ -28,14 +28,21 @@ import asyncio
 import logging
 import random
 import socket
+from typing import Dict, Union
 
 import sglang as sgl
 from components.decode_worker import SGLangDecodeWorker
 from sglang.srt.utils import get_ip
 from utils.protocol import DisaggPreprocessedRequest, PreprocessedRequest
-from utils.sglang import parse_sglang_args
+from utils.sgl_utils import parse_sglang_args
 
-from dynamo.llm import ModelType, register_llm
+from dynamo.llm import (
+    ModelType,
+    WorkerMetricsPublisher,
+    ZmqKvEventPublisher,
+    ZmqKvEventPublisherConfig,
+    register_llm,
+)
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
@@ -56,20 +63,62 @@ class SGLangWorker:
         self.engine_args = parse_sglang_args(class_name, "")
         self.engine = sgl.Engine(server_args=self.engine_args)
 
-        logger.info("SGLangWorker initialized")
+        # Initialize metrics publisher
+        self.metrics_publisher = WorkerMetricsPublisher()
+
+    def _update_metrics(self):
+        """Update metrics with current engine state"""
+        # TODO: remove this once the following upstream changes are merged:
+        #   • ai-dynamo/dynamo#1465 – "feat: receive kvmetrics from sglang scheduler"
+        #   • sgl-project/sglang#6721 – "Expose runtime KV-cache & request metrics"
+        logger.warning(
+            "Publishing placeholder metrics in SGLangWorker; these are NOT real engine metrics yet and will be replaced once upstream support lands."
+        )
+        self.metrics_publisher.publish(
+            request_active_slots=1,
+            request_total_slots=100,
+            kv_active_blocks=random.randint(0, 500),
+            kv_total_blocks=1000,
+            num_requests_waiting=0,
+            gpu_cache_usage_perc=random.uniform(0.1, 0.8),
+            gpu_prefix_cache_hit_rate=random.uniform(0.0, 0.5),
+        )
+
+    async def create_metrics_publisher_endpoint(self):
+        component = dynamo_context["component"]
+        await self.metrics_publisher.create_endpoint(component)
 
     @async_on_start
     async def async_init(self):
         runtime = dynamo_context["runtime"]
-        logger.info("Registering LLM for discovery")
         comp_ns, comp_name = SGLangWorker.dynamo_address()  # type: ignore
         endpoint = runtime.namespace(comp_ns).component(comp_name).endpoint("generate")
+        component = runtime.namespace(comp_ns).component(comp_name)
+
+        logger.info(
+            f"Registering LLM for discovery with kv block size {self.engine_args.page_size}, endpoint={endpoint}, model_path={self.engine_args.model_path}, served_model_name={self.engine_args.served_model_name}"
+        )
         await register_llm(
             ModelType.Backend,
             endpoint,
             self.engine_args.model_path,
             self.engine_args.served_model_name,
+            kv_cache_block_size=self.engine_args.page_size,
         )
+
+        self.metrics_publisher.publish(
+            request_active_slots=0,
+            request_total_slots=1024,
+            kv_active_blocks=0,
+            kv_total_blocks=1024,
+            num_requests_waiting=0,
+            gpu_cache_usage_perc=0.0,
+            gpu_prefix_cache_hit_rate=0.0,
+        )
+
+        # Create metrics publisher endpoint for KV router discovery
+        asyncio.create_task(self.create_metrics_publisher_endpoint())
+
         if self.engine_args.disaggregation_mode:
             self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info()
             comp_ns, comp_name = SGLangDecodeWorker.dynamo_address()  # type: ignore
@@ -79,6 +128,18 @@ class SGLangWorker:
                 .endpoint("generate")
                 .client()
             )
+
+        # Configure ZMQ KV Event Publisher to relay KV events from SGLang to NATS
+        zmq_config = ZmqKvEventPublisherConfig(
+            worker_id=endpoint.lease_id(),
+            kv_block_size=self.engine_args.page_size,  # Keep in sync with register_llm above
+        )
+
+        # Keep a reference on the instance to avoid the publisher being garbage-collected.
+        self._kv_event_publisher = ZmqKvEventPublisher(
+            component=component,
+            config=zmq_config,
+        )
 
     def _get_bootstrap_info(self):
         """
@@ -99,7 +160,6 @@ class SGLangWorker:
         return bootstrap_host, bootstrap_port
 
     def _build_sampling_params(self, request: PreprocessedRequest) -> dict:
-        # TODO: maintain a full mapping from PreprocessedRequest to SGLang's SamplingParams
         sampling_params = {}
         if request.sampling_options.temperature:
             sampling_params["temperature"] = request.sampling_options.temperature
@@ -112,63 +172,123 @@ class SGLangWorker:
             sampling_params["ignore_eos"] = request.stop_conditions.ignore_eos
         return sampling_params
 
+    def _get_request_batch_size(self, request: PreprocessedRequest):
+        """Get batch size from request, returns None for single requests"""
+        if request.batch_token_ids is not None:
+            return len(request.batch_token_ids)
+        return None
+
+    def _is_batch_request(self, request: PreprocessedRequest):
+        """Check if request is in batch mode"""
+        return request.batch_token_ids is not None
+
     @endpoint()
     async def generate(self, request: PreprocessedRequest):
+        # Check if we're in batch mode at the start
+        is_batch = self._is_batch_request(request)
+        batch_size = self._get_request_batch_size(request)
+
         # TODO: maintain a mapping from SGLang's Ouput struct to LLMEngineOuput
         sampling_params = self._build_sampling_params(request)
 
         if self.engine_args.disaggregation_mode != "null":
-            bootstrap_room = self._generate_bootstrap_room()
+            if is_batch:
+                bootstrap_room = [
+                    self._generate_bootstrap_room() for _ in range(batch_size)
+                ]
+                bootstrap_host = [self.bootstrap_host] * batch_size
+                bootstrap_port = [self.bootstrap_port] * batch_size
+            else:
+                bootstrap_host = self.bootstrap_host
+                bootstrap_port = self.bootstrap_port
+                bootstrap_room = self._generate_bootstrap_room()
 
             # decode worker request
             disagg_request = DisaggPreprocessedRequest(
                 request=request,
                 sampling_params=sampling_params,
-                bootstrap_host=self.bootstrap_host,
-                bootstrap_port=self.bootstrap_port,
+                bootstrap_host=bootstrap_host,
+                bootstrap_port=bootstrap_port,
                 bootstrap_room=bootstrap_room,
             )
 
             # prefill response is not used
             prefill = await self.engine.async_generate(
-                input_ids=request.token_ids,
+                input_ids=request.token_ids
+                if not is_batch
+                else request.batch_token_ids,
                 sampling_params=sampling_params,
                 stream=True,
-                bootstrap_host=self.bootstrap_host,
-                bootstrap_port=self.bootstrap_port,
+                bootstrap_host=bootstrap_host,
+                bootstrap_port=bootstrap_port,
                 bootstrap_room=bootstrap_room,
             )
             prefill_task = asyncio.create_task(self._prefill_generator(prefill))
 
             decode = await self.decode_client.generate(disagg_request.model_dump_json())
 
-            async for out in self._process_stream(decode, unpack=True):
+            async for out in self._process_stream(
+                decode, unpack=True, is_batch=is_batch
+            ):
                 yield out
 
             await prefill_task
         else:
             g = await self.engine.async_generate(
-                input_ids=request.token_ids,
+                input_ids=request.token_ids
+                if not is_batch
+                else request.batch_token_ids,
                 sampling_params=sampling_params,
                 stream=True,
             )
 
-            async for out in self._process_stream(g, unpack=False):
+            async for out in self._process_stream(g, unpack=False, is_batch=is_batch):
                 yield out
 
-    async def _process_stream(self, stream_source, unpack: bool):
-        num_output_tokens_so_far = 0
+    async def _process_stream(self, stream_source, unpack: bool, is_batch: bool):
+        # Initialize based on batch mode
+        num_output_tokens_so_far: Union[Dict[int, int], int]
+        if is_batch:
+            num_output_tokens_so_far = {}
+        else:
+            num_output_tokens_so_far = 0
+
         async for res in stream_source:
             data = res.data() if unpack else res
             finish_reason = data["meta_info"]["finish_reason"]
-            if finish_reason:
-                # Don't forward the stop token
-                out = {"token_ids": [], "finish_reason": finish_reason["type"]}
+
+            if is_batch:
+                # Handle batch response
+                assert isinstance(num_output_tokens_so_far, dict)
+                index = data.get("index", 0)
+                if index not in num_output_tokens_so_far:
+                    num_output_tokens_so_far[index] = 0
+
+                if finish_reason:
+                    out = {
+                        "token_ids": [],
+                        "finish_reason": finish_reason["type"],
+                        "index": index,
+                    }
+                else:
+                    next_total_toks = len(data["output_ids"])
+                    new_tokens = data["output_ids"][num_output_tokens_so_far[index] :]
+                    out = {
+                        "token_ids": new_tokens,
+                        "index": index,
+                    }
+                    num_output_tokens_so_far[index] = next_total_toks
             else:
-                next_total_toks = len(data["output_ids"])
-                out = {"token_ids": data["output_ids"][num_output_tokens_so_far:]}
+                # Handle single response
+                assert isinstance(num_output_tokens_so_far, int)
+                if finish_reason:
+                    out = {"token_ids": [], "finish_reason": finish_reason["type"]}
+                else:
+                    next_total_toks = len(data["output_ids"])
+                    out = {"token_ids": data["output_ids"][num_output_tokens_so_far:]}
+                    num_output_tokens_so_far = next_total_toks
+
             yield out
-            num_output_tokens_so_far = next_total_toks
 
     def _generate_bootstrap_room(self):
         return random.randint(0, 2**63 - 1)

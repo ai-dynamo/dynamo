@@ -19,7 +19,5 @@ datasources:
   - name: prometheus
     type: prometheus
     access: proxy
-    # TODO: Use proper docker networking
-    # url: http://prometheus:9090
-    url: http://localhost:9090
+    url: http://prometheus:9090
     isDefault: true

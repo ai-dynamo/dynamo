@@ -193,7 +193,7 @@ impl Scheduler {
     pub fn new(
         kv_capacity: usize,
         watermark: f64,
-        block_size: usize,
+        block_size: u32,
         chunk_size: Option<usize>,
         output_tx: Option<mpsc::Sender<Uuid>>,
         cancellation_token: Option<CancellationToken>,
@@ -272,7 +272,7 @@ impl Scheduler {
                         let mut kv_manager_guard = kv_manager_clone.lock().await;
 
                         // Base time needed for decoding (assumed memory bound on KV cache)
-                        let active_tokens = kv_manager_guard.num_active_blocks() * block_size;
+                        let active_tokens = kv_manager_guard.num_active_blocks() * (block_size as usize);
                         // TODO: 2 is a dummy / magic scaling factor
                         let mut generation_time = Duration::from_micros((active_tokens / 2) as u64);
 
@@ -417,7 +417,7 @@ impl Scheduler {
 }
 
 /// Convert a Request to an ActiveSequence
-fn get_active_sequence(request: Request, block_size: usize, chunk_size: usize) -> ActiveSequence {
+fn get_active_sequence(request: Request, block_size: u32, chunk_size: usize) -> ActiveSequence {
     if let Request::Active(active_seq) = request {
         return active_seq;
     }
@@ -486,7 +486,7 @@ mod tests {
 
         let kv_capacity: usize = 500;
         let watermark: f64 = 0.01; // 1% watermark
-        let block_size: usize = 64;
+        let block_size: u32 = 64;
         let chunk_size: usize = 256;
         let num_requests: usize = 100;
         let input_len: usize = 1000;

@@ -231,10 +231,13 @@ class LocalConnector(PlannerConnector):
         target_watcher = matching_components[highest_suffix]
         logger.info(f"Removing watcher {target_watcher}")
 
-        success = await self.circus.remove_watcher(name=target_watcher)
-        logger.info(
-            f"Circus remove_watcher for {target_watcher} {'succeeded' if success else 'failed'}"
+        success = await self.circus.remove_watcher(
+            name=target_watcher, blocking=blocking
         )
+        if not blocking:
+            logger.info(
+                f"Circus remove_watcher for {target_watcher} {'succeeded' if success else 'failed'}"
+            )
 
         if success:
             if highest_suffix > 0:  # Numbered watcher - remove entire entry

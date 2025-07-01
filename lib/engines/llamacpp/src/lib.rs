@@ -78,7 +78,7 @@ impl LlamacppEngine {
 
         let (ctx_set, ctx_get) = tokio::sync::mpsc::channel(NUM_CONTEXTS);
         let llama_ctx_params = if model_config.card().context_length > 0 {
-            let n_ctx = NonZeroU32::new(model_config.card().context_length as u32);
+            let n_ctx = NonZeroU32::new(model_config.card().context_length);
             LlamaContextParams::default().with_n_ctx(n_ctx)
         } else {
             // Context length defaults to 512 currently
@@ -269,6 +269,7 @@ fn run_request(
             cum_log_probs: None, // TODO output.cumulative_logprob.map(|v| v as f64),
             log_probs: None,     // TODO  output.logprobs
             finish_reason: None,
+            index: None,
         };
         work_request
             .response_channel
