@@ -42,6 +42,7 @@ dynamo-runtime = { workspace = true }
 
 # workspace
 anyhow = { workspace = true }
+async-openai = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 async-nats = { workspace = true }
@@ -72,7 +73,6 @@ uuid = { workspace = true }
 xxhash-rust = { workspace = true }
 
 akin = "0.4.0"
-async-openai = { workspace = true }
 blake3 = "1"
 bytemuck = "1.22"
 candle-core = { version = "0.8.0" }

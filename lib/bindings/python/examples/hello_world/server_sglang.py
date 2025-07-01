@@ -32,6 +32,7 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
+DEFAULT_TEMPERATURE = 0.7
 
 
 class Config:
@@ -54,7 +55,8 @@ class RequestHandler:
     async def generate(self, request):
         # print(f"Received request: {request}")
         sampling_params = {
-            "temperature": request["sampling_options"]["temperature"],
+            "temperature": request["sampling_options"]["temperature"]
+            or DEFAULT_TEMPERATURE,
             # sglang defaults this to 128
             "max_new_tokens": request["stop_conditions"]["max_tokens"],
         }

@@ -499,6 +499,64 @@ impl KvIndexer {
     }
 }
 
+/// Bindings for the approximate KV indexer. We need to exactly match the regular KV Indexer
+/// interface, so that the router can switch between the two.
+#[pyclass]
+pub(crate) struct ApproxKvIndexer {
+    inner: Arc<llm_rs::kv_router::approx::ApproxKvIndexer>,
+}
+
+#[pymethods]
+impl ApproxKvIndexer {
+    #[new]
+    fn new(component: Component, kv_block_size: usize, ttl_secs: f64) -> PyResult<Self> {
+        let ttl = tokio::time::Duration::from_secs_f64(ttl_secs);
+        let inner = Arc::new(llm_rs::kv_router::approx::ApproxKvIndexer::new(
+            component.inner.drt().runtime().child_token(),
+            kv_block_size as u32,
+            ttl,
+        ));
+        Ok(Self { inner })
+    }
+
+    fn block_size(&self) -> u32 {
+        self.inner.block_size()
+    }
+
+    fn find_matches_for_request<'p>(
+        &self,
+        py: Python<'p>,
+        token_ids: Vec<u32>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let indexer = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let rs_overlap_scores = indexer
+                .find_matches_for_request(token_ids.as_slice())
+                .await
+                .map_err(to_pyerr)?;
+            Ok(OverlapScores {
+                inner: rs_overlap_scores,
+            })
+        })
+    }
+
+    fn process_routing_decision_for_request<'p>(
+        &self,
+        py: Python<'p>,
+        tokens: Vec<u32>,
+        worker_id: i64,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let indexer = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            indexer
+                .process_routing_decision_for_request(tokens.as_slice(), worker_id)
+                .await
+                .map_err(to_pyerr)?;
+            Ok(())
+        })
+    }
+}
+
 #[pyclass]
 #[derive(Clone)]
 pub(crate) struct EndpointKvMetrics {

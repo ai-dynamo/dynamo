@@ -144,11 +144,7 @@ impl LocalModelBuilder {
                 endpoint_id,
                 template,
                 http_port: self.http_port,
-                // We always have one. The Option is so we can take it.
-                router_config: self
-                    .router_config
-                    .take()
-                    .expect("unreachable, RouterConfig missing"),
+                router_config: self.router_config.take().unwrap_or_default(),
             });
         }
 
@@ -203,10 +199,7 @@ impl LocalModelBuilder {
             endpoint_id,
             template,
             http_port: self.http_port,
-            router_config: self
-                .router_config
-                .take()
-                .expect("unreachable, RouterConfig missing"),
+            router_config: self.router_config.take().unwrap_or_default(),
         })
     }
 }

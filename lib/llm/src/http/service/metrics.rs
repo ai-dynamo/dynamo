@@ -58,6 +58,9 @@ pub enum Endpoint {
 
     /// OAI Embeddings
     Embeddings,
+
+    /// OAI Responses
+    Responses,
 }
 
 /// Metrics for the HTTP service
@@ -354,6 +357,7 @@ impl std::fmt::Display for Endpoint {
             Endpoint::Completions => write!(f, "completions"),
             Endpoint::ChatCompletions => write!(f, "chat_completions"),
             Endpoint::Embeddings => write!(f, "embeddings"),
+            Endpoint::Responses => write!(f, "responses"),
         }
     }
 }
@@ -364,6 +368,7 @@ impl Endpoint {
             Endpoint::Completions => "completions",
             Endpoint::ChatCompletions => "chat_completions",
             Endpoint::Embeddings => "embeddings",
+            Endpoint::Responses => "responses",
         }
     }
 }
