@@ -112,7 +112,7 @@ def create_circus_watcher(
         stop_children=True,
         use_sockets=use_sockets,
         graceful_timeout=86400,
-        respawn=os.environ.get("DYN_CIRCUS_RESPAWN", False),  # TODO
+        respawn=os.environ.get("DYN_CIRCUS_RESPAWN", "false").lower() in ("true", "1", "yes"),
         stdout_stream=stdout_stream,
         stderr_stream=stderr_stream,
         **kwargs,
