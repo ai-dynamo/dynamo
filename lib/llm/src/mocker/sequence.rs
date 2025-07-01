@@ -89,7 +89,7 @@ impl ActiveSequence {
         assert!(block_size > 1, "block_size must be greater than 1");
         let num_input_tokens = tokens.len();
 
-        let tokens = Tokens::from(tokens).into_sequence(block_size, None);
+        let tokens = Tokens::from(tokens).into_sequence(block_size as u32, None);
         let unique_blocks =
             create_unique_blocks_from_sequence(&tokens, None, block_size, enable_prefix_caching);
         let creation_signal = Some(MoveBlock::Use(unique_blocks.clone()));

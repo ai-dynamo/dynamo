@@ -58,7 +58,7 @@ pub struct KvManager {
     max_capacity: usize,
 
     #[getter(copy)]
-    block_size: u32,
+    block_size: usize,
 
     active_blocks: HashMap<UniqueBlock, usize>,
 

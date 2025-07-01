@@ -264,7 +264,7 @@ impl MockVllmEngine {
         let kv_event_publisher = Arc::new(KvEventPublisher::new(
             comp.clone(),
             worker_id,
-            block_size,
+            block_size as u32,
             None,
         )?);
         tracing::info!("KV event publisher created");
