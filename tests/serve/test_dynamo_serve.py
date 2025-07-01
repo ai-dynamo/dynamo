@@ -337,8 +337,8 @@ class DynamoServeProcess(ManagedProcess):
         retry_delay = 5
         elapsed = 0.0
         logger.info("Waiting for Deployment Ready")
-        json_paylaod = (
-            payload.chat
+        json_payload = (
+            payload.payload_chat
             if self.graph.endpoints[0] == "v1/chat/completions"
             else payload.payload_completions
         )
@@ -348,7 +348,7 @@ class DynamoServeProcess(ManagedProcess):
             try:
                 response = requests.post(
                     url,
-                    json=json_paylaod,
+                    json=json_payload,
                     timeout=self.graph.timeout - elapsed,
                 )
             except (requests.RequestException, requests.Timeout) as e:

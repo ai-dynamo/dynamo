@@ -24,7 +24,13 @@ import pytest
 
 from tests.fault_tolerance.client import client
 from tests.fault_tolerance.parse_results import main as parse_results
+from tests.fault_tolerance.scenarios import (  # noqa: F401
+    deployment_graph_test,
+    failures,
+)
 from tests.fault_tolerance.utils.circus_controller import CircusController
+from tests.fault_tolerance.utils.metrics import nvidia_smi  # noqa: F401
+from tests.fault_tolerance.utils.metrics import worker_metrics  # noqa: F401
 from tests.serve.test_dynamo_serve import DynamoServeProcess
 from tests.utils.managed_process import terminate_process_tree
 
@@ -92,7 +98,7 @@ def _clients(
         logger.debug(f"{proc} joined")
 
 
-def _inject_failures(failures, logger):
+def _inject_failures(failures, logger):  # noqa: F811
     circus_controller = CircusController.from_state_file("dynamo")
 
     for failure_time, component in failures:
@@ -146,20 +152,20 @@ def results_summary():
 @pytest.mark.e2e
 @pytest.mark.slow
 async def test_worker_failure(
-    deployment_graph_test,
+    deployment_graph_test,  # noqa: F811
     request,
     runtime_services,
     num_clients,
     requests_per_client,
-    worker_metrics,
+    worker_metrics,  # noqa: F811
     respawn,
-    failures,
+    failures,  # noqa: F811
     input_token_length,
     output_token_length,
     max_num_seqs,
     max_retries,
     display_dynamo_output,
-    nvidia_smi,
+    nvidia_smi,  # noqa: F811
     separate_process_logs,
     hf_hub_offline,
 ):
