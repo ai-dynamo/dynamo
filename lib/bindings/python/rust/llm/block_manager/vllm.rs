@@ -122,30 +122,34 @@ impl KvbmCacheManager {
         Ok(KvbmBlockList::new(BlockListType::ImmutableDevice(blocks)))
     }
 
-    /// Get the offloaded computed blocks for the given sequence hashes.
-    /// This is used to get the blocks for the request.
-    pub fn get_offloaded_computed_blocks(
+    /// Get the number of offloaded computed blocks for the given sequence hashes.
+    pub fn get_num_offloaded_computed_blocks(
         &self,
         sequence_hashes: Vec<SequenceHash>,
-    ) -> PyResult<(KvbmBlockList, KvbmBlockList)> {
-        let host_blocks = if let Some(host) = self.block_manager().host() {
+    ) -> PyResult<(usize, usize)> {
+        let num_host_blocks = if let Some(host) = self.block_manager().host() {
             host.match_sequence_hashes_blocking(&sequence_hashes)
                 .map_err(to_pyerr)?
+                .len()
         } else {
-            vec![]
+            0
         };
 
-        let disk_blocks = if let Some(disk) = self.block_manager().disk() {
+        let num_disk_blocks = if let Some(disk) = self.block_manager().disk() {
             disk.match_sequence_hashes_blocking(&sequence_hashes)
                 .map_err(to_pyerr)?
+                .len()
         } else {
-            vec![]
+            0
         };
 
-        Ok((
-            KvbmBlockList::new(BlockListType::ImmutableHost(host_blocks)),
-            KvbmBlockList::new(BlockListType::ImmutableDisk(disk_blocks)),
-        ))
+        tracing::debug!(
+            "in get_num_offloaded_computed_blocks, found {} host blocks and {} disk blocks",
+            num_host_blocks,
+            num_disk_blocks,
+        );
+
+        Ok((num_host_blocks, num_disk_blocks))
     }
 
     /// Updates the slot manager with the current request state and allocates new blocks if needed.

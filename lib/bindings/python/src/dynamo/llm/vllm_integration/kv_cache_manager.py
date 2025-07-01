@@ -101,67 +101,6 @@ class KvbmCacheManager(KVConnectorBase_V1):
 
         return KvbmCacheBlocks(owned_blocks), num_computed_tokens
 
-    def get_offloaded_computed_blocks(
-        self,
-        request: Request,
-        num_computed_tokens: int,
-    ) -> tuple[int, KvbmCacheBlocks, KvbmCacheBlocks]:
-        """
-        Get the offloaded computed blocks for the request.
-
-        Args:
-            request (Request): the request object.
-            num_computed_tokens (int): the number of locally
-                computed tokens for this request
-
-        Returns:
-            tuple[need_to_allocate, KvbmCacheBlocks, KvbmCacheBlocks]:
-                - the number of tokens that can be loaded from the offloaded kv blocks.
-                - The offloaded computed blocks for the request in G2.
-                - The offloaded computed blocks for the request in G3.
-        """
-        # TODO: add stats for offloaded computed tokens
-        # if self.log_stats:
-        #     assert self.prefix_cache_stats is not None
-        #     self.prefix_cache_stats.requests += 1
-
-        sequence_hashes = self._create_slot(request)
-
-        (
-            host_owned_blocks,
-            disk_owned_blocks,
-        ) = self.cache_manager.get_offloaded_computed_blocks(sequence_hashes)
-        host_block_count = host_owned_blocks.block_count()
-        disk_block_count = disk_owned_blocks.block_count()
-
-        num_host_computed_tokens = host_block_count * self.block_size
-        num_disk_computed_tokens = disk_block_count * self.block_size
-
-        num_external_hit_tokens = max(
-            num_disk_computed_tokens, num_host_computed_tokens
-        )
-
-        need_to_allocate = num_external_hit_tokens - num_computed_tokens
-
-        # In a full-prompt-hit case, we need to recompute the last token
-        if num_external_hit_tokens == request.num_tokens:
-            need_to_allocate -= 1
-
-        # TODO: add stats for offloaded computed tokens
-        # if self.log_stats:
-        #     assert self.prefix_cache_stats is not None
-        #     self.prefix_cache_stats.queries += request.num_tokens
-        #     self.prefix_cache_stats.hits += num_computed_tokens
-
-        if need_to_allocate > 0:
-            return (
-                need_to_allocate,
-                KvbmCacheBlocks(host_owned_blocks),
-                KvbmCacheBlocks(disk_owned_blocks),
-            )
-
-        return 0, KvbmCacheBlocks(host_owned_blocks), KvbmCacheBlocks(disk_owned_blocks)
-
     def onboard_computed_blocks(
         self, host_blocks: KvbmCacheBlocks, disk_blocks: KvbmCacheBlocks
     ) -> KvbmCacheBlocks:
@@ -389,6 +328,27 @@ class KvbmCacheManager(KVConnectorBase_V1):
                 - `True` if external KV cache tokens will be loaded
                   asynchronously (between scheduler steps).
         """
+        sequence_hashes = self._create_slot(request)
+
+        num_host_computed_blocks, num_disk_computed_blocks = self.cache_manager.get_num_offloaded_computed_blocks(sequence_hashes)
+
+        num_host_computed_tokens = num_host_computed_blocks * self.block_size
+        num_disk_computed_tokens = num_disk_computed_blocks * self.block_size
+
+        num_external_hit_tokens = max(
+            num_disk_computed_tokens, num_host_computed_tokens
+        )
+
+        need_to_allocate = num_external_hit_tokens - num_computed_tokens
+
+        # In a full-prompt-hit case, we need to recompute the last token,
+        # to get the logits to generate the next token.
+        if num_external_hit_tokens == request.num_tokens:
+            need_to_allocate -= 1
+
+        if need_to_allocate > 0:
+            return need_to_allocate, False
+
         return 0, False
 
     def update_state_after_alloc(
