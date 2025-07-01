@@ -166,11 +166,11 @@ pub struct ApproxKvIndexer {
     /// A handle to the background task managing the KV store.
     task: OnceLock<std::thread::JoinHandle<()>>,
     /// The size of the KV block this indexer can handle.
-    kv_block_size: usize,
+    kv_block_size: u32,
 }
 
 impl ApproxKvIndexer {
-    pub fn new(token: CancellationToken, kv_block_size: usize, ttl: Duration) -> Self {
+    pub fn new(token: CancellationToken, kv_block_size: u32, ttl: Duration) -> Self {
         let (match_tx, mut match_rx) = mpsc::channel::<MatchRequest>(2048);
         let (route_tx, mut route_rx) = mpsc::channel::<RouterResult>(2048);
         let (remove_worker_tx, mut remove_worker_rx) = mpsc::channel::<WorkerId>(16);
@@ -273,7 +273,7 @@ impl ApproxKvIndexer {
         }
     }
 
-    pub fn block_size(&self) -> usize {
+    pub fn block_size(&self) -> u32 {
         self.kv_block_size
     }
 
@@ -367,6 +367,8 @@ mod tests {
     use tokio::time::{self, Duration, Instant};
     use tokio_util::sync::CancellationToken;
 
+    const KV_BLOCK_SIZE: u32 = 4;
+
     impl<T: Clone + Hash + Eq + Ord> TimerManager<T> {
         pub fn get_expiry(&self, key: &T) -> Option<&Instant> {
             self.timers.get(key)
@@ -455,7 +457,6 @@ mod tests {
     ///   3. Matches disappear after TTL expiry
     #[tokio::test]
     async fn test_approx_kv_indexer_basic_flow() {
-        const KV_BLOCK_SIZE: usize = 4;
         const TTL: Duration = Duration::from_millis(200);
         let cancel = CancellationToken::new();
         let indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL);
@@ -492,7 +493,6 @@ mod tests {
     /// Verify that `remove_worker` clears all entries for the specified worker.
     #[tokio::test]
     async fn test_remove_worker() {
-        const KV_BLOCK_SIZE: usize = 4;
         const TTL: Duration = Duration::from_secs(5); // Large enough to avoid expiry during test
         let cancel = CancellationToken::new();
         let mut indexer = ApproxKvIndexer::new(cancel.clone(), KV_BLOCK_SIZE, TTL);
@@ -526,7 +526,6 @@ mod tests {
     /// After removing one of multiple workers that share the same block, the remaining worker's entries should persist.
     #[tokio::test]
     async fn test_remove_worker_preserves_other_workers() {
-        const KV_BLOCK_SIZE: usize = 4;
         const TTL: Duration = Duration::from_secs(5); // Large enough to avoid expiry during test
 
         let cancel = CancellationToken::new();
@@ -568,7 +567,6 @@ mod tests {
     /// Two sequences with a shared prefix should yield overlap scores reflecting the common blocks.
     #[tokio::test]
     async fn test_common_prefix_overlap() {
-        const KV_BLOCK_SIZE: usize = 4;
         const TTL: Duration = Duration::from_secs(5);
 
         let cancel = CancellationToken::new();
@@ -604,7 +602,6 @@ mod tests {
     /// When the same block resides on multiple workers, all should appear in the overlap scores.
     #[tokio::test]
     async fn test_multiple_workers_same_block() {
-        const KV_BLOCK_SIZE: usize = 4;
         const TTL: Duration = Duration::from_secs(5);
 
         let cancel = CancellationToken::new();

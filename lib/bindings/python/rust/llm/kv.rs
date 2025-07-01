@@ -535,13 +535,13 @@ impl ApproxKvIndexer {
         let ttl = tokio::time::Duration::from_secs_f64(ttl_secs);
         let inner = Arc::new(llm_rs::kv_router::approx::ApproxKvIndexer::new(
             component.inner.drt().runtime().child_token(),
-            kv_block_size,
+            kv_block_size as u32,
             ttl,
         ));
         Ok(Self { inner })
     }
 
-    fn block_size(&self) -> usize {
+    fn block_size(&self) -> u32 {
         self.inner.block_size()
     }
 
