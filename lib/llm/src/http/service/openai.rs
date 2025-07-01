@@ -80,9 +80,8 @@ impl ErrorResponse {
     }
 
     /// Not Implemented Error
-    /// Return this error when the service encounters an internal error.
-    /// We should return a generic message to the client instead of the real error.
-    /// Internal Services errors are the result of misconfiguration or bugs in the service.
+    /// Return this error when the client requests a feature that is not yet implemented.
+    /// This should be used for features that are planned but not available.
     pub fn not_implemented_error(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
         tracing::error!("Not Implemented error: {msg}");
         (
@@ -437,7 +436,17 @@ async fn responses(
     let request_id = uuid::Uuid::new_v4().to_string();
 
     // Convert NvCreateResponse --> NvCreateChatCompletionRequest
-    let request: NvCreateChatCompletionRequest = request.into();
+    let request: NvCreateChatCompletionRequest = request.try_into().map_err(|e| {
+        tracing::error!(
+            request_id,
+            "Failed to convert NvCreateResponse to NvCreateChatCompletionRequest: {:?}",
+            e
+        );
+        ErrorResponse::not_implemented_error(&format!(
+            "Only Input::Text(_) is currently supported: {}",
+            e
+        ))
+    })?;
 
     let model = &request.inner.model;
 
@@ -447,6 +456,13 @@ async fn responses(
         .manager()
         .get_chat_completions_engine(model)
         .map_err(|_| ErrorResponse::model_not_found())?;
+
+    let mut inflight_guard =
+        state
+            .metrics_clone()
+            .create_inflight_guard(model, Endpoint::Responses, false);
+
+    let _response_collector = state.metrics_clone().create_response_collector(model);
 
     let request = Context::with_id(request, request_id.clone());
 
@@ -476,13 +492,15 @@ async fn responses(
     // Convert NvCreateChatCompletionResponse --> NvResponse
     let response: NvResponse = response.into();
 
+    inflight_guard.mark_ok();
+
     Ok(Json(response).into_response())
 }
 
 pub fn validate_input_is_text_only(request: &NvCreateResponse) -> Option<impl IntoResponse> {
     match &request.inner.input {
         async_openai::types::responses::Input::Text(_) => None,
-        _ => Some(error_response("Only `Input::Text` is supported. Structured, multimedia, or custom input types are not yet implemented.")),
+        _ => Some(ErrorResponse::not_implemented_error("Only `Input::Text` is supported. Structured, multimedia, or custom input types are not yet implemented.")),
     }
 }
 
@@ -492,65 +510,92 @@ pub fn validate_unsupported_fields(request: &NvCreateResponse) -> Option<impl In
     let inner = &request.inner;
 
     if inner.background == Some(true) {
-        return Some(error_response("`background: true` is not supported."));
+        return Some(ErrorResponse::not_implemented_error(
+            "`background: true` is not supported.",
+        ));
     }
     if inner.include.is_some() {
-        return Some(error_response("`include` is not supported."));
+        return Some(ErrorResponse::not_implemented_error(
+            "`include` is not supported.",
+        ));
     }
     if inner.instructions.is_some() {
-        return Some(error_response("`instructions` is not supported."));
+        return Some(ErrorResponse::not_implemented_error(
+            "`instructions` is not supported.",
+        ));
     }
     if inner.max_tool_calls.is_some() {
-        return Some(error_response("`max_tool_calls` is not supported."));
+        return Some(ErrorResponse::not_implemented_error(
+            "`max_tool_calls` is not supported.",
+        ));
     }
     if inner.metadata.is_some() {
-        return Some(error_response("`metadata` is not supported."));
+        return Some(ErrorResponse::not_implemented_error(
+            "`metadata` is not supported.",
+        ));
     }
     if inner.parallel_tool_calls == Some(true) {
-        return Some(error_response(
+        return Some(ErrorResponse::not_implemented_error(
             "`parallel_tool_calls: true` is not supported.",
         ));
     }
     if inner.previous_response_id.is_some() {
-        return Some(error_response("`previous_response_id` is not supported."));
+        return Some(ErrorResponse::not_implemented_error(
+            "`previous_response_id` is not supported.",
+        ));
     }
     if inner.prompt.is_some() {
-        return Some(error_response("`prompt` is not supported."));
+        return Some(ErrorResponse::not_implemented_error(
+            "`prompt` is not supported.",
+        ));
     }
     if inner.reasoning.is_some() {
-        return Some(error_response("`reasoning` is not supported."));
+        return Some(ErrorResponse::not_implemented_error(
+            "`reasoning` is not supported.",
+        ));
     }
     if inner.service_tier.is_some() {
-        return Some(error_response("`service_tier` is not supported."));
+        return Some(ErrorResponse::not_implemented_error(
+            "`service_tier` is not supported.",
+        ));
     }
     if inner.store == Some(true) {
-        return Some(error_response("`store: true` is not supported."));
+        return Some(ErrorResponse::not_implemented_error(
+            "`store: true` is not supported.",
+        ));
     }
     if inner.stream == Some(true) {
-        return Some(error_response("`stream: true` is not supported."));
+        return Some(ErrorResponse::not_implemented_error(
+            "`stream: true` is not supported.",
+        ));
     }
     if inner.text.is_some() {
-        return Some(error_response("`text` is not supported."));
+        return Some(ErrorResponse::not_implemented_error(
+            "`text` is not supported.",
+        ));
     }
     if inner.tool_choice.is_some() {
-        return Some(error_response("`tool_choice` is not supported."));
+        return Some(ErrorResponse::not_implemented_error(
+            "`tool_choice` is not supported.",
+        ));
     }
     if inner.tools.is_some() {
-        return Some(error_response("`tools` is not supported."));
+        return Some(ErrorResponse::not_implemented_error(
+            "`tools` is not supported.",
+        ));
     }
     if inner.truncation.is_some() {
-        return Some(error_response("`truncation` is not supported."));
+        return Some(ErrorResponse::not_implemented_error(
+            "`truncation` is not supported.",
+        ));
     }
     if inner.user.is_some() {
-        return Some(error_response("`user` is not supported."));
+        return Some(ErrorResponse::not_implemented_error(
+            "`user` is not supported.",
+        ));
     }
 
     None
-}
-
-fn error_response(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
-    tracing::error!("Not Implemented error: {msg}");
-    ErrorResponse::not_implemented_error(msg)
 }
 
 // todo - abstract this to the top level lib.rs to be reused

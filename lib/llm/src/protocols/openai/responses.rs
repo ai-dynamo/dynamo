@@ -149,13 +149,17 @@ impl OpenAIStopConditionsProvider for NvCreateResponse {
     }
 }
 
-impl From<NvCreateResponse> for NvCreateChatCompletionRequest {
-    fn from(resp: NvCreateResponse) -> Self {
+impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
+    type Error = anyhow::Error;
+
+    fn try_from(resp: NvCreateResponse) -> Result<Self, Self::Error> {
         // Create messages from input
         let input_text = match resp.inner.input {
             Input::Text(text) => text,
             Input::Items(_) => {
-                panic!("Input::Items not supported in conversion to NvCreateChatCompletionRequest")
+                return Err(anyhow::anyhow!(
+                    "Input::Items not supported in conversion to NvCreateChatCompletionRequest"
+                ));
             }
         };
 
@@ -170,7 +174,7 @@ impl From<NvCreateResponse> for NvCreateChatCompletionRequest {
         let top_logprobs = convert_top_logprobs(resp.inner.top_logprobs);
 
         // The below should encompass all of the allowed configurable parameters
-        NvCreateChatCompletionRequest {
+        Ok(NvCreateChatCompletionRequest {
             inner: CreateChatCompletionRequest {
                 messages,
                 model: resp.inner.model,
@@ -182,7 +186,7 @@ impl From<NvCreateResponse> for NvCreateChatCompletionRequest {
                 ..Default::default()
             },
             nvext: resp.nvext,
-        }
+        })
     }
 }
 
@@ -193,12 +197,15 @@ fn convert_top_logprobs(input: Option<u32>) -> Option<u8> {
 impl From<NvCreateChatCompletionResponse> for NvResponse {
     fn from(nv_resp: NvCreateChatCompletionResponse) -> Self {
         let chat_resp = nv_resp.inner;
-        let choice = chat_resp
+        let content_text = chat_resp
             .choices
             .into_iter()
             .next()
-            .expect("at least one choice expected");
-        let content_text = choice.message.content.unwrap_or_default();
+            .and_then(|choice| choice.message.content)
+            .unwrap_or_else(|| {
+                tracing::warn!("No choices in chat completion response, using empty content");
+                String::new()
+            });
         let message_id = format!("msg_{}", Uuid::new_v4().simple());
         let response_id = format!("resp_{}", Uuid::new_v4().simple());
 
@@ -303,7 +310,8 @@ mod tests {
 
     #[test]
     fn test_into_nvcreate_chat_completion_request() {
-        let nv_req: NvCreateChatCompletionRequest = make_response_with_input("hi there").into();
+        let nv_req: NvCreateChatCompletionRequest =
+            make_response_with_input("hi there").try_into().unwrap();
 
         assert_eq!(nv_req.inner.model, "test-model");
         assert_eq!(nv_req.inner.temperature, Some(0.5));
