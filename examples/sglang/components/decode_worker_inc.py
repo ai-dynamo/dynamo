@@ -20,6 +20,7 @@ import logging
 import sys
 
 import sglang as sgl
+import msgspec
 import uvloop
 from sglang.srt.server_args import ServerArgs
 from utils.protocol import DisaggPreprocessedRequest
@@ -36,16 +37,18 @@ class DecodeRequestHandler:
         self.engine = engine
         logging.info("Decode request handler initialized")
 
-    async def generate(self, req: DisaggPreprocessedRequest):
+    async def generate(self, req: str):
+        req = msgspec.json.decode(req, type=dict)
+
         g = await self.engine.async_generate(
-            input_ids=req.request.token_ids
-            if req.request.batch_token_ids is None
-            else req.request.batch_token_ids,
-            sampling_params=req.sampling_params,
+            input_ids=req["request"]["token_ids"]
+            if req["request"]["batch_token_ids"] is None
+            else req["request"]["batch_token_ids"],
+            sampling_params=req["sampling_params"],
             stream=True,
-            bootstrap_host=req.bootstrap_host,
-            bootstrap_port=req.bootstrap_port,
-            bootstrap_room=req.bootstrap_room,
+            bootstrap_host=req["bootstrap_host"],
+            bootstrap_port=req["bootstrap_port"],
+            bootstrap_room=req["bootstrap_room"],
         )
 
         async for result in g:
