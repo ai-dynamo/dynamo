@@ -120,11 +120,19 @@ impl KvbmBlockList {
     pub fn get_block_id(&self, block_idx: usize) -> PyResult<usize> {
         let blocks = self.blocks.lock().unwrap();
         let block_id = match &*blocks {
-            Some(BlockListType::ImmutableDevice(blocks)) => blocks.get(block_idx).map(|b| b.block_id()),
-            Some(BlockListType::MutableDevice(blocks)) => blocks.get(block_idx).map(|b| b.block_id()),
-            Some(BlockListType::ImmutableHost(blocks)) => blocks.get(block_idx).map(|b| b.block_id()),
+            Some(BlockListType::ImmutableDevice(blocks)) => {
+                blocks.get(block_idx).map(|b| b.block_id())
+            }
+            Some(BlockListType::MutableDevice(blocks)) => {
+                blocks.get(block_idx).map(|b| b.block_id())
+            }
+            Some(BlockListType::ImmutableHost(blocks)) => {
+                blocks.get(block_idx).map(|b| b.block_id())
+            }
             Some(BlockListType::MutableHost(blocks)) => blocks.get(block_idx).map(|b| b.block_id()),
-            Some(BlockListType::ImmutableDisk(blocks)) => blocks.get(block_idx).map(|b| b.block_id()),
+            Some(BlockListType::ImmutableDisk(blocks)) => {
+                blocks.get(block_idx).map(|b| b.block_id())
+            }
             Some(BlockListType::MutableDisk(blocks)) => blocks.get(block_idx).map(|b| b.block_id()),
             None => None,
         };

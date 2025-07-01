@@ -73,7 +73,7 @@ impl KvbmLeader {
             config.barrier_id
         );
 
-        let leader_sockets = new_leader_sockets("tcp://127.0.0.1").await?;
+        let leader_sockets = new_leader_sockets("tcp://127.0.0.1")?;
 
         let zmq_data = Arc::new(KvbmLeaderData {
             pub_url: leader_sockets.pub_url.clone(),

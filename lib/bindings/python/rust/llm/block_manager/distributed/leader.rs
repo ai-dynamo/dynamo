@@ -3,6 +3,7 @@
 
 use super::*;
 
+use derive_getters::Dissolve;
 use llm_rs::block_manager::distributed::{KvbmLeader as KvbmLeaderImpl, KvbmLeaderConfig};
 
 fn compute_num_blocks(env_var: &str, bytes_per_block: usize) -> usize {
@@ -14,16 +15,10 @@ fn compute_num_blocks(env_var: &str, bytes_per_block: usize) -> usize {
 }
 
 #[pyclass]
-#[derive(Clone)]
+#[derive(Clone, Dissolve)]
 pub struct KvbmLeader {
     leader: Arc<KvbmLeaderImpl>,
-    _rt: Arc<tokio::runtime::Runtime>,
-}
-
-impl KvbmLeader {
-    pub fn inner(&self) -> Arc<KvbmLeaderImpl> {
-        self.leader.clone()
-    }
+    rt: Arc<tokio::runtime::Runtime>,
 }
 
 #[pymethods]
@@ -52,7 +47,7 @@ impl KvbmLeader {
 
         Ok(Self {
             leader: Arc::new(leader),
-            _rt: Arc::new(rt),
+            rt: Arc::new(rt),
         })
     }
 }

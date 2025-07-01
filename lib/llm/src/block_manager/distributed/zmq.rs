@@ -36,7 +36,7 @@ pub struct LeaderSockets {
     pub ack_url: String,
 }
 
-pub async fn new_leader_sockets(url: &str) -> Result<LeaderSockets> {
+pub fn new_leader_sockets(url: &str) -> Result<LeaderSockets> {
     let url = format!("{}:0", url);
 
     let context = Context::new();
@@ -210,16 +210,17 @@ impl ZmqActiveMessageLeader {
                     let arr: [u8; std::mem::size_of::<usize>()] = (*message[0]).try_into()?;
                     let id = usize::from_be_bytes(arr);
 
-                    tracing::debug!(
-                        "ZmqActiveMessageLeader: Received ACK for message with id: {}",
-                        id
-                    );
                     let mut pending_messages = pending_messages.lock().await;
                     // TODO: Should we error if we can't find the pending message?
                     if let std::collections::hash_map::Entry::Occupied(mut entry) =
                         pending_messages.entry(id)
                     {
                         entry.get_mut().remaining_workers -= 1;
+                        tracing::debug!(
+                            "ZmqActiveMessageLeader: Received ACK for message with id: {}. There are {} remaining workers.",
+                            id,
+                            entry.get().remaining_workers
+                        );
                         // If all workers have ACKed, notify the completion indicator.
                         if entry.get().remaining_workers == 0 {
                             let e = entry.remove();
@@ -294,7 +295,7 @@ impl MessageHandle {
         message.push_back(id.to_be_bytes().as_slice().into());
         let message = Multipart(message);
         self.push_handle.lock().await.send(message).await?;
-
+        tracing::debug!("ZmqActiveMessageWorker: ACKed message with id: {}", id);
         Ok(())
     }
 }

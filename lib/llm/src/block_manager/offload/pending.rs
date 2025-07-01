@@ -114,6 +114,8 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: Blo
 
         let blocks = target_pool.register_blocks(targets).await?;
 
+        tracing::debug!("Transfer complete. Registered {} blocks.", blocks.len());
+
         if let Some(completion_indicator) = completion_indicator {
             completion_indicator
                 .send(Ok(blocks))

@@ -71,6 +71,7 @@ type VllmBlockManager = dynamo_llm::block_manager::KvBlockManager<
 #[derive(Clone)]
 pub struct BlockManager {
     inner: Arc<VllmBlockManager>,
+    _rt: Arc<tokio::runtime::Runtime>,
 }
 
 #[pymethods]
@@ -110,22 +111,24 @@ impl BlockManager {
                 .map_err(to_pyerr)?,
         );
 
-        if leader.inner().num_host_blocks() > 0 {
-            tracing::info!("Using {} host blocks", leader.inner().num_host_blocks());
+        let (leader, rt) = leader.dissolve();
+
+        if leader.num_host_blocks() > 0 {
+            tracing::info!("Using {} host blocks", leader.num_host_blocks());
             config = config.host_layout(
                 dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
-                    .num_blocks(leader.inner().num_host_blocks())
+                    .num_blocks(leader.num_host_blocks())
                     .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
                     .build()
                     .map_err(to_pyerr)?,
             );
         }
 
-        if leader.inner().num_disk_blocks() > 0 {
-            tracing::info!("Using {} disk blocks", leader.inner().num_disk_blocks());
+        if leader.num_disk_blocks() > 0 {
+            tracing::info!("Using {} disk blocks", leader.num_disk_blocks());
             config = config.disk_layout(
                 dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
-                    .num_blocks(leader.inner().num_disk_blocks())
+                    .num_blocks(leader.num_disk_blocks())
                     .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
                     .build()
                     .map_err(to_pyerr)?,
@@ -133,24 +136,21 @@ impl BlockManager {
         }
 
         let config = config.build().map_err(to_pyerr)?;
-        let tokio_runtime = pyo3_async_runtimes::tokio::get_runtime();
         Ok(BlockManager {
             inner: Arc::from(
-                tokio_runtime
-                    .block_on(async {
-                        let resources = DistributedLeaderWorkerResources::new(
-                            leader.inner(),
-                            cancel_token.child_token(),
-                        )?;
+                rt.block_on(async {
+                    let resources =
+                        DistributedLeaderWorkerResources::new(leader, cancel_token.child_token())?;
 
-                        dynamo_llm::block_manager::KvBlockManager::<
-                            Logical<DistributedLeaderWorkerResources>,
-                            BasicMetadata,
-                        >::new(config, resources)
-                        .await
-                    })
-                    .map_err(to_pyerr)?,
+                    dynamo_llm::block_manager::KvBlockManager::<
+                        Logical<DistributedLeaderWorkerResources>,
+                        BasicMetadata,
+                    >::new(config, resources)
+                    .await
+                })
+                .map_err(to_pyerr)?,
             ),
+            _rt: rt,
         })
     }
 
