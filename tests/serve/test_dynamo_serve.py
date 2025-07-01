@@ -320,18 +320,35 @@ class DynamoServeProcess(ManagedProcess):
             return True
         return False
 
+    def check_response(
+        self, payload, response, response_handler, logger=logging.getLogger()
+    ):
+        assert response.status_code == 200, "Response Error"
+        content = response_handler(response)
+        logger.info("Received Content: %s", content)
+        # Check for expected responses
+        assert content, "Empty response content"
+        for expected in payload.expected_response:
+            assert expected in content, "Expected '%s' not found in response" % expected
+
     def wait_for_ready(self, payload, logger=logging.getLogger()):
         url = f"http://localhost:{self.port}/{self.graph.endpoints[0]}"
         start_time = time.time()
         retry_delay = 5
         elapsed = 0.0
         logger.info("Waiting for Deployment Ready")
+        json_paylaod = (
+            payload.chat
+            if self.graph.endpoints[0] == "v1/chat/completions"
+            else payload.payload_completions
+        )
+
         while time.time() - start_time < self.graph.timeout:
             elapsed = time.time() - start_time
             try:
                 response = requests.post(
                     url,
-                    json=payload.payload_chat,
+                    json=json_paylaod,
                     timeout=self.graph.timeout - elapsed,
                 )
             except (requests.RequestException, requests.Timeout) as e:
@@ -374,15 +391,7 @@ class DynamoServeProcess(ManagedProcess):
                 % self.graph.timeout
             )
 
-        content = self.graph.response_handlers[0](response)
-
-        logger.debug("Received Content: %s", content)
-
-        # Check for expected responses
-        assert content, "Empty response content"
-
-        for expected in payload.expected_response:
-            assert expected in content, "Expected '%s' not found in response" % expected
+        self.check_response(payload, response, self.graph.response_handlers[0], logger)
 
         logger.info("Deployment Ready")
 
@@ -428,89 +437,30 @@ def test_serve_deployment(deployment_graph_test, request, runtime_services):
 
     deployment_graph, payload = deployment_graph_test
 
-    def check_response(response, response_handler):
-        assert response.status_code == 200, "Server is not healthy"
-        content = response_handler(response)
-        logger.info("Received Content: %s", content)
-        # Check for expected responses
-        assert content, "Empty response content"
-        for expected in payload.expected_response:
-            assert expected in content, "Expected '%s' not found in response" % expected
-
     with DynamoServeProcess(deployment_graph, request) as server_process:
-        first_success_pending = True
+        server_process.wait_for_ready(payload, logger)
+
         for endpoint, response_handler in zip(
             deployment_graph.endpoints, deployment_graph.response_handlers
         ):
             url = f"http://localhost:{server_process.port}/{endpoint}"
             start_time = time.time()
-            retry_delay = 5
             elapsed = 0.0
+
             request_body = (
                 payload.payload_chat
                 if endpoint == "v1/chat/completions"
                 else payload.payload_completions
             )
 
-            # We can skip this
-            while (
-                time.time() - start_time < deployment_graph.timeout
-                and first_success_pending
-            ):
-                elapsed = time.time() - start_time
-                try:
-                    response = requests.post(
-                        url,
-                        json=request_body,
-                        timeout=deployment_graph.timeout - elapsed,
-                    )
-                except (requests.RequestException, requests.Timeout) as e:
-                    logger.warning("Retrying due to Request failed: %s", e)
-                    time.sleep(retry_delay)
-                    continue
-                logger.info("Response%r", response)
-                if response.status_code == 500:
-                    error = response.json().get("error", "")
-                    if "no instances" in error:
-                        logger.warning("Retrying due to no instances available")
-                        time.sleep(retry_delay)
-                        continue
-                if response.status_code == 404:
-                    error = response.json().get("error", "")
-                    if "Model not found" in error:
-                        logger.warning("Retrying due to model not found")
-                        time.sleep(retry_delay)
-                        continue
-                # Process the response
-                if response.status_code != 200:
-                    logger.error(
-                        "Service returned status code %s: %s",
-                        response.status_code,
-                        response.text,
-                    )
-                    pytest.fail(
-                        "Service returned status code %s: %s"
-                        % (response.status_code, response.text)
-                    )
-                else:
-                    check_response(response, response_handler)
-                    first_success_pending = False
-                    break
-            else:
-                if first_success_pending:
-                    logger.error(
-                        "Service did not return a successful response within %s s",
-                        deployment_graph.timeout,
-                    )
-                    pytest.fail(
-                        "Service did not return a successful response within %s s"
-                        % deployment_graph.timeout
-                    )
-
             for _ in range(payload.repeat_count):
+                elapsed = time.time() - start_time
+
                 response = requests.post(
                     url,
                     json=request_body,
                     timeout=deployment_graph.timeout - elapsed,
                 )
-                check_response(response, response_handler)
+                server_process.check_response(
+                    payload, response, response_handler, logger
+                )
