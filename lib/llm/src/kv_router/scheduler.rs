@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use super::protocols::WorkerSelectionResult;
 use super::WorkerSelector;
 use crate::kv_router::indexer::OverlapScores;
-use crate::kv_router::protocols::ForwardPassMetrics;
+use crate::kv_router::protocols::{ForwardPassMetrics, KvStats, WorkerStats};
 use crate::kv_router::scoring::ProcessedEndpoints;
 use crate::kv_router::KvRouterConfig;
 use crate::kv_router::KV_HIT_RATE_SUBJECT;
