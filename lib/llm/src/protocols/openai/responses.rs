@@ -247,7 +247,134 @@ impl From<NvCreateChatCompletionResponse> for NvResponse {
 
 #[cfg(test)]
 mod tests {
+    use async_openai::types::responses::{CreateResponse, Input};
+    use async_openai::types::{
+        ChatCompletionRequestMessage, ChatCompletionRequestUserMessageContent,
+    };
+
     use super::*;
+    use crate::types::openai::chat_completions::NvCreateChatCompletionResponse;
+
+    fn make_response_with_input(text: &str) -> NvCreateResponse {
+        NvCreateResponse {
+            inner: CreateResponse {
+                input: Input::Text(text.into()),
+                model: "test-model".into(),
+                max_output_tokens: Some(1024),
+                temperature: Some(0.5),
+                top_p: Some(0.9),
+                top_logprobs: Some(15),
+                ..Default::default()
+            },
+            nvext: Some(NvExt {
+                annotations: Some(vec!["debug".into(), "trace".into()]),
+                ..Default::default()
+            }),
+        }
+    }
+
+    #[test]
+    fn test_annotations_trait_behavior() {
+        let req = make_response_with_input("hello");
+        assert_eq!(
+            req.annotations(),
+            Some(vec!["debug".to_string(), "trace".to_string()])
+        );
+        assert!(req.has_annotation("debug"));
+        assert!(req.has_annotation("trace"));
+        assert!(!req.has_annotation("missing"));
+    }
+
+    #[test]
+    fn test_openai_sampling_trait_behavior() {
+        let req = make_response_with_input("hello");
+        assert_eq!(req.get_temperature(), Some(0.5));
+        assert_eq!(req.get_top_p(), Some(0.9));
+        assert_eq!(req.get_frequency_penalty(), None);
+        assert_eq!(req.get_presence_penalty(), None);
+    }
+
+    #[test]
+    fn test_openai_stop_conditions_trait_behavior() {
+        let req = make_response_with_input("hello");
+        assert_eq!(req.get_max_tokens(), Some(1024));
+        assert_eq!(req.get_min_tokens(), None);
+        assert_eq!(req.get_stop(), None);
+    }
+
+    #[test]
+    fn test_into_nvcreate_chat_completion_request() {
+        let nv_req: NvCreateChatCompletionRequest = make_response_with_input("hi there").into();
+
+        assert_eq!(nv_req.inner.model, "test-model");
+        assert_eq!(nv_req.inner.temperature, Some(0.5));
+        assert_eq!(nv_req.inner.top_p, Some(0.9));
+        assert_eq!(nv_req.inner.max_completion_tokens, Some(1024));
+        assert_eq!(nv_req.inner.top_logprobs, Some(15));
+        assert_eq!(nv_req.inner.stream, Some(true));
+
+        let messages = &nv_req.inner.messages;
+        assert_eq!(messages.len(), 1);
+        match &messages[0] {
+            ChatCompletionRequestMessage::User(user_msg) => match &user_msg.content {
+                ChatCompletionRequestUserMessageContent::Text(t) => {
+                    assert_eq!(t, "hi there");
+                }
+                _ => panic!("unexpected user content type"),
+            },
+            _ => panic!("expected user message"),
+        }
+    }
+
+    #[allow(deprecated)]
+    #[test]
+    fn test_into_nvresponse_from_chat_response() {
+        let now = 1_726_000_000;
+        let chat_resp = NvCreateChatCompletionResponse {
+            inner: async_openai::types::CreateChatCompletionResponse {
+                id: "chatcmpl-xyz".into(),
+                choices: vec![async_openai::types::ChatChoice {
+                    index: 0,
+                    message: async_openai::types::ChatCompletionResponseMessage {
+                        content: Some("This is a reply".into()),
+                        refusal: None,
+                        tool_calls: None,
+                        role: async_openai::types::Role::Assistant,
+                        function_call: None,
+                        audio: None,
+                    },
+                    finish_reason: None,
+                    logprobs: None,
+                }],
+                created: now,
+                model: "llama-3.1-8b-instruct".into(),
+                service_tier: None,
+                system_fingerprint: None,
+                object: "chat.completion".to_string(),
+                usage: None,
+            },
+        };
+
+        let wrapped: NvResponse = chat_resp.into();
+
+        assert_eq!(wrapped.inner.model, "llama-3.1-8b-instruct");
+        assert_eq!(wrapped.inner.status, Status::Completed);
+        assert_eq!(wrapped.inner.object, "response");
+        assert!(wrapped.inner.id.starts_with("resp_"));
+
+        let msg = match &wrapped.inner.output[0] {
+            OutputContent::Message(m) => m,
+            _ => panic!("Expected Message variant"),
+        };
+        assert_eq!(msg.role, ResponseRole::Assistant);
+
+        match &msg.content[0] {
+            Content::OutputText(txt) => {
+                assert_eq!(txt.text, "This is a reply");
+            }
+            _ => panic!("Expected OutputText content"),
+        }
+    }
 
     #[test]
     fn test_convert_top_logprobs_clamped() {

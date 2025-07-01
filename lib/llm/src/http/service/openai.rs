@@ -28,21 +28,15 @@ use super::{
     metrics::{Endpoint, InflightGuard, ResponseMetricCollector},
     service_v2, RouteDoc,
 };
+use crate::preprocessor::LLMMetricAnnotation;
 use crate::protocols::openai::{
-    chat_completions::NvCreateChatCompletionResponse, completions::NvCreateCompletionResponse,
-};
-use crate::protocols::openai::{
+    chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse},
+    completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
-    responses::NvResponse,
+    responses::{NvCreateResponse, NvResponse},
 };
 use crate::request_template::RequestTemplate;
-use crate::types::{
-    openai::{
-        chat_completions::NvCreateChatCompletionRequest, completions::NvCreateCompletionRequest,
-    },
-    Annotated,
-};
-use crate::{preprocessor::LLMMetricAnnotation, protocols::openai::responses::NvCreateResponse};
+use crate::types::Annotated;
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ErrorResponse {
@@ -509,7 +503,7 @@ pub fn validate_unsupported_fields(request: &NvCreateResponse) -> Option<impl In
     if inner.max_tool_calls.is_some() {
         return Some(error_response("`max_tool_calls` is not supported."));
     }
-    if inner.metadata.clone().is_some_and(|m| !m.is_empty()) {
+    if inner.metadata.is_some() {
         return Some(error_response("`metadata` is not supported."));
     }
     if inner.parallel_tool_calls == Some(true) {
@@ -541,7 +535,7 @@ pub fn validate_unsupported_fields(request: &NvCreateResponse) -> Option<impl In
     if inner.tool_choice.is_some() {
         return Some(error_response("`tool_choice` is not supported."));
     }
-    if inner.tools.clone().is_some_and(|t| !t.is_empty()) {
+    if inner.tools.is_some() {
         return Some(error_response("`tools` is not supported."));
     }
     if inner.truncation.is_some() {
@@ -790,9 +784,17 @@ pub fn responses_router(
 
 #[cfg(test)]
 mod tests {
-    use crate::discovery::ModelManagerError;
+    use std::collections::HashMap;
+
+    use async_openai::types::responses::{
+        CreateResponse, Input, InputContent, InputItem, InputMessage, PromptConfig,
+        Role as ResponseRole, ServiceTier, TextConfig, TextResponseFormat, ToolChoice,
+        ToolChoiceMode, Truncation,
+    };
 
     use super::*;
+    use crate::discovery::ModelManagerError;
+    use crate::protocols::openai::responses::NvCreateResponse;
 
     const BACKUP_ERROR_MESSAGE: &str = "Failed to generate completions";
 
@@ -805,6 +807,37 @@ mod tests {
 
     fn other_error_from_engine() -> Result<(), anyhow::Error> {
         Err(ModelManagerError::ModelNotFound("foo".to_string()))?
+    }
+
+    fn make_base_request() -> NvCreateResponse {
+        NvCreateResponse {
+            inner: CreateResponse {
+                input: Input::Text("hello".into()),
+                model: "test-model".into(),
+                background: None,
+                include: None,
+                instructions: None,
+                max_output_tokens: None,
+                max_tool_calls: None,
+                metadata: None,
+                parallel_tool_calls: None,
+                previous_response_id: None,
+                prompt: None,
+                reasoning: None,
+                service_tier: None,
+                store: None,
+                stream: None,
+                text: None,
+                tool_choice: None,
+                tools: None,
+                truncation: None,
+                user: None,
+                temperature: None,
+                top_logprobs: None,
+                top_p: None,
+            },
+            nvext: None,
+        }
     }
 
     #[test]
@@ -846,5 +879,102 @@ mod tests {
                 other_error_from_engine().unwrap_err()
             )
         );
+    }
+
+    #[test]
+    fn test_validate_input_is_text_only_accepts_text() {
+        let request = make_base_request();
+        let result = validate_input_is_text_only(&request);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_validate_input_is_text_only_rejects_items() {
+        let mut request = make_base_request();
+        request.inner.input = Input::Items(vec![InputItem::Message(InputMessage {
+            kind: Default::default(),
+            role: ResponseRole::User,
+            content: InputContent::TextInput("structured".into()),
+        })]);
+        let result = validate_input_is_text_only(&request);
+        assert!(result.is_some());
+    }
+
+    #[test]
+    fn test_validate_unsupported_fields_accepts_clean_request() {
+        let request = make_base_request();
+        let result = validate_unsupported_fields(&request);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_validate_unsupported_fields_detects_flags() {
+        #[allow(clippy::type_complexity)]
+        let unsupported_cases: Vec<(&str, Box<dyn FnOnce(&mut CreateResponse)>)> = vec![
+            ("background", Box::new(|r| r.background = Some(true))),
+            (
+                "include",
+                Box::new(|r| r.include = Some(vec!["file_search_call.results".into()])),
+            ),
+            (
+                "instructions",
+                Box::new(|r| r.instructions = Some("System prompt".into())),
+            ),
+            ("max_tool_calls", Box::new(|r| r.max_tool_calls = Some(3))),
+            ("metadata", Box::new(|r| r.metadata = Some(HashMap::new()))),
+            (
+                "parallel_tool_calls",
+                Box::new(|r| r.parallel_tool_calls = Some(true)),
+            ),
+            (
+                "previous_response_id",
+                Box::new(|r| r.previous_response_id = Some("prev-id".into())),
+            ),
+            (
+                "prompt",
+                Box::new(|r| {
+                    r.prompt = Some(PromptConfig {
+                        id: "template-id".into(),
+                        version: None,
+                        variables: None,
+                    })
+                }),
+            ),
+            (
+                "reasoning",
+                Box::new(|r| r.reasoning = Some(Default::default())),
+            ),
+            (
+                "service_tier",
+                Box::new(|r| r.service_tier = Some(ServiceTier::Auto)),
+            ),
+            ("store", Box::new(|r| r.store = Some(true))),
+            ("stream", Box::new(|r| r.stream = Some(true))),
+            (
+                "text",
+                Box::new(|r| {
+                    r.text = Some(TextConfig {
+                        format: TextResponseFormat::Text,
+                    })
+                }),
+            ),
+            (
+                "tool_choice",
+                Box::new(|r| r.tool_choice = Some(ToolChoice::Mode(ToolChoiceMode::Required))),
+            ),
+            ("tools", Box::new(|r| r.tools = Some(vec![]))),
+            (
+                "truncation",
+                Box::new(|r| r.truncation = Some(Truncation::Auto)),
+            ),
+            ("user", Box::new(|r| r.user = Some("user-id".into()))),
+        ];
+
+        for (field, set_field) in unsupported_cases {
+            let mut req = make_base_request();
+            (set_field)(&mut req.inner);
+            let result = validate_unsupported_fields(&req);
+            assert!(result.is_some(), "Expected rejection for `{field}`");
+        }
     }
 }
