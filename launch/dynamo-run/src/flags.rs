@@ -216,26 +216,18 @@ impl Flags {
         out
     }
 
-    /// Load extra arguments from a JSON file
+    /// Load extra engine arguments from a JSON file
     /// Returns a HashMap of parameter names to values
-    fn load_json_args(
-        path: &Option<PathBuf>,
+    pub fn load_extra_engine_args(
+        &self,
     ) -> anyhow::Result<Option<HashMap<String, serde_json::Value>>> {
-        if let Some(path) = path {
+        if let Some(path) = &self.extra_engine_args {
             let file_content = std::fs::read_to_string(path)?;
             let args: HashMap<String, serde_json::Value> = serde_json::from_str(&file_content)?;
             Ok(Some(args))
         } else {
             Ok(None)
         }
-    }
-
-    /// Load extra engine arguments from a JSON file
-    /// Returns a HashMap of parameter names to values
-    pub fn load_extra_engine_args(
-        &self,
-    ) -> anyhow::Result<Option<HashMap<String, serde_json::Value>>> {
-        Self::load_json_args(&self.extra_engine_args)
     }
 }
 
