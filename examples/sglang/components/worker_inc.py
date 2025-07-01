@@ -18,6 +18,8 @@ from dynamo.llm import (
     ModelType,
     WorkerMetricsPublisher,
     register_llm,
+    ZmqKvEventPublisher,
+    ZmqKvEventPublisherConfig,
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 import uvloop
@@ -279,7 +281,13 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
     # Set up metrics in background
     handler.setup_metrics()
 
-    # This is the final blocking call
+    # Set up ZMQ kv event publisher
+    zmq_config = ZmqKvEventPublisherConfig(
+        worker_id=endpoint.lease_id(),
+        kv_block_size=server_args.page_size,
+    )
+    _ = ZmqKvEventPublisher(component=component, config=zmq_config)
+
     await endpoint.serve_endpoint(handler.generate)
 
 
