@@ -15,20 +15,21 @@
 
 from __future__ import annotations
 
-import logging
 import asyncio
-import uvloop
+import logging
 import sys
 
-from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.runtime import DistributedRuntime, dynamo_worker
-
 import sglang as sgl
+import uvloop
 from sglang.srt.server_args import ServerArgs
 from utils.protocol import DisaggPreprocessedRequest
 from utils.sgl_utils import parse_sglang_args_inc
 
+from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime.logging import configure_dynamo_logging
+
 configure_dynamo_logging()
+
 
 class DecodeRequestHandler:
     def __init__(self, engine: sgl.Engine):
@@ -50,6 +51,7 @@ class DecodeRequestHandler:
         async for result in g:
             yield result
 
+
 @dynamo_worker(static=False)
 async def worker(runtime: DistributedRuntime):
     server_args = parse_sglang_args_inc(sys.argv[1:])
@@ -68,6 +70,7 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
 
     endpoint = component.endpoint("generate")
     await endpoint.serve_endpoint(handler.generate)
+
 
 if __name__ == "__main__":
     uvloop.install()

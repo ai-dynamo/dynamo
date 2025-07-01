@@ -1,40 +1,45 @@
-
 import asyncio
 import logging
 import random
-import sys
 import socket
-from typing import Dict, Union, Optional, Any
+import sys
+from typing import Any, Dict, Optional, Union
 
 import sglang as sgl
+from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_ip
 from utils.protocol import DisaggPreprocessedRequest, PreprocessedRequest
-from sglang.srt.server_args import ServerArgs
 from utils.sgl_utils import parse_sglang_args_inc
 
 from dynamo.llm import (
     ModelType,
     WorkerMetricsPublisher,
-    ZmqKvEventPublisher,
-    ZmqKvEventPublisherConfig,
     register_llm,
 )
-
-from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 
+
 class RequestHandler:
-    def __init__(self, engine: sgl.Engine, server_args: ServerArgs, decode_client: Optional[Any] = None):
+    def __init__(
+        self,
+        engine: sgl.Engine,
+        server_args: ServerArgs,
+        decode_client: Optional[Any] = None,
+    ):
         self.engine = engine
-        
+
         if server_args.disaggregation_mode != "null":
             self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info()
             if decode_client is None:
-                raise ValueError("decode_client must be provided when disaggregation_mode is not 'null'")
+                raise ValueError(
+                    "decode_client must be provided when disaggregation_mode is not 'null'"
+                )
             self.decode_client = decode_client
-            logging.info(f"Disaggregation enabled - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}")
+            logging.info(
+                f"Disaggregation enabled - bootstrap host: {self.bootstrap_host}, bootstrap port: {self.bootstrap_port}"
+            )
 
-        logging.info(f"Request handler initialized")
+        logging.info("Request handler initialized")
 
     def _update_metrics(self):
         """Update metrics with current engine state"""
@@ -52,7 +57,7 @@ class RequestHandler:
             gpu_cache_usage_perc=random.uniform(0.1, 0.8),
             gpu_prefix_cache_hit_rate=random.uniform(0.0, 0.5),
         )
-    
+
     def _get_bootstrap_info(self):
         """Bootstrap info from tokenizer manager"""
         inner_tm = self.engine.tokenizer_manager
@@ -79,7 +84,7 @@ class RequestHandler:
         if request.stop_conditions.ignore_eos:
             sampling_params["ignore_eos"] = request.stop_conditions.ignore_eos
         return sampling_params
-    
+
     def _get_request_batch_size(self, request: PreprocessedRequest):
         """Get batch size from request, returns None for single requests"""
         if request.batch_token_ids is not None:
@@ -89,10 +94,10 @@ class RequestHandler:
     def _is_batch_request(self, request: PreprocessedRequest):
         """Check if request is in batch mode"""
         return request.batch_token_ids is not None
-    
+
     def _generate_bootstrap_room(self):
         return random.randint(0, 2**63 - 1)
-    
+
     async def generate(self, request: PreprocessedRequest):
         # Check if we're in batch mode at the start
         is_batch = self._is_batch_request(request)
@@ -154,7 +159,7 @@ class RequestHandler:
 
             async for out in self._process_stream(g, unpack=False, is_batch=is_batch):
                 yield out
-    
+
     async def _process_stream(self, stream_source, unpack: bool, is_batch: bool):
         # Initialize based on batch mode
         num_output_tokens_so_far: Union[Dict[int, int], int]
@@ -204,10 +209,12 @@ class RequestHandler:
         async for _ in prefill:
             pass
 
+
 @dynamo_worker(static=False)
 async def worker(runtime: DistributedRuntime):
     server_args = parse_sglang_args_inc(sys.argv[1:])
     await init(runtime, server_args)
+
 
 async def init(runtime: DistributedRuntime, server_args: ServerArgs):
     """Initialize worker (either prefill or aggregated)"""
@@ -239,13 +246,14 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
     asyncio.create_task(metrics_publisher.create_endpoint(component))
 
     if server_args.disaggregation_mode != "null":
-        decode_client = await runtime.namespace("dynamo").component("decode").endpoint("generate").client()
+        decode_client = (
+            await runtime.namespace("dynamo")
+            .component("decode")
+            .endpoint("generate")
+            .client()
+        )
         handler = RequestHandler(engine, server_args, decode_client)
     else:
         handler = RequestHandler(engine, server_args)
 
     await endpoint.serve_endpoint(handler.generate)
-
-
-
-
