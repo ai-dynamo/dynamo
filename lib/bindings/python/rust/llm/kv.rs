@@ -700,27 +700,19 @@ impl KvRecorder {
 
 #[pyclass]
 #[repr(transparent)]
-pub struct PyForwardPassMetrics(
-    pub llm_rs::kv_router::protocols::ForwardPassMetrics
-);
+pub struct PyForwardPassMetrics(pub llm_rs::kv_router::protocols::ForwardPassMetrics);
 
 #[pyclass]
 #[repr(transparent)]
-pub struct PyWorkerStats(
-    pub llm_rs::kv_router::protocols::WorkerStats
-);
+pub struct PyWorkerStats(pub llm_rs::kv_router::protocols::WorkerStats);
 
 #[pyclass]
 #[repr(transparent)]
-pub struct PyKvStats(
-    pub llm_rs::kv_router::protocols::KvStats
-);
+pub struct PyKvStats(pub llm_rs::kv_router::protocols::KvStats);
 
 #[pyclass]
 #[repr(transparent)]
-pub struct PySpecDecodeStats(
-    pub llm_rs::kv_router::protocols::SpecDecodeStats
-);
+pub struct PySpecDecodeStats(pub llm_rs::kv_router::protocols::SpecDecodeStats);
 
 #[pymethods]
 impl PyForwardPassMetrics {
