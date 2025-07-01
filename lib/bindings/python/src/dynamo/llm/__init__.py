@@ -22,6 +22,7 @@ try:
 except ImportError:
     pass  # BlockManager is not enabled by default
 
+from dynamo._core import ApproxKvIndexer as ApproxKvIndexer
 from dynamo._core import DisaggregatedRouter as DisaggregatedRouter
 from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
 from dynamo._core import HttpError as HttpError

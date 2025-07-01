@@ -12,35 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+"""
+Custom Sphinx extensions for Dynamo documentation.
+"""
 
-accelerate==1.6.0
-fastapi==0.115.6
-ftfy
-genai-perf==0.0.13
-grpcio-tools==1.66.0
-httpx
-kubernetes==32.0.1
-matplotlib
-msgspec
-mypy
-numpy==1.26.4 # pmdarima is not compatible with numpy 2
-opentelemetry-api
-opentelemetry-sdk
-pip==25.0.1
-pmdarima
-pre-commit
-prometheus-api-client
-prophet
-protobuf==5.29.5
-pydantic==2.7.1
-pynvml
-pyright
-PyYAML
-scikit-learn
-scipy<1.14.0  # Pin scipy version for pmdarima compatibility
-sentencepiece
-tensorboard==2.19.0
-tensorboardX==2.6.2.2
-transformers
-types-PyYAML
-uvicorn
+__version__ = "0.1.0"

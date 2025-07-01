@@ -54,6 +54,7 @@ either = { workspace = true }
 etcd-client = { workspace = true }
 futures =  { workspace = true }
 hf-hub = { workspace = true }
+humantime = { workspace = true } # input/batch
 rand = { workspace = true }
 oneshot = { workspace = true }
 prometheus = { workspace = true }
@@ -79,6 +80,9 @@ derive-getters = "0.5"
 offset-allocator = "0.2"
 regex = "1"
 rayon = "1"
+
+# input/text
+dialoguer = { version = "0.11", default-features = false, features = ["editor", "history"] }
 
 # block_manager
 nixl-sys = {git="https://github.com/ai-dynamo/nixl", rev = "a7c654d46a14cd5ce635cc8c02433d71df93dedf", optional = true }

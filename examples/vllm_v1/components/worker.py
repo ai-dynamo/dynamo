@@ -112,7 +112,7 @@ class VllmBaseWorker:
         This sets the port number for the side channel.
         """
         if hostname is None:
-            hostname = "127.0.0.1"
+            hostname = socket.gethostname()
         if port is None:
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                 s.bind(("", 0))  # Bind to a free port provided by the host.

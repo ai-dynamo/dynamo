@@ -1,21 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use dynamo_llm::{
+use crate::{
     backend::Backend,
     engines::StreamingEngineAdapter,
     model_type::ModelType,
@@ -33,7 +21,7 @@ use dynamo_runtime::pipeline::{
 };
 use dynamo_runtime::{protocols::Endpoint as EndpointId, DistributedRuntime};
 
-use crate::EngineConfig;
+use crate::entrypoint::EngineConfig;
 
 pub async fn run(
     distributed_runtime: DistributedRuntime,
@@ -91,7 +79,7 @@ pub async fn run(
 
             (Box::pin(fut), Some(model.card().clone()))
         }
-        EngineConfig::Dynamic => {
+        EngineConfig::Dynamic(_) => {
             // We can only get here for in=dyn out=vllm|sglang`, because vllm and sglang are a
             // subprocess that we talk to like a remote endpoint.
             // That means the vllm/sglang subprocess is doing all the work, we are idle.
