@@ -18,6 +18,7 @@ import json
 import os
 import re
 from datetime import datetime
+from typing import Any
 
 import pandas as pd
 from tabulate import tabulate
@@ -344,7 +345,7 @@ def main(logs_dir, tablefmt, log_paths=[]):
                     results.append(result)
 
     # Group results by test prefix
-    grouped = {}
+    grouped: dict[str, list[dict[str, Any]]] = {}
     commands = {}
     for res in results:
         test_prefix = res["test"]

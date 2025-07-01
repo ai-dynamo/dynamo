@@ -87,7 +87,7 @@ class CircusController:
             logger.error(f"Failed to get process count for {name}: {e}")
             return None
 
-    async def _list_watchers(self) -> Optional[List[str]]:
+    async def _list_watchers(self) -> List[str]:
         """
         List all watchers managed by circus.
 
@@ -99,7 +99,7 @@ class CircusController:
             return response.get("watchers", [])
         except (CallError, Exception) as e:
             logger.error(f"Failed to list watchers: {e}")
-            return None
+            return []
 
     def close(self) -> None:
         """Close the connection to the arbiter."""
