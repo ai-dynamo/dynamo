@@ -411,10 +411,18 @@ async fn responses(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // Handle unsupported fields - if Some(resp) is returned by from validate_unsupported_fields,
+    // Handle unsupported fields - if Some(resp) is returned by validate_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
     // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceeed.
     if let Some(resp) = validate_unsupported_fields(&request) {
+        return Ok(resp.into_response());
+    }
+
+    // Handle non-text (image, audio, file) inputs - if Some(resp) is returned by
+    // validate_input_is_text_only, then we are handling something other than Input::Text(_).
+    // We will log an error message and early return a 501 NOT_IMPLEMENTED status code.
+    // Otherwise, proceeed.
+    if let Some(resp) = validate_input_is_text_only(&request) {
         return Ok(resp.into_response());
     }
 
@@ -475,6 +483,13 @@ async fn responses(
     let response: NvResponse = response.into();
 
     Ok(Json(response).into_response())
+}
+
+pub fn validate_input_is_text_only(request: &NvCreateResponse) -> Option<impl IntoResponse> {
+    match &request.inner.input {
+        async_openai::types::responses::Input::Text(_) => None,
+        _ => Some(error_response("Only `Input::Text` is supported. Structured, multimedia, or custom input types are not yet implemented.")),
+    }
 }
 
 /// Checks for unsupported fields in the request.
