@@ -34,6 +34,10 @@ from dynamo._core import KvRecorder as KvRecorder
 from dynamo._core import KvRouter as KvRouter
 from dynamo._core import ModelType as ModelType
 from dynamo._core import OverlapScores as OverlapScores
+from dynamo._core import PyForwardPassMetrics as PyForwardPassMetrics
+from dynamo._core import PyKvStats as PyKvStats
+from dynamo._core import PySpecDecodeStats as PySpecDecodeStats
+from dynamo._core import PyWorkerStats as PyWorkerStats
 from dynamo._core import RadixTree as RadixTree
 from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher
 from dynamo._core import ZmqKvEventListener as ZmqKvEventListener
