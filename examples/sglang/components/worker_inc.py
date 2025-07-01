@@ -25,6 +25,8 @@ from dynamo.llm import (
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
+configure_dynamo_logging()
+
 
 class RequestHandler:
     def __init__(
@@ -290,8 +292,6 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
 
     await endpoint.serve_endpoint(handler.generate)
 
-
-configure_dynamo_logging()
 
 if __name__ == "__main__":
     uvloop.install()
