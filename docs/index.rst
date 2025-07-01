@@ -147,5 +147,11 @@ and is driven by a transparent development approach. Check out our repo at https
    Multinode Examples <examples/multinode.md>
    LLM Deployment Examples using TensorRT-LLM <examples/trtllm.md>
 
+.. toctree::
+   :hidden:
+   :caption: Reference
+
+   Glossary <dynamo_glossary.md>
+   KVBM Reading <architecture/kvbm_reading.md>
 
 
