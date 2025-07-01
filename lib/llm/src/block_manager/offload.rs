@@ -536,8 +536,12 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
     }
 }
 
-#[cfg(all(test, feature = "testing-cuda"))]
-pub mod tests {
+#[cfg(all(
+    test,
+    feature = "block-manager",
+    any(feature = "testing-cuda", feature = "testing-gds")
+))]
+mod test_utils {
     use super::*;
 
     use crate::block_manager::{
@@ -552,20 +556,18 @@ pub mod tests {
         },
         DType, LayoutConfig, NixlRegisterableStorage,
     };
-    use crate::tokens::{TokenBlockSequence, Tokens};
     use nixl_sys::{MemoryRegion, NixlDescriptor};
 
     use aligned_vec::avec;
     use cudarc::runtime::sys::{cudaMemcpy, cudaMemcpyKind, cudaMemset};
     use prometheus::Registry;
-    use rstest::*;
     use std::fs::File;
     use std::io::{Read, Seek, SeekFrom, Write};
     use std::mem::ManuallyDrop;
     use std::os::unix::io::FromRawFd;
 
-    const BLOCK_SIZE: usize = 4;
-    const NUM_LAYERS: usize = 8;
+    pub const BLOCK_SIZE: usize = 4;
+    pub const NUM_LAYERS: usize = 8;
 
     type DevicePool = Option<Arc<BlockPool<DeviceStorage, Local, BasicMetadata>>>;
     type HostPool = Option<Arc<BlockPool<PinnedStorage, Local, BasicMetadata>>>;
@@ -575,11 +577,14 @@ pub mod tests {
         static ref NIXL_AGENT: Arc<Option<NixlAgent>> = {
             let agent = NixlAgent::new("offload-manager").unwrap();
             let (_, ucx_params) = agent.get_plugin_params("UCX").unwrap();
-            let (_, gds_params) = agent.get_plugin_params("GDS").unwrap();
             let (_, posix_params) = agent.get_plugin_params("POSIX").unwrap();
             agent.create_backend("UCX", &ucx_params).unwrap();
-            agent.create_backend("GDS", &gds_params).unwrap();
             agent.create_backend("POSIX", &posix_params).unwrap();
+
+            if cfg!(feature = "testing-gds") {
+                let (_, gds_params) = agent.get_plugin_params("GDS").unwrap();
+                agent.create_backend("GDS", &gds_params).unwrap();
+            }
             Arc::new(Some(agent))
         };
     }
@@ -608,7 +613,7 @@ pub mod tests {
     }
 
     #[allow(clippy::type_complexity)]
-    fn build_pools(
+    pub fn build_pools(
         device_blocks: usize,
         host_blocks: Option<usize>,
         disk_blocks: Option<usize>,
@@ -695,17 +700,8 @@ pub mod tests {
         Ok((manager, device_pool, host_pool, disk_pool))
     }
 
-    /// Create a block in the 'RESET' state.
-    #[expect(dead_code)]
-    async fn get_block<S: Storage, Metadata: BlockMetadata>(
-        pool: &Arc<BlockPool<S, Local, Metadata>>,
-    ) -> Result<MutableBlock<S, Local, Metadata>> {
-        let mut blocks = pool.allocate_blocks(1).await?;
-        Ok(blocks.pop().unwrap())
-    }
-
     /// Create a block in the 'COMPLETED' state.
-    async fn completed_block<S: Storage, Metadata: BlockMetadata>(
+    pub async fn completed_block<S: Storage, Metadata: BlockMetadata>(
         pool: &Arc<BlockPool<S, Local, Metadata>>,
         tokens: [u32; BLOCK_SIZE],
     ) -> Result<MutableBlock<S, Local, Metadata>> {
@@ -724,7 +720,7 @@ pub mod tests {
         Ok(block)
     }
 
-    fn populate_block<S: Storage + NixlDescriptor>(
+    pub fn populate_block<S: Storage + NixlDescriptor>(
         block: &impl BlockDataProvider<StorageType = S>,
         value: u8,
     ) -> Result<()> {
@@ -815,7 +811,7 @@ pub mod tests {
         Ok(contents.to_vec())
     }
 
-    fn check_block_contents(
+    pub fn check_block_contents(
         block1: &impl BlockDataProvider<StorageType = impl Storage + NixlDescriptor>,
         block2: &impl BlockDataProvider<StorageType = impl Storage + NixlDescriptor>,
         value: u8,
@@ -832,6 +828,17 @@ pub mod tests {
         }
         Ok(())
     }
+}
+
+#[cfg(all(test, feature = "testing-cuda"))]
+pub mod cuda_tests {
+    use super::*;
+    use test_utils::*;
+
+    use crate::block_manager::layout::LayoutType;
+    use crate::tokens::{TokenBlockSequence, Tokens};
+
+    use rstest::*;
 
     #[tokio::test]
     async fn test_offload_invalid_blocks() -> Result<()> {
@@ -1129,167 +1136,29 @@ pub mod tests {
     }
 
     #[tokio::test]
-    #[rstest]
-    #[case(LayoutType::FullyContiguous)]
-    #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
-    #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
-    async fn test_offload_disk(#[case] layout_type: LayoutType) -> Result<()> {
-        let (offload_manager, _, host_pool, disk_pool) =
-            build_pools_with_layout(4, Some(4), Some(4), None, layout_type)?;
-
-        let host_pool = host_pool.as_ref().unwrap();
-        let disk_pool = disk_pool.as_ref().unwrap();
-
-        let host_block = completed_block(host_pool, [0, 1, 2, 3]).await?;
-        let immutable_host_block = host_pool
-            .register_blocks(vec![host_block])
-            .await?
-            .into_iter()
-            .next()
-            .unwrap();
-
-        populate_block(&immutable_host_block, 42)?;
-
-        offload_manager.offload(&immutable_host_block, 0).await?;
-
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        let disk_blocks = disk_pool
-            .match_sequence_hashes(vec![immutable_host_block.sequence_hash()].as_slice())
-            .await?;
-        assert_eq!(disk_blocks.len(), 1);
-        assert_eq!(
-            disk_blocks[0].sequence_hash(),
-            immutable_host_block.sequence_hash()
-        );
-
-        check_block_contents(&immutable_host_block, &disk_blocks[0], 42)?;
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[rstest]
-    #[case(LayoutType::FullyContiguous)]
-    #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
-    #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
-    async fn test_onboard_disk(#[case] layout_type: LayoutType) -> Result<()> {
-        let (offload_manager, device_pool, _, disk_pool) =
-            build_pools_with_layout(4, None, Some(4), None, layout_type)?;
-
-        let device_pool = device_pool.as_ref().unwrap();
-        let disk_pool = disk_pool.as_ref().unwrap();
-
-        let disk_block = completed_block(disk_pool, [0, 1, 2, 3]).await?;
-        let immutable_disk_block = disk_pool
-            .register_blocks(vec![disk_block])
-            .await?
-            .into_iter()
-            .next()
-            .unwrap();
-
-        populate_block(&immutable_disk_block, 42)?;
-
-        let device_block = offload_manager
-            .onboard(vec![immutable_disk_block.clone()])
-            .await?;
-
-        check_block_contents(&immutable_disk_block, &device_block[0], 42)?;
-
-        assert_eq!(device_block.len(), 1);
-        assert_eq!(
-            device_block[0].sequence_hash(),
-            immutable_disk_block.sequence_hash()
-        );
-        assert_eq!(
-            device_pool
-                .match_sequence_hashes(vec![immutable_disk_block.sequence_hash()].as_slice())
-                .await?
-                .len(),
-            1
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    #[rstest]
-    #[case(LayoutType::FullyContiguous)]
-    #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
-    #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
-    async fn test_bulk_transfer_disk(#[case] layout_type: LayoutType) -> Result<()> {
-        let (offload_manager, device_pool, host_pool, disk_pool) =
-            build_pools_with_layout(8, Some(8), Some(8), None, layout_type)?;
-
-        let disk_pool = disk_pool.as_ref().unwrap();
-        let host_pool = host_pool.as_ref().unwrap();
-        let device_pool = device_pool.as_ref().unwrap();
-
-        let mut host_blocks = Vec::new();
-
-        for i in 0..8 {
-            let block = completed_block(host_pool, [i; 4]).await?;
-            populate_block(&block, i as u8)?;
-            host_blocks.push(block);
-        }
-
-        let immutable_host_blocks = host_pool.register_blocks(host_blocks).await?;
-
-        for block in &immutable_host_blocks {
-            offload_manager.offload(block, 0).await?;
-        }
-
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        let mut disk_blocks = Vec::new();
-
-        for (i, host_block) in immutable_host_blocks.iter().enumerate() {
-            let blocks = disk_pool
-                .match_sequence_hashes(vec![host_block.sequence_hash()].as_slice())
-                .await?;
-            assert_eq!(blocks.len(), 1);
-            check_block_contents(host_block, &blocks[0], i as u8)?;
-            disk_blocks.push(blocks[0].clone());
-        }
-
-        let device_blocks = offload_manager.onboard(disk_blocks.clone()).await?;
-        assert_eq!(device_blocks.len(), disk_blocks.len());
-
-        for (i, disk_block) in disk_blocks.iter().enumerate() {
-            let blocks = device_pool
-                .match_sequence_hashes(vec![disk_block.sequence_hash()].as_slice())
-                .await?;
-            assert_eq!(blocks.len(), 1);
-            check_block_contents(disk_block, &blocks[0], i as u8)?;
-        }
-
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn test_transfer_batcher() -> Result<()> {
-        let (offload_manager, device_pool, _, disk_pool) = build_pools(
+        let (offload_manager, device_pool, host_pool, _) = build_pools(
             2 * MAX_TRANSFER_BATCH_SIZE + 1,
-            None,
             Some(2 * MAX_TRANSFER_BATCH_SIZE + 1),
+            None,
             None,
         )?;
 
         let device_pool = device_pool.as_ref().unwrap();
-        let disk_pool = disk_pool.as_ref().unwrap();
+        let host_pool = host_pool.as_ref().unwrap();
 
-        let mut disk_blocks = Vec::new();
+        let mut host_blocks = Vec::new();
 
         for i in 0..2 * MAX_TRANSFER_BATCH_SIZE + 1 {
-            let disk_block = completed_block(disk_pool, [i as u32; 4]).await?;
-            populate_block(&disk_block, i as u8)?;
-            disk_blocks.push(disk_block);
+            let host_block = completed_block(host_pool, [i as u32; 4]).await?;
+            populate_block(&host_block, i as u8)?;
+            host_blocks.push(host_block);
         }
 
-        let immutable_disk_blocks = disk_pool.register_blocks(disk_blocks).await?;
+        let immutable_host_blocks = host_pool.register_blocks(host_blocks).await?;
 
         let device_blocks = offload_manager
-            .onboard(immutable_disk_blocks.clone())
+            .onboard(immutable_host_blocks.clone())
             .await?;
         assert_eq!(device_blocks.len(), 2 * MAX_TRANSFER_BATCH_SIZE + 1);
 
@@ -1406,60 +1275,6 @@ pub mod tests {
     }
 
     #[tokio::test]
-    async fn test_transfer_big_blocks() -> Result<()> {
-        // Try a block size of 32 MB.
-        let inner_dim = 2_usize.pow(20) * 32 / NUM_LAYERS / BLOCK_SIZE;
-        let (offload_manager, device_pool, host_pool, disk_pool) =
-            build_pools(2, Some(2), Some(2), Some(inner_dim))?;
-
-        let device_pool = device_pool.as_ref().unwrap();
-        let host_pool = host_pool.as_ref().unwrap();
-        let disk_pool = disk_pool.as_ref().unwrap();
-
-        let device_block = completed_block(device_pool, [0; 4]).await?;
-
-        populate_block(&device_block, 42)?;
-
-        let immutable_device_block = device_pool
-            .register_blocks(vec![device_block])
-            .await?
-            .into_iter()
-            .next()
-            .unwrap();
-
-        // Offload to host.
-        offload_manager.offload(&immutable_device_block, 0).await?;
-
-        // Wait for the offload to be processed.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let host_blocks = host_pool
-            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()].as_slice())
-            .await?;
-        assert_eq!(host_blocks.len(), 1);
-        check_block_contents(&immutable_device_block, &host_blocks[0], 42)?;
-
-        // Offload to disk
-        offload_manager.offload(&host_blocks[0], 0).await?;
-
-        // Wait for the offload to be processed.
-        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-
-        let disk_blocks = disk_pool
-            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()].as_slice())
-            .await?;
-        assert_eq!(disk_blocks.len(), 1);
-        check_block_contents(&host_blocks[0], &disk_blocks[0], 42)?;
-
-        // Onboard to device.
-        let device_blocks = offload_manager.onboard(disk_blocks.clone()).await?;
-        assert_eq!(device_blocks.len(), 1);
-        check_block_contents(&disk_blocks[0], &device_blocks[0], 42)?;
-
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn test_offload_evict_order() -> Result<()> {
         let (offload_manager, device_pool, host_pool, _) = build_pools(4, Some(4), None, None)?;
 
@@ -1569,6 +1384,208 @@ pub mod tests {
         assert_eq!(
             device_pool
                 .match_sequence_hashes(sequence_hashes.as_slice())
+                .await?
+                .len(),
+            1
+        );
+
+        Ok(())
+    }
+}
+
+#[cfg(all(test, feature = "testing-gds"))]
+mod gds_tests {
+    use super::*;
+    use test_utils::*;
+
+    use crate::block_manager::layout::LayoutType;
+
+    use rstest::*;
+
+    #[tokio::test]
+    #[rstest]
+    #[case(LayoutType::FullyContiguous)]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
+    async fn test_offload_disk(#[case] layout_type: LayoutType) -> Result<()> {
+        let (offload_manager, _, host_pool, disk_pool) =
+            build_pools_with_layout(4, Some(4), Some(4), None, layout_type)?;
+
+        let host_pool = host_pool.as_ref().unwrap();
+        let disk_pool = disk_pool.as_ref().unwrap();
+
+        let host_block = completed_block(host_pool, [0, 1, 2, 3]).await?;
+        let immutable_host_block = host_pool
+            .register_blocks(vec![host_block])
+            .await?
+            .into_iter()
+            .next()
+            .unwrap();
+
+        populate_block(&immutable_host_block, 42)?;
+
+        offload_manager.offload(&immutable_host_block, 0).await?;
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let disk_blocks = disk_pool
+            .match_sequence_hashes(vec![immutable_host_block.sequence_hash()].as_slice())
+            .await?;
+        assert_eq!(disk_blocks.len(), 1);
+        assert_eq!(
+            disk_blocks[0].sequence_hash(),
+            immutable_host_block.sequence_hash()
+        );
+
+        check_block_contents(&immutable_host_block, &disk_blocks[0], 42)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_transfer_big_blocks() -> Result<()> {
+        // Try a block size of 32 MB.
+        let inner_dim = 2_usize.pow(20) * 32 / NUM_LAYERS / BLOCK_SIZE;
+        let (offload_manager, device_pool, host_pool, disk_pool) =
+            build_pools(2, Some(2), Some(2), Some(inner_dim))?;
+
+        let device_pool = device_pool.as_ref().unwrap();
+        let host_pool = host_pool.as_ref().unwrap();
+        let disk_pool = disk_pool.as_ref().unwrap();
+
+        let device_block = completed_block(device_pool, [0; 4]).await?;
+
+        populate_block(&device_block, 42)?;
+
+        let immutable_device_block = device_pool
+            .register_blocks(vec![device_block])
+            .await?
+            .into_iter()
+            .next()
+            .unwrap();
+
+        // Offload to host.
+        offload_manager.offload(&immutable_device_block, 0).await?;
+
+        // Wait for the offload to be processed.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let host_blocks = host_pool
+            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()].as_slice())
+            .await?;
+        assert_eq!(host_blocks.len(), 1);
+        check_block_contents(&immutable_device_block, &host_blocks[0], 42)?;
+
+        // Offload to disk
+        offload_manager.offload(&host_blocks[0], 0).await?;
+
+        // Wait for the offload to be processed.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let disk_blocks = disk_pool
+            .match_sequence_hashes(vec![immutable_device_block.sequence_hash()].as_slice())
+            .await?;
+        assert_eq!(disk_blocks.len(), 1);
+        check_block_contents(&host_blocks[0], &disk_blocks[0], 42)?;
+
+        // Onboard to device.
+        let device_blocks = offload_manager.onboard(disk_blocks.clone()).await?;
+        assert_eq!(device_blocks.len(), 1);
+        check_block_contents(&disk_blocks[0], &device_blocks[0], 42)?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[rstest]
+    #[case(LayoutType::FullyContiguous)]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
+    async fn test_bulk_transfer_disk(#[case] layout_type: LayoutType) -> Result<()> {
+        let (offload_manager, device_pool, host_pool, disk_pool) =
+            build_pools_with_layout(8, Some(8), Some(8), None, layout_type)?;
+
+        let disk_pool = disk_pool.as_ref().unwrap();
+        let host_pool = host_pool.as_ref().unwrap();
+        let device_pool = device_pool.as_ref().unwrap();
+
+        let mut host_blocks = Vec::new();
+
+        for i in 0..8 {
+            let block = completed_block(host_pool, [i; 4]).await?;
+            populate_block(&block, i as u8)?;
+            host_blocks.push(block);
+        }
+
+        let immutable_host_blocks = host_pool.register_blocks(host_blocks).await?;
+
+        for block in &immutable_host_blocks {
+            offload_manager.offload(block, 0).await?;
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        let mut disk_blocks = Vec::new();
+
+        for (i, host_block) in immutable_host_blocks.iter().enumerate() {
+            let blocks = disk_pool
+                .match_sequence_hashes(vec![host_block.sequence_hash()].as_slice())
+                .await?;
+            assert_eq!(blocks.len(), 1);
+            check_block_contents(host_block, &blocks[0], i as u8)?;
+            disk_blocks.push(blocks[0].clone());
+        }
+
+        let device_blocks = offload_manager.onboard(disk_blocks.clone()).await?;
+        assert_eq!(device_blocks.len(), disk_blocks.len());
+
+        for (i, disk_block) in disk_blocks.iter().enumerate() {
+            let blocks = device_pool
+                .match_sequence_hashes(vec![disk_block.sequence_hash()].as_slice())
+                .await?;
+            assert_eq!(blocks.len(), 1);
+            check_block_contents(disk_block, &blocks[0], i as u8)?;
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[rstest]
+    #[case(LayoutType::FullyContiguous)]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
+    #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
+    async fn test_onboard_disk(#[case] layout_type: LayoutType) -> Result<()> {
+        let (offload_manager, device_pool, _, disk_pool) =
+            build_pools_with_layout(4, None, Some(4), None, layout_type)?;
+
+        let device_pool = device_pool.as_ref().unwrap();
+        let disk_pool = disk_pool.as_ref().unwrap();
+
+        let disk_block = completed_block(disk_pool, [0, 1, 2, 3]).await?;
+        let immutable_disk_block = disk_pool
+            .register_blocks(vec![disk_block])
+            .await?
+            .into_iter()
+            .next()
+            .unwrap();
+
+        populate_block(&immutable_disk_block, 42)?;
+
+        let device_block = offload_manager
+            .onboard(vec![immutable_disk_block.clone()])
+            .await?;
+
+        check_block_contents(&immutable_disk_block, &device_block[0], 42)?;
+
+        assert_eq!(device_block.len(), 1);
+        assert_eq!(
+            device_block[0].sequence_hash(),
+            immutable_disk_block.sequence_hash()
+        );
+        assert_eq!(
+            device_pool
+                .match_sequence_hashes(vec![immutable_disk_block.sequence_hash()].as_slice())
                 .await?
                 .len(),
             1
