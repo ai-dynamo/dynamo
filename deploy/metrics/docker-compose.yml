@@ -115,6 +115,7 @@ services:
     container_name: grafana
     volumes:
       - ./grafana.json:/etc/grafana/provisioning/dashboards/llm-worker-dashboard.json
+      - ./grafana-dcgm-dashboard.json:/etc/grafana/provisioning/dashboards/dcgm-dashboard.json
       - ./grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
       - ./grafana-dashboard-providers.yml:/etc/grafana/provisioning/dashboards/dashboard-providers.yml
     environment:

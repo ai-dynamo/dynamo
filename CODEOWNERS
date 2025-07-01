@@ -22,7 +22,7 @@ Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo 
 /examples/hello_world/ @alec-flowers @biswapanda @grahamking @hhzhang16 @ishandhanani @julienmancuso @kkranen @mohammedabdulwahhab @nnshah1 @tedzhouhk
 /examples/llm/ @alec-flowers @biswapanda @grahamking @guanluo @hhzhang16 @ishandhanani @julienmancuso @kkranen @mohammedabdulwahhab @nnshah1 @piotrm-nvidia @ptarasiewiczNV @rmccorm4 @tanmayv25 @tedzhouhk @PeaBrane
 /examples/multimodal/ @indrajit96 @krishung5 @whoisj
-/examples/sglang/ @biswapanda @ishandhanani @tedzhouhk @rmccorm4
+/examples/sglang/ @biswapanda @ishandhanani @tedzhouhk @rmccorm4 @alec-flowers @grahamking
 /examples/tensorrt_llm/ @guanluo @richardhuo-nv @rmccorm4 @tanmayv25
 /examples/vllm_v0/ @alec-flowers @tedzhouhk @PeaBrane
 /examples/vllm_v1/ @biswapanda @ptarasiewiczNV @tedzhouhk @PeaBrane
