@@ -94,7 +94,7 @@ class Processor(ProcessMixIn):
     @async_on_start
     async def async_init(self):
         runtime = dynamo_context["runtime"]
-        comp_ns, comp_name = self.worker._service.dynamo_address()  # type: ignore
+        comp_ns, comp_name = VllmWorker.dynamo_address()  # type: ignore
         self.worker_client = (
             await runtime.namespace(comp_ns)
             .component(comp_name)
