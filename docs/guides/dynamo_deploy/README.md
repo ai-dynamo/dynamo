@@ -36,7 +36,7 @@ The Dynamo Cloud Platform (`deploy/cloud/`) provides a managed deployment experi
 
 For detailed instructions on using the Dynamo Cloud Platform, see:
 - [Dynamo Cloud Platform Guide](dynamo_cloud.md): walks through installing and configuring the Dynamo cloud components on your Kubernetes cluster.
-- [Operator Deployment Guide](operator_deployment.md)
+- [Your Inference Graph Deployment Guide](operator_deployment.md)
 
 ### Manual Deployment with Helm Charts
 

@@ -108,7 +108,7 @@ Make sure your dynamo cloud the `deploy_dynamo_cloud.sh --crds --interactive` sc
 kubectl port-forward svc/$DEPLOYMENT_NAME-frontend 3000:3000  -n ${KUBE_NS}
 ```
 
-### Deployment Steps For your Hello World graph.
+### Now deploy your Hello World graph.
 
 For detailed deployment instructions, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md).
 
@@ -129,7 +129,7 @@ export DYNAMO_CLOUD=http://localhost:8080  # If using port-forward
 # Build the Dynamo base image (see operator_deployment.md for details)
 export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
 
-# Build the service
+# Build the service archive package.
 cd $PROJECT_ROOT/examples/hello_world
 DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk '{ print $3 }' | sed 's/\.$//')
 

@@ -24,13 +24,14 @@ This guide walks you through deploying an inference graph created with the Dynam
 Before proceeding with deployment, ensure you have:
 
 - [Dynamo Python package](../../get_started.md#alternative-setup-manual-installation) installed
-- A Kubernetes cluster with the [Dynamo cloud platform](dynamo_cloud.md) installed
+- A Kubernetes cluster
+- [Dynamo Base Image](../../get_started.md#building-the-dynamo-base-image) built
+- [Dynamo cloud platform](dynamo_cloud.md) deployed on your Cluster
 - Ubuntu 24.04 as the base image for your services
 - Required dependencies:
   - Helm package manager
   - Rust packages and toolchain
 
-You must have first followed the instructions in [deploy/dynamo/helm/README.md](https://github.com/ai-dynamo/dynamo/blob/main/deploy/dynamo/cloud/helm/README.md) to install Dynamo Cloud on your Kubernetes cluster.
 
 ## Understanding the Deployment Process
 
@@ -45,14 +46,14 @@ The deployment process involves two main steps:
    - This archive is used as input for the remote build process
 
 2. **Remote Image Build**
-   - A `yatai-dynamonim-image-builder` pod is created in your cluster
+   - A `dynamo-image-builder` pod is created in your cluster
    - This pod:
      - Takes the Dynamo service archive
      - Containerizes it using the specified base image
      - Pushes the final container image to your cluster's registry
    - The build process is managed by the Dynamo operator
 
-## Deployment Steps
+## Deployment Steps for your Inference Graph
 
 ### 1. Configure Environment Variables
 
@@ -66,7 +67,7 @@ This is the simplest approach for local development and testing:
 export PROJECT_ROOT=$(pwd)
 
 # Set your Kubernetes namespace (must match the namespace where Dynamo cloud is installed)
-export KUBE_NS=hello-world
+export KUBE_NS=<your-namespace>
 
 # In a separate terminal, run port-forward to expose the dynamo-store service locally
 kubectl port-forward svc/dynamo-store 8080:80 -n $KUBE_NS
@@ -83,7 +84,7 @@ For production environments, you should use proper ingress configuration:
 export PROJECT_ROOT=$(pwd)
 
 # Set your Kubernetes namespace (must match the namespace where Dynamo cloud is installed)
-export KUBE_NS=hello-world
+export KUBE_NS=<your-namespace>
 
 # Set DYNAMO_CLOUD to your externally accessible endpoint
 # This could be your Ingress hostname or VirtualService URL
@@ -94,39 +95,42 @@ export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com  # Replace with your actual 
 The `DYNAMO_CLOUD` environment variable is required for all Dynamo deployment commands. Make sure it's set before running any deployment operations.
 ```
 
-### 2. Build the Dynamo Base Image
-
-Before building your service, you need to ensure the base image is properly set up:
-
-1. For detailed instructions on building and pushing the Dynamo base image, see the [Building the Dynamo Base Image](../../get_started.md#building-the-dynamo-base-image) section in the main README.
-
-2. Export the image from the previous step to your environment.
+Export the [Dynamo Base Image](../../get_started.md#building-the-dynamo-base-image) as DYNAMO_IMAGE env var from the prerequisites.
 ```bash
-# Export the image from the previous step to your environment
 export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
-
-# Navigate to your project directory
-cd $PROJECT_ROOT/examples/hello_world
-
-# Build the service and capture the tag
-DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk '{ print $3 }' | sed 's/\.$//')
 ```
 
-### 3. Deploy to Kubernetes
+### 2. Build the Dynamo Deployment package with your inference graph.
+
+```bash
+DYNAMO_TAG=$(dynamo build <your-graph-name> | grep "Successfully built" | awk '{ print $3 }' | sed 's/\.$//')
+```
+
+### 3. Deploy your dynamo graph package to Kubernetes
 
 Deploy your service using the Dynamo deployment command:
 
 ```bash
 # Set your Helm release name
-export DEPLOYMENT_NAME=hello-world
+export DEPLOYMENT_NAME=<your-deployment-name>
 
 # Create the deployment
 dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME
 ```
 
+Follow the [Hello World example](../../examples/hello_world.md) for more details.
+
 #### Managing Deployments
 
-Once you have deployments running, you can manage them using the following commands:
+Once you have deployments running, you can manage them using Dynamo CLI.
+Either export the endpoint into the env var `DYNAMO_CLOUD`
+
+```bash
+DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com  # If production, replace with your actual endpoint
+DYNAMO_CLOUD=http://localhost:8080 # If local port forward
+```
+
+or add it as the endpoint with the ` -e` flag to the commands below.
 
 To see a list of all deployments in your namespace:
 
@@ -160,34 +164,21 @@ This command permanently deletes the deployment and all associated resources. Ma
 ### 4. Test the Deployment
 
 The deployment process creates several pods:
-1. A `yatai-dynamonim-image-builder` pod for building the container image
+1. A `dynamo-image-builder` pod for building the container image
 2. Service pods prefixed with `$DEPLOYMENT_NAME` once the build is complete
 
 To test your deployment:
 
 ```bash
 # Forward the service port to localhost
-kubectl -n ${KUBE_NS} port-forward svc/${DEPLOYMENT_NAME}-frontend 3000:3000
+kubectl -n ${KUBE_NS} port-forward svc/${DEPLOYMENT_NAME}-<your-service>3000:3000
 
-# Test the API endpoint
+# Test the API endpoint (adjust per your service)
 curl -X 'POST' 'http://localhost:3000/generate' \
     -H 'accept: text/event-stream' \
     -H 'Content-Type: application/json' \
     -d '{"text": "test"}'
 ```
-
-## Expected Output
-
-When you send a request with "test" as input, you'll see how the text flows through each service:
-
-```
-Frontend: Middle: Backend: test-mid-back
-```
-
-This demonstrates the service pipeline:
-1. The Frontend receives "test"
-2. The Middle service adds "-mid" to create "test-mid"
-3. The Backend service adds "-back" to create "test-mid-back"
 
 ## Using Kubernetes Secrets for Environment Variables
 
