@@ -111,10 +111,11 @@ def client(
     max_retries,
     retry_delay=1,
 ):
+    logger = logging.getLogger(f"CLIENT: {index}")
+
     try:
         log_path = os.path.join(log_dir, f"client_{index}.log.txt")
         with open(log_path, "w") as log:
-            logger = logging.getLogger(f"CLIENT: {index}")
             url = f"http://localhost:{server_process.port}/{deployment_graph.endpoints[0]}"
 
             for i in range(requests_per_client):
@@ -134,5 +135,5 @@ def client(
                 log.write(json.dumps(result) + "\n")
                 log.flush()
     except Exception as e:
-        print(e)
+        logger.error(str(e))
     logger.info("Exiting")
