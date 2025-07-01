@@ -33,6 +33,7 @@ class RequestHandler:
         decode_client: Optional[Any] = None,
     ):
         self.engine = engine
+        self.server_args = server_args
         self.component = component
         self.metrics_publisher = WorkerMetricsPublisher()
 
@@ -100,33 +101,33 @@ class RequestHandler:
 
         return bootstrap_host, bootstrap_port
 
-    def _build_sampling_params(self, request: PreprocessedRequest) -> dict:
+    def _build_sampling_params(self, request: dict) -> dict:
         sampling_params = {}
-        if request.sampling_options.temperature:
-            sampling_params["temperature"] = request.sampling_options.temperature
-        if request.sampling_options.top_p:
-            sampling_params["top_p"] = request.sampling_options.top_p
-        if request.sampling_options.top_k:
-            sampling_params["top_k"] = request.sampling_options.top_k
-        sampling_params["max_new_tokens"] = request.stop_conditions.max_tokens
-        if request.stop_conditions.ignore_eos:
-            sampling_params["ignore_eos"] = request.stop_conditions.ignore_eos
+        if request["sampling_options"]["temperature"]:
+            sampling_params["temperature"] = request["sampling_options"]["temperature"]
+        if request["sampling_options"]["top_p"]:
+            sampling_params["top_p"] = request["sampling_options"]["top_p"]
+        if request["sampling_options"]["top_k"]:
+            sampling_params["top_k"] = request["sampling_options"]["top_k"]
+        sampling_params["max_new_tokens"] = request["stop_conditions"]["max_tokens"]
+        if request["stop_conditions"]["ignore_eos"]:
+            sampling_params["ignore_eos"] = request["stop_conditions"]["ignore_eos"]
         return sampling_params
 
-    def _get_request_batch_size(self, request: PreprocessedRequest):
+    def _get_request_batch_size(self, request: dict):
         """Get batch size from request, returns None for single requests"""
-        if request.batch_token_ids is not None:
-            return len(request.batch_token_ids)
+        if request["batch_token_ids"] is not None:
+            return len(request["batch_token_ids"])
         return None
 
-    def _is_batch_request(self, request: PreprocessedRequest):
+    def _is_batch_request(self, request: dict):
         """Check if request is in batch mode"""
-        return request.batch_token_ids is not None
+        return request["batch_token_ids"] is not None
 
     def _generate_bootstrap_room(self):
         return random.randint(0, 2**63 - 1)
 
-    async def generate(self, request: PreprocessedRequest):
+    async def generate(self, request: dict):
         # Check if we're in batch mode at the start
         print(f"Received request: {request}")
         print(f"Request type: {type(request)}")
@@ -137,7 +138,7 @@ class RequestHandler:
         # TODO: maintain a mapping from SGLang's Ouput struct to LLMEngineOuput
         sampling_params = self._build_sampling_params(request)
 
-        if self.engine_args.disaggregation_mode != "null":
+        if self.server_args.disaggregation_mode != "null":
             if is_batch:
                 bootstrap_room = [
                     self._generate_bootstrap_room() for _ in range(batch_size)
@@ -160,9 +161,9 @@ class RequestHandler:
 
             # prefill response is not used
             prefill = await self.engine.async_generate(
-                input_ids=request.token_ids
+                input_ids=request["token_ids"]
                 if not is_batch
-                else request.batch_token_ids,
+                else request["batch_token_ids"],
                 sampling_params=sampling_params,
                 stream=True,
                 bootstrap_host=bootstrap_host,
@@ -181,9 +182,9 @@ class RequestHandler:
             await prefill_task
         else:
             g = await self.engine.async_generate(
-                input_ids=request.token_ids
+                input_ids=request["token_ids"]
                 if not is_batch
-                else request.batch_token_ids,
+                else request["batch_token_ids"],
                 sampling_params=sampling_params,
                 stream=True,
             )
