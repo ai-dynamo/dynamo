@@ -318,7 +318,7 @@ mod tests {
         // Verify state after pushing tokens
         assert_eq!(seq1.unique_blocks().len(), 2); // One full block and one partial block
         assert_eq!(seq1.len(), 17);
-        assert_eq!(seq1.len() % (seq1.block_size() as usize), 1);
+        assert_eq!(seq1.len() % seq1.block_size(), 1);
 
         // Create another sequence with block size 16 initialized with tokens [0..17]
         let extended_tokens: Vec<u32> = (0..16).collect();
@@ -367,12 +367,12 @@ mod tests {
             "seq2 should have exactly 3 blocks"
         );
         assert_eq!(
-            seq1.len() % (seq1.block_size() as usize),
+            seq1.len() % seq1.block_size(),
             1,
             "seq1 should have 1 partial token"
         );
         assert_eq!(
-            seq2.len() % (seq2.block_size() as usize),
+            seq2.len() % seq2.block_size(),
             1,
             "seq2 should have 1 partial token"
         );
