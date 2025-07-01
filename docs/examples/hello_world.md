@@ -110,30 +110,34 @@ kubectl port-forward svc/$DEPLOYMENT_NAME-frontend 3000:3000  -n ${KUBE_NS}
 
 ### Now deploy your Hello World graph.
 
-For detailed deployment instructions, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md).
+For details, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md) but it is sufficient to follow the instructions below.
 
-
-The following are the specific commands for the hello world example:
 
 ```bash
 # Set your dynamo root directory
-cd <root dynamo folder>
+cd <root-dynamo-folder>
 export PROJECT_ROOT=$(pwd)
-
-# Configure environment variables (see operator_deployment.md for details)
 export KUBE_NS=hello-world
 export DYNAMO_CLOUD=http://localhost:8080  # If using port-forward
-# OR
-# export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com  # If using Ingress/VirtualService
+# or
+export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com  # If using Ingress/VirtualService
+```
 
-# Build the Dynamo base image (see operator_deployment.md for details)
+Export the [Dynamo Base Image](../../get_started.md#building-the-dynamo-base-image) you built during the prerequisites step as the `DYNAMO_IMAGE` environment variable.
+
+```bash
 export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
+```
 
-# Build the service archive package.
+
+# Build the Dynamo deployment package.
+```bash
 cd $PROJECT_ROOT/examples/hello_world
 DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk '{ print $3 }' | sed 's/\.$//')
+```
 
 # Deploy to Kubernetes
+```bash
 export DEPLOYMENT_NAME=ci-hw
 dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME
 ```
