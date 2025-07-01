@@ -60,12 +60,6 @@ class RequestHandler:
             # sglang defaults this to 128
             "max_new_tokens": request["stop_conditions"]["max_tokens"],
         }
-        if request["sampling_options"]["temperature"] is not None:
-            sampling_params["temperature"] = request["sampling_options"]["temperature"]
-        sampling_params = {
-            # sglang defaults this to 128
-            "max_new_tokens": request["stop_conditions"]["max_tokens"],
-        }
         num_output_tokens_so_far = 0
         gen = await self.engine_client.async_generate(
             input_ids=request["token_ids"], sampling_params=sampling_params, stream=True
