@@ -320,11 +320,11 @@ impl WorkerSelector for DefaultWorkerSelector {
                 request.overlap.scores.get(&worker_id).copied().unwrap_or(0) as f64;
             let new_blocks = request_blocks as f64 - overlap_blocks;
 
-            let kv_total_blocks = ep.data.kv_total_blocks as f64;
+            let kv_total_blocks = ep.data.kv_stats.kv_total_blocks as f64;
             assert!(kv_total_blocks > 0.0);
 
             let normalized_new_blocks = new_blocks / kv_total_blocks;
-            let gpu_cache_usage = (ep.data.kv_stats.kv_active_blocks as f64) / kv_total_blocks;
+            let gpu_cache_usage = ep.data.kv_stats.gpu_cache_usage_perc as f64;
             let num_requests_waiting = ep.data.worker_stats.num_requests_waiting as f64;
 
             // Calculate logit (lower is better)
