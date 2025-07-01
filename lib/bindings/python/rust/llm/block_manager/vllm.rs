@@ -126,35 +126,40 @@ impl KvbmCacheManager {
     pub fn get_num_offloaded_computed_blocks(
         &self,
         sequence_hashes: Vec<SequenceHash>,
-    ) -> PyResult<(usize, usize)> {
-        let num_host_blocks = if let Some(host) = self.block_manager().host() {
-            host.match_sequence_hashes_blocking(&sequence_hashes)
-                .map_err(to_pyerr)?
-                .len()
+    ) -> PyResult<(Option<KvbmBlockList>, Option<KvbmBlockList>)> {
+        let host_blocks = if let Some(host) = self.block_manager().host() {
+            Some(
+                host.match_sequence_hashes_blocking(&sequence_hashes)
+                    .map_err(to_pyerr)?,
+            )
         } else {
-            0
+            None
         };
 
-        let num_disk_blocks = if let Some(disk) = self.block_manager().disk() {
-            disk.match_sequence_hashes_blocking(&sequence_hashes)
-                .map_err(to_pyerr)?
-                .len()
+        let disk_blocks = if let Some(disk) = self.block_manager().disk() {
+            Some(
+                disk.match_sequence_hashes_blocking(&sequence_hashes)
+                    .map_err(to_pyerr)?,
+            )
         } else {
-            0
+            None
         };
 
         tracing::debug!(
             "in get_num_offloaded_computed_blocks, found {} host blocks and {} disk blocks",
-            num_host_blocks,
-            num_disk_blocks,
+            host_blocks.as_ref().map(|blocks| blocks.len()).unwrap_or(0),
+            disk_blocks.as_ref().map(|blocks| blocks.len()).unwrap_or(0),
         );
 
-        Ok((num_host_blocks, num_disk_blocks))
+        Ok((
+            host_blocks.map(|blocks| KvbmBlockList::new(BlockListType::ImmutableHost(blocks))),
+            disk_blocks.map(|blocks| KvbmBlockList::new(BlockListType::ImmutableDisk(blocks))),
+        ))
     }
 
     /// Updates the slot manager with the current request state and allocates new blocks if needed.
     /// Returns the new blocks if they were allocated, otherwise returns None.
-    pub fn alloctate_slots(&self, update: SlotUpdate) -> PyResult<Option<BlockStates>> {
+    pub fn allocate_slots(&self, update: SlotUpdate) -> PyResult<Option<BlockStates>> {
         self.slot_manager
             .lock()
             .map_err(to_pyerr)?
@@ -211,55 +216,25 @@ impl KvbmCacheManager {
         Ok(usage)
     }
 
-    #[pyo3(signature = (host_blocks=None, disk_blocks=None))]
-    pub fn onboard_blocks(
+    #[pyo3(signature = (request_id, request_num_computed_tokens, host_onboard_blocks=None, disk_onboard_blocks=None))]
+    pub fn onboard_into_slot(
         &self,
-        host_blocks: Option<KvbmBlockList>,
-        disk_blocks: Option<KvbmBlockList>,
-    ) -> PyResult<(Option<KvbmBlockList>, Option<KvbmBlockList>)> {
-        let host_onboard_blocks = if let Some(host_blocks) = host_blocks {
-            let host_blocks = host_blocks
-                .take_blocks()
-                .ok_or(to_pyerr("host_blocks has already been taken"))?;
-            let BlockListType::ImmutableHost(blocks) = host_blocks else {
-                return Err(to_pyerr("Blocks are not immutable host blocks"));
-            };
-
-            let device_blocks = self
-                .block_manager()
-                .onboard_blocks(blocks)
-                .blocking_recv()
-                .map_err(to_pyerr)?
-                .map_err(to_pyerr)?;
-            Some(KvbmBlockList::new(BlockListType::ImmutableDevice(
-                device_blocks,
-            )))
-        } else {
-            None
-        };
-
-        let disk_onboard_blocks = if let Some(disk_blocks) = disk_blocks {
-            let disk_blocks = disk_blocks
-                .take_blocks()
-                .ok_or(to_pyerr("disk_blocks has already been taken"))?;
-            let BlockListType::ImmutableDisk(blocks) = disk_blocks else {
-                return Err(to_pyerr("Blocks are not immutable disk blocks"));
-            };
-
-            let device_blocks = self
-                .block_manager()
-                .onboard_blocks(blocks)
-                .blocking_recv()
-                .map_err(to_pyerr)?
-                .map_err(to_pyerr)?;
-            Some(KvbmBlockList::new(BlockListType::ImmutableDevice(
-                device_blocks,
-            )))
-        } else {
-            None
-        };
-
-        Ok((host_onboard_blocks, disk_onboard_blocks))
+        request_id: String,
+        request_num_computed_tokens: usize,
+        host_onboard_blocks: Option<KvbmBlockList>,
+        disk_onboard_blocks: Option<KvbmBlockList>,
+    ) -> PyResult<()> {
+        self.slot_manager
+            .lock()
+            .map_err(to_pyerr)?
+            .onboard_into_slot(
+                &request_id,
+                request_num_computed_tokens,
+                host_onboard_blocks,
+                disk_onboard_blocks,
+                self.block_manager(),
+            )
+            .map_err(to_pyerr)
     }
 }
 
@@ -522,6 +497,64 @@ impl<R: RequestKey> SlotManager<R> {
                 Ok(None)
             }
         }
+    }
+
+    pub fn onboard_into_slot(
+        &mut self,
+        request_id: &R,
+        request_num_computed_tokens: usize,
+        host_onboard_blocks: Option<KvbmBlockList>,
+        disk_onboard_blocks: Option<KvbmBlockList>,
+        bm: &VllmBlockManager,
+    ) -> Result<(), SlotError> {
+        let slot = self.slots.get_mut(request_id).ok_or(SlotError::NotFound)?;
+
+        if host_onboard_blocks.is_some() || disk_onboard_blocks.is_some() {
+            let num_device_blocks = request_num_computed_tokens / self.block_size;
+
+            let host_blocks = if let Some(host_blocks) = host_onboard_blocks {
+                let host_blocks = host_blocks.take_blocks().ok_or(SlotError::Error(
+                    "host_onboard_blocks should be ImmutableHost".to_string(),
+                ))?;
+                let BlockListType::ImmutableHost(host_blocks) = host_blocks else {
+                    return Err(SlotError::Error(
+                        "host_onboard_blocks should be ImmutableHost".to_string(),
+                    ));
+                };
+                Some(host_blocks)
+            } else {
+                None
+            };
+
+            let disk_blocks = if let Some(disk_blocks) = disk_onboard_blocks {
+                let disk_blocks = disk_blocks.take_blocks().ok_or(SlotError::Error(
+                    "disk_onboard_blocks should be ImmutableDisk".to_string(),
+                ))?;
+                let BlockListType::ImmutableDisk(disk_blocks) = disk_blocks else {
+                    return Err(SlotError::Error(
+                        "disk_onboard_blocks should be ImmutableDisk".to_string(),
+                    ));
+                };
+                Some(disk_blocks)
+            } else {
+                None
+            };
+
+            let mut onboard_idx_start = num_device_blocks;
+
+            if let Some(host_blocks) = host_blocks.as_ref() {
+                if onboard_idx_start < host_blocks.len() {
+                    slot.onboard_blocks_to_slot(host_blocks[onboard_idx_start..].to_vec(), bm)?;
+                    onboard_idx_start += host_blocks.len() - onboard_idx_start;
+                }
+            }
+
+            if let Some(disk_blocks) = disk_blocks.as_ref() {
+                slot.onboard_blocks_to_slot(disk_blocks[onboard_idx_start..].to_vec(), bm)?;
+            }
+        }
+
+        Ok(())
     }
 
     pub fn get_block_ids(&self, request_id: &R) -> Result<Vec<BlockId>, SlotError> {

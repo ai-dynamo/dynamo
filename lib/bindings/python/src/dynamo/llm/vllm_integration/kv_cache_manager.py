@@ -57,6 +57,7 @@ class KvbmCacheManager(KVConnectorBase_V1):
         self.log_stats = log_stats
         # FIXME: make prefix cache stats conditional on log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
+        self.pending_onboard_blocks = {}
 
     @property
     def usage(self) -> float:
@@ -211,7 +212,7 @@ class KvbmCacheManager(KVConnectorBase_V1):
             delay_cache_blocks=delay_cache_blocks,
         )
 
-        new_blocks = self.cache_manager.alloctate_slots(slot_update)
+        new_blocks = self.cache_manager.allocate_slots(slot_update)
 
         if new_blocks is None:
             return None
@@ -330,7 +331,20 @@ class KvbmCacheManager(KVConnectorBase_V1):
         """
         sequence_hashes = self._create_slot(request)
 
-        num_host_computed_blocks, num_disk_computed_blocks = self.cache_manager.get_num_offloaded_computed_blocks(sequence_hashes)
+        (
+            host_computed_blocks,
+            disk_computed_blocks,
+        ) = self.cache_manager.get_num_offloaded_computed_blocks(sequence_hashes)
+
+        if host_computed_blocks is not None:
+            num_host_computed_blocks = host_computed_blocks.block_count()
+        else:
+            num_host_computed_blocks = 0
+
+        if disk_computed_blocks is not None:
+            num_disk_computed_blocks = disk_computed_blocks.block_count()
+        else:
+            num_disk_computed_blocks = 0
 
         num_host_computed_tokens = num_host_computed_blocks * self.block_size
         num_disk_computed_tokens = num_disk_computed_blocks * self.block_size
@@ -347,6 +361,11 @@ class KvbmCacheManager(KVConnectorBase_V1):
             need_to_allocate -= 1
 
         if need_to_allocate > 0:
+            self.pending_onboard_blocks[request.request_id] = (
+                host_computed_blocks,
+                disk_computed_blocks,
+            )
+
             return need_to_allocate, False
 
         return 0, False
@@ -354,10 +373,31 @@ class KvbmCacheManager(KVConnectorBase_V1):
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
+        if request.request_id not in self.pending_onboard_blocks:
+            return
+
+        host_blocks, disk_blocks = self.pending_onboard_blocks.pop(request.request_id)
+
+        self.cache_manager.onboard_into_slot(
+            request.request_id, request.num_computed_tokens, host_blocks, disk_blocks
+        )
+
+    def build_connector_meta(
+        self, scheduler_output: SchedulerOutput
+    ) -> KVConnectorMetadata:
         """
-        Update KVConnector state after block allocation.
+        Build the connector metadata for this step.
+
+        This function should NOT modify fields in the scheduler_output.
+        Also, calling this function will reset the state of the connector.
+
+        Args:
+            scheduler_output (SchedulerOutput): the scheduler output object.
         """
-        pass
+
+        self.pending_onboard_blocks.clear()
+
+        return KVConnectorMetadata()
 
     # Unused KV connector methods
 
@@ -421,17 +461,3 @@ class KvbmCacheManager(KVConnectorBase_V1):
         This prevents overwrites of paged KV buffer before saving done.
         """
         pass
-
-    def build_connector_meta(
-        self, scheduler_output: SchedulerOutput
-    ) -> KVConnectorMetadata:
-        """
-        Build the connector metadata for this step.
-
-        This function should NOT modify fields in the scheduler_output.
-        Also, calling this function will reset the state of the connector.
-
-        Args:
-            scheduler_output (SchedulerOutput): the scheduler output object.
-        """
-        return KVConnectorMetadata()
