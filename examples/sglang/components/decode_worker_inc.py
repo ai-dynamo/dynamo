@@ -19,11 +19,10 @@ import asyncio
 import logging
 import sys
 
-import sglang as sgl
 import msgspec
+import sglang as sgl
 import uvloop
 from sglang.srt.server_args import ServerArgs
-from utils.protocol import DisaggPreprocessedRequest
 from utils.sgl_utils import parse_sglang_args_inc
 
 from dynamo.runtime import DistributedRuntime, dynamo_worker

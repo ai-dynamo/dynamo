@@ -9,20 +9,20 @@ import sys
 from typing import Any, Dict, Optional, Union
 
 import sglang as sgl
+import uvloop
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_ip
-from utils.protocol import DisaggPreprocessedRequest, PreprocessedRequest
+from utils.protocol import DisaggPreprocessedRequest
 from utils.sgl_utils import parse_sglang_args_inc
 
 from dynamo.llm import (
     ModelType,
     WorkerMetricsPublisher,
-    register_llm,
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
+    register_llm,
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
-import uvloop
 from dynamo.runtime.logging import configure_dynamo_logging
 
 

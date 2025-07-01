@@ -46,9 +46,7 @@ def parse_sglang_args_inc(args: list[str]) -> ServerArgs:
     bootstrap_port = _reserve_disaggregation_bootstrap_port()
     ServerArgs.add_cli_args(parser)
     parsed_args = parser.parse_args(args)
-    if not any(
-        arg.startswith("--disaggregation-bootstrap-port") for arg in args
-    ):
+    if not any(arg.startswith("--disaggregation-bootstrap-port") for arg in args):
         args_dict = vars(parsed_args)
         args_dict["disaggregation_bootstrap_port"] = bootstrap_port
         parsed_args = Namespace(**args_dict)
