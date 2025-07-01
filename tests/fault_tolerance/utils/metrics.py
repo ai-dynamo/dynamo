@@ -85,8 +85,16 @@ async def get_metrics(runtime, log_dir):
                 }
                 log.write(json.dumps(record) + "\n")
                 log.flush()
-            except Exception:
-                pass
+            except Exception as e:
+                record = {
+                    "time": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                    "watchers": [],
+                    "metrics": [],
+                    "vllm_processes": [],
+                    "error": str(e),
+                }
+                log.write(json.dumps(record) + "\n")
+                log.flush()
 
 
 @pytest.fixture
