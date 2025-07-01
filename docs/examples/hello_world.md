@@ -107,7 +107,7 @@ If you're using Istio (with a Gateway) or a Kubernetes Ingress controller, your 
 However, if you're running in a restricted or local environment without ingress access, you may still need to use kubectl port-forward to access the service.
 
 ```bash
-kubectl port-forward svc/$DEPLOYMENT_NAME-frontend 3000:3000  -n ${KUBE_NS}
+kubectl port-forward svc/$DEPLOYMENT_NAME-frontend 3000:3000  -n ${NAMESPACE}
 ```
 
 ### Now deploy your Hello World graph.
@@ -119,7 +119,7 @@ For details, please refer to the [Operator Deployment Guide](../../docs/guides/d
 # Set your dynamo root directory
 cd <root-dynamo-folder>
 export PROJECT_ROOT=$(pwd)
-export KUBE_NS=hello-world
+export NAMESPACE=hello-world # the namespace you used to deploy dynamo.
 export DYNAMO_CLOUD=http://localhost:8080  # If using port-forward
 # or
 export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com  # If using Ingress/VirtualService
@@ -150,10 +150,10 @@ Once the deployment is complete, you can test it using:
 
 ```bash
 # Find your frontend pod
-export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
+export FRONTEND_POD=$(kubectl get pods -n ${NAMESPACE} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
 
 # Forward the pod's port to localhost
-kubectl port-forward pod/$FRONTEND_POD 8000:8000 -n ${KUBE_NS}
+kubectl port-forward pod/$FRONTEND_POD 8000:8000 -n ${NAMESPACE}
 
 # Test the API endpoint
 curl -X 'POST' 'http://localhost:8000/generate' \
