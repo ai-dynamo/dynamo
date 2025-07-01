@@ -9,7 +9,6 @@ use dynamo_llm::{backend::ExecutionContext, engines::StreamingEngine, local_mode
 use dynamo_runtime::protocols::Endpoint as EndpointId;
 use dynamo_runtime::slug::Slug;
 use dynamo_runtime::{CancellationToken, DistributedRuntime};
-use tokio::sync::OnceCell;
 
 mod flags;
 pub use flags::Flags;
@@ -64,21 +63,6 @@ pub async fn run(
         .model_path_pos
         .clone()
         .or(flags.model_path_flag.clone());
-
-    // Create a OnceCell for lazy initialization of distributed runtime
-    let distributed_runtime_cell: OnceCell<DistributedRuntime> = OnceCell::new();
-    let runtime_clone = runtime.clone();
-
-    // Helper closure to get or initialize the distributed runtime
-    let get_distributed_runtime = || async {
-        distributed_runtime_cell
-            .get_or_init(|| async {
-                DistributedRuntime::from_settings(runtime_clone.clone())
-                    .await
-                    .expect("Failed to create distributed runtime")
-            })
-            .await
-    };
 
     let mut local_model: LocalModel = if is_out_dynamic(&out_opt) {
         // If output is dynamic we are ingress and don't have a local model, but making an
@@ -301,73 +285,6 @@ pub async fn run(
                 model: Box::new(local_model),
             }
         }
-
-        Output::Mocker => {
-            let endpoint = match &in_opt {
-                Input::Endpoint(path) => path.parse()?,
-                _ => internal_endpoint("mocker"),
-            };
-
-            // Load mocker args from JSON file if provided
-            let engine_args = flags.load_extra_engine_args()?;
-
-            let mut builder = dynamo_llm::mocker::protocols::MockEngineArgs::builder();
-
-            // Use kv_cache_block_size flag as block_size if provided
-            if let Some(block_size) = flags.kv_cache_block_size {
-                builder = builder.block_size(block_size);
-            }
-
-            // Apply args from JSON file if provided
-            if let Some(args) = engine_args {
-                // This overwrites the kv_cache_block_size passed in
-                if let Some(v) = args.get("block_size").and_then(|v| v.as_u64()) {
-                    builder = builder.block_size(v as usize);
-                }
-                if let Some(v) = args.get("num_gpu_blocks").and_then(|v| v.as_u64()) {
-                    builder = builder.num_gpu_blocks(v as usize);
-                }
-                if let Some(v) = args.get("max_num_seqs").and_then(|v| v.as_u64()) {
-                    builder = builder.max_num_seqs(Some(v as usize));
-                }
-                if let Some(v) = args.get("max_num_batched_tokens").and_then(|v| v.as_u64()) {
-                    builder = builder.max_num_batched_tokens(Some(v as usize));
-                }
-                if let Some(v) = args.get("enable_prefix_caching").and_then(|v| v.as_bool()) {
-                    builder = builder.enable_prefix_caching(v);
-                }
-
-                // These are mocker-specific args
-                if let Some(v) = args.get("speedup_ratio").and_then(|v| v.as_f64()) {
-                    builder = builder.speedup_ratio(v);
-                }
-                if let Some(v) = args.get("watermark").and_then(|v| v.as_f64()) {
-                    builder = builder.watermark(v);
-                }
-                if let Some(v) = args.get("dp_size").and_then(|v| v.as_u64()) {
-                    builder = builder.dp_size(v as u32);
-                }
-            }
-
-            let args = builder
-                .build()
-                .map_err(|e| anyhow::anyhow!("Failed to build MockEngineArgs: {e}"))?;
-
-            // Get or initialize the distributed runtime
-            let distributed_runtime = get_distributed_runtime().await;
-            let engine = dynamo_llm::mocker::engine::make_mocker_engine(
-                distributed_runtime.clone(),
-                endpoint,
-                args,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to create mocker engine: {e}"))?;
-
-            EngineConfig::StaticCore {
-                engine,
-                model: Box::new(local_model),
-            }
-        }
     };
 
     match in_opt {
@@ -395,7 +312,7 @@ pub async fn run(
         }
         Input::Endpoint(path) => {
             // Get or initialize the distributed runtime
-            let distributed_runtime = get_distributed_runtime().await;
+            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
             crate::input::endpoint::run(distributed_runtime.clone(), path, engine_config).await?;
         }
     }

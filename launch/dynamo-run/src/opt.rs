@@ -90,9 +90,6 @@ pub enum Output {
     /// Listen for models on nats/etcd, add/remove dynamically
     Dynamic,
 
-    /// Mock vLLM engine for testing and development
-    Mocker,
-
     #[cfg(feature = "mistralrs")]
     /// Run inference on a model in a GGUF file using mistralrs w/ candle
     MistralRs,
@@ -129,7 +126,6 @@ impl TryFrom<&str> for Output {
 
             "echo_full" => Ok(Output::EchoFull),
             "echo_core" => Ok(Output::EchoCore),
-            "mocker" => Ok(Output::Mocker),
 
             "dyn" => Ok(Output::Dynamic),
 
@@ -164,8 +160,6 @@ impl fmt::Display for Output {
             Output::EchoCore => "echo_core",
 
             Output::Dynamic => "dyn",
-
-            Output::Mocker => "mocker",
         };
         write!(f, "{s}")
     }
@@ -174,11 +168,7 @@ impl fmt::Display for Output {
 impl Output {
     #[allow(unused_mut)]
     pub fn available_engines() -> Vec<String> {
-        let mut out = vec![
-            "echo_core".to_string(),
-            "echo_full".to_string(),
-            "mocker".to_string(),
-        ];
+        let mut out = vec!["echo_core".to_string(), "echo_full".to_string()];
         #[cfg(feature = "mistralrs")]
         {
             out.push(Output::MistralRs.to_string());
