@@ -132,10 +132,6 @@ class RequestHandler:
         return random.randint(0, 2**63 - 1)
 
     async def generate(self, request: dict):
-        # Check if we're in batch mode at the start
-        print(f"Received request: {request}")
-        print(f"Request type: {type(request)}")
-
         is_batch = self._is_batch_request(request)
         batch_size = self._get_request_batch_size(request)
 
