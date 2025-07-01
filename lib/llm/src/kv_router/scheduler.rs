@@ -387,6 +387,7 @@ impl WorkerSelector for DefaultWorkerSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kv_router::protocols::{KvStats, WorkerStats};
 
     #[test]
     fn test_softmax_sample_single_key() {
