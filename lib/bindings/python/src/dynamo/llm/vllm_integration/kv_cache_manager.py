@@ -362,6 +362,7 @@ class KvbmCacheManager(KVConnectorBase_V1):
 
         if need_to_allocate > 0:
             self.pending_onboard_blocks[request.request_id] = (
+                num_computed_tokens // self.block_size,
                 host_computed_blocks,
                 disk_computed_blocks,
             )
@@ -376,10 +377,12 @@ class KvbmCacheManager(KVConnectorBase_V1):
         if request.request_id not in self.pending_onboard_blocks:
             return
 
-        host_blocks, disk_blocks = self.pending_onboard_blocks.pop(request.request_id)
+        num_device_blocks, host_blocks, disk_blocks = self.pending_onboard_blocks.pop(
+            request.request_id
+        )
 
         self.cache_manager.onboard_into_slot(
-            request.request_id, request.num_computed_tokens, host_blocks, disk_blocks
+            request.request_id, num_device_blocks, host_blocks, disk_blocks
         )
 
     def build_connector_meta(
