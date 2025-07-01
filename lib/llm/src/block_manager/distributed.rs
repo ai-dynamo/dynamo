@@ -216,29 +216,61 @@ mod tests {
         .await
         .unwrap();
 
+        let device_pool = block_manager.device().unwrap();
         let host_pool = block_manager.host().unwrap();
 
+        let mut device_blocks = device_pool.allocate_blocks(NUM_DEVICE_BLOCKS).await?;
+
+        let mut sequence_hashes = Vec::new();
+        for block in &mut device_blocks {
+            block.init_sequence(42).unwrap();
+
+            for _ in 0..BLOCK_SIZE {
+                block.add_token(42).unwrap();
+            }
+
+            block.commit().unwrap();
+
+            sequence_hashes.push(block.sequence_hash().unwrap());
+        }
+
+        // Register our blocks on the device.
+        let immutable_device_blocks = device_pool.register_blocks(device_blocks).await?;
+
+        // Wait for the blocks to be offloaded.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Now, all blocks should be on the host.
         let host_blocks = host_pool
-            .allocate_blocks(4)
-            .await?
-            .into_iter()
-            .enumerate()
-            .map(|(i, mut b)| {
-                b.init_sequence(42).unwrap();
+            .match_sequence_hashes(sequence_hashes.as_slice())
+            .await?;
 
-                for _ in 0..BLOCK_SIZE {
-                    b.add_token(i as u32).unwrap();
-                }
+        assert_eq!(host_blocks.len(), NUM_DEVICE_BLOCKS);
 
-                b.commit().unwrap();
+        // Return the device blocks to the pool.
+        drop(immutable_device_blocks);
 
-                b
-            })
-            .collect::<Vec<_>>();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-        let immutable_host_blocks = host_pool.register_blocks(host_blocks).await?;
+        // Clear out the device pool.
+        let _ = device_pool.allocate_blocks(NUM_DEVICE_BLOCKS).await?;
 
-        let _ = block_manager.onboard_blocks(immutable_host_blocks).await?;
+        // Now, all the blocks should be gone.
+        assert_eq!(
+            device_pool
+                .match_sequence_hashes(sequence_hashes.as_slice())
+                .await?
+                .len(),
+            0
+        );
+
+        // Wait for the device blocks to be returned to the pool.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Now, onboard them back to the device.
+        let new_device_blocks = block_manager.onboard_blocks(host_blocks).await??;
+
+        assert_eq!(new_device_blocks.len(), NUM_DEVICE_BLOCKS);
 
         Ok(())
     }

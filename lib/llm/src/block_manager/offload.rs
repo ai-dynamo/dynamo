@@ -329,7 +329,10 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
 
                     if let Some(target_block) = target_block {
                         pool_metrics.counter("offload_processed").inc();
-                        tracing::debug!("Offloading block with sequence hash {} to target pool.", request.sequence_hash);
+                        tracing::debug!(
+                            "Offloading block with sequence hash {} to target pool.",
+                            request.sequence_hash
+                        );
                         transfer_manager
                             .enqueue_transfer(PendingTransfer::new(
                                 vec![block],
