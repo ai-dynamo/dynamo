@@ -4,6 +4,7 @@
 
 # run ingress
 dynamo run in=http out=dyn &
+
 # run prefill worker
 python3 components/worker_inc.py \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
@@ -14,6 +15,7 @@ python3 components/worker_inc.py \
   --skip-tokenizer-init \
   --disaggregation-mode prefill \
   --disaggregation-transfer-backend nixl & 
+
 # run decode worker
 CUDA_VISIBLE_DEVICES=1 python3 components/decode_worker_inc.py \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \

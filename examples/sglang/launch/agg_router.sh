@@ -4,6 +4,7 @@
 
 # run ingress
 dynamo run in=http out=dyn router=kv &
+
 # run worker
 python3 components/worker_inc.py \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
