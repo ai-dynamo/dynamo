@@ -606,10 +606,10 @@ mod tests {
         static ref NIXL_AGENT: Arc<Option<NixlAgent>> = {
             let agent = NixlAgent::new("offload-manager").unwrap();
             let (_, ucx_params) = agent.get_plugin_params("UCX").unwrap();
-            let (_, gds_params) = agent.get_plugin_params("GDS").unwrap();
+            let (_, gds_mt_params) = agent.get_plugin_params("GDS_MT").unwrap();
             let (_, posix_params) = agent.get_plugin_params("POSIX").unwrap();
             agent.create_backend("UCX", &ucx_params).unwrap();
-            agent.create_backend("GDS", &gds_params).unwrap();
+            agent.create_backend("GDS_MT", &gds_mt_params).unwrap();
             agent.create_backend("POSIX", &posix_params).unwrap();
             Arc::new(Some(agent))
         };

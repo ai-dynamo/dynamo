@@ -37,8 +37,7 @@ mod tests {
 
     use dynamo_runtime::logging::init as init_logging;
 
-    const NUM_DEVICE_BLOCKS: usize = 8;
-    const NUM_HOST_BLOCKS: usize = 8;
+    const NUM_BLOCKS: usize = 8;
 
     #[derive(Clone, Debug)]
     struct MockTensor {
@@ -100,12 +99,12 @@ mod tests {
         let barrier_id = get_unique_barrier_id();
 
         for i in 0..num_workers {
-            let tensors: Vec<Box<dyn TorchTensor>> =
-                vec![Box::new(MockTensor::new(vec![2, NUM_DEVICE_BLOCKS, 4096]))];
+            let tensors: Vec<Arc<dyn TorchTensor>> =
+                vec![Arc::new(MockTensor::new(vec![2, NUM_BLOCKS, 4096]))];
 
             let config = KvbmWorkerConfig::builder()
                 .barrier_id(barrier_id.clone())
-                .num_device_blocks(NUM_DEVICE_BLOCKS)
+                .num_device_blocks(NUM_BLOCKS)
                 .tensors(tensors)
                 .worker_id(i)
                 .build()?;
@@ -117,7 +116,8 @@ mod tests {
         let leader_config = KvbmLeaderConfig::builder()
             .barrier_id(barrier_id)
             .world_size(num_workers)
-            .num_host_blocks(NUM_HOST_BLOCKS)
+            .num_host_blocks(NUM_BLOCKS)
+            .num_disk_blocks(NUM_BLOCKS)
             .build()?;
 
         // When/if this returns, we know that all the workers were also successful.
@@ -137,7 +137,9 @@ mod tests {
 
         let (leader, _workers) = build_leader_and_workers(num_workers).await?;
 
-        for block_idx in 0..std::cmp::min(NUM_DEVICE_BLOCKS, NUM_HOST_BLOCKS) {
+        // Do a whole bunch of distributed transfers.
+
+        for block_idx in 0..NUM_BLOCKS {
             leader
                 .transfer_blocks_request(utils::BlockTransferRequest::new(
                     utils::BlockTransferPool::Device,
@@ -148,10 +150,21 @@ mod tests {
                 .await?;
         }
 
-        for block_idx in 0..std::cmp::min(NUM_DEVICE_BLOCKS, NUM_HOST_BLOCKS) {
+        for block_idx in 0..NUM_BLOCKS {
             leader
                 .transfer_blocks_request(utils::BlockTransferRequest::new(
                     utils::BlockTransferPool::Host,
+                    utils::BlockTransferPool::Disk,
+                    vec![(block_idx, block_idx)],
+                ))
+                .await?
+                .await?;
+        }
+
+        for block_idx in 0..NUM_BLOCKS {
+            leader
+                .transfer_blocks_request(utils::BlockTransferRequest::new(
+                    utils::BlockTransferPool::Disk,
                     utils::BlockTransferPool::Device,
                     vec![(block_idx, block_idx)],
                 ))
@@ -194,13 +207,19 @@ mod tests {
             )
             .device_layout(
                 KvManagerLayoutConfig::builder()
-                    .num_blocks(NUM_DEVICE_BLOCKS)
+                    .num_blocks(NUM_BLOCKS)
                     .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
                     .build()?,
             )
             .host_layout(
                 KvManagerLayoutConfig::builder()
-                    .num_blocks(NUM_HOST_BLOCKS)
+                    .num_blocks(NUM_BLOCKS)
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                    .build()?,
+            )
+            .disk_layout(
+                KvManagerLayoutConfig::builder()
+                    .num_blocks(NUM_BLOCKS)
                     .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
                     .build()?,
             )
@@ -218,8 +237,9 @@ mod tests {
 
         let device_pool = block_manager.device().unwrap();
         let host_pool = block_manager.host().unwrap();
+        let disk_pool = block_manager.disk().unwrap();
 
-        let mut device_blocks = device_pool.allocate_blocks(NUM_DEVICE_BLOCKS).await?;
+        let mut device_blocks = device_pool.allocate_blocks(NUM_BLOCKS).await?;
 
         let mut sequence_hashes = Vec::new();
         for block in &mut device_blocks {
@@ -245,7 +265,13 @@ mod tests {
             .match_sequence_hashes(sequence_hashes.as_slice())
             .await?;
 
-        assert_eq!(host_blocks.len(), NUM_DEVICE_BLOCKS);
+        assert_eq!(host_blocks.len(), NUM_BLOCKS);
+
+        let disk_blocks = disk_pool
+            .match_sequence_hashes(sequence_hashes.as_slice())
+            .await?;
+
+        assert_eq!(disk_blocks.len(), NUM_BLOCKS);
 
         // Return the device blocks to the pool.
         drop(immutable_device_blocks);
@@ -253,7 +279,7 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         // Clear out the device pool.
-        let _ = device_pool.allocate_blocks(NUM_DEVICE_BLOCKS).await?;
+        let _ = device_pool.allocate_blocks(NUM_BLOCKS).await?;
 
         // Now, all the blocks should be gone.
         assert_eq!(
@@ -270,7 +296,7 @@ mod tests {
         // Now, onboard them back to the device.
         let new_device_blocks = block_manager.onboard_blocks(host_blocks, None).await??;
 
-        assert_eq!(new_device_blocks.len(), NUM_DEVICE_BLOCKS);
+        assert_eq!(new_device_blocks.len(), NUM_BLOCKS);
 
         Ok(())
     }

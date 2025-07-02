@@ -45,11 +45,11 @@ impl Resources {
                 }
 
                 if config.disk_layout.is_some() {
-                    if let Ok((_, gds_params)) = agent.get_plugin_params("GDS") {
-                        let backend = agent.create_backend("GDS", &gds_params)?;
-                        nixl_backends.insert("GDS".to_string(), Arc::new(backend));
+                    if let Ok((_, gds_mt_params)) = agent.get_plugin_params("GDS_MT") {
+                        let backend = agent.create_backend("GDS_MT", &gds_mt_params)?;
+                        nixl_backends.insert("GDS_MT".to_string(), Arc::new(backend));
                     } else {
-                        tracing::warn!("No GDS plugin found; will not create GDS backend");
+                        tracing::warn!("No GDS_MT plugin found; will not create GDS_MT backend");
                     }
                 }
 

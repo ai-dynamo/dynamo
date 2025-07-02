@@ -3,6 +3,7 @@
 
 use super::*;
 
+use std::sync::Arc;
 use utils::get_barrier_id;
 
 use llm_rs::block_manager::distributed::{KvbmWorker as KvbmWorkerImpl, KvbmWorkerConfig};
@@ -91,11 +92,11 @@ impl KvbmWorker {
         worker_id: usize,
         dtype_width_bytes: usize,
     ) -> PyResult<Self> {
-        let mut vllm_tensors: Vec<Box<dyn TorchTensor>> = Vec::with_capacity(tensors.len());
+        let mut vllm_tensors: Vec<Arc<dyn TorchTensor>> = Vec::with_capacity(tensors.len());
 
         for tensor in tensors {
             let vllm_tensor = VllmTensor::new(tensor.clone()).map_err(to_pyerr)?;
-            vllm_tensors.push(Box::new(vllm_tensor));
+            vllm_tensors.push(Arc::new(vllm_tensor));
         }
 
         let barrier_id = get_barrier_id();
