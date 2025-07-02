@@ -139,7 +139,7 @@ RUN cp target/release/dynamo-run deploy/sdk/src/dynamo/sdk/cli/bin
 RUN cd lib/bindings/python && pip install --break-system-packages -e . && cd ../../..
 RUN pip install --break-system-packages -e .
 
-ENV PYTHONPATH=/sgl-workspace/dynamo/components/planner/src:/sgl-workspace/dynamo/examples/sglang
+ENV PYTHONPATH=/sgl-workspace/dynamo/components/planner/src:/sgl-workspace/dynamo/examples/sglang:$PYTHONPATH
 
 RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-${ARCH}.deb && \
     dpkg -i nats-server-v2.10.24-${ARCH}.deb && rm nats-server-v2.10.24-${ARCH}.deb
