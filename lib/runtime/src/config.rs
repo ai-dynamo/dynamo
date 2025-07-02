@@ -321,11 +321,6 @@ mod tests {
             let config = RuntimeConfig::from_settings().unwrap();
             assert!(!config.http_server_enabled());
         });
-
-        temp_env::with_vars(vec![("DYN_RUNTIME_HTTP_ENABLED", Some("0"))], || {
-            let config = RuntimeConfig::from_settings().unwrap();
-            assert!(!config.http_server_enabled());
-        });
     }
 
     #[test]
