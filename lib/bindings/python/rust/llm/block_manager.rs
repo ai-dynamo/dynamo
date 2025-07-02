@@ -44,24 +44,6 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     Ok(())
 }
 
-pub fn map_dtype(dtype: &str) -> anyhow::Result<dynamo_llm::common::dtype::DType> {
-    Ok(match dtype {
-        "fp8" | "FP8" => dynamo_llm::common::dtype::DType::FP8,
-        "fp16" | "FP16" => dynamo_llm::common::dtype::DType::FP16,
-        "bf16" | "BF16" => dynamo_llm::common::dtype::DType::BF16,
-        "fp32" | "FP32" => dynamo_llm::common::dtype::DType::FP32,
-        "u8" | "U8" => dynamo_llm::common::dtype::DType::U8,
-        "u16" | "U16" => dynamo_llm::common::dtype::DType::U16,
-        "u32" | "U32" => dynamo_llm::common::dtype::DType::U32,
-        "u64" | "U64" => dynamo_llm::common::dtype::DType::U64,
-        "i8" | "I8" => dynamo_llm::common::dtype::DType::I8,
-        "i16" | "I16" => dynamo_llm::common::dtype::DType::I16,
-        "i32" | "I32" => dynamo_llm::common::dtype::DType::I32,
-        "i64" | "I64" => dynamo_llm::common::dtype::DType::I64,
-        _ => return Err(anyhow::anyhow!("Unsupported dtype: {}", dtype)),
-    })
-}
-
 type VllmBlockManager = dynamo_llm::block_manager::KvBlockManager<
     Logical<DistributedLeaderWorkerResources>,
     BasicMetadata,

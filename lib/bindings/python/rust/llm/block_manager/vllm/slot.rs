@@ -317,7 +317,6 @@ mod tests {
     impl TestFixture {
         fn new() -> Self {
             use dynamo_llm::block_manager::layout::{FullyContiguous, LayoutConfig};
-            use dynamo_llm::common::dtype::DType;
 
             let config = LayoutConfig {
                 num_blocks: 10,
@@ -326,7 +325,7 @@ mod tests {
                 page_size: 64,
                 inner_dim: 128,
                 alignment: 1,
-                dtype: DType::FP16,
+                dtype_width_bytes: 2,
             };
             let layout = FullyContiguous::allocate(config, &NullDeviceAllocator).unwrap();
             let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)

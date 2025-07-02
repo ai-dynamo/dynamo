@@ -85,8 +85,8 @@ pub struct KvManagerModelConfig {
     #[validate(range(min = 1))]
     pub inner_dim: usize,
 
-    #[builder(default = "DType::FP16")]
-    pub dtype: DType,
+    #[builder(default = "2")]
+    pub dtype_width_bytes: usize,
 }
 
 impl KvManagerModelConfig {

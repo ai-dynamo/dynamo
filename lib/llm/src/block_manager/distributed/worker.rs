@@ -16,7 +16,6 @@ use crate::block_manager::{
     storage::{torch::TorchTensor, DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator},
     BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage,
 };
-use crate::common::dtype::DType;
 
 use derive_builder::Builder;
 use nixl_sys::Agent as NixlAgent;
@@ -93,8 +92,8 @@ pub struct KvbmWorkerConfig {
     #[builder(default = "1")]
     worker_id: usize,
 
-    #[builder(default = "DType::FP16")]
-    dtype: DType,
+    #[builder(default = "2")]
+    dtype_width_bytes: usize,
 
     #[builder(default = "String::from(\"kvbm\")")]
     barrier_id: String,
@@ -126,10 +125,10 @@ pub struct KvbmWorker {
 impl KvbmWorker {
     pub async fn new(config: KvbmWorkerConfig) -> anyhow::Result<Self> {
         tracing::info!(
-            "Initializing KvbmWorker with params: num_device_blocks={}, page_size={}, dtype={:?}",
+            "Initializing KvbmWorker with params: num_device_blocks={}, page_size={}, dtype_width_bytes={}",
             config.num_device_blocks,
             config.page_size,
-            config.dtype
+            config.dtype_width_bytes
         );
 
         if config.num_device_blocks == 0 {
@@ -172,7 +171,7 @@ impl KvbmWorker {
             .outer_dim(outer_dim)
             .page_size(config.page_size)
             .inner_dim(inner_dim)
-            .dtype(config.dtype);
+            .dtype_width_bytes(config.dtype_width_bytes);
 
         let layout_type = LayoutType::LayerSeparate { outer_contiguous };
 

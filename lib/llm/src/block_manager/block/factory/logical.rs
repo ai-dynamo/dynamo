@@ -65,7 +65,7 @@ impl<S: Storage, R: LogicalResources> IntoBlocks<S, Logical<R>> for LogicalBlock
 #[cfg(test)]
 mod tests {
     use crate::block_manager::block::data::logical::null::NullResources;
-    use crate::block_manager::{BlockPool, DType, PinnedStorage};
+    use crate::block_manager::{BlockPool, PinnedStorage};
 
     use super::*;
 
@@ -80,7 +80,7 @@ mod tests {
             .num_layers(3)
             .outer_dim(2)
             .inner_dim(8192)
-            .dtype(DType::FP16)
+            .dtype_width_bytes(2)
             .build()
             .unwrap();
 

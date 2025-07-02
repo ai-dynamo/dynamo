@@ -581,7 +581,7 @@ mod tests {
             DeviceAllocator, DeviceStorage, DiskAllocator, DiskStorage, PinnedAllocator,
             PinnedStorage, StorageAllocator, StorageType,
         },
-        DType, LayoutConfig, NixlRegisterableStorage,
+        LayoutConfig, NixlRegisterableStorage,
     };
     use crate::tokens::{TokenBlockSequence, Tokens};
     use nixl_sys::{MemoryRegion, NixlDescriptor};
@@ -679,7 +679,7 @@ mod tests {
             page_size: BLOCK_SIZE,
             inner_dim: inner_dim.unwrap_or(1024),
             alignment: 1,
-            dtype: DType::FP16,
+            dtype_width_bytes: 2,
         };
 
         let agent_arc = NIXL_AGENT.clone();
