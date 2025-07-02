@@ -2816,7 +2816,7 @@ dependencies = [
 [[package]]
 name = "nixl-sys"
 version = "0.3.1"
-source = "git+https://github.com/ai-dynamo/nixl?rev=a7c654d46a14cd5ce635cc8c02433d71df93dedf#a7c654d46a14cd5ce635cc8c02433d71df93dedf"
+source = "git+https://github.com/ai-dynamo/nixl?rev=fa800bcfe3814b08df9cda9c30443de8c19665e5#fa800bcfe3814b08df9cda9c30443de8c19665e5"
 dependencies = [
  "bindgen",
  "cc",

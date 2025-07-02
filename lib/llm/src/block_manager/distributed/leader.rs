@@ -11,10 +11,13 @@ use dynamo_runtime::{DistributedRuntime, Runtime};
 
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
+
+const INIT_TIMEOUT_SECS: u64 = 120;
 
 /// Data that is sent to workers over ETCD to establish a ZMQ connection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,7 +58,9 @@ impl KvbmLeaderConfig {
 /// - Syncing the leader barrier with workers.
 /// - Sending messages to workers.
 pub struct KvbmLeader {
+    _worker_data: Arc<HashMap<String, ()>>, // TODO: Replace with KvbmLeaderData
     zmq_leader: ZmqActiveMessageLeader,
+    config: KvbmLeaderConfig,
 }
 
 impl KvbmLeader {
@@ -70,7 +75,7 @@ impl KvbmLeader {
             config.barrier_id
         );
 
-        let leader_sockets = new_leader_sockets("tcp://127.0.0.1").await?;
+        let leader_sockets = new_leader_sockets("tcp://127.0.0.1")?;
 
         let zmq_data = Arc::new(KvbmLeaderData {
             pub_url: leader_sockets.pub_url.clone(),
@@ -81,20 +86,18 @@ impl KvbmLeader {
 
         // Build our leader barrier and publish the data.
         let leader_barrier: LeaderBarrier<KvbmLeaderData, ()> = LeaderBarrier::new(
-            config.barrier_id,
+            config.barrier_id.clone(),
             config.world_size,
-            Some(Duration::from_secs(30)),
+            Some(Duration::from_secs(INIT_TIMEOUT_SECS)),
         );
 
-        let drt_clone = drt.clone();
-        let zmq_data_clone = zmq_data.clone();
-
-        leader_barrier
-            .sync(&drt_clone, zmq_data_clone.as_ref())
+        let worker_data = leader_barrier
+            .sync(&drt, zmq_data.as_ref())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to sync leader barrier: {:?}", e))?;
 
         tracing::info!("Leader barrier synced with {} workers", config.world_size);
+        tracing::debug!("Worker data: {:?}", worker_data);
 
         // Now, create our active message leader.
         // This also blocks until a ZMQ connection has been established.
@@ -102,12 +105,16 @@ impl KvbmLeader {
         let zmq_leader = ZmqActiveMessageLeader::new(
             leader_sockets,
             config.world_size,
-            Duration::from_secs(30),
+            Duration::from_secs(INIT_TIMEOUT_SECS),
             cancel_token.clone(),
         )
         .await?;
 
-        Ok(Self { zmq_leader })
+        Ok(Self {
+            _worker_data: Arc::new(worker_data),
+            zmq_leader,
+            config,
+        })
     }
 
     pub async fn transfer_blocks_request(
@@ -118,5 +125,13 @@ impl KvbmLeader {
         self.zmq_leader
             .broadcast(ZMQ_TRANSFER_BLOCKS_MESSAGE, data)
             .await
+    }
+
+    pub fn num_host_blocks(&self) -> usize {
+        self.config.num_host_blocks
+    }
+
+    pub fn num_disk_blocks(&self) -> usize {
+        self.config.num_disk_blocks
     }
 }

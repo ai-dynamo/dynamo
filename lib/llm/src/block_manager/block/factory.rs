@@ -1,3 +1,11 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+pub mod local;
+pub mod logical;
+
+pub use local::LocalBlockDataFactory;
+
 use crate::block_manager::LayoutConfig;
 
 use super::*;
@@ -42,59 +50,29 @@ pub trait BlockFactory<S: Storage, L: LocalityProvider> {
 }
 
 /// Extension trait for factories that can produce all blocks at once
-pub trait IntoBlocks<S: Storage, L: LocalityProvider> {
+pub trait IntoBlocks<S: Storage, L: LocalityProvider>: BlockFactory<S, L> + Sized {
     /// Consume the factory and create all blocks with default metadata
-    fn into_blocks<M: BlockMetadata + Default>(self) -> BlockResult<Vec<Block<S, L, M>>>;
+    fn into_blocks<M: BlockMetadata + Default>(self) -> BlockResult<Vec<Block<S, L, M>>> {
+        let num_blocks = self.num_blocks();
+        let mut blocks = Vec::with_capacity(num_blocks);
+        for block_idx in 0..num_blocks {
+            let block = self.create_block(block_idx)?;
+            blocks.push(block);
+        }
+        Ok(blocks)
+    }
 
     /// Consume the factory and create all blocks with the given metadata value
     fn into_blocks_with_metadata<M: BlockMetadata + Clone>(
         self,
         metadata: M,
-    ) -> BlockResult<Vec<Block<S, L, M>>>;
-}
-
-/// Factory for creating LocalBlockData (DEPRECATED - use LocalBlockFactory instead)
-#[derive(Debug, Clone, Dissolve)]
-pub struct LocalBlockDataFactory<S: Storage> {
-    layout: Arc<dyn BlockLayout<StorageType = S>>,
-    block_set_idx: usize,
-    worker_id: WorkerID,
-}
-
-impl<S: Storage> LocalBlockDataFactory<S> {
-    pub fn new(
-        layout: Arc<dyn BlockLayout<StorageType = S>>,
-        block_set_idx: usize,
-        worker_id: WorkerID,
-    ) -> Self {
-        Self {
-            layout,
-            block_set_idx,
-            worker_id,
+    ) -> BlockResult<Vec<Block<S, L, M>>> {
+        let num_blocks = self.num_blocks();
+        let mut blocks = Vec::with_capacity(num_blocks);
+        for block_idx in 0..num_blocks {
+            let block = self.create_block_with_metadata(block_idx, metadata.clone())?;
+            blocks.push(block);
         }
-    }
-}
-
-impl<S: Storage> BlockFactory<S, locality::Local> for LocalBlockDataFactory<S> {
-    fn create_block_data(&self, block_idx: BlockId) -> BlockResult<BlockData<S>> {
-        if block_idx >= self.layout.num_blocks() {
-            return Err(BlockError::InvalidBlockID(block_idx));
-        }
-
-        let data = BlockData::new(
-            self.layout.clone(),
-            block_idx,
-            self.block_set_idx,
-            self.worker_id,
-        );
-        Ok(data)
-    }
-
-    fn num_blocks(&self) -> usize {
-        self.layout.num_blocks()
-    }
-
-    fn layout_config(&self) -> &LayoutConfig {
-        self.layout.config()
+        Ok(blocks)
     }
 }

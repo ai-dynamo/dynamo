@@ -16,7 +16,6 @@ use crate::block_manager::{
     storage::{torch::TorchTensor, DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator},
     BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage,
 };
-use crate::common::dtype::DType;
 
 use derive_builder::Builder;
 use nixl_sys::Agent as NixlAgent;
@@ -32,7 +31,7 @@ use dynamo_runtime::{
 };
 
 fn load_and_validate_tensors(
-    tensors: Vec<Box<dyn TorchTensor>>,
+    tensors: &[Arc<dyn TorchTensor>],
     device_id: usize,
 ) -> anyhow::Result<(Vec<DeviceStorage>, Vec<usize>)> {
     let mut shape = None;
@@ -68,7 +67,7 @@ fn load_and_validate_tensors(
         }
 
         // Build the storage object from the tensor.
-        let device_tensor = DeviceStorage::new_from_torch(allocator.ctx(), tensor)?;
+        let device_tensor = DeviceStorage::new_from_torch(allocator.ctx(), tensor.clone())?;
 
         device_tensors.push(device_tensor);
     }
@@ -85,7 +84,7 @@ pub struct KvbmWorkerConfig {
     page_size: usize,
 
     #[builder(default = "Vec::new()")]
-    tensors: Vec<Box<dyn TorchTensor>>,
+    tensors: Vec<Arc<dyn TorchTensor>>,
 
     #[builder(default = "0")]
     device_id: usize,
@@ -93,8 +92,8 @@ pub struct KvbmWorkerConfig {
     #[builder(default = "1")]
     worker_id: usize,
 
-    #[builder(default = "DType::FP16")]
-    dtype: DType,
+    #[builder(default = "2")]
+    dtype_width_bytes: usize,
 
     #[builder(default = "String::from(\"kvbm\")")]
     barrier_id: String,
@@ -106,14 +105,13 @@ impl KvbmWorkerConfig {
     }
 }
 
-fn build_agent(worker_id: usize) -> anyhow::Result<NixlAgent> {
-    // TODO: Get GDS enabled here.
-    // There seems to be some issue with NIXL that causes errors if a large amount of GDS backends are instantiated all at once.
-
+fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
     let agent = NixlAgent::new(&format!("kvbm-worker-{}", worker_id))?;
-    // let (_, gds_params) = agent.get_plugin_params("GDS")?;
+    if use_gds {
+        let (_, gds_params) = agent.get_plugin_params("GDS_MT")?;
+        agent.create_backend("GDS_MT", &gds_params)?;
+    }
     let (_, posix_params) = agent.get_plugin_params("POSIX")?;
-    // agent.create_backend("GDS", &gds_params)?;
     agent.create_backend("POSIX", &posix_params)?;
 
     Ok(agent)
@@ -126,17 +124,17 @@ pub struct KvbmWorker {
 impl KvbmWorker {
     pub async fn new(config: KvbmWorkerConfig) -> anyhow::Result<Self> {
         tracing::info!(
-            "Initializing KvbmWorker with params: num_device_blocks={}, page_size={}, dtype={:?}",
+            "Initializing KvbmWorker with params: num_device_blocks={}, page_size={}, dtype_width_bytes={}",
             config.num_device_blocks,
             config.page_size,
-            config.dtype
+            config.dtype_width_bytes
         );
 
         if config.num_device_blocks == 0 {
             return Err(anyhow::anyhow!("num_device_blocks must be greater than 0"));
         }
 
-        let (device_tensors, shape) = load_and_validate_tensors(config.tensors, config.device_id)?;
+        let (device_tensors, shape) = load_and_validate_tensors(&config.tensors, config.device_id)?;
 
         if shape.len() < 3 {
             return Err(anyhow::anyhow!(format!(
@@ -172,7 +170,7 @@ impl KvbmWorker {
             .outer_dim(outer_dim)
             .page_size(config.page_size)
             .inner_dim(inner_dim)
-            .dtype(config.dtype);
+            .dtype_width_bytes(config.dtype_width_bytes);
 
         let layout_type = LayoutType::LayerSeparate { outer_contiguous };
 
@@ -183,18 +181,6 @@ impl KvbmWorker {
 
         let layout_builder_clone = layout_builder.clone();
 
-        let agent = build_agent(config.worker_id)?;
-
-        let transfer_context = Arc::new(TransferContext::new(
-            Arc::new(Some(agent)),
-            DeviceAllocator::new(config.device_id)
-                .unwrap()
-                .ctx()
-                .new_stream()
-                .unwrap(),
-            Handle::current(),
-        ));
-
         let cancel_token = CancellationToken::new();
         let task = CriticalTaskExecutionHandle::new(
             move |cancel_token| {
@@ -202,9 +188,7 @@ impl KvbmWorker {
                     device_layout,
                     layout_builder_clone,
                     layout_type,
-                    config.barrier_id,
-                    config.worker_id,
-                    transfer_context,
+                    config,
                     cancel_token,
                 )
             },
@@ -236,26 +220,22 @@ impl KvbmWorker {
         device_layout: Box<dyn NixlLayout<StorageType = DeviceStorage>>,
         mut layout_builder: LayoutConfigBuilder,
         layout_type: LayoutType,
-        barrier_id: String,
-        worker_id: usize,
-        transfer_context: Arc<TransferContext>,
+        config: KvbmWorkerConfig,
         cancel_token: CancellationToken,
     ) -> anyhow::Result<()> {
-        // Build our device, host, and disk block lists.
-        let device_blocks = Some(Self::make_layout::<_, BasicMetadata>(
-            device_layout,
-            transfer_context.nixl_agent().as_ref(),
-            0,
-            worker_id,
-        )?);
-
         let runtime = Runtime::from_current()?;
         let drt = DistributedRuntime::from_settings(runtime).await?;
 
-        tracing::info!("Worker {} waiting on barrier {}", worker_id, barrier_id);
+        tracing::info!(
+            "Worker {} waiting on barrier {}",
+            config.worker_id,
+            config.barrier_id
+        );
 
-        let worker_barrier =
-            WorkerBarrier::<KvbmLeaderData, ()>::new(barrier_id, worker_id.to_string());
+        let worker_barrier = WorkerBarrier::<KvbmLeaderData, ()>::new(
+            config.barrier_id,
+            config.worker_id.to_string(),
+        );
 
         let leader_data = tokio::select! {
             _ = cancel_token.cancelled() => {
@@ -269,9 +249,29 @@ impl KvbmWorker {
 
         tracing::info!(
             "Worker {} received leader data: {:?}",
-            worker_id,
+            config.worker_id,
             leader_data
         );
+
+        let agent = build_agent(config.worker_id, leader_data.num_disk_blocks > 0)?;
+
+        let transfer_context = Arc::new(TransferContext::new(
+            Arc::new(Some(agent)),
+            DeviceAllocator::new(config.device_id)
+                .unwrap()
+                .ctx()
+                .new_stream()
+                .unwrap(),
+            Handle::current(),
+        ));
+
+        // Build our device, host, and disk block lists.
+        let device_blocks = Some(Self::make_layout::<_, BasicMetadata>(
+            device_layout,
+            transfer_context.nixl_agent().as_ref(),
+            0,
+            config.worker_id,
+        )?);
 
         let host_blocks = if leader_data.num_host_blocks > 0 {
             let host_allocator = Arc::new(PinnedAllocator::default());
@@ -284,7 +284,7 @@ impl KvbmWorker {
                 host_layout,
                 transfer_context.nixl_agent().as_ref(),
                 1,
-                worker_id,
+                config.worker_id,
             )?)
         } else {
             None
@@ -301,7 +301,7 @@ impl KvbmWorker {
                 disk_layout,
                 transfer_context.nixl_agent().as_ref(),
                 2,
-                worker_id,
+                config.worker_id,
             )?)
         } else {
             None

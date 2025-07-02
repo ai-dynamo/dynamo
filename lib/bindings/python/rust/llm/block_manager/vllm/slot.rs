@@ -148,6 +148,7 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
     /// Note: We should only apply computed blocks once at the beginning.
     /// Here we clear the list of immutable blocks before applying them because vLLM can try to apply
     /// this multiple times if the slot was unable acquire blocks for the remainder of the sequence.
+    // TODO: What about something like chunked prefill?
     pub fn apply_computed_blocks(
         &mut self,
         computed_blocks: Vec<ImmutableBlock<S, L, BasicMetadata>>,
@@ -158,11 +159,7 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
         self.immutable.clear();
 
         // create an iterator over the mutable blocks zipped with the token blocks
-        let zipped_blocks = self
-            .sequence
-            .blocks()
-            .iter()
-            .zip(computed_blocks);
+        let zipped_blocks = self.sequence.blocks().iter().zip(computed_blocks);
 
         // validate the sequence hashes of the incoming immutable computed blocks
         // against the sequence hashes of blocks in the sequence.
@@ -263,6 +260,34 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
     }
 }
 
+impl<L: LocalityProvider> Slot<DeviceStorage, L> {
+    pub fn onboard_blocks_to_slot<T: Storage>(
+        &mut self,
+        offloaded_blocks: Vec<ImmutableBlock<T, L, BasicMetadata>>,
+        bm: &dynamo_llm::block_manager::KvBlockManager<L, BasicMetadata>,
+    ) -> Result<(), SlotError> {
+        if offloaded_blocks.len() > self.mutable.len() {
+            return Err(SlotError::from_str(
+                "insufficient mutable blocks to onboard",
+            ));
+        }
+
+        self.computed_position += offloaded_blocks.len() * self.sequence.block_size();
+
+        let target_device_blocks = self.mutable.drain(0..offloaded_blocks.len()).collect();
+
+        let immutable_device_blocks = bm
+            .onboard_blocks(offloaded_blocks, Some(target_device_blocks))
+            .blocking_recv()
+            .unwrap()
+            .map_err(|e| SlotError::from_str(&format!("failed to onboard blocks: {:?}", e)))?;
+
+        self.immutable.extend(immutable_device_blocks);
+
+        Ok(())
+    }
+}
+
 impl<S: Storage, L: LocalityProvider> Drop for Slot<S, L> {
     fn drop(&mut self) {
         self.free_blocks();
@@ -273,8 +298,8 @@ impl<S: Storage, L: LocalityProvider> Drop for Slot<S, L> {
 mod tests {
     use super::*;
     use dynamo_llm::block_manager::{
-        block::{BasicMetadata, Blocks},
         block::locality::Local,
+        block::{BasicMetadata, Blocks},
         pool::BlockPool,
         storage::tests::{NullDeviceAllocator, NullDeviceStorage},
     };
@@ -292,7 +317,6 @@ mod tests {
     impl TestFixture {
         fn new() -> Self {
             use dynamo_llm::block_manager::layout::{FullyContiguous, LayoutConfig};
-            use dynamo_llm::common::dtype::DType;
 
             let config = LayoutConfig {
                 num_blocks: 10,
@@ -301,7 +325,7 @@ mod tests {
                 page_size: 64,
                 inner_dim: 128,
                 alignment: 1,
-                dtype: DType::FP16,
+                dtype_width_bytes: 2,
             };
             let layout = FullyContiguous::allocate(config, &NullDeviceAllocator).unwrap();
             let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)
@@ -1427,7 +1451,7 @@ mod tests {
         let allocated_blocks = slot2.allocate_blocks(additional_tokens.len(), &fixture.pool);
         if allocated_blocks.is_some() {
             let pre_decode_mutable = slot2.mutable.len();
-            let pre_decode_immutable = slot2.immutable.len();
+            let _ = slot2.immutable.len();
 
             let result = slot2.apply_computed_tokens(additional_tokens, &fixture.pool);
             // This should work as decode tokens after cache hit

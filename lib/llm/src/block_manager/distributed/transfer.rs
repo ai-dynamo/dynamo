@@ -14,7 +14,7 @@ use crate::block_manager::{
         data::local::LocalBlockData,
         locality,
         transfer::{TransferContext, WriteTo, WriteToStrategy},
-        Block, BlockDataProvider, ReadableBlock, WritableBlock,
+        Block, BlockDataProvider, BlockDataProviderMut, ReadableBlock, WritableBlock,
     },
     storage::{DeviceStorage, DiskStorage, Local, PinnedStorage},
     BasicMetadata, BlockMetadata, Storage,
@@ -107,6 +107,8 @@ impl BlockTransferHandler {
             ReadableBlock<StorageType = Source> + Local + WriteToStrategy<LocalBlockData<Target>>,
         // Check that the target block is writable.
         LocalBlockData<Target>: WritableBlock<StorageType = Target>,
+        LocalBlockData<Source>: BlockDataProvider<Locality = locality::Local>,
+        LocalBlockData<Target>: BlockDataProviderMut<Locality = locality::Local>,
     {
         let Some(source_pool_manager) = source_pool_manager else {
             return Err(anyhow::anyhow!("Source pool manager not initialized"));

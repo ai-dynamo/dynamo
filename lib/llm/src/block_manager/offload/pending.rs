@@ -43,14 +43,14 @@ use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::runtime::Handle;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
 use crate::block_manager::block::{
     locality::LocalityProvider,
     transfer::{TransferContext, WriteTo, WriteToStrategy},
-    BlockError, BlockMetadata, BlockState, ImmutableBlock, MutableBlock, ReadableBlock,
-    WritableBlock,
+    BlockDataProvider, BlockDataProviderMut, BlockError, BlockMetadata, BlockState, ImmutableBlock,
+    MutableBlock, ReadableBlock, WritableBlock,
 };
 use crate::block_manager::pool::BlockPoolError;
 use crate::block_manager::storage::{Local, Storage};
@@ -113,6 +113,8 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: Blo
         }
 
         let blocks = target_pool.register_blocks(targets).await?;
+
+        tracing::debug!("Transfer complete. Registered {} blocks.", blocks.len());
 
         if let Some(completion_indicator) = completion_indicator {
             completion_indicator
@@ -249,6 +251,9 @@ where
         + WriteToStrategy<MutableBlock<Target, Locality, Metadata>>,
     // Check that the target block is writable.
     MutableBlock<Target, Locality, Metadata>: WritableBlock<StorageType = Target>,
+    // Check that the source and target blocks have the same locality.
+    ImmutableBlock<Source, Locality, Metadata>: BlockDataProvider<Locality = Locality>,
+    MutableBlock<Target, Locality, Metadata>: BlockDataProviderMut<Locality = Locality>,
 {
     async fn enqueue_transfer(
         &self,
@@ -345,6 +350,9 @@ where
         + WriteToStrategy<MutableBlock<Target, Locality, Metadata>>,
     // Check that the target block is writable.
     MutableBlock<Target, Locality, Metadata>: WritableBlock<StorageType = Target>,
+    // Check that the source and target blocks have the same locality.
+    ImmutableBlock<Source, Locality, Metadata>: BlockDataProvider<Locality = Locality>,
+    MutableBlock<Target, Locality, Metadata>: BlockDataProviderMut<Locality = Locality>,
 {
     async fn enqueue_transfer(
         &self,
@@ -497,7 +505,7 @@ where
                                     Ok(result) => result,
                                     Err(e) => {
                                         tracing::error!("Error receiving transfer results: {:?}", e);
-                                        completion_indicator.send(Err(e)).unwrap();
+                                        let _ = completion_indicator.send(Err(e));
                                         return Ok(());
                                     }
                                 };
@@ -507,7 +515,7 @@ where
                     }
 
                     // Send the final results to the top-level completion indicator.
-                    completion_indicator.send(Ok(results))?;
+                    let _ = completion_indicator.send(Ok(results));
 
                     Ok(())
                 },

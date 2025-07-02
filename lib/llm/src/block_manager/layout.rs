@@ -122,7 +122,6 @@ use derive_getters::Getters;
 use thiserror::Error;
 
 use crate::block_manager::storage::{Storage, StorageAllocator};
-use crate::common::dtype::DType;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -290,8 +289,8 @@ pub struct LayoutConfig {
     pub alignment: usize,
 
     /// Data type
-    #[builder(default = "DType::FP16")]
-    pub dtype: DType,
+    #[builder(default = "2")]
+    pub dtype_width_bytes: usize,
 }
 
 impl LayoutConfig {
@@ -335,7 +334,7 @@ impl FullyContiguousConfig {
         config.validate()?;
 
         let alignment = config.alignment;
-        let memory_region_size = config.page_size * config.inner_dim * config.dtype.size_in_bytes();
+        let memory_region_size = config.page_size * config.inner_dim * config.dtype_width_bytes;
         let outer_dim_stride_in_bytes = memory_region_size;
         let layer_stride_in_bytes = outer_dim_stride_in_bytes * config.outer_dim;
         let natural_block_stride = config.num_layers * layer_stride_in_bytes;
@@ -584,7 +583,7 @@ impl LayerSeparateConfig {
         config.validate()?;
 
         let alignment = config.alignment;
-        let memory_region_size = config.page_size * config.inner_dim * config.dtype.size_in_bytes();
+        let memory_region_size = config.page_size * config.inner_dim * config.dtype_width_bytes;
 
         let outer_dim_stride_in_bytes;
         let block_stride_in_bytes;
@@ -812,7 +811,6 @@ pub mod tests {
     use super::*;
     use crate::block_manager::storage::tests::{NullDeviceAllocator, NullDeviceStorage};
     use crate::block_manager::storage::{StorageType, SystemAllocator};
-    use crate::common::dtype::DType;
     use dynamo_runtime::logging::init as init_logging;
 
     const NUM_BLOCKS: usize = 7;
@@ -820,7 +818,7 @@ pub mod tests {
     const OUTER_DIM: usize = 2;
     const PAGE_SIZE: usize = 4;
     const INNER_DIM: usize = 13;
-    const DTYPE: DType = DType::FP32; // Example dtype
+    const DTYPE_WIDTH_BYTES: usize = 4;
 
     /// Helper function to calculate expected memory offset
     fn calculate_expected_offset(
@@ -844,7 +842,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: alignment.unwrap_or(1),
-            dtype: DTYPE,
+            dtype_width_bytes: DTYPE_WIDTH_BYTES,
         };
 
         FullyContiguous::allocate(config, &NullDeviceAllocator)
@@ -886,7 +884,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: 1,
-            dtype: DTYPE,
+            dtype_width_bytes: DTYPE_WIDTH_BYTES,
         };
         // Calculate correct size needed
         let fc_config = FullyContiguousConfig::new(config.clone()).unwrap();
@@ -1025,7 +1023,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: 1,
-            dtype: DTYPE,
+            dtype_width_bytes: DTYPE_WIDTH_BYTES,
         };
 
         let allocator = SystemAllocator;
@@ -1047,7 +1045,7 @@ pub mod tests {
 
         assert_eq!(
             layout.storage.size(),
-            NUM_BLOCKS * NUM_LAYERS * OUTER_DIM * PAGE_SIZE * INNER_DIM * DTYPE.size_in_bytes()
+            NUM_BLOCKS * NUM_LAYERS * OUTER_DIM * PAGE_SIZE * INNER_DIM * DTYPE_WIDTH_BYTES
         );
     }
 
@@ -1063,11 +1061,11 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: ALIGNMENT,
-            dtype: DTYPE,
+            dtype_width_bytes: DTYPE_WIDTH_BYTES,
         };
 
         // Calculate expected size needed *for the data layout itself*
-        let memory_region_size = PAGE_SIZE * INNER_DIM * DTYPE.size_in_bytes();
+        let memory_region_size = PAGE_SIZE * INNER_DIM * DTYPE_WIDTH_BYTES;
         assert_eq!(memory_region_size, 208);
 
         let natural_block_stride = OUTER_DIM * NUM_LAYERS * memory_region_size;
@@ -1143,31 +1141,6 @@ pub mod tests {
         );
     }
 
-    #[test]
-    fn test_fc_allocate_require_exact() {
-        let config = LayoutConfig {
-            num_blocks: NUM_BLOCKS,
-            num_layers: NUM_LAYERS,
-            outer_dim: OUTER_DIM,
-            page_size: PAGE_SIZE,
-            inner_dim: INNER_DIM,
-            alignment: 1,
-            dtype: DTYPE,
-        };
-
-        let exact_size =
-            (OUTER_DIM * NUM_BLOCKS * NUM_LAYERS * PAGE_SIZE * INNER_DIM * DTYPE.size_in_bytes())
-                as u64;
-
-        // Require the allocation to exactly match the required size.
-        FullyContiguous::new(config.clone(), vec![NullDeviceStorage::new(exact_size)])
-            .expect("Layout creation failed");
-
-        assert!(
-            FullyContiguous::new(config, vec![NullDeviceStorage::new(exact_size + 1)]).is_err()
-        );
-    }
-
     // LayerSeparate Tests
 
     /// Helper function to setup LayerSeparate layout with specified configuration
@@ -1182,7 +1155,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: alignment.unwrap_or(1),
-            dtype: DTYPE,
+            dtype_width_bytes: DTYPE_WIDTH_BYTES,
         };
 
         // Create one storage per layer
@@ -1241,7 +1214,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: 1,
-            dtype: DTYPE,
+            dtype_width_bytes: DTYPE_WIDTH_BYTES,
         };
 
         // Create wrong number of storages (should be NUM_LAYERS, but provide NUM_LAYERS - 1)
@@ -1365,7 +1338,7 @@ pub mod tests {
         let layout = setup_layer_separate_layout(None, true).expect("Layout setup failed");
 
         let region = layout.memory_region(0, 0, 0).unwrap();
-        let expected_size = PAGE_SIZE * INNER_DIM * DTYPE.size_in_bytes();
+        let expected_size = PAGE_SIZE * INNER_DIM * DTYPE_WIDTH_BYTES;
 
         assert_eq!(region.size, expected_size);
     }
@@ -1418,7 +1391,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: ALIGNMENT,
-            dtype: DTYPE,
+            dtype_width_bytes: DTYPE_WIDTH_BYTES,
         };
 
         // Create storages with sufficient size
@@ -1464,7 +1437,7 @@ pub mod tests {
     fn test_ls_stride_calculations_outer_contiguous() {
         let layout = setup_layer_separate_layout(None, true).expect("Layout setup failed");
 
-        let memory_region_size = PAGE_SIZE * INNER_DIM * DTYPE.size_in_bytes();
+        let memory_region_size = PAGE_SIZE * INNER_DIM * DTYPE_WIDTH_BYTES;
 
         // In outer_contiguous mode:
         // outer_dim_stride = block_stride * num_blocks
@@ -1481,7 +1454,7 @@ pub mod tests {
     fn test_ls_stride_calculations_block_contiguous() {
         let layout = setup_layer_separate_layout(None, false).expect("Layout setup failed");
 
-        let memory_region_size = PAGE_SIZE * INNER_DIM * DTYPE.size_in_bytes();
+        let memory_region_size = PAGE_SIZE * INNER_DIM * DTYPE_WIDTH_BYTES;
 
         // In block_contiguous mode:
         // outer_dim_stride = memory_region_size
@@ -1517,39 +1490,10 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: 1,
-            dtype: DTYPE,
+            dtype_width_bytes: DTYPE_WIDTH_BYTES,
         };
 
         LayerSeparate::allocate(config, &NullDeviceAllocator, true)
             .expect("Layout allocation failed");
-    }
-
-    #[test]
-    fn test_ls_allocate_require_exact() {
-        let config = LayoutConfig {
-            num_blocks: NUM_BLOCKS,
-            num_layers: 1,
-            outer_dim: OUTER_DIM,
-            page_size: PAGE_SIZE,
-            inner_dim: INNER_DIM,
-            alignment: 1,
-            dtype: DTYPE,
-        };
-
-        let exact_size =
-            (OUTER_DIM * NUM_BLOCKS * PAGE_SIZE * INNER_DIM * DTYPE.size_in_bytes()) as u64;
-
-        // Require the allocation to exactly match the required size.
-        LayerSeparate::new(
-            config.clone(),
-            vec![NullDeviceStorage::new(exact_size)],
-            true,
-        )
-        .expect("Layout creation failed");
-
-        assert!(
-            LayerSeparate::new(config, vec![NullDeviceStorage::new(exact_size + 1)], true,)
-                .is_err()
-        );
     }
 }

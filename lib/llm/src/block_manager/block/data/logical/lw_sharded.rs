@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 use std::collections::HashMap;
 
 use crate::block_manager::block::nixl::{NixlBlockSet, RemoteBlocks, SerializedNixlBlockSet};

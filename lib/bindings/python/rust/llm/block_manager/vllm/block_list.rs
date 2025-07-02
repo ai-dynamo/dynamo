@@ -18,15 +18,71 @@ use super::*;
 use std::sync::Arc;
 
 use dynamo_llm::block_manager as bm;
+use dynamo_llm::block_manager::block::data::logical::distributed_leader_worker::DistributedLeaderWorkerResources;
+use dynamo_llm::block_manager::block::locality::Logical;
 
 use crate::to_pyerr;
 
 type DeviceStorageType = bm::storage::DeviceStorage;
+type HostStorageType = bm::storage::PinnedStorage;
+type DiskStorageType = bm::storage::DiskStorage;
 
 #[derive(Debug)]
 pub enum BlockListType {
-    Immutable(Vec<bm::block::ImmutableBlock<DeviceStorageType, bm::block::locality::Local, bm::BasicMetadata>>),
-    Mutable(Vec<bm::block::MutableBlock<DeviceStorageType, bm::block::locality::Local, bm::BasicMetadata>>),
+    ImmutableDevice(
+        Vec<
+            bm::block::ImmutableBlock<
+                DeviceStorageType,
+                Logical<DistributedLeaderWorkerResources>,
+                bm::BasicMetadata,
+            >,
+        >,
+    ),
+    MutableDevice(
+        Vec<
+            bm::block::MutableBlock<
+                DeviceStorageType,
+                Logical<DistributedLeaderWorkerResources>,
+                bm::BasicMetadata,
+            >,
+        >,
+    ),
+    ImmutableHost(
+        Vec<
+            bm::block::ImmutableBlock<
+                HostStorageType,
+                Logical<DistributedLeaderWorkerResources>,
+                bm::BasicMetadata,
+            >,
+        >,
+    ),
+    MutableHost(
+        Vec<
+            bm::block::MutableBlock<
+                HostStorageType,
+                Logical<DistributedLeaderWorkerResources>,
+                bm::BasicMetadata,
+            >,
+        >,
+    ),
+    ImmutableDisk(
+        Vec<
+            bm::block::ImmutableBlock<
+                DiskStorageType,
+                Logical<DistributedLeaderWorkerResources>,
+                bm::BasicMetadata,
+            >,
+        >,
+    ),
+    MutableDisk(
+        Vec<
+            bm::block::MutableBlock<
+                DiskStorageType,
+                Logical<DistributedLeaderWorkerResources>,
+                bm::BasicMetadata,
+            >,
+        >,
+    ),
 }
 
 #[pyclass]
@@ -39,8 +95,12 @@ pub struct KvbmBlockList {
 impl KvbmBlockList {
     pub fn new(blocks: BlockListType) -> Self {
         let count = match &blocks {
-            BlockListType::Immutable(blocks) => blocks.len(),
-            BlockListType::Mutable(blocks) => blocks.len(),
+            BlockListType::ImmutableDevice(blocks) => blocks.len(),
+            BlockListType::MutableDevice(blocks) => blocks.len(),
+            BlockListType::ImmutableHost(blocks) => blocks.len(),
+            BlockListType::MutableHost(blocks) => blocks.len(),
+            BlockListType::ImmutableDisk(blocks) => blocks.len(),
+            BlockListType::MutableDisk(blocks) => blocks.len(),
         };
 
         Self {
@@ -60,8 +120,20 @@ impl KvbmBlockList {
     pub fn get_block_id(&self, block_idx: usize) -> PyResult<usize> {
         let blocks = self.blocks.lock().unwrap();
         let block_id = match &*blocks {
-            Some(BlockListType::Immutable(blocks)) => blocks.get(block_idx).map(|b| b.block_id()),
-            Some(BlockListType::Mutable(blocks)) => blocks.get(block_idx).map(|b| b.block_id()),
+            Some(BlockListType::ImmutableDevice(blocks)) => {
+                blocks.get(block_idx).map(|b| b.block_id())
+            }
+            Some(BlockListType::MutableDevice(blocks)) => {
+                blocks.get(block_idx).map(|b| b.block_id())
+            }
+            Some(BlockListType::ImmutableHost(blocks)) => {
+                blocks.get(block_idx).map(|b| b.block_id())
+            }
+            Some(BlockListType::MutableHost(blocks)) => blocks.get(block_idx).map(|b| b.block_id()),
+            Some(BlockListType::ImmutableDisk(blocks)) => {
+                blocks.get(block_idx).map(|b| b.block_id())
+            }
+            Some(BlockListType::MutableDisk(blocks)) => blocks.get(block_idx).map(|b| b.block_id()),
             None => None,
         };
 
@@ -71,13 +143,35 @@ impl KvbmBlockList {
     pub fn get_block_hash(&self, block_idx: usize) -> PyResult<Option<u64>> {
         let blocks = self.blocks.lock().unwrap();
         let sequence_hash = match &*blocks {
-            Some(BlockListType::Immutable(blocks)) => Some(
+            Some(BlockListType::ImmutableDevice(blocks)) => Some(
                 blocks
                     .get(block_idx)
                     .ok_or_else(|| to_pyerr("block not found"))?
                     .sequence_hash(),
             ),
-            Some(BlockListType::Mutable(blocks)) => blocks
+            Some(BlockListType::MutableDevice(blocks)) => blocks
+                .get(block_idx)
+                .ok_or_else(|| to_pyerr("block not found"))?
+                .sequence_hash()
+                .ok(),
+            Some(BlockListType::ImmutableHost(blocks)) => Some(
+                blocks
+                    .get(block_idx)
+                    .ok_or_else(|| to_pyerr("block not found"))?
+                    .sequence_hash(),
+            ),
+            Some(BlockListType::MutableHost(blocks)) => blocks
+                .get(block_idx)
+                .ok_or_else(|| to_pyerr("block not found"))?
+                .sequence_hash()
+                .ok(),
+            Some(BlockListType::ImmutableDisk(blocks)) => Some(
+                blocks
+                    .get(block_idx)
+                    .ok_or_else(|| to_pyerr("block not found"))?
+                    .sequence_hash(),
+            ),
+            Some(BlockListType::MutableDisk(blocks)) => blocks
                 .get(block_idx)
                 .ok_or_else(|| to_pyerr("block not found"))?
                 .sequence_hash()

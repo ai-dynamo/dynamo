@@ -535,7 +535,6 @@ mod tests {
     use super::super::layout::{tests::setup_layout, FullyContiguous, LayoutConfig};
     use super::*;
 
-    use crate::block_manager::DType;
     use crate::tokens::{TokenBlockSequence, Tokens};
 
     use crate::block_manager::storage::tests::{NullDeviceAllocator, NullDeviceStorage};
@@ -743,7 +742,7 @@ mod tests {
             page_size: 4,
             inner_dim: 1024,
             alignment: 1,
-            dtype: DType::FP16,
+            dtype_width_bytes: 2,
         };
 
         let layout = FullyContiguous::<NullDeviceStorage>::allocate(config, &NullDeviceAllocator)?;

@@ -14,7 +14,12 @@
 // limitations under the License.
 
 mod local;
+mod logical;
 mod resources;
+
+use crate::block_manager::block::{factory::IntoBlocks, MutableBlock};
+use crate::block_manager::locality::LogicalResources;
+use crate::block_manager::offload::request::BlockResult;
 
 use super::*;
 
@@ -32,6 +37,7 @@ use super::{
 use derive_getters::Dissolve;
 use std::sync::Arc;
 use tokio::runtime::Handle;
+use tokio::sync::oneshot;
 
 pub(crate) struct Resources {
     pub worker_id: WorkerID,
@@ -96,13 +102,114 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManagerState<Lo
         Ok(())
     }
 
-    // pub async fn onboard_blocks<S: Storage + 'static>(
-    //     &self,
-    //     blocks: Vec<ImmutableBlock<S, Locality, Metadata>>,
-    // ) -> BlockResult<DeviceStorage, Locality, Metadata> {
-    //     // self.offload_manager.onboard(blocks).await
-    //     unimplemented!()
-    // }
+    pub fn onboard_blocks<S: Storage + 'static>(
+        &self,
+        blocks: Vec<ImmutableBlock<S, Locality, Metadata>>,
+        targets: Option<Vec<MutableBlock<DeviceStorage, Locality, Metadata>>>,
+    ) -> oneshot::Receiver<BlockResult<DeviceStorage, Locality, Metadata>> {
+        self.offload_manager.onboard(blocks, targets)
+    }
+}
+
+impl<R: LogicalResources, Metadata: BlockMetadata>
+    KvBlockManagerState<locality::Logical<R>, Metadata>
+{
+    pub async fn new(config: KvBlockManagerConfig, logical_resources: R) -> Result<Arc<Self>> {
+        let mut resources = Resources::new(config)?;
+        let block_data_factories =
+            logical::LogicalBlockFactories::new(&mut resources, logical_resources)?;
+
+        let (disk_factory, host_factory, device_factory) = block_data_factories.dissolve();
+
+        let (disk_pool, disk_blocks) = match disk_factory {
+            Some(factory) => {
+                let (pool, blocks) =
+                    create_block_pool::<_, _, Metadata>(factory, &resources, "disk")?;
+                (Some(Arc::new(pool)), Some(blocks))
+            }
+            None => {
+                tracing::debug!("No disk layout provided; will not allocate disk blocks.");
+                (None, None)
+            }
+        };
+
+        let (host_pool, host_blocks) = match host_factory {
+            Some(factory) => {
+                let (pool, blocks) =
+                    create_block_pool::<_, _, Metadata>(factory, &resources, "host")?;
+                (Some(Arc::new(pool)), Some(blocks))
+            }
+            None => {
+                tracing::debug!("No host layout provided; will not allocate host blocks.");
+                (None, None)
+            }
+        };
+
+        let (device_pool, device_blocks) = match device_factory {
+            Some(factory) => {
+                let (pool, blocks) =
+                    create_block_pool::<_, _, Metadata>(factory, &resources, "device")?;
+                (Some(Arc::new(pool)), Some(blocks))
+            }
+            None => {
+                tracing::debug!("No device layout provided; will not allocate device blocks.");
+                (None, None)
+            }
+        };
+
+        let offload_manager = OffloadManager::new(
+            disk_pool.clone(),
+            host_pool.clone(),
+            device_pool.clone(),
+            resources.nixl_agent.clone(),
+            resources.async_rt_handle.clone(),
+            resources.metrics.clone(),
+            resources.cancellation_token.clone(),
+        )?;
+
+        let resources = Arc::new(resources);
+
+        let state = Arc::new(Self {
+            resources: resources.clone(),
+            disk_pool,
+            host_pool,
+            device_pool,
+            local_block_set: NixlBlockSet::new(resources.worker_id),
+            remote_block_sets: RwLock::new(HashMap::new()),
+            offload_manager,
+        });
+
+        if let Some(mut blocks) = disk_blocks {
+            blocks.iter_mut().for_each(|block| {
+                block.set_manager(state.clone());
+            });
+
+            state.disk_pool.as_ref().unwrap().add_blocks(blocks).await?;
+        }
+
+        if let Some(mut blocks) = host_blocks {
+            blocks.iter_mut().for_each(|block| {
+                block.set_manager(state.clone());
+            });
+
+            state.host_pool.as_ref().unwrap().add_blocks(blocks).await?;
+        }
+
+        if let Some(mut blocks) = device_blocks {
+            blocks.iter_mut().for_each(|block| {
+                block.set_manager(state.clone());
+            });
+
+            state
+                .device_pool
+                .as_ref()
+                .unwrap()
+                .add_blocks(blocks)
+                .await?;
+        }
+
+        Ok(state)
+    }
 }
 
 // move into mod local
@@ -119,7 +226,8 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
 
         let (disk_pool, disk_blocks) = match disk_factory {
             Some(factory) => {
-                let (pool, blocks) = create_block_pool::<_, Metadata>(factory, &resources, "disk")?;
+                let (pool, blocks) =
+                    create_block_pool::<_, _, Metadata>(factory, &resources, "disk")?;
                 (Some(Arc::new(pool)), Some(blocks))
             }
             None => {
@@ -130,7 +238,8 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
 
         let (host_pool, host_blocks) = match host_factory {
             Some(factory) => {
-                let (pool, blocks) = create_block_pool::<_, Metadata>(factory, &resources, "host")?;
+                let (pool, blocks) =
+                    create_block_pool::<_, _, Metadata>(factory, &resources, "host")?;
                 (Some(Arc::new(pool)), Some(blocks))
             }
             None => {
@@ -141,7 +250,8 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
 
         let (device_pool, device_blocks) = match device_factory {
             Some(factory) => {
-                let (pool, blocks) = create_block_pool::<_, Metadata>(factory, &resources, "disk")?;
+                let (pool, blocks) =
+                    create_block_pool::<_, _, Metadata>(factory, &resources, "disk")?;
                 (Some(Arc::new(pool)), Some(blocks))
             }
             None => {
@@ -392,15 +502,12 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> std::fmt::Debug
 // }
 
 #[expect(clippy::type_complexity)]
-pub(crate) fn create_block_pool<S: Storage, M: BlockMetadata>(
-    factory: LocalBlockDataFactory<S>,
+pub(crate) fn create_block_pool<S: Storage, L: LocalityProvider, M: BlockMetadata>(
+    factory: impl IntoBlocks<S, L>,
     resources: &Resources,
     pool_name: &str,
-) -> Result<(
-    BlockPool<S, locality::Local, M>,
-    Vec<Block<S, locality::Local, M>>,
-)> {
-    let pool = BlockPool::<S, locality::Local, M>::builder()
+) -> Result<(BlockPool<S, L, M>, Vec<Block<S, L, M>>)> {
+    let pool = BlockPool::<S, L, M>::builder()
         .cancel_token(resources.cancellation_token.clone())
         .global_registry(resources.global_registry.clone())
         .async_runtime(resources.async_rt_handle.clone())
@@ -408,10 +515,7 @@ pub(crate) fn create_block_pool<S: Storage, M: BlockMetadata>(
         .pool_metrics(resources.metrics.pool(pool_name))
         .build()?;
 
-    let (layout, block_set_idx, worker_id) = factory.dissolve();
-
-    let blocks = block::layout_to_blocks::<_, M>(layout, block_set_idx, worker_id)?;
-
+    let blocks = factory.into_blocks()?;
     Ok((pool, blocks))
 }
 

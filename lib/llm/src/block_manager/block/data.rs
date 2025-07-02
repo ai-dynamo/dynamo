@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 use super::*;
 
 pub mod local;
@@ -102,9 +105,13 @@ pub trait BlockDataViews<S: Storage> {
 }
 
 pub trait BlockDataProvider: StorageTypeProvider {
+    type Locality: LocalityProvider;
+
     fn block_data(&self) -> &impl BlockDataExt<Self::StorageType>;
 }
 
 pub trait BlockDataProviderMut: BlockDataProvider {
+    type Locality: LocalityProvider;
+
     fn block_data_mut(&mut self) -> &mut impl BlockDataExt<Self::StorageType>;
 }

@@ -311,7 +311,7 @@ impl StorageAllocator<PinnedStorage> for PinnedAllocator {
 #[derive(Debug)]
 enum DeviceStorageType {
     Owned,                                   // Memory that we allocated ourselves.
-    Torch { _tensor: Box<dyn TorchTensor> }, // Memory that came from a torch tensor.
+    Torch { _tensor: Arc<dyn TorchTensor> }, // Memory that came from a torch tensor.
 }
 
 /// CUDA device memory storage
@@ -344,7 +344,7 @@ impl DeviceStorage {
 
     pub fn new_from_torch(
         ctx: &Arc<CudaContext>,
-        tensor: Box<dyn TorchTensor>,
+        tensor: Arc<dyn TorchTensor>,
     ) -> Result<Self, StorageError> {
         let device = tensor.device();
 
@@ -465,7 +465,7 @@ impl StorageAllocator<DeviceStorage> for DeviceAllocator {
 mod tests {
     use super::*;
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     struct MockTensor {
         device: TorchDevice,
         data_ptr: u64,
@@ -514,7 +514,7 @@ mod tests {
 
         let tensor = MockTensor::new(TorchDevice::Cuda(0), actual_storage.addr(), size_bytes);
 
-        let storage = DeviceStorage::new_from_torch(&ctx, Box::new(tensor)).unwrap();
+        let storage = DeviceStorage::new_from_torch(&ctx, Arc::new(tensor)).unwrap();
 
         assert_eq!(storage.size(), size_bytes);
         assert_eq!(storage.storage_type(), StorageType::Device(0));
@@ -534,7 +534,7 @@ mod tests {
             size_bytes,
         );
 
-        let result = DeviceStorage::new_from_torch(&ctx, Box::new(tensor));
+        let result = DeviceStorage::new_from_torch(&ctx, Arc::new(tensor));
         assert!(result.is_err());
 
         if let Err(StorageError::InvalidConfig(msg)) = result {
@@ -553,7 +553,7 @@ mod tests {
 
         let tensor = MockTensor::new(TorchDevice::Cuda(1), actual_storage.addr(), size_bytes);
 
-        let result = DeviceStorage::new_from_torch(&ctx, Box::new(tensor));
+        let result = DeviceStorage::new_from_torch(&ctx, Arc::new(tensor));
         assert!(result.is_err());
     }
 }

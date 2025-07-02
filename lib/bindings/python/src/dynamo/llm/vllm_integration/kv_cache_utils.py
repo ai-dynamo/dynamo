@@ -51,7 +51,8 @@ class KvbmCacheBlocks:
 
     def __add__(self, other: "KvbmCacheBlocks") -> "KvbmCacheBlocks":
         """Adds two KVCacheBlocks instances."""
-        raise NotImplementedError("__add__ not implemented")
+        # This is a disgusting hack to get this to work nicely with vLLM.
+        return None
 
     @classmethod
     def create_empty(cls) -> "KvbmCacheBlocks":
