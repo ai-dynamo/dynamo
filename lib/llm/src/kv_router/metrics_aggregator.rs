@@ -144,3 +144,47 @@ pub async fn collect_endpoints_task(
         }
     }
 }
+
+pub async fn poll_worker_ids(
+    component: Component,
+    watch_tx: watch::Sender<Vec<i64>>,
+    cancel: CancellationToken,
+) {
+    let backoff_delay = Duration::from_millis(100);
+    let scrape_timeout = Duration::from_millis(300);
+    let endpoint = component.endpoint(KV_METRICS_ENDPOINT);
+    let service_subject = endpoint.subject();
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                break;
+            }
+            _ = tokio::time::sleep(backoff_delay) => {
+                tracing::trace!("collecting worker ids for service: {}", service_subject);
+                let unfiltered_endpoints =
+                    match collect_endpoints(&component, &service_subject, scrape_timeout).await
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!("Failed to retrieve endpoints for {}: {:?}", service_subject, e);
+                            continue;
+                        }
+                    };
+
+                // Map each endpoint to its worker ID
+                let worker_ids: Vec<i64> = unfiltered_endpoints
+                    .into_iter()
+                    .map(|endpoint| endpoint.id().unwrap())
+                    .collect();
+
+                tracing::trace!("Found {} worker ids for service: {service_subject}", worker_ids.len());
+
+                if watch_tx.send(worker_ids).is_err() {
+                    tracing::trace!("failed to send worker ids; shutting down");
+                    break;
+                }
+            }
+        }
+    }
+}
