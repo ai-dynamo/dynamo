@@ -137,6 +137,7 @@ RUN if [ "$ARCH" = "arm64" ]; then \
 # This commit references a NIXL fix that was releasted after the 0.4.8.post1 release https://github.com/sgl-project/sglang/pull/7330
 ARG SGLANG_COMMIT="bb9b608c86ebad7d9d01e29fe058bc184dc7285f"
 RUN --mount=type=cache,target=/root/.cache/uv \
+    cd /opt && \
     git clone https://github.com/sgl-project/sglang.git && \
     cd sglang && \
     git checkout ${SGLANG_COMMIT} && \
@@ -227,7 +228,7 @@ COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
 
 USER $USERNAME
 ENV HOME=/home/$USERNAME
-ENV PYTHONPATH=$HOME/dynamo/deploy/sdk/src:$PYTHONPATH:$HOME/dynamo/components/planner/src:$PYTHONPATH:$HOME/dynamo/examples/sglang:$PYTHONPATH
+ENV PYTHONPATH=/workspace/dynamo/deploy/sdk/src:$PYTHONPATH:/workspace/dynamo/components/planner/src:$PYTHONPATH:/workspace/examples/sglang:$PYTHONPATH
 WORKDIR $HOME
 
 # https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
