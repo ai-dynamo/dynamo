@@ -22,6 +22,12 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
+/// Default HTTP server host
+const DEFAULT_HTTP_SERVER_HOST: &str = "0.0.0.0";
+
+/// Default HTTP server port
+const DEFAULT_HTTP_SERVER_PORT: u16 = 9090;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerConfig {
     /// Grace shutdown period for http-service.
@@ -73,13 +79,13 @@ pub struct RuntimeConfig {
     pub max_blocking_threads: usize,
 
     /// HTTP server host for health and metrics endpoints
-    #[builder(default = "\"0.0.0.0\".to_string()")]
+    #[builder(default = "DEFAULT_HTTP_SERVER_HOST.to_string()")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub http_server_host: String,
 
     /// HTTP server port for health and metrics endpoints
     /// If set to 0, the system will assign a random available port
-    #[builder(default = "9090")]
+    #[builder(default = "DEFAULT_HTTP_SERVER_PORT")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub http_server_port: u16,
 }
@@ -122,8 +128,8 @@ impl RuntimeConfig {
         RuntimeConfig {
             num_worker_threads: 1,
             max_blocking_threads: 1,
-            http_server_host: "0.0.0.0".to_string(),
-            http_server_port: 9090,
+            http_server_host: DEFAULT_HTTP_SERVER_HOST.to_string(),
+            http_server_port: DEFAULT_HTTP_SERVER_PORT,
         }
     }
 
@@ -142,8 +148,8 @@ impl Default for RuntimeConfig {
         Self {
             num_worker_threads: 16,
             max_blocking_threads: 16,
-            http_server_host: "0.0.0.0".to_string(),
-            http_server_port: 9090,
+            http_server_host: DEFAULT_HTTP_SERVER_HOST.to_string(),
+            http_server_port: DEFAULT_HTTP_SERVER_PORT,
         }
     }
 }
