@@ -36,8 +36,8 @@ class DecodeRequestHandler:
         self.engine = engine
         logging.info("Decode request handler initialized")
 
-    async def generate(self, req: str):
-        req = msgspec.json.decode(req, type=dict)
+    async def generate(self, request: str):
+        req = msgspec.json.decode(request, type=dict)
 
         results = await self.engine.async_generate(
             input_ids=req["request"]["token_ids"]
