@@ -114,15 +114,7 @@ DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk
 
 ### 3. Deploy to Kubernetes
 
-Deploy your service using the Dynamo deployment command:
-
-```bash
-# Set your Helm release name
-export DEPLOYMENT_NAME=hello-world
-
-# Create the deployment
-dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME
-```
+TODO: Deploy your service using dynamo graph deployment CR.
 
 #### Managing Deployments
 

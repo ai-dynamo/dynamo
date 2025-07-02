@@ -243,7 +243,7 @@ DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk
 
 # Deploy to Kubernetes
 export DEPLOYMENT_NAME=llm-agg
-dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
+# TODO: Deploy your service using dynamo graph deployment CR.
 ```
 
 **Note**: Optionally add `--Planner.no-operation=false` at the end of the deployment command to enable the planner component to take scaling actions on your deployment.

@@ -124,6 +124,4 @@ For manual testing, you can use the controller_test.py file to add/remove compon
 
 The Kubernetes backend works by updating the replicas count of the DynamoGraphDeployment custom resource. When the planner determines that workers need to be scaled up or down based on workload metrics, it uses the Kubernetes API to patch the DynamoGraphDeployment resource specification, changing the replicas count for the appropriate worker component. The Kubernetes operator then reconciles this change by creating or terminating the necessary pods. This provides a seamless autoscaling experience in Kubernetes environments without requiring manual intervention.
 
-The Kubernetes backend will automatically be used by Planner when your pipeline is deployed with `dynamo deployment create`. By default, the planner will run in no-op mode, which means it will monitor metrics but not take scaling actions. To enable actual scaling, you should also specify `--Planner.no-operation=false`.
-
-
+The Kubernetes backend will automatically be used by Planner when your pipeline is deployed using dynamo graph deployment CR. By default, the planner will run in no-op mode, which means it will monitor metrics but not take scaling actions. To enable actual scaling, you should also specify `--Planner.no-operation=false`.

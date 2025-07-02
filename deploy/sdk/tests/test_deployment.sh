@@ -32,4 +32,4 @@ DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk
 
 # Step.3: Deploy!
 echo $DYNAMO_TAG
-dynamo deployment create $DYNAMO_TAG --no-wait -n $DEPLOYMENT_NAME
+# TODO: Deploy your service using dynamo graph deployment CR.
