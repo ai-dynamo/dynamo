@@ -15,6 +15,7 @@ pub struct LogicalBlockData<S: Storage, P: Parallelism> {
     block_id: BlockId,
     block_set_id: usize,
     worker_id: WorkerID,
+    #[allow(dead_code)]
     parallelism: P,
     storage_type: StorageType,
     storage: std::marker::PhantomData<S>,
