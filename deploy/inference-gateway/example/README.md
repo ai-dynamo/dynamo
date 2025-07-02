@@ -32,11 +32,11 @@ export DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built"
 ```bash
 # Deploy first graph
 export DEPLOYMENT_NAME=llm-agg1
-# TODO: Deploy your service using dynamo graph deployment CR.
+# TODO: Deploy your service using a DynamoGraphDeployment CR.
 
 # Deploy second graph
 export DEPLOYMENT_NAME=llm-agg2
-# TODO: Deploy your service using dynamo graph deployment CR.
+# TODO: Deploy your service using a DynamoGraphDeployment CR.
 ```
 
 3. **Deploy Inference Gateway**

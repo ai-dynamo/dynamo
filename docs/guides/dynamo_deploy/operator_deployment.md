@@ -114,7 +114,7 @@ DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk
 
 ### 3. Deploy to Kubernetes
 
-TODO: Deploy your service using dynamo graph deployment CR.
+TODO: Deploy your service using a DynamoGraphDeployment CR.
 
 #### Managing Deployments
 

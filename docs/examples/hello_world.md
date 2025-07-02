@@ -124,7 +124,7 @@ cd $PROJECT_ROOT/examples/hello_world
 DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk '{ print $3 }' | sed 's/\.$//')
 
 # Deploy to Kubernetes
-# TODO
+# TODO: Deploy your service using a DynamoGraphDeployment CR.
 ```
 
 ### Testing the Deployment
