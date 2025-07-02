@@ -65,7 +65,7 @@ impl DistributedRuntime {
             })
             .await??;
 
-        Ok(Self {
+        let distributed_runtime = Self {
             runtime,
             etcd_client,
             nats_client,
@@ -73,7 +73,33 @@ impl DistributedRuntime {
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
-        })
+            start_time: std::time::Instant::now(),
+        };
+
+        // Start HTTP server for health and metrics
+        let drt_arc = Arc::new(distributed_runtime.clone());
+        let runtime_clone = distributed_runtime.runtime.clone();
+        secondary.spawn(async move {
+            let config = match crate::config::RuntimeConfig::from_settings() {
+                Ok(config) => config,
+                Err(_) => crate::config::RuntimeConfig::default(),
+            };
+
+            if let Err(e) = crate::http_server::start_http_server(
+                &config.http_server_host,
+                config.http_server_port,
+                runtime_clone.child_token(),
+                drt_arc,
+            )
+            .await
+            {
+                tracing::error!("HTTP server startup failed: {}", e);
+            } else {
+                tracing::debug!("HTTP server started successfully");
+            }
+        });
+
+        Ok(distributed_runtime)
     }
 
     pub async fn from_settings(runtime: Runtime) -> Result<Self> {
@@ -162,6 +188,11 @@ impl DistributedRuntime {
 
     pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>> {
         self.instance_sources.clone()
+    }
+
+    /// Get the uptime of this DistributedRuntime in seconds
+    pub fn uptime(&self) -> std::time::Duration {
+        self.start_time.elapsed()
     }
 }
 

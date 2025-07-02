@@ -98,4 +98,7 @@ pub struct DistributedRuntime {
     is_static: bool,
 
     instance_sources: Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
+
+    // Start time for tracking uptime
+    start_time: std::time::Instant,
 }

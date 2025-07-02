@@ -14,20 +14,34 @@
 // limitations under the License.
 
 use axum::{http::StatusCode, response::IntoResponse, routing::get, Router};
-use prometheus::{Encoder, TextEncoder};
+use prometheus::{proto, Encoder, TextEncoder};
+use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing;
 
-/// Start HTTP server, bind DRT's child token to shut down
+/// Start HTTP server with DistributedRuntime support
 pub async fn start_http_server(
     host: &str,
     port: u16,
     cancel_token: CancellationToken,
+    drt: Arc<crate::DistributedRuntime>,
 ) -> anyhow::Result<()> {
     let app = Router::new()
-        .route("/health", get(health_handler))
-        .route("/metrics", get(metrics_handler));
+        .route(
+            "/health",
+            get({
+                let drt_clone = Arc::clone(&drt);
+                move || health_handler(drt_clone)
+            }),
+        )
+        .route(
+            "/metrics",
+            get({
+                let drt_clone = Arc::clone(&drt);
+                move || metrics_handler(drt_clone)
+            }),
+        );
 
     let address = format!("{}:{}", host, port);
     tracing::debug!("Starting HTTP server on: {}", address);
@@ -56,16 +70,36 @@ pub async fn start_http_server(
 }
 
 /// Health handler
-async fn health_handler() -> impl IntoResponse {
-    (StatusCode::OK, "OK")
+async fn health_handler(drt: Arc<crate::DistributedRuntime>) -> impl IntoResponse {
+    let uptime = drt.uptime();
+    let response = format!("OK\nUptime: {} seconds", uptime.as_secs());
+    (StatusCode::OK, response)
 }
 
-/// Metrics handler, using prometheus to collect metrics
-async fn metrics_handler() -> impl IntoResponse {
+/// Metrics handler with DistributedRuntime uptime
+async fn metrics_handler(drt: Arc<crate::DistributedRuntime>) -> impl IntoResponse {
     let encoder = TextEncoder::new();
     let mut buffer = Vec::new();
 
-    match encoder.encode(&prometheus::gather(), &mut buffer) {
+    // Create metrics specific to this DistributedRuntime
+    let mut metrics = Vec::new();
+
+    // Add uptime metric
+    let uptime_seconds = drt.uptime().as_secs_f64();
+    let mut uptime_metric = proto::MetricFamily::new();
+    uptime_metric.set_name("dynamo_runtime_uptime_seconds".to_string());
+    uptime_metric.set_help("Total uptime of the DistributedRuntime in seconds".to_string());
+    uptime_metric.set_field_type(proto::MetricType::GAUGE);
+
+    let mut metric = proto::Metric::new();
+    let mut gauge = proto::Gauge::new();
+    gauge.set_value(uptime_seconds);
+    metric.set_gauge(gauge);
+    uptime_metric.mut_metric().push(metric);
+
+    metrics.push(uptime_metric);
+
+    match encoder.encode(&metrics, &mut buffer) {
         Ok(()) => match String::from_utf8(buffer) {
             Ok(response) => (StatusCode::OK, response),
             Err(e) => {
@@ -95,10 +129,14 @@ mod tests {
     async fn test_http_server_lifecycle() {
         let cancel_token = CancellationToken::new();
         let cancel_token_for_server = cancel_token.clone();
+        let runtime = crate::Runtime::single_threaded().unwrap();
+        let drt = crate::DistributedRuntime::from_settings(runtime)
+            .await
+            .unwrap();
 
         // start HTTP server
         let server_handle = tokio::spawn(async move {
-            let _ = start_http_server("127.0.0.1", 0, cancel_token_for_server).await;
+            let _ = start_http_server("127.0.0.1", 0, cancel_token_for_server, Arc::new(drt)).await;
         });
 
         // wait for a while to let the server start
@@ -117,19 +155,46 @@ mod tests {
 
     #[tokio::test]
     async fn test_health_handler() {
-        let response = health_handler().await;
+        let runtime = crate::Runtime::single_threaded().unwrap();
+        let drt = crate::DistributedRuntime::from_settings(runtime)
+            .await
+            .unwrap();
+
+        // Wait a bit to ensure uptime is measurable
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let response = health_handler(Arc::new(drt)).await;
         let response = response.into_response();
-        let (parts, _body) = response.into_parts();
+        let (parts, body) = response.into_parts();
 
         assert_eq!(parts.status, StatusCode::OK);
+
+        // Check that the response contains uptime information
+        let body_bytes = hyper::body::to_bytes(body).await.unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("OK"));
+        assert!(body_str.contains("Uptime:"));
     }
 
     #[tokio::test]
     async fn test_metrics_handler() {
-        let response = metrics_handler().await;
+        let runtime = crate::Runtime::single_threaded().unwrap();
+        let drt = crate::DistributedRuntime::from_settings(runtime)
+            .await
+            .unwrap();
+
+        // Wait a bit to ensure uptime is measurable
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        let response = metrics_handler(Arc::new(drt)).await;
         let response = response.into_response();
-        let (parts, _body) = response.into_parts();
+        let (parts, body) = response.into_parts();
 
         assert_eq!(parts.status, StatusCode::OK);
+
+        // Check that the response contains the uptime metric
+        let body_bytes = hyper::body::to_bytes(body).await.unwrap();
+        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+        assert!(body_str.contains("dynamo_runtime_uptime_seconds"));
     }
 }
