@@ -88,11 +88,10 @@ RUN pip install --break-system-packages "sglang==0.4.8.post1"
 ENV SGL_FORCE_SHUTDOWN=1
 
 WORKDIR /sgl-workspace
-# support batch completions for SGL benchmarking
+# support dynamo sglang components
 # https://github.com/ai-dynamo/dynamo/pull/1626
-ARG DYNAMO_COMMIT="fc16a79bfc5a4c4f58503d3c36f2013340244cac"
-ARG DYNAMO_BRANCH="ishan/sgl-v2"
-RUN git clone https://github.com/ai-dynamo/dynamo.git && cd dynamo && git checkout ${DYNAMO_BRANCH}
+ARG DYNAMO_COMMIT=""
+RUN git clone https://github.com/ai-dynamo/dynamo.git && cd dynamo && git checkout ${DYNAMO_COMMIT}
 
 # install dynamo in editable mode
 WORKDIR /sgl-workspace/dynamo
