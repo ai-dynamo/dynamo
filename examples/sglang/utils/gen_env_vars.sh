@@ -1,4 +1,6 @@
 #!/bin/bash
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
 
 # Helper script to generate environment variables for each node during a multinode SGLang deployment
 
@@ -23,16 +25,11 @@ fi
 echo "=== HEAD PREFILL NODE ($HEAD_PREFILL_NODE) ==="
 echo "Run all of these commands on the head prefill node:"
 echo ""
-echo "# Start NATS server"
 echo "nats-server -js &"
-echo ""
-echo "# Start etcd"
 echo "etcd --listen-client-urls http://0.0.0.0:2379 \\"
 echo "     --advertise-client-urls http://0.0.0.0:2379 \\"
 echo "     --listen-peer-urls http://0.0.0.0:2380 \\"
 echo "     --initial-cluster default=http://$HEAD_PREFILL_NODE:2380 &"
-echo ""
-echo "# Export environment variables"
 echo "export HEAD_PREFILL_NODE_IP=$HEAD_PREFILL_NODE"
 echo "export HEAD_DECODE_NODE_IP=$HEAD_DECODE_NODE"
 echo ""
