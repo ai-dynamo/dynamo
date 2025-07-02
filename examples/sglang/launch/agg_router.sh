@@ -11,6 +11,9 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# run clear_namespace
+python3 utils/clear_namespace.py --namespace dynamo
+
 # run ingress
 dynamo run in=http out=dyn --router-mode kv &
 DYNAMO_PID=$!

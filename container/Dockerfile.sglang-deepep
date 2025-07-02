@@ -91,7 +91,8 @@ WORKDIR /sgl-workspace
 # support batch completions for SGL benchmarking
 # https://github.com/ai-dynamo/dynamo/pull/1626
 ARG DYNAMO_COMMIT="fc16a79bfc5a4c4f58503d3c36f2013340244cac"
-RUN git clone https://github.com/ai-dynamo/dynamo.git && cd dynamo && git checkout ${DYNAMO_COMMIT}
+ARG DYNAMO_BRANCH="ishan/sgl-v2"
+RUN git clone https://github.com/ai-dynamo/dynamo.git && cd dynamo && git checkout ${DYNAMO_BRANCH}
 
 # install dynamo in editable mode
 WORKDIR /sgl-workspace/dynamo
@@ -138,7 +139,7 @@ RUN cp target/release/dynamo-run deploy/sdk/src/dynamo/sdk/cli/bin
 RUN cd lib/bindings/python && pip install --break-system-packages -e . && cd ../../..
 RUN pip install --break-system-packages -e .
 
-ENV PYTHONPATH=/sgl-workspace/dynamo/components/planner/src
+ENV PYTHONPATH=/sgl-workspace/dynamo/components/planner/src:/sgl-workspace/dynamo/examples/sglang
 
 RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-${ARCH}.deb && \
     dpkg -i nats-server-v2.10.24-${ARCH}.deb && rm nats-server-v2.10.24-${ARCH}.deb
@@ -165,8 +166,7 @@ ENV PATH=/sgl-workspace/perf_analyzer/build/perf_analyzer/src/perf-analyzer-buil
 
 RUN pip install --break-system-packages genai-perf
 
-COPY examples/sglang/configs/deepseek_r1/wideep/* /sgl-workspace/dynamo/examples/sglang/configs/*
-COPY examples/sglang/utils/deepseek-r1-wideep/* /sgl-workspace/dynamo/examples/sglang/utils/*
+COPY examples/sglang/configs/deepseek_r1/wideep/* /sgl-workspace/dynamo/examples/sglang/configs/
+COPY examples/sglang/utils/benchmarking/* /sgl-workspace/dynamo/examples/sglang/utils/
 
 WORKDIR /sgl-workspace/dynamo/examples/sglang
-
