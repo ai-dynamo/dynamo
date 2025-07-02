@@ -226,7 +226,7 @@ mod tests {
             .build()?;
 
         let resources =
-            DistributedLeaderWorkerResources::new(Arc::new(leader), cancel_token.child_token())?;
+            DistributedLeaderWorkerResources::new(Some(Arc::new(leader)), cancel_token.child_token())?;
 
         let block_manager = KvBlockManager::<
             Logical<DistributedLeaderWorkerResources>,

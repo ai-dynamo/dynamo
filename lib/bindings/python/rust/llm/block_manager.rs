@@ -51,10 +51,10 @@ pub struct BlockManager {
 #[pymethods]
 impl BlockManager {
     #[new]
-    #[pyo3(signature = (worker_id, leader, page_size, device_num_blocks))]
+    #[pyo3(signature = (worker_id, leader = None, page_size = 32, device_num_blocks = 16))]
     fn new(
         worker_id: u64,
-        leader: distributed::KvbmLeader,
+        leader: Option<distributed::KvbmLeader>,
         page_size: usize,
         device_num_blocks: usize,
     ) -> PyResult<Self> {
@@ -85,29 +85,34 @@ impl BlockManager {
                 .map_err(to_pyerr)?,
         );
 
-        let (leader, rt) = leader.dissolve();
-
-        if leader.num_host_blocks() > 0 {
-            tracing::info!("Using {} host blocks", leader.num_host_blocks());
-            config = config.host_layout(
-                dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
-                    .num_blocks(leader.num_host_blocks())
-                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
-                    .build()
-                    .map_err(to_pyerr)?,
-            );
-        }
-
-        if leader.num_disk_blocks() > 0 {
-            tracing::info!("Using {} disk blocks", leader.num_disk_blocks());
-            config = config.disk_layout(
-                dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
-                    .num_blocks(leader.num_disk_blocks())
-                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
-                    .build()
-                    .map_err(to_pyerr)?,
-            );
-        }
+        let (leader, rt) = if let Some(leader) = leader {
+            let (leader, rt) = leader.dissolve();
+            if leader.num_host_blocks() > 0 {
+                tracing::info!("Using {} host blocks", leader.num_host_blocks());
+                config = config.host_layout(
+                    dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
+                        .num_blocks(leader.num_host_blocks())
+                        .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                        .build()
+                        .map_err(to_pyerr)?,
+                );
+            }
+    
+            if leader.num_disk_blocks() > 0 {
+                tracing::info!("Using {} disk blocks", leader.num_disk_blocks());
+                config = config.disk_layout(
+                    dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
+                        .num_blocks(leader.num_disk_blocks())
+                        .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                        .build()
+                        .map_err(to_pyerr)?,
+                );
+            }
+            (Some(leader), rt)
+        } else {
+            tracing::info!("Leader not provided. Block transfer functionality will be disabled.");
+            (None, Arc::new(tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(to_pyerr)?))
+        };
 
         let config = config.build().map_err(to_pyerr)?;
         Ok(BlockManager {

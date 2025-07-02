@@ -12,22 +12,17 @@ import pytest
 import torch
 from vllm.v1.request import Request, SamplingParams
 
-from dynamo.llm import BlockManager
-from dynamo.llm.vllm_integration.kv_cache_manager import KvbmCacheManager
+try:
+    from dynamo.llm import BlockManager
+    from dynamo.llm.vllm_integration.kv_cache_manager import KvbmCacheManager
+    KVBM_NOT_AVAILABLE = False
+except ImportError:
+    KVBM_NOT_AVAILABLE = True
 
 pytestmark = pytest.mark.pre_merge
 
-
-WORKER_ID = 0
-NUM_LAYER = 5
-OUTER_DIM = 2
 PAGE_SIZE = 4
-INNER_DIM = 13
-DTYPE, TORCH_DTYPE = "FP32", torch.float32
-HOST_NUM_BLOCKS = 16
 DEVICE_NUM_BLOCKS = 16
-DEVICE_ID = 0
-
 
 def new_request():
     return Request(
@@ -55,15 +50,10 @@ def new_kv_cache_manager():
     try:
         return KvbmCacheManager(
             BlockManager(
-                WORKER_ID,
-                NUM_LAYER,
-                OUTER_DIM,
-                PAGE_SIZE,
-                INNER_DIM,
-                DTYPE,
-                HOST_NUM_BLOCKS,
-                DEVICE_NUM_BLOCKS,
-                DEVICE_ID,
+                worker_id=0,
+                leader=None,
+                page_size=PAGE_SIZE,
+                device_num_blocks=DEVICE_NUM_BLOCKS,
             )
         )
     except Exception as e:
@@ -72,13 +62,17 @@ def new_kv_cache_manager():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA unavailable")
-async def test_kvbm(block_manager: KvbmCacheManager):
+@pytest.mark.skipif(KVBM_NOT_AVAILABLE, reason="KVBM not available")
+async def test_kvbm():
     """
     Tests the KVBM kv_cache_manager APIs.
 
     Args:
         block_manager: The KVBM cache manager.
     """
+
+    block_manager = new_kv_cache_manager()
+
     request_1 = new_request()
     request_2 = new_request()
     request_3 = new_request()
@@ -133,7 +127,7 @@ async def main():
     """
     Main function to run the test.
     """
-    await test_kvbm(new_kv_cache_manager())
+    await test_kvbm()
 
 
 if __name__ == "__main__":

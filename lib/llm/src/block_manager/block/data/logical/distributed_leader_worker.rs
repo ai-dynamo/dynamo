@@ -13,7 +13,9 @@ type TransferRequest = (BlockTransferRequest, oneshot::Sender<()>);
 
 #[derive(Clone)]
 pub struct DistributedLeaderWorkerResources {
-    transfer_tx: mpsc::UnboundedSender<TransferRequest>,
+    /// Make this an option to make testing easier.
+    // TODO(jothomson): We should be using NullResources for this.
+    transfer_tx: Option<mpsc::UnboundedSender<TransferRequest>>,
 }
 
 impl std::fmt::Debug for DistributedLeaderWorkerResources {
@@ -23,19 +25,28 @@ impl std::fmt::Debug for DistributedLeaderWorkerResources {
 }
 
 impl DistributedLeaderWorkerResources {
-    pub fn new(leader: Arc<KvbmLeader>, cancel_token: CancellationToken) -> anyhow::Result<Self> {
-        let (transfer_tx, transfer_rx) = mpsc::unbounded_channel();
+    pub fn new(
+        leader: Option<Arc<KvbmLeader>>,
+        cancel_token: CancellationToken,
+    ) -> anyhow::Result<Self> {
+        if let Some(leader) = leader {
+            let (transfer_tx, transfer_rx) = mpsc::unbounded_channel();
 
-        CriticalTaskExecutionHandle::new(
-            move |cancel_token| async move {
-                Self::worker(leader, transfer_rx, cancel_token).await
-            },
-            cancel_token,
-            "DistributedLeaderWorkerResources",
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to create DistributedLeaderWorkerResources: {}", e))?.detach();
+            CriticalTaskExecutionHandle::new(
+                move |cancel_token| async move {
+                    Self::worker(leader, transfer_rx, cancel_token).await
+                },
+                cancel_token,
+                "DistributedLeaderWorkerResources",
+            )
+            .map_err(|e| anyhow::anyhow!("Failed to create DistributedLeaderWorkerResources: {}", e))?.detach();
 
-        Ok(Self { transfer_tx })
+            Ok(Self {
+                transfer_tx: Some(transfer_tx),
+            })
+        } else {
+            Ok(Self { transfer_tx: None })
+        }
     }
 
     fn get_pool<S: Storage>(data: &impl BlockDataExt<S>) -> BlockTransferPool {
@@ -90,25 +101,29 @@ impl LogicalResources for DistributedLeaderWorkerResources {
         RB: BlockDataProvider<Locality = Logical<Self>>,
         WB: WritableBlock + BlockDataProviderMut<Locality = Logical<Self>>,
     {
-        let source_pool = Self::get_pool(sources[0].block_data());
-        let target_pool = Self::get_pool(targets[0].block_data());
+        if let Some(transfer_tx) = &self.transfer_tx {
+            let source_pool = Self::get_pool(sources[0].block_data());
+            let target_pool = Self::get_pool(targets[0].block_data());
 
-        let source_idxs = sources.iter().map(|source| source.block_data().block_id());
-        let target_idxs = targets.iter().map(|target| target.block_data().block_id());
+            let source_idxs = sources.iter().map(|source| source.block_data().block_id());
+            let target_idxs = targets.iter().map(|target| target.block_data().block_id());
 
-        let request = BlockTransferRequest::new(
-            source_pool,
-            target_pool,
-            source_idxs.zip(target_idxs).collect(),
-        );
+            let request = BlockTransferRequest::new(
+                source_pool,
+                target_pool,
+                source_idxs.zip(target_idxs).collect(),
+            );
 
-        let (tx, rx) = oneshot::channel();
-        self.transfer_tx.send((request, tx)).unwrap();
+            let (tx, rx) = oneshot::channel();
+            transfer_tx.send((request, tx)).unwrap();
 
-        if notify {
-            Ok(Some(rx))
+            if notify {
+                Ok(Some(rx))
+            } else {
+                Ok(None)
+            }
         } else {
-            Ok(None)
+            panic!("Block transfer functionality is disabled.");
         }
     }
 }

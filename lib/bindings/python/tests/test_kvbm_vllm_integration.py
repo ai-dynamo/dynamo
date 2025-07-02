@@ -21,18 +21,16 @@ try:
 except ImportError:
     VLLM_NOT_AVAILABLE = True
 
-from dynamo.llm import BlockManager
-from dynamo.llm.vllm_integration.kv_cache_manager import KvbmCacheManager
-
+try:
+    from dynamo.llm import BlockManager
+    from dynamo.llm.vllm_integration.kv_cache_manager import KvbmCacheManager
+    KVBM_NOT_AVAILABLE = False
+except:
+    KVBM_NOT_AVAILABLE = True
 
 def new_kv_cache_manager(
-    worker_id: int = 0,
-    num_layer: int = 1,
-    outer_dim: int = 1,
-    page_size: int = 16,
-    inner_dim: int = 1,
-    device_id: int = 0,
     num_blocks: int = 11,
+    page_size: int = 16
 ):
     """
     Creates a new KVBM cache manager.
@@ -40,17 +38,13 @@ def new_kv_cache_manager(
     Returns:
         KvbmCacheManager: The KVBM cache manager.
     """
+
     return KvbmCacheManager(
         BlockManager(
-            worker_id,
-            num_layer,
-            outer_dim,
-            page_size,
-            inner_dim,
-            "FP32",  # dtype
-            num_blocks,  # host_num_blocks
-            num_blocks,  # device_num_blocks
-            device_id,
+            worker_id=0,
+            leader=None,
+            page_size=page_size,
+            device_num_blocks=num_blocks,
         )
     )
 
@@ -95,7 +89,7 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
     )
 
 
-@pytest.mark.skipif(VLLM_NOT_AVAILABLE, reason="VLLM not available")
+@pytest.mark.skipif(VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE, reason="VLLM not available or KVBM not available")
 def test_prefill():
     """
     Tests the KvbmCacheManager's prefill functionality.
@@ -146,17 +140,13 @@ def test_prefill():
 
     for block in computed_blocks.blocks:
         assert block._block_hash is not None
-        print(block)
 
     # Clean up
-    manager.free_block_hashes(req0)
-    manager.free_block_hashes(req1)
+    del computed_blocks
 
-    # TODO(oandreeva):
-    # Currently need a delay here, since there's an intermittency.
-    # Not all blocks become available for KVBM to assign to the new request.
-    # Heppens with `free` and `free_block_hashes` calls.
-    time.sleep(0.5)
+    manager.free_block_hashes(req0)
+
+    manager.free_block_hashes(req1)
 
     # Cache miss and eviction.
     req3 = make_request("3", [24] * (16 * 11))
@@ -173,8 +163,6 @@ def test_prefill():
     ):
         assert block._block_hash is None
         assert block.block_id == expected_block_id
-
-    time.sleep(0.5)
 
 
 @pytest.mark.skip(reason="KVBM needs to support reset_prefix_cache")
@@ -294,7 +282,7 @@ def test_prefill_plp():
     manager.free(req2)
 
 
-@pytest.mark.skipif(VLLM_NOT_AVAILABLE, reason="VLLM not available")
+@pytest.mark.skipif(VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE, reason="VLLM not available or KVBM not available")
 def test_decode():
     manager = new_kv_cache_manager()
 
@@ -362,7 +350,7 @@ def test_decode():
     manager.free_block_hashes(req0)
 
 
-@pytest.mark.skipif(VLLM_NOT_AVAILABLE, reason="VLLM not available")
+@pytest.mark.skipif(VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE, reason="VLLM not available or KVBM not available")
 def test_evict():
     manager = new_kv_cache_manager()
     used_blocks = set()
@@ -428,10 +416,10 @@ def test_evict():
     # assert manager.block_pool.free_block_queue.num_free_blocks == 7
 
 
-@pytest.mark.skipif(VLLM_NOT_AVAILABLE, reason="VLLM not available")
+@pytest.mark.skipif(VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE, reason="VLLM not available or KVBM not available")
 def test_hash_block_correct_reuse():
     """
-    This tests when a previously cached block is reused as a new block,
+    This tests when a previously cached block is reused as a new block, 
     its hash metadata should be correctly reset.
     """
     block_size = 16
@@ -459,9 +447,8 @@ def test_hash_block_correct_reuse():
     assert computed_blocks.blocks[0].block_id == 0
 
     # Deallocate the block.
+    del computed_blocks
     manager.free(req)
-    # Note(oandreeva): need to fix this in the kvbm core to not depend on time.sleep()
-    time.sleep(2)
 
     # Allocate new blocks, last one is partial not full, make sure hash info on the
     # blocks are cleared.
@@ -480,7 +467,7 @@ def test_hash_block_correct_reuse():
     assert blocks.blocks[1].block_hash is None
 
 
-@pytest.mark.skipif(VLLM_NOT_AVAILABLE, reason="VLLM not available")
+@pytest.mark.skipif(VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE, reason="VLLM not available or KVBM not available")
 def test_computed_blocks_not_evicted():
     """
     Test that the computed blocks are not evicted when getting new blocks
@@ -530,8 +517,7 @@ def test_computed_blocks_not_evicted():
     # Free the blocks.
     manager.free(req0)
     manager.free(req1)
-    # Note(oandreeva): need to fix this in the kvbm core to not depend on time.sleep()
-    time.sleep(2)
+    del computed_blocks
 
     # Now if we have a cache hit on the block_id 0, we should evict the block_id 1
     # cached block rather than the first one.
@@ -578,7 +564,7 @@ def _test_mm_prefix_caching():
     pass
 
 
-@pytest.mark.skipif(VLLM_NOT_AVAILABLE, reason="VLLM not available")
+@pytest.mark.skipif(VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE, reason="VLLM not available or KVBM not available")
 def test_cache_key_salting():
     """
     This tests that cache salts are applied during hashing and the cache
@@ -649,7 +635,7 @@ def test_cache_key_salting():
     """
 
 
-@pytest.mark.skipif(VLLM_NOT_AVAILABLE, reason="VLLM not available")
+@pytest.mark.skipif(VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE, reason="VLLM not available or KVBM not available")
 def test_prefill_not_enough_free_blocks_with_computed_blocks():
     """
     This is a unit test that tests the correctness of the allocate_slots
@@ -772,7 +758,7 @@ def _test_eagle_with_sliding_window():
     Test Eagle behavior with sliding window."""
     pass
 
-
+@pytest.mark.skipif(KVBM_NOT_AVAILABLE, reason="KVBM not available")
 def test_kvbm_wrong_blocks_provided():
     """
     Tests that providing wrong blocks to allocate_slots results in an error.
