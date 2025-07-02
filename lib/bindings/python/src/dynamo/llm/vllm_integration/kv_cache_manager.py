@@ -358,7 +358,15 @@ class KvbmCacheManager(KVConnectorBase_V1):
         # In a full-prompt-hit case, we need to recompute the last token,
         # to get the logits to generate the next token.
         if num_external_hit_tokens == request.num_tokens:
+            # NOTE: since num_external_hit_tokens and num_computed_tokens are both block aligned,
+            # need_to_allocate is also block aligned
             need_to_allocate -= 1
+
+            # since need_to_allocate is block aligned, we need subtract 1 to avoid onboarding the last block
+            if host_computed_blocks is not None:
+                host_computed_blocks = max(0, host_computed_blocks - 1)
+            if disk_computed_blocks is not None:
+                disk_computed_blocks = max(0, disk_computed_blocks - 1)
 
         if need_to_allocate > 0:
             self.pending_onboard_blocks[request.request_id] = (
