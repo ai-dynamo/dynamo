@@ -80,10 +80,7 @@ impl DistributedRuntime {
         let drt_arc = Arc::new(distributed_runtime.clone());
         let runtime_clone = distributed_runtime.runtime.clone();
         secondary.spawn(async move {
-            let config = match crate::config::RuntimeConfig::from_settings() {
-                Ok(config) => config,
-                Err(_) => crate::config::RuntimeConfig::default(),
-            };
+            let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
 
             if let Err(e) = crate::http_server::start_http_server(
                 &config.http_server_host,

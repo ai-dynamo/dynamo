@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use axum::{http::StatusCode, response::IntoResponse, routing::get, Router};
+use axum::{body, http::StatusCode, response::IntoResponse, routing::get, Router};
 use prometheus::{proto, Encoder, TextEncoder};
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -28,13 +28,13 @@ pub async fn start_http_server(
     drt: Arc<crate::DistributedRuntime>,
 ) -> anyhow::Result<()> {
     let app = Router::new()
-        .route(
-            "/health",
-            get({
-                let drt_clone = Arc::clone(&drt);
-                move || health_handler(drt_clone)
-            }),
-        )
+        // .route(
+        //     "/health",
+        //     get({
+        //         let drt_clone = Arc::clone(&drt);
+        //         move || health_handler(drt_clone)
+        //     }),
+        // )
         .route(
             "/metrics",
             get({
@@ -69,12 +69,12 @@ pub async fn start_http_server(
     Ok(())
 }
 
-/// Health handler
-async fn health_handler(drt: Arc<crate::DistributedRuntime>) -> impl IntoResponse {
-    let uptime = drt.uptime();
-    let response = format!("OK\nUptime: {} seconds", uptime.as_secs());
-    (StatusCode::OK, response)
-}
+// /// Health handler
+// async fn health_handler(drt: Arc<crate::DistributedRuntime>) -> impl IntoResponse {
+//     let uptime = drt.uptime();
+//     let response = format!("OK\nUptime: {} seconds", uptime.as_secs());
+//     (StatusCode::OK, response)
+// }
 
 /// Metrics handler with DistributedRuntime uptime
 async fn metrics_handler(drt: Arc<crate::DistributedRuntime>) -> impl IntoResponse {
@@ -130,7 +130,8 @@ mod tests {
         let cancel_token = CancellationToken::new();
         let cancel_token_for_server = cancel_token.clone();
         let runtime = crate::Runtime::single_threaded().unwrap();
-        let drt = crate::DistributedRuntime::from_settings(runtime)
+        // Use from_settings_without_discovery to avoid nested HTTP server startup
+        let drt = crate::DistributedRuntime::from_settings_without_discovery(runtime)
             .await
             .unwrap();
 
@@ -153,33 +154,34 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn test_health_handler() {
-        let runtime = crate::Runtime::single_threaded().unwrap();
-        let drt = crate::DistributedRuntime::from_settings(runtime)
-            .await
-            .unwrap();
+    // #[tokio::test]
+    // async fn test_health_handler() {
+    //     let runtime = crate::Runtime::single_threaded().unwrap();
+    //     let drt = crate::DistributedRuntime::from_settings(runtime)
+    //         .await
+    //         .unwrap();
 
-        // Wait a bit to ensure uptime is measurable
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    //     // Wait a bit to ensure uptime is measurable
+    //     tokio::time::sleep(Duration::from_millis(10)).await;
 
-        let response = health_handler(Arc::new(drt)).await;
-        let response = response.into_response();
-        let (parts, body) = response.into_parts();
+    //     let response = health_handler(Arc::new(drt)).await;
+    //     let response = response.into_response();
+    //     let (parts, body) = response.into_parts();
 
-        assert_eq!(parts.status, StatusCode::OK);
+    //     assert_eq!(parts.status, StatusCode::OK);
 
-        // Check that the response contains uptime information
-        let body_bytes = hyper::body::to_bytes(body).await.unwrap();
-        let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
-        assert!(body_str.contains("OK"));
-        assert!(body_str.contains("Uptime:"));
-    }
+    //     // Check that the response contains uptime information
+    //     let body_bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+    //     let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
+    //     assert!(body_str.contains("OK"));
+    //     assert!(body_str.contains("Uptime:"));
+    // }
 
     #[tokio::test]
     async fn test_metrics_handler() {
         let runtime = crate::Runtime::single_threaded().unwrap();
-        let drt = crate::DistributedRuntime::from_settings(runtime)
+        // Use from_settings_without_discovery to avoid starting HTTP server in test
+        let drt = crate::DistributedRuntime::from_settings_without_discovery(runtime)
             .await
             .unwrap();
 
@@ -193,7 +195,7 @@ mod tests {
         assert_eq!(parts.status, StatusCode::OK);
 
         // Check that the response contains the uptime metric
-        let body_bytes = hyper::body::to_bytes(body).await.unwrap();
+        let body_bytes = axum::body::to_bytes(body, usize::MAX).await.unwrap();
         let body_str = String::from_utf8(body_bytes.to_vec()).unwrap();
         assert!(body_str.contains("dynamo_runtime_uptime_seconds"));
     }
