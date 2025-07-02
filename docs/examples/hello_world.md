@@ -116,7 +116,7 @@ The following are the specific commands for the hello world example:
 
 ```bash
 # Set your dynamo root directory
-cd <root dynamo folder>
+cd <root-dynamo-folder>
 export PROJECT_ROOT=$(pwd)
 
 # Configure environment variables (see operator_deployment.md for details)
