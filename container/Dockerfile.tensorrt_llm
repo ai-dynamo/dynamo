@@ -16,6 +16,8 @@
 ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
 ARG BASE_IMAGE_TAG="25.05-py3"
 ARG RELEASE_BUILD
+ARG RUNTIME_IMAGE="nvcr.io/nvidia/pytorch"
+ARG RUNTIME_IMAGE_TAG="25.05-py3"
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -217,6 +219,17 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN mkdir /opt/dynamo && \
     uv venv /opt/dynamo/venv --python 3.12
 
+# Activate virtual environment
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+# Install NIXL Python module
+RUN cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl
+
+# Install the wheel
+# TODO: Move NIXL wheel install to the wheel_builder stage
+RUN uv pip install /workspace/wheels/nixl/*.whl
+
 ###################################
 ####### WHEEL BUILD STAGE #########
 ###################################
@@ -348,5 +361,110 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
 # FIXME: May want a modification with dynamo banner on entry
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
+CMD []
+
+####################################
+########## Runtime Image ###########
+####################################
+
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
+
+WORKDIR /workspace
+ENV DYNAMO_HOME=/workspace
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+
+# Install build-essential and python3-dev as apt dependencies
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential \
+        python3-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+### COPY BINDINGS ###
+# Copy all bindings (wheels, lib, include) from dev image
+COPY --from=dev /opt/dynamo/bindings /opt/dynamo/bindings
+### COPY NATS & ETCD ###
+# Copy nats and etcd from build image
+COPY --from=build /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=build /usr/local/bin/etcd/ /usr/local/bin/etcd/
+ENV PATH=/usr/local/bin/etcd/:$PATH
+
+# Copy TensorRT-LLM wheel context if it exists
+COPY --from=trtllm_wheel . /trtllm_wheel/
+
+# Copy UCX from build image as plugin for NIXL
+# Copy NIXL source from build image (required for NIXL plugins)
+COPY --from=build /usr/local/ucx /usr/local/ucx
+COPY --from=build /usr/local/nixl /usr/local/nixl
+ARG ARCH_ALT
+ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins
+ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:$LD_LIBRARY_PATH
+
+# Setup the python environment
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+RUN uv venv $VIRTUAL_ENV --python 3.12 && \
+    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
+
+# Common dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
+
+# Install test dependencies
+#TODO: Remove this once we have a functional dev image built on top of the runtime image
+RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
+
+#TODO: Remove this once we have a functional dev image built on top of the runtime image
+COPY . /workspace
+RUN uv pip install /workspace/benchmarks
+
+# Install TensorRT-LLM (same as in build stage)
+ARG HAS_TRTLLM_CONTEXT=0
+ARG TENSORRTLLM_PIP_WHEEL="tensorrt-llm"
+ARG TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
+
+# TODO: Currently, ABI compatibility issues with TRTLLM wheel and NGC PyTorch prevent us
+# from using the TRTLLM wheel in a uv venv. Once the issues are resolved, we can
+# use uv to install TensorRT-LLM wheel within the uv venv.
+# Note: TensorRT needs to be uninstalled before installing the TRTLLM wheel
+# because there might be mismatched versions of TensorRT between the NGC PyTorch
+# and the TRTLLM wheel.
+RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
+    pip uninstall -y tensorrt && \
+    if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
+        # Install from local wheel directory in build context
+        WHEEL_FILE=$(find /trtllm_wheel -name "*.whl" | head -n 1); \
+        if [ -n "$WHEEL_FILE" ]; then \
+            pip install "$WHEEL_FILE"; \
+        else \
+            echo "No wheel file found in /trtllm_wheel directory."; \
+            exit 1; \
+        fi; \
+    else \
+         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
+         pip install --index-url "${TENSORRTLLM_INDEX_URL}" \
+         --extra-index-url https://pypi.org/simple \
+         "${TENSORRTLLM_PIP_WHEEL}" ; \
+    fi
+
+# Install the wheels and symlink executables to /usr/local/bin so dynamo components can use them
+# Dynamo components currently do not have the VIRTUAL_ENV in their PATH, so we need to symlink the executables
+# Copy Dynamo wheels into wheelhouse
+COPY --from=dev /workspace/wheels/nixl/*.whl wheelhouse/
+COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
+RUN uv pip install ai-dynamo --find-links wheelhouse && \
+    uv pip install nixl --find-links wheelhouse && \
+    ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/
+
+# Copy TensorRT-LLM environment setup script
+COPY --from=dev /usr/local/bin/set_trtllm_env.sh /usr/local/bin/set_trtllm_env.sh
+
+# Copy launch banner
+RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
+    sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
+    echo "cat ~/.launch_screen" >> ~/.bashrc
+
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
