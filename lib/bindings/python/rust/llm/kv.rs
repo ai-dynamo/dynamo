@@ -792,12 +792,12 @@ impl PyForwardPassMetrics {
 #[pymethods]
 impl PyWorkerStats {
     #[new]
-    #[pyo3(signature = (data_parallel_rank, request_active_slots, request_total_slots, num_requests_waiting))]
+    #[pyo3(signature = (request_active_slots, request_total_slots, num_requests_waiting, data_parallel_rank=None))]
     fn new(
-        data_parallel_rank: Option<u32>,
         request_active_slots: u64,
         request_total_slots: u64,
         num_requests_waiting: u64,
+        data_parallel_rank: Option<u32>,
     ) -> Self {
         Self(WorkerStats {
             data_parallel_rank,
