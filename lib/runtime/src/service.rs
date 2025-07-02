@@ -104,10 +104,18 @@ impl ServiceClient {
         subject: impl Into<String>,
         payload: impl Into<Bytes>,
     ) -> Result<Message> {
+        let subject = subject.into();
+        let payload = payload.into();
+        println!("*** unary: subject={}, payload={:?}", subject, payload);
+        tracing::info!(
+            "*** unary: subject={}, payload={:?}",
+            subject,
+            payload
+        );
         let response = self
             .nats_client
             .client()
-            .request(subject.into(), payload.into())
+            .request(subject, payload)
             .await?;
         Ok(response)
     }
