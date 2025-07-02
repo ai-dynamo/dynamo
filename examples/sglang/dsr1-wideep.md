@@ -85,73 +85,76 @@ export NATS_SERVER=nats://HEAD_PREFILL_NODE_IP:4222
 export ETCD_ENDPOINTS=http://HEAD_PREFILL_NODE_IP:2379
 ```
 
-6. Configure each configuration file to use the correct `dist-init-addr`, and `node-rank`
-
-Each container contains the configuration file in `configs/dsr1-wideep.yaml`. For our example, we will make the following changes:
-
-On the prefill head node, `vim` into the configs and change the following section of the `SGLangWorker`:
-
-```yaml
-SGLangWorker:
-    ...
-    dist-init-addr: HEAD_PREFILL_NODE_IP
-    nnodes: 2
-    node-rank: 0
-    ...
-```
-
-On the other prefill node (since this example has 2 prefill nodes), change the following section of the `SGLangWorker`:
-
-```yaml
-SGLangWorker:
-    ...
-    dist-init-addr: HEAD_PREFILL_NODE_IP
-    nnodes: 2
-    node-rank: 1
-    ...
-```
-
-On the decode head node, `vim` into the configs and change the following section of the `SGLangDecodeWorker`:
-
-```yaml
-SGLangDecodeWorker:
-    ...
-    dist-init-addr: HEAD_DECODE_NODE_IP
-    nnodes: 4
-    node-rank: 0
-    ...
-```
-
-On the other decode nodes (this example has 4 decode nodes), change the following section of the `SGLangDecodeWorker`:
-
-```yaml
-SGLangDecodeWorker:
-    ...
-    dist-init-addr: HEAD_DECODE_NODE_IP
-    nnodes: 4
-    # depending on which node this will be 1, 2, and 3
-    node-rank: 1
-```
-
-7. Start up the workers using the following commands
-
-On prefill head node
+6. Run the ingress and prefill worker
 
 ```bash
-dynamo serve graphs.agg:Frontend -f configs/dsr1-wideep.yaml
+# run ingress
+dynamo run in=http out=dyn &
+# run prefill worker
+python3 components/worker_inc.py \
+  --model-path /model/ \
+  --served-model-name deepseek-ai/DeepSeek-R1 \
+  --skip-tokenizer-init \
+  --disaggregation-mode prefill \
+  --disaggregation-transfer-backend nixl \
+  --disaggregation-bootstrap-port 30001 \
+  --dist-init-addr HEAD_PREFILL_NODE_IP:29500 \
+  --nnodes 4 \
+  --node-rank 0 \
+  --tp-size 32 \
+  --dp-size 32 \
+  --enable-dp-attention \
+  --decode-log-interval 1 \
+  --enable-deepep-moe \
+  --page-size 1 \
+  --trust-remote-code \
+  --moe-dense-tp-size 1 \
+  --enable-dp-lm-head \
+  --disable-radix-cache \
+  --watchdog-timeout 1000000 \
+  --enable-two-batch-overlap \
+  --deepep-mode normal \
+  --mem-fraction-static 0.85 \
+  --deepep-config /configs/deepep.json \
+  --ep-num-redundant-experts 32 \
+  --ep-dispatch-algorithm dynamic \
+  --eplb-algorithm deepseek
 ```
 
-On prefill child node
+On the other prefill node (since this example has 4 total prefill nodes), run the same command but change `--node-rank` to 1,2, and 3
+
+7. Run the decode worker on the head decode node
 
 ```bash
-dynamo serve graphs.agg:Frontend -f configs/dsr1-wideep.yaml --service-name SGLangWorker
+python3 components/decode_worker_inc.py \
+  --model-path /model/ \
+  --served-model-name deepseek-ai/DeepSeek-R1 \
+  --skip-tokenizer-init \
+  --disaggregation-mode decode \
+  --disaggregation-transfer-backend nixl \
+  --disaggregation-bootstrap-port 30001 \
+  --dist-init-addr HEAD_DECODE_NODE_IP:29500 \
+  --nnodes 9 \
+  --node-rank 0 \
+  --tp-size 72 \
+  --dp-size 72 \
+  --enable-dp-attention \
+  --decode-log-interval 1 \
+  --enable-deepep-moe \
+  --page-size 1 \
+  --trust-remote-code \
+  --moe-dense-tp-size 1 \
+  --enable-dp-lm-head \
+  --disable-radix-cache \
+  --watchdog-timeout 1000000 \
+  --enable-two-batch-overlap \
+  --deepep-mode low_latency \
+  --mem-fraction-static 0.835 \
+  --ep-num-redundant-experts 32 \
+  --cuda-graph-bs 256
 ```
 
-On all decode nodes
-
-```bash
-dynamo serve graphs.disagg:Frontend -f configs/dsr1-wideep.yaml --service-name SGLangDecodeWorker
-```
+On the other decode nodes (this example has 9 total decode nodes), run the same command but change `--node-rank` to 1, 2, 3, 4, 5, 6, 7, and 8
 
 8. Run the warmup script to warm up the model
 
