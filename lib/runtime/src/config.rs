@@ -191,6 +191,15 @@ pub fn use_local_timezone() -> bool {
     env_is_truthy("DYN_LOG_USE_LOCAL_TZ")
 }
 
+/// Check whether health and metrics HTTP server is enabled (default is true)
+/// Set the `DYN_HEALTH_METRICS_SERVER` environment variable to "0" or "false" to disable
+pub fn health_metrics_server_enabled() -> bool {
+    match std::env::var("DYN_HEALTH_METRICS_SERVER") {
+        Ok(val) => !matches!(val.to_lowercase().as_str(), "0" | "false" | "off" | "no"),
+        Err(_) => true, // Default to enabled
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +278,35 @@ mod tests {
                 Ok(())
             },
         )
+    }
+
+    #[test]
+    fn test_health_metrics_server_enabled() {
+        // Test default (should be enabled)
+        temp_env::with_vars(vec![("DYN_HEALTH_METRICS_SERVER", None::<&str>)], || {
+            assert!(health_metrics_server_enabled());
+        });
+
+        // Test explicitly enabled
+        temp_env::with_vars(vec![("DYN_HEALTH_METRICS_SERVER", Some("1"))], || {
+            assert!(health_metrics_server_enabled());
+        });
+
+        temp_env::with_vars(vec![("DYN_HEALTH_METRICS_SERVER", Some("true"))], || {
+            assert!(health_metrics_server_enabled());
+        });
+
+        // Test disabled
+        temp_env::with_vars(vec![("DYN_HEALTH_METRICS_SERVER", Some("0"))], || {
+            assert!(!health_metrics_server_enabled());
+        });
+
+        temp_env::with_vars(vec![("DYN_HEALTH_METRICS_SERVER", Some("false"))], || {
+            assert!(!health_metrics_server_enabled());
+        });
+
+        temp_env::with_vars(vec![("DYN_HEALTH_METRICS_SERVER", Some("off"))], || {
+            assert!(!health_metrics_server_enabled());
+        });
     }
 }
