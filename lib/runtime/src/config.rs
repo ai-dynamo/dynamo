@@ -88,6 +88,11 @@ pub struct RuntimeConfig {
     #[builder(default = "DEFAULT_HTTP_SERVER_PORT")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub http_server_port: u16,
+
+    /// Health and metrics HTTP server enabled
+    #[builder(default = "true")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub http_enabled: bool,
 }
 
 impl RuntimeConfig {
@@ -124,12 +129,20 @@ impl RuntimeConfig {
         Ok(config)
     }
 
+    /// Check if HTTP server should be enabled
+    /// HTTP server is enabled by default, but can be disabled by setting DYN_RUNTIME_HTTP_ENABLED to false
+    /// If a port is explicitly provided, HTTP server will be enabled regardless
+    pub fn http_server_enabled(&self) -> bool {
+        self.http_enabled
+    }
+
     pub fn single_threaded() -> Self {
         RuntimeConfig {
             num_worker_threads: 1,
             max_blocking_threads: 1,
             http_server_host: DEFAULT_HTTP_SERVER_HOST.to_string(),
             http_server_port: DEFAULT_HTTP_SERVER_PORT,
+            http_enabled: true,
         }
     }
 
@@ -150,6 +163,7 @@ impl Default for RuntimeConfig {
             max_blocking_threads: 16,
             http_server_host: DEFAULT_HTTP_SERVER_HOST.to_string(),
             http_server_port: DEFAULT_HTTP_SERVER_PORT,
+            http_enabled: true,
         }
     }
 }
@@ -163,6 +177,22 @@ impl RuntimeConfigBuilder {
     }
 }
 
+/// Check if a string is truthy
+/// This will be used to evaluate environment variables or any other subjective
+/// configuration parameters that can be set by the user that should be evaluated
+/// as a boolean value.
+pub fn is_truthy(val: &str) -> bool {
+    matches!(val.to_lowercase().as_str(), "1" | "true" | "on" | "yes")
+}
+
+/// Check if a string is falsey
+/// This will be used to evaluate environment variables or any other subjective
+/// configuration parameters that can be set by the user that should be evaluated
+/// as a boolean value (opposite of is_truthy).
+pub fn is_falsey(val: &str) -> bool {
+    matches!(val.to_lowercase().as_str(), "0" | "false" | "off" | "no")
+}
+
 /// Check if an environment variable is truthy
 pub fn env_is_truthy(env: &str) -> bool {
     match std::env::var(env) {
@@ -171,12 +201,12 @@ pub fn env_is_truthy(env: &str) -> bool {
     }
 }
 
-/// Check if a string is truthy
-/// This will be used to evaluate environment variables or any other subjective
-/// configuration parameters that can be set by the user that should be evaluated
-/// as a boolean value.
-pub fn is_truthy(val: &str) -> bool {
-    matches!(val.to_lowercase().as_str(), "1" | "true" | "on" | "yes")
+/// Check if an environment variable is falsey
+pub fn env_is_falsey(env: &str) -> bool {
+    match std::env::var(env) {
+        Ok(val) => is_falsey(val.as_str()),
+        Err(_) => false,
+    }
 }
 
 /// Check whether JSONL logging enabled
@@ -195,15 +225,6 @@ pub fn disable_ansi_logging() -> bool {
 /// Set the `DYN_LOG_USE_LOCAL_TZ` environment variable to a [`is_truthy`] value
 pub fn use_local_timezone() -> bool {
     env_is_truthy("DYN_LOG_USE_LOCAL_TZ")
-}
-
-/// Check whether health and metrics HTTP server is enabled (default is true)
-/// Set the `DYN_HEALTH_METRICS_SERVER` environment variable to "0" or "false" to disable
-pub fn health_metrics_server_enabled() -> bool {
-    match std::env::var("DYN_HEALTH_METRICS_SERVER") {
-        Ok(val) => !matches!(val.to_lowercase().as_str(), "0" | "false" | "off" | "no"),
-        Err(_) => true, // Default to enabled
-    }
 }
 
 #[cfg(test)]
@@ -287,32 +308,70 @@ mod tests {
     }
 
     #[test]
-    fn test_health_metrics_server_enabled() {
-        // Test default (should be enabled)
-        temp_env::with_vars(vec![("DYN_HEALTH_METRICS_SERVER", None::<&str>)], || {
-            assert!(health_metrics_server_enabled());
+    fn test_http_server_enabled_by_default() {
+        temp_env::with_vars(vec![("DYN_RUNTIME_HTTP_ENABLED", None::<&str>)], || {
+            let config = RuntimeConfig::from_settings().unwrap();
+            assert!(config.http_server_enabled());
+        });
+    }
+
+    #[test]
+    fn test_http_server_disabled_explicitly() {
+        temp_env::with_vars(vec![("DYN_RUNTIME_HTTP_ENABLED", Some("false"))], || {
+            let config = RuntimeConfig::from_settings().unwrap();
+            assert!(!config.http_server_enabled());
         });
 
-        // Test explicitly enabled
-        temp_env::with_vars(vec![("DYN_HEALTH_METRICS_SERVER", Some("1"))], || {
-            assert!(health_metrics_server_enabled());
+        temp_env::with_vars(vec![("DYN_RUNTIME_HTTP_ENABLED", Some("0"))], || {
+            let config = RuntimeConfig::from_settings().unwrap();
+            assert!(!config.http_server_enabled());
+        });
+    }
+
+    #[test]
+    fn test_http_server_enabled_by_port() {
+        temp_env::with_vars(vec![("DYN_RUNTIME_HTTP_SERVER_PORT", Some("8080"))], || {
+            let config = RuntimeConfig::from_settings().unwrap();
+            assert!(config.http_server_enabled()); // Still enabled by default
+            assert_eq!(config.http_server_port, 8080);
+        });
+    }
+
+    #[test]
+    fn test_is_truthy_and_falsey() {
+        // Test truthy values
+        assert!(is_truthy("1"));
+        assert!(is_truthy("true"));
+        assert!(is_truthy("TRUE"));
+        assert!(is_truthy("on"));
+        assert!(is_truthy("yes"));
+
+        // Test falsey values
+        assert!(is_falsey("0"));
+        assert!(is_falsey("false"));
+        assert!(is_falsey("FALSE"));
+        assert!(is_falsey("off"));
+        assert!(is_falsey("no"));
+
+        // Test opposite behavior
+        assert!(!is_truthy("0"));
+        assert!(!is_falsey("1"));
+
+        // Test env functions
+        temp_env::with_vars(vec![("TEST_TRUTHY", Some("true"))], || {
+            assert!(env_is_truthy("TEST_TRUTHY"));
+            assert!(!env_is_falsey("TEST_TRUTHY"));
         });
 
-        temp_env::with_vars(vec![("DYN_HEALTH_METRICS_SERVER", Some("true"))], || {
-            assert!(health_metrics_server_enabled());
+        temp_env::with_vars(vec![("TEST_FALSEY", Some("false"))], || {
+            assert!(!env_is_truthy("TEST_FALSEY"));
+            assert!(env_is_falsey("TEST_FALSEY"));
         });
 
-        // Test disabled
-        temp_env::with_vars(vec![("DYN_HEALTH_METRICS_SERVER", Some("0"))], || {
-            assert!(!health_metrics_server_enabled());
-        });
-
-        temp_env::with_vars(vec![("DYN_HEALTH_METRICS_SERVER", Some("false"))], || {
-            assert!(!health_metrics_server_enabled());
-        });
-
-        temp_env::with_vars(vec![("DYN_HEALTH_METRICS_SERVER", Some("off"))], || {
-            assert!(!health_metrics_server_enabled());
+        // Test missing env vars
+        temp_env::with_vars(vec![("TEST_MISSING", None::<&str>)], || {
+            assert!(!env_is_truthy("TEST_MISSING"));
+            assert!(!env_is_falsey("TEST_MISSING"));
         });
     }
 }

@@ -77,12 +77,11 @@ impl DistributedRuntime {
         };
 
         // Start HTTP server for health and metrics (if enabled)
-        if crate::config::health_metrics_server_enabled() {
+        let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
+        if config.http_server_enabled() {
             let drt_arc = Arc::new(distributed_runtime.clone());
             let runtime_clone = distributed_runtime.runtime.clone();
             secondary.spawn(async move {
-                let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
-
                 if let Err(e) = crate::http_server::start_http_server(
                     &config.http_server_host,
                     config.http_server_port,
@@ -98,7 +97,7 @@ impl DistributedRuntime {
             });
         } else {
             tracing::debug!(
-                "Health and metrics HTTP server is disabled via DYN_HEALTH_METRICS_SERVER"
+                "Health and metrics HTTP server is disabled via DYN_RUNTIME_HTTP_ENABLED"
             );
         }
 
