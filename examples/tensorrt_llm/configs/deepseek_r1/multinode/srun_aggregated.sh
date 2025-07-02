@@ -64,7 +64,7 @@ srun \
   --oversubscribe \
   --container-image "${IMAGE}" \
   --container-mounts "${MOUNTS}" \
-  --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE,TASK \
+  --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE,TASK,ENGINE_CONFIG \
   --verbose \
   --label \
   -A "${ACCOUNT}" \

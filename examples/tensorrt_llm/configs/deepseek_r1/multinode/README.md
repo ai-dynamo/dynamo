@@ -44,7 +44,7 @@ For simplicity of the example, we will make some assumptions about your slurm cl
    will only need 4 nodes. If you customize the configurations to require a
    different number of nodes, you can adjust the number of allocated nodes
    accordingly. Pre-allocating nodes is technically not a requirement,
-   but it makes iterations of testing/experimenting easier when
+   but it makes iterations of testing/experimenting easier.
 
    Make sure to set your `PARTITION` and `ACCOUNT` according to your slurm cluster setup:
     ```bash
