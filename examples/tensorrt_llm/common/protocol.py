@@ -20,6 +20,33 @@ from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.serve.openai_protocol import DisaggregatedParams
 
 
+class TokenRangeRetentionConfig(BaseModel):
+    token_start: int = Field(..., description="Start token index for retention")
+    token_end: Optional[int] = Field(
+        None, description="End token index for retention (exclusive)"
+    )
+    priority: int = Field(..., description="Priority level for retention")
+    duration_ms: Optional[int] = Field(
+        None, description="Duration in milliseconds for retention"
+    )
+
+
+class KvCacheRetentionConfig(BaseModel):
+    token_range_retention_configs: Optional[List[TokenRangeRetentionConfig]] = Field(
+        None, description="List of token range retention configurations"
+    )
+    decode_retention_priority: Optional[int] = Field(
+        None, description="Priority for decode retention"
+    )
+    decode_duration_ms: Optional[int] = Field(
+        None, description="Duration in milliseconds for decode retention"
+    )
+    transfer_mode: Optional[str] = Field(
+        None, description="Transfer mode: 'DRAM', 'GDS', or 'POSIX_DEBUG_FALLBACK'"
+    )
+    directory: Optional[str] = Field(None, description="Directory for KV cache storage")
+
+
 class Tokens(BaseModel):
     tokens: list[int]
 
@@ -102,3 +129,4 @@ class TRTLLMWorkerRequest(BaseModel):
     annotations: List[str] = Field(default_factory=list)
     estimated_prefix_hit_num_blocks: Optional[int] = None
     disaggregated_params: Optional[DisaggregatedParams] = Field(default=None)
+    kv_cache_retention_config: Optional[KvCacheRetentionConfig] = Field(default=None)

@@ -288,6 +288,73 @@ See [client](../llm/README.md#client) section to learn how to send request to th
 
 NOTE: To send a request to a multi-node deployment, target the node which deployed the `Frontend` component.
 
+### KV Cache Retention Configuration
+
+TensorRT-LLM supports KV cache retention configuration to control how key-value cache is managed during inference. This feature allows you to specify retention policies for different token ranges and control the duration and priority of cache retention.
+
+#### Configuration Options
+
+The KV cache retention configuration supports the following parameters:
+
+- **token_range_retention_configs**: List of configurations for specific token ranges in the input sequence.
+  - `token_start`: Starting token index for a range in input sequence.
+  - `token_end`: Ending token index for a range range in input sequence. If not provided, the range covers for all the remaining sequence tokens.
+  - `priority`: Retention priority (higher values = higher priority)
+  - `duration_ms`: How long to retain the cache in milliseconds
+- **decode_retention_priority**: Priority for decode phase cache retention
+- **decode_duration_ms**: Duration to retain decode cache in milliseconds
+- **transfer_mode**: Cache transfer mode between nodes
+- **directory**: Directory for persistent cache storage
+
+[Priority-Based KV Cache Eviction](https://developer.nvidia.com/blog/introducing-new-kv-cache-reuse-optimizations-in-nvidia-tensorrt-llm/#priority-based_kv_cache_eviction) describes the feature in further detail.
+
+#### Example Usage
+
+To send a request with KV cache retention configuration, include the `kv_cache_retention_config` field in your request:
+
+```bash
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Explain quantum computing in detail, covering fundamental concepts like quantum bits (qubits), superposition, entanglement, quantum gates, and quantum algorithms. Describe how quantum computers differ from classical computers, the principles of quantum mechanics that enable quantum computing, and discuss major quantum algorithms such as Shors algorithm for factoring and Grovers algorithm for search. Include information about quantum error correction, the current state of quantum computing technology, and potential applications in cryptography, drug discovery, optimization problems, and artificial intelligence. Also explain the challenges facing quantum computing development, including decoherence, scalability issues, and the race for quantum supremacy."
+      }
+    ],
+    "max_tokens": 500,
+    "temperature": 0.6,
+    "nvext": {
+      "kv_cache_retention_config": {
+        "token_range_retention_configs": [
+          {
+            "token_start": 0,
+            "token_end": 20,
+            "priority": 95,
+            "duration_ms": 120000
+          },
+          {
+            "token_start": 20,
+            "token_end": 100,
+            "priority": 75,
+            "duration_ms": 60000
+          },
+          {
+            "token_start": 100,
+            "priority": 50,
+            "duration_ms": 30000
+          }
+        ],
+        "decode_retention_priority": 85,
+        "decode_duration_ms": 180000,
+        "transfer_mode": "DRAM",
+        "directory": "/var/cache/dynamo/kv"
+      }
+    }
+  }'
+```
+
 ### Close deployment
 
 See [close deployment](../../docs/guides/dynamo_serve.md#close-deployment) section to learn about how to close the deployment.

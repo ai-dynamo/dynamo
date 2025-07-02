@@ -471,6 +471,55 @@ Execute the following to load the TensorRT-LLM model specified in the configurat
 dynamo-run in=http out=trtllm TinyLlama/TinyLlama-1.1B-Chat-v1.0
 ```
 
+**KV Cache Retention Configuration**
+
+You can pass KV cache retention configuration in your curl requests to control how the KV cache is managed during generation. This is useful for optimizing memory usage and performance in scenarios where you want to retain specific parts of the KV cache for longer periods.
+
+Example curl request with KV cache retention config:
+
+```bash
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Explain quantum computing in detail, covering fundamental concepts like quantum bits (qubits), superposition, entanglement, quantum gates, and quantum algorithms. Describe how quantum computers differ from classical computers, the principles of quantum mechanics that enable quantum computing, and discuss major quantum algorithms such as Shors algorithm for factoring and Grovers algorithm for search. Include information about quantum error correction, the current state of quantum computing technology, and potential applications in cryptography, drug discovery, optimization problems, and artificial intelligence. Also explain the challenges facing quantum computing development, including decoherence, scalability issues, and the race for quantum supremacy."
+      }
+    ],
+    "max_tokens": 500,
+    "temperature": 0.6,
+    "nvext": {
+      "kv_cache_retention_config": {
+        "token_range_retention_configs": [
+          {
+            "token_start": 0,
+            "token_end": 20,
+            "priority": 95,
+            "duration_ms": 120000
+          },
+          {
+            "token_start": 20,
+            "token_end": 100,
+            "priority": 75,
+            "duration_ms": 60000
+          },
+          {
+            "token_start": 100,
+            "priority": 50,
+            "duration_ms": 30000
+          }
+        ],
+        "decode_retention_priority": 85,
+        "decode_duration_ms": 180000,
+        "transfer_mode": "DRAM",
+        "directory": "/var/cache/dynamo/kv"
+      }
+    }
+  }'
+```
+
 #### Echo Engines
 
 Dynamo includes two echo engines for testing and debugging purposes:

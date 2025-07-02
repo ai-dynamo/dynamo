@@ -19,6 +19,9 @@ use serde::{Deserialize, Serialize};
 use super::{SamplingOptions, StopConditions};
 use crate::protocols::TokenIdType;
 
+// Add this import for KV cache retention config
+use crate::protocols::openai::nvext::KvCacheRetentionConfig;
+
 /// [`PreprocessedRequest`] is the internal representation of an LLM request. The [`dynamo.llm-preprocessor`]
 /// crate is responsible for converting request from the public APIs to this internal representation.
 #[derive(Serialize, Deserialize, Debug, Clone, Builder)]
@@ -55,6 +58,10 @@ pub struct PreprocessedRequest {
     /// Estimated number of prefix hit tokens (only used in kv aware routing)
     #[builder(default)]
     pub estimated_prefix_hit_num_blocks: Option<u32>,
+
+    /// KV Cache retention configuration
+    #[builder(default)]
+    pub kv_cache_retention_config: Option<KvCacheRetentionConfig>,
 }
 
 impl PreprocessedRequest {
