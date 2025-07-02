@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-import time
 from typing import Optional
 
 import pytest
@@ -24,14 +23,13 @@ except ImportError:
 try:
     from dynamo.llm import BlockManager
     from dynamo.llm.vllm_integration.kv_cache_manager import KvbmCacheManager
+
     KVBM_NOT_AVAILABLE = False
-except:
+except ImportError:
     KVBM_NOT_AVAILABLE = True
 
-def new_kv_cache_manager(
-    num_blocks: int = 11,
-    page_size: int = 16
-):
+
+def new_kv_cache_manager(num_blocks: int = 11, page_size: int = 16):
     """
     Creates a new KVBM cache manager.
 
@@ -89,7 +87,10 @@ def make_kv_cache_config(block_size: int, num_blocks: int) -> KVCacheConfig:
     )
 
 
-@pytest.mark.skipif(VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE, reason="VLLM not available or KVBM not available")
+@pytest.mark.skipif(
+    VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE,
+    reason="VLLM not available or KVBM not available",
+)
 def test_prefill():
     """
     Tests the KvbmCacheManager's prefill functionality.
@@ -282,7 +283,10 @@ def test_prefill_plp():
     manager.free(req2)
 
 
-@pytest.mark.skipif(VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE, reason="VLLM not available or KVBM not available")
+@pytest.mark.skipif(
+    VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE,
+    reason="VLLM not available or KVBM not available",
+)
 def test_decode():
     manager = new_kv_cache_manager()
 
@@ -350,7 +354,10 @@ def test_decode():
     manager.free_block_hashes(req0)
 
 
-@pytest.mark.skipif(VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE, reason="VLLM not available or KVBM not available")
+@pytest.mark.skipif(
+    VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE,
+    reason="VLLM not available or KVBM not available",
+)
 def test_evict():
     manager = new_kv_cache_manager()
     used_blocks = set()
@@ -416,10 +423,13 @@ def test_evict():
     # assert manager.block_pool.free_block_queue.num_free_blocks == 7
 
 
-@pytest.mark.skipif(VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE, reason="VLLM not available or KVBM not available")
+@pytest.mark.skipif(
+    VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE,
+    reason="VLLM not available or KVBM not available",
+)
 def test_hash_block_correct_reuse():
     """
-    This tests when a previously cached block is reused as a new block, 
+    This tests when a previously cached block is reused as a new block,
     its hash metadata should be correctly reset.
     """
     block_size = 16
@@ -467,7 +477,10 @@ def test_hash_block_correct_reuse():
     assert blocks.blocks[1].block_hash is None
 
 
-@pytest.mark.skipif(VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE, reason="VLLM not available or KVBM not available")
+@pytest.mark.skipif(
+    VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE,
+    reason="VLLM not available or KVBM not available",
+)
 def test_computed_blocks_not_evicted():
     """
     Test that the computed blocks are not evicted when getting new blocks
@@ -564,7 +577,10 @@ def _test_mm_prefix_caching():
     pass
 
 
-@pytest.mark.skipif(VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE, reason="VLLM not available or KVBM not available")
+@pytest.mark.skipif(
+    VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE,
+    reason="VLLM not available or KVBM not available",
+)
 def test_cache_key_salting():
     """
     This tests that cache salts are applied during hashing and the cache
@@ -635,7 +651,10 @@ def test_cache_key_salting():
     """
 
 
-@pytest.mark.skipif(VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE, reason="VLLM not available or KVBM not available")
+@pytest.mark.skipif(
+    VLLM_NOT_AVAILABLE or KVBM_NOT_AVAILABLE,
+    reason="VLLM not available or KVBM not available",
+)
 def test_prefill_not_enough_free_blocks_with_computed_blocks():
     """
     This is a unit test that tests the correctness of the allocate_slots
@@ -757,6 +776,7 @@ def _test_eagle_with_sliding_window():
     """NOTE: KVBM does not support spec decoding at the moment.
     Test Eagle behavior with sliding window."""
     pass
+
 
 @pytest.mark.skipif(KVBM_NOT_AVAILABLE, reason="KVBM not available")
 def test_kvbm_wrong_blocks_provided():

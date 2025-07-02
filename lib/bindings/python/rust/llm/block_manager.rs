@@ -97,7 +97,7 @@ impl BlockManager {
                         .map_err(to_pyerr)?,
                 );
             }
-    
+
             if leader.num_disk_blocks() > 0 {
                 tracing::info!("Using {} disk blocks", leader.num_disk_blocks());
                 config = config.disk_layout(
@@ -111,7 +111,15 @@ impl BlockManager {
             (Some(leader), rt)
         } else {
             tracing::info!("Leader not provided. Block transfer functionality will be disabled.");
-            (None, Arc::new(tokio::runtime::Builder::new_multi_thread().enable_all().build().map_err(to_pyerr)?))
+            (
+                None,
+                Arc::new(
+                    tokio::runtime::Builder::new_multi_thread()
+                        .enable_all()
+                        .build()
+                        .map_err(to_pyerr)?,
+                ),
+            )
         };
 
         let config = config.build().map_err(to_pyerr)?;

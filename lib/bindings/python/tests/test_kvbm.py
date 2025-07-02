@@ -15,6 +15,7 @@ from vllm.v1.request import Request, SamplingParams
 try:
     from dynamo.llm import BlockManager
     from dynamo.llm.vllm_integration.kv_cache_manager import KvbmCacheManager
+
     KVBM_NOT_AVAILABLE = False
 except ImportError:
     KVBM_NOT_AVAILABLE = True
@@ -23,6 +24,7 @@ pytestmark = pytest.mark.pre_merge
 
 PAGE_SIZE = 4
 DEVICE_NUM_BLOCKS = 16
+
 
 def new_request():
     return Request(
