@@ -439,7 +439,7 @@ vllm uses [ray](https://docs.vllm.ai/en/latest/serving/distributed_serving.html#
 
 Here is an example on two 8x nodes:
 - Leader node: `ray start --head --port=6379`
-- Each follower node: `ray start --address='<HEAD_NODE_IP>:6379'`
+- Each follower node: `ray start --address=<HEAD_NODE_IP>:6379`
 - Leader node: `dynamo-run out=vllm ~/llms/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 16`
 
 The `--tensor-parallel-size` parameter is the total number of GPUs in the cluster. This is often constrained by a model dimension such as being a divisor of the number of attention heads.
