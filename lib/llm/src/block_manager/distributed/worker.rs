@@ -181,18 +181,6 @@ impl KvbmWorker {
 
         let layout_builder_clone = layout_builder.clone();
 
-        // let agent = build_agent(config.worker_id, )?;
-
-        // let transfer_context = Arc::new(TransferContext::new(
-        //     Arc::new(Some(agent)),
-        //     DeviceAllocator::new(config.device_id)
-        //         .unwrap()
-        //         .ctx()
-        //         .new_stream()
-        //         .unwrap(),
-        //     Handle::current(),
-        // ));
-
         let cancel_token = CancellationToken::new();
         let task = CriticalTaskExecutionHandle::new(
             move |cancel_token| {
