@@ -103,12 +103,6 @@ Dynamo Cloud acts as an orchestration layer between the end user and Kubernetes,
 You must have first followed the instructions in [deploy/cloud/helm/README.md](../../deploy/cloud/helm/README.md) to create your Dynamo cloud deployment.
 
 Make sure your dynamo cloud the `deploy_dynamo_cloud.sh --crds --interactive` script finished successfully.
-If you're using Istio (with a Gateway) or a Kubernetes Ingress controller, your service is already exposed externally, and port forwarding is not required.
-However, if you're running in a restricted or local environment without ingress access, you may still need to use kubectl port-forward to access the service.
-
-```bash
-kubectl port-forward svc/$DEPLOYMENT_NAME-frontend 3000:3000  -n ${NAMESPACE}
-```
 
 ### Now deploy your Hello World graph.
 
@@ -119,10 +113,20 @@ For details, please refer to the [Operator Deployment Guide](../../docs/guides/d
 # Set your dynamo root directory
 cd <root-dynamo-folder>
 export PROJECT_ROOT=$(pwd)
-export NAMESPACE=hello-world # the namespace you used to deploy dynamo.
-export DYNAMO_CLOUD=http://localhost:8080  # If using port-forward
-# or
-export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com  # If using Ingress/VirtualService
+export NAMESPACE=hello-world # the namespace you used to deploy Dynamo cloud to.
+```
+
+Pick your deployment destination.
+
+If local
+
+```bash
+export DYNAMO_CLOUD=http://localhost:8080
+```
+
+If kubernetes
+```bash
+export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com
 ```
 
 Export the [Dynamo Base Image](../../get_started.md#building-the-dynamo-base-image) you built during the prerequisites step as the `DYNAMO_IMAGE` environment variable.
@@ -146,20 +150,20 @@ dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME
 
 ### Testing the Deployment
 
-Once the deployment is complete, you can test it using:
+Once the deployment is complete, you can test it using commands below.
 
 ```bash
 # Find your frontend pod
 export FRONTEND_POD=$(kubectl get pods -n ${NAMESPACE} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
 
 # Forward the pod's port to localhost
-kubectl port-forward pod/$FRONTEND_POD 8000:8000 -n ${NAMESPACE}
+kubectl port-forward pod/$FRONTEND_POD 8000:3000 -n ${NAMESPACE}
 
 # Test the API endpoint
-curl -X 'POST' 'http://localhost:8000/generate' \
-    -H 'accept: text/event-stream' \
-    -H 'Content-Type: application/json' \
-    -d '{"text": "test"}'
+curl -N -X POST http://localhost:8000/generate \
+  -H "accept: text/event-stream" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "test"}'
 ```
 
 For more details on managing deployments, testing, and troubleshooting, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md).
