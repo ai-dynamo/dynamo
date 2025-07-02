@@ -207,23 +207,7 @@ export DYNAMO_CLOUD=http://localhost:8080  # If using port-forward
 # Build the Dynamo base image (see operator_deployment.md for details)
 export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
 
-# Build the service
-cd $PROJECT_ROOT/examples/multimodal
-DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk '{ print $NF }' | sed 's/\.$//')
-# For disaggregated serving:
-# DYNAMO_TAG=$(dynamo build graphs.disagg:Frontend | grep "Successfully built" |  awk '{ print $NF }' | sed 's/\.$//')
-
-# Deploy to Kubernetes
-export DEPLOYMENT_NAME=multimodal-agg
-# For aggregated serving with LLaVA:
-dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg-llava.yaml
-# For aggregated serving with Qwen2.5-VL:
-# dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg-qwen.yaml
-# For aggregated serving with Phi3V:
-# dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg-phi3v.yaml
-# For disaggregated serving:
-# export DEPLOYMENT_NAME=multimodal-disagg
-# dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/disagg.yaml
+# TODO: Apply Dynamo graph deployment for the example
 ```
 
 **Note**: To avoid rate limiting from unauthenticated requests to HuggingFace (HF), you can provide your `HF_TOKEN` as a secret in your deployment. See the [operator deployment guide](../../docs/guides/dynamo_deploy/operator_deployment.md#referencing-secrets-in-your-deployment) for instructions on referencing secrets like `HF_TOKEN` in your deployment configuration.
