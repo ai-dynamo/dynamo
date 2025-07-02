@@ -46,10 +46,11 @@
 //! implementation of the main block manager.
 
 use crate::mocker::evictor::LRUEvictor;
-use crate::mocker::protocols::{MoveBlock, PrefillCost, UniqueBlock};
+use crate::mocker::protocols::{MoveBlock, MoveBlockResponse, PrefillCost, UniqueBlock};
 use crate::mocker::sequence::ActiveSequence;
 use derive_getters::Getters;
 use std::collections::{HashMap, HashSet};
+use tokio::sync::mpsc;
 
 #[derive(Getters)]
 pub struct KvManager {
@@ -57,17 +58,27 @@ pub struct KvManager {
     max_capacity: usize,
 
     #[getter(copy)]
-    block_size: u32,
+    block_size: usize,
 
     active_blocks: HashMap<UniqueBlock, usize>,
 
     inactive_blocks: LRUEvictor<UniqueBlock>,
 
     all_blocks: HashSet<UniqueBlock>,
+
+    move_block_response_tx: Option<mpsc::UnboundedSender<MoveBlockResponse>>,
 }
 
 impl KvManager {
-    pub fn new(max_capacity: usize, block_size: u32) -> Self {
+    pub fn new(max_capacity: usize, block_size: usize) -> Self {
+        Self::new_with_sender(max_capacity, block_size, None)
+    }
+
+    pub fn new_with_sender(
+        max_capacity: usize,
+        block_size: usize,
+        move_block_response_tx: Option<mpsc::UnboundedSender<MoveBlockResponse>>,
+    ) -> Self {
         let active_blocks = HashMap::new();
         let inactive_blocks = LRUEvictor::default();
         let all_blocks = HashSet::new();
@@ -78,18 +89,46 @@ impl KvManager {
             active_blocks,
             inactive_blocks,
             all_blocks,
+            move_block_response_tx,
+        }
+    }
+
+    /// Utility method to send block responses with optional reversing
+    fn send_block_response(
+        &self,
+        mut blocks: Vec<u64>,
+        reverse: bool,
+        store: bool,
+        parent_hash: Option<u64>,
+    ) {
+        if let Some(ref tx) = self.move_block_response_tx {
+            if !blocks.is_empty() {
+                if reverse {
+                    blocks.reverse();
+                }
+                let response = if store {
+                    MoveBlockResponse::Store(blocks, parent_hash)
+                } else {
+                    MoveBlockResponse::Remove(blocks)
+                };
+                tx.send(response).unwrap();
+            }
         }
     }
 
     /// Process a MoveBlock instruction synchronously
     pub fn process(&mut self, event: &MoveBlock) -> bool {
         match event {
-            MoveBlock::Use(hashes, _) => {
+            MoveBlock::Use(hashes) => {
+                let mut blocks_stored = Vec::<u64>::new();
+
+                let mut parent_block: Option<&UniqueBlock> = None;
                 for hash in hashes {
                     // First check if it already exists in active blocks
                     if let Some(ref_count) = self.active_blocks.get_mut(hash) {
                         // Block already active, just increment reference count
                         *ref_count += 1;
+                        parent_block = Some(hash);
                         continue;
                     }
 
@@ -97,6 +136,7 @@ impl KvManager {
                     if self.inactive_blocks.remove(hash) {
                         // Insert into active with reference count 1
                         self.active_blocks.insert(hash.clone(), 1);
+                        parent_block = Some(hash);
                         continue;
                     }
 
@@ -106,30 +146,53 @@ impl KvManager {
 
                     // If at max capacity, evict the oldest entry from inactive blocks
                     if active_count + inactive_count >= self.max_capacity {
-                        if let Some(evicted) = self.inactive_blocks.evict() {
-                            // Remove evicted block from all_blocks
-                            self.all_blocks.remove(&evicted);
-                        } else {
-                            // Cannot evict block, meaning no free blocks left in inactive pool
-                            // Send a signal, scheduler would expect to handle preemption upon receiving this
+                        let Some(evicted) = self.inactive_blocks.evict() else {
                             return false;
+                        };
+                        self.all_blocks.remove(&evicted);
+                        if let UniqueBlock::FullBlock(evicted_full_block) = evicted {
+                            self.send_block_response(vec![evicted_full_block], false, false, None);
                         }
                     }
 
                     // Now insert the new block in active blocks with reference count 1
                     self.active_blocks.insert(hash.clone(), 1);
-                    // Add to all_blocks as it's a new block
                     self.all_blocks.insert(hash.clone());
+                    if self.move_block_response_tx.is_some() {
+                        if let UniqueBlock::FullBlock(stored_full_block) = hash {
+                            blocks_stored.push(*stored_full_block);
+                        }
+                    }
                 }
+
+                let parent_hash = match parent_block {
+                    None => None,
+                    Some(UniqueBlock::FullBlock(block)) => Some(*block),
+                    Some(UniqueBlock::PartialBlock(_)) => panic!("parent block cannot be partial"),
+                };
+                self.send_block_response(blocks_stored, false, true, parent_hash);
             }
+
             MoveBlock::Destroy(hashes) => {
+                let mut blocks_destroyed = Vec::<u64>::new();
+
                 // Loop in inverse direction
                 for hash in hashes.iter().rev() {
                     self.active_blocks.remove(hash).unwrap();
                     // Remove from all_blocks when destroyed
                     assert!(self.all_blocks.remove(hash));
+
+                    // Track blocks for batch sending
+                    if self.move_block_response_tx.is_some() {
+                        if let UniqueBlock::FullBlock(destroyed_full_block) = hash {
+                            blocks_destroyed.push(*destroyed_full_block);
+                        }
+                    }
                 }
+
+                self.send_block_response(blocks_destroyed, true, false, None);
             }
+
             MoveBlock::Deref(hashes) => {
                 // Loop in inverse direction
                 for hash in hashes.iter().rev() {
@@ -149,15 +212,15 @@ impl KvManager {
                     }
                 }
             }
-            MoveBlock::Promote(uuid, hash) => {
+
+            MoveBlock::Promote(uuid, hash, parent_hash) => {
                 let uuid_block = UniqueBlock::PartialBlock(*uuid);
                 let hash_block = UniqueBlock::FullBlock(*hash);
 
                 let Some(ref_count) = self.active_blocks.remove(&uuid_block) else {
                     let in_all_blocks = self.all_blocks.contains(&uuid_block);
                     panic!(
-                        "Missing active block for promotion: {:?}. Block still exists: {}",
-                        uuid_block, in_all_blocks
+                        "Missing active block for promotion: {uuid_block:?}. Block still exists: {in_all_blocks}"
                     );
                 };
 
@@ -167,6 +230,7 @@ impl KvManager {
                 // Update all_blocks
                 assert!(self.all_blocks.remove(&uuid_block));
                 self.all_blocks.insert(hash_block);
+                self.send_block_response(vec![*hash], false, true, *parent_hash);
             }
         }
 
@@ -178,6 +242,7 @@ impl KvManager {
     pub fn probe_new_blocks(&self, blocks: &[UniqueBlock]) -> usize {
         blocks
             .iter()
+            // .filter(|&block| !self.active_blocks.contains_key(block))
             .filter(|&block| !self.all_blocks.contains(block))
             .count()
     }
@@ -200,6 +265,11 @@ impl KvManager {
         self.active_blocks.len()
     }
 
+    /// Get the percentage of active blocks relative to maximum capacity
+    pub fn get_active_perc(&self) -> f64 {
+        self.active_blocks.len() as f64 / self.max_capacity as f64
+    }
+
     /// Get the number of inactive blocks
     pub fn num_inactive_blocks(&self) -> usize {
         self.inactive_blocks.len()
@@ -216,63 +286,28 @@ impl KvManager {
     }
 
     /// Check if a sequence can be scheduled and calculate cost if possible
-    pub fn try_schedule(
-        &self,
-        sequence: &ActiveSequence,
-        watermark: f64,
-        tokens_budget: usize,
-    ) -> Option<PrefillCost> {
-        // Return None immediately if tokens_budget is 0
-        if tokens_budget == 0 {
-            return None;
-        }
-
-        // Get unique blocks from the sequence
-        let unique_blocks = sequence.unique_blocks();
-
-        // Get the count of new blocks
-        let new_blocks = self.probe_new_blocks(unique_blocks);
-
-        // Calculate current usage and available capacity
-        let active_count = self.active_blocks.len();
-
-        // Check if we can schedule based on the watermark
-        if (active_count + new_blocks) as f64 > (1.0 - watermark) * self.max_capacity as f64 {
-            return None;
-        }
-
-        // Calculate overlap blocks
-        let overlap_blocks = unique_blocks.len() - new_blocks;
-
-        // Calculate new tokens
-        let new_tokens = sequence.num_input_tokens() - overlap_blocks * (self.block_size as usize);
-
-        // // Print the full equation with actual values substituted
-        // println!("{} = {} - ({} * {}) (new_tokens = num_input_tokens - overlap_blocks * block_size)",
-        //     new_tokens,
-        //     sequence.num_input_tokens(),
-        //     overlap_blocks,
-        //     self.block_size);
-
-        // Return None if new_tokens exceeds tokens_budget
-        if new_tokens > tokens_budget {
-            return None;
-        }
+    pub fn get_prefill_cost(&self, sequence: &ActiveSequence) -> PrefillCost {
+        let seq_blocks = sequence.unique_blocks();
+        let new_blocks = self.probe_new_blocks(seq_blocks);
+        let overlap_blocks = seq_blocks.len() - new_blocks;
+        let new_tokens = sequence.num_input_tokens() - overlap_blocks * self.block_size;
 
         // Calculate prefill compute
         let prefill_compute =
-            new_tokens as f64 * (new_tokens + overlap_blocks * (self.block_size as usize)) as f64;
+            1.25e-6 * (new_tokens as f64).powi(2) + 7.41e-2 * (new_tokens as f64) + 2.62e1;
 
-        Some(PrefillCost {
+        PrefillCost {
+            new_blocks,
             new_tokens,
             prefill_compute,
-        })
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::mpsc;
 
     #[test]
     fn test_failure_on_max_capacity() {
@@ -282,7 +317,7 @@ mod tests {
         // Helper function to use multiple blocks that returns the response
         fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) -> bool {
             let blocks = ids.into_iter().map(UniqueBlock::FullBlock).collect();
-            manager.process(&MoveBlock::Use(blocks, None))
+            manager.process(&MoveBlock::Use(blocks))
         }
 
         // First use 10 blocks (0 to 9) in a batch
@@ -301,15 +336,17 @@ mod tests {
     }
 
     #[test]
-    // This is taken directly from the example in the vllm v1 prefix caching docs
     fn test_block_lifecycle_stringent() {
-        // Create a KvManager with 10 blocks capacity
-        let mut manager = KvManager::new(10, 16);
+        // Create a channel to listen to block responses
+        let (tx, mut rx) = mpsc::unbounded_channel::<MoveBlockResponse>();
+
+        // Create a KvManager with 10 blocks capacity and the response sender
+        let mut manager = KvManager::new_with_sender(10, 16, Some(tx));
 
         // Helper function to use multiple blocks
         fn use_blocks(manager: &mut KvManager, ids: Vec<u64>) {
             let blocks = ids.into_iter().map(UniqueBlock::FullBlock).collect();
-            manager.process(&MoveBlock::Use(blocks, None));
+            manager.process(&MoveBlock::Use(blocks));
         }
 
         // Helper function to destroy multiple blocks
@@ -324,6 +361,56 @@ mod tests {
             manager.process(&MoveBlock::Deref(blocks));
         }
 
+        // Helper function to assert block responses
+        fn assert_block_response(
+            rx: &mut mpsc::UnboundedReceiver<MoveBlockResponse>,
+            expected_type: &str,
+            expected_blocks: Vec<u64>,
+            description: &str,
+        ) {
+            let response = rx
+                .try_recv()
+                .unwrap_or_else(|_| panic!("Expected {expected_type} response {description}"));
+
+            match (&response, expected_type) {
+                (MoveBlockResponse::Store(blocks, _parent_hash), "Store") => {
+                    assert_eq!(
+                        blocks.len(),
+                        expected_blocks.len(),
+                        "Expected {} blocks in Store response {}",
+                        expected_blocks.len(),
+                        description
+                    );
+                    assert_eq!(
+                        *blocks, expected_blocks,
+                        "Store blocks don't match expected {description}"
+                    );
+                }
+                (MoveBlockResponse::Remove(blocks), "Remove") => {
+                    assert_eq!(
+                        blocks.len(),
+                        expected_blocks.len(),
+                        "Expected {} blocks in Remove response {}",
+                        expected_blocks.len(),
+                        description
+                    );
+                    assert_eq!(
+                        *blocks, expected_blocks,
+                        "Remove blocks don't match expected {description}"
+                    );
+                }
+                _ => panic!("Expected {expected_type} response, got {response:?} {description}"),
+            }
+        }
+
+        // Helper function to assert no response is received
+        fn assert_no_response(
+            rx: &mut mpsc::UnboundedReceiver<MoveBlockResponse>,
+            description: &str,
+        ) {
+            assert!(rx.try_recv().is_err(), "Expected no response {description}",);
+        }
+
         // Helper function to check if active blocks contain expected blocks with expected ref counts
         fn assert_active_blocks(manager: &KvManager, expected_blocks: &[(u64, usize)]) {
             assert_eq!(
@@ -336,14 +423,12 @@ mod tests {
                 let block = UniqueBlock::FullBlock(id);
                 assert!(
                     manager.active_blocks().contains_key(&block),
-                    "Block {} not found in active blocks",
-                    id
+                    "Block {id} not found in active blocks",
                 );
                 assert_eq!(
                     manager.active_blocks().get(&block),
                     Some(&ref_count),
-                    "Block {} has wrong reference count",
-                    id
+                    "Block {id} has wrong reference count",
                 );
             }
         }
@@ -366,17 +451,18 @@ mod tests {
                 let block = UniqueBlock::FullBlock(id);
                 assert!(
                     inactive_blocks.iter().any(|&b| *b == block),
-                    "Block {} not found in inactive blocks",
-                    id
+                    "Block {id} not found in inactive blocks",
                 );
             }
         }
 
         // First use blocks 0, 1, 2, 3, 4 in a batch
         use_blocks(&mut manager, (0..5).collect());
+        assert_block_response(&mut rx, "Store", vec![0, 1, 2, 3, 4], "after first use");
 
         // Then use blocks 0, 1, 5, 6 in a batch
         use_blocks(&mut manager, vec![0, 1, 5, 6]);
+        assert_block_response(&mut rx, "Store", vec![5, 6], "after second use");
 
         // Check that the blocks 0 and 1 are in active blocks, both with reference counts of 2
         assert_active_blocks(
@@ -386,9 +472,11 @@ mod tests {
 
         // Now destroy block 4
         destroy_blocks(&mut manager, vec![4]);
+        assert_block_response(&mut rx, "Remove", vec![4], "after destroy block 4");
 
         // And deref blocks 3, 2, 1, 0 in this order as a batch
         deref_blocks(&mut manager, vec![0, 1, 2, 3]);
+        assert_no_response(&mut rx, "after deref operation");
 
         // Check that the inactive_blocks is size 2 (via num_objects) and contains 3 and 2
         assert_inactive_blocks(&manager, 2, &[3, 2]);
@@ -396,6 +484,7 @@ mod tests {
 
         // Now destroy block 6
         destroy_blocks(&mut manager, vec![6]);
+        assert_block_response(&mut rx, "Remove", vec![6], "after block 6 eviction");
 
         // And deref blocks 5, 1, 0 as a batch
         deref_blocks(&mut manager, vec![0, 1, 5]);
@@ -406,6 +495,7 @@ mod tests {
 
         // Now use 0, 1, 2, 7, 8, 9 as a batch
         use_blocks(&mut manager, vec![0, 1, 2, 7, 8, 9]);
+        assert_block_response(&mut rx, "Store", vec![7, 8, 9], "after [7, 8, 9] use");
 
         // Check that the inactive_blocks is size 2, and contains 3 and 5
         assert_inactive_blocks(&manager, 2, &[3, 5]);
@@ -420,8 +510,14 @@ mod tests {
 
         // Now use blocks 10, 11, 12 as a batch
         use_blocks(&mut manager, vec![10, 11, 12]);
+        assert_block_response(&mut rx, "Remove", vec![3], "after block 5 eviction");
+        assert_block_response(&mut rx, "Store", vec![10, 11, 12], "after [10, 11, 12] use");
 
         // Check that the inactive_blocks is size 1 and contains only 5
         assert_inactive_blocks(&manager, 1, &[5]);
+
+        use_blocks(&mut manager, vec![13]);
+        assert_block_response(&mut rx, "Remove", vec![5], "after block 5 eviction");
+        assert_block_response(&mut rx, "Store", vec![13], "after block 13 use");
     }
 }

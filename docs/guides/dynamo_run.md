@@ -2,7 +2,7 @@
 
 This guide explains the `dynamo run` command.
 
-`dynamo-run` is a CLI tool for exploring the Dynamo components. It's also an example of how to use components from Rust. If you use the Python wheel, it's available as `dynamo run` .
+`dynamo-run` is a CLI tool for exploring the Dynamo components. It's also an example of how to use components from Rust. If you use the Python wheel, it's available as `dynamo run`.
 
 It supports these engines: mistralrs, llamacpp, sglang, vllm, and tensorrt-llm. `mistralrs` is the default.
 
@@ -30,7 +30,7 @@ The vllm and sglang engines require [etcd](https://etcd.io/) and [nats](https://
 
 ### Use model from Hugging Face
 
-To automatically downloads Qwen3 4B from Hugging Face (16 GiB download) and starts it in interactive text mode:
+To automatically download Qwen3 4B from Hugging Face (16 GiB download) and to start it in interactive text mode:
 ```
 dynamo run out=vllm Qwen/Qwen3-4B
 ```
@@ -53,7 +53,7 @@ To run a model from local file:
 See the following sections for details.
 
 #### Download model from Hugging Face
-One of the models available from HUgging Face should be high quality and fast on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
+One of the models available from Hugging Face should be high quality and fast on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
 For example, try https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/blob/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf
 
 To download model file:
@@ -139,7 +139,7 @@ The KV metrics publisher in VLLM adds a `load_metrics` endpoint to the current c
 
 Example 4: Multiple component in a pipeline.
 
-In the P/D disaggregated setup you would have `deepseek-distill-llama8b.prefill.generate` (possibly multiple instance of this) and `deepseek-distill-llama8b.decode.generate`.
+In the P/D disaggregated setup you would have `deepseek-distill-llama8b.prefill.generate` (possibly multiple instances of this) and `deepseek-distill-llama8b.decode.generate`.
 
 For output it is always only `out=dyn`. This tells Dynamo to auto-discover the instances, group them by model, and load balance appropriately (depending on `--router-mode` flag). The old syntax of `dyn://...` is still accepted for backwards compatibility.
 
@@ -171,7 +171,7 @@ To set up KV-aware routing on patched vllm:
 1. Build the C bindings:
    ```
    cd $REPO_ROOT/lib/bindings/c
-   cargo build`.
+   cargo build
    ```
 1. Put the library you just built on library path:
    ```
@@ -257,8 +257,8 @@ cargo build
 Optionally you can run `cargo build` from any location with arguments:
 
 ```
---target-dir /path/to/target_directory` # specify target_directory with write privileges
---manifest-path /path/to/project/Cargo.toml` # if cargo build is run outside of `launch/` directory
+--target-dir /path/to/target_directory # specify target_directory with write privileges
+--manifest-path /path/to/project/Cargo.toml # if cargo build is run outside of `launch/` directory
 ```
 
 The binary is called `dynamo-run` in `target/debug`
@@ -376,7 +376,7 @@ python3 -m sglang.launch_server --model-path /data/models/DeepSeek-R1-Distill-Ll
 
 Using the [vllm](https://github.com/vllm-project/vllm) Python library. Slow startup, fast inference. Supports both safetensors from HF and GGUF files, but is very slow for GGUF - prefer llamacpp.
 
-The vllm engine requires requires [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`) to be running.
+The vllm engine requires [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`) to be running.
 
 We use [uv](https://docs.astral.sh/uv/) but any virtualenv manager should work.
 
@@ -439,7 +439,7 @@ vllm uses [ray](https://docs.vllm.ai/en/latest/serving/distributed_serving.html#
 
 Here is an example on two 8x nodes:
 - Leader node: `ray start --head --port=6379`
-- Each follower node: `ray start --address='<HEAD_NODE_IP>:6379`
+- Each follower node: `ray start --address=<HEAD_NODE_IP>:6379`
 - Leader node: `dynamo-run out=vllm ~/llms/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 16`
 
 The `--tensor-parallel-size` parameter is the total number of GPUs in the cluster. This is often constrained by a model dimension such as being a divisor of the number of attention heads.
@@ -454,7 +454,7 @@ Using [TensorRT-LLM's LLM API](https://nvidia.github.io/TensorRT-LLM/llm-api/), 
 
 You can use `--extra-engine-args` to pass extra arguments to LLM API engine.
 
-The trtllm engine requires requires [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`) to be running.
+The trtllm engine requires [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`) to be running.
 
 ##### Step 1: Build the environment
 
@@ -544,7 +544,7 @@ Pass it like this:
 dynamo-run out=sglang ~/llms/Llama-3.2-3B-Instruct --extra-engine-args sglang_extra.json
 ```
 
-The tensorrtllm backend also support passing any argument the engine accepts. However, in this case config should be a yaml file.
+The tensorrtllm backend also supports passing any argument the engine accepts. However, in this case config should be a yaml file.
 
 ```
 backend: pytorch
