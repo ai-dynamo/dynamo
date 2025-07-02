@@ -61,28 +61,13 @@ docker run \
 
 In each container, you should be in the `/sgl-workspace/dynamo/examples/sglang` directory.
 
-4. On the head prefill node, start `nats-server` and `etcd` using the following commands
+4. On the head prefill node, run the helper script provided to generate commands to start the `nats-server`, `etcd`. This script will also tell you which environment variables to export on each node to make deployment easier.
 
 ```bash
-nats-server -js &
-etcd --listen-client-urls http://0.0.0.0:2379 \
-     --advertise-client-urls http://0.0.0.0:2379 \
-     --listen-peer-urls http://0.0.0.0:2380 \
-     --initial-cluster default=http://HEAD_PREFILL_NODE_IP:2380 &
+./utils/gen_env_vars.sh
 ```
 
-5. On every other node, go ahead and export the `NATS_SERVER` and `ETCD_ENDPOINTS` environment variables
-
-> [!IMPORTANT]
-> You will need the IP address of your head prefill node and head decode node for the configuration files
-
-```bash
-# run this on every other node
-export NATS_SERVER=nats://HEAD_PREFILL_NODE_IP:4222
-export ETCD_ENDPOINTS=http://HEAD_PREFILL_NODE_IP:2379
-```
-
-6. Run the ingress and prefill worker
+5. Run the ingress and prefill worker
 
 ```bash
 # run ingress
@@ -95,7 +80,7 @@ python3 components/worker_inc.py \
   --disaggregation-mode prefill \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
-  --dist-init-addr HEAD_PREFILL_NODE_IP:29500 \
+  --dist-init-addr ${HEAD_PREFILL_NODE_IP}:29500 \
   --nnodes 4 \
   --node-rank 0 \
   --tp-size 32 \
@@ -130,7 +115,7 @@ python3 components/decode_worker_inc.py \
   --disaggregation-mode decode \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
-  --dist-init-addr HEAD_DECODE_NODE_IP:29500 \
+  --dist-init-addr ${HEAD_DECODE_NODE_IP}:29500 \
   --nnodes 9 \
   --node-rank 0 \
   --tp-size 72 \
