@@ -18,7 +18,6 @@
 import argparse
 import asyncio
 import logging
-import os
 
 from dynamo.runtime import DistributedRuntime, EtcdKvCache, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -36,6 +35,7 @@ async def clear_namespace(runtime: DistributedRuntime, namespace: str):
     )
     await etcd_kv_cache.clear_all()
     logger.info(f"Cleared /{namespace} in EtcdKvCache")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
