@@ -19,7 +19,7 @@ dynamo run in=http out=dyn &
 DYNAMO_PID=$!
 
 # run prefill worker
-python3 components/worker_inc.py \
+python3 components/worker.py \
   --model-path silence09/DeepSeek-R1-Small-2layers \
   --served-model-name silence09/DeepSeek-R1-Small-2layers \
   --tp 2 \
@@ -33,7 +33,7 @@ python3 components/worker_inc.py \
 PREFILL_PID=$!
 
 # run decode worker
-CUDA_VISIBLE_DEVICES=2,3 python3 components/decode_worker_inc.py \
+CUDA_VISIBLE_DEVICES=2,3 python3 components/decode_worker.py \
   --model-path silence09/DeepSeek-R1-Small-2layers \
   --served-model-name silence09/DeepSeek-R1-Small-2layers \
   --tp 2 \

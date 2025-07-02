@@ -19,7 +19,7 @@ dynamo run in=http out=dyn --router-mode kv &
 DYNAMO_PID=$!
 
 # run worker
-python3 components/worker_inc.py \
+python3 components/worker.py \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --page-size 16 \

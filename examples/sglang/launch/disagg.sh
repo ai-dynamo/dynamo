@@ -19,7 +19,7 @@ dynamo run in=http out=dyn &
 DYNAMO_PID=$!
 
 # run prefill worker
-python3 components/worker_inc.py \
+python3 components/worker.py \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --page-size 16 \
@@ -31,7 +31,7 @@ python3 components/worker_inc.py \
 PREFILL_PID=$!
 
 # run decode worker
-CUDA_VISIBLE_DEVICES=1 python3 components/decode_worker_inc.py \
+CUDA_VISIBLE_DEVICES=1 python3 components/decode_worker.py \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
   --page-size 16 \
