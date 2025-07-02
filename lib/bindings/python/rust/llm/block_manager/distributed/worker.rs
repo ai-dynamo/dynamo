@@ -3,6 +3,8 @@
 
 use super::*;
 
+use utils::get_barrier_id;
+
 use llm_rs::block_manager::distributed::{KvbmWorker as KvbmWorkerImpl, KvbmWorkerConfig};
 use llm_rs::block_manager::storage::torch::{TorchDevice, TorchTensor};
 
@@ -80,7 +82,7 @@ pub struct KvbmWorker {
 #[pymethods]
 impl KvbmWorker {
     #[new]
-    #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, worker_id=0, dtype_width_bytes=2, barrier_id="kvbm".to_string()))]
+    #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, worker_id=0, dtype_width_bytes=2))]
     fn new(
         num_device_blocks: usize,
         page_size: usize,
@@ -88,7 +90,6 @@ impl KvbmWorker {
         device_id: usize,
         worker_id: usize,
         dtype_width_bytes: usize,
-        barrier_id: String,
     ) -> PyResult<Self> {
         let mut vllm_tensors: Vec<Box<dyn TorchTensor>> = Vec::with_capacity(tensors.len());
 
@@ -96,6 +97,8 @@ impl KvbmWorker {
             let vllm_tensor = VllmTensor::new(tensor.clone()).map_err(to_pyerr)?;
             vllm_tensors.push(Box::new(vllm_tensor));
         }
+
+        let barrier_id = get_barrier_id();
 
         let config = KvbmWorkerConfig::builder()
             .num_device_blocks(num_device_blocks)

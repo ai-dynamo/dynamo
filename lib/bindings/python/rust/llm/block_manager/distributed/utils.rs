@@ -1,11 +1,6 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-use super::*;
-
-mod leader;
-mod utils;
-mod worker;
-
-pub use leader::KvbmLeader;
-pub use worker::KvbmWorker;
+pub fn get_barrier_id() -> String {
+    std::env::var("DYNAMO_KVBM_BARRIER_ID").unwrap_or("kvbm".to_string())
+}
