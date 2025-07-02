@@ -19,7 +19,7 @@ from argparse import Namespace
 from sglang.srt.server_args import ServerArgs
 
 from dynamo.sdk.cli.utils import reserve_free_port
-from dynamo.sdk.lib.config import ServiceConfig
+
 
 def parse_sglang_args_inc(args: list[str]) -> ServerArgs:
     parser = argparse.ArgumentParser()
