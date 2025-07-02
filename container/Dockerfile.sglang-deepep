@@ -165,8 +165,8 @@ ENV PATH=/sgl-workspace/perf_analyzer/build/perf_analyzer/src/perf-analyzer-buil
 
 RUN pip install --break-system-packages genai-perf
 
-COPY examples/sglang/configs/deepseek-r1-wideep/* /sgl-workspace/dynamo/examples/sglang/configs/
-COPY examples/sglang/utils/deepseek-r1-wideep/* /sgl-workspace/dynamo/examples/sglang/utils/
+COPY examples/sglang/configs/deepseek_r1/wideep/* /sgl-workspace/dynamo/examples/sglang/configs/*
+COPY examples/sglang/utils/deepseek-r1-wideep/* /sgl-workspace/dynamo/examples/sglang/utils/*
 
 WORKDIR /sgl-workspace/dynamo/examples/sglang
 
