@@ -24,7 +24,7 @@ python3 components/worker_inc.py \
   --trust-remote-code \
   --skip-tokenizer-init \
   --disaggregation-mode prefill \
-  --disaggregation-transfer-backend nixl & 
+  --disaggregation-transfer-backend nixl &
 PREFILL_PID=$!
 
 # run decode worker

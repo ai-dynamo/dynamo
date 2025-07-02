@@ -35,7 +35,7 @@ python3 components/worker_inc.py \
 
 Node 2: Run the remaining 8 shards of the prefill worker
 ```bash
-# nats and etcd endpoints 
+# nats and etcd endpoints
 export NATS_SERVER="nats://<node-1-ip>"
 export ETCD_ENDPOINTS="<node-1-ip>:2379"
 
@@ -58,7 +58,7 @@ python3 components/worker_inc.py \
 
 Node 3: Run the first 8 shards of the decode worker
 ```bash
-# nats and etcd endpoints 
+# nats and etcd endpoints
 export NATS_SERVER="nats://<node-1-ip>"
 export ETCD_ENDPOINTS="<node-1-ip>:2379"
 
@@ -81,7 +81,7 @@ python3 components/decode_worker_inc.py \
 
 Node 4: Run the remaining 8 shards of the decode worker
 ```bash
-# nats and etcd endpoints 
+# nats and etcd endpoints
 export NATS_SERVER="nats://<node-1-ip>"
 export ETCD_ENDPOINTS="<node-1-ip>:2379"
 

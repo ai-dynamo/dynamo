@@ -26,7 +26,7 @@ python3 components/worker_inc.py \
   --skip-tokenizer-init \
   --disaggregation-mode prefill \
   --disaggregation-transfer-backend nixl \
-  --port 30000 & 
+  --port 30000 &
 PREFILL_PID=$!
 
 # run decode worker
