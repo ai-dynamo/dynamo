@@ -23,10 +23,11 @@
 // TODO: Determine if we should use an External EventSource crate. There appear to be several
 // potential candidates.
 
+use std::{io::Cursor, pin::Pin};
+
 use bytes::BytesMut;
 use futures::Stream;
 use serde::Deserialize;
-use std::{io::Cursor, pin::Pin};
 use tokio_util::codec::{Decoder, FramedRead, LinesCodec};
 
 use super::Annotated;

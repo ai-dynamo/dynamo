@@ -8,7 +8,7 @@ max_batch_size: 256
 max_num_tokens: 256
 max_seq_len: 8448
 kv_cache_config:
-  free_gpu_memory_fraction: 0.8
+  free_gpu_memory_fraction: 0.7
 use_cuda_graph: true
 cuda_graph_padding_enabled: true
 cuda_graph_batch_sizes:

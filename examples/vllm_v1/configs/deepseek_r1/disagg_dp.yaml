@@ -60,7 +60,6 @@ VllmDpWorker:
   # depending on the DP worker counts and where the DP worker is located.
   # See README.md for more details.
   data_parallel_start_rank: 8
-  headless: true
   ServiceArgs:
     workers: 1
     resources:

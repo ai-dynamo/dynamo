@@ -57,10 +57,16 @@ services:
     depends_on:
       - nats-server
 
+  # DCGM stands for Data Center GPU Manager: https://developer.nvidia.com/dcgm
+  # dcgm-exporter is a tool from NVIDIA that exposes DCGM metrics in Prometheus format.
   dcgm-exporter:
     image: nvidia/dcgm-exporter:4.2.3-4.1.3-ubi9
     ports:
-      - 9401:9400  # Remap from 9400 to 9401 to avoid conflict with an existing dcgm-exporter (on dlcluster)
+      # Remap from 9400 to 9401 (public port) to avoid conflict with an existing dcgm-exporter
+      # on dlcluster. To access dcgm:
+      # Outside the container: curl http://localhost:9401/metrics
+      # Inside the container (container-to-container): curl http://dcgm-exporter:9400/metrics
+      - 9401:9400
     cap_add:
       - SYS_ADMIN
     deploy:
@@ -109,6 +115,7 @@ services:
     container_name: grafana
     volumes:
       - ./grafana.json:/etc/grafana/provisioning/dashboards/llm-worker-dashboard.json
+      - ./grafana-dcgm-dashboard.json:/etc/grafana/provisioning/dashboards/dcgm-dashboard.json
       - ./grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
       - ./grafana-dashboard-providers.yml:/etc/grafana/provisioning/dashboards/dashboard-providers.yml
     environment:

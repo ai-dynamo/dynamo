@@ -175,7 +175,7 @@ RUN uv pip install /workspace/wheels/nixl/*.whl
 
 # Install patched vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
-ARG VLLM_REF="7e8d97dd3f0aaf05265f947997310ca3827d3c06"
+ARG VLLM_REF="3c545c0c3b98ee642373a308197d750d0e449403"
 ENV CUDA_HOME=/usr/local/cuda
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
@@ -210,6 +210,23 @@ RUN pyright --help > /dev/null 2>&1
 RUN printf "[safe]\n      directory=/workspace\n" > /root/.gitconfig
 
 RUN ln -sf /bin/bash /bin/sh
+
+# Install prometheus
+ARG PROM_VERSION=3.4.1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl tar ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+RUN ARCH=$(dpkg --print-architecture) && \
+    case "$ARCH" in \
+        amd64) PLATFORM=linux-amd64 ;; \
+        arm64) PLATFORM=linux-arm64 ;; \
+        *) echo "Unsupported architecture: $ARCH" && exit 1 ;; \
+    esac && \
+    curl -fsSL https://github.com/prometheus/prometheus/releases/download/v${PROM_VERSION}/prometheus-${PROM_VERSION}.${PLATFORM}.tar.gz \
+    | tar -xz -C /tmp && \
+    mv /tmp/prometheus-${PROM_VERSION}.${PLATFORM}/prometheus /usr/local/bin/ && \
+    chmod +x /usr/local/bin/prometheus && \
+    rm -rf /tmp/prometheus-${PROM_VERSION}.${PLATFORM}
 
 ### BUILDS ###
 

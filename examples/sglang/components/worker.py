@@ -34,9 +34,15 @@ import sglang as sgl
 from components.decode_worker import SGLangDecodeWorker
 from sglang.srt.utils import get_ip
 from utils.protocol import DisaggPreprocessedRequest, PreprocessedRequest
-from utils.sglang import parse_sglang_args
+from utils.sgl_utils import parse_sglang_args
 
-from dynamo.llm import ModelType, register_llm
+from dynamo.llm import (
+    ModelType,
+    WorkerMetricsPublisher,
+    ZmqKvEventPublisher,
+    ZmqKvEventPublisherConfig,
+    register_llm,
+)
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
@@ -57,20 +63,62 @@ class SGLangWorker:
         self.engine_args = parse_sglang_args(class_name, "")
         self.engine = sgl.Engine(server_args=self.engine_args)
 
-        logger.info("SGLangWorker initialized")
+        # Initialize metrics publisher
+        self.metrics_publisher = WorkerMetricsPublisher()
+
+    def _update_metrics(self):
+        """Update metrics with current engine state"""
+        # TODO: remove this once the following upstream changes are merged:
+        #   • ai-dynamo/dynamo#1465 – "feat: receive kvmetrics from sglang scheduler"
+        #   • sgl-project/sglang#6721 – "Expose runtime KV-cache & request metrics"
+        logger.warning(
+            "Publishing placeholder metrics in SGLangWorker; these are NOT real engine metrics yet and will be replaced once upstream support lands."
+        )
+        self.metrics_publisher.publish(
+            request_active_slots=1,
+            request_total_slots=100,
+            kv_active_blocks=random.randint(0, 500),
+            kv_total_blocks=1000,
+            num_requests_waiting=0,
+            gpu_cache_usage_perc=random.uniform(0.1, 0.8),
+            gpu_prefix_cache_hit_rate=random.uniform(0.0, 0.5),
+        )
+
+    async def create_metrics_publisher_endpoint(self):
+        component = dynamo_context["component"]
+        await self.metrics_publisher.create_endpoint(component)
 
     @async_on_start
     async def async_init(self):
         runtime = dynamo_context["runtime"]
-        logger.info("Registering LLM for discovery")
         comp_ns, comp_name = SGLangWorker.dynamo_address()  # type: ignore
         endpoint = runtime.namespace(comp_ns).component(comp_name).endpoint("generate")
+        component = runtime.namespace(comp_ns).component(comp_name)
+
+        logger.info(
+            f"Registering LLM for discovery with kv block size {self.engine_args.page_size}, endpoint={endpoint}, model_path={self.engine_args.model_path}, served_model_name={self.engine_args.served_model_name}"
+        )
         await register_llm(
             ModelType.Backend,
             endpoint,
             self.engine_args.model_path,
             self.engine_args.served_model_name,
+            kv_cache_block_size=self.engine_args.page_size,
         )
+
+        self.metrics_publisher.publish(
+            request_active_slots=0,
+            request_total_slots=1024,
+            kv_active_blocks=0,
+            kv_total_blocks=1024,
+            num_requests_waiting=0,
+            gpu_cache_usage_perc=0.0,
+            gpu_prefix_cache_hit_rate=0.0,
+        )
+
+        # Create metrics publisher endpoint for KV router discovery
+        asyncio.create_task(self.create_metrics_publisher_endpoint())
+
         if self.engine_args.disaggregation_mode:
             self.bootstrap_host, self.bootstrap_port = self._get_bootstrap_info()
             comp_ns, comp_name = SGLangDecodeWorker.dynamo_address()  # type: ignore
@@ -80,6 +128,18 @@ class SGLangWorker:
                 .endpoint("generate")
                 .client()
             )
+
+        # Configure ZMQ KV Event Publisher to relay KV events from SGLang to NATS
+        zmq_config = ZmqKvEventPublisherConfig(
+            worker_id=endpoint.lease_id(),
+            kv_block_size=self.engine_args.page_size,  # Keep in sync with register_llm above
+        )
+
+        # Keep a reference on the instance to avoid the publisher being garbage-collected.
+        self._kv_event_publisher = ZmqKvEventPublisher(
+            component=component,
+            config=zmq_config,
+        )
 
     def _get_bootstrap_info(self):
         """
@@ -100,7 +160,6 @@ class SGLangWorker:
         return bootstrap_host, bootstrap_port
 
     def _build_sampling_params(self, request: PreprocessedRequest) -> dict:
-        # TODO: maintain a full mapping from PreprocessedRequest to SGLang's SamplingParams
         sampling_params = {}
         if request.sampling_options.temperature:
             sampling_params["temperature"] = request.sampling_options.temperature
