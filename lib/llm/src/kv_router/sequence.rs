@@ -198,8 +198,8 @@ mod tests {
         assert_eq!(full_block_count, 1);
         assert!(shared_block_requests.is_some());
         let shared_requests = shared_block_requests.unwrap();
-        assert!(shared_requests.contains(&"0".to_string()));
-        assert!(shared_requests.contains(&"1".to_string()));
+        assert!(shared_requests.contains("0"));
+        assert!(shared_requests.contains("1"));
 
         // Step 3: Free request 1
         manager.free(&"1".to_string());
