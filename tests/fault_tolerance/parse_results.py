@@ -91,8 +91,8 @@ def parse_client_logs(test_dir, expected_length=100):
         df = pd.DataFrame(all_logs)
         df.sort_values("time", inplace=True)
         return df
-    else:
-        return None
+
+    return None
 
 
 def calculate_metrics(df, fault_time, sla=2.1):

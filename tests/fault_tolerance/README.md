@@ -18,7 +18,7 @@ limitations under the License.
 # Fault Tolerance Test Suite
 
 As a large scale distributed inference serving framework in addition
-to providing high throughput and and low latency, Dynamo needs to
+to providing high throughput and low latency, Dynamo needs to
 provide fault detection, resilency, and quick recovery in the face of
 unforseen failures. In order to test Dynamo we are developing a test
 suite to inject and measure the impact of different types of failure
@@ -32,7 +32,7 @@ then inject failures by terminating processes in the graph. To test
 the recovery time and impact of failures a set number of clients are
 launched in parallel. Each client sends a set number of synchronous
 requests. Log files are stored for each dynamo process as well as for
-each client and inspected using a post processing script.
+each client and inspected using a post-processing script.
 
 > [!NOTE]
 > Test pass / failure is not an indication of SLA for recovery or resilience
