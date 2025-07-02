@@ -20,10 +20,8 @@ if [ -z "$HEAD_PREFILL_NODE" ] || [ -z "$HEAD_DECODE_NODE" ]; then
     exit 1
 fi
 
-echo "=== SGLang Multi-Node Environment Variables ==="
-echo ""
 echo "=== HEAD PREFILL NODE ($HEAD_PREFILL_NODE) ==="
-echo "Run these commands on the head prefill node:"
+echo "Run all of these commands on the head prefill node:"
 echo ""
 echo "# Start NATS server"
 echo "nats-server -js &"
