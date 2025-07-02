@@ -38,29 +38,36 @@ each client and inspected using a post-processing script.
 > Test pass / failure is not an indication of SLA for recovery or resilience
 > It only indicates is the test was executed and data was collected
 
-> [!NOTE] The test suite currently targets single node Dynamo Serve.
+> [!NOTE]
+> The test suite currently targets single node Dynamo Serve.
 > Support for Dynamo Deploy is a work in progress.
 
 ###  Test Sequence Diagram
 
 ```mermaid
 sequenceDiagram
-    participant Test as "test_worker_failure"
-    participant Server as "DynamoServeProcess"
-    participant Clients as "Client Processes"
-    participant FailureInjector as "_inject_failures"
+    participant Tester as Test Runner
+    participant Dynamo as DynamoServeProcess
+    participant Circus as CircusController
+    participant Client as Test Clients
+    participant Metrics as Metrics Collector
 
-    Note over Test: Launches with fixtures (deployment, clients, failures)
-    Test->>Server: Start Dynamo server with _set_deployment_args
-    Server->>Test: Waits for ready via server_process.wait_for_ready(payload)
-    Test->>Clients: Spawn clients via _clients context manager
-    Clients->>Server: Send requests (requests_per_client loops)
-    Test->>FailureInjector: Trigger _inject_failures at timed intervals
-    FailureInjector->>Server: Terminate processes (dynamo/vllm workers via CircusController)
-    Server->>Clients: Retry handling (max_retries) during failure
-    Clients->>Test: Log results (success/failure statuses)
-    Test->>Server: Cleanup (terminate_process_tree on exit)
-    Note over Test: Assert metrics/valid responses implicitly via logs
+    Tester->>Dynamo: Launch deployment graph
+    Dynamo-->>Tester: Signal ready
+    Tester->>Metrics: Start metrics collection
+    Tester->>Client: Spawn multiple clients
+    loop During Test
+        Client->>Dynamo: Send chat completion requests
+        Dynamo-->>Client: Return responses
+        Metrics->>Dynamo: Collect runtime metrics
+    end
+    Tester->>Dynamo: Inject failures (terminate components)
+    Dynamo-->>Tester: Recover/respawn as configured
+    Client-->>Tester: Log request results
+    Metrics-->>Tester: Log metrics data
+    Tester->>Dynamo: Shutdown deployment
+    Tester->>Metrics: Stop metrics collection
+    Tester->>Tester: Parse logs and summarize results
 ```
 
 ### Failure Scenarios
