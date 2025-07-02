@@ -203,6 +203,7 @@ pub struct ActiveSequencesMultiWorker {
     responders: HashMap<WorkerId, mpsc::Receiver<usize>>,
     request_to_worker: HashMap<RequestId, WorkerId>,
     handles: HashMap<WorkerId, thread::JoinHandle<()>>,
+    block_size: usize,
 }
 
 impl ActiveSequencesMultiWorker {
@@ -215,39 +216,9 @@ impl ActiveSequencesMultiWorker {
         let mut handles = HashMap::new();
 
         for worker_id in worker_ids {
-            let (request_tx, request_rx) = mpsc::channel::<WorkerCommand>();
-            let (response_tx, response_rx) = mpsc::channel::<usize>();
-
-            let handle = thread::spawn(move || {
-                let mut active_sequences = ActiveSequences::new(block_size);
-
-                while let Ok(command) = request_rx.recv() {
-                    match command {
-                        WorkerCommand::AddRequest {
-                            request_id,
-                            token_sequence,
-                        } => {
-                            active_sequences.add_request(request_id, token_sequence);
-                        }
-                        WorkerCommand::Free { request_id } => {
-                            active_sequences.free(&request_id);
-                        }
-                        WorkerCommand::Push { request_id, token } => {
-                            active_sequences.push(&request_id, token);
-                        }
-                        WorkerCommand::NewBlocks { token_sequence } => {
-                            let new_blocks = active_sequences.new_blocks(&token_sequence);
-                            response_tx.send(new_blocks).unwrap();
-                        }
-                        WorkerCommand::Shutdown => {
-                            break;
-                        }
-                    }
-                }
-            });
-
-            senders.insert(worker_id, request_tx);
-            responders.insert(worker_id, response_rx);
+            let (sender, responder, handle) = Self::start_worker(block_size);
+            senders.insert(worker_id, sender);
+            responders.insert(worker_id, responder);
             handles.insert(worker_id, handle);
         }
 
@@ -256,6 +227,84 @@ impl ActiveSequencesMultiWorker {
             responders,
             request_to_worker: HashMap::new(),
             handles,
+            block_size,
+        }
+    }
+
+    /// Helper method to start a worker thread
+    fn start_worker(
+        block_size: usize,
+    ) -> (
+        mpsc::Sender<WorkerCommand>,
+        mpsc::Receiver<usize>,
+        thread::JoinHandle<()>,
+    ) {
+        let (request_tx, request_rx) = mpsc::channel::<WorkerCommand>();
+        let (response_tx, response_rx) = mpsc::channel::<usize>();
+
+        let handle = thread::spawn(move || {
+            let mut active_sequences = ActiveSequences::new(block_size);
+
+            while let Ok(command) = request_rx.recv() {
+                match command {
+                    WorkerCommand::AddRequest {
+                        request_id,
+                        token_sequence,
+                    } => {
+                        active_sequences.add_request(request_id, token_sequence);
+                    }
+                    WorkerCommand::Free { request_id } => {
+                        active_sequences.free(&request_id);
+                    }
+                    WorkerCommand::Push { request_id, token } => {
+                        active_sequences.push(&request_id, token);
+                    }
+                    WorkerCommand::NewBlocks { token_sequence } => {
+                        let new_blocks = active_sequences.new_blocks(&token_sequence);
+                        response_tx.send(new_blocks).unwrap();
+                    }
+                    WorkerCommand::Shutdown => {
+                        break;
+                    }
+                }
+            }
+        });
+
+        (request_tx, response_rx, handle)
+    }
+
+    /// Update the set of workers, adding and removing as needed
+    pub fn update_workers(&mut self, new_worker_ids: Vec<WorkerId>) {
+        let current_workers: HashSet<WorkerId> = self.senders.keys().copied().collect();
+        let new_workers: HashSet<WorkerId> = new_worker_ids.into_iter().collect();
+
+        let workers_to_remove: Vec<WorkerId> =
+            current_workers.difference(&new_workers).copied().collect();
+        let workers_to_add: Vec<WorkerId> =
+            new_workers.difference(&current_workers).copied().collect();
+
+        // Remove workers
+        for worker_id in &workers_to_remove {
+            tracing::warn!("Removing worker {}", worker_id);
+
+            // Send shutdown command to the worker
+            if let Some(sender) = self.senders.remove(worker_id) {
+                let _ = sender.send(WorkerCommand::Shutdown);
+            }
+            self.responders.remove(worker_id);
+            if let Some(handle) = self.handles.remove(worker_id) {
+                let _ = handle.join();
+            }
+        }
+
+        // Add new workers
+        for worker_id in &workers_to_add {
+            tracing::warn!("Adding worker {}", worker_id);
+
+            let (sender, responder, handle) = Self::start_worker(self.block_size);
+            self.senders.insert(*worker_id, sender);
+            self.responders.insert(*worker_id, responder);
+            self.handles.insert(*worker_id, handle);
         }
     }
 
@@ -338,39 +387,6 @@ impl ActiveSequencesMultiWorker {
         }
 
         results
-    }
-
-    /// Remove a worker from the pool
-    /// Panics if the worker still has active requests assigned to it
-    pub fn remove_worker(&mut self, worker_id: WorkerId) {
-        // Check if any requests are still assigned to this worker
-        let active_requests: Vec<RequestId> = self
-            .request_to_worker
-            .iter()
-            .filter_map(|(req_id, w_id)| {
-                if *w_id == worker_id {
-                    Some(req_id.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if !active_requests.is_empty() {
-            panic!(
-                "Cannot remove worker {} with active requests: {:?}",
-                worker_id, active_requests
-            );
-        }
-
-        // Send shutdown command to the worker
-        if let Some(sender) = self.senders.remove(&worker_id) {
-            let _ = sender.send(WorkerCommand::Shutdown);
-        }
-        self.responders.remove(&worker_id);
-        if let Some(handle) = self.handles.remove(&worker_id) {
-            let _ = handle.join();
-        }
     }
 }
 
@@ -483,40 +499,13 @@ mod tests {
         assert_eq!(new_blocks_map[&0], 1); // Worker 0 would have 1 new block
         assert_eq!(new_blocks_map[&1], 1); // Worker 1 would have 1 new block
         assert_eq!(new_blocks_map[&2], 2); // Worker 2 would have 2 new blocks
-    }
 
-    #[test]
-    fn test_remove_worker() {
-        let block_size = 4;
-        let worker_ids = vec![0, 1, 2];
-        let mut manager = ActiveSequencesMultiWorker::new(block_size, worker_ids);
+        manager.update_workers(vec![0, 1]);
+        manager.update_workers(vec![0, 1, 3]);
 
-        // Remove worker 1 (no active requests)
-        manager.remove_worker(1);
-        assert_eq!(manager.num_workers(), 2);
+        let new_blocks_map = manager.new_blocks(to_sequence(vec![0, 1, 2, 3, 4]));
 
-        // Verify worker 1 is gone by trying to add a request to it
-        let to_sequence =
-            |tokens: Vec<u32>| Tokens::from(tokens).into_sequence(block_size as u32, None);
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            manager.add_request("req0".to_string(), to_sequence(vec![0, 1, 2, 3]), 1);
-        }));
-        assert!(result.is_err());
-    }
-
-    #[test]
-    #[should_panic(expected = "Cannot remove worker 0 with active requests")]
-    fn test_remove_worker_with_active_requests() {
-        let block_size = 4;
-        let worker_ids = vec![0, 1, 2];
-        let mut manager = ActiveSequencesMultiWorker::new(block_size, worker_ids);
-        let to_sequence =
-            |tokens: Vec<u32>| Tokens::from(tokens).into_sequence(block_size as u32, None);
-
-        // Add a request to worker 0
-        manager.add_request("req0".to_string(), to_sequence(vec![0, 1, 2, 3]), 0);
-
-        // Try to remove worker 0 - should panic
-        manager.remove_worker(0);
+        assert_eq!(new_blocks_map.len(), 3);
+        assert_eq!(new_blocks_map[&3], 2);
     }
 }
