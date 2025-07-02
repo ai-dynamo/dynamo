@@ -93,6 +93,7 @@ and is driven by a transparent development approach. Check out our repo at https
    KV Block Manager <architecture/kvbm_intro.rst>
    KV Cache Routing <architecture/kv_cache_routing.md>
    Planner <architecture/planner.md>
+   Dynamo Architecture Flow <architecture/dynamo_flow.md>
 
 .. toctree::
    :hidden:
