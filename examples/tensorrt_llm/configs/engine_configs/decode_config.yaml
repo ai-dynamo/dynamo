@@ -23,5 +23,5 @@ enable_chunked_prefill: true
 disable_overlap_scheduler: false
 use_cuda_graph: true
 kv_cache_config:
-  free_gpu_memory_fraction: 0.50
+  free_gpu_memory_fraction: 0.95
 
