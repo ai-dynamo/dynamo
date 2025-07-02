@@ -110,6 +110,7 @@ cd /workspace/examples/sglang
 
 ```bash
 cd /workspace/examples/sglang
+export PYTHONPATH=$PYTHONPATH:/workspace/examples/sglang/utils
 ./launch/agg_router.sh
 ```
 

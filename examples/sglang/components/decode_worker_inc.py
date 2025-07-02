@@ -39,7 +39,7 @@ class DecodeRequestHandler:
     async def generate(self, req: str):
         req = msgspec.json.decode(req, type=dict)
 
-        g = await self.engine.async_generate(
+        results = await self.engine.async_generate(
             input_ids=req["request"]["token_ids"]
             if req["request"]["batch_token_ids"] is None
             else req["request"]["batch_token_ids"],
@@ -50,7 +50,7 @@ class DecodeRequestHandler:
             bootstrap_room=req["bootstrap_room"],
         )
 
-        async for result in g:
+        async for result in results:
             yield result
 
 
