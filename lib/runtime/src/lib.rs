@@ -96,5 +96,7 @@ pub struct DistributedRuntime {
     // startup. Will not start etcd.
     is_static: bool,
 
+    // TODO(DIS-204): move this functionality into component_registry - the comments on the usecase for component::Registry
+    // align perfectly with this functionality.
     instance_sources: Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
 }
