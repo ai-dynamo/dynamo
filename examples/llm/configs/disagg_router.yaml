@@ -47,6 +47,7 @@ VllmWorker:
 
 PrefillWorker:
   max-num-batched-tokens: 16384
+  max-batched-prefill-tokens: 2048
   ServiceArgs:
     workers: 1
     resources:
