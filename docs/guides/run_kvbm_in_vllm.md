@@ -40,7 +40,7 @@ export DYNAMO_KVBM_MANAGER=kvbm
 export DYNAMO_KVBM_CPU_CACHE=4
 
 # enable kv offloading to disk
-# 8 means 4GP of disk would be used
+# 8 means *GP of disk would be used
 export DYNAMO_KVBM_DISK_CACHE=8
 
 # serve an example LLM model
