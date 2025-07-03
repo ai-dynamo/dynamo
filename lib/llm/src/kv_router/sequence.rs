@@ -130,6 +130,12 @@ impl ActiveSequences {
             .count()
     }
 
+    /// Return the total number of blocks that would be used if the token sequence was added
+    /// This is the sum of new blocks that would be added plus the current active blocks
+    pub fn potential_blocks(&self, token_sequence: &TokenBlockSequence) -> usize {
+        self.new_blocks(token_sequence) + self.active_blocks
+    }
+
     /// Free all blocks associated with a request
     pub fn free(&mut self, request_id: &RequestId) {
         let Some(token_seq) = self.active_seqs.get(request_id) else {
@@ -179,7 +185,7 @@ impl ActiveSequences {
 }
 
 #[derive(Debug)]
-enum WorkerCommand {
+enum UpdateSequences {
     AddRequest {
         request_id: RequestId,
         token_sequence: TokenBlockSequence,
@@ -194,12 +200,15 @@ enum WorkerCommand {
     NewBlocks {
         token_sequence: Arc<TokenBlockSequence>,
     },
+    PotentialBlocks {
+        token_sequence: Arc<TokenBlockSequence>,
+    },
     Shutdown,
 }
 
 /// Multi-worker wrapper around ActiveSequences that distributes requests across multiple threads
 pub struct ActiveSequencesMultiWorker {
-    senders: HashMap<WorkerId, mpsc::Sender<WorkerCommand>>,
+    senders: HashMap<WorkerId, mpsc::Sender<UpdateSequences>>,
     responders: HashMap<WorkerId, mpsc::Receiver<usize>>,
     request_to_worker: HashMap<RequestId, WorkerId>,
     handles: HashMap<WorkerId, thread::JoinHandle<()>>,
@@ -235,11 +244,11 @@ impl ActiveSequencesMultiWorker {
     fn start_worker(
         block_size: usize,
     ) -> (
-        mpsc::Sender<WorkerCommand>,
+        mpsc::Sender<UpdateSequences>,
         mpsc::Receiver<usize>,
         thread::JoinHandle<()>,
     ) {
-        let (request_tx, request_rx) = mpsc::channel::<WorkerCommand>();
+        let (request_tx, request_rx) = mpsc::channel::<UpdateSequences>();
         let (response_tx, response_rx) = mpsc::channel::<usize>();
 
         let handle = thread::spawn(move || {
@@ -247,23 +256,27 @@ impl ActiveSequencesMultiWorker {
 
             while let Ok(command) = request_rx.recv() {
                 match command {
-                    WorkerCommand::AddRequest {
+                    UpdateSequences::AddRequest {
                         request_id,
                         token_sequence,
                     } => {
                         active_sequences.add_request(request_id, token_sequence);
                     }
-                    WorkerCommand::Free { request_id } => {
+                    UpdateSequences::Free { request_id } => {
                         active_sequences.free(&request_id);
                     }
-                    WorkerCommand::Push { request_id, token } => {
+                    UpdateSequences::Push { request_id, token } => {
                         active_sequences.push(&request_id, token);
                     }
-                    WorkerCommand::NewBlocks { token_sequence } => {
+                    UpdateSequences::NewBlocks { token_sequence } => {
                         let new_blocks = active_sequences.new_blocks(&token_sequence);
                         response_tx.send(new_blocks).unwrap();
                     }
-                    WorkerCommand::Shutdown => {
+                    UpdateSequences::PotentialBlocks { token_sequence } => {
+                        let potential_blocks = active_sequences.potential_blocks(&token_sequence);
+                        response_tx.send(potential_blocks).unwrap();
+                    }
+                    UpdateSequences::Shutdown => {
                         break;
                     }
                 }
@@ -289,7 +302,7 @@ impl ActiveSequencesMultiWorker {
 
             // Send shutdown command to the worker
             if let Some(sender) = self.senders.remove(worker_id) {
-                let _ = sender.send(WorkerCommand::Shutdown);
+                let _ = sender.send(UpdateSequences::Shutdown);
             }
             self.responders.remove(worker_id);
             if let Some(handle) = self.handles.remove(worker_id) {
@@ -321,7 +334,7 @@ impl ActiveSequencesMultiWorker {
         self.request_to_worker.insert(request_id.clone(), worker_id);
 
         self.senders[&worker_id]
-            .send(WorkerCommand::AddRequest {
+            .send(UpdateSequences::AddRequest {
                 request_id,
                 token_sequence,
             })
@@ -336,7 +349,7 @@ impl ActiveSequencesMultiWorker {
             .expect("Request ID not found in request_to_worker mapping");
 
         self.senders[&worker_id]
-            .send(WorkerCommand::Free {
+            .send(UpdateSequences::Free {
                 request_id: request_id.clone(),
             })
             .expect("Failed to send free command to worker");
@@ -352,7 +365,7 @@ impl ActiveSequencesMultiWorker {
             .expect("Request ID not found in request_to_worker mapping");
 
         self.senders[&worker_id]
-            .send(WorkerCommand::Push {
+            .send(UpdateSequences::Push {
                 request_id: request_id.clone(),
                 token,
             })
@@ -364,29 +377,45 @@ impl ActiveSequencesMultiWorker {
         self.senders.len()
     }
 
-    /// Query all workers for the number of new blocks that would be added by a token sequence
-    pub fn new_blocks(&self, token_sequence: TokenBlockSequence) -> HashMap<WorkerId, usize> {
+    /// Generic method to query all workers with a given command
+    fn query_workers(
+        &self,
+        token_sequence: TokenBlockSequence,
+        command_fn: impl Fn(Arc<TokenBlockSequence>) -> UpdateSequences,
+    ) -> HashMap<WorkerId, usize> {
         let mut results = HashMap::new();
         let token_sequence_shared = Arc::new(token_sequence);
 
         // Send queries to all workers in parallel
         for sender in self.senders.values() {
             sender
-                .send(WorkerCommand::NewBlocks {
-                    token_sequence: token_sequence_shared.clone(),
-                })
-                .expect("Failed to send new_blocks command to worker");
+                .send(command_fn(token_sequence_shared.clone()))
+                .expect("Failed to send command to worker");
         }
 
         // Collect results from all workers
         for (worker_id, receiver) in &self.responders {
-            let new_blocks = receiver
+            let result = receiver
                 .recv_timeout(Duration::from_secs(1))
-                .expect("Failed to receive new_blocks response from worker");
-            results.insert(*worker_id, new_blocks);
+                .expect("Failed to receive response from worker");
+            results.insert(*worker_id, result);
         }
 
         results
+    }
+
+    /// Query all workers for the number of new blocks that would be added by a token sequence
+    pub fn new_blocks(&self, token_sequence: TokenBlockSequence) -> HashMap<WorkerId, usize> {
+        self.query_workers(token_sequence, |ts| UpdateSequences::NewBlocks {
+            token_sequence: ts,
+        })
+    }
+
+    /// Query all workers for the total number of blocks (new + active) that would be used by a token sequence
+    pub fn potential_blocks(&self, token_sequence: TokenBlockSequence) -> HashMap<WorkerId, usize> {
+        self.query_workers(token_sequence, |ts| UpdateSequences::PotentialBlocks {
+            token_sequence: ts,
+        })
     }
 }
 
@@ -394,7 +423,7 @@ impl Drop for ActiveSequencesMultiWorker {
     fn drop(&mut self) {
         // Send shutdown command to all workers
         for sender in self.senders.values() {
-            let _ = sender.send(WorkerCommand::Shutdown);
+            let _ = sender.send(UpdateSequences::Shutdown);
         }
 
         // Wait for all threads to finish
