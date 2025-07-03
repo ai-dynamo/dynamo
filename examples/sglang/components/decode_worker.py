@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import sys
 
 import msgspec
@@ -54,8 +55,26 @@ class DecodeRequestHandler:
             yield result
 
 
+async def graceful_shutdown(runtime):
+    logging.info("Received shutdown signal, shutting down DistributedRuntime")
+    runtime.shutdown()
+    logging.info("DistributedRuntime shutdown complete")
+
+
 @dynamo_worker(static=False)
 async def worker(runtime: DistributedRuntime):
+    # Set up signal handler for graceful shutdown
+    loop = asyncio.get_running_loop()
+
+    def signal_handler():
+        # Schedule the shutdown coroutine instead of calling it directly
+        asyncio.create_task(graceful_shutdown(runtime))
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
+
+    logging.info("Signal handlers set up for graceful shutdown")
+
     server_args = parse_sglang_args_inc(sys.argv[1:])
     await init(runtime, server_args)
 
