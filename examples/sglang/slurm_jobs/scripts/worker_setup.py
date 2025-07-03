@@ -16,11 +16,9 @@ import os
 import socket
 import subprocess
 import time
-import types
 from pathlib import Path
 
 import requests
-import yaml
 
 # Network configurations
 ETCD_CLIENT_PORT = 2379
@@ -54,74 +52,6 @@ def log_gpu_utilization(log_file: Path) -> None:
         logging.warning("Failed to start GPU utilization monitoring")
     else:
         logging.info("Started GPU utilization monitoring in the background")
-
-
-def update_yaml_config(
-    config_file: Path,
-    prefill_host_ip: str,
-    decode_host_ip: str,
-    rank: int,
-    total_nodes: int,
-    total_gpus: int,
-) -> None:
-    """
-    Update SGLangWorker and SGLangDecodeWorker in a YAML config file.
-    Args:
-        config_file: Path to the YAML config file
-        prefill_host_ip: IP address of the prefill host node
-        decode_host_ip: IP address of the decode host node
-        rank: Rank of the current node (0 for host node)
-        total_nodes: Total number of nodes in the cluster
-        total_gpus: Total number of GPUs in the cluster
-    """
-    replacements = types.MappingProxyType(
-        {
-            # Prefill node
-            "SGLangWorker.dist-init-addr": f"{prefill_host_ip}:{DIST_INIT_PORT}",
-            "SGLangWorker.node-rank": rank,
-            "SGLangWorker.tp-size": total_gpus,
-            "SGLangWorker.dp-size": total_gpus,
-            "SGLangWorker.nnodes": total_nodes,
-            # Decode node
-            "SGLangDecodeWorker.dist-init-addr": f"{decode_host_ip}:{DIST_INIT_PORT}",
-            "SGLangDecodeWorker.node-rank": rank,
-            "SGLangDecodeWorker.tp-size": total_gpus,
-            "SGLangDecodeWorker.dp-size": total_gpus,
-            "SGLangDecodeWorker.nnodes": total_nodes,
-        }
-    )
-
-    with open(config_file) as f:
-        config_data = yaml.safe_load(f)
-
-    for key_path, new_value in replacements.items():
-        keys = key_path.split(".")
-        current = config_data
-
-        for key in keys[:-1]:
-            if key not in current:
-                logging.warning(
-                    f"Key '{key}' not found in config, skipping replacement for '{key_path}'"
-                )
-                break
-            current = current[key]
-        else:
-            target_key = keys[-1]
-            if target_key in current:
-                old_value = current[target_key]
-                current[target_key] = new_value
-                logging.info(f"Updated {key_path}: {old_value} -> {new_value}")
-            else:
-                logging.warning(
-                    f"Target key '{target_key}' not found in path '{key_path}'"
-                )
-
-    with open(config_file, "w") as f:
-        yaml.dump(config_data, f)
-
-    logging.info("Updated config file:")
-    with open(config_file) as f:
-        logging.info(f.read())
 
 
 def check_etcd_health(etcd_url: str) -> bool:
@@ -221,12 +151,6 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         help="Type of worker to run",
     )
     parser.add_argument(
-        "--config",
-        type=str,
-        default="configs/deepep/dsr1.yaml",
-        help="Path to the YAML config file (default: configs/deepep/dsr1.yaml)",
-    )
-    parser.add_argument(
         "--gpus_per_node",
         type=int,
         default=8,
@@ -254,11 +178,14 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("GPUs per node must be at least 1")
 
 
-def setup_prefill_node(rank: int, prefill_host_ip: str, config_file: Path) -> int:
+def setup_prefill_node(
+    rank: int, prefill_host_ip: str, total_nodes: int, total_gpus: int
+) -> int:
     """
     Setup the prefill node.
     """
     if rank == 0:
+        logging.info(f"Setting up host prefill node: {rank}")
         logging.info(f"Starting nats server on node {rank} with IP {prefill_host_ip}")
 
         nats_process = run_command("nats-server -js", background=True)
@@ -276,32 +203,92 @@ def setup_prefill_node(rank: int, prefill_host_ip: str, config_file: Path) -> in
         if not etcd_process:
             raise RuntimeError("Failed to start etcd")
 
-        dynamo_cmd = f"dynamo serve graphs.agg:Frontend -f {config_file}"
-        logging.info(f"[Host Prefill Node {rank}] Command: {dynamo_cmd}")
-        return_code = run_command(dynamo_cmd)
+        ingress_process = run_command("dynamo run in=http out=dyn", background=True)
+        if not ingress_process:
+            raise RuntimeError("Failed to start ingress")
 
     else:
+        logging.info(f"Setting up child prefill node: {rank}")
         if not wait_for_etcd(f"http://{prefill_host_ip}:{ETCD_CLIENT_PORT}"):
             raise RuntimeError("Failed to connect to etcd")
 
-        dynamo_cmd = f"dynamo serve graphs.agg:Frontend -f {config_file} --service-name SGLangWorker"
-        logging.info(f"[Child Prefill Node {rank}] Command: {dynamo_cmd}")
-        return_code = run_command(dynamo_cmd)
-
-    return return_code
+    dynamo_cmd = (
+        f"python3 components/worker.py "
+        "--model-path /model/ "
+        "--served-model-name deepseek-ai/DeepSeek-R1 "
+        "--skip-tokenizer-init "
+        "--disaggregation-mode prefill "
+        "--disaggregation-transfer-backend nixl "
+        "--disaggregation-bootstrap-port 30001 "
+        f"--dist-init-addr {prefill_host_ip}:{DIST_INIT_PORT} "
+        f"--nnodes {total_nodes} "
+        f"--node-rank {rank} "
+        f"--tp-size {total_gpus} "
+        f"--dp-size {total_gpus} "
+        "--enable-dp-attention "
+        "--decode-log-interval 1 "
+        "--enable-deepep-moe "
+        "--page-size 1 "
+        "--trust-remote-code "
+        "--moe-dense-tp-size 1 "
+        "--enable-dp-lm-head "
+        "--disable-radix-cache "
+        "--watchdog-timeout 1000000 "
+        "--enable-two-batch-overlap "
+        "--deepep-mode normal "
+        "--mem-fraction-static 0.85 "
+        "--deepep-config /configs/deepep.json "
+        "--ep-num-redundant-experts 32 "
+        "--ep-dispatch-algorithm dynamic "
+        "--eplb-algorithm deepseek "
+    )
+    return run_command(dynamo_cmd)
 
 
 def setup_decode_node(
-    rank: int, decode_host_ip: str, prefill_host_ip: str, config_file: Path
+    rank: int,
+    decode_host_ip: str,
+    prefill_host_ip: str,
+    total_nodes: int,
+    total_gpus: int,
 ) -> int:
     """
     Setup the decode node.
     """
+    logging.info(f"Setting up child decode node: {rank}")
+
     if not wait_for_etcd(f"http://{prefill_host_ip}:{ETCD_CLIENT_PORT}"):
         raise RuntimeError("Failed to connect to etcd")
 
-    dynamo_cmd = f"dynamo serve graphs.disagg:Frontend -f {config_file} --service-name SGLangDecodeWorker"
-    logging.info(f"[Decode Node {rank}] Command: {dynamo_cmd}")
+    dynamo_cmd = (
+        "python3 components/decode_worker.py "
+        "--model-path /model/ "
+        "--served-model-name deepseek-ai/DeepSeek-R1 "
+        "--skip-tokenizer-init "
+        "--disaggregation-mode decode "
+        "--disaggregation-transfer-backend nixl "
+        "--disaggregation-bootstrap-port 30001 "
+        f"--dist-init-addr {decode_host_ip}:{DIST_INIT_PORT} "
+        f"--nnodes {total_nodes} "
+        f"--node-rank {rank} "
+        f"--tp-size {total_gpus} "
+        f"--dp-size {total_gpus} "
+        "--enable-dp-attention "
+        "--decode-log-interval 1 "
+        "--enable-deepep-moe "
+        "--page-size 1 "
+        "--trust-remote-code "
+        "--moe-dense-tp-size 1 "
+        "--enable-dp-lm-head "
+        "--disable-radix-cache "
+        "--watchdog-timeout 1000000 "
+        "--enable-two-batch-overlap "
+        "--deepep-mode low_latency "
+        "--mem-fraction-static 0.835 "
+        "--ep-num-redundant-experts 32 "
+        "--cuda-graph-bs 256 "
+    )
+
     return run_command(dynamo_cmd)
 
 
@@ -330,23 +317,21 @@ def main(args: list[str] | None = None):
     logging.info(f"Decode host IP: {args.decode_host_ip}")
     logging.info(f"Rank: {args.rank}")
 
-    config_file = Path(args.config)
-
     setup_env(args.prefill_host_ip)
-    update_yaml_config(
-        config_file,
-        args.prefill_host_ip,
-        args.decode_host_ip,
-        args.rank,
-        args.total_nodes,
-        args.total_nodes * args.gpus_per_node,
-    )
-
     if args.worker_type == "prefill":
-        setup_prefill_node(args.rank, args.prefill_host_ip, config_file)
+        setup_prefill_node(
+            args.rank,
+            args.prefill_host_ip,
+            args.total_nodes,
+            args.total_nodes * args.gpus_per_node,
+        )
     else:
         setup_decode_node(
-            args.rank, args.decode_host_ip, args.prefill_host_ip, config_file
+            args.rank,
+            args.decode_host_ip,
+            args.prefill_host_ip,
+            args.total_nodes,
+            args.total_nodes * args.gpus_per_node,
         )
 
     logging.info(f"{args.worker_type.capitalize()} node setup complete")
