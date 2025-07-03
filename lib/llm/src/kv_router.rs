@@ -106,9 +106,10 @@ impl KvRouter {
             .primary_lease()
             .expect("Cannot KV route static workers")
             .primary_token();
-        tracing::info!("KV Routing initialized");
         let metrics_aggregator =
             EndpointCollector::new(component.clone(), cancellation_token.clone()).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
         let indexer = KvIndexer::new(cancellation_token.clone(), block_size);
         let scheduler = KvScheduler::start(
             component.namespace().clone(),
@@ -140,6 +141,7 @@ impl KvRouter {
             }
         });
 
+        tracing::info!("KV Routing initialized");
         Ok(Self {
             scheduler,
             indexer,
