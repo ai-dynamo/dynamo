@@ -110,51 +110,44 @@ where
 
     /// Issue a request to the next available instance in a round-robin fashion
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let slf = self;
-        let routing_algorithm = move || async move {
-            let counter = slf.round_robin_counter.fetch_add(1, Ordering::Relaxed);
+        let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
 
-            let instance_id = {
-                let instances = slf.client.instances_avail().await;
-                let count = instances.len();
-                if count == 0 {
-                    return Err(anyhow::anyhow!(
-                        "no instances found for endpoint {:?}",
-                        slf.client.endpoint.etcd_root()
-                    ));
-                }
-                let offset = counter % count as u64;
-                instances[offset as usize].id()
-            };
-            tracing::trace!("round robin router selected {instance_id}");
-
-            Ok(instance_id)
+        let instance_id = {
+            let instances = self.client.instances_avail().await;
+            let count = instances.len();
+            if count == 0 {
+                return Err(anyhow::anyhow!(
+                    "no instances found for endpoint {:?}",
+                    self.client.endpoint.etcd_root()
+                ));
+            }
+            let offset = counter % count as u64;
+            instances[offset as usize].id()
         };
-        self.generate_with_fault_tolerance(routing_algorithm, request)
+        tracing::trace!("round robin router selected {instance_id}");
+
+        self.generate_with_fault_detection(instance_id, request)
             .await
     }
 
     /// Issue a request to a random endpoint
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let slf = self;
-        let routing_algorithm = move || async move {
-            let instance_id = {
-                let instances = slf.client.instances_avail().await;
-                let count = instances.len();
-                if count == 0 {
-                    return Err(anyhow::anyhow!(
-                        "no instances found for endpoint {:?}",
-                        slf.client.endpoint.etcd_root()
-                    ));
-                }
-                let counter = rand::rng().random::<u64>();
-                let offset = counter % count as u64;
-                instances[offset as usize].id()
-            };
-            tracing::trace!("random router selected {instance_id}");
-            Ok(instance_id)
+        let instance_id = {
+            let instances = self.client.instances_avail().await;
+            let count = instances.len();
+            if count == 0 {
+                return Err(anyhow::anyhow!(
+                    "no instances found for endpoint {:?}",
+                    self.client.endpoint.etcd_root()
+                ));
+            }
+            let counter = rand::rng().random::<u64>();
+            let offset = counter % count as u64;
+            instances[offset as usize].id()
         };
-        self.generate_with_fault_tolerance(routing_algorithm, request)
+        tracing::trace!("random router selected {instance_id}");
+
+        self.generate_with_fault_detection(instance_id, request)
             .await
     }
 
@@ -164,22 +157,19 @@ where
         request: SingleIn<T>,
         instance_id: i64,
     ) -> anyhow::Result<ManyOut<U>> {
-        let slf = self;
-        let routing_algorithm = move || async move {
-            let found = {
-                let instances = slf.client.instances_avail().await;
-                instances.iter().any(|ep| ep.id() == instance_id)
-            };
-
-            if !found {
-                return Err(anyhow::anyhow!(
-                    "instance_id={instance_id} not found for endpoint {:?}",
-                    slf.client.endpoint.etcd_root()
-                ));
-            }
-            Ok(instance_id)
+        let found = {
+            let instances = self.client.instances_avail().await;
+            instances.iter().any(|ep| ep.id() == instance_id)
         };
-        self.generate_with_fault_tolerance(routing_algorithm, request)
+
+        if !found {
+            return Err(anyhow::anyhow!(
+                "instance_id={instance_id} not found for endpoint {:?}",
+                self.client.endpoint.etcd_root()
+            ));
+        }
+
+        self.generate_with_fault_detection(instance_id, request)
             .await
     }
 
@@ -191,17 +181,11 @@ where
         self.addressed.generate(request).await
     }
 
-    async fn generate_with_fault_tolerance<F, R>(
+    async fn generate_with_fault_detection(
         &self,
-        routing_algorithm: F,
+        instance_id: i64,
         request: SingleIn<T>,
-    ) -> anyhow::Result<ManyOut<U>>
-    where
-        F: FnOnce() -> R,
-        R: Future<Output = anyhow::Result<i64>>,
-    {
-        let instance_id = routing_algorithm().await?;
-
+    ) -> anyhow::Result<ManyOut<U>> {
         let subject = self.client.endpoint.subject_to(instance_id);
         let request = request.map(|req| AddressedRequest::new(req, subject));
 
