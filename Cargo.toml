@@ -76,7 +76,7 @@ tokio-util = { version = "0.7", features = ["codec", "net"] }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
 validator = { version = "0.20.0", features = ["derive"] }
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1.17", features = ["v4", "serde"] }
 url = {version = "2.5", features = ["serde"]}
 xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
 
