@@ -2,8 +2,7 @@
 
 ## Multi-node sized models
 
-SGLang allows you to deploy multi-node sized models by adding in the `dist-init-addr`, `nnodes`, and `node-rank` arguments. Below we demonstrate and example of deploying DeepSeek R1 for disaggregated serving across 4 nodes. This example requires
-4 nodes of 8xH100 GPUs.
+SGLang allows you to deploy multi-node sized models by adding in the `dist-init-addr`, `nnodes`, and `node-rank` arguments. Below we demonstrate and example of deploying DeepSeek R1 for disaggregated serving across 4 nodes. This example requires 4 nodes of 8xH100 GPUs.
 
 **Step 1**: Start NATS/ETCD on your head node. Ensure you have the correct firewall rules to allow communication between the nodes as you will need the NATS/ETCD endpoints to be accessible by all other nodes.
 ```bash
@@ -14,130 +13,93 @@ docker compose -f lib/runtime/docker-compose.yml up -d
 **Step 2**: Ensure that your configuration file has the required arguments. Here's an example configuration that runs prefill and the model in TP16:
 
 Node 1: Run HTTP ingress, processor, and 8 shards of the prefill worker
-```yaml
-# configs/prefill-1.yaml
-Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1
-  endpoint: dynamo.SGLangWorker.generate
-  port: 8000
-
-SGLangWorker:
-  model-path: deepseek-ai/DeepSeek-R1
-  served-model-name: deepseek-ai/DeepSeek-R1
-  tp: 16
-  trust-remote-code: true
-  skip-tokenizer-init: true
-  dist-init-addr: <node-1-ip>:29500
-  disaggregation-bootstrap-port: 30001
-  disaggregation-mode: prefill
-  disaggregation-transfer-backend: nixl
-  nnodes: 2
-  node-rank: 0
-  mem-fraction-static: 0.82
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: 8
-```
-
-Run this with:
 ```bash
-cd examples/sglang
-dynamo serve graphs.agg:Frontend -f configs/prefill-1.yaml
+# run ingress
+dynamo run in=http out=dyn &
+# run prefill worker
+python3 components/worker_inc.py \
+  --model-path /model/ \
+  --served-model-name deepseek-ai/DeepSeek-R1 \
+  --tp 16 \
+  --dp-size 16 \
+  --dist-init-addr HEAD_PREFILL_NODE_IP:29500 \
+  --nnodes 2 \
+  --node-rank 0 \
+  --enable-dp-attention \
+  --trust-remote-code \
+  --skip-tokenizer-init \
+  --disaggregation-mode prefill \
+  --disaggregation-transfer-backend nixl \
+  --mem-fraction-static 0.82 \
 ```
 
-Node 2: Run the remaining 8 shards of the prefill worker and the decode worker
-```yaml
-# configs/prefill-2.yaml
-SGLangWorker:
-  model-path: deepseek-ai/DeepSeek-R1
-  served-model-name: deepseek-ai/DeepSeek-R1
-  tp: 16
-  trust-remote-code: true
-  skip-tokenizer-init: true
-  mem-fraction-static: 0.82
-  dist-init-addr: <node-1-ip>:29500
-  disaggregation-bootstrap-port: 30001
-  disaggregation-mode: prefill
-  disaggregation-transfer-backend: nixl
-  nnodes: 2
-  node-rank: 1
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: 8
-```
-
-On all other nodes, we need to export the NATS and ETCD endpoints. Run this with with:
+Node 2: Run the remaining 8 shards of the prefill worker
 ```bash
+# nats and etcd endpoints
 export NATS_SERVER="nats://<node-1-ip>"
 export ETCD_ENDPOINTS="<node-1-ip>:2379"
 
-cd examples/sglang
-dynamo serve graphs.disagg:Frontend -f configs/prefill-2.yaml --service-name SGLangWorker
+# worker
+python3 components/worker_inc.py \
+  --model-path /model/ \
+  --served-model-name deepseek-ai/DeepSeek-R1 \
+  --tp 16 \
+  --dp-size 16 \
+  --dist-init-addr HEAD_PREFILL_NODE_IP:29500 \
+  --nnodes 2 \
+  --node-rank 1 \
+  --enable-dp-attention \
+  --trust-remote-code \
+  --skip-tokenizer-init \
+  --disaggregation-mode prefill \
+  --disaggregation-transfer-backend nixl \
+  --mem-fraction-static 0.82
 ```
 
 Node 3: Run the first 8 shards of the decode worker
-```yaml
-# configs/decode-1.yaml
-SGLangDecodeWorker:
-  model-path: deepseek-ai/DeepSeek-R1
-  served-model-name: deepseek-ai/DeepSeek-R1
-  tp: 16
-  trust-remote-code: true
-  skip-tokenizer-init: true
-  mem-fraction-static: 0.80
-  dist-init-addr: 2:29500
-  disaggregation-mode: decode
-  disaggregation-transfer-backend: nixl
-  disaggregation-bootstrap-port: 30001
-  nnodes: 2
-  node-rank: 0
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: 8
-```
-
-Run this with:
 ```bash
+# nats and etcd endpoints
 export NATS_SERVER="nats://<node-1-ip>"
 export ETCD_ENDPOINTS="<node-1-ip>:2379"
 
-cd examples/sglang
-dynamo serve graphs.disagg:Frontend -f configs/decode-1.yaml --service-name SGLangDecodeWorker
+# worker
+python3 components/decode_worker_inc.py \
+  --model-path /model/ \
+  --served-model-name deepseek-ai/DeepSeek-R1 \
+  --tp 16 \
+  --dp-size 16 \
+  --dist-init-addr HEAD_DECODE_NODE_IP:29500 \
+  --nnodes 2 \
+  --node-rank 0 \
+  --enable-dp-attention \
+  --trust-remote-code \
+  --skip-tokenizer-init \
+  --disaggregation-mode decode \
+  --disaggregation-transfer-backend nixl \
+  --mem-fraction-static 0.82
 ```
 
 Node 4: Run the remaining 8 shards of the decode worker
-```yaml
-# configs/decode-2.yaml
-SGLangDecodeWorker:
-  model-path: deepseek-ai/DeepSeek-R1
-  served-model-name: deepseek-ai/DeepSeek-R1
-  tp: 16
-  trust-remote-code: true
-  skip-tokenizer-init: true
-  mem-fraction-static: 0.80
-  dist-init-addr: 2:29500
-  disaggregation-mode: decode
-  disaggregation-transfer-backend: nixl
-  disaggregation-bootstrap-port: 30001
-  disable-cuda-graph: true
-  nnodes: 2
-  node-rank: 1
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: 8
-```
-
-Run this with:
 ```bash
+# nats and etcd endpoints
 export NATS_SERVER="nats://<node-1-ip>"
 export ETCD_ENDPOINTS="<node-1-ip>:2379"
 
-cd examples/sglang
-dynamo serve graphs.disagg:Frontend -f configs/decode-2.yaml --service-name SGLangDecodeWorker
+# worker
+python3 components/decode_worker_inc.py \
+  --model-path /model/ \
+  --served-model-name deepseek-ai/DeepSeek-R1 \
+  --tp 16 \
+  --dp-size 16 \
+  --dist-init-addr HEAD_DECODE_NODE_IP:29500 \
+  --nnodes 2 \
+  --node-rank 1 \
+  --enable-dp-attention \
+  --trust-remote-code \
+  --skip-tokenizer-init \
+  --disaggregation-mode decode \
+  --disaggregation-transfer-backend nixl \
+  --mem-fraction-static 0.82
 ```
 
 **Step 3**: Run inference
