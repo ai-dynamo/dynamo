@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 class SGLangProcess(ManagedProcess):
     """Simple process manager for sglang shell scripts"""
 
-    def __init__(self, script_name, request, port=8080):
+    def __init__(self, script_name, request, port=8000):
         sglang_dir = "/workspace/examples/sglang"
         script_path = os.path.join(sglang_dir, "launch", script_name)
 
