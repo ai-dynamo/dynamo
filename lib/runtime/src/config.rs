@@ -142,7 +142,7 @@ impl RuntimeConfig {
             max_blocking_threads: 1,
             http_server_host: DEFAULT_HTTP_SERVER_HOST.to_string(),
             http_server_port: DEFAULT_HTTP_SERVER_PORT,
-            http_enabled: true,
+            http_enabled: false,
         }
     }
 
@@ -163,7 +163,7 @@ impl Default for RuntimeConfig {
             max_blocking_threads: 16,
             http_server_host: DEFAULT_HTTP_SERVER_HOST.to_string(),
             http_server_port: DEFAULT_HTTP_SERVER_PORT,
-            http_enabled: true,
+            http_enabled: false,
         }
     }
 }
@@ -311,7 +311,7 @@ mod tests {
     fn test_http_server_enabled_by_default() {
         temp_env::with_vars(vec![("DYN_RUNTIME_HTTP_ENABLED", None::<&str>)], || {
             let config = RuntimeConfig::from_settings().unwrap();
-            assert!(config.http_server_enabled());
+            assert!(!config.http_server_enabled());
         });
     }
 
@@ -324,10 +324,18 @@ mod tests {
     }
 
     #[test]
+    fn test_http_server_enabled_explicitly() {
+        temp_env::with_vars(vec![("DYN_RUNTIME_HTTP_ENABLED", Some("true"))], || {
+            let config = RuntimeConfig::from_settings().unwrap();
+            assert!(config.http_server_enabled());
+        });
+    }
+
+    #[test]
     fn test_http_server_enabled_by_port() {
         temp_env::with_vars(vec![("DYN_RUNTIME_HTTP_SERVER_PORT", Some("8080"))], || {
             let config = RuntimeConfig::from_settings().unwrap();
-            assert!(config.http_server_enabled()); // Still enabled by default
+            assert!(!config.http_server_enabled());
             assert_eq!(config.http_server_port, 8080);
         });
     }
