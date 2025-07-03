@@ -5,6 +5,7 @@ import asyncio
 import logging
 import random
 import socket
+import os
 import sys
 from typing import Any, Dict, Optional, Union
 
@@ -288,8 +289,9 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
     _ = ZmqKvEventPublisher(component=component, config=zmq_config)
 
     # Setup HTTP server (TODO: make this configurabel via CLI arg)
-    http_server = SglangHttpServer(engine, port=8888)
-    asyncio.create_task(http_server.start_server())
+    if os.environ.get("DYN_SGL_HTTP_SERVER"):
+        http_server = SglangHttpServer(engine, server_args, runtime)
+        asyncio.create_task(http_server.start_server())
 
     await endpoint.serve_endpoint(handler.generate)
 

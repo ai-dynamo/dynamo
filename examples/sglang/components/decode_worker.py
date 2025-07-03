@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 
 import msgspec
@@ -53,6 +54,10 @@ class DecodeRequestHandler:
         async for result in results:
             yield result
 
+    async def flush_cache(self):
+        await self.engine.tokenizer_manager.flush_cache()
+        logging.info("Decode worker cache flushed")
+
 
 @dynamo_worker(static=False)
 async def worker(runtime: DistributedRuntime):
@@ -70,8 +75,15 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
     component = runtime.namespace("dynamo").component("decode")
     await component.create_service()
 
-    endpoint = component.endpoint("generate")
-    await endpoint.serve_endpoint(handler.generate)
+    gen_endpoint = component.endpoint("generate")
+    flush_endpoint = component.endpoint("flush_cache")
+
+    tasks = [gen_endpoint.serve_endpoint(handler.generate)]
+    
+    if os.environ.get("DYN_SGL_HTTP_SERVER"):
+        tasks.append(flush_endpoint.serve_endpoint(handler.flush_cache))
+    
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":

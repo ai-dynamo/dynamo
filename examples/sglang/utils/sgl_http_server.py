@@ -3,14 +3,18 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 import sglang as sgl
 import asyncio
+from sglang.server_args import ServerArgs
 from dynamo.runtime import DistributedRuntime
 
 class SglangHttpServer:
     # TODO: add decode client conditional as well
-    def __init__(self, engine: sgl.Engine, drt: DistributedRuntime, port: int = 8888):
+    def __init__(self, engine: sgl.Engine, server_args: ServerArgs, drt: DistributedRuntime, port: int = 9001):
         self.engine = engine
         self.port = port
         self.app = FastAPI()
+        if server_args.disaggregation_mode != "null":
+            self.decode_flush_client = drt.namespace("dynamo").component("decode").endpoint("flush_cache").client()
+
         self.setup_routes()
         
     def setup_routes(self):
@@ -22,7 +26,7 @@ class SglangHttpServer:
                 asyncio.create_task(self.engine.tokenizer_manager.flush_cache())
                 
                 # then we target the decode worker over nats
-                await self.drt.namespace("dynamo").component("decode").endpoint("generate").client()
+                await self.decode_flush_client.flush_cache()
                 
                 return {"message": "Cache flush initiated", "success": True}
             except Exception as e:
