@@ -11,6 +11,7 @@ use std::{
     fmt,
     io::{IsTerminal as _, Read as _},
     path::PathBuf,
+    str::FromStr,
 };
 
 pub mod batch;
@@ -19,7 +20,8 @@ pub mod endpoint;
 pub mod http;
 pub mod text;
 
-use dynamo_runtime::{protocols::ENDPOINT_SCHEME, DistributedRuntime};
+use dynamo_runtime::protocols::ENDPOINT_SCHEME;
+use either::Either;
 
 const BATCH_PREFIX: &str = "batch:";
 
@@ -40,6 +42,14 @@ pub enum Input {
 
     /// Batch mode. Run all the prompts, write the outputs, exit.
     Batch(PathBuf),
+}
+
+impl FromStr for Input {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Input::try_from(s)
+    }
 }
 
 impl TryFrom<&str> for Input {
@@ -87,28 +97,36 @@ impl Default for Input {
 
 /// Run the given engine (EngineConfig) connected to an input.
 /// Does not return until the input exits.
+/// For Input::Endpoint pass a DistributedRuntime. For everything else pass either a Runtime or a
+/// DistributedRuntime.
 pub async fn run_input(
+    rt: Either<dynamo_runtime::Runtime, dynamo_runtime::DistributedRuntime>,
     in_opt: Input,
-    runtime: dynamo_runtime::Runtime,
     engine_config: super::EngineConfig,
 ) -> anyhow::Result<()> {
+    let runtime = match &rt {
+        Either::Left(rt) => rt.clone(),
+        Either::Right(drt) => drt.runtime().clone(),
+    };
     match in_opt {
         Input::Http => {
-            http::run(runtime.clone(), engine_config).await?;
+            http::run(runtime, engine_config).await?;
         }
         Input::Text => {
-            text::run(runtime.clone(), None, engine_config).await?;
+            text::run(runtime, None, engine_config).await?;
         }
         Input::Stdin => {
             let mut prompt = String::new();
             std::io::stdin().read_to_string(&mut prompt).unwrap();
-            text::run(runtime.clone(), Some(prompt), engine_config).await?;
+            text::run(runtime, Some(prompt), engine_config).await?;
         }
         Input::Batch(path) => {
-            batch::run(runtime.clone(), path, engine_config).await?;
+            batch::run(runtime, path, engine_config).await?;
         }
         Input::Endpoint(path) => {
-            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
+            let Either::Right(distributed_runtime) = rt else {
+                anyhow::bail!("Input::Endpoint requires passing a DistributedRuntime");
+            };
             endpoint::run(distributed_runtime, path, engine_config).await?;
         }
     }

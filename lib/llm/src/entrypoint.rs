@@ -31,6 +31,7 @@ impl RouterConfig {
     }
 }
 
+#[derive(Clone)]
 pub enum EngineConfig {
     /// Remote networked engines
     Dynamic(Box<LocalModel>),
