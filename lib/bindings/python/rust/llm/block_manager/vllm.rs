@@ -135,18 +135,27 @@ impl KvbmCacheManager {
             let blocks = host
                 .match_sequence_hashes_blocking(&sequence_hashes)
                 .map_err(to_pyerr)?;
-            let num_matched_host = blocks.len();
-            (Some(blocks), num_matched_host)
+            if !blocks.is_empty() {
+                let num_blocks = blocks.len();
+                (Some(blocks), num_blocks)
+            } else {
+                (None, 0)
+            }
         } else {
             (None, 0)
         };
 
-        let disk_blocks = if num_matched_host == sequence_hashes.len() {
+        let disk_blocks = if num_matched_host < sequence_hashes.len() {
             if let Some(disk) = self.block_manager().disk() {
-                Some(
-                    disk.match_sequence_hashes_blocking(&sequence_hashes[num_matched_host..])
-                        .map_err(to_pyerr)?,
-                )
+                let blocks = disk
+                    .match_sequence_hashes_blocking(&sequence_hashes[num_matched_host..])
+                    .map_err(to_pyerr)?;
+
+                if !blocks.is_empty() {
+                    Some(blocks)
+                } else {
+                    None
+                }
             } else {
                 None
             }

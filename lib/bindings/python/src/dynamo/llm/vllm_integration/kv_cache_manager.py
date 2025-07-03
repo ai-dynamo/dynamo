@@ -92,6 +92,10 @@ class KvbmCacheManager(KVConnectorBase_V1):
 
         sequence_hashes = self._create_slot(request)
 
+        # We need to ensure there's at least 1 token that we don't match against.
+        if len(request.all_token_ids) > 0 and len(request.all_token_ids) % self.block_size == 0:
+            sequence_hashes = sequence_hashes[:-1]
+
         owned_blocks = self.cache_manager.get_computed_blocks(sequence_hashes)
         block_count = owned_blocks.block_count()
 
@@ -347,8 +351,6 @@ class KvbmCacheManager(KVConnectorBase_V1):
         # In a full-prompt-hit case, we need to recompute the last token,
         # to get the logits to generate the next token.
         if num_computed_tokens + need_to_allocate == request.num_tokens:
-            # NOTE: since num_external_hit_tokens and num_computed_tokens are both block aligned,
-            # need_to_allocate is also block aligned
             need_to_allocate -= 1
 
         if need_to_allocate > 0:
