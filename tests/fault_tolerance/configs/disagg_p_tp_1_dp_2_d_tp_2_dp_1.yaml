@@ -32,7 +32,6 @@ Processor:
       cpu: "10"
       memory: "20Gi"
 
-
 VllmWorker:
   remote-prefill: true
   conditional-disagg: true
