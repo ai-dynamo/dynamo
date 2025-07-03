@@ -228,7 +228,7 @@ COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
 
 USER $USERNAME
 ENV HOME=/home/$USERNAME
-ENV PYTHONPATH=$HOME/dynamo/deploy/sdk/src:$PYTHONPATH:$HOME/dynamo/components/planner/src:$PYTHONPATH
+ENV PYTHONPATH=/workspace/dynamo/deploy/sdk/src:/workspace/dynamo/components/planner/src:/workspace/examples/sglang:$PYTHONPATH
 WORKDIR $HOME
 
 # https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
@@ -356,6 +356,8 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH=/opt/dynamo/bindings/lib/libdynamo_llm_capi.so
 ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/
+
+ENV PYTHONPATH=/workspace/dynamo/deploy/sdk/src:/workspace/dynamo/components/planner/src:/workspace/examples/sglang/utils:$PYTHONPATH
 
 ########################################
 ########## Development Image ###########

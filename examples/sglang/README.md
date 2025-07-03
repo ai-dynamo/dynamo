@@ -95,7 +95,7 @@ that get spawned depend upon the chosen graph.
 #### Aggregated
 
 ```bash
-cd /workspace/examples/sglang
+cd $DYNAMO_ROOT/examples/sglang
 ./launch/agg.sh
 ```
 
@@ -108,8 +108,7 @@ cd /workspace/examples/sglang
 > After these are in, the TODOs in `worker.py` will be resolved and the placeholder logic removed.
 
 ```bash
-cd /workspace/examples/sglang
-export PYTHONPATH=$PYTHONPATH:/workspace/examples/sglang/utils
+cd $DYNAMO_ROOT/examples/sglang
 ./launch/agg_router.sh
 ```
 
@@ -133,7 +132,7 @@ Because Dynamo has a discovery mechanism, we do not use a load balancer. Instead
 > Disaggregated serving in SGLang currently requires each worker to have the same tensor parallel size [unless you are using an MLA based model](https://github.com/sgl-project/sglang/pull/5922)
 
 ```bash
-cd /workspace/examples/sglang
+cd $DYNAMO_ROOT/examples/sglang
 ./launch/disagg.sh
 ```
 
@@ -143,7 +142,7 @@ SGLang also supports DP attention for MoE models. We provide an example config f
 
 ```bash
 # note this will require 4 GPUs
-cd /workspace/examples/sglang
+cd $DYNAMO_ROOT/examples/sglang
 ./launch/disagg_dp_attn.sh
 ```
 

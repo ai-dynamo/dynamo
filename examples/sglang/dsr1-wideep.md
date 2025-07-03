@@ -73,7 +73,7 @@ In each container, you should be in the `/sgl-workspace/dynamo/examples/sglang` 
 # run ingress
 dynamo run in=http out=dyn &
 # run prefill worker
-python3 components/worker_inc.py \
+python3 components/worker.py \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --skip-tokenizer-init \
@@ -108,7 +108,7 @@ On the other prefill node (since this example has 4 total prefill nodes), run th
 7. Run the decode worker on the head decode node
 
 ```bash
-python3 components/decode_worker_inc.py \
+python3 components/decode_worker.py \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --skip-tokenizer-init \
@@ -137,14 +137,6 @@ python3 components/decode_worker_inc.py \
 ```
 
 On the other decode nodes (this example has 9 total decode nodes), run the same command but change `--node-rank` to 1, 2, 3, 4, 5, 6, 7, and 8
-
-8. Run the warmup script to warm up the model
-
-DeepGEMM kernels can sometimes take a while to warm up. Here we provide a small helper script that should help. You can run this as many times as you want before starting inference/benchmarking. You can exec into the head node and run this script standalone - it does not need a container.
-
-```bash
-./warmup.sh HEAD_PREFILL_NODE_IP
-```
 
 ## Benchmarking
 
