@@ -73,7 +73,7 @@ In each container, you should be in the `/sgl-workspace/dynamo/examples/sglang` 
 # run ingress
 dynamo run in=http out=dyn &
 # run prefill worker
-python3 components/worker_inc.py \
+python3 components/worker.py \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --skip-tokenizer-init \
@@ -108,7 +108,7 @@ On the other prefill node (since this example has 4 total prefill nodes), run th
 7. Run the decode worker on the head decode node
 
 ```bash
-python3 components/decode_worker_inc.py \
+python3 components/decode_worker.py \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --skip-tokenizer-init \
