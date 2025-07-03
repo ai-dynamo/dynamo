@@ -25,14 +25,15 @@ readme.workspace = true
 description = "Dynamo LLM Library"
 
 [features]
-default = []
+# default = []
 
-# todo: enable this as default
-# default = ["block-manager", "testing-full"]
+# todo: get this working in CI as a default.
+# default = ["block-manager"]
 
 testing-full  = ["testing-cuda", "testing-nixl"]
 testing-cuda  = ["dep:cudarc"]
 testing-nixl  = ["dep:nixl-sys"]
+testing-etcd = []
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
 sentencepiece = ["dep:sentencepiece"]
 
@@ -53,6 +54,7 @@ derive_builder = {workspace = true }
 either = { workspace = true }
 etcd-client = { workspace = true }
 futures =  { workspace = true }
+futures-util = "0.3.31"
 hf-hub = { workspace = true }
 humantime = { workspace = true } # input/batch
 rand = { workspace = true }
@@ -63,6 +65,7 @@ serde_json = { workspace = true }
 strum = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
+tmq = "0.5.0"
 tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-util = { workspace = true }
@@ -85,7 +88,7 @@ rayon = "1"
 dialoguer = { version = "0.11", default-features = false, features = ["editor", "history"] }
 
 # block_manager
-nixl-sys = {git="https://github.com/ai-dynamo/nixl", rev = "a7c654d46a14cd5ce635cc8c02433d71df93dedf", optional = true }
+nixl-sys = {git="https://github.com/ai-dynamo/nixl", rev = "fa800bcfe3814b08df9cda9c30443de8c19665e5", optional = true }
 cudarc = { version = "0.16.2", features = ["cuda-12020"], optional = true }
 ndarray = { version = "0.16", optional = true }
 nix = { version = "0.26", optional = true }

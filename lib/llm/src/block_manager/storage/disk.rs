@@ -17,16 +17,17 @@ use super::*;
 
 use core::ffi::c_char;
 use nix::fcntl::{fallocate, FallocateFlags};
+use nix::unistd::unlink;
+use std::ffi::CStr;
 use std::ffi::CString;
-use std::fs::File;
-use std::os::unix::io::{AsRawFd, FromRawFd};
 
 #[derive(Debug)]
 pub struct DiskStorage {
-    file: File,
+    fd: u64,
     file_name: String,
     size: usize,
     handles: RegistrationHandles,
+    unlinked: bool,
 }
 
 impl Local for DiskStorage {}
@@ -50,45 +51,63 @@ impl DiskStorage {
             )
         };
 
-        let file = unsafe { File::from_raw_fd(raw_fd) };
-        let file_name = String::from_utf8_lossy(&template_bytes)
-            .trim_end_matches("\0")
+        let file_name = CStr::from_bytes_with_nul(template_bytes.as_slice())
+            .unwrap()
+            .to_str()
+            .map_err(|e| {
+                StorageError::AllocationFailed(format!("Failed to read temp file name: {}", e))
+            })?
             .to_string();
 
-        file.set_len(size as u64).map_err(|_| {
-            StorageError::AllocationFailed("Failed to set temp file size".to_string())
-        })?;
-
-        // File::set_len() only updates the metadata of the file, it does not allocate the underlying storage.
         // We need to use fallocate to actually allocate the storage and create the blocks on disk.
-        fallocate(file.as_raw_fd(), FallocateFlags::empty(), 0, size as i64).map_err(|_| {
-            StorageError::AllocationFailed("Failed to allocate temp file".to_string())
+        fallocate(raw_fd, FallocateFlags::empty(), 0, size as i64).map_err(|e| {
+            StorageError::AllocationFailed(format!("Failed to allocate temp file: {}", e))
         })?;
 
         Ok(Self {
-            file,
+            fd: raw_fd as u64,
             file_name,
             size,
             handles: RegistrationHandles::new(),
+            unlinked: false,
         })
     }
 
     pub fn fd(&self) -> u64 {
-        self.file.as_raw_fd() as u64
+        self.fd
+    }
+
+    /// Unlink our temp file.
+    /// This means that when this process terminates, the file will be automatically deleted by the OS.
+    /// Unfortunately, GDS requires that files we try to register must be linked.
+    /// To get around this, we unlink the file only after we've registered it with NIXL.
+    pub fn unlink(&mut self) -> Result<(), StorageError> {
+        if self.unlinked {
+            return Ok(());
+        }
+
+        self.unlinked = true;
+
+        unlink(self.file_name.as_str()).map_err(|e| {
+            StorageError::AllocationFailed(format!("Failed to unlink temp file: {}", e))
+        })
+    }
+
+    pub fn unlinked(&self) -> bool {
+        self.unlinked
     }
 }
 
 impl Drop for DiskStorage {
-    // TODO: How robust is this actually?
     fn drop(&mut self) {
         self.handles.release();
-        std::fs::remove_file(self.file_name.clone()).unwrap();
+        let _ = self.unlink();
     }
 }
 
 impl Storage for DiskStorage {
     fn storage_type(&self) -> StorageType {
-        StorageType::Disk
+        StorageType::Disk(self.fd())
     }
 
     fn addr(&self) -> u64 {
