@@ -109,8 +109,11 @@ impl ActiveSequences {
     }
 
     /// Add a new request with its initial tokens
-    pub fn add_request(&mut self, request_id: RequestId, token_sequence: TokenBlockSequence) {
-        // let token_sequence = Tokens::from(tokens).into_sequence(self.block_size as u32, None);
+    pub fn add_request(
+        &mut self,
+        request_id: RequestId,
+        token_sequence: TokenBlockSequence,
+    ) -> usize {
         let blocks = create_unique_blocks_from_sequence(&token_sequence, None, self.block_size);
 
         for block in &blocks {
@@ -118,6 +121,8 @@ impl ActiveSequences {
         }
 
         self.active_seqs.insert(request_id.clone(), token_sequence);
+
+        self.active_blocks
     }
 
     /// Match a request against existing blocks and return the number of new blocks that would be added
@@ -137,7 +142,7 @@ impl ActiveSequences {
     }
 
     /// Free all blocks associated with a request
-    pub fn free(&mut self, request_id: &RequestId) {
+    pub fn free(&mut self, request_id: &RequestId) -> usize {
         let Some(token_seq) = self.active_seqs.get(request_id) else {
             panic!("Cannot free non-existent request {request_id}");
         };
@@ -153,10 +158,12 @@ impl ActiveSequences {
         }
 
         self.active_seqs.remove(request_id).unwrap();
+
+        self.active_blocks
     }
 
     /// Push a token to a specific request's sequence
-    pub fn push(&mut self, request_id: &RequestId, token: u32) {
+    pub fn push(&mut self, request_id: &RequestId, token: u32) -> usize {
         let token_seq = self
             .active_seqs
             .get_mut(request_id)
@@ -165,7 +172,7 @@ impl ActiveSequences {
 
         // No need to update anything
         if token_seq.total_tokens() % self.block_size != 1 {
-            return;
+            return self.active_blocks;
         }
 
         let last_seq_hash = token_seq
@@ -181,6 +188,8 @@ impl ActiveSequences {
         }
 
         self.add_block(request_id.clone(), &UniqueBlock::default());
+
+        self.active_blocks
     }
 }
 
@@ -203,6 +212,7 @@ enum UpdateSequences {
     PotentialBlocks {
         token_sequence: Arc<TokenBlockSequence>,
     },
+    ActiveBlocks,
     Shutdown,
 }
 
@@ -260,13 +270,17 @@ impl ActiveSequencesMultiWorker {
                         request_id,
                         token_sequence,
                     } => {
-                        active_sequences.add_request(request_id, token_sequence);
+                        let active_blocks =
+                            active_sequences.add_request(request_id, token_sequence);
+                        response_tx.send(active_blocks).unwrap();
                     }
                     UpdateSequences::Free { request_id } => {
-                        active_sequences.free(&request_id);
+                        let active_blocks = active_sequences.free(&request_id);
+                        response_tx.send(active_blocks).unwrap();
                     }
                     UpdateSequences::Push { request_id, token } => {
-                        active_sequences.push(&request_id, token);
+                        let active_blocks = active_sequences.push(&request_id, token);
+                        response_tx.send(active_blocks).unwrap();
                     }
                     UpdateSequences::NewBlocks { token_sequence } => {
                         let new_blocks = active_sequences.new_blocks(&token_sequence);
@@ -275,6 +289,10 @@ impl ActiveSequencesMultiWorker {
                     UpdateSequences::PotentialBlocks { token_sequence } => {
                         let potential_blocks = active_sequences.potential_blocks(&token_sequence);
                         response_tx.send(potential_blocks).unwrap();
+                    }
+                    UpdateSequences::ActiveBlocks => {
+                        let active_blocks = active_sequences.active_blocks();
+                        response_tx.send(active_blocks).unwrap();
                     }
                     UpdateSequences::Shutdown => {
                         break;
@@ -287,7 +305,7 @@ impl ActiveSequencesMultiWorker {
     }
 
     /// Update the set of workers, adding and removing as needed
-    pub fn update_workers(&mut self, new_worker_ids: Vec<WorkerId>) {
+    pub fn update_workers(&mut self, new_worker_ids: Vec<WorkerId>) -> HashMap<WorkerId, usize> {
         let current_workers: HashSet<WorkerId> = self.senders.keys().copied().collect();
         let new_workers: HashSet<WorkerId> = new_worker_ids.into_iter().collect();
 
@@ -319,6 +337,9 @@ impl ActiveSequencesMultiWorker {
             self.responders.insert(*worker_id, responder);
             self.handles.insert(*worker_id, handle);
         }
+
+        // Return active blocks for all workers
+        self.active_blocks()
     }
 
     pub fn add_request(
@@ -326,7 +347,7 @@ impl ActiveSequencesMultiWorker {
         request_id: RequestId,
         token_sequence: TokenBlockSequence,
         worker_id: WorkerId,
-    ) {
+    ) -> usize {
         if !self.senders.contains_key(&worker_id) {
             panic!("Worker ID {worker_id} not found");
         }
@@ -339,9 +360,13 @@ impl ActiveSequencesMultiWorker {
                 token_sequence,
             })
             .expect("Failed to send add_request command to worker");
+
+        self.responders[&worker_id]
+            .recv_timeout(Duration::from_secs(1))
+            .expect("Failed to receive active blocks response from worker")
     }
 
-    pub fn free(&mut self, request_id: &RequestId) {
+    pub fn free(&mut self, request_id: &RequestId) -> usize {
         let worker_id = self
             .request_to_worker
             .get(request_id)
@@ -355,9 +380,13 @@ impl ActiveSequencesMultiWorker {
             .expect("Failed to send free command to worker");
 
         self.request_to_worker.remove(request_id);
+
+        self.responders[&worker_id]
+            .recv_timeout(Duration::from_secs(1))
+            .expect("Failed to receive active blocks response from worker")
     }
 
-    pub fn push(&mut self, request_id: &RequestId, token: u32) {
+    pub fn push(&mut self, request_id: &RequestId, token: u32) -> usize {
         let worker_id = self
             .request_to_worker
             .get(request_id)
@@ -370,6 +399,10 @@ impl ActiveSequencesMultiWorker {
                 token,
             })
             .expect("Failed to send push command to worker");
+
+        self.responders[&worker_id]
+            .recv_timeout(Duration::from_secs(1))
+            .expect("Failed to receive active blocks response from worker")
     }
 
     /// Get the number of workers
@@ -380,11 +413,11 @@ impl ActiveSequencesMultiWorker {
     /// Generic method to query all workers with a given command
     fn query_workers(
         &self,
-        token_sequence: TokenBlockSequence,
-        command_fn: impl Fn(Arc<TokenBlockSequence>) -> UpdateSequences,
+        token_sequence: Option<TokenBlockSequence>,
+        command_fn: impl Fn(Option<Arc<TokenBlockSequence>>) -> UpdateSequences,
     ) -> HashMap<WorkerId, usize> {
         let mut results = HashMap::new();
-        let token_sequence_shared = Arc::new(token_sequence);
+        let token_sequence_shared = token_sequence.map(Arc::new);
 
         // Send queries to all workers in parallel
         for sender in self.senders.values() {
@@ -406,16 +439,23 @@ impl ActiveSequencesMultiWorker {
 
     /// Query all workers for the number of new blocks that would be added by a token sequence
     pub fn new_blocks(&self, token_sequence: TokenBlockSequence) -> HashMap<WorkerId, usize> {
-        self.query_workers(token_sequence, |ts| UpdateSequences::NewBlocks {
-            token_sequence: ts,
+        self.query_workers(Some(token_sequence), |ts| match ts {
+            Some(ts) => UpdateSequences::NewBlocks { token_sequence: ts },
+            None => unreachable!("token_sequence should always be Some for new_blocks"),
         })
     }
 
     /// Query all workers for the total number of blocks (new + active) that would be used by a token sequence
     pub fn potential_blocks(&self, token_sequence: TokenBlockSequence) -> HashMap<WorkerId, usize> {
-        self.query_workers(token_sequence, |ts| UpdateSequences::PotentialBlocks {
-            token_sequence: ts,
+        self.query_workers(Some(token_sequence), |ts| match ts {
+            Some(ts) => UpdateSequences::PotentialBlocks { token_sequence: ts },
+            None => unreachable!("token_sequence should always be Some for potential_blocks"),
         })
+    }
+
+    /// Query all workers for their current number of active blocks
+    pub fn active_blocks(&self) -> HashMap<WorkerId, usize> {
+        self.query_workers(None, |_| UpdateSequences::ActiveBlocks)
     }
 }
 

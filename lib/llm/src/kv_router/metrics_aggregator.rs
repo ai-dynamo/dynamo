@@ -15,7 +15,7 @@
 
 use std::sync::Once;
 
-pub use crate::kv_router::protocols::ForwardPassMetrics;
+pub use crate::kv_router::protocols::{ForwardPassMetrics, LoadMetrics, PredictiveLoadMetrics};
 use crate::kv_router::KV_METRICS_ENDPOINT;
 
 use crate::kv_router::scheduler::Endpoint;
@@ -27,6 +27,38 @@ use tokio_util::sync::CancellationToken;
 
 static METRICS_WAITING_MESSAGE: Once = Once::new();
 static METRICS_FOUND_MESSAGE: Once = Once::new();
+
+pub struct EndpointCollector {
+    pub service_name: String,
+    pub endpoints_rx: watch::Receiver<ProcessedEndpoints>,
+}
+
+impl EndpointCollector {
+    pub async fn new(component: Component, cancellation_token: CancellationToken) -> Self {
+        let (watch_tx, watch_rx) = watch::channel(ProcessedEndpoints::default());
+
+        tokio::spawn(collect_endpoints_task(
+            component.clone(),
+            watch_tx,
+            cancellation_token.clone(),
+            "generate".to_string(),
+            false,
+        ));
+
+        Self {
+            service_name: component.service_name(),
+            endpoints_rx: watch_rx,
+        }
+    }
+
+    pub fn get_endpoints(&self) -> ProcessedEndpoints {
+        self.endpoints_rx.borrow().clone()
+    }
+
+    pub fn endpoints_watcher(&self) -> watch::Receiver<ProcessedEndpoints> {
+        self.endpoints_rx.clone()
+    }
+}
 
 pub struct KvMetricsAggregator {
     pub service_name: String,
@@ -41,6 +73,8 @@ impl KvMetricsAggregator {
             component.clone(),
             watch_tx,
             cancellation_token.clone(),
+            KV_METRICS_ENDPOINT.to_string(),
+            true,
         ));
 
         Self {
@@ -93,10 +127,12 @@ pub async fn collect_endpoints_task(
     component: Component,
     watch_tx: watch::Sender<ProcessedEndpoints>,
     cancel: CancellationToken,
+    subject: String,
+    filter_metrics: bool,
 ) {
     let backoff_delay = Duration::from_millis(100);
     let scrape_timeout = Duration::from_millis(300);
-    let endpoint = component.endpoint(KV_METRICS_ENDPOINT);
+    let endpoint = component.endpoint(&subject);
     let service_subject = endpoint.subject();
 
     loop {
@@ -115,73 +151,44 @@ pub async fn collect_endpoints_task(
                             continue;
                         }
                     };
-                let endpoints: Vec<Endpoint> = unfiltered_endpoints
-                    .into_iter()
-                    .filter(|s| s.data.is_some())
-                    .filter_map(|s|
-                        match s.data.unwrap().decode::<ForwardPassMetrics>() {
-                            Ok(data) => Some(Endpoint {
-                                name: s.name,
-                                subject: s.subject,
-                                data,
-                            }),
-                            Err(e) => {
-                                tracing::debug!("skip endpoint data that can't be parsed as ForwardPassMetrics: {:?}", e);
-                                None
+
+                let endpoints: Vec<Endpoint> = if filter_metrics {
+                    // Original filtering behavior
+                    unfiltered_endpoints
+                        .into_iter()
+                        .filter(|s| s.data.is_some())
+                        .filter_map(|s|
+                            match s.data.unwrap().decode::<ForwardPassMetrics>() {
+                                Ok(data) => Some(Endpoint {
+                                    name: s.name,
+                                    subject: s.subject,
+                                    data: LoadMetrics::ForwardPassMetrics(data),
+                                }),
+                                Err(e) => {
+                                    tracing::debug!("skip endpoint data that can't be parsed as ForwardPassMetrics: {:?}", e);
+                                    None
+                                }
                             }
-                        }
-                    )
-                    .collect();
+                        )
+                        .collect()
+                } else {
+                    // No filtering - just use default LoadMetrics
+                    unfiltered_endpoints
+                        .into_iter()
+                        .map(|s| Endpoint {
+                            name: s.name,
+                            subject: s.subject,
+                            data: LoadMetrics::default(),
+                        })
+                        .collect()
+                };
+
                 tracing::trace!("Found {} endpoints for service: {service_subject}", endpoints.len());
 
                 let processed = ProcessedEndpoints::new(endpoints);
 
                 if watch_tx.send(processed).is_err() {
                     tracing::trace!("failed to send processed endpoints; shutting down");
-                    break;
-                }
-            }
-        }
-    }
-}
-
-pub async fn poll_worker_ids(
-    component: Component,
-    watch_tx: watch::Sender<Vec<i64>>,
-    cancel: CancellationToken,
-) {
-    let backoff_delay = Duration::from_millis(100);
-    let scrape_timeout = Duration::from_millis(300);
-    let endpoint = component.endpoint(KV_METRICS_ENDPOINT);
-    let service_subject = endpoint.subject();
-
-    loop {
-        tokio::select! {
-            _ = cancel.cancelled() => {
-                break;
-            }
-            _ = tokio::time::sleep(backoff_delay) => {
-                tracing::trace!("collecting worker ids for service: {}", service_subject);
-                let unfiltered_endpoints =
-                    match collect_endpoints(&component, &service_subject, scrape_timeout).await
-                    {
-                        Ok(v) => v,
-                        Err(e) => {
-                            tracing::warn!("Failed to retrieve endpoints for {}: {:?}", service_subject, e);
-                            continue;
-                        }
-                    };
-
-                // Map each endpoint to its worker ID
-                let worker_ids: Vec<i64> = unfiltered_endpoints
-                    .into_iter()
-                    .map(|endpoint| endpoint.id().unwrap())
-                    .collect();
-
-                tracing::trace!("Found {} worker ids for service: {service_subject}", worker_ids.len());
-
-                if watch_tx.send(worker_ids).is_err() {
-                    tracing::trace!("failed to send worker ids; shutting down");
                     break;
                 }
             }

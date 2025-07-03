@@ -56,6 +56,33 @@ pub struct ForwardPassMetrics {
     pub gpu_prefix_cache_hit_rate: f32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct PredictiveLoadMetrics {
+    pub kv_active_blocks: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LoadMetrics {
+    ForwardPassMetrics(ForwardPassMetrics),
+    PredictiveLoadMetrics(PredictiveLoadMetrics),
+}
+
+impl LoadMetrics {
+    pub fn kv_active_blocks(&self) -> u64 {
+        match self {
+            LoadMetrics::ForwardPassMetrics(metrics) => metrics.kv_active_blocks,
+            LoadMetrics::PredictiveLoadMetrics(metrics) => metrics.kv_active_blocks,
+        }
+    }
+}
+
+impl Default for LoadMetrics {
+    fn default() -> Self {
+        LoadMetrics::PredictiveLoadMetrics(PredictiveLoadMetrics::default())
+    }
+}
+
 /// A [`LocalBlockHash`] is a hash computed from the tokens_ids, extra_token_ids and the optional
 /// lora_id of a block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Ord, PartialOrd)]

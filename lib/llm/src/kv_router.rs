@@ -28,7 +28,7 @@ pub mod sequence;
 use crate::{
     kv_router::{
         indexer::{KvIndexer, KvIndexerInterface, RouterEvent},
-        metrics_aggregator::KvMetricsAggregator,
+        metrics_aggregator::EndpointCollector,
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
         scoring::ProcessedEndpoints,
@@ -63,21 +63,14 @@ pub struct KvRouterConfig {
     /// Higher values prioritize KV cache reuse. Default: 2.0
     pub overlap_score_weight: f64,
 
-    /// Weight for GPU cache usage in worker selection.
-    /// Higher values avoid workers with nearly full KV caches. Default: 1.0
-    pub gpu_cache_usage_weight: f64,
-
-    /// Weight for waiting requests in worker selection.
-    /// Higher values avoid workers with queued requests. Default: 1.0
-    pub waiting_requests_weight: f64,
+    pub temperature: f64,
 }
 
 impl Default for KvRouterConfig {
     fn default() -> Self {
         Self {
             overlap_score_weight: 1.0,
-            gpu_cache_usage_weight: 1.0,
-            waiting_requests_weight: 1.0,
+            temperature: 0.5,
         }
     }
 }
@@ -85,18 +78,11 @@ impl Default for KvRouterConfig {
 impl KvRouterConfig {
     /// Create a new KvRouterConfig with optional weight values.
     /// If a weight is None, the default value will be used.
-    pub fn new(
-        overlap_score_weight: Option<f64>,
-        gpu_cache_usage_weight: Option<f64>,
-        waiting_requests_weight: Option<f64>,
-    ) -> Self {
+    pub fn new(overlap_score_weight: Option<f64>, temperature: Option<f64>) -> Self {
         let default = Self::default();
         Self {
             overlap_score_weight: overlap_score_weight.unwrap_or(default.overlap_score_weight),
-            gpu_cache_usage_weight: gpu_cache_usage_weight
-                .unwrap_or(default.gpu_cache_usage_weight),
-            waiting_requests_weight: waiting_requests_weight
-                .unwrap_or(default.waiting_requests_weight),
+            temperature: temperature.unwrap_or(default.temperature),
         }
     }
 }
@@ -122,7 +108,7 @@ impl KvRouter {
             .primary_token();
         tracing::info!("KV Routing initialized");
         let metrics_aggregator =
-            KvMetricsAggregator::new(component.clone(), cancellation_token.clone()).await;
+            EndpointCollector::new(component.clone(), cancellation_token.clone()).await;
         let indexer = KvIndexer::new(cancellation_token.clone(), block_size);
         let scheduler = KvScheduler::start(
             component.namespace().clone(),

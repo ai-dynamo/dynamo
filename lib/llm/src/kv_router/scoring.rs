@@ -18,6 +18,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::kv_router::protocols::LoadMetrics;
 use crate::kv_router::scheduler::Endpoint;
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -32,7 +33,7 @@ impl ProcessedEndpoints {
         // compute some basic statistics
         let load_values: Vec<f64> = endpoints
             .iter()
-            .map(|x| x.data.kv_active_blocks as f64)
+            .map(|x| x.data.kv_active_blocks() as f64)
             .collect();
         let load_avg = load_values.iter().copied().sum::<f64>() / load_values.len() as f64;
         let variance = load_values
@@ -48,6 +49,36 @@ impl ProcessedEndpoints {
             endpoints,
             load_avg,
             load_std,
+        }
+    }
+
+    pub fn worker_ids(&self) -> Vec<i64> {
+        self.endpoints.keys().copied().collect()
+    }
+
+    pub fn active_blocks(&self) -> HashMap<i64, usize> {
+        self.endpoints
+            .iter()
+            .map(|(&worker_id, endpoint)| (worker_id, endpoint.data.kv_active_blocks() as usize))
+            .collect()
+    }
+
+    pub fn update_active_blocks(&mut self, worker_id: i64, active_blocks: usize) {
+        if let Some(endpoint) = self.endpoints.get_mut(&worker_id) {
+            match &mut endpoint.data {
+                LoadMetrics::ForwardPassMetrics(metrics) => {
+                    metrics.kv_active_blocks = active_blocks as u64;
+                }
+                LoadMetrics::PredictiveLoadMetrics(metrics) => {
+                    metrics.kv_active_blocks = active_blocks as u64;
+                }
+            }
+        }
+    }
+
+    pub fn update_active_blocks_all(&mut self, worker_blocks: HashMap<i64, usize>) {
+        for (worker_id, blocks) in worker_blocks {
+            self.update_active_blocks(worker_id, blocks);
         }
     }
 }
