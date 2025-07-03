@@ -78,7 +78,6 @@ cli.command(
 )(run)
 cli.add_typer(deployment_app, name="deployment")
 cli.command()(deploy)
-cli.command()(build)
 
 if __name__ == "__main__":
     cli()
