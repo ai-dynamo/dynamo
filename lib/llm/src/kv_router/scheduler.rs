@@ -24,11 +24,13 @@ use tokio::sync::Mutex;
 use super::protocols::WorkerSelectionResult;
 use super::WorkerSelector;
 use crate::kv_router::indexer::OverlapScores;
+use crate::kv_router::indexer::WorkerId;
 use crate::kv_router::protocols::LoadMetrics;
 use crate::kv_router::scoring::ProcessedEndpoints;
 use crate::kv_router::sequence::ActiveSequencesMultiWorker;
 use crate::kv_router::KvRouterConfig;
 use crate::kv_router::KV_HIT_RATE_SUBJECT;
+use crate::tokens::TokenBlockSequence;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KVHitRateEvent {
@@ -211,6 +213,29 @@ impl KvScheduler {
             .await
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
         Ok(res)
+    }
+
+    /// Add a new request with its initial tokens to a specific worker
+    pub async fn add_request(
+        &self,
+        request_id: String,
+        token_sequence: TokenBlockSequence,
+        worker_id: WorkerId,
+    ) -> usize {
+        let mut sequences = self.sequences.lock().await;
+        sequences.add_request(request_id, token_sequence, worker_id)
+    }
+
+    /// Push a token to a specific request's sequence
+    pub async fn push(&self, request_id: &String, token: u32) -> usize {
+        let mut sequences = self.sequences.lock().await;
+        sequences.push(request_id, token)
+    }
+
+    /// Free all blocks associated with a request
+    pub async fn free(&self, request_id: &String) -> usize {
+        let mut sequences = self.sequences.lock().await;
+        sequences.free(request_id)
     }
 }
 

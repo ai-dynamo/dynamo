@@ -83,7 +83,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::time::Duration as StdDuration;
 
-use dynamo_llm::kv_router::protocols::ForwardPassMetrics;
+use dynamo_llm::kv_router::protocols::{ForwardPassMetrics, LoadMetrics};
 use dynamo_llm::kv_router::scheduler::Endpoint;
 use dynamo_llm::kv_router::scoring::ProcessedEndpoints;
 
@@ -338,13 +338,13 @@ impl PrometheusMetricsCollector {
 /// Prometheus metrics collection
 pub struct PrometheusMetrics {
     kv_blocks_active: prometheus::GaugeVec,
-    kv_blocks_total: prometheus::GaugeVec,
-    requests_active: prometheus::GaugeVec,
-    requests_total: prometheus::GaugeVec,
+    _kv_blocks_total: prometheus::GaugeVec,
+    _kv_requests_active: prometheus::GaugeVec,
+    _kv_requests_total: prometheus::GaugeVec,
     load_avg: prometheus::GaugeVec,
     load_std: prometheus::GaugeVec,
     // KV hit rate metrics
-    kv_hit_rate_percent: prometheus::GaugeVec,
+    _kv_hit_rate_percent: prometheus::GaugeVec,
     // FIXME: These are currently unused outside of mock_worker
     kv_hit_rate_isl_blocks: prometheus::CounterVec,
     kv_hit_rate_overlap_blocks: prometheus::CounterVec,
@@ -359,17 +359,17 @@ impl PrometheusMetrics {
                 "Active KV cache blocks",
                 &["component", "endpoint", "worker_id"]
             )?,
-            kv_blocks_total: register_gauge_vec!(
+            _kv_blocks_total: register_gauge_vec!(
                 "llm_kv_blocks_total",
                 "Total KV cache blocks",
                 &["component", "endpoint", "worker_id"]
             )?,
-            requests_active: register_gauge_vec!(
+            _kv_requests_active: register_gauge_vec!(
                 "llm_requests_active_slots",
                 "Active request slots",
                 &["component", "endpoint", "worker_id"]
             )?,
-            requests_total: register_gauge_vec!(
+            _kv_requests_total: register_gauge_vec!(
                 "llm_requests_total_slots",
                 "Total request slots",
                 &["component", "endpoint", "worker_id"]
@@ -385,7 +385,7 @@ impl PrometheusMetrics {
                 &["component", "endpoint"]
             )?,
             // KV hit rate (ForwardPassMetrics)
-            kv_hit_rate_percent: register_gauge_vec!(
+            _kv_hit_rate_percent: register_gauge_vec!(
                 "llm_kv_hit_rate_percent",
                 "KV hit rate percentage per worker",
                 &["component", "endpoint", "worker_id"]
@@ -455,31 +455,7 @@ impl PrometheusMetrics {
                 &self.kv_blocks_active,
                 config,
                 &worker_id,
-                metrics.kv_active_blocks as f64,
-            );
-            self.set_worker_gauge(
-                &self.kv_blocks_total,
-                config,
-                &worker_id,
-                metrics.kv_total_blocks as f64,
-            );
-            self.set_worker_gauge(
-                &self.requests_active,
-                config,
-                &worker_id,
-                metrics.request_active_slots as f64,
-            );
-            self.set_worker_gauge(
-                &self.requests_total,
-                config,
-                &worker_id,
-                metrics.request_total_slots as f64,
-            );
-            self.set_worker_gauge(
-                &self.kv_hit_rate_percent,
-                config,
-                &worker_id,
-                metrics.gpu_prefix_cache_hit_rate as f64,
+                metrics.kv_active_blocks() as f64,
             );
         }
 
@@ -602,7 +578,7 @@ pub fn postprocess_metrics(
             e.id().ok().map(|id| Endpoint {
                 name: format!("worker-{id}"),
                 subject: e.subject.clone(),
-                data: m.clone(),
+                data: LoadMetrics::ForwardPassMetrics(m.clone()),
             })
         })
         .collect();

@@ -148,7 +148,13 @@ impl KvRouter {
     }
 
     // [TODO] indexer needs to take 'lora_id' as parameter
-    pub async fn schedule(&self, token_ids: &Vec<u32>, _lora_id: u64) -> Result<i64> {
+    // Update schedule to take context_id for request tracking
+    pub async fn schedule(
+        &self,
+        context_id: &str,
+        token_ids: &Vec<u32>,
+        _lora_id: u64,
+    ) -> Result<i64> {
         // Extracting part of the code in KvRouter::generate() for only
         // the decision making part, routing is done by the caller
         let isl_tokens = token_ids.len();
@@ -158,12 +164,24 @@ impl KvRouter {
             .await?;
         tracing::debug!("KV router overlap_scores: {:?}", overlap_scores);
         let worker_id = self.scheduler.schedule(overlap_scores, isl_tokens).await?;
+
+        // Convert tokens to TokenBlockSequence and add request
+        let token_sequence = TokenBlockSequence::from_slice(token_ids, self.block_size, None);
+        self.scheduler
+            .add_request(context_id.to_string(), token_sequence, worker_id)
+            .await;
+
         Ok(worker_id)
     }
 
     /// Give these tokens, find the worker with the best match in it's KV cache.
     /// Returned overlap amount is in number of blocks.
-    async fn find_best_match(&self, tokens: &[u32]) -> anyhow::Result<(i64, u32)> {
+    /// Now also takes context_id for request tracking
+    async fn find_best_match(
+        &self,
+        context_id: &str,
+        tokens: &[u32],
+    ) -> anyhow::Result<(i64, u32)> {
         let isl_tokens = tokens.len();
         let block_size = self.block_size;
 
@@ -180,7 +198,23 @@ impl KvRouter {
             .schedule(overlap_scores.clone(), isl_tokens)
             .await?;
         let overlap_amount = overlap_scores.scores.get(&worker_id).copied().unwrap_or(0);
+
+        let token_sequence = TokenBlockSequence::from_slice(tokens, block_size, None);
+        self.scheduler
+            .add_request(context_id.to_string(), token_sequence, worker_id)
+            .await;
+
         Ok((worker_id, overlap_amount))
+    }
+
+    /// Push a token to a specific request's sequence
+    pub async fn push(&self, request_id: &String, token: u32) -> usize {
+        self.scheduler.push(request_id, token).await
+    }
+
+    /// Free all blocks associated with a request
+    pub async fn free(&self, request_id: &String) -> usize {
+        self.scheduler.free(request_id).await
     }
 
     /// Get the block size this router was configured with
@@ -189,6 +223,7 @@ impl KvRouter {
     }
 }
 
+// NOTE: this would not be usable for now, should deprecate
 #[async_trait]
 impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Error> for KvRouter {
     async fn generate(
@@ -196,7 +231,7 @@ impl AsyncEngine<SingleIn<RouterRequest>, ManyOut<Annotated<RouterResponse>>, Er
         request: SingleIn<RouterRequest>,
     ) -> Result<ManyOut<Annotated<RouterResponse>>> {
         let (request, ctx) = request.into_parts();
-        let (worker_id, _) = self.find_best_match(&request.tokens).await?;
+        let (worker_id, _) = self.find_best_match(ctx.id(), &request.tokens).await?;
 
         let response = RouterResponse { worker_id };
         let response = Annotated::from_data(response);
@@ -230,13 +265,40 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         match self.inner.client.instance_source.as_ref() {
             InstanceSource::Static => self.inner.r#static(request).await,
             InstanceSource::Dynamic(_) => {
-                let (instance_id, overlap_amount) =
-                    self.chooser.find_best_match(&request.token_ids).await?;
+                // Extract context ID for request tracking
+                let context_id = request.context().id().to_string();
+
+                let (instance_id, overlap_amount) = self
+                    .chooser
+                    .find_best_match(&context_id, &request.token_ids)
+                    .await?;
                 // Update the request with the estimated prefix hit blocks
                 let (mut backend_input, context) = request.into_parts();
                 backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
                 let updated_request = context.map(|_| backend_input);
-                self.inner.direct(updated_request, instance_id).await
+
+                // Get the response stream from the worker
+                let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
+
+                // Wrap the stream to track tokens
+                let stream_context = response_stream.context();
+                let chooser = self.chooser.clone();
+                let request_id = context_id.clone();
+
+                let wrapped_stream = Box::pin(async_stream::stream! {
+                    while let Some(item) = response_stream.next().await {
+                        // Track tokens if they exist in the response
+                        if let Some(ref output) = item.data {
+                            for token_id in &output.token_ids {
+                                chooser.push(&request_id, *token_id).await;
+                            }
+                        }
+                        yield item;
+                    }
+                    chooser.free(&request_id).await;
+                });
+
+                Ok(ResponseStream::new(wrapped_stream, stream_context))
             }
         }
     }
