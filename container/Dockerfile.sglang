@@ -142,10 +142,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     cd sglang && \
     git checkout ${SGLANG_COMMIT} && \
     # Install in editable mode for development
-    uv pip install -e "python[all]" && \
-    # Build wheel for distribution
-    cd python && \
-    uv build --wheel --out-dir /workspace/wheels/sglang
+    uv pip install -e "python[all]"
 
 # Set env var that allows for forceful shutdown of inflight requests in SGL's TokenizerManager
 ENV SGL_FORCE_SHUTDOWN=1
@@ -376,7 +373,7 @@ CMD []
 ########## Runtime Image ###########
 ####################################
 
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS runtime
+FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
 WORKDIR /workspace
 ENV DYNAMO_HOME=/workspace
@@ -389,10 +386,18 @@ COPY --from=base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 ENV PATH=/usr/local/bin/etcd/:$PATH
 
+# Copy UCX from base image as plugin for NIXL
+# Copy NIXL source from base image (required for NIXL plugins)
+COPY --from=base /usr/local/ucx /usr/local/ucx
+COPY --from=base /usr/local/nixl /usr/local/nixl
+ARG ARCH_ALT
+ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins
+ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:$LD_LIBRARY_PATH
+
 # Setup the python environment
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential libnuma-dev python3-dev && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential python3-dev libnuma-dev && \
     rm -rf /var/lib/apt/lists/* && \
     uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
@@ -400,12 +405,18 @@ RUN apt-get update && \
 # Install the wheels and symlink executables to /usr/local/bin so dynamo components can use them
 # Dynamo components currently do not have the VIRTUAL_ENV in their PATH, so we need to symlink the executables
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
-COPY --from=base /workspace/wheels/ wheelhouse/
+COPY --from=base /workspace/wheels/nixl/*.whl wheelhouse/
 RUN uv pip install ai-dynamo --find-links wheelhouse && \
     uv pip install ai-dynamo-runtime --find-links wheelhouse && \
-    uv pip install sglang[all] --find-links wheelhouse && \
     uv pip install nixl --find-links wheelhouse && \
     ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/
+
+# Install SGLang and related packages (sgl-kernel, einops, sentencepiece) since they are not included in the runtime wheel: 
+# https://github.com/sgl-project/sglang/blob/v0.4.9.post1/python/pyproject.toml#L18-51
+RUN uv pip install "sglang[runtime_common]>=0.4.9.post1" && \
+    uv pip install einops && \
+    uv pip install sgl-kernel==0.2.4 && \
+    uv pip install sentencepiece
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
