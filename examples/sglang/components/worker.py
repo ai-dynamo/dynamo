@@ -14,6 +14,7 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_ip
 from utils.protocol import DisaggPreprocessedRequest
 from utils.sgl_utils import parse_sglang_args_inc
+from utils.sgl_http_server import SglangHttpServer
 
 from dynamo.llm import (
     ModelType,
@@ -285,6 +286,10 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
         kv_block_size=server_args.page_size,
     )
     _ = ZmqKvEventPublisher(component=component, config=zmq_config)
+
+    # Setup HTTP server (TODO: make this configurabel via CLI arg)
+    http_server = SglangHttpServer(engine, port=8888)
+    asyncio.create_task(http_server.start_server())
 
     await endpoint.serve_endpoint(handler.generate)
 
