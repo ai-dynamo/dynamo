@@ -127,8 +127,15 @@ class Middle:
     image=DYNAMO_IMAGE,
     # Example of kubernetes overrides if needed.
     # kubernetes_overrides={
-    #     "entrypoint": ["sh -c"],
-    #     "cmd": ["echo hello from FrontEnd!"],
+    #     # "entrypoint": ["sh -c"],
+    #     # "cmd": ["echo hello from FrontEnd!"],
+    #     "liveness_probe_settings": {
+    #         "http_get": {
+    #             "path": "/healthz",
+    #             "port": 5000,
+    #         },
+    #         "initial_delay_seconds": 1,
+    #     },
     # },
 )
 class Frontend:
