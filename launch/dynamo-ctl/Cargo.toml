@@ -1,0 +1,20 @@
+[package]
+name = "dynamo-ctl"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+homepage.workspace = true
+license.workspace = true
+repository.workspace = true
+readme.workspace = true
+description = "Command Line Client for Interacting with Dynamo"
+
+[dependencies]
+anyhow = { workspace = true }
+crossterm = "0.27"
+etcd-client = { workspace = true }
+futures = { workspace = true }
+ratatui = { version = "0.26", features = ["all-widgets"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
