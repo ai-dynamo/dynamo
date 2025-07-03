@@ -15,45 +15,65 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import sys
 
+import msgspec
 import sglang as sgl
-from utils.protocol import DisaggPreprocessedRequest
-from utils.sgl_utils import parse_sglang_args
+import uvloop
+from sglang.srt.server_args import ServerArgs
+from utils.sgl_utils import parse_sglang_args_inc
 
-from dynamo.sdk import endpoint, service
+from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime.logging import configure_dynamo_logging
 
-logger = logging.getLogger(__name__)
+configure_dynamo_logging()
 
 
-@service(
-    dynamo={
-        "enabled": True,
-        "namespace": "dynamo",
-    },
-    resources={"gpu": 1},
-    workers=1,
-)
-class SGLangDecodeWorker:
-    def __init__(self):
-        class_name = self.__class__.__name__
-        self.engine_args = parse_sglang_args(class_name, "")
-        self.engine = sgl.Engine(server_args=self.engine_args)
+class DecodeRequestHandler:
+    def __init__(self, engine: sgl.Engine):
+        self.engine = engine
+        logging.info("Decode request handler initialized")
 
-        logger.warning("Decode worker initialized")
+    async def generate(self, request: str):
+        req = msgspec.json.decode(request, type=dict)
 
-    @endpoint()
-    async def generate(self, req: DisaggPreprocessedRequest):
-        g = await self.engine.async_generate(
-            input_ids=req.request.token_ids
-            if req.request.batch_token_ids is None
-            else req.request.batch_token_ids,
-            sampling_params=req.sampling_params,
+        results = await self.engine.async_generate(
+            input_ids=req["request"]["token_ids"]
+            if req["request"]["batch_token_ids"] is None
+            else req["request"]["batch_token_ids"],
+            sampling_params=req["sampling_params"],
             stream=True,
-            bootstrap_host=req.bootstrap_host,
-            bootstrap_port=req.bootstrap_port,
-            bootstrap_room=req.bootstrap_room,
+            bootstrap_host=req["bootstrap_host"],
+            bootstrap_port=req["bootstrap_port"],
+            bootstrap_room=req["bootstrap_room"],
         )
 
-        async for result in g:
+        async for result in results:
             yield result
+
+
+@dynamo_worker(static=False)
+async def worker(runtime: DistributedRuntime):
+    server_args = parse_sglang_args_inc(sys.argv[1:])
+    await init(runtime, server_args)
+
+
+async def init(runtime: DistributedRuntime, server_args: ServerArgs):
+    """Initialize decode worker"""
+
+    engine = sgl.Engine(server_args=server_args)
+
+    handler = DecodeRequestHandler(engine)
+
+    component = runtime.namespace("dynamo").component("decode")
+    await component.create_service()
+
+    endpoint = component.endpoint("generate")
+    await endpoint.serve_endpoint(handler.generate)
+
+
+if __name__ == "__main__":
+    uvloop.install()
+    asyncio.run(worker())
