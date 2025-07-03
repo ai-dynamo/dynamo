@@ -18,9 +18,6 @@ python3 utils/clear_namespace.py --namespace dynamo
 dynamo run in=http out=dyn &
 DYNAMO_PID=$!
 
-# run ingress
-dynamo run in=http out=dyn &
-
 # run worker
 python3 components/worker.py \
   --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
