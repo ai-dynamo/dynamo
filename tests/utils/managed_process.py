@@ -26,6 +26,45 @@ import psutil
 import requests
 
 
+def terminate_process(process, logger=logging.getLogger(), immediate_kill=False):
+    try:
+        logger.info("Terminating PID: %s name: %s", process.pid, process.name())
+        if immediate_kill:
+            logger.info("Sending Kill: %s %s", process.pid, process.name())
+            process.kill()
+        else:
+            process.terminate()
+    except psutil.AccessDenied:
+        logger.warning("Access denied for PID %s", process.pid)
+    except psutil.NoSuchProcess:
+        logger.warning("PID %s no longer exists", process.pid)
+
+
+def terminate_process_tree(
+    pid, logger=logging.getLogger(), immediate_kill=False, timeout=10
+):
+    try:
+        parent = psutil.Process(pid)
+        for child in parent.children(recursive=True):
+            terminate_process(child, logger, immediate_kill)
+
+        terminate_process(parent, logger, immediate_kill)
+
+        for child in parent.children(recursive=True):
+            try:
+                child.wait(timeout)
+            except psutil.TimeoutExpired:
+                terminate_process(child, logger, immediate_kill=True)
+        try:
+            parent.wait(timeout)
+        except psutil.TimeoutExpired:
+            terminate_process(parent, logger, immediate_kill=True)
+
+    except psutil.NoSuchProcess:
+        # Process already terminated
+        pass
+
+
 @dataclass
 class ManagedProcess:
     command: List[str]
@@ -39,6 +78,7 @@ class ManagedProcess:
     data_dir: Optional[str] = None
     terminate_existing: bool = True
     stragglers: List[str] = field(default_factory=list)
+    straggler_commands: List[str] = field(default_factory=list)
     log_dir: str = os.getcwd()
 
     _logger = logging.getLogger()
@@ -78,7 +118,7 @@ class ManagedProcess:
                     process.stdout.close()
                 if process.stdin:
                     process.stdin.close()
-                self._terminate_process_tree(process.pid)
+                terminate_process_tree(process.pid, self._logger)
                 process.wait()
         if self.data_dir:
             self._remove_directory(self.data_dir)
@@ -86,7 +126,20 @@ class ManagedProcess:
         for ps_process in psutil.process_iter(["name", "cmdline"]):
             try:
                 if ps_process.name() in self.stragglers:
-                    self._terminate_process_tree(ps_process.pid)
+                    self._logger.info(
+                        "Terminating Straggler %s %s", ps_process.name(), ps_process.pid
+                    )
+
+                    terminate_process_tree(ps_process.pid, self._logger)
+                for cmdline in self.straggler_commands:
+                    if cmdline in " ".join(ps_process.cmdline()):
+                        self._logger.info(
+                            "Terminating Straggler Cmdline %s %s %s",
+                            ps_process.name(),
+                            ps_process.pid,
+                            cmdline,
+                        )
+                        terminate_process_tree(ps_process.pid, self._logger)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 # Process may have terminated or become inaccessible during iteration
                 pass
@@ -202,34 +255,22 @@ class ManagedProcess:
 
     def _terminate_existing(self):
         if self.terminate_existing:
-            self._logger.info("Terminating Existing %s", self._command_name)
             for proc in psutil.process_iter(["name", "cmdline"]):
                 if proc.name() == self._command_name or proc.name() in self.stragglers:
-                    self._terminate_process_tree(proc.pid)
+                    self._logger.info(
+                        "Terminating Existing %s %s", proc.name(), proc.pid
+                    )
 
-    def _terminate_process(self, process):
-        try:
-            self._logger.info("Terminating %s", process)
-            process.terminate()
-        except psutil.AccessDenied:
-            self._logger.warning("Access denied for PID %s", process.pid)
-        except psutil.NoSuchProcess:
-            self._logger.warning("PID %s no longer exists", process.pid)
-        except psutil.TimeoutExpired:
-            self._logger.warning(
-                "PID %s did not terminate before timeout, killing", process.pid
-            )
-            process.kill()
-
-    def _terminate_process_tree(self, pid):
-        try:
-            parent = psutil.Process(pid)
-            for child in parent.children(recursive=True):
-                self._terminate_process(child)
-            self._terminate_process(parent)
-        except psutil.NoSuchProcess:
-            # Process already terminated
-            pass
+                    terminate_process_tree(proc.pid, self._logger)
+                for cmdline in self.straggler_commands:
+                    if cmdline in " ".join(proc.cmdline()):
+                        self._logger.info(
+                            "Terminating Existing CmdLine %s %s %s",
+                            proc.name(),
+                            proc.pid,
+                            proc.cmdline(),
+                        )
+                        terminate_process_tree(proc.pid, self._logger)
 
 
 def main():

@@ -162,6 +162,8 @@ markers = [
     "weekly: marks tests to run weekly",
     "gpu_1: marks tests to run on GPU",
     "gpu_2: marks tests to run on 2GPUs",
+    "gpu_4: marks tests to run on 4GPUs",
+    "gpu_8: marks tests to run on 8GPUs",
     "e2e: marks tests as end-to-end tests",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",
