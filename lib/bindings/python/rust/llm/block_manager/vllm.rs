@@ -127,20 +127,29 @@ impl KvbmCacheManager {
         &self,
         sequence_hashes: Vec<SequenceHash>,
     ) -> PyResult<(Option<KvbmBlockList>, Option<KvbmBlockList>)> {
-        let host_blocks = if let Some(host) = self.block_manager().host() {
-            Some(
-                host.match_sequence_hashes_blocking(&sequence_hashes)
-                    .map_err(to_pyerr)?,
-            )
+        if sequence_hashes.is_empty() {
+            return Ok((None, None));
+        }
+
+        let (host_blocks, num_matched_host) = if let Some(host) = self.block_manager().host() {
+            let blocks = host
+                .match_sequence_hashes_blocking(&sequence_hashes)
+                .map_err(to_pyerr)?;
+            let num_matched_host = blocks.len();
+            (Some(blocks), num_matched_host)
         } else {
-            None
+            (None, 0)
         };
 
-        let disk_blocks = if let Some(disk) = self.block_manager().disk() {
-            Some(
-                disk.match_sequence_hashes_blocking(&sequence_hashes)
-                    .map_err(to_pyerr)?,
-            )
+        let disk_blocks = if num_matched_host == sequence_hashes.len() {
+            if let Some(disk) = self.block_manager().disk() {
+                Some(
+                    disk.match_sequence_hashes_blocking(&sequence_hashes[num_matched_host..])
+                        .map_err(to_pyerr)?,
+                )
+            } else {
+                None
+            }
         } else {
             None
         };
@@ -216,20 +225,25 @@ impl KvbmCacheManager {
         Ok(usage)
     }
 
-    #[pyo3(signature = (request_id, request_num_computed_tokens, host_onboard_blocks=None, disk_onboard_blocks=None))]
+    #[pyo3(signature = (request_id, num_onboard_blocks, host_onboard_blocks=None, disk_onboard_blocks=None))]
     pub fn onboard_into_slot(
         &self,
         request_id: String,
-        request_num_computed_tokens: usize,
+        num_onboard_blocks: usize,
         host_onboard_blocks: Option<KvbmBlockList>,
         disk_onboard_blocks: Option<KvbmBlockList>,
     ) -> PyResult<()> {
+        tracing::debug!(
+            "Onboarding {} blocks into slot for request {}",
+            num_onboard_blocks,
+            request_id
+        );
         self.slot_manager
             .lock()
             .map_err(to_pyerr)?
             .onboard_into_slot(
                 &request_id,
-                request_num_computed_tokens,
+                num_onboard_blocks,
                 host_onboard_blocks,
                 disk_onboard_blocks,
                 self.block_manager(),
@@ -502,57 +516,74 @@ impl<R: RequestKey> SlotManager<R> {
     pub fn onboard_into_slot(
         &mut self,
         request_id: &R,
-        request_num_computed_tokens: usize,
+        num_onboard_blocks: usize,
         host_onboard_blocks: Option<KvbmBlockList>,
         disk_onboard_blocks: Option<KvbmBlockList>,
         bm: &VllmBlockManager,
     ) -> Result<(), SlotError> {
         let slot = self.slots.get_mut(request_id).ok_or(SlotError::NotFound)?;
 
-        if host_onboard_blocks.is_some() || disk_onboard_blocks.is_some() {
-            let num_device_blocks = request_num_computed_tokens / self.block_size;
-
-            let host_blocks = if let Some(host_blocks) = host_onboard_blocks {
-                let host_blocks = host_blocks.take_blocks().ok_or(SlotError::Error(
+        let host_blocks = if let Some(host_blocks) = host_onboard_blocks {
+            let host_blocks = host_blocks.take_blocks().ok_or(SlotError::Error(
+                "host_onboard_blocks should be ImmutableHost".to_string(),
+            ))?;
+            let BlockListType::ImmutableHost(host_blocks) = host_blocks else {
+                return Err(SlotError::Error(
                     "host_onboard_blocks should be ImmutableHost".to_string(),
-                ))?;
-                let BlockListType::ImmutableHost(host_blocks) = host_blocks else {
-                    return Err(SlotError::Error(
-                        "host_onboard_blocks should be ImmutableHost".to_string(),
-                    ));
-                };
-                Some(host_blocks)
-            } else {
-                None
+                ));
             };
+            Some(host_blocks)
+        } else {
+            None
+        };
 
-            let disk_blocks = if let Some(disk_blocks) = disk_onboard_blocks {
-                let disk_blocks = disk_blocks.take_blocks().ok_or(SlotError::Error(
+        let disk_blocks = if let Some(disk_blocks) = disk_onboard_blocks {
+            let disk_blocks = disk_blocks.take_blocks().ok_or(SlotError::Error(
+                "disk_onboard_blocks should be ImmutableDisk".to_string(),
+            ))?;
+            let BlockListType::ImmutableDisk(disk_blocks) = disk_blocks else {
+                return Err(SlotError::Error(
                     "disk_onboard_blocks should be ImmutableDisk".to_string(),
-                ))?;
-                let BlockListType::ImmutableDisk(disk_blocks) = disk_blocks else {
-                    return Err(SlotError::Error(
-                        "disk_onboard_blocks should be ImmutableDisk".to_string(),
-                    ));
-                };
-                Some(disk_blocks)
-            } else {
-                None
+                ));
             };
+            Some(disk_blocks)
+        } else {
+            None
+        };
 
-            let mut onboard_idx_start = num_device_blocks;
+        if host_blocks.is_none() && disk_blocks.is_none() {
+            tracing::debug!("No blocks to onboard for request {}", request_id);
+        } else if host_blocks.is_some() && disk_blocks.is_none() {
+            let host_blocks = host_blocks.unwrap();
+            tracing::debug!(
+                "Onboarding {} host blocks for request {}",
+                num_onboard_blocks,
+                request_id
+            );
+            slot.onboard_blocks_to_slot(host_blocks[..num_onboard_blocks].to_vec(), bm)?;
+        } else if disk_blocks.is_some() && host_blocks.is_none() {
+            let disk_blocks = disk_blocks.unwrap();
+            tracing::debug!(
+                "Onboarding {} disk blocks for request {}",
+                num_onboard_blocks,
+                request_id
+            );
+            slot.onboard_blocks_to_slot(disk_blocks[..num_onboard_blocks].to_vec(), bm)?;
+        } else {
+            let host_blocks = host_blocks.unwrap();
+            let disk_blocks = disk_blocks.unwrap();
 
-            if let Some(host_blocks) = host_blocks.as_ref() {
-                if onboard_idx_start < host_blocks.len() {
-                    slot.onboard_blocks_to_slot(host_blocks[onboard_idx_start..].to_vec(), bm)?;
-                    onboard_idx_start += host_blocks.len() - onboard_idx_start;
-                }
-            }
+            let num_disk_blocks = num_onboard_blocks - host_blocks.len();
 
-            if let Some(disk_blocks) = disk_blocks.as_ref() {
-                slot.onboard_blocks_to_slot(disk_blocks[onboard_idx_start..].to_vec(), bm)?;
-            }
-        }
+            tracing::debug!(
+                "Onboarding {} host and {} disk blocks for request {}",
+                host_blocks.len(),
+                num_disk_blocks,
+                request_id
+            );
+            slot.onboard_blocks_to_slot(host_blocks, bm)?;
+            slot.onboard_blocks_to_slot(disk_blocks[..num_disk_blocks].to_vec(), bm)?;
+        };
 
         Ok(())
     }

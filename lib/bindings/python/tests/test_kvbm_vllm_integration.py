@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from typing import Optional
-
+from unittest.mock import patch, MagicMock
 import pytest
 import torch
 
@@ -808,3 +808,92 @@ def test_kvbm_wrong_blocks_provided():
     # Clean up
     manager.free_block_hashes(req0)
     manager.free_block_hashes(req1)
+
+@pytest.mark.skipif(KVBM_NOT_AVAILABLE, reason="KVBM not available")
+@pytest.mark.skipif(VLLM_NOT_AVAILABLE, reason="VLLM not available")
+@patch("dynamo.llm.vllm_integration.kv_cache_manager.KvbmCacheManager")
+def test_kvbm_new_matched_tokens_edge_case(MockCacheManager):
+    PAGE_SIZE = 4
+    NUM_BLOCKS = 3
+    SEQ_LEN = PAGE_SIZE * NUM_BLOCKS
+
+    def create_list_mock(num_blocks: Optional[int]):
+
+        if num_blocks is None:
+            return None
+
+        mock_list = MagicMock()
+        mock_list.block_count.return_value = num_blocks
+        mock_list.__len__.return_value = num_blocks
+        return mock_list
+
+    def create_mock(num_host_blocks: Optional[int], num_disk_blocks: Optional[int]):
+        mock_instance = MagicMock()
+
+        mock_instance.block_size = PAGE_SIZE
+
+        mock_instance._create_slot.return_value = [0, 1, 2]
+
+        host = create_list_mock(num_host_blocks)
+        disk = create_list_mock(num_disk_blocks)
+
+        mock_instance.cache_manager.get_num_offloaded_computed_blocks.return_value = (host, disk)
+
+        return mock_instance
+    
+    def get_pending_entry(mock, request_id):
+        (id, entry) = mock.pending_onboard_blocks.__setitem__.call_args[0]
+        assert id == request_id
+        return entry
+
+    # Case 1: Some blocks on host, no blocks on disk
+    request = make_request("0", [0]*SEQ_LEN)
+    mock = create_mock(2, None)
+    (num_external_computed_tokens, async_load) = KvbmCacheManager.get_num_new_matched_tokens(mock, request, 0)
+
+    assert num_external_computed_tokens == 2 * PAGE_SIZE
+    assert async_load == False
+
+    entry = get_pending_entry(mock, request.request_id)
+
+    assert entry[0] == 2
+    assert len(entry[1]) == 2
+    assert entry[2] is None 
+
+    # Case 2: No blocks on host, some blocks on disk
+    request = make_request("1", [0]*SEQ_LEN)
+    mock = create_mock(None, 2)
+
+    (num_external_computed_tokens, async_load) = KvbmCacheManager.get_num_new_matched_tokens(mock, request, 0)
+
+    assert num_external_computed_tokens == 2 * PAGE_SIZE
+    assert async_load == False
+
+    entry = get_pending_entry(mock, request.request_id)
+    assert entry[0] == 2
+    assert entry[1] is None
+    assert len(entry[2]) == 2
+
+    # Case 3: All blocks on host.
+    request = make_request("2", [0]*SEQ_LEN)
+    mock = create_mock(3, None)
+    (num_external_computed_tokens, async_load) = KvbmCacheManager.get_num_new_matched_tokens(mock, request, 0)
+    assert num_external_computed_tokens == SEQ_LEN - 1
+    assert async_load == False
+
+    entry = get_pending_entry(mock, request.request_id)
+    assert entry[0] == 2
+    assert len(entry[1]) == 3
+    assert entry[2] is None
+
+    # Case 4: All blocks on disk.
+    request = make_request("3", [0]*SEQ_LEN)
+    mock = create_mock(None, 3)
+    (num_external_computed_tokens, async_load) = KvbmCacheManager.get_num_new_matched_tokens(mock, request, 0)
+    assert num_external_computed_tokens == SEQ_LEN - 1
+    assert async_load == False
+
+    entry = get_pending_entry(mock, request.request_id)
+    assert entry[0] == 2
+    assert entry[1] is None
+    assert len(entry[2]) == 3

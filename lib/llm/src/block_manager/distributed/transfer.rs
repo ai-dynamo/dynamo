@@ -152,6 +152,13 @@ impl Handler for BlockTransferHandler {
 
         let request: BlockTransferRequest = serde_json::from_slice(&message.data[0])?;
 
+        tracing::debug!(
+            "Performing transfer of {} blocks from {:?} to {:?}",
+            request.blocks().len(),
+            request.from_pool(),
+            request.to_pool()
+        );
+
         let notify = match (request.from_pool(), request.to_pool()) {
             (Device, Host) => self.begin_transfer(&self.device, &self.host, request).await,
             (Host, Device) => self.begin_transfer(&self.host, &self.device, request).await,
