@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 pub use super::preprocessor::PreprocessedRequest;
 pub use super::FinishReason;
 use crate::protocols::TokenIdType;
+use dynamo_runtime::protocols::is_error::IsError;
 
 pub type TokenType = Option<String>;
 pub type LogProbs = Vec<f64>;
@@ -130,6 +131,20 @@ impl LLMEngineOutput {
             log_probs: None,
             finish_reason: Some(FinishReason::Error(err_msg)),
             index: None,
+        }
+    }
+}
+
+impl IsError for LLMEngineOutput {
+    fn from_err(err: Box<dyn std::error::Error>) -> Self {
+        LLMEngineOutput::error(format!("{:?}", err))
+    }
+
+    fn err(&self) -> Option<Box<dyn std::error::Error>> {
+        if let Some(FinishReason::Error(err_msg)) = &self.finish_reason {
+            Some(anyhow::Error::msg(err_msg.clone()).into())
+        } else {
+            None
         }
     }
 }
