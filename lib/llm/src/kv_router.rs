@@ -169,20 +169,23 @@ impl KvRouter {
             .collect();
         let overlap_scores = self.indexer.find_matches(local_block_hashes).await?;
 
-        let token_sequence = TokenBlockSequence::from_slice(tokens, block_size, None);
-        let potential_blocks = self.scheduler.potential_blocks(token_sequence).await;
-        let worker_id = self
+        let best_worker_id = self
             .scheduler
-            .schedule(overlap_scores.clone(), isl_tokens, potential_blocks)
+            .schedule_and_update(
+                context_id.to_string(),
+                isl_tokens,
+                block_size,
+                tokens,
+                overlap_scores.clone(),
+            )
             .await?;
 
-        let token_sequence = TokenBlockSequence::from_slice(tokens, block_size, None);
-        self.scheduler
-            .add_request(context_id.to_string(), token_sequence, worker_id)
-            .await;
-
-        let overlap_amount = overlap_scores.scores.get(&worker_id).copied().unwrap_or(0);
-        Ok((worker_id, overlap_amount))
+        let overlap_amount = overlap_scores
+            .scores
+            .get(&best_worker_id)
+            .copied()
+            .unwrap_or(0);
+        Ok((best_worker_id, overlap_amount))
     }
 
     /// Push a token to a specific request's sequence

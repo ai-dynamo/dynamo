@@ -218,6 +218,28 @@ impl KvScheduler {
         Ok(res)
     }
 
+    // Hold the lock for the entire read, schedule, and update cycle, to prevent staleness
+    pub async fn schedule_and_update(
+        &self,
+        request_id: String,
+        isl_tokens: usize,
+        block_size: u32,
+        tokens: &[u32],
+        overlap: OverlapScores,
+    ) -> Result<i64, KvSchedulerError> {
+        let mut sequences = self.sequences.lock().await;
+
+        let token_sequence = TokenBlockSequence::from_slice(tokens, block_size, None);
+        let potential_blocks = sequences.potential_blocks(token_sequence);
+
+        let best_worker_id = self.schedule(overlap, isl_tokens, potential_blocks).await?;
+
+        let token_sequence = TokenBlockSequence::from_slice(tokens, block_size, None);
+        sequences.add_request(request_id, token_sequence, best_worker_id);
+
+        Ok(best_worker_id)
+    }
+
     /// Add a new request with its initial tokens to a specific worker
     pub async fn potential_blocks(
         &self,
