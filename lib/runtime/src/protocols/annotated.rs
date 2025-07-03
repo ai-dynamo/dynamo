@@ -28,7 +28,7 @@ pub trait AnnotationsProvider {
 /// Our services have the option of returning an "annotated" stream, which allows use
 /// to include additional information with each delta. This is useful for debugging,
 /// performance benchmarking, and improved observability.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Annotated<R> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<R>,
