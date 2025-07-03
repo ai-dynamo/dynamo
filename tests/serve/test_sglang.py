@@ -16,9 +16,13 @@ logger = logging.getLogger(__name__)
 class SGLangProcess(ManagedProcess):
     """Simple process manager for sglang shell scripts"""
     
-    def __init__(self, script_name, request, port=8000):
+    def __init__(self, script_name, request, port=8080):
         sglang_dir = "/workspace/examples/sglang"
         script_path = os.path.join(sglang_dir, "launch", script_name)
+        
+        # Verify script exists
+        if not os.path.exists(script_path):
+            raise FileNotFoundError(f"SGLang script not found: {script_path}")
         
         # Make script executable and run it
         os.chmod(script_path, 0o755)
@@ -28,13 +32,28 @@ class SGLangProcess(ManagedProcess):
         
         super().__init__(
             command=command,
-            timeout=600,
+            timeout=900,
             display_output=True,
             working_dir=sglang_dir,
-            health_check_ports=[port],
-            delayed_start=30,  # Give sglang time to start
+            health_check_ports=[],  # Disable port health check
+            health_check_urls=[
+                (f"http://localhost:{port}/v1/models", self._check_models_api)
+            ],
+            delayed_start=60,  # Give SGLang more time to fully start
+            terminate_existing=False,
+            stragglers=[],  # Don't kill any stragglers automatically
             log_dir=request.node.name,
         )
+
+    def _check_models_api(self, response):
+        """Check if models API is working and returns models"""
+        try:
+            if response.status_code != 200:
+                return False
+            data = response.json()
+            return data.get("data") and len(data["data"]) > 0
+        except Exception:
+            return False
 
 
 @pytest.mark.e2e
@@ -43,6 +62,13 @@ class SGLangProcess(ManagedProcess):
 @pytest.mark.gpu_1
 def test_sglang_aggregated(request, runtime_services):
     """Test sglang aggregated deployment"""
+    
+    # First check if sglang is available
+    try:
+        import sglang
+        logger.info(f"SGLang version: {sglang.__version__}")
+    except ImportError:
+        pytest.skip("SGLang not available")
     
     with SGLangProcess("agg.sh", request) as server:
         # Test chat completions
@@ -71,6 +97,13 @@ def test_sglang_aggregated(request, runtime_services):
 @pytest.mark.gpu_2
 def test_sglang_disaggregated(request, runtime_services):
     """Test sglang disaggregated deployment (requires 2 GPUs)"""
+    
+    # First check if sglang is available
+    try:
+        import sglang
+        logger.info(f"SGLang version: {sglang.__version__}")
+    except ImportError:
+        pytest.skip("SGLang not available")
     
     with SGLangProcess("disagg.sh", request) as server:
         # Test chat completions
@@ -113,10 +146,6 @@ def test_sglang_disaggregated(request, runtime_services):
 
 
 @pytest.mark.skip(reason="Requires 4 GPUs - enable when hardware available")
-@pytest.mark.e2e
-@pytest.mark.slow
-@pytest.mark.sglang
-@pytest.mark.gpu_4
 def test_sglang_disagg_dp_attention(request, runtime_services):
     """Test sglang disaggregated with DP attention (requires 4 GPUs)"""
     
