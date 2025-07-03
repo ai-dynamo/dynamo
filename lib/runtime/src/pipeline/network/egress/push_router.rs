@@ -109,16 +109,6 @@ where
 
     /// Issue a request to the next available instance in a round-robin fashion
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        match self.round_robin_ret_id(request).await {
-            Ok((stream, _)) => Ok(stream),
-            Err(err) => Err(err),
-        }
-    }
-
-    pub async fn round_robin_ret_id(
-        &self,
-        request: SingleIn<T>,
-    ) -> anyhow::Result<(ManyOut<U>, i64)> {
         let slf = self;
         let routing_algorithm = move || async move {
             let counter = slf.round_robin_counter.fetch_add(1, Ordering::Relaxed);
@@ -145,13 +135,6 @@ where
 
     /// Issue a request to a random endpoint
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        match self.random_ret_id(request).await {
-            Ok((stream, _)) => Ok(stream),
-            Err(err) => Err(err),
-        }
-    }
-
-    pub async fn random_ret_id(&self, request: SingleIn<T>) -> anyhow::Result<(ManyOut<U>, i64)> {
         let slf = self;
         let routing_algorithm = move || async move {
             let instance_id = {
@@ -195,13 +178,8 @@ where
             }
             Ok(instance_id)
         };
-        match self
-            .generate_with_fault_tolerance(routing_algorithm, request)
+        self.generate_with_fault_tolerance(routing_algorithm, request)
             .await
-        {
-            Ok((stream, _)) => Ok(stream),
-            Err(err) => Err(err),
-        }
     }
 
     pub async fn r#static(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
@@ -216,7 +194,7 @@ where
         &self,
         routing_algorithm: F,
         request: SingleIn<T>,
-    ) -> anyhow::Result<(ManyOut<U>, i64)>
+    ) -> anyhow::Result<ManyOut<U>>
     where
         F: FnOnce() -> R,
         R: Future<Output = anyhow::Result<i64>>,
@@ -234,10 +212,7 @@ where
                 }
             }
         }
-        match stream {
-            Ok(stream) => Ok((stream, instance_id)),
-            Err(err) => Err(err),
-        }
+        stream
     }
 }
 

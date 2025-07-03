@@ -643,18 +643,14 @@ impl Client {
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let router = self.router.clone();
+        let client = self.router.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (stream, instance_id) = router
-                .round_robin_ret_id(request.into())
-                .await
-                .map_err(to_pyerr)?;
+            let stream = client.round_robin(request.into()).await.map_err(to_pyerr)?;
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream::new(
                 Arc::new(Mutex::new(rx)),
                 annotated,
-                Some((router.clone(), instance_id)),
             ))
         })
     }
@@ -671,18 +667,14 @@ impl Client {
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let router = self.router.clone();
+        let client = self.router.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let (stream, instance_id) = router
-                .random_ret_id(request.into())
-                .await
-                .map_err(to_pyerr)?;
+            let stream = client.random(request.into()).await.map_err(to_pyerr)?;
             tokio::spawn(process_stream(stream, tx));
             Ok(AsyncResponseStream::new(
                 Arc::new(Mutex::new(rx)),
                 annotated,
-                Some((router.clone(), instance_id)),
             ))
         })
     }
@@ -700,10 +692,10 @@ impl Client {
         let annotated = annotated.unwrap_or(false);
 
         let (tx, rx) = tokio::sync::mpsc::channel(32);
-        let router = self.router.clone();
+        let client = self.router.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let stream = router
+            let stream = client
                 .direct(request.into(), instance_id)
                 .await
                 .map_err(to_pyerr)?;
@@ -713,7 +705,6 @@ impl Client {
             Ok(AsyncResponseStream::new(
                 Arc::new(Mutex::new(rx)),
                 annotated,
-                Some((router.clone(), instance_id)),
             ))
         })
     }
@@ -740,7 +731,6 @@ impl Client {
             Ok(AsyncResponseStream::new(
                 Arc::new(Mutex::new(rx)),
                 annotated,
-                None,
             ))
         })
     }
@@ -788,33 +778,22 @@ async fn process_stream(
 
 #[pyclass]
 struct AsyncResponseStream {
-    // Pipe for receiving responses.
     rx: Arc<Mutex<tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>>>,
     // Return response in Annotated wrapper.
     annotated: bool,
-    // For iterator to track complete final receival.
+    // For iterator to track complete final revceival.
     is_complete_final: Arc<AtomicBool>,
-    // Track the (router, instance_id) for reporting complete final errors.
-    routing: Option<(
-        rs::pipeline::PushRouter<serde_json::Value, serde_json::Value>,
-        i64,
-    )>,
 }
 
 impl AsyncResponseStream {
     pub fn new(
         rx: Arc<Mutex<tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>>>,
         annotated: bool,
-        routing: Option<(
-            rs::pipeline::PushRouter<serde_json::Value, serde_json::Value>,
-            i64,
-        )>,
     ) -> Self {
         AsyncResponseStream {
             rx,
             annotated,
             is_complete_final: Arc::new(AtomicBool::new(false)),
-            routing,
         }
     }
 }
@@ -832,7 +811,6 @@ impl AsyncResponseStream {
         let rx = self.rx.clone();
         let annotated = self.annotated;
         let is_complete_final = self.is_complete_final.clone();
-        let routing = self.routing.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             loop {
@@ -871,9 +849,6 @@ impl AsyncResponseStream {
                     }
                     None => {
                         if !(*is_complete_final).load(Ordering::Relaxed) {
-                            if let Some((router, instance_id)) = &routing {
-                                router.client.report_instance_down(*instance_id).await;
-                            }
                             return Err(PyConnectionError::new_err(
                                 "Stream closed unexpectedly before complete final",
                             ));
