@@ -61,16 +61,6 @@ impl<R> Annotated<R> {
         }
     }
 
-    /// Create a new annotated stream with complete final event
-    pub fn from_complete_final() -> Self {
-        Self {
-            data: None,
-            id: None,
-            event: Some("complete_final".to_string()),
-            comment: None,
-        }
-    }
-
     /// Add an annotation to the stream
     ///
     /// Annotations populate the `event` field and the `comment` field
@@ -102,10 +92,6 @@ impl<R> Annotated<R> {
 
     pub fn is_ok(&self) -> bool {
         self.event.as_deref() != Some("error")
-    }
-
-    pub fn is_complete_final(&self) -> bool {
-        self.event.as_deref() == Some("complete_final")
     }
 
     pub fn is_err(&self) -> bool {
@@ -180,17 +166,3 @@ impl<R> Annotated<R> {
 //         Box::pin(stream)
 //     }
 // }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_complete_final() {
-        let annotated: Annotated<()> = Annotated::from_complete_final();
-        assert!(annotated.is_complete_final());
-        assert!(annotated.data.is_none());
-        assert_eq!(annotated.event, Some("complete_final".to_string()));
-        assert!(annotated.comment.is_none());
-    }
-}
