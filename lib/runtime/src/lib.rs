@@ -39,6 +39,7 @@ pub mod engine;
 pub mod logging;
 pub mod pipeline;
 pub mod prelude;
+pub mod profiling;
 pub mod protocols;
 pub mod runnable;
 pub mod runtime;

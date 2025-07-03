@@ -46,6 +46,10 @@ either = { workspace = true }
 etcd-client = { workspace = true }
 futures = { workspace = true }
 humantime = { workspace = true }
+opentelemetry = { version = "0.24", features = ["rt-tokio", "metrics", "trace"] }
+opentelemetry_sdk = { version = "0.24", features = ["rt-tokio", "metrics", "trace"] }
+opentelemetry_http = { version = "0.13" }
+opentelemetry_otlp = { version = "0.17", features = ["http-proto", "grpc-proto"] }
 prometheus = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
