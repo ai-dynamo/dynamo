@@ -90,7 +90,7 @@ pub struct RuntimeConfig {
     pub http_server_port: u16,
 
     /// Health and metrics HTTP server enabled
-    #[builder(default = "true")]
+    #[builder(default = "false")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub http_enabled: bool,
 }
