@@ -302,7 +302,7 @@ impl WorkerSelector for DefaultWorkerSelector {
 
         // Calculate logits for each worker
         for (worker_id, _) in workers.endpoints.iter() {
-            let cached_blocks = request.overlap.scores.get(&worker_id).copied().unwrap_or(0) as f64;
+            let cached_blocks = request.overlap.scores.get(worker_id).copied().unwrap_or(0) as f64;
             let prefill_blocks = request_blocks as f64 - cached_blocks;
 
             let decode_blocks = *potential_active_blocks.get(worker_id).unwrap() as f64;
