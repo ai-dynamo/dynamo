@@ -24,6 +24,8 @@ except ImportError:
 
 from dynamo._core import ApproxKvIndexer as ApproxKvIndexer
 from dynamo._core import DisaggregatedRouter as DisaggregatedRouter
+from dynamo._core import EngineType
+from dynamo._core import EntrypointArgs as EntrypointArgs
 from dynamo._core import HttpAsyncEngine as HttpAsyncEngine
 from dynamo._core import HttpError as HttpError
 from dynamo._core import HttpService as HttpService
@@ -40,7 +42,9 @@ from dynamo._core import ZmqKvEventListener as ZmqKvEventListener
 from dynamo._core import ZmqKvEventPublisher as ZmqKvEventPublisher
 from dynamo._core import ZmqKvEventPublisherConfig as ZmqKvEventPublisherConfig
 from dynamo._core import compute_block_hash_for_seq_py as compute_block_hash_for_seq_py
+from dynamo._core import make_engine
 from dynamo._core import register_llm as register_llm
+from dynamo._core import run_input
 
 try:
     from dynamo.llm.tensorrtllm import (  # noqa: F401

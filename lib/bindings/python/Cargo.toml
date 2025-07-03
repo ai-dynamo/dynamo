@@ -40,6 +40,7 @@ block-manager = ["dynamo-llm/block-manager", "dep:dlpark"]
 [dependencies]
 dynamo-llm = { path = "../../llm" }
 dynamo-runtime = { path = "../../runtime" }
+dynamo-engine-mistralrs = { path = "../../engines/mistralrs", features = ["cuda"] }
 
 anyhow = { version = "1" }
 async-openai = { version = "0.29.0" }
@@ -50,7 +51,7 @@ once_cell = { version = "1.20.3" }
 serde = { version = "1" }
 serde_json = { version = "1.0.138" }
 thiserror = { version = "2.0" }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.46.0", features = ["full"] }
 tokio-stream = { version = "0" }
 tokio-util = { version = "0.7" }
 tracing = { version = "0" }

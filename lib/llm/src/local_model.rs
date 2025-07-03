@@ -80,8 +80,8 @@ impl LocalModelBuilder {
         self
     }
 
-    pub fn endpoint_id(&mut self, endpoint_id: EndpointId) -> &mut Self {
-        self.endpoint_id = Some(endpoint_id);
+    pub fn endpoint_id(&mut self, endpoint_id: Option<EndpointId>) -> &mut Self {
+        self.endpoint_id = endpoint_id;
         self
     }
 
@@ -96,8 +96,9 @@ impl LocalModelBuilder {
         self
     }
 
-    pub fn http_port(&mut self, port: u16) -> &mut Self {
-        self.http_port = port;
+    /// Passing None resets it to default
+    pub fn http_port(&mut self, port: Option<u16>) -> &mut Self {
+        self.http_port = port.unwrap_or(DEFAULT_HTTP_PORT);
         self
     }
 

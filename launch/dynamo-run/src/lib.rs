@@ -41,14 +41,14 @@ pub async fn run(
         .kv_cache_block_size(flags.kv_cache_block_size)
         // Only set if user provides. Usually loaded from tokenizer_config.json
         .context_length(flags.context_length)
-        .http_port(flags.http_port)
+        .http_port(Some(flags.http_port))
         .router_config(flags.router_config())
         .request_template(flags.request_template.clone());
 
     // If `in=dyn` we want the trtllm/sglang/vllm subprocess to listen on that endpoint.
     // If not, then the endpoint isn't exposed so we let LocalModel invent one.
     if let Input::Endpoint(path) = &in_opt {
-        builder.endpoint_id(path.parse().with_context(|| path.clone())?);
+        builder.endpoint_id(Some(path.parse().with_context(|| path.clone())?));
     };
 
     let local_model = builder.build().await?;
