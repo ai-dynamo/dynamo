@@ -75,13 +75,14 @@ sequenceDiagram
 The test suite includes several predefined fault injection scenarios designed to validate system resilience under various failure conditions. These scenarios are configured in `scenarios.py` and can be selected via pytest parameters. Below is a description of the available scenarios:
 
 | Scenario Name          | Description                                                                 | Affected Components                             | Timing Example     |
-|------------------------|-----------------------------------------------------------------------------|-------------------------------------------------|-------------------|
-| **decode_worker**      | Terminates decoder worker processes  | `dynamo_vllmworker`                             | 30 seconds         |
-| **prefill_worker**     | Terminates prefill worker processes  | `dynamo_prefillworker`                          | 30 seconds         |
-| **frontend**           | Terminates frontend processes handling client requests                       | `dynamo_frontend`                               | 30 seconds         |
-| **processor**          | Terminates processor responsible for tokenization                 | `dynamo_processor`                              | 30 seconds         |
-| **vllm_worker**        | Terminates low-level VLLM worker processes                                   | `vllm_worker` (external to Dynamo)             | 30 seconds         |
-| **none**               | Baseline scenario with no failures                                          | N/A                                             | N/A               |
+|------------------------|-----------------------------------------------------------------------------|-------------------------------------------------|--------------------|
+| **decode_worker**      | Terminates decoder worker processes                                         | `dynamo_vllmworker`                             | 30 seconds         |
+| **prefill_worker**     | Terminates prefill worker processes                                         | `dynamo_prefillworker`                          | 30 seconds         |
+| **frontend**           | Terminates frontend processes handling client requests                      | `dynamo_frontend`                               | 30 seconds         |
+| **processor**          | Terminates processor nodes responsible for task orchestration               | `dynamo_processor`                              | 30 seconds         |
+| **vllm_worker**        | Terminates low-level VLLM worker processes                                  | `vllm_worker` (external to Dynamo)              | 30 seconds         |
+| **none**               | Baseline scenario with no failures                                          | N/A                                             | N/A                |
+
 
 #### Key Characteristics:
 1. **Timing**: Failures are injected at predefined intervals (e.g., 30 seconds after test start)
