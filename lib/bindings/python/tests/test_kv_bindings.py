@@ -26,14 +26,14 @@ import pytest
 
 from dynamo.llm import (
     ApproxKvIndexer,
+    ForwardPassMetrics,
     KvEventPublisher,
     KvIndexer,
     KvMetricsAggregator,
-    PyForwardPassMetrics,
-    PyKvStats,
-    PyWorkerStats,
+    KvStats,
     RadixTree,
     WorkerMetricsPublisher,
+    WorkerStats,
 )
 from dynamo.runtime import Component, DistributedRuntime
 
@@ -337,27 +337,27 @@ async def test_metrics_aggregator(distributed_runtime):
 async def metrics_publisher_task(kv_listener, expected_metrics):
     # Construct the structured ForwardPassMetrics payload expected by the
     # current Rust bindings instead of passing the individual scalar values
-    # directly. The API for `WorkerMetricsPublisher.publish` was recently
+    # directly. The API for `WorkerMetricsPublisher.publish`
     # changed from a list of positional scalars to a single
-    # `PyForwardPassMetrics` object.
+    # `ForwardPassMetrics` object.
 
     metrics_publisher = WorkerMetricsPublisher()
 
-    worker_stats = PyWorkerStats(
+    worker_stats = WorkerStats(
         None,
         expected_metrics["request_active_slots"],
         expected_metrics["request_total_slots"],
         expected_metrics["num_requests_waiting"],
     )
 
-    kv_stats = PyKvStats(
+    kv_stats = KvStats(
         expected_metrics["kv_active_blocks"],
         expected_metrics["kv_total_blocks"],
         expected_metrics["gpu_cache_usage_perc"],
         expected_metrics["gpu_prefix_cache_hit_rate"],
     )
 
-    metrics = PyForwardPassMetrics(worker_stats, kv_stats, None)
+    metrics = ForwardPassMetrics(worker_stats, kv_stats, None)
 
     # Publish and expose the metrics via the endpoint so that the aggregator
     # test can discover them.

@@ -19,6 +19,10 @@ use std::sync::atomic::AtomicU32;
 use super::*;
 use llm_rs::kv_router::indexer::compute_block_hash_for_seq;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
+use llm_rs::kv_router::protocols::ForwardPassMetrics as RsForwardPassMetrics;
+use llm_rs::kv_router::protocols::KvStats as RsKvStats;
+use llm_rs::kv_router::protocols::SpecDecodeStats as RsSpecDecodeStats;
+use llm_rs::kv_router::protocols::WorkerStats as RsWorkerStats;
 use rs::traits::events::EventSubscriber;
 use tracing;
 
@@ -115,7 +119,7 @@ impl WorkerMetricsPublisher {
 
     #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (metrics))]
-    fn publish(&self, _py: Python, metrics: &PyForwardPassMetrics) -> PyResult<()> {
+    fn publish(&self, _py: Python, metrics: &ForwardPassMetrics) -> PyResult<()> {
         // Create and publish the complete metrics
         self.inner
             .publish(metrics.0.clone().into())
@@ -616,15 +620,15 @@ impl KvMetricsAggregator {
         let endpoint_kv_metrics = endpoints
             .endpoints
             .iter()
-            .map(|(worker_id, x)| EndpointKvMetrics {
+            .map(|(worker_id, endpoint)| EndpointKvMetrics {
                 worker_id: *worker_id,
-                request_active_slots: x.data.worker_stats.request_active_slots,
-                request_total_slots: x.data.worker_stats.request_total_slots,
-                kv_active_blocks: x.data.kv_stats.kv_active_blocks,
-                kv_total_blocks: x.data.kv_stats.kv_total_blocks,
-                num_requests_waiting: x.data.worker_stats.num_requests_waiting,
-                gpu_cache_usage_perc: x.data.kv_stats.gpu_cache_usage_perc,
-                gpu_prefix_cache_hit_rate: x.data.kv_stats.gpu_prefix_cache_hit_rate,
+                request_active_slots: endpoint.data.worker_stats.request_active_slots,
+                request_total_slots: endpoint.data.worker_stats.request_total_slots,
+                kv_active_blocks: endpoint.data.kv_stats.kv_active_blocks,
+                kv_total_blocks: endpoint.data.kv_stats.kv_total_blocks,
+                num_requests_waiting: endpoint.data.worker_stats.num_requests_waiting,
+                gpu_cache_usage_perc: endpoint.data.kv_stats.gpu_cache_usage_perc,
+                gpu_prefix_cache_hit_rate: endpoint.data.kv_stats.gpu_prefix_cache_hit_rate,
             })
             .collect();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
@@ -758,30 +762,30 @@ impl KvRecorder {
 
 #[pyclass]
 #[repr(transparent)]
-pub struct PyForwardPassMetrics(pub llm_rs::kv_router::protocols::ForwardPassMetrics);
+pub struct ForwardPassMetrics(pub RsForwardPassMetrics);
 
 #[pyclass]
 #[repr(transparent)]
-pub struct PyWorkerStats(pub llm_rs::kv_router::protocols::WorkerStats);
+pub struct WorkerStats(pub RsWorkerStats);
 
 #[pyclass]
 #[repr(transparent)]
-pub struct PyKvStats(pub llm_rs::kv_router::protocols::KvStats);
+pub struct KvStats(pub RsKvStats);
 
 #[pyclass]
 #[repr(transparent)]
-pub struct PySpecDecodeStats(pub llm_rs::kv_router::protocols::SpecDecodeStats);
+pub struct SpecDecodeStats(pub RsSpecDecodeStats);
 
 #[pymethods]
-impl PyForwardPassMetrics {
+impl ForwardPassMetrics {
     #[new]
     #[pyo3(signature = (worker_stats, kv_stats, spec_decode_stats = None))]
     fn new(
-        worker_stats: &PyWorkerStats,
-        kv_stats: &PyKvStats,
-        spec_decode_stats: Option<&PySpecDecodeStats>,
+        worker_stats: &WorkerStats,
+        kv_stats: &KvStats,
+        spec_decode_stats: Option<&SpecDecodeStats>,
     ) -> Self {
-        Self(ForwardPassMetrics {
+        Self(RsForwardPassMetrics {
             worker_stats: worker_stats.0.clone(),
             kv_stats: kv_stats.0.clone(),
             spec_decode_stats: spec_decode_stats.map(|s| s.0.clone()),
@@ -790,7 +794,7 @@ impl PyForwardPassMetrics {
 }
 
 #[pymethods]
-impl PyWorkerStats {
+impl WorkerStats {
     #[new]
     #[pyo3(signature = (request_active_slots, request_total_slots, num_requests_waiting, data_parallel_rank=None))]
     fn new(
@@ -799,7 +803,7 @@ impl PyWorkerStats {
         num_requests_waiting: u64,
         data_parallel_rank: Option<u32>,
     ) -> Self {
-        Self(WorkerStats {
+        Self(RsWorkerStats {
             data_parallel_rank,
             request_active_slots,
             request_total_slots,
@@ -809,7 +813,7 @@ impl PyWorkerStats {
 }
 
 #[pymethods]
-impl PyKvStats {
+impl KvStats {
     #[new]
     #[pyo3(signature = (kv_active_blocks, kv_total_blocks, gpu_cache_usage_perc, gpu_prefix_cache_hit_rate))]
     fn new(
@@ -818,7 +822,7 @@ impl PyKvStats {
         gpu_cache_usage_perc: f32,
         gpu_prefix_cache_hit_rate: f32,
     ) -> Self {
-        Self(KvStats {
+        Self(RsKvStats {
             kv_active_blocks,
             kv_total_blocks,
             gpu_cache_usage_perc,
@@ -828,7 +832,7 @@ impl PyKvStats {
 }
 
 #[pymethods]
-impl PySpecDecodeStats {
+impl SpecDecodeStats {
     #[new]
     #[pyo3(signature = (num_spec_tokens, num_drafts, num_draft_tokens, num_accepted_tokens, num_accepted_tokens_per_pos))]
     fn new(
@@ -838,7 +842,7 @@ impl PySpecDecodeStats {
         num_accepted_tokens: Option<u32>,
         num_accepted_tokens_per_pos: Option<Vec<u32>>,
     ) -> Self {
-        Self(SpecDecodeStats {
+        Self(RsSpecDecodeStats {
             num_spec_tokens,
             num_drafts,
             num_draft_tokens,

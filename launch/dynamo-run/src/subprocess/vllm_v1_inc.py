@@ -32,12 +32,7 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
-from dynamo._core import (
-    PyForwardPassMetrics,
-    PyKvStats,
-    PySpecDecodeStats,
-    PyWorkerStats,
-)
+from dynamo._core import ForwardPassMetrics, KvStats, SpecDecodeStats, WorkerStats
 from dynamo.llm import (
     ModelType,
     WorkerMetricsPublisher,
@@ -91,14 +86,14 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
                 / scheduler_stats.prefix_cache_stats.queries
             )
 
-        worker_stats = PyWorkerStats(
+        worker_stats = WorkerStats(
             data_parallel_rank=self.dp_rank,
             request_active_slots=scheduler_stats.num_running_reqs,
             request_total_slots=0,  # TODO - remove from metrics
             num_requests_waiting=scheduler_stats.num_waiting_reqs,
         )
 
-        kv_stats = PyKvStats(
+        kv_stats = KvStats(
             kv_active_blocks=0,  # TODO - need to calculate this
             kv_total_blocks=0,  # TODO - remove from metrics
             gpu_cache_usage_perc=scheduler_stats.gpu_cache_usage,  # used in current cost function
@@ -107,7 +102,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
 
         spec_dec_stats = scheduler_stats.spec_decoding_stats
         if spec_dec_stats:
-            spec_dec_stats = PySpecDecodeStats(
+            spec_dec_stats = SpecDecodeStats(
                 num_spec_tokens=spec_dec_stats.num_spec_tokens,
                 num_drafts=spec_dec_stats.num_drafts,
                 num_draft_tokens=spec_dec_stats.num_draft_tokens,
@@ -115,7 +110,7 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
                 num_accepted_tokens_per_pos=spec_dec_stats.num_accepted_tokens_per_pos,
             )
 
-        metrics = PyForwardPassMetrics(
+        metrics = ForwardPassMetrics(
             worker_stats=worker_stats,
             kv_stats=kv_stats,
             spec_decode_stats=spec_dec_stats,

@@ -355,7 +355,48 @@ def compute_block_hash_for_seq_py(tokens: List[int], kv_block_size: int) -> List
     Returns:
         List of block hashes as integers
     """
+
     ...
+
+class WorkerStats:
+    """
+    Worker stats.
+    """
+
+    ...
+
+class KvStats:
+    """
+    KV stats.
+    """
+
+    ...
+
+class SpecDecodeStats:
+    """
+    Speculative decoding stats.
+    """
+
+    ...
+
+class ForwardPassMetrics:
+    """
+    A collection of metrics for a forward pass.
+    Includes worker stats, KV stats, and speculative decoding stats.
+    """
+
+    ...
+
+    def __init__(
+        self,
+        worker_stats: WorkerStats,
+        kv_stats: KvStats,
+        spec_decode_stats: Optional[SpecDecodeStats] = None,
+    ) -> None:
+        """
+        Create a `ForwardPassMetrics` object
+        """
+        ...
 
 class WorkerMetricsPublisher:
     """
@@ -377,22 +418,10 @@ class WorkerMetricsPublisher:
 
     def publish(
         self,
-        request_active_slots: int,
-        request_total_slots: int,
-        kv_active_blocks: int,
-        kv_total_blocks: int,
-        num_requests_waiting: int,
-        gpu_cache_usage_perc: float,
-        gpu_prefix_cache_hit_rate: float,
-        data_parallel_rank: int = 0,
-        spec_dec_num_spec_tokens: Optional[int] = None,
-        spec_dec_num_drafts: Optional[int] = None,
-        spec_dec_num_draft_tokens: Optional[int] = None,
-        spec_dec_num_accepted_tokens: Optional[int] = None,
-        spec_dec_num_accepted_tokens_per_pos: Optional[list[int]] = None,
+        metrics: ForwardPassMetrics
     ) -> None:
         """
-        Update the KV metrics being reported.
+        Update the metrics being reported.
         """
         ...
 
