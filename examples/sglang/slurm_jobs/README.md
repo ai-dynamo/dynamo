@@ -24,18 +24,18 @@ logs/
 ├── 3062824/                    # Job ID directory
 │   ├── log.out                 # Main job output (node allocation, IP addresses, launch commands)
 │   ├── log.err                 # Main job errors
-│   ├── eos0197_prefill.out     # Prefill node stdout (eos0197)
-│   ├── eos0197_prefill.err     # Prefill node stderr (eos0197)
-│   ├── eos0200_prefill.out     # Prefill node stdout (eos0200)
-│   ├── eos0200_prefill.err     # Prefill node stderr (eos0200)
-│   ├── eos0201_decode.out      # Decode node stdout (eos0201)
-│   ├── eos0201_decode.err      # Decode node stderr (eos0201)
-│   ├── eos0204_decode.out      # Decode node stdout (eos0204)
-│   ├── eos0204_decode.err      # Decode node stderr (eos0204)
-│   ├── eos0197_prefill_gpu_utilization.log    # GPU utilization monitoring (eos0197)
-│   ├── eos0200_prefill_gpu_utilization.log    # GPU utilization monitoring (eos0200)
-│   ├── eos0201_decode_gpu_utilization.log     # GPU utilization monitoring (eos0201)
-│   └── eos0204_decode_gpu_utilization.log     # GPU utilization monitoring (eos0204)
+│   ├── node0197_prefill.out     # Prefill node stdout (node0197)
+│   ├── node0197_prefill.err     # Prefill node stderr (node0197)
+│   ├── node0200_prefill.out     # Prefill node stdout (node0200)
+│   ├── node0200_prefill.err     # Prefill node stderr (node0200)
+│   ├── node0201_decode.out      # Decode node stdout (node0201)
+│   ├── node0201_decode.err      # Decode node stderr (node0201)
+│   ├── node0204_decode.out      # Decode node stdout (node0204)
+│   ├── node0204_decode.err      # Decode node stderr (node0204)
+│   ├── node0197_prefill_gpu_utilization.log    # GPU utilization monitoring (node0197)
+│   ├── node0200_prefill_gpu_utilization.log    # GPU utilization monitoring (node0200)
+│   ├── node0201_decode_gpu_utilization.log     # GPU utilization monitoring (node0201)
+│   └── node0204_decode_gpu_utilization.log     # GPU utilization monitoring (node0204)
 ├── 3063137/                    # Another job ID directory
 ├── 3062689/                    # Another job ID directory
 └── ...
