@@ -44,6 +44,6 @@ class SglangHttpServer:
         server = uvicorn.Server(config)
         
         # Single nice log with available endpoints
-        logging.info(f"🚀 Admin server running on http://0.0.0.0:{self.port} - Endpoints: POST /flush_cache")
+        logging.info(f"🚀 SGL engine HTTP server running on http://0.0.0.0:{self.port} - Endpoints: POST /flush_cache")
         
         await server.serve()
