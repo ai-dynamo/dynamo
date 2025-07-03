@@ -256,12 +256,6 @@ where
                 }
             }
 
-            if tx.send(Annotated::from_complete_final()).await.is_err() {
-                tracing::trace!(
-                    request_id,
-                    "error sending complete final; channel is closed"
-                );
-            }
             tracing::debug!(
                 request_id,
                 "finished processing python async generator stream"

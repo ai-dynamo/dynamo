@@ -3,19 +3,13 @@
 
 use futures::StreamExt;
 use once_cell::sync::OnceCell;
-use pyo3::exceptions::{PyConnectionError, PyRuntimeError, PyStopAsyncIteration};
+use pyo3::exceptions::PyStopAsyncIteration;
 use pyo3::types::PyBytes;
 use pyo3::types::{PyDict, PyList, PyString};
 use pyo3::IntoPyObjectExt;
 use pyo3::{exceptions::PyException, prelude::*};
 use rs::pipeline::network::Ingress;
-use std::{
-    fmt::Display,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
-    },
-};
+use std::{fmt::Display, sync::Arc};
 use tokio::sync::Mutex;
 
 use dynamo_runtime::{
@@ -648,10 +642,10 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = client.round_robin(request.into()).await.map_err(to_pyerr)?;
             tokio::spawn(process_stream(stream, tx));
-            Ok(AsyncResponseStream::new(
-                Arc::new(Mutex::new(rx)),
+            Ok(AsyncResponseStream {
+                rx: Arc::new(Mutex::new(rx)),
                 annotated,
-            ))
+            })
         })
     }
 
@@ -672,10 +666,10 @@ impl Client {
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let stream = client.random(request.into()).await.map_err(to_pyerr)?;
             tokio::spawn(process_stream(stream, tx));
-            Ok(AsyncResponseStream::new(
-                Arc::new(Mutex::new(rx)),
+            Ok(AsyncResponseStream {
+                rx: Arc::new(Mutex::new(rx)),
                 annotated,
-            ))
+            })
         })
     }
 
@@ -702,10 +696,10 @@ impl Client {
 
             tokio::spawn(process_stream(stream, tx));
 
-            Ok(AsyncResponseStream::new(
-                Arc::new(Mutex::new(rx)),
+            Ok(AsyncResponseStream {
+                rx: Arc::new(Mutex::new(rx)),
                 annotated,
-            ))
+            })
         })
     }
 
@@ -728,10 +722,10 @@ impl Client {
 
             tokio::spawn(process_stream(stream, tx));
 
-            Ok(AsyncResponseStream::new(
-                Arc::new(Mutex::new(rx)),
+            Ok(AsyncResponseStream {
+                rx: Arc::new(Mutex::new(rx)),
                 annotated,
-            ))
+            })
         })
     }
 }
@@ -779,23 +773,7 @@ async fn process_stream(
 #[pyclass]
 struct AsyncResponseStream {
     rx: Arc<Mutex<tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>>>,
-    // Return response in Annotated wrapper.
     annotated: bool,
-    // For iterator to track complete final revceival.
-    is_complete_final: Arc<AtomicBool>,
-}
-
-impl AsyncResponseStream {
-    pub fn new(
-        rx: Arc<Mutex<tokio::sync::mpsc::Receiver<RsAnnotated<PyObject>>>>,
-        annotated: bool,
-    ) -> Self {
-        AsyncResponseStream {
-            rx,
-            annotated,
-            is_complete_final: Arc::new(AtomicBool::new(false)),
-        }
-    }
 }
 
 #[pymethods]
@@ -810,7 +788,6 @@ impl AsyncResponseStream {
     fn next<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         let rx = self.rx.clone();
         let annotated = self.annotated;
-        let is_complete_final = self.is_complete_final.clone();
 
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             loop {
@@ -824,17 +801,6 @@ impl AsyncResponseStream {
                             }
                         };
 
-                        let is_last_response = pyobj.is_complete_final();
-                        if (*is_complete_final).fetch_or(is_last_response, Ordering::Relaxed) {
-                            return Err(PyRuntimeError::new_err(
-                                "More response after complete final",
-                            ));
-                        }
-                        if is_last_response && pyobj.data.is_none() {
-                            tracing::debug!("Skipping empty response with complete final");
-                            continue;
-                        }
-
                         if annotated {
                             let object = Annotated { inner: pyobj };
                             #[allow(deprecated)]
@@ -847,14 +813,7 @@ impl AsyncResponseStream {
                             }
                         }
                     }
-                    None => {
-                        if !(*is_complete_final).load(Ordering::Relaxed) {
-                            return Err(PyConnectionError::new_err(
-                                "Stream closed unexpectedly before complete final",
-                            ));
-                        }
-                        return Err(PyStopAsyncIteration::new_err("Stream exhausted"));
-                    }
+                    None => return Err(PyStopAsyncIteration::new_err("Stream exhausted")),
                 }
             }
         })
