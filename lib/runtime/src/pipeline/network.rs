@@ -323,3 +323,11 @@ impl<Req: PipelineIO, Resp: PipelineIO> Ingress<Req, Resp> {
 pub trait PushWorkHandler: Send + Sync {
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError>;
 }
+
+// TODO: Detect end-of-stream using Server-Sent Events (SSE). This will be removed.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct StreamItemWrapper<U> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<U>,
+    pub complete_final: bool,
+}

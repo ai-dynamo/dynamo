@@ -146,6 +146,23 @@ impl<R> Annotated<R> {
     }
 }
 
+impl<R> is_error::IsError for Annotated<R>
+where
+    R: for<'de> Deserialize<'de> + Serialize,
+{
+    fn from_err(err: Box<dyn std::error::Error>) -> Self {
+        Annotated::from_error(format!("{:?}", err))
+    }
+
+    fn is_ok(&self) -> bool {
+        Annotated::is_ok(self)
+    }
+
+    fn is_err(&self) -> bool {
+        Annotated::is_err(self)
+    }
+}
+
 // impl<R> Annotated<R>
 // where
 //     R: for<'de> Deserialize<'de> + Serialize,

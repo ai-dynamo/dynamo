@@ -34,6 +34,7 @@ use crate::{
     pipeline::{
         error::PipelineErrorExt, AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
     },
+    protocols::is_error::IsError,
     traits::DistributedRuntimeProvider,
 };
 
@@ -94,7 +95,7 @@ async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPu
 impl<T, U> PushRouter<T, U>
 where
     T: Data + Serialize,
-    U: Data + for<'de> Deserialize<'de>,
+    U: Data + for<'de> Deserialize<'de> + IsError,
 {
     pub async fn from_client(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
         let addressed = addressed_router(&client.endpoint).await?;
@@ -220,7 +221,7 @@ where
 impl<T, U> AsyncEngine<SingleIn<T>, ManyOut<U>, Error> for PushRouter<T, U>
 where
     T: Data + Serialize,
-    U: Data + for<'de> Deserialize<'de>,
+    U: Data + for<'de> Deserialize<'de> + IsError,
 {
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
         match self.client.instance_source.as_ref() {

@@ -19,6 +19,7 @@ use std::str::FromStr;
 use crate::pipeline::PipelineError;
 
 pub mod annotated;
+pub mod is_error;
 
 pub type LeaseId = i64;
 
