@@ -78,6 +78,7 @@ impl Endpoint {
 pub struct SchedulingRequest {
     pub isl_tokens: usize,
     pub overlap: OverlapScores,
+    pub potential_blocks: HashMap<i64, usize>,
     resp_tx: tokio::sync::oneshot::Sender<i64>,
 }
 
@@ -198,11 +199,13 @@ impl KvScheduler {
         &self,
         overlap: OverlapScores,
         isl_tokens: usize,
+        potential_blocks: HashMap<i64, usize>,
     ) -> Result<i64, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
             isl_tokens,
             overlap,
+            potential_blocks,
             resp_tx,
         };
         self.request_tx
@@ -213,6 +216,15 @@ impl KvScheduler {
             .await
             .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
         Ok(res)
+    }
+
+    /// Add a new request with its initial tokens to a specific worker
+    pub async fn potential_blocks(
+        &self,
+        token_sequence: TokenBlockSequence,
+    ) -> HashMap<i64, usize> {
+        let sequences = self.sequences.lock().await;
+        sequences.potential_blocks(token_sequence)
     }
 
     /// Add a new request with its initial tokens to a specific worker
@@ -320,7 +332,7 @@ impl WorkerSelector for DefaultWorkerSelector {
         }
 
         let request_blocks = request.isl_tokens.div_ceil(block_size as usize);
-        let potential_active_blocks = workers.active_blocks();
+        let potential_active_blocks = &request.potential_blocks;
 
         let mut worker_logits = HashMap::new();
         let mut max_logit = f64::NEG_INFINITY;

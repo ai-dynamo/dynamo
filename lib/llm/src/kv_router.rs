@@ -149,33 +149,6 @@ impl KvRouter {
         })
     }
 
-    // [TODO] indexer needs to take 'lora_id' as parameter
-    // Update schedule to take context_id for request tracking
-    pub async fn schedule(
-        &self,
-        context_id: &str,
-        token_ids: &Vec<u32>,
-        _lora_id: u64,
-    ) -> Result<i64> {
-        // Extracting part of the code in KvRouter::generate() for only
-        // the decision making part, routing is done by the caller
-        let isl_tokens = token_ids.len();
-        let overlap_scores = self
-            .indexer
-            .find_matches_for_request(token_ids.as_slice())
-            .await?;
-        tracing::debug!("KV router overlap_scores: {:?}", overlap_scores);
-        let worker_id = self.scheduler.schedule(overlap_scores, isl_tokens).await?;
-
-        // Convert tokens to TokenBlockSequence and add request
-        let token_sequence = TokenBlockSequence::from_slice(token_ids, self.block_size, None);
-        self.scheduler
-            .add_request(context_id.to_string(), token_sequence, worker_id)
-            .await;
-
-        Ok(worker_id)
-    }
-
     /// Give these tokens, find the worker with the best match in it's KV cache.
     /// Returned overlap amount is in number of blocks.
     /// Now also takes context_id for request tracking
@@ -195,17 +168,20 @@ impl KvRouter {
             .map(|block| LocalBlockHash(block.block_hash()))
             .collect();
         let overlap_scores = self.indexer.find_matches(local_block_hashes).await?;
+
+        let token_sequence = TokenBlockSequence::from_slice(tokens, block_size, None);
+        let potential_blocks = self.scheduler.potential_blocks(token_sequence).await;
         let worker_id = self
             .scheduler
-            .schedule(overlap_scores.clone(), isl_tokens)
+            .schedule(overlap_scores.clone(), isl_tokens, potential_blocks)
             .await?;
-        let overlap_amount = overlap_scores.scores.get(&worker_id).copied().unwrap_or(0);
 
         let token_sequence = TokenBlockSequence::from_slice(tokens, block_size, None);
         self.scheduler
             .add_request(context_id.to_string(), token_sequence, worker_id)
             .await;
 
+        let overlap_amount = overlap_scores.scores.get(&worker_id).copied().unwrap_or(0);
         Ok((worker_id, overlap_amount))
     }
 
