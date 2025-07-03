@@ -22,7 +22,6 @@ import importlib.metadata
 import typer
 from rich.console import Console
 
-from dynamo.sdk.cli.build import build
 from dynamo.sdk.cli.deployment import app as deployment_app
 from dynamo.sdk.cli.deployment import deploy
 from dynamo.sdk.cli.env import env
