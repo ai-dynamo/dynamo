@@ -14,6 +14,15 @@
 # limitations under the License.
 
 from components.frontend import Frontend
-from components.worker import SGLangWorker
+from components.simple_load_balancer import SimpleLoadBalancer
+from components.worker import VllmDecodeWorker, VllmPrefillWorker
 
-Frontend.link(SGLangWorker)
+from dynamo.planner.planner_sla import Planner
+from dynamo.planner.prometheus import Prometheus
+
+load_balancer = Frontend.link(SimpleLoadBalancer)
+load_balancer.link(VllmPrefillWorker)
+load_balancer.link(VllmDecodeWorker)
+
+Frontend.link(Planner)
+Frontend.link(Prometheus)
