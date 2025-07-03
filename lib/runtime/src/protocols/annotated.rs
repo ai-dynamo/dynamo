@@ -154,12 +154,17 @@ where
         Annotated::from_error(format!("{:?}", err))
     }
 
-    fn is_ok(&self) -> bool {
-        Annotated::is_ok(self)
-    }
-
-    fn is_err(&self) -> bool {
-        Annotated::is_err(self)
+    fn err(&self) -> Option<Box<dyn std::error::Error>> {
+        if self.is_error() {
+            if let Some(comment) = &self.comment {
+                if !comment.is_empty() {
+                    return Some(anyhow::Error::msg(comment.join("; ")).into());
+                }
+            }
+            Some(anyhow::Error::msg("unknown error").into())
+        } else {
+            None
+        }
     }
 }
 

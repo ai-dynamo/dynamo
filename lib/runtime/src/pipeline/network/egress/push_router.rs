@@ -189,15 +189,38 @@ where
         let subject = self.client.endpoint.subject_to(instance_id);
         let request = request.map(|req| AddressedRequest::new(req, subject));
 
-        let stream = self.addressed.generate(request).await;
-        if let Some(err) = stream.as_ref().err() {
-            if let Some(req_err) = err.downcast_ref::<NatsRequestError>() {
-                if matches!(req_err.kind(), NatsNoResponders) {
-                    self.client.report_instance_down(instance_id).await;
+        let stream: anyhow::Result<ManyOut<U>> = self.addressed.generate(request).await;
+        match stream {
+            Ok(stream) => {
+                Ok(stream)
+                // TODO: Why compiler crashed for trying to inspect the stream?
+                /*
+                use futures::StreamExt;
+                use super::{AsyncEngineContextProvider, ResponseStream};
+                */
+                /*
+                let engine_ctx = stream.context();
+                let stream = stream.then(move |res| async move {
+                    if let Some(err) = res.err() {
+                        const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
+                        if format!("{:?}", err) == STREAM_ERR_MSG {
+                            self.client.report_instance_down(instance_id).await;
+                        }
+                    }
+                    res
+                });
+                Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
+                */
+            }
+            Err(err) => {
+                if let Some(req_err) = err.downcast_ref::<NatsRequestError>() {
+                    if matches!(req_err.kind(), NatsNoResponders) {
+                        self.client.report_instance_down(instance_id).await;
+                    }
                 }
+                Err(err)
             }
         }
-        stream
     }
 }
 

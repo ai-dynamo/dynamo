@@ -19,9 +19,16 @@ pub trait IsError {
     /// Construct an instance from an error.
     fn from_err(err: Box<dyn Error>) -> Self;
 
+    /// Construct into an error instance.
+    fn err(&self) -> Option<Box<dyn Error>>;
+
     /// Check if the current instance represents a success.
-    fn is_ok(&self) -> bool;
+    fn is_ok(&self) -> bool {
+        !self.is_err()
+    }
 
     /// Check if the current instance represents an error.
-    fn is_err(&self) -> bool;
+    fn is_err(&self) -> bool {
+        self.err().is_some()
+    }
 }
