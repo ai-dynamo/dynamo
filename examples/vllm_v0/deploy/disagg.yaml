@@ -1,0 +1,94 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: disagg
+spec:
+  envs:
+    - name: DYN_DEPLOYMENT_CONFIG
+      value: '{"Common":{"model":"deepseek-ai/DeepSeek-R1-Distill-Llama-8B","block-size":64,"max-model-len":16384,"kv-transfer-config":"{\"kv_connector\":\"DynamoNixlConnector\"}"},"Frontend":{"served_model_name":"deepseek-ai/DeepSeek-R1-Distill-Llama-8B","endpoint":"dynamo.VllmWorker.generate","port":8000,"router":"round-robin","common-configs":["block-size"]},"VllmWorker":{"remote-prefill":true,"conditional-disagg":true,"max-local-prefill-length":10,"max-prefill-queue-size":2,"enable-prefix-caching":true,"common-configs":["model","block-size","max-model-len","kv-transfer-config"]},"PrefillWorker":{"max-num-batched-tokens":16384,"common-configs":["model","block-size","max-model-len","kv-transfer-config"]}}'
+  services:
+    Frontend:
+      dynamoNamespace: vllm-v0-disagg
+      componentType: main
+      replicas: 1
+      resources:
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+        limits:
+          cpu: "1"
+          memory: "2Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
+          args:
+            - cd
+            - /workspace/examples/vllm_v0
+            - "&&"
+            - dynamo
+            - serve
+            - graphs.disagg:Frontend
+            - --system-app-port
+            - "5000"
+            - --enable-system-app
+            - --use-default-health-checks
+            - --service-name
+            - Frontend
+    VllmWorker:
+      dynamoNamespace: vllm-v0-disagg
+      envFromSecret: hf-token-secret
+      replicas: 1
+      resources:
+        requests:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+        limits:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
+          args:
+            - cd
+            - /workspace/examples/vllm_v0
+            - "&&"
+            - dynamo
+            - serve
+            - graphs.disagg:VllmWorker
+            - --system-app-port
+            - "5000"
+            - --enable-system-app
+            - --use-default-health-checks
+            - --service-name
+            - VllmWorker
+    PrefillWorker:
+      dynamoNamespace: vllm-v0-disagg
+      envFromSecret: hf-token-secret
+      replicas: 1
+      resources:
+        requests:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+        limits:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
+          args:
+            - cd
+            - /workspace/examples/vllm_v0
+            - "&&"
+            - dynamo
+            - serve
+            - graphs.disagg:PrefillWorker
+            - --system-app-port
+            - "5000"
+            - --enable-system-app
+            - --use-default-health-checks
+            - --service-name
+            - PrefillWorker

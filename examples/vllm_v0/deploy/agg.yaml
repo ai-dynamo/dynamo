@@ -1,0 +1,65 @@
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: agg
+spec:
+  envs:
+    - name: DYN_DEPLOYMENT_CONFIG
+      value: '{"Common":{"model":"deepseek-ai/DeepSeek-R1-Distill-Llama-8B","block-size":64,"max-model-len":16384},"Frontend":{"served_model_name":"deepseek-ai/DeepSeek-R1-Distill-Llama-8B","endpoint":"dynamo.VllmWorker.generate","port":8000,"router":"round-robin","common-configs":["block-size"]},"VllmWorker":{"enforce-eager":true,"max-num-batched-tokens":16384,"enable-prefix-caching":true,"common-configs":["model","block-size","max-model-len"]}}'
+  services:
+    Frontend:
+      dynamoNamespace: vllm-v0-agg
+      componentType: main
+      replicas: 1
+      resources:
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+        limits:
+          cpu: "1"
+          memory: "2Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
+          args:
+            - cd
+            - /workspace/examples/vllm_v0
+            - "&&"
+            - dynamo
+            - serve
+            - graphs.agg:Frontend
+            - --system-app-port
+            - "5000"
+            - --enable-system-app
+            - --use-default-health-checks
+            - --service-name
+            - Frontend
+    VllmWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: vllm-v0-agg
+      replicas: 1
+      resources:
+        requests:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+        limits:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
+          args:
+            - cd
+            - /workspace/examples/vllm_v0
+            - "&&"
+            - dynamo
+            - serve
+            - graphs.agg:VllmWorker
+            - --system-app-port
+            - "5000"
+            - --enable-system-app
+            - --use-default-health-checks
+            - --service-name
+            - VllmWorker
