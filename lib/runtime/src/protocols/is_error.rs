@@ -32,3 +32,30 @@ pub trait IsError {
         self.err().is_some()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct TestError {
+        message: String,
+    }
+    impl IsError for TestError {
+        fn from_err(err: Box<dyn Error>) -> Self {
+            TestError {
+                message: err.to_string(),
+            }
+        }
+        fn err(&self) -> Option<Box<dyn Error>> {
+            Some(anyhow::Error::msg(self.message.clone()).into())
+        }
+    }
+
+    #[test]
+    fn test_is_error_default_implementations() {
+        let err = TestError::from_err(anyhow::Error::msg("Test error".to_string()).into());
+        assert_eq!(format!("{}", err.err().unwrap()), "Test error");
+        assert!(!err.is_ok());
+        assert!(err.is_err());
+    }
+}

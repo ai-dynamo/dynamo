@@ -159,3 +159,26 @@ pub struct EmbeddingsEngineOutput {
     pub prompt_tokens: u32,
     pub total_tokens: u32,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_error() {
+        let output = LLMEngineOutput::stop();
+        assert!(output.err().is_none());
+        assert!(output.is_ok());
+        assert!(!output.is_err());
+
+        let output = LLMEngineOutput::error("Test error".to_string());
+        assert_eq!(format!("{}", output.err().unwrap()), "Test error");
+        assert!(!output.is_ok());
+        assert!(output.is_err());
+
+        let output = LLMEngineOutput::from_err(anyhow::Error::msg("Test error 2").into());
+        assert_eq!(format!("{}", output.err().unwrap()), "Test error 2");
+        assert!(!output.is_ok());
+        assert!(output.is_err());
+    }
+}

@@ -15,6 +15,7 @@
 
 use super::*;
 use crate::{error, Result};
+use is_error::IsError;
 
 pub trait AnnotationsProvider {
     fn annotations(&self) -> Option<Vec<String>>;
@@ -146,7 +147,7 @@ impl<R> Annotated<R> {
     }
 }
 
-impl<R> is_error::IsError for Annotated<R>
+impl<R> IsError for Annotated<R>
 where
     R: for<'de> Deserialize<'de> + Serialize,
 {
@@ -188,3 +189,27 @@ where
 //         Box::pin(stream)
 //     }
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_error() {
+        let annotated = Annotated::from_data("Test data".to_string());
+        assert!(annotated.err().is_none());
+        assert!(annotated.is_ok());
+        assert!(!annotated.is_err());
+
+        let annotated = Annotated::<String>::from_error("Test error 2".to_string());
+        assert_eq!(format!("{}", annotated.err().unwrap()), "Test error 2");
+        assert!(!annotated.is_ok());
+        assert!(annotated.is_err());
+
+        let annotated =
+            Annotated::<String>::from_err(anyhow::Error::msg("Test error 3".to_string()).into());
+        assert_eq!(format!("{}", annotated.err().unwrap()), "Test error 3");
+        assert!(!annotated.is_ok());
+        assert!(annotated.is_err());
+    }
+}
