@@ -369,7 +369,7 @@ class WorkerMetricsPublisher:
         Create a `WorkerMetricsPublisher` object
         """
 
-    def create_service(self, component: Component) -> None:
+    def create_endpoint(self, component: Component) -> None:
         """
         Similar to Component.create_service, but only service created through
         this method will interact with KV router of the same component.
