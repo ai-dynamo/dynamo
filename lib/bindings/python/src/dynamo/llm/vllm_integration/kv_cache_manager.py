@@ -93,7 +93,10 @@ class KvbmCacheManager(KVConnectorBase_V1):
         sequence_hashes = self._create_slot(request)
 
         # We need to ensure there's at least 1 token that we don't match against.
-        if len(request.all_token_ids) > 0 and len(request.all_token_ids) % self.block_size == 0:
+        if (
+            len(request.all_token_ids) > 0
+            and len(request.all_token_ids) % self.block_size == 0
+        ):
             sequence_hashes = sequence_hashes[:-1]
 
         owned_blocks = self.cache_manager.get_computed_blocks(sequence_hashes)
@@ -334,7 +337,9 @@ class KvbmCacheManager(KVConnectorBase_V1):
         (
             host_computed_blocks,
             disk_computed_blocks,
-        ) = self.cache_manager.get_num_offloaded_computed_blocks(sequence_hashes[num_device_blocks:])
+        ) = self.cache_manager.get_num_offloaded_computed_blocks(
+            sequence_hashes[num_device_blocks:]
+        )
 
         if host_computed_blocks is not None:
             num_host_computed_blocks = host_computed_blocks.block_count()
@@ -346,7 +351,9 @@ class KvbmCacheManager(KVConnectorBase_V1):
         else:
             num_disk_computed_blocks = 0
 
-        need_to_allocate = (num_host_computed_blocks + num_disk_computed_blocks) * self.block_size;
+        need_to_allocate = (
+            num_host_computed_blocks + num_disk_computed_blocks
+        ) * self.block_size
 
         # In a full-prompt-hit case, we need to recompute the last token,
         # to get the logits to generate the next token.
