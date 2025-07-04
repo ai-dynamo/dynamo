@@ -17,7 +17,7 @@ ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
 ARG BASE_IMAGE_TAG="25.05-py3"
 ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
+ARG RUNTIME_IMAGE_TAG="12.9.0-devel-ubuntu24.04"
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -395,9 +395,20 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 # Copy NIXL source from build image (required for NIXL plugins)
 COPY --from=build /usr/local/ucx /usr/local/ucx
 COPY --from=build /usr/local/nixl /usr/local/nixl
+# Copy HPCX from base image
+COPY --from=build /opt/hpcx /opt/hpcx
+# Copy NUMA library from build image
+COPY --from=build /usr/lib/x86_64-linux-gnu/libnuma.so* /usr/lib/x86_64-linux-gnu/
 ARG ARCH_ALT
 ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins
-ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:/opt/hpcx/ompi/lib:$LD_LIBRARY_PATH
+ENV OMPI_HOME=/opt/hpcx/ompi
+ENV PATH=/opt/hpcx/ompi/bin:$PATH
+ENV OPAL_PREFIX=/opt/hpcx/ompi
+# Configure OpenMPI to use local process launch manager
+ENV OMPI_MCA_plm_rsh_agent=""
+ENV OMPI_MCA_plm="isolated"
+ENV OMPI_MCA_btl_base_warn_component_unused="0"
 
 # Setup the python environment
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
@@ -414,28 +425,31 @@ RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/
     uv pip install --requirement /tmp/requirements.txt
 
 COPY --from=build /usr/local/lib/lib* /usr/local/lib/
-COPY --from=build /usr/local/lib/python3.12/dist-packages/torch $VIRTUAL_ENV/lib/python3.12/dist-packages/torch
-COPY --from=build /usr/local/lib/python3.12/dist-packages/torch-*.dist-info $VIRTUAL_ENV/lib/python3.12/dist-packages/
-COPY --from=build /usr/local/lib/python3.12/dist-packages/torchgen $VIRTUAL_ENV/lib/python3.12/dist-packages/torchgen
-COPY --from=build /usr/local/lib/python3.12/dist-packages/torchvision $VIRTUAL_ENV/lib/python3.12/dist-packages/torchvision
-COPY --from=build /usr/local/lib/python3.12/dist-packages/torchvision-*.dist-info $VIRTUAL_ENV/lib/python3.12/dist-packages/
-COPY --from=build /usr/local/lib/python3.12/dist-packages/torchvision.libs $VIRTUAL_ENV/lib/python3.12/dist-packages/torchvision.libs
-COPY --from=build /usr/local/lib/python3.12/dist-packages/setuptools $VIRTUAL_ENV/lib/python3.12/dist-packages/setuptools
-COPY --from=build /usr/local/lib/python3.12/dist-packages/setuptools-*.dist-info $VIRTUAL_ENV/lib/python3.12/dist-packages/
-COPY --from=build /usr/local/lib/python3.12/dist-packages/functorch $VIRTUAL_ENV/lib/python3.12/dist-packages/functorch
-COPY --from=build /usr/local/lib/python3.12/dist-packages/pytorch_triton-*.dist-info $VIRTUAL_ENV/lib/python3.12/dist-packages/
-COPY --from=build /usr/local/lib/python3.12/dist-packages/triton $VIRTUAL_ENV/lib/python3.12/dist-packages/triton
-COPY --from=build /usr/local/lib/python3.12/dist-packages/jinja2 $VIRTUAL_ENV/lib/python3.12/dist-packages/jinja2
-COPY --from=build /usr/local/lib/python3.12/dist-packages/jinja2-*.dist-info $VIRTUAL_ENV/lib/python3.12/dist-packages/
-COPY --from=build /usr/local/lib/python3.12/dist-packages/networkx $VIRTUAL_ENV/lib/python3.12/dist-packages/networkx
-COPY --from=build /usr/local/lib/python3.12/dist-packages/networkx-*.dist-info $VIRTUAL_ENV/lib/python3.12/dist-packages/
-COPY --from=build /usr/local/lib/python3.12/dist-packages/sympy $VIRTUAL_ENV/lib/python3.12/dist-packages/sympy
-COPY --from=build /usr/local/lib/python3.12/dist-packages/sympy-*.dist-info $VIRTUAL_ENV/lib/python3.12/dist-packages/
-COPY --from=build /usr/local/lib/python3.12/dist-packages/packaging $VIRTUAL_ENV/lib/python3.12/dist-packages/packaging
-COPY --from=build /usr/local/lib/python3.12/dist-packages/packaging-*.dist-info $VIRTUAL_ENV/lib/python3.12/dist-packages/
-COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn $VIRTUAL_ENV/lib/python3.12/dist-packages/flash_attn
-COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn-*.dist-info $VIRTUAL_ENV/lib/python3.12/dist-packages/
-COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-*-linux-gnu.so $VIRTUAL_ENV/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/torch /usr/local/lib/python3.12/dist-packages/torch
+COPY --from=build /usr/local/lib/python3.12/dist-packages/torch-*.dist-info /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/torchgen /usr/local/lib/python3.12/dist-packages/torchgen
+COPY --from=build /usr/local/lib/python3.12/dist-packages/torchvision /usr/local/lib/python3.12/dist-packages/torchvision
+COPY --from=build /usr/local/lib/python3.12/dist-packages/torchvision-*.dist-info /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/torchvision.libs /usr/local/lib/python3.12/dist-packages/torchvision.libs
+COPY --from=build /usr/local/lib/python3.12/dist-packages/setuptools /usr/local/lib/python3.12/dist-packages/setuptools
+COPY --from=build /usr/local/lib/python3.12/dist-packages/functorch /usr/local/lib/python3.12/dist-packages/functorch
+COPY --from=build /usr/local/lib/python3.12/dist-packages/pytorch_triton-*.dist-info /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/triton /usr/local/lib/python3.12/dist-packages/triton
+COPY --from=build /usr/local/lib/python3.12/dist-packages/jinja2 /usr/local/lib/python3.12/dist-packages/jinja2
+COPY --from=build /usr/local/lib/python3.12/dist-packages/jinja2-*.dist-info /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/networkx /usr/local/lib/python3.12/dist-packages/networkx
+COPY --from=build /usr/local/lib/python3.12/dist-packages/networkx-*.dist-info /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/sympy /usr/local/lib/python3.12/dist-packages/sympy
+COPY --from=build /usr/local/lib/python3.12/dist-packages/sympy-*.dist-info /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/packaging /usr/local/lib/python3.12/dist-packages/packaging
+COPY --from=build /usr/local/lib/python3.12/dist-packages/packaging-*.dist-info /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn /usr/local/lib/python3.12/dist-packages/flash_attn
+COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn-*.dist-info /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-*-linux-gnu.so /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/mpi4py /usr/local/lib/python3.12/dist-packages/mpi4py
+COPY --from=build /usr/local/lib/python3.12/dist-packages/mpi4py-*.dist-info /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/mpmath /usr/local/lib/python3.12/dist-packages/mpmath
+COPY --from=build /usr/local/lib/python3.12/dist-packages/mpmath-*.dist-info /usr/local/lib/python3.12/dist-packages/
 
 #TODO: Remove this once we have a functional dev image built on top of the runtime image
 COPY . /workspace
