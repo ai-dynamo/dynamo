@@ -13,6 +13,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::{AsyncEngineContextProvider, ResponseStream};
+use crate::{
+    component::{Client, Endpoint, InstanceSource},
+    engine::{AsyncEngine, Data},
+    pipeline::{
+        error::PipelineErrorExt, AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
+    },
+    protocols::is_error::IsError,
+    traits::DistributedRuntimeProvider,
+};
 use async_nats::client::{
     RequestError as NatsRequestError, RequestErrorKind::NoResponders as NatsNoResponders,
 };
@@ -27,16 +37,7 @@ use std::{
         Arc,
     },
 };
-
-use crate::{
-    component::{Client, Endpoint, InstanceSource},
-    engine::{AsyncEngine, Data},
-    pipeline::{
-        error::PipelineErrorExt, AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
-    },
-    protocols::is_error::IsError,
-    traits::DistributedRuntimeProvider,
-};
+use tokio_stream::StreamExt;
 
 #[derive(Clone)]
 pub struct PushRouter<T, U>
@@ -192,25 +193,24 @@ where
         let stream: anyhow::Result<ManyOut<U>> = self.addressed.generate(request).await;
         match stream {
             Ok(stream) => {
-                Ok(stream)
-                // TODO: Why compiler crashed for trying to inspect the stream?
-                /*
-                use futures::StreamExt;
-                use super::{AsyncEngineContextProvider, ResponseStream};
-                */
-                /*
                 let engine_ctx = stream.context();
-                let stream = stream.then(move |res| async move {
+                let client = self.client.clone();
+                let stream = stream.then(move |res| {
+                    let mut report_instance_down: Option<(Client, i64)> = None;
                     if let Some(err) = res.err() {
                         const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
                         if format!("{:?}", err) == STREAM_ERR_MSG {
-                            self.client.report_instance_down(instance_id).await;
+                            report_instance_down = Some((client.clone(), instance_id));
                         }
                     }
-                    res
+                    async move {
+                        if let Some((client, instance_id)) = report_instance_down {
+                            client.report_instance_down(instance_id).await;
+                        }
+                        res
+                    }
                 });
                 Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
-                */
             }
             Err(err) => {
                 if let Some(req_err) = err.downcast_ref::<NatsRequestError>() {
