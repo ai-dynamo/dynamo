@@ -133,3 +133,14 @@ impl LLMEngineOutput {
         }
     }
 }
+
+/// Raw output from embedding engines containing embedding vectors
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct EmbeddingsEngineOutput {
+    /// Generated embedding vectors (one per input text)
+    pub embeddings: Vec<Vec<f64>>,
+
+    /// Token usage information
+    pub prompt_tokens: u32,
+    pub total_tokens: u32,
+}
