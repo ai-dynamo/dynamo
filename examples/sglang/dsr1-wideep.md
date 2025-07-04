@@ -138,14 +138,6 @@ python3 components/decode_worker.py \
 
 On the other decode nodes (this example has 9 total decode nodes), run the same command but change `--node-rank` to 1, 2, 3, 4, 5, 6, 7, and 8
 
-8. Run the warmup script to warm up the model
-
-DeepGEMM kernels can sometimes take a while to warm up. Here we provide a small helper script that should help. You can run this as many times as you want before starting inference/benchmarking. You can exec into the head node and run this script standalone - it does not need a container.
-
-```bash
-./warmup.sh HEAD_PREFILL_NODE_IP
-```
-
 ## Benchmarking
 
 In the official [blog post repro instructions](https://github.com/sgl-project/sglang/issues/6017), SGL uses batch inference to benchmark their prefill and decode workers. They do this by pretokenizing the ShareGPT dataset and then creating a batch of 8192 requests with ISL 4096 and OSL 5 (for prefill stress test) and a batch of 40000 with ISL 2000 and OSL 100 (for decode stress test). If you want to repro these benchmarks, you will need to add the following flags to the prefill and decode commands:
