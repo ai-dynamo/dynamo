@@ -78,7 +78,7 @@ curl localhost:8000/v1/completions \
   }'
 ```
 
-For more detailed explenations, refer to the main [LLM examples README](../llm/README.md).
+For more detailed explanations, refer to the main [LLM examples README](../llm/README.md).
 
 
 
@@ -114,9 +114,14 @@ cd examples/vllm_v1
 dynamo serve components.worker:VllmPrefillWorker -f configs/deepseek_r1/disagg.yaml
 ```
 
-### Data Parallelism Deployment
+### Data Parallel Attention Deployment
 
-Additional configuration steps will be required for enabling DP for DSR1 model,
+With Data Parallel Attention (DP Attention), multiple replicas of the Attention layer share a single copy of the MoE layer.
+vLLM will automatically use DP Attention with shared experts when deploying MoE models with Data Parallelism enabled.
+If Data Parallelism is enabled without Expert Parallelism, experts will be sharded using _Tensor Parallelism_ across the
+combination of model-level TP and DP groups.
+
+Additional configuration steps are required for enabling Data Parallelism in Dynamo,
 as it typically requires setting up the DP groups across nodes.
 `configs/deepseek_r1/agg_dp.yaml` and `configs/deepseek_r1/disagg_dp.yaml` will be
 the replacement for aggregated deployment and disaggregated deployment.
@@ -130,7 +135,7 @@ cd examples/vllm_v1
 dynamo serve components.worker:VllmDecodeWorker -f configs/deepseek_r1/disagg_dp.yaml --VllmDecodeWorker.data_parallel_address=<head-ip>
 ```
 
-The above command will create 1 of the 2 DP groups and the worker will be consdiered
+The above command will create 1 of the 2 DP groups and the worker will be considered
 the head of the DP groups. Next we need to create a `VllmDpWorker` to create the rest of the DP groups, one for each group.
 
 ```bash
@@ -144,11 +149,15 @@ dynamo serve components.worker:VllmDpWorker -f configs/deepseek_r1/disagg_dp.yam
 
 ### Wide EP
 
-If running oustide of Dynamo vLLM V1 container please follow [vLLM guide](https://github.com/vllm-project/vllm/tree/main/tools/ep_kernels) to install EP kernels and install [DeepGEMM](https://github.com/deepseek-ai/DeepGEMM).
+When Data Parallelism and Expert Parallelism are both enabled for MoE models, vLLM will employ DP Attention
+while distributing experts across the model-level TP and DP groups. Experts _will not_ be sharded via TP,
+regardless of the model-level TP settings.
+
+If running outside of Dynamo vLLM V1 container, please follow [vLLM guide](https://github.com/vllm-project/vllm/tree/main/tools/ep_kernels) to install EP kernels and install [DeepGEMM](https://github.com/deepseek-ai/DeepGEMM).
 
 To run DSR1 with DEP16 (EP16 MoE and DP16 for other layers) with [DeepEP kernels](https://github.com/deepseek-ai/DeepEP) run on head node:
 
-```
+```bash
 export VLLM_ALL2ALL_BACKEND="deepep_low_latency" # or "deepep_high_throughput"
 export VLLM_USE_DEEP_GEMM=1
 export GLOO_SOCKET_IFNAME=eth3 # or another non IB interface that you can find with `ifconfig -a`
@@ -158,7 +167,7 @@ dynamo serve components.worker:VllmDecodeWorker -f configs/deepseek_r1/disagg_dp
 
 on 2nd node:
 
-```
+```bash
 export VLLM_ALL2ALL_BACKEND="deepep_low_latency" # or "deepep_high_throughput"
 export VLLM_USE_DEEP_GEMM=1
 export GLOO_SOCKET_IFNAME=eth3 # or another non IB interface that you can find with `ifconfig -a`
