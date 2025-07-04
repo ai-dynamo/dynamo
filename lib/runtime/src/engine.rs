@@ -188,7 +188,7 @@ pub trait AsyncEngineStream<Resp: Data>:
 }
 
 /// Engine is a trait that defines the interface for a streaming engine.
-/// The synchronous Engine version is does not need to be awaited.
+/// The synchronous Engine version does not need to be awaited.
 ///
 /// This is the core trait for all async engine implementations. It provides:
 /// - Generic type parameters for request, response, and error types

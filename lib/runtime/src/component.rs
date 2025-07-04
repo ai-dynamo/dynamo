@@ -116,15 +116,14 @@ pub struct Component {
     #[educe(Debug(ignore))]
     drt: Arc<DistributedRuntime>,
 
-    // todo - restrict the namespace to a-z0-9-_A-Z
     /// Name of the component
     #[builder(setter(into))]
     #[validate(custom(function = "validate_allowed_chars"))]
     name: String,
 
-    // todo - restrict the namespace to a-z0-9-_A-Z
     /// Namespace
     #[builder(setter(into))]
+    #[validate(nested)]
     namespace: Namespace,
 
     // A static component's endpoints cannot be discovered via etcd, they are
@@ -210,12 +209,12 @@ impl Component {
         let Some(etcd_client) = self.drt.etcd_client() else {
             return Ok(vec![]);
         };
-        let mut out = vec![];
-        // The extra slash is important to only list exact component matches, not substrings.
-        for kv in etcd_client
+        // NOTE: The extra slash is important to only list exact component matches, not substrings.
+        let kv_prefixes = etcd_client
             .kv_get_prefix(format!("{}/", self.etcd_root()))
-            .await?
-        {
+            .await?;
+        let mut out = Vec::with_capacity(kv_prefixes.len());
+        for kv in kv_prefixes {
             let val = match serde_json::from_slice::<Instance>(kv.value()) {
                 Ok(val) => val,
                 Err(err) => {
@@ -259,12 +258,12 @@ impl ComponentBuilder {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Validate)]
 pub struct Endpoint {
     component: Component,
 
-    // todo - restrict alphabet
     /// Endpoint name
+    #[validate(custom(function = "validate_allowed_chars"))]
     name: String,
 
     is_static: bool,
@@ -489,7 +488,7 @@ impl Namespace {
 // Custom validator function
 fn validate_allowed_chars(input: &str) -> Result<(), ValidationError> {
     // Define the allowed character set using a regex
-    let regex = regex::Regex::new(r"^[a-z0-9-_]+$").unwrap();
+    let regex = regex::Regex::new(r"^[a-zA-Z0-9-_]+$").unwrap();
 
     if regex.is_match(input) {
         Ok(())
