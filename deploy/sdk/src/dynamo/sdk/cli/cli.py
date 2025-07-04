@@ -23,8 +23,6 @@ import typer
 from rich.console import Console
 
 from dynamo.sdk.cli.build import build
-from dynamo.sdk.cli.deployment import app as deployment_app
-from dynamo.sdk.cli.deployment import deploy
 from dynamo.sdk.cli.env import env
 from dynamo.sdk.cli.run import run
 from dynamo.sdk.cli.serve import serve
@@ -76,8 +74,6 @@ cli.command(
     context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
     add_help_option=False,
 )(run)
-cli.add_typer(deployment_app, name="deployment")
-cli.command()(deploy)
 cli.command()(build)
 
 if __name__ == "__main__":
