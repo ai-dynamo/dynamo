@@ -1,16 +1,17 @@
-# SLURM Jobs for Dynamo Serve Benchmarking
+# Example: Deploy Multi-node SGLang with Dynamo on SLURM
 
-This folder contains SLURM job scripts designed to launch Dynamo Serve service on SLURM cluster nodes and monitor GPU activity. The primary purpose is to automate the process of starting prefill and decode nodes to enable running benchmarks.
+This folder implements the example of [SGLang DeepSeek-R1 Disaggregated with WideEP](https://github.com/ai-dynamo/dynamo/blob/main/examples/sglang/dsr1-wideep.md) on a SLURM cluster.
 
 ## Overview
 
-The scripts in this folder orchestrate the deployment of Dynamo Serve across multiple cluster nodes, with separate nodes handling prefill and decode operations. The system uses a Python-based job submission system with Jinja2 templates for flexible configuration.
+The scripts in this folder set up multiple cluster nodes to run the [SGLang DeepSeek-R1 Disaggregated with WideEP](https://github.com/ai-dynamo/dynamo/blob/main/examples/sglang/dsr1-wideep.md) example, with separate nodes handling prefill and decode.
+The node setup is done using Python job submission scripts with Jinja2 templates for flexible configuration. The setup also includes GPU utilization monitoring capabilities to track performance during benchmarks.
 
 ## Scripts
 
 - **`submit_job_script.py`**: Main script for generating and submitting SLURM job scripts from templates
 - **`job_script_template.j2`**: Jinja2 template for generating SLURM job scripts
-- **`scripts/worker_setup.py`**: Worker script that handles the actual Dynamo Serve setup on each node
+- **`scripts/worker_setup.py`**: Worker script that handles the setup on each node
 - **`scripts/monitor_gpu_utilization.sh`**: Script for monitoring GPU utilization during benchmarks
 
 ## Logs Folder Structure
@@ -41,6 +42,23 @@ logs/
 └── ...
 ```
 
+## Setup
+
+For simplicity of the example, we will make some assumptions about your SLURM cluster:
+1. We assume you have access to a SLURM cluster with multiple GPU nodes
+   available. For functional testing, most setups should be fine. For performance
+   testing, you should aim to allocate groups of nodes that are performantly
+   inter-connected, such as those in an NVL72 setup.
+2. We assume this SLURM cluster has the [Pyxis](https://github.com/NVIDIA/pyxis)
+   SPANK plugin setup. In particular, the `job_script_template.j2` template in this
+   example will use `srun` arguments like `--container-image`,
+   `--container-mounts`, and `--container-env` that are added to `srun` by Pyxis.
+   If your cluster supports similar container based plugins, you may be able to
+   modify the template to use that instead.
+3. We assume you have already built a recent Dynamo+SGLang container image as
+   described [here](https://github.com/ai-dynamo/dynamo/blob/main/examples/sglang/dsr1-wideep.md#instructions).
+   This is the image that can be passed to the `--container-image` argument in later steps.
+
 ## Usage
 
 1. **Submit a benchmark job**:
@@ -49,7 +67,8 @@ logs/
      --template job_script_template.j2 \
      --model-dir /path/to/model \
      --config-dir /path/to/configs \
-     --container-image container-image-uri
+     --container-image container-image-uri \
+     --account your-slurm-account
    ```
 
    **Required arguments**:

@@ -212,6 +212,8 @@ def setup_prefill_node(
         if not wait_for_etcd(f"http://{prefill_host_ip}:{ETCD_CLIENT_PORT}"):
             raise RuntimeError("Failed to connect to etcd")
 
+    # NOTE: This implements the example in examples/sglang/dsr1-wideep.md
+    # For other examples, the command might have to be modified.
     dynamo_cmd = (
         f"python3 components/worker.py "
         "--model-path /model/ "
