@@ -24,7 +24,7 @@ from pydantic import BaseModel
 from dynamo import sdk
 from dynamo.planner.planner_sla import Planner
 from dynamo.planner.prometheus import Prometheus
-from dynamo.sdk import depends, service
+from dynamo.sdk import depends, service, serve
 from dynamo.sdk.lib.config import ServiceConfig
 from dynamo.sdk.lib.image import DYNAMO_IMAGE
 
@@ -101,3 +101,45 @@ class Frontend:
             stdout=None,
             stderr=None,
         )
+
+
+if __name__ == "__main__":
+    """
+    Example of running Frontend component with python command
+    $ python frontend.py [-f CONFIG_FILE] [--key1=value1 --key2=value2 ...]
+    """
+    import asyncio
+    import os
+    from pathlib import Path
+    from typing import Optional
+
+    import typer
+    import uvloop
+    from dynamo.sdk.cli.serve_standalone import setup_service_config
+
+    app = typer.Typer(
+        context_settings={
+            "allow_extra_args": True,
+            "ignore_unknown_options": True,
+            "help_option_names": ["-h", "--help"],
+        },
+        no_args_is_help=True,
+    )
+
+    @app.command()
+    def main(
+        ctx: typer.Context,
+        config_file: Optional[Path] = typer.Option(
+            None,
+            "--config-file",
+            "-f",
+            help="Path to YAML config file for service configuration",
+            exists=True,
+        ),
+    ):
+        """Run Frontend in standalone mode."""
+        setup_service_config(ctx, config_file)
+        uvloop.install()
+        asyncio.run(serve(Frontend))
+
+    app()

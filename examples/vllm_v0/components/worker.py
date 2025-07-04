@@ -35,7 +35,7 @@ from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
 from dynamo.llm import ModelType, WorkerMetricsPublisher, register_llm
-from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
+from dynamo.sdk import async_on_start, depends, endpoint, service, DynamoContext, serve
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,9 @@ logger = logging.getLogger(__name__)
 class VllmWorker:
     prefill_worker = depends(PrefillWorker)
 
-    def __init__(self):
+    def __init__(self, dynamo_context: DynamoContext):
+        self.runtime = dynamo_context.runtime
+        self.component = dynamo_context.component
         self.client = None
         self.disaggregated_router: PyDisaggregatedRouter = None  # type: ignore
         class_name = self.__class__.__name__
@@ -85,7 +87,7 @@ class VllmWorker:
                 )
                 self.engine_args.enable_prefix_caching = True
 
-            VLLM_WORKER_ID = dynamo_context["endpoints"][0].lease_id()
+            VLLM_WORKER_ID = dynamo_context.endpoints["generate"].lease_id()
             os.environ["VLLM_WORKER_ID"] = str(VLLM_WORKER_ID)
             os.environ["VLLM_KV_NAMESPACE"] = "dynamo"
             os.environ["VLLM_KV_COMPONENT"] = class_name
@@ -100,10 +102,9 @@ class VllmWorker:
 
     @async_on_start
     async def async_init(self):
-        runtime = dynamo_context["runtime"]
         logger.info("Registering LLM for discovery")
         comp_ns, comp_name = VllmWorker.dynamo_address()  # type: ignore
-        endpoint = runtime.namespace(comp_ns).component(comp_name).endpoint("generate")
+        endpoint = self.runtime.namespace(comp_ns).component(comp_name).endpoint("generate")
         print(endpoint)
         await register_llm(
             ModelType.Backend,
@@ -136,16 +137,14 @@ class VllmWorker:
             lambda _: logger.info("metrics publisher endpoint created")
         )
 
-        runtime = dynamo_context["runtime"]
-
         if self.engine_args.remote_prefill:
             metadata = self.engine_client.nixl_metadata
-            metadata_store = NixlMetadataStore("dynamo", runtime)
+            metadata_store = NixlMetadataStore("dynamo", self.runtime)
             await metadata_store.put(metadata.engine_id, metadata)
 
         if self.engine_args.conditional_disagg:
             self.disaggregated_router = PyDisaggregatedRouter(
-                runtime,
+                self.runtime,
                 self.namespace,
                 max_local_prefill_length=self.engine_args.max_local_prefill_length,
                 max_prefill_queue_size=self.engine_args.max_prefill_queue_size,
@@ -160,7 +159,7 @@ class VllmWorker:
 
         def signal_handler():
             # Schedule the shutdown coroutine instead of calling it directly
-            asyncio.create_task(self.graceful_shutdown(runtime))
+            asyncio.create_task(self.graceful_shutdown(self.runtime))
 
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, signal_handler)
@@ -185,9 +184,8 @@ class VllmWorker:
             loop.stop()
 
     async def create_metrics_publisher_endpoint(self):
-        component = dynamo_context["component"]
         logger.info("Creating metrics publisher endpoint with primary lease")
-        await self.metrics_publisher.create_endpoint(component)
+        await self.metrics_publisher.create_endpoint(self.component)
 
     def get_remote_prefill_request_callback(self):
         # TODO: integrate prefill_queue to dynamo endpoint
@@ -267,3 +265,45 @@ class VllmWorker:
             if output.stop_reason:
                 out["stop_reason"] = output.stop_reason
             yield out
+
+
+if __name__ == "__main__":
+    """
+    Example of running VllmWorker component with python command
+    $ python worker.py [-f CONFIG_FILE] [--key1=value1 --key2=value2 ...]
+    """
+    import asyncio
+    import os
+    from pathlib import Path
+    from typing import Optional
+
+    import typer
+    import uvloop
+    from dynamo.sdk.cli.serve_standalone import setup_service_config
+
+    app = typer.Typer(
+        context_settings={
+            "allow_extra_args": True,
+            "ignore_unknown_options": True,
+            "help_option_names": ["-h", "--help"],
+        },
+        no_args_is_help=True,
+    )
+
+    @app.command()
+    def main(
+        ctx: typer.Context,
+        config_file: Optional[Path] = typer.Option(
+            None,
+            "--config-file",
+            "-f",
+            help="Path to YAML config file for service configuration",
+            exists=True,
+        ),
+    ):
+        """Run VllmWorker in standalone mode."""
+        setup_service_config(ctx, config_file)
+        uvloop.install()
+        asyncio.run(serve(VllmWorker))
+
+    app()
