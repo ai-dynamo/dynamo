@@ -40,7 +40,7 @@
 //! ## NOTE
 //! The current prefill and decoding time simulations are not scientific at all and are WIP
 
-use crate::kv_router::protocols::{ForwardPassMetrics, KvCacheEventData};
+use crate::kv_router::protocols::{ForwardPassMetrics, KvCacheEventData, KvStats, WorkerStats};
 use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::kv_manager::KvManager;
 use crate::mocker::protocols::{
@@ -476,16 +476,26 @@ impl Scheduler {
             sum / hit_rates_guard.len() as f32
         };
 
-        ForwardPassMetrics {
+        let worker_stats = WorkerStats {
             data_parallel_rank: self.dp_rank,
             request_active_slots,
-            // vllm max_num_seqs for gpu >= 70 vram, otherwise 256, fallback is 128
-            request_total_slots: 1024,
+            request_total_slots: 1024, // vllm max_num_seqs for gpu >= 70 vram, otherwise 256, fallback is 128
+            num_requests_waiting,
+        };
+
+        let kv_stats = KvStats {
             kv_active_blocks: active_blocks_count,
             kv_total_blocks: total_capacity,
-            num_requests_waiting,
             gpu_cache_usage_perc,
             gpu_prefix_cache_hit_rate,
+        };
+
+        let spec_decode_stats = None;
+
+        ForwardPassMetrics {
+            worker_stats,
+            kv_stats,
+            spec_decode_stats,
         }
         // Guards drop naturally here in reverse order (LIFO): hit_rates_guard, kv_manager, state
     }
@@ -754,20 +764,20 @@ mod tests {
         let metrics = scheduler.get_forward_pass_metrics().await;
 
         assert_eq!(
-            metrics.num_requests_waiting, 0,
+            metrics.worker_stats.num_requests_waiting, 0,
             "Expected no waiting requests, got {}",
-            metrics.num_requests_waiting
+            metrics.worker_stats.num_requests_waiting
         );
 
         assert!(
-            metrics.gpu_prefix_cache_hit_rate > 0.8,
+            metrics.kv_stats.gpu_prefix_cache_hit_rate > 0.8,
             "Expected cache hit rate > 0.8, got {}",
-            metrics.gpu_prefix_cache_hit_rate
+            metrics.kv_stats.gpu_prefix_cache_hit_rate
         );
 
         println!(
             "Test passed! Cache hit rate: {:.3}",
-            metrics.gpu_prefix_cache_hit_rate
+            metrics.kv_stats.gpu_prefix_cache_hit_rate
         );
         println!("Received {received_tokens} tokens");
     }
@@ -823,16 +833,16 @@ mod tests {
         let metrics = scheduler.get_forward_pass_metrics().await;
 
         assert_eq!(
-            metrics.gpu_cache_usage_perc,
+            metrics.kv_stats.gpu_cache_usage_perc,
             0.0,
             "Expected GPU cache usage to be 0%, got {}%",
-            metrics.gpu_cache_usage_perc * 100.0
+            metrics.kv_stats.gpu_cache_usage_perc * 100.0
         );
 
         assert_eq!(
-            metrics.kv_active_blocks, 0,
+            metrics.kv_stats.kv_active_blocks, 0,
             "Expected 0 active blocks, got {}",
-            metrics.kv_active_blocks
+            metrics.kv_stats.kv_active_blocks
         );
     }
 }
