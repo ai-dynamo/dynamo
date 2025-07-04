@@ -59,7 +59,7 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
     /// These tokens will advance the computed sequence position.
     pub fn apply_computed_tokens(
         &mut self,
-        tokens_to_append: Vec<u32>,
+        mut tokens_to_append: Vec<u32>,
         block_pool: &BlockPool<S, L, BasicMetadata>,
     ) -> Result<(), SlotError> {
         if tokens_to_append.is_empty() {
@@ -80,6 +80,17 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
         // if we are still prefilling, we don't extend the sequence, but verify the tokens match what is already present.
         if self.computed_position < self.prefill_position {
             tracing::debug!("applying {} prefill tokens", tokens_to_append.len());
+
+            // In chunked prefill, vLLM may combine the final prefill chunk with some decode tokens.
+            // We need to split off the decode tokens and apply them below.
+            let remaining_decode_tokens = if self.computed_position + tokens_to_append.len()
+                > self.sequence.total_tokens()
+            {
+                tokens_to_append.split_off(self.sequence.total_tokens() - self.computed_position)
+            } else {
+                vec![]
+            };
+
             debug_assert_eq!(
                 self.sequence
                     .tokens_at(
@@ -89,7 +100,10 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
                 &tokens_to_append,
             );
             self.computed_position += tokens_to_append.len();
-        } else {
+            tokens_to_append = remaining_decode_tokens;
+        }
+
+        if !tokens_to_append.is_empty() {
             tracing::debug!("applying {} tokens", tokens_to_append.len());
             // if we are not prefilling, we extend the sequence and advance the sequence position.
             // first advance the sequence, then the position -- this covers the case where the extend fails.
@@ -322,7 +336,7 @@ mod tests {
                 num_blocks: 10,
                 num_layers: 2,
                 outer_dim: 1,
-                page_size: 64,
+                page_size: BLOCK_SIZE,
                 inner_dim: 128,
                 alignment: 1,
                 dtype_width_bytes: 2,
@@ -1662,5 +1676,32 @@ mod tests {
         }
 
         println!("✅ Sequence hash mismatch test completed");
+    }
+
+    #[test]
+    fn test_blocks_chunked_prefill_with_decode_tokens() {
+        let fixture = TestFixture::new();
+
+        let tokens = vec![0; BLOCK_SIZE * 2];
+
+        let mut slot = Slot::new(tokens.clone().into(), BLOCK_SIZE, SALT_HASH);
+
+        let allocated_blocks = slot.allocate_blocks(tokens.len() + 2, &fixture.pool);
+        assert_eq!(allocated_blocks.unwrap().len(), 3);
+
+        slot.apply_computed_tokens(tokens[..BLOCK_SIZE].to_vec(), &fixture.pool)
+            .unwrap();
+
+        assert_eq!(slot.immutable.len(), 1);
+        assert_eq!(slot.mutable.len(), 2);
+
+        // Add the remaining prefill tokens along with some simulated decode tokens.
+        let remaining_prefill_with_decode_tokens = vec![0; BLOCK_SIZE + 1];
+
+        slot.apply_computed_tokens(remaining_prefill_with_decode_tokens, &fixture.pool)
+            .unwrap();
+
+        assert_eq!(slot.immutable.len(), 2);
+        assert_eq!(slot.mutable.len(), 1);
     }
 }
