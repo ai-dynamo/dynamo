@@ -180,7 +180,6 @@ all-docker:
     ARG DOCKER_SERVER=my-registry
     ARG IMAGE_TAG=latest
     BUILD ./deploy/cloud/operator+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
-    BUILD ./deploy/cloud/api-store+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 
 all-lint:
     BUILD ./deploy/cloud/operator+lint

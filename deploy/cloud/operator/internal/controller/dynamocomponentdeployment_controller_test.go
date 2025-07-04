@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
+	dynamoCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -535,12 +536,6 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 							},
 						},
 					},
-					dynamoComponent: &v1alpha1.DynamoComponent{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "service1",
-							Namespace: "default",
-						},
-					},
 					instanceID: ptr.To(5),
 				},
 			},
@@ -580,12 +575,6 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 							},
 						},
 					},
-					dynamoComponent: &v1alpha1.DynamoComponent{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "service-missing-lws-size",
-							Namespace: "default",
-						},
-					},
 					instanceID: ptr.To(0),
 				},
 			},
@@ -612,12 +601,6 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 									"nvidia.com/lws-size":        "abc",
 								},
 							},
-						},
-					},
-					dynamoComponent: &v1alpha1.DynamoComponent{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "service-invalid-lws-size-non-int",
-							Namespace: "default",
 						},
 					},
 					instanceID: ptr.To(1),
@@ -648,12 +631,6 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 							},
 						},
 					},
-					dynamoComponent: &v1alpha1.DynamoComponent{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "service-invalid-lws-size-zero",
-							Namespace: "default",
-						},
-					},
 					instanceID: ptr.To(2),
 				},
 			},
@@ -680,12 +657,6 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 									"nvidia.com/lws-size":        "-1",
 								},
 							},
-						},
-					},
-					dynamoComponent: &v1alpha1.DynamoComponent{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "service-invalid-lws-size-negative",
-							Namespace: "default",
 						},
 					},
 					instanceID: ptr.To(3),
@@ -716,12 +687,6 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 							},
 						},
 					},
-					dynamoComponent: &v1alpha1.DynamoComponent{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "service-valid-lws-size-one",
-							Namespace: "default",
-						},
-					},
 					instanceID: ptr.To(4),
 				},
 			},
@@ -750,12 +715,6 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 							},
 						},
 					},
-					dynamoComponent: &v1alpha1.DynamoComponent{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "service-nil-instanceid",
-							Namespace: "default",
-						},
-					},
 					instanceID: nil,
 				},
 			},
@@ -782,12 +741,6 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 									"nvidia.com/lws-size":        "2",
 								},
 							},
-						},
-					},
-					dynamoComponent: &v1alpha1.DynamoComponent{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "service-negative-instanceid",
-							Namespace: "default",
 						},
 					},
 					instanceID: ptr.To(-1),
@@ -821,17 +774,26 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 	}
 }
 
+type mockDockerSecretRetriever struct {
+	GetSecretsFunc func(namespace, imageName string) ([]string, error)
+}
+
+func (m *mockDockerSecretRetriever) GetSecrets(namespace, imageName string) ([]string, error) {
+	return m.GetSecretsFunc(namespace, imageName)
+}
+
 func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.T) {
 	var limit = ptr.To(resource.MustParse("250Mi"))
 	limit.SetMilli(ptr.To(resource.MustParse("1Gi")).MilliValue() / 2)
 	type fields struct {
-		Client            client.Client
-		Recorder          record.EventRecorder
-		Config            controller_common.Config
-		NatsAddr          string
-		EtcdAddr          string
-		EtcdStorage       etcdStorage
-		UseVirtualService bool
+		Client                client.Client
+		Recorder              record.EventRecorder
+		Config                controller_common.Config
+		NatsAddr              string
+		EtcdAddr              string
+		EtcdStorage           etcdStorage
+		UseVirtualService     bool
+		DockerSecretRetriever *mockDockerSecretRetriever
 	}
 	type args struct {
 		ctx context.Context
@@ -853,6 +815,11 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 			fields: fields{
 				Recorder: record.NewFakeRecorder(100),
 				Config:   controller_common.Config{}, // Provide default or test-specific config
+				DockerSecretRetriever: &mockDockerSecretRetriever{
+					GetSecretsFunc: func(namespace, imageName string) ([]string, error) {
+						return []string{}, nil
+					},
+				},
 			},
 			args: args{
 				ctx: context.Background(),
@@ -877,12 +844,13 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										GPU: "1",
 									},
 								},
+								ExtraPodSpec: &dynamoCommon.ExtraPodSpec{
+									MainContainer: &corev1.Container{
+										Image: "test-image:latest",
+									},
+								},
 							},
 						},
-					},
-					dynamoComponent: &v1alpha1.DynamoComponent{
-						ObjectMeta: metav1.ObjectMeta{Name: "test-lws-component", Namespace: "default"},
-						Spec:       v1alpha1.DynamoComponentSpec{Image: "test-image:latest"},
 					},
 					instanceID: ptr.To(0),
 				},
@@ -904,8 +872,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 					Name:      "test-lws-deploy-0",
 					Namespace: "default",
 					Labels: map[string]string{
-						commonconsts.KubeLabelDynamoComponent: "test-lws-component",
-						"instance-id":                         "0",
+						"instance-id": "0",
 					},
 				},
 				Spec: leaderworkersetv1.LeaderWorkerSetSpec{
@@ -916,9 +883,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 						LeaderTemplate: &corev1.PodTemplateSpec{
 							ObjectMeta: metav1.ObjectMeta{
 								Labels: map[string]string{
-									"instance-id":                         "0",
-									"role":                                "leader",
-									commonconsts.KubeLabelDynamoComponent: "test-lws-component",
+									"instance-id": "0",
+									"role":        "leader",
 								},
 								Annotations: map[string]string{
 									"scheduling.k8s.io/group-name": "test-lws-deploy-0",
@@ -969,9 +935,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 						WorkerTemplate: corev1.PodTemplateSpec{
 							ObjectMeta: metav1.ObjectMeta{
 								Labels: map[string]string{
-									"instance-id":                         "0",
-									"role":                                "worker",
-									commonconsts.KubeLabelDynamoComponent: "test-lws-component",
+									"instance-id": "0",
+									"role":        "worker",
 								},
 								Annotations: map[string]string{
 									"scheduling.k8s.io/group-name": "test-lws-deploy-0",
@@ -1027,12 +992,13 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										GPU: "1",
 									},
 								},
+								ExtraPodSpec: &dynamoCommon.ExtraPodSpec{
+									MainContainer: &corev1.Container{
+										Image: "test-image:latest",
+									},
+								},
 							},
 						},
-					},
-					dynamoComponent: &v1alpha1.DynamoComponent{
-						ObjectMeta: metav1.ObjectMeta{Namespace: "default"},
-						Spec:       v1alpha1.DynamoComponentSpec{Image: "test-image:latest"},
 					},
 					instanceID: nil,
 				},
@@ -1067,12 +1033,13 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										GPU: "1",
 									},
 								},
+								ExtraPodSpec: &dynamoCommon.ExtraPodSpec{
+									MainContainer: &corev1.Container{
+										Image: "", // Image is missing, will cause error in generatePodTemplateSpec
+									},
+								},
 							},
 						},
-					},
-					dynamoComponent: &v1alpha1.DynamoComponent{ // Image is missing, will cause error in generatePodTemplateSpec
-						ObjectMeta: metav1.ObjectMeta{Name: "test-lws-component-leader-err", Namespace: "default"},
-						Spec:       v1alpha1.DynamoComponentSpec{Image: ""},
 					},
 					instanceID: ptr.To(0),
 				},
@@ -1115,9 +1082,6 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 			if tt.args.opt.dynamoComponentDeployment != nil {
 				initialClientObjects = append(initialClientObjects, tt.args.opt.dynamoComponentDeployment)
 			}
-			if tt.args.opt.dynamoComponent != nil {
-				initialClientObjects = append(initialClientObjects, tt.args.opt.dynamoComponent)
-			}
 			if len(tt.args.mockServiceAccounts) > 0 {
 				initialClientObjects = append(initialClientObjects, tt.args.mockServiceAccounts...)
 			}
@@ -1128,13 +1092,14 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 				Build()
 
 			r := &DynamoComponentDeploymentReconciler{
-				Client:            fakeKubeClient, // Use the fake client
-				Recorder:          tt.fields.Recorder,
-				Config:            tt.fields.Config,
-				NatsAddr:          tt.fields.NatsAddr,
-				EtcdAddr:          tt.fields.EtcdAddr,
-				EtcdStorage:       tt.fields.EtcdStorage,
-				UseVirtualService: tt.fields.UseVirtualService,
+				Client:                fakeKubeClient, // Use the fake client
+				Recorder:              tt.fields.Recorder,
+				Config:                tt.fields.Config,
+				NatsAddr:              tt.fields.NatsAddr,
+				EtcdAddr:              tt.fields.EtcdAddr,
+				EtcdStorage:           tt.fields.EtcdStorage,
+				UseVirtualService:     tt.fields.UseVirtualService,
+				DockerSecretRetriever: tt.fields.DockerSecretRetriever,
 				// Scheme: s, // Pass scheme if reconciler uses it directly, often client uses it
 			}
 			got, got1, err := r.generateLeaderWorkerSet(tt.args.ctx, tt.args.opt)
