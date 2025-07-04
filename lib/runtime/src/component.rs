@@ -29,7 +29,11 @@
 //!
 //! TODO: Top-level Overview of Endpoints/Functions
 
-use crate::{discovery::Lease, service::ServiceSet, transports::etcd::EtcdPath};
+use crate::{
+    discovery::Lease,
+    service::{ServiceInfo, ServiceSet},
+    transports::etcd::EtcdPath,
+};
 
 use super::{
     error,
@@ -238,14 +242,21 @@ impl Component {
             .await
     }
 
-    /// TODO
+    /// This method scrapes the stats for all available services.
     ///
-    /// This method will scrape the stats for all available services
     /// Returns a stream of `ServiceInfo` objects.
+    ///
     /// This should be consumed by a `[tokio::time::timeout_at`] because each services
     /// will only respond once, but there is no way to know when all services have responded.
-    pub async fn stats_stream(&self) -> Result<()> {
-        unimplemented!("collect_stats")
+    ///
+    /// The stream will be closed when the timeout is reached.
+    pub fn stats_stream(
+        &self,
+        timeout: Duration,
+    ) -> Result<impl futures::stream::Stream<Item = Result<ServiceInfo>>> {
+        let service_name = self.service_name();
+        let service_client = self.drt().service_client();
+        service_client.stream_collect_services(&service_name, timeout)
     }
 
     pub fn service_builder(&self) -> service::ServiceConfigBuilder {
