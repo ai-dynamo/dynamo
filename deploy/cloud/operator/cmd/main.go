@@ -20,6 +20,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -28,7 +29,11 @@ import (
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
 	clientv3 "go.etcd.io/etcd/client/v3"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/informers"
+	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
+	k8sCache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 
 	"k8s.io/apimachinery/pkg/runtime"
@@ -47,6 +52,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/etcd"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/secrets"
 	istioclientsetscheme "istio.io/client-go/pkg/clientset/versioned/scheme"
 	//+kubebuilder:scaffold:imports
 )
@@ -124,6 +130,7 @@ func main() {
 		EnableLWS:                   enableLWS,
 	}
 
+	mainCtx := ctrl.SetupSignalHandler()
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
 
 	// if the enable-http2 flag is false (the default), http/2 should be disabled
@@ -191,25 +198,104 @@ func main() {
 		setupLog.Error(err, "unable to create etcd client")
 		os.Exit(1)
 	}
-	if err = (&controller.DynamoComponentDeploymentReconciler{
-		Client:            mgr.GetClient(),
-		Recorder:          mgr.GetEventRecorderFor("dynamocomponentdeployment"),
-		Config:            ctrlConfig,
-		NatsAddr:          natsAddr,
-		EtcdAddr:          etcdAddr,
-		EtcdStorage:       etcd.NewStorage(cli),
-		UseVirtualService: istioVirtualServiceGateway != "",
-	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponentDeployment")
+
+	dockerSecretRetriever := secrets.NewDockerSecretIndexer(mgr.GetClient())
+	// refresh whenever a secret is created/deleted/updated
+	// Set up informer
+	var factory informers.SharedInformerFactory
+	if restrictedNamespace == "" {
+		factory = informers.NewSharedInformerFactory(kubernetes.NewForConfigOrDie(mgr.GetConfig()), time.Hour*24)
+	} else {
+		factory = informers.NewFilteredSharedInformerFactory(
+			kubernetes.NewForConfigOrDie(mgr.GetConfig()),
+			time.Hour*24,
+			restrictedNamespace,
+			nil,
+		)
+	}
+	secretInformer := factory.Core().V1().Secrets().Informer()
+	// Start the informer factory
+	go factory.Start(mainCtx.Done())
+	// Wait for the initial sync
+	if !k8sCache.WaitForCacheSync(mainCtx.Done(), secretInformer.HasSynced) {
+		setupLog.Error(nil, "Failed to sync informer cache")
 		os.Exit(1)
 	}
-	if err = (&controller.DynamoComponentReconciler{
-		Client:   mgr.GetClient(),
-		Scheme:   mgr.GetScheme(),
-		Recorder: mgr.GetEventRecorderFor("dynamocomponent"),
-		Config:   ctrlConfig,
+	setupLog.Info("Secret informer cache synced and ready")
+	_, err = secretInformer.AddEventHandler(k8sCache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj interface{}) {
+			secret := obj.(*corev1.Secret)
+			if secret.Type == corev1.SecretTypeDockerConfigJson {
+				setupLog.Info("refreshing docker secrets index after secret creation...")
+				err := dockerSecretRetriever.RefreshIndex(context.Background())
+				if err != nil {
+					setupLog.Error(err, "unable to refresh docker secrets index after secret creation")
+				} else {
+					setupLog.Info("docker secrets index refreshed after secret creation")
+				}
+			}
+		},
+		UpdateFunc: func(old, new interface{}) {
+			newSecret := new.(*corev1.Secret)
+			if newSecret.Type == corev1.SecretTypeDockerConfigJson {
+				setupLog.Info("refreshing docker secrets index after secret update...")
+				err := dockerSecretRetriever.RefreshIndex(context.Background())
+				if err != nil {
+					setupLog.Error(err, "unable to refresh docker secrets index after secret update")
+				} else {
+					setupLog.Info("docker secrets index refreshed after secret update")
+				}
+			}
+		},
+		DeleteFunc: func(obj interface{}) {
+			secret := obj.(*corev1.Secret)
+			if secret.Type == corev1.SecretTypeDockerConfigJson {
+				setupLog.Info("refreshing docker secrets index after secret deletion...")
+				err := dockerSecretRetriever.RefreshIndex(context.Background())
+				if err != nil {
+					setupLog.Error(err, "unable to refresh docker secrets index after secret deletion")
+				} else {
+					setupLog.Info("docker secrets index refreshed after secret deletion")
+				}
+			}
+		},
+	})
+	if err != nil {
+		setupLog.Error(err, "unable to add event handler to secret informer")
+		os.Exit(1)
+	}
+	// launch a goroutine to refresh the docker secret indexer in any case every minute
+	go func() {
+		// Initial refresh
+		if err := dockerSecretRetriever.RefreshIndex(context.Background()); err != nil {
+			setupLog.Error(err, "initial docker secrets index refresh failed")
+		}
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-mainCtx.Done():
+				return
+			case <-ticker.C:
+				setupLog.Info("refreshing docker secrets index...")
+				if err := dockerSecretRetriever.RefreshIndex(mainCtx); err != nil {
+					setupLog.Error(err, "unable to refresh docker secrets index")
+				}
+				setupLog.Info("docker secrets index refreshed")
+			}
+		}
+	}()
+	if err = (&controller.DynamoComponentDeploymentReconciler{
+		Client:                mgr.GetClient(),
+		Recorder:              mgr.GetEventRecorderFor("dynamocomponentdeployment"),
+		Config:                ctrlConfig,
+		NatsAddr:              natsAddr,
+		EtcdAddr:              etcdAddr,
+		EtcdStorage:           etcd.NewStorage(cli),
+		UseVirtualService:     istioVirtualServiceGateway != "",
+		DockerSecretRetriever: dockerSecretRetriever,
 	}).SetupWithManager(mgr); err != nil {
-		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponent")
+		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponentDeployment")
 		os.Exit(1)
 	}
 	if err = (&controller.DynamoGraphDeploymentReconciler{
@@ -236,7 +322,7 @@ func main() {
 	}
 
 	setupLog.Info("starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(mainCtx); err != nil {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}

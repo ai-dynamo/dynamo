@@ -24,8 +24,6 @@ rules:
   resources:
   - configmaps
   - events
-  - pods
-  - secrets
   - services
   verbs:
   - create
@@ -47,7 +45,7 @@ rules:
 - apiGroups:
   - ""
   resources:
-  - serviceaccounts
+  - pods
   verbs:
   - get
   - list
@@ -141,7 +139,6 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments
-  - dynamocomponents
   - dynamographdeployments
   verbs:
   - create
@@ -155,7 +152,6 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments/finalizers
-  - dynamocomponents/finalizers
   - dynamographdeployments/finalizers
   verbs:
   - update
@@ -163,7 +159,6 @@ rules:
   - nvidia.com
   resources:
   - dynamocomponentdeployments/status
-  - dynamocomponents/status
   - dynamographdeployments/status
   verbs:
   - get
