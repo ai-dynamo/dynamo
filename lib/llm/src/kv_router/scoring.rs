@@ -21,7 +21,7 @@ use std::collections::HashMap;
 use crate::kv_router::protocols::LoadMetrics;
 use crate::kv_router::scheduler::Endpoint;
 
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ProcessedEndpoints {
     pub endpoints: HashMap<i64, Endpoint>,
     pub load_avg: f64,

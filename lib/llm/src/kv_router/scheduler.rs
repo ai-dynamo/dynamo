@@ -53,7 +53,7 @@ pub enum KvSchedulerError {
 
 /// [gluo FIXME] exactly the same as EndpointInfo except that 'data'
 /// is cleaned (not optional)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Endpoint {
     pub name: String,
     pub subject: String,

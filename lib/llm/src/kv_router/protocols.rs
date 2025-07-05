@@ -39,7 +39,7 @@ pub struct WorkerSelectionResult {
     pub overlap_blocks: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ForwardPassMetrics {
     // https://lmsys.org/blog/2024-12-04-sglang-v0-4/#data-parallelism-attention-for-deepseek-models
     // Data parallel ranks are semi-independent, so we need to track metrics at the DP level
@@ -56,12 +56,12 @@ pub struct ForwardPassMetrics {
     pub gpu_prefix_cache_hit_rate: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct PredictiveLoadMetrics {
     pub kv_active_blocks: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum LoadMetrics {
     ForwardPassMetrics(ForwardPassMetrics),
