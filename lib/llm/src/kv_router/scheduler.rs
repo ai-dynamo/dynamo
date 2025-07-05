@@ -75,16 +75,22 @@ impl Endpoint {
     }
 }
 
+#[derive(Debug)]
+pub struct SchedulingResponse {
+    pub best_worker_id: i64,
+    pub endpoints_changed: Option<Vec<i64>>,
+}
+
 pub struct SchedulingRequest {
     pub isl_tokens: usize,
     pub overlap: OverlapScores,
     pub potential_blocks: HashMap<i64, usize>,
-    resp_tx: tokio::sync::oneshot::Sender<i64>,
+    resp_tx: tokio::sync::oneshot::Sender<SchedulingResponse>,
 }
 
 impl SchedulingRequest {
-    pub fn respond(self, worker_id: i64) {
-        if self.resp_tx.send(worker_id).is_err() {
+    pub fn respond(self, response: SchedulingResponse) {
+        if self.resp_tx.send(response).is_err() {
             tracing::trace!("failed to send response to requestor");
         }
     }
@@ -120,7 +126,6 @@ impl KvScheduler {
             block_size as usize,
             endpoints.worker_ids(),
         )));
-        let sequences_clone = sequences.clone();
 
         // Channel to accept new scheduling requests
         let (request_tx, request_rx) = tokio::sync::mpsc::channel::<SchedulingRequest>(1024);
@@ -128,6 +133,7 @@ impl KvScheduler {
         tokio::spawn(async move {
             let mut request: SchedulingRequest;
             let mut request_rx = request_rx;
+            let mut pending_endpoint_update: Option<Vec<i64>> = None;
             tracing::trace!("scheduler background task started");
 
             'outer: loop {
@@ -149,11 +155,11 @@ impl KvScheduler {
 
                     _ = endpoints_rx.changed() => {
                         endpoints = endpoints_rx.borrow_and_update().clone();
-                        let mut sequences_guard = sequences_clone.lock().await;
-                        endpoints.update_active_blocks_all(sequences_guard.update_workers(endpoints.worker_ids()));
+                        pending_endpoint_update = Some(endpoints.worker_ids());
                         continue 'outer;
                     }
                 };
+
                 loop {
                     match selector.select_worker(&endpoints, &request, block_size) {
                         Ok(selection) => {
@@ -164,19 +170,26 @@ impl KvScheduler {
                             }) {
                                 tracing::warn!("Failed to send KV hit rate event: {:?}", e);
                             }
-                            request.respond(selection.worker_id);
+
+                            let response = SchedulingResponse {
+                                best_worker_id: selection.worker_id,
+                                endpoints_changed: pending_endpoint_update.take(),
+                            };
+                            request.respond(response);
                             continue 'outer;
                         }
                         Err(KvSchedulerError::AllWorkersBusy) => {
                             tracing::trace!("all workers busy; waiting for more capacity");
                             match endpoints_rx.changed().await {
-                                Ok(_) => {}
+                                Ok(_) => {
+                                    endpoints = endpoints_rx.borrow_and_update().clone();
+                                    pending_endpoint_update = Some(endpoints.worker_ids());
+                                }
                                 Err(e) => {
                                     tracing::error!("error waiting for endpoints change: {:?}", e);
                                     break 'outer;
                                 }
                             };
-                            endpoints = endpoints_rx.borrow_and_update().clone();
                         }
                         Err(e) => {
                             tracing::error!("error scheduling request: {:?}", e);
@@ -200,7 +213,7 @@ impl KvScheduler {
         overlap: OverlapScores,
         isl_tokens: usize,
         potential_blocks: HashMap<i64, usize>,
-    ) -> Result<i64, KvSchedulerError> {
+    ) -> Result<SchedulingResponse, KvSchedulerError> {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
             isl_tokens,
@@ -218,7 +231,6 @@ impl KvScheduler {
         Ok(res)
     }
 
-    // Hold the lock for the entire read, schedule, and update cycle, to prevent staleness
     pub async fn schedule_and_update(
         &self,
         request_id: String,
@@ -232,12 +244,15 @@ impl KvScheduler {
         let token_sequence = TokenBlockSequence::from_slice(tokens, block_size, None);
         let potential_blocks = sequences.potential_blocks(token_sequence);
 
-        let best_worker_id = self.schedule(overlap, isl_tokens, potential_blocks).await?;
+        let response = self.schedule(overlap, isl_tokens, potential_blocks).await?;
+        if let Some(new_worker_ids) = response.endpoints_changed {
+            sequences.update_workers(new_worker_ids);
+        }
 
         let token_sequence = TokenBlockSequence::from_slice(tokens, block_size, None);
-        sequences.add_request(request_id, token_sequence, best_worker_id);
+        sequences.add_request(request_id, token_sequence, response.best_worker_id);
 
-        Ok(best_worker_id)
+        Ok(response.best_worker_id)
     }
 
     /// Add a new request with its initial tokens to a specific worker
