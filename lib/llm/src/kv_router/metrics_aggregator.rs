@@ -191,6 +191,8 @@ pub async fn collect_endpoints_task(
                 let processed = ProcessedEndpoints::new(endpoints);
 
                 // Only send if different from last sent value
+                // This is necessary because the watch channel does not track changes
+                // https://docs.rs/tokio/latest/tokio/sync/watch/struct.Receiver.html#method.has_changed
                 let should_send = match &last_sent {
                     Some(last) => last != &processed,
                     None => true,
