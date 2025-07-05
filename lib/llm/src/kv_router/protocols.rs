@@ -39,7 +39,7 @@ pub struct WorkerSelectionResult {
     pub overlap_blocks: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ForwardPassMetrics {
     // https://lmsys.org/blog/2024-12-04-sglang-v0-4/#data-parallelism-attention-for-deepseek-models
     // Data parallel ranks are semi-independent, so we need to track metrics at the DP level
@@ -54,6 +54,33 @@ pub struct ForwardPassMetrics {
     pub gpu_cache_usage_perc: f32,
     // percentage represented as a float from 0 to 1
     pub gpu_prefix_cache_hit_rate: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct PredictiveLoadMetrics {
+    pub kv_active_blocks: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LoadMetrics {
+    ForwardPassMetrics(ForwardPassMetrics),
+    PredictiveLoadMetrics(PredictiveLoadMetrics),
+}
+
+impl LoadMetrics {
+    pub fn kv_active_blocks(&self) -> u64 {
+        match self {
+            LoadMetrics::ForwardPassMetrics(metrics) => metrics.kv_active_blocks,
+            LoadMetrics::PredictiveLoadMetrics(metrics) => metrics.kv_active_blocks,
+        }
+    }
+}
+
+impl Default for LoadMetrics {
+    fn default() -> Self {
+        LoadMetrics::PredictiveLoadMetrics(PredictiveLoadMetrics::default())
+    }
 }
 
 /// A [`LocalBlockHash`] is a hash computed from the tokens_ids, extra_token_ids and the optional
