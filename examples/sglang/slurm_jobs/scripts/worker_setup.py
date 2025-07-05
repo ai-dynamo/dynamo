@@ -102,7 +102,7 @@ def wait_for_etcd(etcd_url: str, max_retries: int = 1000) -> bool:
 
 def run_command(
     cmd: str, background: bool = False, shell: bool = True, stdout=None, stderr=None
-) -> subprocess.Popen | int:
+):
     """
     Run a command either in background or foreground.
 
@@ -320,9 +320,9 @@ def setup_env(prefill_host_ip: str):
     logging.info(f"set ETCD_ENDPOINTS: {etcd_endpoints}")
 
 
-def main(args: list[str] | None = None):
+def main(input_args: list[str] | None = None):
     setup_logging()
-    args = _parse_command_line_args(args)
+    args = _parse_command_line_args(input_args)
     _validate_args(args)
 
     if args.gpu_utilization_log:

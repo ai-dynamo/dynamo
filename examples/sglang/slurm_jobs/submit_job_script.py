@@ -103,9 +103,9 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     return parser.parse_args(args)
 
 
-def main(args: list[str] | None = None):
+def main(input_args: list[str] | None = None):
     setup_logging()
-    args = _parse_command_line_args(args)
+    args = _parse_command_line_args(input_args)
 
     total_nodes = args.prefill_nodes + args.decode_nodes
     template_vars = {
