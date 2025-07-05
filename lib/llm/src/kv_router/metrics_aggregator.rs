@@ -135,6 +135,9 @@ pub async fn collect_endpoints_task(
     let endpoint = component.endpoint(&subject);
     let service_subject = endpoint.subject();
 
+    // Keep track of the last sent value to avoid unnecessary updates
+    let mut last_sent: Option<ProcessedEndpoints> = None;
+
     loop {
         tokio::select! {
             _ = cancel.cancelled() => {
@@ -187,9 +190,21 @@ pub async fn collect_endpoints_task(
 
                 let processed = ProcessedEndpoints::new(endpoints);
 
-                if watch_tx.send(processed).is_err() {
-                    tracing::trace!("failed to send processed endpoints; shutting down");
-                    break;
+                // Only send if different from last sent value
+                let should_send = match &last_sent {
+                    Some(last) => last != &processed,
+                    None => true,
+                };
+
+                if should_send {
+                    tracing::trace!("Endpoints changed, sending update for service: {service_subject}");
+                    if watch_tx.send(processed.clone()).is_err() {
+                        tracing::trace!("failed to send processed endpoints; shutting down");
+                        break;
+                    }
+                    last_sent = Some(processed);
+                } else {
+                    tracing::trace!("Endpoints unchanged, skipping update for service: {service_subject}");
                 }
             }
         }
