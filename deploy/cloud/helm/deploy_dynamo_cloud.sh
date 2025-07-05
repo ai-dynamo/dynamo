@@ -16,6 +16,17 @@
 # limitations under the License.
 
 set -euo pipefail
+trap 'echo "Error at line $LINENO. Exiting."' ERR
+
+required_tools=(envsubst kubectl helm)
+
+for tool in "${required_tools[@]}"; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "Error: Required tool '$tool' is not installed or not in PATH."
+    exit 1
+  fi
+done
+
 
 # Use system helm
 HELM_CMD=$(which helm)
@@ -42,6 +53,7 @@ export ENABLE_LWS="${ENABLE_LWS:=false}"
 # Add command line options
 INTERACTIVE=false
 INSTALL_CRDS=false
+YAML_ONLY=false
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
   key="$1"
@@ -54,10 +66,15 @@ while [[ $# -gt 0 ]]; do
       INSTALL_CRDS=true
       shift
       ;;
+    --yaml-only)
+      YAML_ONLY=true
+      shift
+      ;;
     --help)
       echo "Usage: $0 [options]"
       echo "Options:"
       echo "  --interactive       Run in interactive mode"
+      echo "  --yaml-only         Only generate generated-values.yaml and exit"
       echo "  --help              Show this help message"
       echo "  --crds              Also install the CRDs"
       exit 0
@@ -153,6 +170,10 @@ cat generated-values.yaml
 
 echo ""
 echo "Generated values file saved as generated-values.yaml"
+if [ "$YAML_ONLY" = true ]; then
+  echo "--yaml-only flag detected; skipping Helm deployment steps."
+  exit 0
+fi
 
 # Build dependencies before installation
 echo "Building helm dependencies..."

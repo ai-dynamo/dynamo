@@ -66,6 +66,12 @@ Users/Clients (HTTP)
 
 ## Running the Example Locally
 
+Make sure you are running etcd and nats
+```bash
+sudo systemctl start etcd
+sudo systemctl start nats-server
+```
+
 1. Launch all three services using a single command:
 
 ```bash
@@ -90,60 +96,74 @@ curl -X 'POST' \
 ## Deploying to and Running the Example in Kubernetes
 
 This example can be deployed to a Kubernetes cluster using [Dynamo Cloud](../../docs/guides/dynamo_deploy/dynamo_cloud.md) and the Dynamo CLI.
+Dynamo Cloud acts as an orchestration layer between the end user and Kubernetes, handling the complexity of deploying your graphs for you.
 
 ### Prerequisites
 
-You must have first followed the instructions in [deploy/cloud/helm/README.md](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/helm/README.md) to create your Dynamo cloud deployment.
+You must have first followed the instructions in [deploy/cloud/helm/README.md](../../deploy/cloud/helm/README.md) to create your Dynamo cloud deployment.
 
-### Deployment Steps For your Hello World graph.
+Make sure your dynamo cloud the `deploy_dynamo_cloud.sh --crds --interactive` script finished successfully.
 
-For detailed deployment instructions, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md). The following are the specific commands for the hello world example:
+### Now deploy your Hello World graph.
+
+For details, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md) but it is sufficient to follow the instructions below.
+
 
 ```bash
-Make sure your dynamo cloud deploy.sh script from the prior step finished successfully and setup port forwaring in another window
-per its suggestion.
-
-kubectl port-forward svc/...-dynamo-api-store <local-port>:80 -n $NAMESPACE
-
-
 # Set your dynamo root directory
-cd <root dynamo folder>
+cd <root-dynamo-folder>
 export PROJECT_ROOT=$(pwd)
+export NAMESPACE=hello-world # the namespace you used to deploy Dynamo cloud to.
+```
 
-# Configure environment variables (see operator_deployment.md for details)
-export KUBE_NS=hello-world
-export DYNAMO_CLOUD=http://localhost:8080  # If using port-forward
-# OR
-# export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com  # If using Ingress/VirtualService
+Pick your deployment destination.
 
-# Build the Dynamo base image (see operator_deployment.md for details)
+If local
+
+```bash
+export DYNAMO_CLOUD=http://localhost:8080
+```
+
+If kubernetes
+```bash
+export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com
+```
+
+Export the [Dynamo Base Image](../../get_started.md#building-the-dynamo-base-image) you built during the prerequisites step as the `DYNAMO_IMAGE` environment variable.
+
+```bash
 export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
+```
 
-# Build the service
+
+# Build the Dynamo deployment package.
+```bash
 cd $PROJECT_ROOT/examples/hello_world
 DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk '{ print $3 }' | sed 's/\.$//')
+```
 
 # Deploy to Kubernetes
+```bash
 export DEPLOYMENT_NAME=ci-hw
 dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME
 ```
 
 ### Testing the Deployment
 
-Once the deployment is complete, you can test it using:
+Once the deployment is complete, you can test it using commands below.
 
 ```bash
 # Find your frontend pod
-export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
+export FRONTEND_POD=$(kubectl get pods -n ${NAMESPACE} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
 
 # Forward the pod's port to localhost
-kubectl port-forward pod/$FRONTEND_POD 8000:8000 -n ${KUBE_NS}
+kubectl port-forward pod/$FRONTEND_POD 8000:3000 -n ${NAMESPACE}
 
 # Test the API endpoint
-curl -X 'POST' 'http://localhost:8000/generate' \
-    -H 'accept: text/event-stream' \
-    -H 'Content-Type: application/json' \
-    -d '{"text": "test"}'
+curl -N -X POST http://localhost:8000/generate \
+  -H "accept: text/event-stream" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "test"}'
 ```
 
 For more details on managing deployments, testing, and troubleshooting, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md).

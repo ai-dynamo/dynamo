@@ -46,14 +46,17 @@ if [ ! -d "$DYNAMO_DIRECTORY" ]; then
 fi
 
 echo "Logging into Docker registry: $DOCKER_REGISTRY"
-docker login "$DOCKER_REGISTRY"
+docker login "$DOCKER_REGISTRY" || { echo "Docker login failed"; exit 1; }
 
 # Change to the specified directory
 cd "$DYNAMO_DIRECTORY"
 
 # Build the Dynamo application container
 echo "Building Dynamo application image for $DYNAMO_IDENTIFIER..."
-DOCKER_DEFAULT_PLATFORM=linux/amd64 uv run dynamo build --containerize $DYNAMO_IDENTIFIER
+# Make sure this does not fail silently
+DOCKER_DEFAULT_PLATFORM=linux/amd64 uv run dynamo build --containerize "$DYNAMO_IDENTIFIER" \
+  || { echo "Dynamo build failed"; exit 1; }
+
 
 # Extract the module and the dynamo name
 DYNAMO_MODULE=$(echo "$DYNAMO_IDENTIFIER" | awk -F':' '{print $1}' | tr '[:upper:]' '[:lower:]')
@@ -88,3 +91,6 @@ cd -
 echo "Installing Helm chart with image: $docker_tag_for_registry"
 HELM_RELEASE="${DYNAMO_MODULE//_/\-}"
 helm upgrade -i "$HELM_RELEASE" ./chart -f ~/.dynamo/packages/"$DYNAMO_MODULE"/"$DYNAMO_NAME"/dynamo.yaml --set image="$docker_tag_for_registry" --set dynamoIdentifier="$DYNAMO_IDENTIFIER" --set configFilePath="$DYNAMO_CONFIG_FILE" -n "$NAMESPACE"
+
+echo "Successfully deployed $DYNAMO_IDENTIFIER to namespace '$NAMESPACE' using image: $docker_tag_for_registry"
+
