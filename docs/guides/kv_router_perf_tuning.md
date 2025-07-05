@@ -15,6 +15,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
+>[!NOTE]
+>This information is temporary and will change soon.
+
 # KV Router Performance Tuning
 
 ## Overview

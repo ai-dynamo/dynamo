@@ -408,7 +408,7 @@ impl WorkerSelector for DefaultWorkerSelector {
         }
 
         // Use softmax sampling to select worker
-        let temperature = self.kv_router_config.temperature; // You can make this configurable if needed
+        let temperature = self.kv_router_config.router_temperature; // You can make this configurable if needed
         let best_worker_id = softmax_sample(&worker_logits, temperature);
 
         let overlap_blocks = request

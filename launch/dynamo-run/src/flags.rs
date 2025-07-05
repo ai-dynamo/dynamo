@@ -119,7 +119,7 @@ pub struct Flags {
     /// Higher values promote more randomness, and 0 fallbacks to deterministic.
     /// Default: 0.5
     #[arg(long)]
-    pub temperature: Option<f64>,
+    pub router_temperature: Option<f64>,
 
     /// Max model context length. Reduce this if you don't have enough VRAM for the full model
     /// context length (e.g. Llama 4).
@@ -205,7 +205,7 @@ impl Flags {
     pub fn router_config(&self) -> RouterConfig {
         RouterConfig::new(
             self.router_mode.into(),
-            KvRouterConfig::new(self.kv_overlap_score_weight, self.temperature),
+            KvRouterConfig::new(self.kv_overlap_score_weight, self.router_temperature),
         )
     }
 

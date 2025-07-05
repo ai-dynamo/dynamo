@@ -63,14 +63,14 @@ pub struct KvRouterConfig {
     /// Higher values prioritize KV cache reuse. Default: 2.0
     pub overlap_score_weight: f64,
 
-    pub temperature: f64,
+    pub router_temperature: f64,
 }
 
 impl Default for KvRouterConfig {
     fn default() -> Self {
         Self {
             overlap_score_weight: 1.0,
-            temperature: 0.5,
+            router_temperature: 0.5,
         }
     }
 }
@@ -82,7 +82,7 @@ impl KvRouterConfig {
         let default = Self::default();
         Self {
             overlap_score_weight: overlap_score_weight.unwrap_or(default.overlap_score_weight),
-            temperature: temperature.unwrap_or(default.temperature),
+            router_temperature: temperature.unwrap_or(default.router_temperature),
         }
     }
 }
