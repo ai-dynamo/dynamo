@@ -123,12 +123,19 @@ pub fn compute_block_hash_for_seq(tokens: &[u32], kv_block_size: u32) -> Vec<Loc
     tokens
         .chunks_exact(kv_block_size as usize) // Split into chunks of kv_block_size elements
         .map(|chunk| {
-            let bytes: Vec<u8> = chunk
-                .iter()
-                .flat_map(|&num| num.to_le_bytes()) // Convert each i32 to its little-endian bytes
-                .collect();
+            // SAFETY: This is safe because:
+            // 1. u32 and u8 have compatible memory layouts (u32 is 4 contiguous u8s)
+            // 2. The slice is valid for the duration of this operation
+            // 3. We're only reading from the memory, not modifying it
+            // 4. The alignment requirements are satisfied (u8 has no alignment requirements)
+            let bytes = unsafe {
+                std::slice::from_raw_parts(
+                    chunk.as_ptr() as *const u8,
+                    chunk.len() * std::mem::size_of::<u32>(),
+                )
+            };
 
-            compute_block_hash(&Bytes::from(bytes)) // Convert the byte Vec to Bytes
+            compute_block_hash(bytes)
         })
         .collect()
 }
@@ -1328,6 +1335,47 @@ mod tests {
         let sequence = (0..(2 * kv_block_size + 1)).collect::<Vec<u32>>();
         let hashes = compute_block_hash_for_seq(&sequence, kv_block_size);
         assert_eq!(hashes.len(), 2);
+    }
+
+    /// Test that the optimized implementation produces the same results as the original
+    /// by comparing against a reference implementation that uses the old approach.
+    #[test]
+    fn test_compute_block_hash_for_seq_optimization_correctness() {
+        setup();
+
+        // Reference implementation using the original approach
+        fn compute_block_hash_for_seq_reference(
+            tokens: &[u32],
+            kv_block_size: u32,
+        ) -> Vec<LocalBlockHash> {
+            tokens
+                .chunks_exact(kv_block_size as usize)
+                .map(|chunk| {
+                    let bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
+                    compute_block_hash(&Bytes::from(bytes))
+                })
+                .collect()
+        }
+
+        // Test various scenarios
+        let test_cases = vec![
+            (vec![1, 2, 3, 4], 4),
+            (vec![0, 1, 2, 3, 4, 5, 6, 7], 4),
+            (vec![42, 1337, 0xDEADBEEF, 0xCAFEBABE], 2),
+            ((0..100).collect::<Vec<u32>>(), 32),
+            (vec![u32::MAX, u32::MIN, 12345, 67890], 4),
+        ];
+
+        for (tokens, kv_block_size) in test_cases {
+            let optimized_result = compute_block_hash_for_seq(&tokens, kv_block_size);
+            let reference_result = compute_block_hash_for_seq_reference(&tokens, kv_block_size);
+
+            assert_eq!(
+                optimized_result, reference_result,
+                "Optimized implementation should produce same results as reference for tokens: {:?}, block_size: {}",
+                tokens, kv_block_size
+            );
+        }
     }
 
     fn make_indexer(
