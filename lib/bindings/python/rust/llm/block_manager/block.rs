@@ -56,8 +56,8 @@ impl Block {
     ) -> Self {
         Self {
             inner: block,
-            dtype: dtype,
-            device_id: device_id,
+            dtype,
+            device_id,
             py_itr_idx: 0,
         }
     }
@@ -77,12 +77,7 @@ impl Block {
     fn to_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let layers: Vec<layer::Layer> = (0..self.num_layers())
             .map(|layer_idx| {
-                layer::Layer::from_rust(
-                    self.inner.clone(),
-                    layer_idx,
-                    self.dtype.clone(),
-                    self.device_id,
-                )
+                layer::Layer::from_rust(self.inner.clone(), layer_idx, self.dtype, self.device_id)
             })
             .collect();
         PyList::new(py, layers)
@@ -100,12 +95,7 @@ impl Block {
                 index, num_layers
             )));
         }
-        let layer = layer::Layer::from_rust(
-            self.inner.clone(),
-            index,
-            self.dtype.clone(),
-            self.device_id,
-        );
+        let layer = layer::Layer::from_rust(self.inner.clone(), index, self.dtype, self.device_id);
         Ok(layer)
     }
 
@@ -125,7 +115,7 @@ impl Block {
         let layer = layer::Layer::from_rust(
             self.inner.clone(),
             self.py_itr_idx,
-            self.dtype.clone(),
+            self.dtype,
             self.device_id,
         );
         self.py_itr_idx += 1;
@@ -206,7 +196,7 @@ impl Block {
             self.inner.clone(),
             ptr,
             vec![num_blocks, num_layers, num_outer_dims, page_size, inner_dim],
-            self.dtype.clone(),
+            self.dtype,
             self.device_id,
         )
     }

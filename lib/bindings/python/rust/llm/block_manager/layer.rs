@@ -117,7 +117,7 @@ impl Layer {
             self.inner.clone(),
             ptr,
             vec![1, 1, num_outer_dims, page_size, inner_dim],
-            self.dtype.clone(),
+            self.dtype,
             self.device_id,
         )
     }
