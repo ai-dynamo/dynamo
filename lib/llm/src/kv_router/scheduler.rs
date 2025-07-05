@@ -294,6 +294,15 @@ fn softmax_sample(logits: &HashMap<i64, f64>, temperature: f64) -> i64 {
         panic!("Empty logits for softmax sampling");
     }
 
+    // Guard: if temperature is 0, return the key with the smallest logit value
+    if temperature == 0.0 {
+        return *logits
+            .iter()
+            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(k, _)| k)
+            .unwrap();
+    }
+
     let keys: Vec<_> = logits.keys().copied().collect();
     let values: Vec<_> = logits.values().copied().collect();
 
@@ -453,5 +462,33 @@ mod tests {
         logits.clear();
         logits.insert(worker_id, 0.0); // Zero value
         assert_eq!(softmax_sample(&logits, 1.0), worker_id);
+    }
+
+    #[test]
+    fn test_softmax_sample_zero_temperature() {
+        // Test that with temperature 0, softmax_sample returns the key with smallest logit
+        let mut logits = HashMap::new();
+        logits.insert(1, 5.0);
+        logits.insert(2, 3.0); // This has the smallest logit
+        logits.insert(3, 7.0);
+        logits.insert(4, 3.5);
+
+        // With temperature 0, should always return worker 2 (smallest logit)
+        for _ in 0..10 {
+            let result = softmax_sample(&logits, 0.0);
+            assert_eq!(
+                result, 2,
+                "Should return worker with smallest logit when temperature is 0"
+            );
+        }
+
+        // Test with negative values
+        logits.clear();
+        logits.insert(10, -1.0);
+        logits.insert(20, -5.0); // This has the smallest logit
+        logits.insert(30, 0.0);
+
+        let result = softmax_sample(&logits, 0.0);
+        assert_eq!(result, 20, "Should handle negative logits correctly");
     }
 }
