@@ -43,7 +43,6 @@
 //!
 //! This module provides a scalable and efficient way to manage and retrieve data blocks for LLM inference, leveraging a global KV cache to optimize performance.
 
-use bytes::Bytes;
 // use prometheus::{IntCounter, IntGauge};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -131,7 +130,7 @@ pub fn compute_block_hash_for_seq(tokens: &[u32], kv_block_size: u32) -> Vec<Loc
             let bytes = unsafe {
                 std::slice::from_raw_parts(
                     chunk.as_ptr() as *const u8,
-                    chunk.len() * std::mem::size_of::<u32>(),
+                    std::mem::size_of_val(chunk),
                 )
             };
 
@@ -918,6 +917,7 @@ impl KvIndexerInterface for KvIndexerSharded {
 mod tests {
 
     use super::*;
+    use bytes::Bytes;
     use rstest::rstest;
     use rstest_reuse::{self, *};
     use tokio::time;
@@ -1352,7 +1352,7 @@ mod tests {
                 .chunks_exact(kv_block_size as usize)
                 .map(|chunk| {
                     let bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
-                    compute_block_hash(&Bytes::from(bytes))
+                    compute_block_hash(&bytes)
                 })
                 .collect()
         }
