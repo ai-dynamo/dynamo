@@ -270,19 +270,19 @@ impl KvScheduler {
         request_id: String,
         token_sequence: TokenBlockSequence,
         worker_id: WorkerId,
-    ) -> usize {
+    ) {
         let mut sequences = self.sequences.lock().await;
         sequences.add_request(request_id, token_sequence, worker_id)
     }
 
     /// Push a token to a specific request's sequence
-    pub async fn push(&self, request_id: &String, token: u32) -> usize {
+    pub async fn push(&self, request_id: &String, token: u32) {
         let mut sequences = self.sequences.lock().await;
         sequences.push(request_id, token)
     }
 
     /// Free all blocks associated with a request
-    pub async fn free(&self, request_id: &String) -> usize {
+    pub async fn free(&self, request_id: &String) {
         let mut sequences = self.sequences.lock().await;
         sequences.free(request_id)
     }

@@ -189,12 +189,12 @@ impl KvRouter {
     }
 
     /// Push a token to a specific request's sequence
-    pub async fn push(&self, request_id: &String, token: u32) -> usize {
+    pub async fn push(&self, request_id: &String, token: u32) {
         self.scheduler.push(request_id, token).await
     }
 
     /// Free all blocks associated with a request
-    pub async fn free(&self, request_id: &String) -> usize {
+    pub async fn free(&self, request_id: &String) {
         self.scheduler.free(request_id).await
     }
 
