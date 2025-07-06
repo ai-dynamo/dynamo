@@ -33,6 +33,8 @@ The NVIDIA Dynamo Platform is a high-performance, low-latency inference framewor
 Dive in: Examples
 -----------------
 
+The examples below assume you build the latest image yourself from source. If using a prebuilt image follow the examples from the corresponding branch.
+
 .. grid:: 1 2 2 2
     :gutter: 3
     :margin: 0
