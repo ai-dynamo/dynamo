@@ -52,22 +52,6 @@ impl KvRouter {
             })
         })
     }
-
-    fn schedule<'p>(
-        &self,
-        py: Python<'p>,
-        token_ids: Vec<u32>,
-        lora_id: u64,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let router = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let worker_id = router
-                .schedule(&token_ids, lora_id)
-                .await
-                .map_err(to_pyerr)?;
-            Ok(worker_id)
-        })
-    }
 }
 
 #[pyfunction]
@@ -640,7 +624,7 @@ impl KvMetricsAggregator {
             .iter()
             .map(|(worker_id, x)| {
                 let metrics = x.data;
-                let Some(fwd_pass_metrics) = LoadMetrics::ForwardPassMetrics(metrics) else {
+                let LoadMetrics::ForwardPassMetrics(fwd_pass_metrics) = metrics else {
                     panic!("Endpoints do not contain forward pass metrics.");
                 };
                 EndpointKvMetrics {
