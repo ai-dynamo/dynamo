@@ -245,11 +245,24 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             InstanceSource::Dynamic(_) => {
                 let (instance_id, overlap_amount) =
                     self.chooser.find_best_match(&request.token_ids).await?;
+
+                let has_worker_id_annotation = request.has_annotation("query_instance_id");
+
                 // Update the request with the estimated prefix hit blocks
                 let (mut backend_input, context) = request.into_parts();
                 backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
-                let updated_request = context.map(|_| backend_input);
-                self.inner.direct(updated_request, instance_id).await
+                // Take this branch when request has the annotation "query_instance_id"
+                // "nvext": { "annotations": ["query_instance_id"]}}
+                // This is used to indicate that the request will be routed to a worker
+                if has_worker_id_annotation {
+                    let instance_id_str = instance_id.to_string();
+                    let response = Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
+                    let stream = stream::iter(vec![response]);
+                    Ok(ResponseStream::new(Box::pin(stream), context.context()))
+                } else {
+                    let updated_request = context.map(|_| backend_input);
+                    self.inner.direct(updated_request, instance_id).await
+                }
             }
         }
     }
