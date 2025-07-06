@@ -112,12 +112,7 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: Blo
             transfer_metadata(source, target)?;
         }
 
-        let blocks = target_pool
-            .register_blocks_with_duplication_setting(
-                targets,
-                BlockRegistrationDuplicationSetting::Disabled,
-            )
-            .await?;
+        let blocks = target_pool.register_blocks(targets).await?;
 
         tracing::debug!("Transfer complete. Registered {} blocks.", blocks.len());
 

@@ -483,7 +483,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
     }
 
-    pub(crate) async fn register_blocks_with_duplication_setting(
+    pub(crate) async fn _register_blocks_with_duplication_setting(
         &self,
         blocks: Vec<MutableBlock<S, L, M>>,
         duplication_setting: BlockRegistrationDuplicationSetting,
