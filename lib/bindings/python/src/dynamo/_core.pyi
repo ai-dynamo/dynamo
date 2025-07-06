@@ -272,25 +272,6 @@ class Client:
         """
         ...
 
-class KvRouter:
-    """
-    A router will determine which worker should handle a given request.
-    """
-
-    ...
-
-    def __init__(self, drt: DistributedRuntime, component: Component) -> None:
-        """
-        Create a `KvRouter` object that is associated with the `component`
-        """
-
-    def schedule(self, token_ids: List[int], lora_id: int) -> int:
-        """
-        Return the worker id that should handle the given token ids,
-        exception will be raised if there is no worker available.
-        """
-        ...
-
 class DisaggregatedRouter:
     """
     A router that determines whether to perform prefill locally or remotely based on
