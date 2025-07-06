@@ -638,15 +638,21 @@ impl KvMetricsAggregator {
         let endpoint_kv_metrics = endpoints
             .endpoints
             .iter()
-            .map(|(worker_id, x)| EndpointKvMetrics {
-                worker_id: *worker_id,
-                request_active_slots: x.data.request_active_slots,
-                request_total_slots: x.data.request_total_slots,
-                kv_active_blocks: x.data.kv_active_blocks,
-                kv_total_blocks: x.data.kv_total_blocks,
-                num_requests_waiting: x.data.num_requests_waiting,
-                gpu_cache_usage_perc: x.data.gpu_cache_usage_perc,
-                gpu_prefix_cache_hit_rate: x.data.gpu_prefix_cache_hit_rate,
+            .map(|(worker_id, x)| {
+                let metrics = x.data;
+                let Some(fwd_pass_metrics) = LoadMetrics::ForwardPassMetrics(metrics) else {
+                    panic!("Endpoints do not contain forward pass metrics.");
+                };
+                EndpointKvMetrics {
+                    worker_id: *worker_id,
+                    request_active_slots: fwd_pass_metrics.request_active_slots,
+                    request_total_slots: fwd_pass_metrics.request_total_slots,
+                    kv_active_blocks: fwd_pass_metrics.kv_active_blocks,
+                    kv_total_blocks: fwd_pass_metrics.kv_total_blocks,
+                    num_requests_waiting: fwd_pass_metrics.num_requests_waiting,
+                    gpu_cache_usage_perc: fwd_pass_metrics.gpu_cache_usage_perc,
+                    gpu_prefix_cache_hit_rate: fwd_pass_metrics.gpu_prefix_cache_hit_rate,
+                }
             })
             .collect();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
