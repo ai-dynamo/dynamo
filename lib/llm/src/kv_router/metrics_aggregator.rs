@@ -159,20 +159,19 @@ pub async fn collect_endpoints_task(
                     // Original filtering behavior
                     unfiltered_endpoints
                         .into_iter()
-                        .filter(|s| s.data.is_some())
-                        .filter_map(|s|
-                            match s.data.unwrap().decode::<ForwardPassMetrics>() {
-                                Ok(data) => Some(Endpoint {
+                        .filter_map(|s| {
+                            s.data?
+                                .decode::<ForwardPassMetrics>()
+                                .map(|data| Endpoint {
                                     name: s.name,
                                     subject: s.subject,
                                     data: LoadMetrics::ForwardPassMetrics(data),
-                                }),
-                                Err(e) => {
+                                })
+                                .inspect_err(|e| {
                                     tracing::debug!("skip endpoint data that can't be parsed as ForwardPassMetrics: {:?}", e);
-                                    None
-                                }
-                            }
-                        )
+                                })
+                                .ok()
+                        })
                         .collect()
                 } else {
                     // No filtering - just use default LoadMetrics
