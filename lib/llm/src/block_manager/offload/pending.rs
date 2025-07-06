@@ -52,7 +52,7 @@ use crate::block_manager::block::{
     BlockDataProvider, BlockDataProviderMut, BlockError, BlockMetadata, BlockState, ImmutableBlock,
     MutableBlock, ReadableBlock, WritableBlock,
 };
-use crate::block_manager::pool::{BlockPoolError, BlockRegistrationDuplicationSetting};
+use crate::block_manager::pool::BlockPoolError;
 use crate::block_manager::storage::{Local, Storage};
 use crate::block_manager::BlockPool;
 
