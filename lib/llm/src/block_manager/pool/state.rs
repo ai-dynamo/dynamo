@@ -164,38 +164,50 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
 
             let mut offload = true;
 
-            let mutable = if let Some(raw_block) = self.inactive.match_sequence_hash(sequence_hash)
-            {
-                assert!(matches!(raw_block.state(), BlockState::Registered(_, _)));
-                MutableBlock::new(raw_block, self.return_tx.clone())
-            } else {
-                // Attempt to register the block
-                // On the very rare chance that the block is registered, but in the process of being returned,
-                // we will wait for it to be returned and then register it.
-                let result = block.register(&mut self.registry);
+            let (mutable, duplicate) =
+                if let Some(raw_block) = self.inactive.match_sequence_hash(sequence_hash) {
+                    // We already have a match, so our block is a duplicate.
+                    assert!(matches!(raw_block.state(), BlockState::Registered(_, _)));
+                    (
+                        MutableBlock::new(raw_block, self.return_tx.clone()),
+                        Some(block),
+                    )
+                } else {
+                    // Attempt to register the block
+                    // On the very rare chance that the block is registered, but in the process of being returned,
+                    // we will wait for it to be returned and then register it.
+                    let result = block.register(&mut self.registry);
 
-                match result {
-                    Ok(handle) => {
-                        // Only create our publish handle if this block is new, and not transfered.
-                        if let Some(handle) = handle {
-                            publish_handles.take_handle(handle);
+                    match result {
+                        Ok(handle) => {
+                            // Only create our publish handle if this block is new, and not transfered.
+                            if let Some(handle) = handle {
+                                publish_handles.take_handle(handle);
+                            }
+                            (block, None)
                         }
-                        block
+                        Err(BlockRegistrationError::BlockAlreadyRegistered(_)) => {
+                            // Block is already registered, wait for it to be returned
+                            // Return the original block as the primary, and the block we passed in as the duplicate.
+                            offload = false;
+                            let raw_block =
+                                self.wait_for_returned_block(sequence_hash, return_rx).await;
+                            (
+                                MutableBlock::new(raw_block, self.return_tx.clone()),
+                                Some(block),
+                            )
+                        }
+                        Err(e) => {
+                            return Err(BlockPoolError::FailedToRegisterBlock(e.to_string()));
+                        }
                     }
-                    Err(BlockRegistrationError::BlockAlreadyRegistered(_)) => {
-                        // Block is already registered, wait for it to be returned
-                        offload = false;
-                        let raw_block =
-                            self.wait_for_returned_block(sequence_hash, return_rx).await;
-                        MutableBlock::new(raw_block, self.return_tx.clone())
-                    }
-                    Err(e) => {
-                        return Err(BlockPoolError::FailedToRegisterBlock(e.to_string()));
-                    }
-                }
-            };
+                };
 
-            let immutable = self.active.register(mutable)?;
+            let mut immutable = self.active.register(mutable)?;
+
+            if let Some(duplicate) = duplicate {
+                immutable = immutable.with_duplicate(duplicate.into());
+            }
 
             if offload {
                 if let Some(priority) = immutable.metadata().offload_priority() {

@@ -720,6 +720,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> IntoReadableBlocks<L, M>
 pub struct ImmutableBlock<S: Storage, L: LocalityProvider, M: BlockMetadata> {
     block: Arc<MutableBlock<S, L, M>>,
     sequence_hash: SequenceHash,
+    duplicate: Option<Arc<MutableBlock<S, L, M>>>,
 }
 
 // ImmutableBlock inherits identification methods from Block via Deref
@@ -729,6 +730,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Clone for ImmutableBlock
         Self {
             block: self.block.clone(),
             sequence_hash: self.sequence_hash,
+            duplicate: self.duplicate.clone(),
         }
     }
 }
@@ -739,6 +741,14 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ImmutableBlock<S, L, M> 
         Self {
             block,
             sequence_hash,
+            duplicate: None,
+        }
+    }
+
+    pub(crate) fn with_duplicate(self, duplicate: Arc<MutableBlock<S, L, M>>) -> Self {
+        Self {
+            duplicate: Some(duplicate),
+            ..self
         }
     }
 
@@ -748,6 +758,14 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ImmutableBlock<S, L, M> 
 
     pub fn sequence_hash(&self) -> SequenceHash {
         self.sequence_hash
+    }
+
+    /// If the ImmutableBlock is a duplicate, returns the block ID of the duplicate;
+    /// otherwise, returns the block ID of the primary block.
+    pub fn block_id(&self) -> BlockId {
+        self.duplicate
+            .as_ref()
+            .map_or(self.block.block_id(), |duplicate| duplicate.block_id())
     }
 }
 
