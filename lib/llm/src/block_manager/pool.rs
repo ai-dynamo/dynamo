@@ -101,8 +101,10 @@ pub type ImmutableBlocks<S, L, M> = Vec<ImmutableBlock<S, L, M>>;
 
 // Specific request type aliases for our use cases
 type AllocateBlocksReq<S, L, M> = RequestResponse<usize, BlockPoolResult<MutableBlocks<S, L, M>>>;
-type RegisterBlocksReq<S, L, M> =
-    RequestResponse<MutableBlocks<S, L, M>, BlockPoolResult<ImmutableBlocks<S, L, M>>>;
+type RegisterBlocksReq<S, L, M> = RequestResponse<
+    (MutableBlocks<S, L, M>, BlockRegistrationDuplicationSetting),
+    BlockPoolResult<ImmutableBlocks<S, L, M>>,
+>;
 type MatchHashesReq<S, L, M> =
     RequestResponse<Vec<SequenceHash>, BlockPoolResult<ImmutableBlocks<S, L, M>>>;
 type TouchBlocksReq = RequestResponse<Vec<SequenceHash>, BlockPoolResult<()>>;
@@ -151,13 +153,23 @@ pub struct BlockPoolArgs<S: Storage, L: LocalityProvider, M: BlockMetadata> {
         default = "BlockManagerMetrics::new(&Arc::new(Registry::new())).unwrap().pool(\"pool\")"
     )]
     pool_metrics: Arc<PoolMetrics>,
+
+    #[builder(default = "BlockRegistrationDuplicationSetting::Allowed")]
+    default_duplication_setting: BlockRegistrationDuplicationSetting,
 }
 
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPoolArgsBuilder<S, L, M> {
     pub fn build(self) -> anyhow::Result<BlockPool<S, L, M>> {
         let args = self.build_internal()?;
-        let (event_manager, cancel_token, blocks, global_registry, async_runtime, metrics) =
-            args.dissolve();
+        let (
+            event_manager,
+            cancel_token,
+            blocks,
+            global_registry,
+            async_runtime,
+            metrics,
+            default_duplication_setting,
+        ) = args.dissolve();
 
         tracing::info!("building block pool");
         let pool = BlockPool::new(
@@ -167,17 +179,32 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPoolArgsBuilder<S, 
             global_registry,
             async_runtime,
             metrics,
+            default_duplication_setting,
         );
 
         Ok(pool)
     }
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockRegistrationDuplicationSetting {
+    /// On registration, if duplication is allowed, blocks with duplicate hashes cannot be registered directly,
+    /// but instead can be held live with a strong reference to the primary block. This maintains the lifetime of
+    /// the duplicate block.
+    Allowed,
+
+    /// On registration, if duplication is disabled, blocks with duplicate hashes will be returned to the inactive pool
+    /// and the primary block, the one first registered, will be returned to the sequence from the registration.
+    Disabled,
+}
+
 /// Manages the blocks in a specific storage backenda
 pub struct BlockPool<S: Storage, L: LocalityProvider, M: BlockMetadata> {
     priority_tx: tokio::sync::mpsc::UnboundedSender<PriorityRequest<S, L, M>>,
     ctrl_tx: tokio::sync::mpsc::UnboundedSender<ControlRequest<S, L, M>>,
     available_blocks_counter: Arc<AtomicU64>,
     total_blocks_counter: Arc<AtomicU64>,
+    default_duplication_setting: BlockRegistrationDuplicationSetting,
 }
 
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Clone for BlockPool<S, L, M> {
@@ -187,6 +214,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Clone for BlockPool<S, L
             ctrl_tx: self.ctrl_tx.clone(),
             available_blocks_counter: self.available_blocks_counter.clone(),
             total_blocks_counter: self.total_blocks_counter.clone(),
+            default_duplication_setting: self.default_duplication_setting.clone(),
         }
     }
 }
@@ -247,6 +275,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
         global_registry: GlobalRegistry,
         async_runtime: Handle,
         metrics: Arc<PoolMetrics>,
+        default_duplication_setting: BlockRegistrationDuplicationSetting,
     ) -> Self {
         let (pool, progress_engine) = Self::with_progress_engine(
             event_manager,
@@ -255,6 +284,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
             global_registry,
             async_runtime,
             metrics,
+            default_duplication_setting,
         );
 
         // pool.runtime.handle().spawn(async move {
@@ -299,6 +329,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
         global_registry: GlobalRegistry,
         async_runtime: Handle,
         metrics: Arc<PoolMetrics>,
+        default_duplication_setting: BlockRegistrationDuplicationSetting,
     ) -> (Self, ProgressEngine<S, L, M>) {
         let (priority_tx, priority_rx) = tokio::sync::mpsc::unbounded_channel();
         let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -312,6 +343,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
             global_registry,
             async_runtime,
             metrics,
+            default_duplication_setting,
         );
 
         let available_blocks_counter = progress_engine.available_blocks_counter.clone();
@@ -323,6 +355,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
                 ctrl_tx,
                 available_blocks_counter,
                 total_blocks_counter,
+                default_duplication_setting,
             },
             progress_engine,
         )
@@ -334,6 +367,10 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
 
     pub fn available_blocks(&self) -> u64 {
         self.available_blocks_counter.load(Ordering::Relaxed)
+    }
+
+    pub fn default_duplication_setting(&self) -> BlockRegistrationDuplicationSetting {
+        self.default_duplication_setting
     }
 
     /// Adds a vector of [`Block`]s to the [`InactiveBlockPool`].
@@ -432,7 +469,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
         &self,
         blocks: Vec<MutableBlock<S, L, M>>,
     ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
-        self._register_blocks(blocks)?
+        self._register_blocks(blocks, self.default_duplication_setting)?
             .await
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
     }
@@ -442,16 +479,27 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
         &self,
         blocks: Vec<MutableBlock<S, L, M>>,
     ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
-        self._register_blocks(blocks)?
+        self._register_blocks(blocks, self.default_duplication_setting)?
             .blocking_recv()
+            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
+    }
+
+    pub(crate) async fn register_blocks_with_duplication_setting(
+        &self,
+        blocks: Vec<MutableBlock<S, L, M>>,
+        duplication_setting: BlockRegistrationDuplicationSetting,
+    ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
+        self._register_blocks(blocks, duplication_setting)?
+            .await
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
     }
 
     fn _register_blocks(
         &self,
         blocks: Vec<MutableBlock<S, L, M>>,
+        duplication_setting: BlockRegistrationDuplicationSetting,
     ) -> AsyncResponse<BlockPoolResult<ImmutableBlocks<S, L, M>>> {
-        let (req, resp_rx) = RegisterBlocksReq::new(blocks);
+        let (req, resp_rx) = RegisterBlocksReq::new((blocks, duplication_setting));
 
         self.priority_tx
             .send(PriorityRequest::RegisterBlocks(req))
@@ -549,6 +597,7 @@ struct State<S: Storage, L: LocalityProvider, M: BlockMetadata> {
     return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, L, M>>,
     event_manager: Arc<dyn EventManager>,
     metrics: Arc<PoolMetrics>,
+    default_duplication_setting: BlockRegistrationDuplicationSetting,
 }
 
 struct ProgressEngine<S: Storage, L: LocalityProvider, M: BlockMetadata> {
@@ -579,8 +628,16 @@ mod tests {
             self,
         ) -> anyhow::Result<(BlockPool<S, L, M>, ProgressEngine<S, L, M>)> {
             let args = self.build_internal()?;
-            let (event_manager, cancel_token, blocks, global_registry, async_runtime, metrics) =
-                args.dissolve();
+            let (
+                event_manager,
+                cancel_token,
+                blocks,
+                global_registry,
+                async_runtime,
+                metrics,
+                default_duplication_setting,
+            ) = args.dissolve();
+
             let (pool, progress_engine) = BlockPool::with_progress_engine(
                 event_manager,
                 cancel_token,
@@ -588,6 +645,7 @@ mod tests {
                 global_registry,
                 async_runtime,
                 metrics,
+                default_duplication_setting,
             );
 
             Ok((pool, progress_engine))
@@ -982,5 +1040,217 @@ mod tests {
             0
         );
         Ok(())
+    }
+
+    #[test]
+    fn test_block_registration_allow_duplicates() {
+        const EXPECTED_SEQUENCE_HASH: u64 = 14643705804678351452;
+
+        // Create a new layout
+        let layout = setup_layout(None).unwrap();
+
+        // Create the Blocks
+        let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)
+            .unwrap()
+            .into_blocks()
+            .unwrap();
+
+        let count = blocks.len() as u64;
+
+        let async_runtime = tokio::runtime::Runtime::new().unwrap();
+
+        // Create the BlockPool and add the blocks
+        let pool = BlockPool::builder()
+            .blocks(blocks)
+            .async_runtime(async_runtime.handle().clone())
+            .default_duplication_setting(BlockRegistrationDuplicationSetting::Allowed)
+            .build()
+            .unwrap();
+
+        assert_eq!(pool.total_blocks(), count);
+        assert_eq!(pool.available_blocks(), count);
+        assert_eq!(
+            pool.default_duplication_setting(),
+            BlockRegistrationDuplicationSetting::Allowed
+        );
+
+        // All blocks should be in the Reset/Empty state
+        // No blocks should match the expected sequence hash
+        let matched_blocks = pool
+            .match_sequence_hashes_blocking(&[EXPECTED_SEQUENCE_HASH])
+            .unwrap();
+        assert_eq!(matched_blocks.len(), 0);
+
+        // Allocate a single block from the pool
+        let mut mutable_blocks = pool.allocate_blocks_blocking(1).unwrap();
+        assert_eq!(mutable_blocks.len(), 1);
+        let mut block = mutable_blocks.pop().unwrap();
+
+        assert_eq!(pool.available_blocks(), count - 1);
+
+        // Initialize the sequence on the block with a salt hash
+        block.init_sequence(1337).unwrap();
+
+        // Add some tokens to the block - our page_size is 4
+        block.add_token(1).unwrap();
+        block.add_token(2).unwrap();
+        block.add_token(3).unwrap();
+        block.add_token(4).unwrap();
+
+        // Should fail because we don't have space in the block
+        assert!(block.add_token(5).is_err());
+
+        // Commit the block - this will generate a sequence hash
+        // This will put the block in a Complete state
+        block.commit().unwrap();
+        assert!(block.state().is_complete()); // perhaps renamed to Commited
+
+        let sequence_hash = block.sequence_hash().unwrap();
+        assert_eq!(sequence_hash, EXPECTED_SEQUENCE_HASH);
+
+        // Register the block
+        // We provide a mutable block to the register_blocks function
+        // This will take ownership of the block and return an immutable block
+        let mut immutable_blocks = pool.register_blocks_blocking(vec![block]).unwrap();
+        let block = immutable_blocks.pop().unwrap();
+        assert!(block.state().is_registered());
+        assert_eq!(block.sequence_hash(), sequence_hash);
+
+        let primary = block.clone();
+        let primary_id = block.block_id();
+
+        // Now allocate another and register it with the same sequence
+        let mut mutable_blocks = pool.allocate_blocks_blocking(1).unwrap();
+        assert_eq!(mutable_blocks.len(), 1);
+        let mut block = mutable_blocks.pop().unwrap();
+        assert_ne!(block.block_id(), primary_id);
+
+        assert_eq!(pool.available_blocks(), count - 2);
+
+        block.init_sequence(1337).unwrap();
+        block.add_token(1).unwrap();
+        block.add_token(2).unwrap();
+        block.add_token(3).unwrap();
+        block.add_token(4).unwrap();
+
+        block.commit().unwrap();
+        assert!(block.state().is_complete());
+
+        let sequence_hash = block.sequence_hash().unwrap();
+        assert_eq!(sequence_hash, EXPECTED_SEQUENCE_HASH);
+
+        let mut immutable_blocks = pool.register_blocks_blocking(vec![block]).unwrap();
+        let block = immutable_blocks.pop().unwrap();
+        assert!(block.state().is_registered());
+        assert_eq!(block.sequence_hash(), sequence_hash);
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        assert_eq!(pool.available_blocks(), count - 2);
+        assert_ne!(block.block_id(), primary_id);
+    }
+
+    #[test]
+    fn test_block_registration_disable_duplicates() {
+        const EXPECTED_SEQUENCE_HASH: u64 = 14643705804678351452;
+
+        // Create a new layout
+        let layout = setup_layout(None).unwrap();
+
+        // Create the Blocks
+        let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)
+            .unwrap()
+            .into_blocks()
+            .unwrap();
+
+        let count = blocks.len() as u64;
+
+        let async_runtime = tokio::runtime::Runtime::new().unwrap();
+
+        // Create the BlockPool and add the blocks
+        let pool = BlockPool::builder()
+            .blocks(blocks)
+            .async_runtime(async_runtime.handle().clone())
+            .default_duplication_setting(BlockRegistrationDuplicationSetting::Disabled)
+            .build()
+            .unwrap();
+
+        assert_eq!(pool.total_blocks(), count);
+        assert_eq!(pool.available_blocks(), count);
+
+        // All blocks should be in the Reset/Empty state
+        // No blocks should match the expected sequence hash
+        let matched_blocks = pool
+            .match_sequence_hashes_blocking(&[EXPECTED_SEQUENCE_HASH])
+            .unwrap();
+        assert_eq!(matched_blocks.len(), 0);
+
+        // Allocate a single block from the pool
+        let mut mutable_blocks = pool.allocate_blocks_blocking(1).unwrap();
+        assert_eq!(mutable_blocks.len(), 1);
+        let mut block = mutable_blocks.pop().unwrap();
+
+        assert_eq!(pool.available_blocks(), count - 1);
+
+        // Initialize the sequence on the block with a salt hash
+        block.init_sequence(1337).unwrap();
+
+        // Add some tokens to the block - our page_size is 4
+        block.add_token(1).unwrap();
+        block.add_token(2).unwrap();
+        block.add_token(3).unwrap();
+        block.add_token(4).unwrap();
+
+        // Should fail because we don't have space in the block
+        assert!(block.add_token(5).is_err());
+
+        // Commit the block - this will generate a sequence hash
+        // This will put the block in a Complete state
+        block.commit().unwrap();
+        assert!(block.state().is_complete()); // perhaps renamed to Commited
+
+        let sequence_hash = block.sequence_hash().unwrap();
+        assert_eq!(sequence_hash, EXPECTED_SEQUENCE_HASH);
+
+        // Register the block
+        // We provide a mutable block to the register_blocks function
+        // This will take ownership of the block and return an immutable block
+        let mut immutable_blocks = pool.register_blocks_blocking(vec![block]).unwrap();
+        let block = immutable_blocks.pop().unwrap();
+        assert!(block.state().is_registered());
+        assert_eq!(block.sequence_hash(), sequence_hash);
+
+        let primary = block.clone();
+        let primary_id = block.block_id();
+
+        // Now allocate another and register it with the same sequence
+        let mut mutable_blocks = pool.allocate_blocks_blocking(1).unwrap();
+        assert_eq!(mutable_blocks.len(), 1);
+        let mut block = mutable_blocks.pop().unwrap();
+
+        assert_eq!(pool.available_blocks(), count - 2);
+
+        block.init_sequence(1337).unwrap();
+        block.add_token(1).unwrap();
+        block.add_token(2).unwrap();
+        block.add_token(3).unwrap();
+        block.add_token(4).unwrap();
+
+        block.commit().unwrap();
+        assert!(block.state().is_complete());
+
+        let sequence_hash = block.sequence_hash().unwrap();
+        assert_eq!(sequence_hash, EXPECTED_SEQUENCE_HASH);
+
+        let mut immutable_blocks = pool.register_blocks_blocking(vec![block]).unwrap();
+        let block = immutable_blocks.pop().unwrap();
+        assert!(block.state().is_registered());
+        assert_eq!(block.sequence_hash(), sequence_hash);
+
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        assert_eq!(pool.available_blocks(), count - 1);
+
+        assert_eq!(block.block_id(), primary_id);
     }
 }

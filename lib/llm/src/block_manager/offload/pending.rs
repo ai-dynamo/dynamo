@@ -52,7 +52,7 @@ use crate::block_manager::block::{
     BlockDataProvider, BlockDataProviderMut, BlockError, BlockMetadata, BlockState, ImmutableBlock,
     MutableBlock, ReadableBlock, WritableBlock,
 };
-use crate::block_manager::pool::BlockPoolError;
+use crate::block_manager::pool::{BlockPoolError, BlockRegistrationDuplicationSetting};
 use crate::block_manager::storage::{Local, Storage};
 use crate::block_manager::BlockPool;
 
@@ -112,7 +112,12 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: Blo
             transfer_metadata(source, target)?;
         }
 
-        let blocks = target_pool.register_blocks(targets).await?;
+        let blocks = target_pool
+            .register_blocks_with_duplication_setting(
+                targets,
+                BlockRegistrationDuplicationSetting::Disabled,
+            )
+            .await?;
 
         tracing::debug!("Transfer complete. Registered {} blocks.", blocks.len());
 

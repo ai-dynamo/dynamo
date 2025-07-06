@@ -27,6 +27,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         global_registry: GlobalRegistry,
         async_runtime: Handle,
         metrics: Arc<PoolMetrics>,
+        default_duplication_setting: BlockRegistrationDuplicationSetting,
     ) -> Self {
         Self {
             active: ActiveBlockPool::new(),
@@ -35,6 +36,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
             return_tx,
             event_manager,
             metrics,
+            default_duplication_setting,
         }
     }
 
@@ -52,8 +54,10 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                 }
             }
             PriorityRequest::RegisterBlocks(req) => {
-                let (blocks, resp_tx) = req.dissolve();
-                let immutable_blocks = self.register_blocks(blocks, return_rx).await;
+                let ((blocks, duplication_setting), resp_tx) = req.dissolve();
+                let immutable_blocks = self
+                    .register_blocks(blocks, duplication_setting, return_rx)
+                    .await;
                 if resp_tx.send(immutable_blocks).is_err() {
                     tracing::error!("failed to send response to register blocks");
                 }
@@ -145,6 +149,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
     pub async fn register_blocks(
         &mut self,
         blocks: Vec<MutableBlock<S, L, M>>,
+        duplication_setting: BlockRegistrationDuplicationSetting,
         return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
     ) -> Result<Vec<ImmutableBlock<S, L, M>>, BlockPoolError> {
         let expected_len = blocks.len();
@@ -158,6 +163,12 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
 
             // If the block is already registered, acquire a clone of the immutable block
             if let Some(immutable) = self.active.match_sequence_hash(sequence_hash) {
+                let immutable =
+                    if duplication_setting == BlockRegistrationDuplicationSetting::Allowed {
+                        immutable.with_duplicate(block.into())
+                    } else {
+                        immutable
+                    };
                 immutable_blocks.push(immutable);
                 continue;
             }
@@ -205,8 +216,13 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
 
             let mut immutable = self.active.register(mutable)?;
 
-            if let Some(duplicate) = duplicate {
-                immutable = immutable.with_duplicate(duplicate.into());
+            match duplication_setting {
+                BlockRegistrationDuplicationSetting::Allowed => {
+                    if let Some(duplicate) = duplicate {
+                        immutable = immutable.with_duplicate(duplicate.into());
+                    }
+                }
+                BlockRegistrationDuplicationSetting::Disabled => {}
             }
 
             if offload {
@@ -324,6 +340,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine
         global_registry: GlobalRegistry,
         async_runtime: Handle,
         metrics: Arc<PoolMetrics>,
+        default_duplication_setting: BlockRegistrationDuplicationSetting,
     ) -> Self {
         let (return_tx, return_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut state = State::<S, L, M>::new(
@@ -332,6 +349,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine
             global_registry,
             async_runtime,
             metrics.clone(),
+            default_duplication_setting,
         );
 
         let count = blocks.len();
