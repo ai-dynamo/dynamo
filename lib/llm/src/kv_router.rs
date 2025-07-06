@@ -108,7 +108,6 @@ impl KvRouter {
             .primary_token();
         let metrics_aggregator =
             EndpointCollector::new(component.clone(), cancellation_token.clone()).await;
-        tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
 
         let indexer = KvIndexer::new(cancellation_token.clone(), block_size);
         let scheduler = KvScheduler::start(
