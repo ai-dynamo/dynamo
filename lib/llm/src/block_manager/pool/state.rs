@@ -27,7 +27,6 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         global_registry: GlobalRegistry,
         async_runtime: Handle,
         metrics: Arc<PoolMetrics>,
-        default_duplication_setting: BlockRegistrationDuplicationSetting,
     ) -> Self {
         Self {
             active: ActiveBlockPool::new(),
@@ -36,7 +35,6 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
             return_tx,
             event_manager,
             metrics,
-            default_duplication_setting,
         }
     }
 
@@ -340,7 +338,6 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine
         global_registry: GlobalRegistry,
         async_runtime: Handle,
         metrics: Arc<PoolMetrics>,
-        default_duplication_setting: BlockRegistrationDuplicationSetting,
     ) -> Self {
         let (return_tx, return_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut state = State::<S, L, M>::new(
@@ -349,7 +346,6 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine
             global_registry,
             async_runtime,
             metrics.clone(),
-            default_duplication_setting,
         );
 
         let count = blocks.len();

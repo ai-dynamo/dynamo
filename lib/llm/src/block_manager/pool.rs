@@ -214,7 +214,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Clone for BlockPool<S, L
             ctrl_tx: self.ctrl_tx.clone(),
             available_blocks_counter: self.available_blocks_counter.clone(),
             total_blocks_counter: self.total_blocks_counter.clone(),
-            default_duplication_setting: self.default_duplication_setting.clone(),
+            default_duplication_setting: self.default_duplication_setting,
         }
     }
 }
@@ -343,7 +343,6 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
             global_registry,
             async_runtime,
             metrics,
-            default_duplication_setting,
         );
 
         let available_blocks_counter = progress_engine.available_blocks_counter.clone();
@@ -597,7 +596,6 @@ struct State<S: Storage, L: LocalityProvider, M: BlockMetadata> {
     return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, L, M>>,
     event_manager: Arc<dyn EventManager>,
     metrics: Arc<PoolMetrics>,
-    default_duplication_setting: BlockRegistrationDuplicationSetting,
 }
 
 struct ProgressEngine<S: Storage, L: LocalityProvider, M: BlockMetadata> {
@@ -1116,7 +1114,7 @@ mod tests {
         assert!(block.state().is_registered());
         assert_eq!(block.sequence_hash(), sequence_hash);
 
-        let primary = block.clone();
+        let _primary = block.clone();
         let primary_id = block.block_id();
 
         // Now allocate another and register it with the same sequence
@@ -1220,7 +1218,7 @@ mod tests {
         assert!(block.state().is_registered());
         assert_eq!(block.sequence_hash(), sequence_hash);
 
-        let primary = block.clone();
+        let _primary = block.clone();
         let primary_id = block.block_id();
 
         // Now allocate another and register it with the same sequence
