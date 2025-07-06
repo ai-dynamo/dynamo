@@ -118,23 +118,36 @@ pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
 /// ### Returns
 ///
 /// A vector of `LocalBlockHash` representing the computed hashes for each chunk of tokens.
+#[cfg(target_endian = "little")]
 pub fn compute_block_hash_for_seq(tokens: &[u32], kv_block_size: u32) -> Vec<LocalBlockHash> {
     tokens
-        .chunks_exact(kv_block_size as usize) // Split into chunks of kv_block_size elements
+        .chunks_exact(kv_block_size as usize)
         .map(|chunk| {
-            // SAFETY: This is safe because:
-            // 1. u32 and u8 have compatible memory layouts (u32 is 4 contiguous u8s)
-            // 2. The slice is valid for the duration of this operation
-            // 3. We're only reading from the memory, not modifying it
-            // 4. The alignment requirements are satisfied (u8 has no alignment requirements)
-            let bytes = unsafe {
-                std::slice::from_raw_parts(
-                    chunk.as_ptr() as *const u8,
-                    std::mem::size_of_val(chunk),
-                )
-            };
-
+            let bytes = bytemuck::cast_slice::<u32, u8>(chunk);
             compute_block_hash(bytes)
+        })
+        .collect()
+}
+
+/// Compute the hash for a sequence of tokens (non-little-endian fallback).
+///
+/// This implementation ensures consistent hashing across different architectures
+/// by explicitly converting each u32 to little-endian bytes.
+///
+/// ### Arguments
+///
+/// * `tokens` - A vector of `u32` tokens.
+///
+/// ### Returns
+///
+/// A vector of `LocalBlockHash` representing the computed hashes for each chunk of tokens.
+#[cfg(not(target_endian = "little"))]
+pub fn compute_block_hash_for_seq(tokens: &[u32], kv_block_size: u32) -> Vec<LocalBlockHash> {
+    tokens
+        .chunks_exact(kv_block_size as usize)
+        .map(|chunk| {
+            let bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
+            compute_block_hash(&bytes)
         })
         .collect()
 }
@@ -917,7 +930,6 @@ impl KvIndexerInterface for KvIndexerSharded {
 mod tests {
 
     use super::*;
-    use bytes::Bytes;
     use rstest::rstest;
     use rstest_reuse::{self, *};
     use tokio::time;
