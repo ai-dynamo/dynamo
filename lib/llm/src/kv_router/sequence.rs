@@ -231,7 +231,6 @@ pub struct ActiveSequencesMultiWorker {
 impl ActiveSequencesMultiWorker {
     pub fn new(block_size: usize, worker_ids: Vec<WorkerId>) -> Self {
         assert!(block_size > 1, "block_size must be greater than 1");
-        assert!(!worker_ids.is_empty(), "worker_ids must not be empty");
 
         let mut senders = HashMap::new();
         let mut handles = HashMap::new();
