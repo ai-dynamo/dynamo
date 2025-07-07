@@ -100,6 +100,12 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     parser.add_argument(
         "--network-interface", default="eth3", help="Network interface to use"
     )
+    parser.add_argument(
+        "--model-name", required=True, help="Model name"
+    )
+    parser.add_argument(
+        "--extra-engine-args", required=True, help="Extra engine arguments"
+    )
     parser.add_argument("--dry-run", action="store_true", help="Dry run the job script")
     return parser.parse_args(args)
 
