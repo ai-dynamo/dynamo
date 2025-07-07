@@ -88,6 +88,9 @@ pub enum BlockError {
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+
+    #[error("Immutable block already has a duplicate")]
+    IncompatibleImmutableBlock,
 }
 
 pub trait BlockMetadata: Default + std::fmt::Debug + Clone + Ord + Send + Sync + 'static {
@@ -775,11 +778,18 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ImmutableBlock<S, L, M> 
         }
     }
 
-    pub(crate) fn with_duplicate(self, duplicate: Arc<MutableBlock<S, L, M>>) -> Self {
-        Self {
+    /// Attempts to add a duplicate block to the ImmutableBlock.
+    pub(crate) fn with_duplicate(
+        self,
+        duplicate: Arc<MutableBlock<S, L, M>>,
+    ) -> Result<Self, BlockError> {
+        if self.duplicate.is_some() {
+            return Err(BlockError::IncompatibleImmutableBlock);
+        }
+        Ok(Self {
             duplicate: Some(duplicate),
             ..self
-        }
+        })
     }
 
     pub(crate) fn mutable_block(&self) -> &Arc<MutableBlock<S, L, M>> {

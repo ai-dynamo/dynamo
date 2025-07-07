@@ -177,16 +177,17 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
 
             // If the block is already registered, acquire a clone of the immutable block
             if let Some(immutable) = self.active.match_sequence_hash(sequence_hash) {
-                let immutable =
-                    if duplication_setting == BlockRegistrationDuplicationSetting::Allowed {
-                        immutable.with_duplicate(block.into())
-                    } else {
-                        // immediate return the block to the pool if duplicates are disabled
-                        if let Some(blocks) = block.try_take_block(private::PrivateToken) {
-                            self.inactive.return_blocks(blocks);
-                        }
-                        immutable
-                    };
+                let immutable = if duplication_setting
+                    == BlockRegistrationDuplicationSetting::Allowed
+                {
+                    immutable.with_duplicate(block.into()).expect("incompatible immutable block; only primary should be returned from match_sequence_hash")
+                } else {
+                    // immediate return the block to the pool if duplicates are disabled
+                    if let Some(blocks) = block.try_take_block(private::PrivateToken) {
+                        self.inactive.return_blocks(blocks);
+                    }
+                    immutable
+                };
                 immutable_blocks.push(immutable);
                 continue;
             }
@@ -237,7 +238,9 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
             match duplication_setting {
                 BlockRegistrationDuplicationSetting::Allowed => {
                     if let Some(duplicate) = duplicate {
-                        immutable = immutable.with_duplicate(duplicate.into());
+                        immutable = immutable
+                            .with_duplicate(duplicate.into())
+                            .expect("incompatible immutable block; only primary should be returned from ActiveBlockPool::register");
                     }
                 }
                 BlockRegistrationDuplicationSetting::Disabled => {
