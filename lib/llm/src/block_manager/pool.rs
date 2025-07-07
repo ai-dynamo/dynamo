@@ -238,12 +238,17 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPoolArgsBuilder<S, 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BlockRegistrationDuplicationSetting {
     /// On registration, if duplication is allowed, blocks with duplicate hashes cannot be registered directly,
-    /// but instead can be held live with a strong reference to the primary block. This maintains the lifetime of
+    /// but instead can be held live with a strong arc to the primary block. This maintains the lifetime of
     /// the duplicate block.
     Allowed,
 
-    /// On registration, if duplication is disabled, blocks with duplicate hashes will be returned to the inactive pool
-    /// and the primary block, the one first registered, will be returned to the sequence from the registration.
+    /// On registration, if duplication is disabled, blocks with duplicate hashes will be returned immediately
+    /// to the inactive pool and the primary block, the one first registered, will be returned to the caller,
+    /// replacing the duplicate block.
+    ///
+    /// Note: If block duplication is disabled, then the implementation must always respect the fact that the
+    /// mutable block that was registered, may not be the same block returned by the registration function, and
+    /// thus be able to update any references that wish to use the block after registration.
     Disabled,
 }
 
