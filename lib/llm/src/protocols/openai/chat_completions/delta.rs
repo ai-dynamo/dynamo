@@ -130,40 +130,15 @@ impl DeltaGenerator {
         finish_reason: Option<async_openai::types::FinishReason>,
         logprobs: Option<async_openai::types::ChatChoiceLogprobs>,
     ) -> async_openai::types::CreateChatCompletionStreamResponse {
-        tracing::info!(
-            index,
-            text = ?text,
-            finish_reason = ?finish_reason,
-            logprobs = ?logprobs,
-            "create_choice called with response fragment"
-        );
-
-        let (content, tool_calls) = match text.as_ref() {
-            Some(t) => match crate::preprocessor::tools::try_parse_tool_call_stream(t) {
-                Ok(Some(tool_call)) => {
-                    tracing::info!(
-                        function_name = ?tool_call.function.as_ref().and_then(|f| f.name.clone()),
-                        arguments = ?tool_call.function.as_ref().and_then(|f| f.arguments.clone()),
-                        tool_call_id = ?tool_call.id,
-                        "Emitting tool_call from assistant delta"
-                    );
-                    (None, Some(vec![tool_call]))
-                }
-                _ => (Some(t.clone()), None),
-            },
-            None => (None, None),
-        };
-
-        // TODO: Update for tool calling
         let delta = async_openai::types::ChatCompletionStreamResponseDelta {
+            content: text,
+            function_call: None,
+            tool_calls: None,
             role: if self.msg_counter == 0 {
                 Some(async_openai::types::Role::Assistant)
             } else {
                 None
             },
-            content,
-            tool_calls,
-            function_call: None,
             refusal: None,
         };
 

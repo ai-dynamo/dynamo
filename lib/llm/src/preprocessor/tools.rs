@@ -189,23 +189,23 @@ pub fn try_parse_call_common(message: &str) -> anyhow::Result<Option<ToolCallRes
 //         try_parse_tool_call_aggregate(&json).ok().flatten()
 //     })
 //     .collect();
-// /// Try parsing a string as a structured tool call, for aggregation usage.
-// ///
-// /// If successful, returns a `ChatCompletionMessageToolCall`.
-// pub fn try_parse_tool_call_aggregate(
-//     message: &str,
-// ) -> anyhow::Result<Option<ChatCompletionMessageToolCall>> {
-//     let parsed = try_parse_call_common(message)?;
-//     if let Some(parsed) = parsed {
-//         Ok(Some(ChatCompletionMessageToolCall {
-//             id: parsed.id,
-//             r#type: ChatCompletionToolType::Function,
-//             function: FunctionCall {
-//                 name: parsed.function.name,
-//                 arguments: parsed.function.arguments,
-//             },
-//         }))
-//     } else {
-//         Ok(None)
-//     }
-// }
+/// Try parsing a string as a structured tool call, for aggregation usage.
+///
+/// If successful, returns a `ChatCompletionMessageToolCall`.
+pub fn try_parse_tool_call_aggregate(
+    message: &str,
+) -> anyhow::Result<Option<async_openai::types::ChatCompletionMessageToolCall>> {
+    let parsed = try_parse_call_common(message)?;
+    if let Some(parsed) = parsed {
+        Ok(Some(async_openai::types::ChatCompletionMessageToolCall {
+            id: parsed.id,
+            r#type: ChatCompletionToolType::Function,
+            function: async_openai::types::FunctionCall {
+                name: parsed.function.name,
+                arguments: parsed.function.arguments,
+            },
+        }))
+    } else {
+        Ok(None)
+    }
+}

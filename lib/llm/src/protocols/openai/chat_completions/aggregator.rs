@@ -145,40 +145,6 @@ impl DeltaAggregator {
                             state_choice.text.push_str(content);
                         }
 
-                        // Handle tool_calls
-                        if let Some(tool_calls) = &choice.delta.tool_calls {
-                            let calls: Vec<_> = tool_calls
-                                .iter()
-                                .filter_map(|chunk| {
-                                    Some(async_openai::types::ChatCompletionMessageToolCall {
-                                        id: chunk.id.clone().unwrap_or_else(|| {
-                                            format!("call-{}", uuid::Uuid::new_v4())
-                                        }),
-                                        r#type: chunk.r#type.clone().unwrap_or(
-                                            async_openai::types::ChatCompletionToolType::Function,
-                                        ),
-                                        function: async_openai::types::FunctionCall {
-                                            name: chunk
-                                                .function
-                                                .as_ref()?
-                                                .name
-                                                .clone()
-                                                .unwrap_or_default(),
-                                            arguments: chunk
-                                                .function
-                                                .as_ref()?
-                                                .arguments
-                                                .clone()
-                                                .unwrap_or("{}".to_string()),
-                                        },
-                                    })
-                                })
-                                .collect();
-                            if !calls.is_empty() {
-                                state_choice.tool_calls = Some(calls);
-                            }
-                        }
-
                         // Update finish reason if provided.
                         if let Some(finish_reason) = choice.finish_reason {
                             state_choice.finish_reason = Some(finish_reason);
@@ -190,11 +156,31 @@ impl DeltaAggregator {
             .await;
 
         // Return early if an error was encountered.
-        let aggregator = if let Some(error) = aggregator.error {
+        let mut aggregator = if let Some(error) = aggregator.error {
             return Err(error);
         } else {
             aggregator
         };
+
+        // After aggregation, inspect each choice's text for tool call syntax
+        for choice in aggregator.choices.values_mut() {
+            if choice.tool_calls.is_none() {
+                if let Ok(Some(tool_call)) =
+                    crate::preprocessor::tools::try_parse_tool_call_aggregate(&choice.text)
+                {
+                    tracing::info!(
+                        tool_call_id = %tool_call.id,
+                        function_name = %tool_call.function.name,
+                        arguments = %tool_call.function.arguments,
+                        "Parsed structured tool call from aggregated content"
+                    );
+
+                    choice.tool_calls = Some(vec![tool_call]);
+                    choice.text.clear();
+                    choice.finish_reason = Some(async_openai::types::FinishReason::ToolCalls);
+                }
+            }
+        }
 
         // Extract aggregated choices and sort them by index.
         let mut choices: Vec<_> = aggregator
