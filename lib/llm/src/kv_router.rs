@@ -313,12 +313,11 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             InstanceSource::Dynamic(_) => {
                 // Extract context ID for request tracking
                 let context_id = request.context().id().to_string();
-
                 let (instance_id, overlap_amount) = self
                     .chooser
                     .find_best_match(&context_id, &request.token_ids)
                     .await?;
-                let has_worker_id_annotation = request.has_annotation("query_instance_id");
+                let query_instance_id = request.has_annotation("query_instance_id");
                 // Extract context information before moving the request
                 let stream_context = request.context().clone();
                 // Update the request with the estimated prefix hit blocks
@@ -326,10 +325,10 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 let isl = backend_input.token_ids.len();
                 backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
                 let updated_request = context.map(|_| backend_input);
-                // Take this branch when request has the annotation "query_instance_id"
-                // "nvext": { "annotations": ["query_instance_id"]}}
-                // This is used to indicate that the request will be routed to a worker
-                if has_worker_id_annotation {
+                // if request has the annotation "query_instance_id", for example
+                // curl -d '{... ,"nvext": { "annotations": ["query_instance_id"]}}'
+                // request will not be routed to worker immediately
+                if query_instance_id {
                     let instance_id_str = instance_id.to_string();
                     let response =
                         Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
