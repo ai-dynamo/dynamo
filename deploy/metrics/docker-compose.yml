@@ -133,6 +133,11 @@ services:
       - GF_INSTALL_PLUGINS=grafana-piechart-panel
       # Default min interval is 5s, but can be configured lower
       - GF_DASHBOARDS_MIN_REFRESH_INTERVAL=2s
+      # Disable password change requirement
+      - GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION=false
+      - GF_SECURITY_ADMIN_PASSWORD_POLICY=false
+      - GF_AUTH_DISABLE_LOGIN_FORM=false
+      - GF_AUTH_DISABLE_SIGNOUT_MENU=false
     restart: unless-stopped
     ports:
       - "3001:3001"
