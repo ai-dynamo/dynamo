@@ -615,6 +615,7 @@ impl KvMetricsAggregator {
     }
 
     fn get_metrics<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        // TODO: update EndpointKvMetrics to match the new ForwardPassMetrics struct
         let endpoints = self.inner.get_endpoints();
         let endpoint_kv_metrics = endpoints
             .endpoints
