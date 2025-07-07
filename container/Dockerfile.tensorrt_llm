@@ -221,7 +221,6 @@ RUN mkdir /opt/dynamo && \
 
 # Activate virtual environment
 ENV VIRTUAL_ENV=/opt/dynamo/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 # Install NIXL Python module
 RUN cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl
