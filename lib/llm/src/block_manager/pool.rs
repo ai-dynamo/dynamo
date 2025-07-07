@@ -518,8 +518,12 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
     /// making them available for sharing via the [`ActiveBlockPool`].
     ///
     /// This function checks if any of the blocks have the same sequence hash as an existing block
-    /// in the active pool. If so, it returns an [`ImmutableBlock`] pointing to the existing block,
-    /// and the provided `block` is implicitly dropped (returned to the [`InactiveBlockPool`]).
+    /// in the active pool. If so, it returns an [`ImmutableBlock`].
+    ///
+    /// Note: Depending on the [`BlockRegistrationDuplicationSetting`], the returned [`ImmutableBlock`] may
+    /// not be the same block that was provided -- that is, it should hold the same content, but was the
+    /// first block registered. If duplication is allowed, we will keep alive both the primary block and
+    /// the duplicate block.
     pub async fn register_blocks(
         &self,
         blocks: Vec<MutableBlock<S, L, M>>,
@@ -648,11 +652,9 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
 
     /// Resets the pool to its initial state.
     ///
-    /// This function will acquire all blocks, which will reset their state, then return them.
+    /// This function will error unless all blocks have returned to the inactive pool.
     ///
-    /// # Returns
-    ///
-    /// A [`Result`] containing `Ok(())` if the reset was successful, otherwise an error.
+    /// On success, all blocks will have been reset to their initial state ([`super::block::BlockState::Reset`]).
     pub async fn reset(&self) -> BlockPoolResult<()> {
         self._reset()?
             .await
