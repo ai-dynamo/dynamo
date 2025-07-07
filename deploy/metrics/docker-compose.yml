@@ -121,9 +121,8 @@ services:
     image: grafana/grafana-enterprise:12.0.1
     container_name: grafana
     volumes:
-      - ./grafana_dashboards:/etc/grafana/provisioning/dashboards:rw
+      - ./grafana_dashboards:/etc/grafana/provisioning/dashboards
       - ./grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
-      # - ./grafana-dashboard-providers.yml:/etc/grafana/provisioning/dashboards/dashboard-providers.yml
     environment:
       # Port 3000 is already used by "dynamo serve", so use 3001
       - GF_SERVER_HTTP_PORT=3001
