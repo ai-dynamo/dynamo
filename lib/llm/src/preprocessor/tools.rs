@@ -144,6 +144,16 @@ pub fn try_parse_tool_call_stream(
 
 /// Internal helper that parses any known valid tool call format into a unified form.
 pub fn try_parse_call_common(message: &str) -> anyhow::Result<Option<ToolCallResponse>> {
+    let trimmed = message.trim();
+
+    // Handle <TOOLCALL>[ ... ] or <tool_call>[ ... ]
+    let json = if trimmed.starts_with("<TOOLCALL>[") && trimmed.ends_with("]</TOOLCALL>") {
+        tracing::info!("Stripping <TOOLCALL> wrapper from tool call payload");
+        &trimmed["<TOOLCALL>[".len()..trimmed.len() - "]</TOOLCALL>".len()]
+    } else {
+        trimmed
+    };
+
     let parse = |name: String, args: HashMap<String, Value>| -> anyhow::Result<_> {
         Ok(ToolCallResponse {
             id: format!("call-{}", Uuid::new_v4()),
@@ -155,15 +165,15 @@ pub fn try_parse_call_common(message: &str) -> anyhow::Result<Option<ToolCallRes
         })
     };
 
-    if let Ok(single) = serde_json::from_str::<CalledFunctionParameters>(message) {
+    if let Ok(single) = serde_json::from_str::<CalledFunctionParameters>(json) {
         return parse(single.name, single.parameters).map(Some);
-    } else if let Ok(single) = serde_json::from_str::<CalledFunctionArguments>(message) {
+    } else if let Ok(single) = serde_json::from_str::<CalledFunctionArguments>(json) {
         return parse(single.name, single.arguments).map(Some);
-    } else if let Ok(mut list) = serde_json::from_str::<Vec<CalledFunctionParameters>>(message) {
+    } else if let Ok(mut list) = serde_json::from_str::<Vec<CalledFunctionParameters>>(json) {
         if let Some(item) = list.pop() {
             return parse(item.name, item.parameters).map(Some);
         }
-    } else if let Ok(mut list) = serde_json::from_str::<Vec<CalledFunctionArguments>>(message) {
+    } else if let Ok(mut list) = serde_json::from_str::<Vec<CalledFunctionArguments>>(json) {
         if let Some(item) = list.pop() {
             return parse(item.name, item.arguments).map(Some);
         }
@@ -171,3 +181,31 @@ pub fn try_parse_call_common(message: &str) -> anyhow::Result<Option<ToolCallRes
 
     Ok(None)
 }
+
+// let calls: Vec<_> = tool_calls
+//     .iter()
+//     .filter_map(|chunk| {
+//         let json = serde_json::to_string(&chunk.function)?;
+//         try_parse_tool_call_aggregate(&json).ok().flatten()
+//     })
+//     .collect();
+// /// Try parsing a string as a structured tool call, for aggregation usage.
+// ///
+// /// If successful, returns a `ChatCompletionMessageToolCall`.
+// pub fn try_parse_tool_call_aggregate(
+//     message: &str,
+// ) -> anyhow::Result<Option<ChatCompletionMessageToolCall>> {
+//     let parsed = try_parse_call_common(message)?;
+//     if let Some(parsed) = parsed {
+//         Ok(Some(ChatCompletionMessageToolCall {
+//             id: parsed.id,
+//             r#type: ChatCompletionToolType::Function,
+//             function: FunctionCall {
+//                 name: parsed.function.name,
+//                 arguments: parsed.function.arguments,
+//             },
+//         }))
+//     } else {
+//         Ok(None)
+//     }
+// }
