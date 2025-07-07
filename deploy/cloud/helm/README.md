@@ -32,12 +32,21 @@ You can build and push Docker images for the Dynamo cloud components (API server
 
 #### 🏗️ Build Dynamo inference runtime.
 
-Make sure you have first built and pushed to your registry Dynamo Base Image for Dynamo inference runtime.
+[One-time Action]
+For basic cases you could use the prebuilt image for the Dynamo Inference Runtime.
+Just export the environment variable. This will be the image used by your individual components. You pick whatever dynamo version you want or use the latest (default)
 
 ```bash
+export DYNAMO_IMAGE=nvcr.io/nvidia/dynamo:latest-vllm
+```
+
+For advanced examples make sure you have first built and pushed to your registry Dynamo Base Image for Dynamo inference runtime. This is a one-time operation.
+
+```bash
+# Run the script to build the default dynamo:latest-vllm image.
 ./container/build.sh
 export IMAGE_TAG=<TAG>
-# the above builds the dynamo:latest-vllm image.
+# retag the image
 docker tag dynamo:latest-vllm <your-registry>/dynamo:${IMAGE_TAG}
 docker push <your-registry>/dynamo:${IMAGE_TAG}
 ```
@@ -45,7 +54,15 @@ docker push <your-registry>/dynamo:${IMAGE_TAG}
 
 #### 🛠️ Build and push Dynamo Cloud platform components
 
-First, set the required environment variables:
+[One-time Action]
+You should also setup or build (advanced case) the images for the Dynamo Cloud Platform.
+If you are a **👤 Dynamo User** you would use the standard images, so just export the appropriate tag:
+```bash
+export IMAGE_TAG=<TAG>
+```
+
+If you are a **🧑‍💻 Dynamo Contributor** you would have to rebuild the dynamo platform images as the code evolves.To do so please use the steps below.
+Set the required environment variables:
 
 ```bash
 export DOCKER_SERVER=<CONTAINER_REGISTRY>
@@ -55,12 +72,9 @@ export IMAGE_TAG=<TAG>
 As a description of the placeholders:
 - `<CONTAINER_REGISTRY>`: Your container registry (e.g., `nvcr.io`, `docker.io/<your-username>`, etc.)
 - `<TAG>`: The tag you want to use for the images of the Dynamo cloud components (e.g., `latest`, `0.0.1`, etc.)
-By default if you use the `dynamo deploy` cli, this tag has to match the tag of the runtime container image.
-If the runtime image tag is not explicitly set, the default is the `dynamo:latest`.
-If you are a dynamo user, your pick whatever dynamo version you want and deploy the Dynamo Cloud once for all of your future graphs.
+If the runtime image tag is not explicitly set, the default is the `latest`.
 
-If you are a contributor, you would need to rebuild these images if you make changes to the Operator or Api Store.
-The tag will go into the dynamo-operator:<IMAGE_TAG> image for the Operator and api-store:<IMAGE_TAG> for the API Store.  The runtime (base) image handles the inference toolchain and the sdk and built by the (`build.sh`). Use the same tags for both images if deploying with `dynamo deploy`. The tags do not have to match if you specify tags explicitly in your Helm and/or dynamo deploy config. (but the images must be compatible)
+The tag will go into the dynamo-operator:<IMAGE_TAG> image for the Operator.  The runtime (base) image handles the inference toolchain and the sdk and built by the (`build.sh`). The tags do not have to match the runtime  image tag but the images must be compatible.
 
 
 Note: Make sure you're logged in to your container registry before pushing images. For example:
