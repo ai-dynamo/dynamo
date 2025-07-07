@@ -17,7 +17,7 @@ ARG BASE_IMAGE="nvcr.io/nvidia/pytorch"
 ARG BASE_IMAGE_TAG="25.05-py3"
 ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
-ARG RUNTIME_IMAGE_TAG="12.9.0-devel-ubuntu24.04"
+ARG RUNTIME_IMAGE_TAG="12.9.0-runtime-ubuntu24.04"
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -423,6 +423,15 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 #TODO: Remove this once we have a functional dev image built on top of the runtime image
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
     uv pip install --requirement /tmp/requirements.txt
+
+# Copy CUDA toolkit components needed for nvcc
+COPY --from=build /usr/local/cuda/bin/ /usr/local/cuda/bin/
+COPY --from=build /usr/local/cuda/include /usr/local/cuda/include
+COPY --from=build /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
+COPY --from=build /usr/local/cuda/lib64/libnvvm.so* /usr/local/cuda/lib64/
+COPY --from=build /usr/local/cuda/lib64/libnvvmx.so* /usr/local/cuda/lib64/
+COPY --from=build /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/
+COPY --from=build /usr/local/cuda/nvvm /usr/local/cuda/nvvm
 
 COPY --from=build /usr/local/lib/lib* /usr/local/lib/
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torch /usr/local/lib/python3.12/dist-packages/torch
