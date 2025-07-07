@@ -18,7 +18,7 @@ limitations under the License.
 # 🚀 Deploy Dynamo Cloud to Kubernetes
 
 Dynamo Cloud acts as an orchestration layer between the end user and Kubernetes, handling the complexity of deploying your graphs for you.
-Before you can deploy your graphs you need to one-time deploy the dynamo runtime and dynamo cloud images.
+Before you can deploy your graphs, you need to deploy the Dynamo Runtime and Dynamo Cloud images. This is a one-time action, only necessary the first time you deploy a DynamoGraph.
 
 
 ## 🏗️ Building Docker images for Dynamo Cloud components
