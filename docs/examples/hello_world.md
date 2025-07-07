@@ -66,6 +66,12 @@ Users/Clients (HTTP)
 
 ## Running the Example Locally
 
+Make sure you are running etcd and nats
+```bash
+sudo systemctl start etcd
+sudo systemctl start nats-server
+```
+
 1. Launch all three services using a single command:
 
 ```bash
@@ -93,21 +99,24 @@ This example can be deployed to a Kubernetes cluster using [Dynamo Cloud](../../
 
 ### Prerequisites
 
-You must have first followed the instructions in [deploy/cloud/helm/README.md](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/helm/README.md) to create your Dynamo cloud deployment.
+You must have first followed the instructions in [deploy/cloud/helm/README.md](../../deploy/cloud/helm/README.md) to create your Dynamo cloud deployment.
+
+Make sure your dynamo cloud the `deploy.sh` script finished successfully and setup port forwarding in another window per its suggestion (note, you may not need that if you use ingress).
+
+```bash
+kubectl port-forward svc/$DEPLOYMENT_NAME-frontend 3000:3000  -n ${KUBE_NS}
+```
 
 ### Deployment Steps For your Hello World graph.
 
-For detailed deployment instructions, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md). The following are the specific commands for the hello world example:
+For detailed deployment instructions, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md).
+
+
+The following are the specific commands for the hello world example:
 
 ```bash
-Make sure your dynamo cloud deploy.sh script from the prior step finished successfully and setup port forwaring in another window
-per its suggestion.
-
-kubectl port-forward svc/...-dynamo-api-store <local-port>:80 -n $NAMESPACE
-
-
 # Set your dynamo root directory
-cd <root dynamo folder>
+cd <root-dynamo-folder>
 export PROJECT_ROOT=$(pwd)
 
 # Configure environment variables (see operator_deployment.md for details)
