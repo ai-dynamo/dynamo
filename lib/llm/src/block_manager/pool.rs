@@ -109,10 +109,10 @@ pub enum OwnedBlock<S: Storage, L: LocalityProvider, M: BlockMetadata> {
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> MaybeReturnableBlock<S, L, M>
     for OwnedBlock<S, L, M>
 {
-    fn is_droppable(&self) -> bool {
+    fn is_returnable(&self) -> bool {
         match self {
-            OwnedBlock::Mutable(block) => block.is_droppable(),
-            OwnedBlock::Immutable(block) => block.is_droppable(),
+            OwnedBlock::Mutable(block) => block.is_returnable(),
+            OwnedBlock::Immutable(block) => block.is_returnable(),
         }
     }
 

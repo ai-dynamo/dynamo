@@ -114,7 +114,7 @@ pub trait BlockMetadata: Default + std::fmt::Debug + Clone + Ord + Send + Sync +
 pub trait MaybeReturnableBlock<S: Storage, L: LocalityProvider, M: BlockMetadata> {
     /// At the time of the call, the block is singularly owned and therefore will be returned to the pool
     /// if dropped.
-    fn is_droppable(&self) -> bool;
+    fn is_returnable(&self) -> bool;
 
     /// Try to take ownership of the block.
     ///
@@ -737,7 +737,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> IntoReadableBlocks<L, M>
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> MaybeReturnableBlock<S, L, M>
     for MutableBlock<S, L, M>
 {
-    fn is_droppable(&self) -> bool {
+    fn is_returnable(&self) -> bool {
         self.block.is_some()
     }
 
@@ -877,7 +877,7 @@ impl<S: Storage + 'static, L: LocalityProvider, M: BlockMetadata> ImmutableBlock
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> MaybeReturnableBlock<S, L, M>
     for ImmutableBlock<S, L, M>
 {
-    fn is_droppable(&self) -> bool {
+    fn is_returnable(&self) -> bool {
         // determine if the arc use count is 1; if duplicate, evaluate that arc, otherwise evaluate the primary
         match &self.duplicate {
             Some(duplicate) => Arc::strong_count(duplicate) == 1,
