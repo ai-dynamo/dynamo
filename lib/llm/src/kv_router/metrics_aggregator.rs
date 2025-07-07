@@ -200,7 +200,7 @@ pub async fn collect_endpoints_task(
                 if should_send {
                     tracing::trace!("Endpoints changed, sending update for service: {service_subject}");
                     if watch_tx.send(processed.clone()).is_err() {
-                        tracing::trace!("failed to send processed endpoints; shutting down");
+                        tracing::error!("failed to send processed endpoints; shutting down");
                         break;
                     }
                     last_sent = Some(processed);
