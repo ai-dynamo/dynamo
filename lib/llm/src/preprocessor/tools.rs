@@ -116,27 +116,25 @@ impl ToolCallingMatcher {
     }
 }
 
-use async_openai::types::{
-    ChatCompletionMessageToolCallChunk, ChatCompletionToolType, FunctionCallStream,
-};
-
 /// Try parsing a string as a structured tool call, for streaming (delta) usage.
 ///
 /// If successful, returns a `ChatCompletionMessageToolCallChunk`.
 pub fn try_parse_tool_call_stream(
     message: &str,
-) -> anyhow::Result<Option<ChatCompletionMessageToolCallChunk>> {
+) -> anyhow::Result<Option<async_openai::types::ChatCompletionMessageToolCallChunk>> {
     let parsed = try_parse_call_common(message)?;
     if let Some(parsed) = parsed {
-        Ok(Some(ChatCompletionMessageToolCallChunk {
-            index: 0,
-            id: Some(parsed.id),
-            r#type: Some(ChatCompletionToolType::Function),
-            function: Some(FunctionCallStream {
-                name: Some(parsed.function.name),
-                arguments: Some(parsed.function.arguments),
-            }),
-        }))
+        Ok(Some(
+            async_openai::types::ChatCompletionMessageToolCallChunk {
+                index: 0,
+                id: Some(parsed.id),
+                r#type: Some(async_openai::types::ChatCompletionToolType::Function),
+                function: Some(async_openai::types::FunctionCallStream {
+                    name: Some(parsed.function.name),
+                    arguments: Some(parsed.function.arguments),
+                }),
+            },
+        ))
     } else {
         Ok(None)
     }
@@ -182,13 +180,6 @@ pub fn try_parse_call_common(message: &str) -> anyhow::Result<Option<ToolCallRes
     Ok(None)
 }
 
-// let calls: Vec<_> = tool_calls
-//     .iter()
-//     .filter_map(|chunk| {
-//         let json = serde_json::to_string(&chunk.function)?;
-//         try_parse_tool_call_aggregate(&json).ok().flatten()
-//     })
-//     .collect();
 /// Try parsing a string as a structured tool call, for aggregation usage.
 ///
 /// If successful, returns a `ChatCompletionMessageToolCall`.
