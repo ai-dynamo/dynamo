@@ -140,7 +140,7 @@ class ManagedProcess:
                             cmdline,
                         )
                         terminate_process_tree(ps_process.pid, self._logger)
-            except (psutil.NoSuchProcess, psutil.AccessDenied):
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                 # Process may have terminated or become inaccessible during iteration
                 pass
 
@@ -256,21 +256,32 @@ class ManagedProcess:
     def _terminate_existing(self):
         if self.terminate_existing:
             for proc in psutil.process_iter(["name", "cmdline"]):
-                if proc.name() == self._command_name or proc.name() in self.stragglers:
-                    self._logger.info(
-                        "Terminating Existing %s %s", proc.name(), proc.pid
-                    )
-
-                    terminate_process_tree(proc.pid, self._logger)
-                for cmdline in self.straggler_commands:
-                    if cmdline in " ".join(proc.cmdline()):
+                try:
+                    if (
+                        proc.name() == self._command_name
+                        or proc.name() in self.stragglers
+                    ):
                         self._logger.info(
-                            "Terminating Existing CmdLine %s %s %s",
-                            proc.name(),
-                            proc.pid,
-                            proc.cmdline(),
+                            "Terminating Existing %s %s", proc.name(), proc.pid
                         )
+
                         terminate_process_tree(proc.pid, self._logger)
+                    for cmdline in self.straggler_commands:
+                        if cmdline in " ".join(proc.cmdline()):
+                            self._logger.info(
+                                "Terminating Existing CmdLine %s %s %s",
+                                proc.name(),
+                                proc.pid,
+                                proc.cmdline(),
+                            )
+                            terminate_process_tree(proc.pid, self._logger)
+                except (
+                    psutil.NoSuchProcess,
+                    psutil.AccessDenied,
+                    psutil.ZombieProcess,
+                ):
+                    # Process may have terminated or become inaccessible during iteration
+                    pass
 
 
 def main():

@@ -54,6 +54,14 @@ class DecodeRequestHandler:
         async for result in results:
             yield result
 
+    async def flush_cache(self, request: dict):
+        _ = request
+        asyncio.create_task(self.engine.tokenizer_manager.flush_cache())
+        yield {
+            "status": "success",
+            "message": "Cache flush initiated. Check backend logs for status",
+        }
+
 
 async def graceful_shutdown(runtime):
     logging.info("Received shutdown signal, shutting down DistributedRuntime")
@@ -89,8 +97,13 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
     component = runtime.namespace("dynamo").component("decode")
     await component.create_service()
 
-    endpoint = component.endpoint("generate")
-    await endpoint.serve_endpoint(handler.generate)
+    gen_endpoint = component.endpoint("generate")
+    flush_endpoint = component.endpoint("flush_cache")
+
+    tasks = [gen_endpoint.serve_endpoint(handler.generate)]
+    tasks.append(flush_endpoint.serve_endpoint(handler.flush_cache))
+
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":

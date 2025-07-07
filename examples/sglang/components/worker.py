@@ -242,6 +242,14 @@ class RequestHandler:
         async for _ in prefill:
             pass
 
+    async def flush_cache(self, request: dict):
+        _ = request
+        asyncio.create_task(self.engine.tokenizer_manager.flush_cache())
+        yield {
+            "status": "success",
+            "message": "Cache flush initiated. Check backend logs for status",
+        }
+
 
 async def graceful_shutdown(runtime):
     logging.info("Received shutdown signal, shutting down DistributedRuntime")
@@ -305,7 +313,12 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
     )
     _ = ZmqKvEventPublisher(component=component, config=zmq_config)
 
-    await endpoint.serve_endpoint(handler.generate)
+    tasks = [endpoint.serve_endpoint(handler.generate)]
+
+    flush_endpoint = component.endpoint("flush_cache")
+    tasks.append(flush_endpoint.serve_endpoint(handler.flush_cache))
+
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":
