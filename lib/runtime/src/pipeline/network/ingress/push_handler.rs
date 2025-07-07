@@ -101,7 +101,7 @@ where
         let mut send_complete_final = true;
         while let Some(resp) = stream.next().await {
             tracing::trace!("Sending response: {:?}", resp);
-            let resp_wrapper = StreamItemWrapper {
+            let resp_wrapper = NetworkStreamWrapper {
                 data: Some(resp),
                 complete_final: false,
             };
@@ -115,7 +115,7 @@ where
             }
         }
         if send_complete_final {
-            let resp_wrapper = StreamItemWrapper::<U> {
+            let resp_wrapper = NetworkStreamWrapper::<U> {
                 data: None,
                 complete_final: true,
             };

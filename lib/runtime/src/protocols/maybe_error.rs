@@ -15,7 +15,7 @@
 
 use std::error::Error;
 
-pub trait IsError {
+pub trait MaybeError {
     /// Construct an instance from an error.
     fn from_err(err: Box<dyn Error>) -> Self;
 
@@ -40,7 +40,7 @@ mod tests {
     struct TestError {
         message: String,
     }
-    impl IsError for TestError {
+    impl MaybeError for TestError {
         fn from_err(err: Box<dyn Error>) -> Self {
             TestError {
                 message: err.to_string(),
@@ -52,7 +52,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_error_default_implementations() {
+    fn test_maybe_error_default_implementations() {
         let err = TestError::from_err(anyhow::Error::msg("Test error".to_string()).into());
         assert_eq!(format!("{}", err.err().unwrap()), "Test error");
         assert!(!err.is_ok());

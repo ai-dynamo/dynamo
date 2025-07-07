@@ -17,7 +17,7 @@ use async_nats::client::Client;
 use tracing as log;
 
 use super::*;
-use crate::{protocols::is_error::IsError, Result};
+use crate::{protocols::maybe_error::MaybeError, Result};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt, StreamNotifyClose};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -81,7 +81,7 @@ impl AddressedPushRouter {
 impl<T, U> AsyncEngine<SingleIn<AddressedRequest<T>>, ManyOut<U>, Error> for AddressedPushRouter
 where
     T: Data + Serialize,
-    U: Data + for<'de> Deserialize<'de> + IsError,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
     async fn generate(&self, request: SingleIn<AddressedRequest<T>>) -> Result<ManyOut<U>, Error> {
         let request_id = request.context().id().to_string();
@@ -176,7 +176,7 @@ where
                         .into(),
                     ));
                 }
-                match serde_json::from_slice::<StreamItemWrapper<U>>(&res_bytes) {
+                match serde_json::from_slice::<NetworkStreamWrapper<U>>(&res_bytes) {
                     Ok(item) => {
                         is_complete_final = item.complete_final;
                         if let Some(data) = item.data {

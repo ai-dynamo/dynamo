@@ -15,7 +15,7 @@
 
 use super::*;
 use crate::{error, Result};
-use is_error::IsError;
+use maybe_error::MaybeError;
 
 pub trait AnnotationsProvider {
     fn annotations(&self) -> Option<Vec<String>>;
@@ -147,7 +147,7 @@ impl<R> Annotated<R> {
     }
 }
 
-impl<R> IsError for Annotated<R>
+impl<R> MaybeError for Annotated<R>
 where
     R: for<'de> Deserialize<'de> + Serialize,
 {
@@ -195,7 +195,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_error() {
+    fn test_maybe_error() {
         let annotated = Annotated::from_data("Test data".to_string());
         assert!(annotated.err().is_none());
         assert!(annotated.is_ok());

@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 pub use super::preprocessor::PreprocessedRequest;
 pub use super::FinishReason;
 use crate::protocols::TokenIdType;
-use dynamo_runtime::protocols::is_error::IsError;
+use dynamo_runtime::protocols::maybe_error::MaybeError;
 
 pub type TokenType = Option<String>;
 pub type LogProbs = Vec<f64>;
@@ -135,7 +135,7 @@ impl LLMEngineOutput {
     }
 }
 
-impl IsError for LLMEngineOutput {
+impl MaybeError for LLMEngineOutput {
     fn from_err(err: Box<dyn std::error::Error>) -> Self {
         LLMEngineOutput::error(format!("{:?}", err))
     }
@@ -165,7 +165,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_is_error() {
+    fn test_maybe_error() {
         let output = LLMEngineOutput::stop();
         assert!(output.err().is_none());
         assert!(output.is_ok());
