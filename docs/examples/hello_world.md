@@ -129,7 +129,7 @@ If kubernetes
 export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com
 ```
 
-Export the [Dynamo Base Image](../../get_started.md#building-the-dynamo-base-image) you built during the prerequisites step as the `DYNAMO_IMAGE` environment variable.
+Export the [Dynamo Base Image](../../get_started.md#building-the-dynamo-base-image) you want to use (or built during the prerequisites step) as the `DYNAMO_IMAGE` environment variable.
 
 ```bash
 export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
@@ -151,7 +151,7 @@ Once the deployment is complete, you can test it using commands below.
 export FRONTEND_POD=$(kubectl get pods -n ${NAMESPACE} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
 
 # Forward the pod's port to localhost
-kubectl port-forward pod/$FRONTEND_POD 8000:3000 -n ${NAMESPACE}
+kubectl port-forward svc/$FRONTEND_SVC 3000:3000 -n ${NAMESPACE}
 
 # Test the API endpoint
 curl -N -X POST http://localhost:8000/generate \
