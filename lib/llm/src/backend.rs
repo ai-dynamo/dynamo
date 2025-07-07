@@ -44,7 +44,11 @@ use dynamo_runtime::{
 
 use crate::protocols::{
     common::{
-        llm_backend::{BackendOutput, FinishReason, LLMEngineOutput, PreprocessedRequest},
+        llm_backend::{
+            BackendOutput, EmbeddingsEngineOutput, FinishReason, LLMEngineOutput,
+            PreprocessedRequest,
+        },
+        preprocessor::PreprocessedEmbeddingRequest,
         StopConditions,
     },
     TokenIdType,
@@ -230,6 +234,36 @@ impl
         });
 
         Ok(ResponseStream::new(Box::pin(stream), context))
+    }
+}
+
+#[async_trait]
+impl
+    Operator<
+        SingleIn<PreprocessedEmbeddingRequest>,
+        ManyOut<Annotated<EmbeddingsEngineOutput>>,
+        SingleIn<PreprocessedEmbeddingRequest>,
+        ManyOut<Annotated<EmbeddingsEngineOutput>>,
+    > for Backend
+{
+    async fn generate(
+        &self,
+        request: SingleIn<PreprocessedEmbeddingRequest>,
+        next: ServerStreamingEngine<
+            PreprocessedEmbeddingRequest,
+            Annotated<EmbeddingsEngineOutput>,
+        >,
+    ) -> Result<ManyOut<Annotated<EmbeddingsEngineOutput>>> {
+        // For embeddings, we mostly pass through since no detokenization is needed
+        // But we could add validation, logging, or other post-processing here
+        let response_stream = next.generate(request).await?;
+
+        // Could add embedding-specific post-processing here:
+        // - Validation of embedding dimensions
+        // - Normalization if requested
+        // - Usage statistics validation
+
+        Ok(response_stream)
     }
 }
 

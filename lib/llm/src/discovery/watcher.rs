@@ -20,8 +20,8 @@ use crate::{
     backend::Backend,
     kv_router::{KvPushRouter, KvRouterConfig},
     model_type::ModelType,
-    preprocessor::{OpenAIPreprocessor, PreprocessedRequest},
-    protocols::common::llm_backend::LLMEngineOutput,
+    preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, PreprocessedRequest},
+    protocols::common::llm_backend::{EmbeddingsEngineOutput, LLMEngineOutput},
     protocols::openai::chat_completions::{
         NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
     },
@@ -300,14 +300,42 @@ impl ModelWatcher {
                     .add_completions_model(&model_entry.name, engine)?;
             }
             ModelType::Embedding => {
-                let push_router = PushRouter::<
-                    NvCreateEmbeddingRequest,
-                    Annotated<NvCreateEmbeddingResponse>,
-                >::from_client(client, Default::default())
+                let Some(mut card) = card else {
+                    anyhow::bail!("Missing model deployment card for embedding model");
+                };
+
+                // Download tokenizer files to local disk
+                let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
+
+                // Create preprocessing pipeline similar to Backend
+                let frontend = SegmentSource::<
+                    SingleIn<NvCreateEmbeddingRequest>,
+                    ManyOut<Annotated<NvCreateEmbeddingResponse>>,
+                >::new();
+
+                let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
+                let backend = Backend::from_mdc(card.clone()).await?.into_operator();
+
+                let router = PushRouter::<
+                    PreprocessedEmbeddingRequest,
+                    Annotated<EmbeddingsEngineOutput>,
+                >::from_client(client, self.router_mode)
                 .await?;
-                let engine = Arc::new(push_router);
+
+                // Note: Embeddings don't need KV routing complexity
+                let service_backend = ServiceBackend::from_engine(Arc::new(router));
+
+                // Link the pipeline: frontend -> preprocessor -> backend -> service_backend -> backend -> preprocessor -> frontend
+                let embedding_engine = frontend
+                    .link(preprocessor.forward_edge())?
+                    .link(backend.forward_edge())?
+                    .link(service_backend)?
+                    .link(backend.backward_edge())?
+                    .link(preprocessor.backward_edge())?
+                    .link(frontend)?;
+
                 self.manager
-                    .add_embeddings_model(&model_entry.name, engine)?;
+                    .add_embeddings_model(&model_entry.name, embedding_engine)?;
             }
         }
 

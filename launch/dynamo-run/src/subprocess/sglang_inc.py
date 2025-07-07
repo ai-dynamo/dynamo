@@ -13,6 +13,7 @@ from typing import Optional
 
 import sglang
 import uvloop
+from sglang.srt.entrypoints.engine import EmbeddingReqInput
 from sglang.srt.server_args import ServerArgs
 
 from dynamo.llm import ModelType, register_llm
@@ -126,38 +127,21 @@ class RequestHandler:
 
             yield out
 
+    async def encode(self, request):
+        obj = EmbeddingReqInput(input_ids=request["token_ids"])
+        generator = self.engine_client.tokenizer_manager.generate_request(obj, None)
+        engine_results = await anext(generator)
 
-class EmbeddingRequestHandler(RequestHandler):
-    """
-    Request handler for the embedding endpoint
-    """
-
-    def __init__(self, engine: sglang.Engine, model_name: str):
-        super().__init__(engine)
-        self._model_name = model_name
-
-    async def generate(self, request):
-        gen = await self.engine_client.async_encode(prompt=request["input"])
         tokens = 0
         embeddings = []
-        for idx, res in enumerate(gen):
-            embeddings.append(
-                {
-                    "index": idx,
-                    "object": "embedding",
-                    "embedding": res["embedding"],
-                }
-            )
-            tokens += res["meta_info"]["prompt_tokens"]
+        for result in engine_results:
+            embeddings.append(result["embedding"])
+            tokens += result["meta_info"]["prompt_tokens"]
 
         out = {
-            "object": "list",
-            "model": self._model_name,
-            "data": embeddings,
-            "usage": {
-                "prompt_tokens": tokens,
-                "total_tokens": tokens,
-            },
+            "embeddings": embeddings,
+            "prompt_tokens": tokens,
+            "total_tokens": tokens,
         }
 
         yield out
@@ -222,13 +206,11 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
     # after the lease is revoked
-    await endpoint.serve_endpoint(
-        RequestHandler(engine_client).generate
-        if not engine_args.is_embedding
-        else EmbeddingRequestHandler(
-            engine_client, model_name=config.model_name or config.model_path
-        ).generate
-    )
+    handler = RequestHandler(engine_client)
+    if engine_args.is_embedding:
+        await endpoint.serve_endpoint(handler.encode)
+    else:
+        await endpoint.serve_endpoint(handler.generate)
 
 
 def cmd_line_args():

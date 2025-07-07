@@ -3392,6 +3392,12 @@ index cafd8150b..6a5e45b4e 100644
 +    num_requests_waiting: int
 +    gpu_cache_usage_perc: float
 +    gpu_prefix_cache_hit_rate: float
++    spec_decode_draft_acceptance_rate: Optional[float] = None
++    spec_decode_system_efficiency: Optional[float] = None
++    spec_decode_draft_tokens: Optional[int] = None
++    spec_decode_emitted_tokens: Optional[int] = None
++    spec_decode_accepted_tokens: Optional[int] = None
++    spec_decode_num_spec_tokens: Optional[int] = None
 diff --git a/vllm/engine/multiprocessing/client.py b/vllm/engine/multiprocessing/client.py
 index f058b1329..2fdb5b8bf 100644
 --- a/vllm/engine/multiprocessing/client.py

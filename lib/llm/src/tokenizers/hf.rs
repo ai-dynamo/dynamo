@@ -54,6 +54,30 @@ impl Encoder for HuggingFaceTokenizer {
             spans,
         })
     }
+
+    fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>> {
+        let hf_encodings = self
+            .tokenizer
+            .encode_batch(inputs.to_vec(), false)
+            .map_err(|err| Error::msg(format!("Error encoding input: {}", err)))?;
+
+        let encodings = hf_encodings
+            .into_iter()
+            .map(|encoding| {
+                let token_ids = encoding.get_ids().to_vec();
+                let tokens = encoding.get_tokens().to_vec();
+                let spans = encoding.get_offsets().to_vec();
+
+                Encoding {
+                    token_ids,
+                    tokens,
+                    spans,
+                }
+            })
+            .collect();
+
+        Ok(encodings)
+    }
 }
 
 impl Decoder for HuggingFaceTokenizer {

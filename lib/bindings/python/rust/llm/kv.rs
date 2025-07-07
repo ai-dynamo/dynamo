@@ -19,6 +19,10 @@ use std::sync::atomic::AtomicU32;
 use super::*;
 use llm_rs::kv_router::indexer::compute_block_hash_for_seq;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
+use llm_rs::kv_router::protocols::ForwardPassMetrics as RsForwardPassMetrics;
+use llm_rs::kv_router::protocols::KvStats as RsKvStats;
+use llm_rs::kv_router::protocols::SpecDecodeStats as RsSpecDecodeStats;
+use llm_rs::kv_router::protocols::WorkerStats as RsWorkerStats;
 use rs::traits::events::EventSubscriber;
 use tracing;
 
@@ -68,34 +72,11 @@ impl WorkerMetricsPublisher {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (request_active_slots, request_total_slots, kv_active_blocks, kv_total_blocks, num_requests_waiting, gpu_cache_usage_perc, gpu_prefix_cache_hit_rate, data_parallel_rank = 0))]
-    fn publish(
-        &self,
-        _py: Python,
-        request_active_slots: u64,
-        request_total_slots: u64,
-        kv_active_blocks: u64,
-        kv_total_blocks: u64,
-        num_requests_waiting: u64,
-        gpu_cache_usage_perc: f32,
-        gpu_prefix_cache_hit_rate: f32,
-        data_parallel_rank: u32,
-    ) -> PyResult<()> {
+    #[pyo3(signature = (metrics))]
+    fn publish(&self, _py: Python, metrics: &ForwardPassMetrics) -> PyResult<()> {
+        // Create and publish the complete metrics
         self.inner
-            .publish(
-                llm_rs::kv_router::protocols::ForwardPassMetrics {
-                    data_parallel_rank: Some(data_parallel_rank),
-                    request_active_slots,
-                    request_total_slots,
-                    kv_active_blocks,
-                    kv_total_blocks,
-                    num_requests_waiting,
-                    gpu_cache_usage_perc,
-                    gpu_prefix_cache_hit_rate,
-                }
-                .into(),
-            )
+            .publish(metrics.0.clone().into())
             .map_err(to_pyerr)
     }
 }
@@ -589,6 +570,7 @@ impl KvMetricsAggregator {
     }
 
     fn get_metrics<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        // TODO: update EndpointKvMetrics to match the new ForwardPassMetrics struct
         let endpoints = self.inner.get_endpoints();
         let load_avg = endpoints.load_avg;
         let load_std = endpoints.load_std;
@@ -739,5 +721,97 @@ impl KvRecorder {
     fn shutdown(&self) -> PyResult<()> {
         self.inner.shutdown();
         Ok(())
+    }
+}
+
+#[pyclass]
+#[repr(transparent)]
+pub struct ForwardPassMetrics(pub RsForwardPassMetrics);
+
+#[pyclass]
+#[repr(transparent)]
+pub struct WorkerStats(pub RsWorkerStats);
+
+#[pyclass]
+#[repr(transparent)]
+pub struct KvStats(pub RsKvStats);
+
+#[pyclass]
+#[repr(transparent)]
+pub struct SpecDecodeStats(pub RsSpecDecodeStats);
+
+#[pymethods]
+impl ForwardPassMetrics {
+    #[new]
+    #[pyo3(signature = (worker_stats, kv_stats, spec_decode_stats = None))]
+    fn new(
+        worker_stats: &WorkerStats,
+        kv_stats: &KvStats,
+        spec_decode_stats: Option<&SpecDecodeStats>,
+    ) -> Self {
+        Self(RsForwardPassMetrics {
+            worker_stats: worker_stats.0.clone(),
+            kv_stats: kv_stats.0.clone(),
+            spec_decode_stats: spec_decode_stats.map(|s| s.0.clone()),
+        })
+    }
+}
+
+#[pymethods]
+impl WorkerStats {
+    #[new]
+    #[pyo3(signature = (request_active_slots, request_total_slots, num_requests_waiting, data_parallel_rank=None))]
+    fn new(
+        request_active_slots: u64,
+        request_total_slots: u64,
+        num_requests_waiting: u64,
+        data_parallel_rank: Option<u32>,
+    ) -> Self {
+        Self(RsWorkerStats {
+            data_parallel_rank,
+            request_active_slots,
+            request_total_slots,
+            num_requests_waiting,
+        })
+    }
+}
+
+#[pymethods]
+impl KvStats {
+    #[new]
+    #[pyo3(signature = (kv_active_blocks, kv_total_blocks, gpu_cache_usage_perc, gpu_prefix_cache_hit_rate))]
+    fn new(
+        kv_active_blocks: u64,
+        kv_total_blocks: u64,
+        gpu_cache_usage_perc: f32,
+        gpu_prefix_cache_hit_rate: f32,
+    ) -> Self {
+        Self(RsKvStats {
+            kv_active_blocks,
+            kv_total_blocks,
+            gpu_cache_usage_perc,
+            gpu_prefix_cache_hit_rate,
+        })
+    }
+}
+
+#[pymethods]
+impl SpecDecodeStats {
+    #[new]
+    #[pyo3(signature = (num_spec_tokens, num_drafts, num_draft_tokens, num_accepted_tokens, num_accepted_tokens_per_pos))]
+    fn new(
+        num_spec_tokens: Option<u32>,
+        num_drafts: Option<u32>,
+        num_draft_tokens: Option<u32>,
+        num_accepted_tokens: Option<u32>,
+        num_accepted_tokens_per_pos: Option<Vec<u32>>,
+    ) -> Self {
+        Self(RsSpecDecodeStats {
+            num_spec_tokens,
+            num_drafts,
+            num_draft_tokens,
+            num_accepted_tokens,
+            num_accepted_tokens_per_pos,
+        })
     }
 }

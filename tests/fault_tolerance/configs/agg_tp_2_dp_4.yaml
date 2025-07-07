@@ -12,34 +12,36 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+Common:
+  model: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  block-size: 64
+  max-model-len: 16384
+
 Frontend:
   served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  endpoint: dynamo.SGLangWorker.generate
+  endpoint: dynamo.Processor.chat/completions
   port: 8000
 
-# We set disaggregation-bootstrap-port in utils/sglang.py to ensure unique ports for each replica
-SGLangWorker:
-  model-path: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  served-model-name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  tp: 1
-  trust-remote-code: true
-  skip-tokenizer-init: true
-  disaggregation-mode: prefill
-  disaggregation-transfer-backend: nixl
+Processor:
+  router: round-robin
+  router-num-threads: 4
+  common-configs: [model, block-size, max-model-len]
   ServiceArgs:
-    workers: 1
+    workers: 2
     resources:
-      gpu: 1
+      cpu: "10"
+      memory: "20Gi"
+VllmWorker:
+  enforce-eager: true
+  max-num-batched-tokens: 16384
+  enable-prefix-caching: true
+  tensor-parallel-size: 2
+  ServiceArgs:
+    workers: 4
+    resources:
+      gpu: '2'
+  common-configs: [model, block-size, max-model-len]
 
-SGLangDecodeWorker:
-  model-path: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  served-model-name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  tp: 1
-  trust-remote-code: true
-  skip-tokenizer-init: true
-  disaggregation-mode: decode
-  disaggregation-transfer-backend: nixl
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: 1
+Planner:
+  environment: local
+  no-operation: true

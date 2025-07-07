@@ -1,8 +1,19 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 backend: pytorch
+
+# WideEP related settings
+moe_backend: WideEP
+# moe_max_num_tokens will default to max_num_tokens if left unspecified.
+#
+# If you want to set this value explicitly, one recommendation is below:
+#   moe_max_num_tokens = max_batch_size * moe_expert_parallel_size
+#   4096 = 256 * 16
+# moe_max_num_tokens: 4096
+moe_load_balancer: /mnt/engine_configs/eplb.yaml
 tensor_parallel_size: 16
 moe_expert_parallel_size: 16
+
 enable_attention_dp: true
 max_batch_size: 256
 max_num_tokens: 256

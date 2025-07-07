@@ -329,13 +329,17 @@ ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:$LD_LIBRARY_PATH
 
 # Use UCX for TRTLLM KV Cache Transfer
 ARG TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL
+ENV TRTLLM_USE_UCX_KVCACHE=1
 
-# Create a script that sets the environment variables and source it
+# Create a script that sets the environment variables and source it.
+# If TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL is set to 1, unset TRTLLM_USE_UCX_KVCACHE
+# and set TRTLLM_USE_NIXL_KVCACHE to 1.
 RUN echo '#!/bin/bash' > /usr/local/bin/set_trtllm_env.sh && \
     if [ "$TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL" = "1" ]; then \
+        echo 'unset TRTLLM_USE_UCX_KVCACHE' >> /usr/local/bin/set_trtllm_env.sh; \
         echo 'export TRTLLM_USE_NIXL_KVCACHE=1' >> /usr/local/bin/set_trtllm_env.sh; \
     else \
-        echo 'export TRTLLM_USE_UCX_KVCACHE=1' >> /usr/local/bin/set_trtllm_env.sh; \
+        echo '# TRTLLM_USE_UCX_KVCACHE should already be set to 1' >> /usr/local/bin/set_trtllm_env.sh; \
     fi && \
     chmod +x /usr/local/bin/set_trtllm_env.sh
 

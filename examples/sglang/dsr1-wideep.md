@@ -61,106 +61,105 @@ docker run \
 
 In each container, you should be in the `/sgl-workspace/dynamo/examples/sglang` directory.
 
-4. On the head prefill node, start `nats-server` and `etcd` using the following commands
+4. On the head prefill node, run the helper script provided to generate commands to start the `nats-server`, `etcd`. This script will also tell you which environment variables to export on each node to make deployment easier.
 
 ```bash
-nats-server -js &
-etcd --listen-client-urls http://0.0.0.0:2379 \
-     --advertise-client-urls http://0.0.0.0:2379 \
-     --listen-peer-urls http://0.0.0.0:2380 \
-     --initial-cluster default=http://HEAD_PREFILL_NODE_IP:2380 &
+./utils/gen_env_vars.sh
 ```
 
-5. On every other node, go ahead and export the `NATS_SERVER` and `ETCD_ENDPOINTS` environment variables
-
-> [!IMPORTANT]
-> You will need the IP address of your head prefill node and head decode node for the configuration files
+5. Run the ingress and prefill worker
 
 ```bash
-# run this on every other node
-export NATS_SERVER=nats://HEAD_PREFILL_NODE_IP:4222
-export ETCD_ENDPOINTS=http://HEAD_PREFILL_NODE_IP:2379
+# run ingress
+dynamo run in=http out=dyn &
+# run prefill worker
+python3 components/worker.py \
+  --model-path /model/ \
+  --served-model-name deepseek-ai/DeepSeek-R1 \
+  --skip-tokenizer-init \
+  --disaggregation-mode prefill \
+  --disaggregation-transfer-backend nixl \
+  --disaggregation-bootstrap-port 30001 \
+  --dist-init-addr ${HEAD_PREFILL_NODE_IP}:29500 \
+  --nnodes 4 \
+  --node-rank 0 \
+  --tp-size 32 \
+  --dp-size 32 \
+  --enable-dp-attention \
+  --decode-log-interval 1 \
+  --enable-deepep-moe \
+  --page-size 1 \
+  --trust-remote-code \
+  --moe-dense-tp-size 1 \
+  --enable-dp-lm-head \
+  --disable-radix-cache \
+  --watchdog-timeout 1000000 \
+  --enable-two-batch-overlap \
+  --deepep-mode normal \
+  --mem-fraction-static 0.85 \
+  --deepep-config /configs/deepep.json \
+  --ep-num-redundant-experts 32 \
+  --ep-dispatch-algorithm dynamic \
+  --eplb-algorithm deepseek
 ```
 
-6. Configure each configuration file to use the correct `dist-init-addr`, and `node-rank`
+On the other prefill node (since this example has 4 total prefill nodes), run the same command but change `--node-rank` to 1,2, and 3
 
-Each container contains the configuration file in `configs/dsr1-wideep.yaml`. For our example, we will make the following changes:
-
-On the prefill head node, `vim` into the configs and change the following section of the `SGLangWorker`:
-
-```yaml
-SGLangWorker:
-    ...
-    dist-init-addr: HEAD_PREFILL_NODE_IP
-    nnodes: 2
-    node-rank: 0
-    ...
-```
-
-On the other prefill node (since this example has 2 prefill nodes), change the following section of the `SGLangWorker`:
-
-```yaml
-SGLangWorker:
-    ...
-    dist-init-addr: HEAD_PREFILL_NODE_IP
-    nnodes: 2
-    node-rank: 1
-    ...
-```
-
-On the decode head node, `vim` into the configs and change the following section of the `SGLangDecodeWorker`:
-
-```yaml
-SGLangDecodeWorker:
-    ...
-    dist-init-addr: HEAD_DECODE_NODE_IP
-    nnodes: 4
-    node-rank: 0
-    ...
-```
-
-On the other decode nodes (this example has 4 decode nodes), change the following section of the `SGLangDecodeWorker`:
-
-```yaml
-SGLangDecodeWorker:
-    ...
-    dist-init-addr: HEAD_DECODE_NODE_IP
-    nnodes: 4
-    # depending on which node this will be 1, 2, and 3
-    node-rank: 1
-```
-
-7. Start up the workers using the following commands
-
-On prefill head node
+7. Run the decode worker on the head decode node
 
 ```bash
-dynamo serve graphs.agg:Frontend -f configs/dsr1-wideep.yaml
+python3 components/decode_worker.py \
+  --model-path /model/ \
+  --served-model-name deepseek-ai/DeepSeek-R1 \
+  --skip-tokenizer-init \
+  --disaggregation-mode decode \
+  --disaggregation-transfer-backend nixl \
+  --disaggregation-bootstrap-port 30001 \
+  --dist-init-addr ${HEAD_DECODE_NODE_IP}:29500 \
+  --nnodes 9 \
+  --node-rank 0 \
+  --tp-size 72 \
+  --dp-size 72 \
+  --enable-dp-attention \
+  --decode-log-interval 1 \
+  --enable-deepep-moe \
+  --page-size 1 \
+  --trust-remote-code \
+  --moe-dense-tp-size 1 \
+  --enable-dp-lm-head \
+  --disable-radix-cache \
+  --watchdog-timeout 1000000 \
+  --enable-two-batch-overlap \
+  --deepep-mode low_latency \
+  --mem-fraction-static 0.835 \
+  --ep-num-redundant-experts 32 \
+  --cuda-graph-bs 256
 ```
 
-On prefill child node
-
-```bash
-dynamo serve graphs.agg:Frontend -f configs/dsr1-wideep.yaml --service-name SGLangWorker
-```
-
-On all decode nodes
-
-```bash
-dynamo serve graphs.disagg:Frontend -f configs/dsr1-wideep.yaml --service-name SGLangDecodeWorker
-```
-
-8. Run the warmup script to warm up the model
-
-DeepGEMM kernels can sometimes take a while to warm up. Here we provide a small helper script that should help. You can run this as many times as you want before starting inference/benchmarking. You can exec into the head node and run this script standalone - it does not need a container.
-
-```bash
-./warmup.sh HEAD_PREFILL_NODE_IP
-```
+On the other decode nodes (this example has 9 total decode nodes), run the same command but change `--node-rank` to 1, 2, 3, 4, 5, 6, 7, and 8
 
 ## Benchmarking
 
-In the official [blog post repro instructions](https://github.com/sgl-project/sglang/issues/6017), SGL uses batch inference to benchmark their prefill and decode workers. They do this by pretokenizing the ShareGPT dataset and then creating a batch of 8192 requests with ISL 4096 and OSL 5 (for prefill stress test) and a batch of 40000 with ISL 2000 and OSL 100 (for decode stress test). If you want to repro these benchmarks, you will need to uncomment the labeled flags in the `configs/dsr1.yaml` file inside of the container.
+In the official [blog post repro instructions](https://github.com/sgl-project/sglang/issues/6017), SGL uses batch inference to benchmark their prefill and decode workers. They do this by pretokenizing the ShareGPT dataset and then creating a batch of 8192 requests with ISL 4096 and OSL 5 (for prefill stress test) and a batch of 40000 with ISL 2000 and OSL 100 (for decode stress test). If you want to repro these benchmarks, you will need to add the following flags to the prefill and decode commands:
+
+prefill:
+```bash
+...
+--max-running-requests 8192 \
+--max-total-tokens 131072 \
+--context-length 8192 \
+--init-expert-location /configs/prefill_in4096.json \
+--chunked-prefill-size 524288
+
+```
+
+decode:
+```bash
+...
+--max-running-requests 18432 \
+--context-length 4500 \
+--init-expert-location /configs/decode_in2000out100.json
+```
 
 We currently provide 2 different ways to perform an end to end benchmark which includes using our OpenAI frontend and tokenization. We will continue to add better support for these sorts of large single batch workloads in the future.
 
