@@ -324,6 +324,7 @@ pub trait PushWorkHandler: Send + Sync {
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError>;
 }
 
+/*
 /// `NetworkStreamWrapper` is a simple wrapper used to detect proper stream termination
 /// in network communication between ingress and egress components.
 ///
@@ -365,7 +366,7 @@ pub trait PushWorkHandler: Send + Sync {
 ///
 /// The detection must be done at egress level because premature stream termination
 /// can be due to network issues that only the egress component can detect.
-///
+*/
 /// TODO: Detect end-of-stream using Server-Sent Events (SSE). This will be removed.
 #[derive(Serialize, Deserialize, Debug)]
 pub struct NetworkStreamWrapper<U> {
