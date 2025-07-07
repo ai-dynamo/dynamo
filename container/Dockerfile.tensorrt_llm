@@ -460,8 +460,6 @@ COPY --from=build /usr/local/lib/python3.12/dist-packages/packaging-${PACKAGING_
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn /usr/local/lib/python3.12/dist-packages/flash_attn
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-*-linux-gnu.so /usr/local/lib/python3.12/dist-packages/
-# COPY --from=build /usr/local/lib/python3.12/dist-packages/mpmath /usr/local/lib/python3.12/dist-packages/mpmath
-# COPY --from=build /usr/local/lib/python3.12/dist-packages/mpmath-${MPMATH_VER}.dist-info /usr/local/lib/python3.12/dist-packages/mpmath-${MPMATH_VER}.dist-info
 
 # Setup environment variables
 ARG ARCH_ALT
