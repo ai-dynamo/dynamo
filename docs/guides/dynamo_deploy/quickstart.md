@@ -6,10 +6,10 @@
 export NAMESPACE=dynamo-cloud
 
 # fetch the crds helm chart
-helm fetch https://helm.ngc.nvidia.com/nvidia/charts/dynamo-crds-v0.3.1.tgz
+helm fetch https://helm.ngc.nvidia.com/nvidia/charts/dynamo-crds-v0.3.2.tgz
 
 # fetch the platform helm chart
-helm fetch https://helm.ngc.nvidia.com/nvidia/charts/dynamo-platform-v0.3.1.tgz
+helm fetch https://helm.ngc.nvidia.com/nvidia/charts/dynamo-platform-v0.3.2.tgz
 
 ```
 
@@ -18,7 +18,7 @@ helm fetch https://helm.ngc.nvidia.com/nvidia/charts/dynamo-platform-v0.3.1.tgz
 **Step 1: Install Custom Resource Definitions (CRDs)**
 
 ```bash
-helm install dynamo-crds dynamo-crds-v0.3.1.tgz \
+helm install dynamo-crds dynamo-crds-v0.3.2.tgz \
   --namespace default \
   --wait \
   --atomic
@@ -29,7 +29,7 @@ helm install dynamo-crds dynamo-crds-v0.3.1.tgz \
 Run the following helm command:
 
 ```bash
-helm install dynamo-platform dynamo-platform-v0.3.1.tgz --namespace ${NAMESPACE}
+helm install dynamo-platform dynamo-platform-v0.3.2.tgz --namespace ${NAMESPACE}
 ```
 
 ## Install Dynamo Components
