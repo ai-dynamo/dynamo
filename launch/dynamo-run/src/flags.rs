@@ -211,7 +211,11 @@ impl Flags {
     pub fn router_config(&self) -> RouterConfig {
         RouterConfig::new(
             self.router_mode.into(),
-            KvRouterConfig::new(self.kv_overlap_score_weight, self.router_temperature, self.max_num_batched_tokens),
+            KvRouterConfig::new(
+                self.kv_overlap_score_weight,
+                self.router_temperature,
+                self.max_num_batched_tokens,
+            ),
         )
     }
 
