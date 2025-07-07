@@ -13,17 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 apiVersion: v2
-name: dynamo-helm-chart
+name: dynamo-platform
 maintainers:
   - name: NVIDIA, Inc.
     url: https://www.nvidia.com
 description: A Helm chart for NVIDIA Dynamo Platform.
 type: application
-version: 0.1.0
+version: 0.3.1
 home: https://nvidia.com
 dependencies:
   - name: dynamo-operator
-    version: 0.1.8
+    version: 0.3.1
     repository: file://components/operator
     condition: dynamo-operator.enabled
   - name: nats

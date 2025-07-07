@@ -25,7 +25,7 @@ dynamo-operator:
   controllerManager:
     manager:
       image:
-        repository: ""
+        repository: "nvcr.io/nvidia/ai-dynamo/kubernetes-operator"
         tag: "latest"
         pullPolicy: IfNotPresent
       args:
@@ -38,7 +38,7 @@ dynamo-operator:
       debugger: python:3.12-slim
     enableRestrictedSecurityContext: false
     dockerRegistry:
-      useKubernetesSecret: true
+      useKubernetesSecret: false
       server:
       username:
       password:
