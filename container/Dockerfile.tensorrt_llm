@@ -375,7 +375,8 @@ ENV DYNAMO_HOME=/workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
-# Install build-essential and python3-dev as apt dependencies
+# Install apt dependencies
+# openssh-client, openssh-server are needed for OpenMPI
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential \
@@ -391,22 +392,15 @@ COPY --from=dev /opt/dynamo/bindings /opt/dynamo/bindings
 # Copy nats and etcd from build image
 COPY --from=build /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=build /usr/local/bin/etcd/ /usr/local/bin/etcd/
-ENV PATH=/usr/local/bin/etcd/:$PATH
 
 # Copy UCX from build image as plugin for NIXL
-# Copy NIXL source from build image (required for NIXL plugins)
 COPY --from=build /usr/local/ucx /usr/local/ucx
+# Copy NIXL source from build image (required for NIXL plugins)
 COPY --from=build /usr/local/nixl /usr/local/nixl
 # Copy HPCX from base image
 COPY --from=build /opt/hpcx /opt/hpcx
 # Copy NUMA library from build image
 COPY --from=build /usr/lib/x86_64-linux-gnu/libnuma.so* /usr/lib/x86_64-linux-gnu/
-ARG ARCH_ALT
-ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins
-ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:/opt/hpcx/ompi/lib:$LD_LIBRARY_PATH
-ENV OMPI_HOME=/opt/hpcx/ompi
-ENV PATH=/opt/hpcx/ompi/bin:$PATH
-ENV OPAL_PREFIX=/opt/hpcx/ompi
 
 # Setup the python environment
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
@@ -432,32 +426,50 @@ COPY --from=build /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/s
 COPY --from=build /usr/local/cuda/nvvm /usr/local/cuda/nvvm
 
 # Copy pytorch installation from NGC PyTorch
+ARG TORCH_VER=2.8.0a0+5228986c39.nv25.5
+ARG TORCHVISION_VER=0.22.0a0
+ARG SETUPTOOLS_VER=78.1.1
+ARG PYTORCH_TRITON_VER=3.3.0+git96316ce52.nvinternal
+ARG JINJA2_VER=3.1.6
+ARG NETWORKX_VER=3.4.2
+ARG SYMPY_VER=1.14.0
+ARG PACKAGING_VER=23.2
+ARG FLASH_ATTN_VER=2.7.3
+ARG MPI4PY_VER
+ARG MPMATH_VER=1.3.0
 COPY --from=build /usr/local/lib/lib* /usr/local/lib/
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torch /usr/local/lib/python3.12/dist-packages/torch
-COPY --from=build /usr/local/lib/python3.12/dist-packages/torch-*.dist-info /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/torch-${TORCH_VER}.dist-info /usr/local/lib/python3.12/dist-packages/torch-${TORCH_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torchgen /usr/local/lib/python3.12/dist-packages/torchgen
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torchvision /usr/local/lib/python3.12/dist-packages/torchvision
-COPY --from=build /usr/local/lib/python3.12/dist-packages/torchvision-*.dist-info /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/torchvision-${TORCHVISION_VER}.dist-info /usr/local/lib/python3.12/dist-packages/torchvision-${TORCHVISION_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torchvision.libs /usr/local/lib/python3.12/dist-packages/torchvision.libs
 COPY --from=build /usr/local/lib/python3.12/dist-packages/setuptools /usr/local/lib/python3.12/dist-packages/setuptools
+COPY --from=build /usr/local/lib/python3.12/dist-packages/setuptools-${SETUPTOOLS_VER}.dist-info /usr/local/lib/python3.12/dist-packages/setuptools-${SETUPTOOLS_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/functorch /usr/local/lib/python3.12/dist-packages/functorch
-COPY --from=build /usr/local/lib/python3.12/dist-packages/pytorch_triton-*.dist-info /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info /usr/local/lib/python3.12/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/triton /usr/local/lib/python3.12/dist-packages/triton
 COPY --from=build /usr/local/lib/python3.12/dist-packages/jinja2 /usr/local/lib/python3.12/dist-packages/jinja2
-COPY --from=build /usr/local/lib/python3.12/dist-packages/jinja2-*.dist-info /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/jinja2-${JINJA2_VER}.dist-info /usr/local/lib/python3.12/dist-packages/jinja2-${JINJA2_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/networkx /usr/local/lib/python3.12/dist-packages/networkx
-COPY --from=build /usr/local/lib/python3.12/dist-packages/networkx-*.dist-info /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/networkx-${NETWORKX_VER}.dist-info /usr/local/lib/python3.12/dist-packages/networkx-${NETWORKX_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/sympy /usr/local/lib/python3.12/dist-packages/sympy
-COPY --from=build /usr/local/lib/python3.12/dist-packages/sympy-*.dist-info /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/sympy-${SYMPY_VER}.dist-info /usr/local/lib/python3.12/dist-packages/sympy-${SYMPY_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/packaging /usr/local/lib/python3.12/dist-packages/packaging
-COPY --from=build /usr/local/lib/python3.12/dist-packages/packaging-*.dist-info /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/packaging-${PACKAGING_VER}.dist-info /usr/local/lib/python3.12/dist-packages/packaging-${PACKAGING_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn /usr/local/lib/python3.12/dist-packages/flash_attn
-COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn-*.dist-info /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-*-linux-gnu.so /usr/local/lib/python3.12/dist-packages/
-COPY --from=build /usr/local/lib/python3.12/dist-packages/mpi4py /usr/local/lib/python3.12/dist-packages/mpi4py
-COPY --from=build /usr/local/lib/python3.12/dist-packages/mpi4py-*.dist-info /usr/local/lib/python3.12/dist-packages/
 COPY --from=build /usr/local/lib/python3.12/dist-packages/mpmath /usr/local/lib/python3.12/dist-packages/mpmath
-COPY --from=build /usr/local/lib/python3.12/dist-packages/mpmath-*.dist-info /usr/local/lib/python3.12/dist-packages/
+COPY --from=build /usr/local/lib/python3.12/dist-packages/mpmath-${MPMATH_VER}.dist-info /usr/local/lib/python3.12/dist-packages/mpmath-${MPMATH_VER}.dist-info
+
+# Setup environment variables
+ARG ARCH_ALT
+ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins
+ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:/opt/hpcx/ompi/lib:$LD_LIBRARY_PATH
+ENV OMPI_HOME=/opt/hpcx/ompi
+ENV PATH=/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:$PATH
+ENV OPAL_PREFIX=/opt/hpcx/ompi
 
 #TODO: Remove this once we have a functional dev image built on top of the runtime image
 COPY . /workspace
