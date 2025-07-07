@@ -22,7 +22,6 @@ import importlib.metadata
 import typer
 from rich.console import Console
 
-from dynamo.sdk.cli.build import build
 from dynamo.sdk.cli.deployment import app as deployment_app
 from dynamo.sdk.cli.deployment import deploy
 from dynamo.sdk.cli.env import env
@@ -78,7 +77,6 @@ cli.command(
 )(run)
 cli.add_typer(deployment_app, name="deployment")
 cli.command()(deploy)
-cli.command()(build)
 
 if __name__ == "__main__":
     cli()
