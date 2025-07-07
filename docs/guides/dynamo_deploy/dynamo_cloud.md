@@ -169,19 +169,6 @@ if you want guidance during the process, run the deployment script with the `--i
 
 omitting `--crds` will skip the CRDs installation/upgrade. This is useful when installing on a shared cluster as CRDs are cluster-scoped resources.
 
-4. **Expose Dynamo Cloud Externally**
-
-``` {note}
-The script automatically displays information about the endpoint that you can use to access Dynamo Cloud. We refer to this externally available endpoint as `DYNAMO_CLOUD`.
-```
-
-The simplest way to expose the `dynamo-store` service within the namespace externally is to use a port-forward:
-
-```bash
-kubectl port-forward svc/dynamo-store <local-port>:80 -n $NAMESPACE
-export DYNAMO_CLOUD=http://localhost:<local-port>
-```
-
 ## Next Steps
 
 After deploying the Dynamo cloud platform, you can:
