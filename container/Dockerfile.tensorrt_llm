@@ -218,8 +218,6 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 ### VIRTUAL ENVIRONMENT SETUP ###
 RUN mkdir /opt/dynamo && \
     uv venv /opt/dynamo/venv --python 3.12
-
-# Activate virtual environment
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 
 # Install NIXL Python module
