@@ -170,7 +170,7 @@ impl KvRouter {
 
         let best_worker_id = self
             .scheduler
-            .schedule_and_update(
+            .schedule(
                 context_id.to_string(),
                 isl_tokens,
                 block_size,

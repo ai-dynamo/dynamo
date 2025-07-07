@@ -210,29 +210,6 @@ impl KvScheduler {
 
     pub async fn schedule(
         &self,
-        overlap: OverlapScores,
-        isl_tokens: usize,
-        potential_blocks: HashMap<i64, usize>,
-    ) -> Result<SchedulingResponse, KvSchedulerError> {
-        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-        let request = SchedulingRequest {
-            isl_tokens,
-            overlap,
-            potential_blocks,
-            resp_tx,
-        };
-        self.request_tx
-            .send(request)
-            .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
-        let res = resp_rx
-            .await
-            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
-        Ok(res)
-    }
-
-    pub async fn schedule_and_update(
-        &self,
         request_id: String,
         isl_tokens: usize,
         block_size: u32,
@@ -244,7 +221,21 @@ impl KvScheduler {
         let token_sequence = TokenBlockSequence::from_slice(tokens, block_size, None);
         let potential_blocks = sequences.potential_blocks(token_sequence);
 
-        let response = self.schedule(overlap, isl_tokens, potential_blocks).await?;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        let request = SchedulingRequest {
+            isl_tokens,
+            overlap,
+            potential_blocks,
+            resp_tx,
+        };
+        self.request_tx
+            .send(request)
+            .await
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+        let response = resp_rx
+            .await
+            .map_err(|_| KvSchedulerError::SubscriberShutdown)?;
+
         if let Some(new_worker_ids) = response.endpoints_changed {
             sequences.update_workers(new_worker_ids);
         }
