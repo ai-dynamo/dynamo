@@ -110,7 +110,7 @@ The following configuration files should be present in this directory:
 - [grafana-datasources.yml](./grafana-datasources.yml): Contains Grafana datasource configuration
 - [grafana_dashboards/grafana-dashboard-providers.yml](./grafana_dashboards/grafana-dashboard-providers.yml): Contains Grafana dashboard provider configuration
 - [grafana_dashboards/grafana-dynamo-dashboard.json](./grafana_dashboards/grafana-dynamo-dashboard.json): Contains Grafana dashboard configuration for various composite metrics (HW and SW)
-- [grafana_dashboards/grafana-llm-dashboard.json](./grafana_dashboards/grafana-llm-dashboard.json): Contains Grafana dashboard configuration
+- [grafana_dashboards/grafana-llm-dashboard.json](./grafana_dashboards/grafana-llm-dashboard.json): Contains Grafana dashboard configuration for LLM specific metrics.
 - [grafana_dashboards/grafana-dcgm-dashboard.json](./grafana_dashboards/grafana-dcgm-dashboard.json): Contains Grafana dashboard configuration for DCGM GPU metrics
 
 ## Running the example `metrics` component
