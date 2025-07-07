@@ -505,6 +505,31 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
 
         Ok(blocks)
     }
+
+    /// Resets the pool to its initial state.
+    ///
+    /// This function will acquire all blocks, which will reset their state, then return them.
+    ///
+    /// A [`Result`] containing `Ok(())` if the reset was successful, otherwise an error.
+    pub fn reset(&mut self) -> Result<(), BlockPoolError> {
+        let total_blocks = self.total_blocks.load(Ordering::Relaxed);
+        let available_blocks = self.available_blocks.load(Ordering::Relaxed);
+
+        if total_blocks != available_blocks {
+            return Err(BlockPoolError::ResetError(format!(
+                "total blocks: {}, available blocks: {}",
+                total_blocks, available_blocks
+            )));
+        }
+
+        let blocks = self.acquire_free_blocks(total_blocks as usize)?;
+
+        for block in blocks.into_iter() {
+            self.return_block(block);
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]

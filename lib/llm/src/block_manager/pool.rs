@@ -69,8 +69,8 @@ use priority_key::PriorityKey;
 pub use super::block::{ImmutableBlock, MutableBlock};
 
 use super::block::{
-    nixl::short_type_name, registry::BlockRegistry, Block, BlockError, BlockMetadata,
-    GlobalRegistry,
+    nixl::short_type_name, private, registry::BlockRegistry, Block, BlockError, BlockMetadata,
+    GlobalRegistry, MaybeReturnableBlock,
 };
 use super::events::{EventManager, NullEventManager};
 use super::metrics::{BlockManagerMetrics, PoolMetrics};
@@ -99,6 +99,47 @@ type AsyncResponse<T> = Result<oneshot::Receiver<T>, BlockPoolError>;
 pub type MutableBlocks<S, L, M> = Vec<MutableBlock<S, L, M>>;
 pub type ImmutableBlocks<S, L, M> = Vec<ImmutableBlock<S, L, M>>;
 
+/// Enum representing either a mutable or immutable block that can be returned to the pool
+#[derive(Debug)]
+pub enum OwnedBlock<S: Storage, L: LocalityProvider, M: BlockMetadata> {
+    Mutable(MutableBlock<S, L, M>),
+    Immutable(ImmutableBlock<S, L, M>),
+}
+
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> MaybeReturnableBlock<S, L, M>
+    for OwnedBlock<S, L, M>
+{
+    fn is_droppable(&self) -> bool {
+        match self {
+            OwnedBlock::Mutable(block) => block.is_droppable(),
+            OwnedBlock::Immutable(block) => block.is_droppable(),
+        }
+    }
+
+    fn try_take_block(self, token: private::PrivateToken) -> Option<Vec<Block<S, L, M>>> {
+        match self {
+            OwnedBlock::Mutable(block) => block.try_take_block(token),
+            OwnedBlock::Immutable(block) => block.try_take_block(token),
+        }
+    }
+}
+
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> From<MutableBlock<S, L, M>>
+    for OwnedBlock<S, L, M>
+{
+    fn from(block: MutableBlock<S, L, M>) -> Self {
+        OwnedBlock::Mutable(block)
+    }
+}
+
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> From<ImmutableBlock<S, L, M>>
+    for OwnedBlock<S, L, M>
+{
+    fn from(block: ImmutableBlock<S, L, M>) -> Self {
+        OwnedBlock::Immutable(block)
+    }
+}
+
 // Specific request type aliases for our use cases
 type AllocateBlocksReq<S, L, M> = RequestResponse<usize, BlockPoolResult<MutableBlocks<S, L, M>>>;
 type RegisterBlocksReq<S, L, M> = RequestResponse<
@@ -109,6 +150,8 @@ type MatchHashesReq<S, L, M> =
     RequestResponse<Vec<SequenceHash>, BlockPoolResult<ImmutableBlocks<S, L, M>>>;
 type TouchBlocksReq = RequestResponse<Vec<SequenceHash>, BlockPoolResult<()>>;
 type AddBlocksReq<S, L, M> = RequestResponse<Vec<Block<S, L, M>>, ()>;
+type ResetReq = RequestResponse<(), BlockPoolResult<()>>;
+type ReturnBlockReq<S, L, M> = RequestResponse<Vec<Block<S, L, M>>, BlockPoolResult<()>>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BlockPoolError {
@@ -129,6 +172,12 @@ pub enum BlockPoolError {
 
     #[error(transparent)]
     BlockError(#[from] BlockError),
+
+    #[error("Reset error: {0}")]
+    ResetError(String),
+
+    #[error("Block is not returnable")]
+    NotReturnable,
 }
 
 #[derive(Builder, Dissolve)]
@@ -246,6 +295,8 @@ enum PriorityRequest<S: Storage, L: LocalityProvider, M: BlockMetadata> {
     RegisterBlocks(RegisterBlocksReq<S, L, M>),
     MatchSequenceHashes(MatchHashesReq<S, L, M>),
     TouchBlocks(TouchBlocksReq),
+    Reset(ResetReq),
+    ReturnBlock(ReturnBlockReq<S, L, M>),
 }
 
 enum ControlRequest<S: Storage, L: LocalityProvider, M: BlockMetadata> {
@@ -557,6 +608,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
         Ok(resp_rx)
     }
 
+    /// Touch a set of blocks, moving them to the back of the LRU queue.
     pub async fn touch_blocks(
         &self,
         sequence_hashes: &[SequenceHash],
@@ -566,6 +618,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
     }
 
+    /// Blocking version of [`BlockPool::touch_blocks`].
     pub fn touch_blocks_blocking(
         &self,
         sequence_hashes: &[SequenceHash],
@@ -583,6 +636,66 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
 
         self.priority_tx
             .send(PriorityRequest::TouchBlocks(req))
+            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
+
+        Ok(resp_rx)
+    }
+
+    /// Resets the pool to its initial state.
+    ///
+    /// This function will acquire all blocks, which will reset their state, then return them.
+    ///
+    /// # Returns
+    ///
+    /// A [`Result`] containing `Ok(())` if the reset was successful, otherwise an error.
+    pub async fn reset(&self) -> BlockPoolResult<()> {
+        self._reset()?
+            .await
+            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
+    }
+
+    /// Blocking version of [`BlockPool::reset`].
+    pub fn reset_blocking(&self) -> BlockPoolResult<()> {
+        self._reset()?
+            .blocking_recv()
+            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
+    }
+
+    fn _reset(&self) -> AsyncResponse<BlockPoolResult<()>> {
+        let (req, resp_rx) = ResetReq::new(());
+
+        self.priority_tx
+            .send(PriorityRequest::Reset(req))
+            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
+
+        Ok(resp_rx)
+    }
+
+    /// Attempt to return a block to the pool. Blocks will naturally be returned to the pool when they are dropped
+    /// and their reference count drops to 0; however, for testing and to synchronize the block returning to the
+    /// pool, this function can be used.
+    pub async fn try_return_block(&self, block: OwnedBlock<S, L, M>) -> BlockPoolResult<()> {
+        self._try_return_block(block)?
+            .await
+            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
+    }
+
+    /// Blocking version of [`BlockPool::try_return_block`].
+    pub fn try_return_block_blocking(&self, block: OwnedBlock<S, L, M>) -> BlockPoolResult<()> {
+        self._try_return_block(block)?
+            .blocking_recv()
+            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
+    }
+
+    fn _try_return_block(&self, block: OwnedBlock<S, L, M>) -> AsyncResponse<BlockPoolResult<()>> {
+        let raw_blocks = block
+            .try_take_block(private::PrivateToken)
+            .ok_or(BlockPoolError::NotReturnable)?;
+
+        let (req, resp_rx) = ReturnBlockReq::new(raw_blocks);
+
+        self.priority_tx
+            .send(PriorityRequest::ReturnBlock(req))
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
 
         Ok(resp_rx)
@@ -615,6 +728,7 @@ mod tests {
     use super::super::layout::{tests::setup_layout, FullyContiguous, LayoutConfig};
     use super::*;
 
+    use crate::block_manager::locality::Local;
     use crate::tokens::{TokenBlockSequence, Tokens};
 
     use crate::block_manager::storage::tests::{NullDeviceAllocator, NullDeviceStorage};
@@ -1040,44 +1154,12 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_block_registration_allow_duplicates() {
-        const EXPECTED_SEQUENCE_HASH: u64 = 14643705804678351452;
+    const EXPECTED_SEQUENCE_HASH: u64 = 14643705804678351452;
 
-        // Create a new layout
-        let layout = setup_layout(None).unwrap();
-
-        // Create the Blocks
-        let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)
-            .unwrap()
-            .into_blocks()
-            .unwrap();
-
-        let count = blocks.len() as u64;
-
-        let async_runtime = tokio::runtime::Runtime::new().unwrap();
-
-        // Create the BlockPool and add the blocks
-        let pool = BlockPool::builder()
-            .blocks(blocks)
-            .async_runtime(async_runtime.handle().clone())
-            .default_duplication_setting(BlockRegistrationDuplicationSetting::Allowed)
-            .build()
-            .unwrap();
-
-        assert_eq!(pool.total_blocks(), count);
-        assert_eq!(pool.available_blocks(), count);
-        assert_eq!(
-            pool.default_duplication_setting(),
-            BlockRegistrationDuplicationSetting::Allowed
-        );
-
-        // All blocks should be in the Reset/Empty state
-        // No blocks should match the expected sequence hash
-        let matched_blocks = pool
-            .match_sequence_hashes_blocking(&[EXPECTED_SEQUENCE_HASH])
-            .unwrap();
-        assert_eq!(matched_blocks.len(), 0);
+    fn create_block(
+        pool: &BlockPool<NullDeviceStorage, Local, BasicMetadata>,
+    ) -> ImmutableBlock<NullDeviceStorage, Local, BasicMetadata> {
+        let count = pool.available_blocks();
 
         // Allocate a single block from the pool
         let mut mutable_blocks = pool.allocate_blocks_blocking(1).unwrap();
@@ -1114,38 +1196,96 @@ mod tests {
         assert!(block.state().is_registered());
         assert_eq!(block.sequence_hash(), sequence_hash);
 
-        let _primary = block.clone();
-        let primary_id = block.block_id();
+        block
+    }
+
+    #[test]
+    fn test_block_registration_allow_duplicates() {
+        // const EXPECTED_SEQUENCE_HASH: u64 = 14643705804678351452;
+
+        // Create a new layout
+        let layout = setup_layout(None).unwrap();
+
+        // Create the Blocks
+        let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)
+            .unwrap()
+            .into_blocks()
+            .unwrap();
+
+        let count = blocks.len() as u64;
+
+        let async_runtime = tokio::runtime::Runtime::new().unwrap();
+
+        // Create the BlockPool and add the blocks
+        let pool = BlockPool::builder()
+            .blocks(blocks)
+            .async_runtime(async_runtime.handle().clone())
+            .default_duplication_setting(BlockRegistrationDuplicationSetting::Allowed)
+            .build()
+            .unwrap();
+
+        assert_eq!(pool.total_blocks(), count);
+        assert_eq!(pool.available_blocks(), count);
+        assert_eq!(
+            pool.default_duplication_setting(),
+            BlockRegistrationDuplicationSetting::Allowed
+        );
+
+        // All blocks should be in the Reset/Empty state
+        // No blocks should match the expected sequence hash
+        let matched_blocks = pool
+            .match_sequence_hashes_blocking(&[EXPECTED_SEQUENCE_HASH])
+            .unwrap();
+        assert_eq!(matched_blocks.len(), 0);
+
+        let primary = create_block(&pool);
+        let primary_id = primary.block_id();
+        assert_eq!(pool.available_blocks(), count - 1);
 
         // Now allocate another and register it with the same sequence
-        let mut mutable_blocks = pool.allocate_blocks_blocking(1).unwrap();
-        assert_eq!(mutable_blocks.len(), 1);
-        let mut block = mutable_blocks.pop().unwrap();
-        assert_ne!(block.block_id(), primary_id);
-
+        let duplicate = create_block(&pool);
+        assert!(duplicate.is_duplicate());
+        assert_ne!(duplicate.block_id(), primary_id);
         assert_eq!(pool.available_blocks(), count - 2);
 
-        block.init_sequence(1337).unwrap();
-        block.add_token(1).unwrap();
-        block.add_token(2).unwrap();
-        block.add_token(3).unwrap();
-        block.add_token(4).unwrap();
+        // Reset only succeeds if all the blocks have been returned to the pool
+        let reset_result = pool.reset_blocking();
+        assert!(reset_result.is_err());
 
-        block.commit().unwrap();
-        assert!(block.state().is_complete());
-
-        let sequence_hash = block.sequence_hash().unwrap();
-        assert_eq!(sequence_hash, EXPECTED_SEQUENCE_HASH);
-
-        let mut immutable_blocks = pool.register_blocks_blocking(vec![block]).unwrap();
-        let block = immutable_blocks.pop().unwrap();
-        assert!(block.state().is_registered());
-        assert_eq!(block.sequence_hash(), sequence_hash);
-
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
+        // we hold both the primary and the duplicate in the duplicate
+        // since we hold the primary in the duplicate, we expect this to fail
+        assert!(pool.try_return_block_blocking(primary.into()).is_err());
         assert_eq!(pool.available_blocks(), count - 2);
-        assert_ne!(block.block_id(), primary_id);
+
+        assert!(pool.try_return_block_blocking(duplicate.into()).is_ok());
+        assert_eq!(pool.available_blocks(), count);
+
+        // we can still match the primary block because we have not reset the pool
+        let mut matched_blocks = pool
+            .match_sequence_hashes_blocking(&[EXPECTED_SEQUENCE_HASH])
+            .unwrap();
+        let primary = matched_blocks.pop().unwrap();
+        assert!(pool.try_return_block_blocking(primary.into()).is_ok());
+        assert_eq!(pool.available_blocks(), count);
+
+        // we can still create a duplicate even if the block is inactive
+        let duplicate = create_block(&pool);
+        assert!(duplicate.is_duplicate());
+        assert_ne!(duplicate.block_id(), primary_id);
+        assert_eq!(pool.available_blocks(), count - 2);
+
+        assert!(pool.try_return_block_blocking(duplicate.into()).is_ok());
+        assert_eq!(pool.available_blocks(), count);
+
+        // Reset the pool
+        let reset_result = pool.reset_blocking();
+        assert!(reset_result.is_ok());
+
+        // Now we should not be able to match the primary block
+        let matched_blocks = pool
+            .match_sequence_hashes_blocking(&[EXPECTED_SEQUENCE_HASH])
+            .unwrap();
+        assert_eq!(matched_blocks.len(), 0);
     }
 
     #[test]
@@ -1183,72 +1323,14 @@ mod tests {
             .unwrap();
         assert_eq!(matched_blocks.len(), 0);
 
-        // Allocate a single block from the pool
-        let mut mutable_blocks = pool.allocate_blocks_blocking(1).unwrap();
-        assert_eq!(mutable_blocks.len(), 1);
-        let mut block = mutable_blocks.pop().unwrap();
-
+        // allocate and register the primary block
+        let primary = create_block(&pool);
+        let primary_id = primary.block_id();
         assert_eq!(pool.available_blocks(), count - 1);
-
-        // Initialize the sequence on the block with a salt hash
-        block.init_sequence(1337).unwrap();
-
-        // Add some tokens to the block - our page_size is 4
-        block.add_token(1).unwrap();
-        block.add_token(2).unwrap();
-        block.add_token(3).unwrap();
-        block.add_token(4).unwrap();
-
-        // Should fail because we don't have space in the block
-        assert!(block.add_token(5).is_err());
-
-        // Commit the block - this will generate a sequence hash
-        // This will put the block in a Complete state
-        block.commit().unwrap();
-        assert!(block.state().is_complete()); // perhaps renamed to Commited
-
-        let sequence_hash = block.sequence_hash().unwrap();
-        assert_eq!(sequence_hash, EXPECTED_SEQUENCE_HASH);
-
-        // Register the block
-        // We provide a mutable block to the register_blocks function
-        // This will take ownership of the block and return an immutable block
-        let mut immutable_blocks = pool.register_blocks_blocking(vec![block]).unwrap();
-        let block = immutable_blocks.pop().unwrap();
-        assert!(block.state().is_registered());
-        assert_eq!(block.sequence_hash(), sequence_hash);
-
-        let _primary = block.clone();
-        let primary_id = block.block_id();
 
         // Now allocate another and register it with the same sequence
-        let mut mutable_blocks = pool.allocate_blocks_blocking(1).unwrap();
-        assert_eq!(mutable_blocks.len(), 1);
-        let mut block = mutable_blocks.pop().unwrap();
-
-        assert_eq!(pool.available_blocks(), count - 2);
-
-        block.init_sequence(1337).unwrap();
-        block.add_token(1).unwrap();
-        block.add_token(2).unwrap();
-        block.add_token(3).unwrap();
-        block.add_token(4).unwrap();
-
-        block.commit().unwrap();
-        assert!(block.state().is_complete());
-
-        let sequence_hash = block.sequence_hash().unwrap();
-        assert_eq!(sequence_hash, EXPECTED_SEQUENCE_HASH);
-
-        let mut immutable_blocks = pool.register_blocks_blocking(vec![block]).unwrap();
-        let block = immutable_blocks.pop().unwrap();
-        assert!(block.state().is_registered());
-        assert_eq!(block.sequence_hash(), sequence_hash);
-
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
+        let duplicate = create_block(&pool);
         assert_eq!(pool.available_blocks(), count - 1);
-
-        assert_eq!(block.block_id(), primary_id);
+        assert_eq!(duplicate.block_id(), primary_id);
     }
 }

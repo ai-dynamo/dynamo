@@ -74,6 +74,22 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                     tracing::error!("failed to send response to touch blocks");
                 }
             }
+            PriorityRequest::Reset(req) => {
+                let (_req, resp_tx) = req.dissolve();
+                let result = self.inactive.reset();
+                if resp_tx.send(result).is_err() {
+                    tracing::error!("failed to send response to reset");
+                }
+            }
+            PriorityRequest::ReturnBlock(req) => {
+                let (returnable_blocks, resp_tx) = req.dissolve();
+                for block in returnable_blocks {
+                    self.return_block(block);
+                }
+                if resp_tx.send(Ok(())).is_err() {
+                    tracing::error!("failed to send response to return block");
+                }
+            }
         }
     }
 
@@ -165,6 +181,10 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                     if duplication_setting == BlockRegistrationDuplicationSetting::Allowed {
                         immutable.with_duplicate(block.into())
                     } else {
+                        // immediate return the block to the pool if duplicates are disabled
+                        if let Some(blocks) = block.try_take_block(private::PrivateToken) {
+                            self.inactive.return_blocks(blocks);
+                        }
                         immutable
                     };
                 immutable_blocks.push(immutable);
@@ -220,7 +240,13 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                         immutable = immutable.with_duplicate(duplicate.into());
                     }
                 }
-                BlockRegistrationDuplicationSetting::Disabled => {}
+                BlockRegistrationDuplicationSetting::Disabled => {
+                    if let Some(block) = duplicate {
+                        if let Some(raw_blocks) = block.try_take_block(private::PrivateToken) {
+                            self.inactive.return_blocks(raw_blocks);
+                        }
+                    }
+                }
             }
 
             if offload {
