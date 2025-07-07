@@ -107,10 +107,10 @@ class VllmWorker:
         # Initially send dummy metrics to kick start,
         # vLLM will not update stat until forward pass is triggered
         worker_stats = WorkerStats(
-            None,
             0,  # request_active_slots
             1024,  # request_total_slots
             0,  # num_requests_waiting
+            None,  # data_parallel_rank
         )
 
         kv_stats = KvStats(

@@ -344,10 +344,10 @@ async def metrics_publisher_task(kv_listener, expected_metrics):
     metrics_publisher = WorkerMetricsPublisher()
 
     worker_stats = WorkerStats(
-        None,
         expected_metrics["request_active_slots"],
         expected_metrics["request_total_slots"],
         expected_metrics["num_requests_waiting"],
+        None,
     )
 
     kv_stats = KvStats(

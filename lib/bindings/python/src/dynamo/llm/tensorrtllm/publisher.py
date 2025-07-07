@@ -159,10 +159,10 @@ class Publisher:
             return
 
         worker_stats = WorkerStats(
-            data_parallel_rank=None,
             request_active_slots=request_active_slots,
             request_total_slots=request_total_slots,
             num_requests_waiting=num_requests_waiting,
+            data_parallel_rank=None,
         )
 
         kv_stats = KvStats(
@@ -237,10 +237,10 @@ class Publisher:
             )
 
             worker_stats = WorkerStats(
-                data_parallel_rank=None,
                 request_active_slots=request_active_slots,
                 request_total_slots=request_total_slots,
                 num_requests_waiting=num_requests_waiting,
+                data_parallel_rank=None,
             )
 
             kv_stats = KvStats(

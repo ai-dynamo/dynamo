@@ -59,10 +59,10 @@ class RequestHandler:
     def setup_metrics(self):
         """Set up metrics publisher - call this after handler creation"""
         worker_stats = WorkerStats(
-            data_parallel_rank=None,
             request_active_slots=0,
             request_total_slots=1024,
             num_requests_waiting=0,
+            data_parallel_rank=None,
         )
 
         kv_stats = KvStats(
@@ -96,10 +96,10 @@ class RequestHandler:
         )
 
         worker_stats = WorkerStats(
-            data_parallel_rank=None,
             request_active_slots=0,
             request_total_slots=1024,
             num_requests_waiting=0,
+            data_parallel_rank=None,
         )
 
         kv_stats = KvStats(

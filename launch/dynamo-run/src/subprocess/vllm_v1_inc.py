@@ -87,10 +87,10 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
             )
 
         worker_stats = WorkerStats(
-            data_parallel_rank=self.dp_rank,
             request_active_slots=scheduler_stats.num_running_reqs,
             request_total_slots=0,  # TODO - remove from metrics
             num_requests_waiting=scheduler_stats.num_waiting_reqs,
+            data_parallel_rank=None,
         )
 
         kv_stats = KvStats(
