@@ -62,7 +62,7 @@ impl KvEventSource {
     /// Start the event source from a [`KvEventSourceConfig`].
     fn start(
         component: Component,
-        kv_block_size: usize,
+        kv_block_size: u32,
         source_config: KvEventSourceConfig,
         cancellation_token: CancellationToken,
         tx: mpsc::UnboundedSender<KvCacheEvent>,
@@ -98,7 +98,7 @@ impl KvEventSource {
 /// A publisher of KV events.
 pub struct KvEventPublisher {
     /// The size of the KV block.
-    kv_block_size: usize,
+    kv_block_size: u32,
     /// The source of KV events.
     /// Can be `None` if all events provided through [`KvEventPublisher::publish`].
     source: Option<KvEventSource>,
@@ -112,7 +112,7 @@ impl KvEventPublisher {
     pub fn new(
         component: Component,
         worker_id: i64,
-        kv_block_size: usize,
+        kv_block_size: u32,
         source_config: Option<KvEventSourceConfig>,
     ) -> Result<Self> {
         let cancellation_token = CancellationToken::new();
@@ -155,7 +155,7 @@ impl KvEventPublisher {
         self.tx.send(event)
     }
 
-    pub fn kv_block_size(&self) -> usize {
+    pub fn kv_block_size(&self) -> u32 {
         self.kv_block_size
     }
 
@@ -223,7 +223,7 @@ pub async fn start_zmq_listener(
     zmq_topic: String,
     tx: mpsc::UnboundedSender<KvCacheEvent>,
     cancellation_token: CancellationToken,
-    kv_block_size: usize,
+    kv_block_size: u32,
 ) {
     tracing::debug!(
         "KVEventPublisher connecting to ZMQ endpoint {} (topic '{}')",
@@ -335,7 +335,7 @@ pub async fn start_zmq_listener(
 fn convert_event(
     raw: RawKvEvent,
     event_id: u64,
-    kv_block_size: usize,
+    kv_block_size: u32,
     warning_count: &Arc<AtomicU32>,
 ) -> KvCacheEvent {
     match raw {
@@ -382,7 +382,7 @@ fn convert_event(
 }
 
 pub fn create_stored_block_from_parts(
-    kv_block_size: usize,
+    kv_block_size: u32,
     block_hash: i64,
     token_ids: &[u32],
     _lora_id: u64,
@@ -395,7 +395,7 @@ pub fn create_stored_block_from_parts(
 }
 
 pub fn create_stored_blocks(
-    kv_block_size: usize,
+    kv_block_size: u32,
     token_ids: &[u32],
     num_block_tokens: &[u64],
     block_hashes: &[i64],

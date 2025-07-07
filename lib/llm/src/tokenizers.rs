@@ -58,6 +58,7 @@ pub mod traits {
 
     pub trait Encoder: Send + Sync {
         fn encode(&self, input: &str) -> Result<Encoding>;
+        fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>>;
     }
 
     pub trait Decoder: Send + Sync {

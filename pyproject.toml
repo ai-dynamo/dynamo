@@ -15,7 +15,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.3.1"
+version = "0.3.2"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -28,7 +28,7 @@ dependencies = [
     "pytest>=8.3.4",
     "types-psutil==7.0.0.20250218",
     "kubernetes==32.0.1",
-    "ai-dynamo-runtime==0.3.1",
+    "ai-dynamo-runtime==0.3.2",
     "fastapi==0.115.6",
     "distro",
     # filelock: required by planner
@@ -36,6 +36,7 @@ dependencies = [
     "typer",
     "circus==0.19.0",
     "click<8.2.0",
+    "setuptools",
 ]
 
 classifiers = [
@@ -139,6 +140,7 @@ addopts = [
     "--ignore-glob=*_inc.py",
     "--ignore-glob=deploy/cloud/api-store/*",
     "--ignore-glob=*/llm/tensorrtllm*",
+    "--ignore-glob=docs/*",
     # FIXME: Get relative/generic blob paths to work here
 ]
 xfail_strict = true
@@ -161,6 +163,8 @@ markers = [
     "weekly: marks tests to run weekly",
     "gpu_1: marks tests to run on GPU",
     "gpu_2: marks tests to run on 2GPUs",
+    "gpu_4: marks tests to run on 4GPUs",
+    "gpu_8: marks tests to run on 8GPUs",
     "e2e: marks tests as end-to-end tests",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",

@@ -31,7 +31,7 @@ scrape_configs:
   - job_name: 'dcgm-exporter'
     scrape_interval: 5s
     static_configs:
-      - targets: ['dcgm-exporter:9401']  # on the "monitoring" network
+      - targets: ['dcgm-exporter:9400']  # on the "monitoring" network
 
   # Uncomment to see its own Prometheus metrics
   # - job_name: 'prometheus'
