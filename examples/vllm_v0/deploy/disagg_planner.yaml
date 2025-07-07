@@ -67,7 +67,7 @@ spec:
           args:
             - dynamo
             - serve
-            - graphs.disagg_planner:Frontend
+            - graphs.disagg_planner:VllmWorker
             - --system-app-port
             - "5000"
             - --enable-system-app
@@ -95,7 +95,7 @@ spec:
           args:
             - dynamo
             - serve
-            - graphs.disagg_planner:Frontend
+            - graphs.disagg_planner:PrefillWorker
             - --system-app-port
             - "5000"
             - --enable-system-app
@@ -147,7 +147,7 @@ spec:
           args:
             - dynamo
             - serve
-            - graphs.disagg_planner:Frontend
+            - graphs.disagg_planner:Prometheus
             - --system-app-port
             - "5000"
             - --enable-system-app
