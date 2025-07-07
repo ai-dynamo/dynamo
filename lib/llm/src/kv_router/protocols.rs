@@ -41,7 +41,6 @@ pub struct WorkerSelectionResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ForwardPassMetrics {
-    // https://lmsys.org/blog/2024-12-04-sglang-v0-4/#data-parallelism-attention-for-deepseek-models
     pub worker_stats: WorkerStats,
     pub kv_stats: KvStats,
     pub spec_decode_stats: Option<SpecDecodeStats>,
@@ -49,6 +48,7 @@ pub struct ForwardPassMetrics {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct WorkerStats {
+    // https://lmsys.org/blog/2024-12-04-sglang-v0-4/#data-parallelism-attention-for-deepseek-models
     pub data_parallel_rank: Option<u32>,
     pub request_active_slots: u64,
     pub request_total_slots: u64,

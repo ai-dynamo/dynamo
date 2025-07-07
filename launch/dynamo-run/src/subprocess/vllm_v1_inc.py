@@ -32,10 +32,13 @@ from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
-from dynamo._core import ForwardPassMetrics, KvStats, SpecDecodeStats, WorkerStats
 from dynamo.llm import (
+    ForwardPassMetrics,
+    KvStats,
     ModelType,
+    SpecDecodeStats,
     WorkerMetricsPublisher,
+    WorkerStats,
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
     register_llm,

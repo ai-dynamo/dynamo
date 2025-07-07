@@ -365,6 +365,18 @@ class WorkerStats:
 
     ...
 
+    def __init__(
+        self,
+        request_active_slots: int,
+        request_total_slots: int,
+        num_requests_waiting: int,
+        data_parallel_rank: Optional[int] = None,
+    ) -> None:
+        """
+        Create a `WorkerStats` object.
+        """
+        ...
+
 class KvStats:
     """
     KV stats.
@@ -372,12 +384,37 @@ class KvStats:
 
     ...
 
+    def __init__(
+        self,
+        kv_active_blocks: int,
+        kv_total_blocks: int,
+        gpu_cache_usage_perc: float,
+        gpu_prefix_cache_hit_rate: float,
+    ) -> None:
+        """
+        Create a `KvStats` object.
+        """
+        ...
+
 class SpecDecodeStats:
     """
     Speculative decoding stats.
     """
 
     ...
+
+    def __init__(
+        self,
+        num_spec_tokens: int,
+        num_drafts: int,
+        num_draft_tokens: int,
+        num_accepted_tokens: int,
+        num_accepted_tokens_per_pos: List[int],
+    ) -> None:
+        """
+        Create a `SpecDecodeStats` object when running with speculative decoding.
+        """
+        ...
 
 class ForwardPassMetrics:
     """

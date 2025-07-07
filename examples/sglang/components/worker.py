@@ -16,10 +16,12 @@ from sglang.srt.utils import get_ip
 from utils.protocol import DisaggPreprocessedRequest
 from utils.sgl_utils import parse_sglang_args_inc
 
-from dynamo._core import ForwardPassMetrics, KvStats, WorkerStats
 from dynamo.llm import (
+    ForwardPassMetrics,
+    KvStats,
     ModelType,
     WorkerMetricsPublisher,
+    WorkerStats,
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
     register_llm,

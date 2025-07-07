@@ -226,8 +226,13 @@ import logging
 import random
 
 from pydantic import BaseModel
-from dynamo.llm import WorkerMetricsPublisher
-from dynamo._core import ForwardPassMetrics, KvStats, SpecDecodeStats, WorkerStats
+from dynamo.llm import (
+    WorkerMetricsPublisher,
+    ForwardPassMetrics,
+    KvStats,
+    SpecDecodeStats,
+    WorkerStats
+)
 from dynamo.sdk import endpoint, service, dynamo_context
 
 logger = logging.getLogger(__name__)

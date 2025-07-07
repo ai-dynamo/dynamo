@@ -31,8 +31,7 @@ from vllm.entrypoints.openai.api_server import (
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
-from dynamo._core import ForwardPassMetrics, KvStats, WorkerStats
-from dynamo.llm import WorkerMetricsPublisher
+from dynamo.llm import ForwardPassMetrics, KvStats, WorkerMetricsPublisher, WorkerStats
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
