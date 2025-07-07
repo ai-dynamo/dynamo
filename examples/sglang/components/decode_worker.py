@@ -55,10 +55,9 @@ class DecodeRequestHandler:
             yield result
 
     async def flush_cache(self, request: dict):
-        _ = request  # Suppress mypy unused variable warning
-        await self.engine.tokenizer_manager.flush_cache()
-        logging.info("Prefill worker cache flushed")
-        yield {"status": "success", "message": "Cache flushed"}
+        _ = request 
+        asyncio.create_task(self.engine.tokenizer_manager.flush_cache())
+        yield {"status": "success", "message": "Cache flush initiated. Check backend logs for status"}
 
 
 @dynamo_worker(static=False)
@@ -81,10 +80,7 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
     flush_endpoint = component.endpoint("flush_cache")
 
     tasks = [gen_endpoint.serve_endpoint(handler.generate)]
-    
-    if os.environ.get("DYN_SGL_HTTP_SERVER"):
-        tasks.append(flush_endpoint.serve_endpoint(handler.flush_cache))
-        logging.info("SGL engine HTTP server enabled. Adding flush_cache endpoint.")
+    tasks.append(flush_endpoint.serve_endpoint(handler.flush_cache))
     
     await asyncio.gather(*tasks)
 

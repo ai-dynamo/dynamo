@@ -5,8 +5,11 @@ import asyncio
 import argparse
 import uvloop
 from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime.logging import configure_dynamo_logging
 
 FLUSH_CACHE_ENDPOINT = "flush_cache"
+
+configure_dynamo_logging()
 
 class SglangHttpServer:
     def __init__(self, port: int, runtime: DistributedRuntime, args):
@@ -48,7 +51,9 @@ class SglangHttpServer:
             ep_name = ep_with_lease.split(":", 1)[0]
             if ep_name == self.args.endpoint:
                 discovered.add((ns, comp))
+                logging.debug(f"Discovered endpoint: {ns}.{comp}")
 
+        logging.debug(f"Endpoint discovery complete. Found {len(discovered)} matching endpoints")
         return discovered
 
     def setup_routes(self):
@@ -61,7 +66,7 @@ class SglangHttpServer:
                 if not discovered:
                     return {"message": "No matching endpoints found", "success": False}
 
-                print("Found components:", ", ".join([f"{ns}.{comp}" for ns, comp in discovered]))
+                logging.debug(f"Found components: {', '.join([f'{ns}.{comp}' for ns, comp in discovered])}")
 
                 for ns, comp in discovered:
                     ep = self.runtime.namespace(ns).component(comp).endpoint(self.args.endpoint)
@@ -69,15 +74,14 @@ class SglangHttpServer:
                     await client.wait_for_instances()
                     ids = client.instance_ids()
 
-                    print(f"-- {ns}.{comp} : {len(ids)} instances --")
+                    logging.debug(f"-- {ns}.{comp} : {len(ids)} instances --")
 
                     for inst_id in ids:
                         try:
                             stream = await client.direct("{}", inst_id)
                             async for payload in stream:
-                                print(f"[{ns}.{comp}][{inst_id}] -> {payload}")
+                                logging.debug(f"[{ns}.{comp}][{inst_id}] -> {payload}")
                         except Exception as e:
-                            print(f"[{ns}.{comp}][{inst_id}] ERROR:", e)
                             logging.error(f"[{ns}.{comp}][{inst_id}] flush error: {e}")
 
                 return {"message": "Cache flush initiated", "success": True}
@@ -91,7 +95,6 @@ class SglangHttpServer:
             self.app, 
             host="0.0.0.0", 
             port=self.port, 
-            log_config=None  # Disable all uvicorn logging
         )
         server = uvicorn.Server(config)
         
@@ -103,7 +106,7 @@ class SglangHttpServer:
 def parse_args():
     p = argparse.ArgumentParser(description="SGLang HTTP server for cache management")
     p.add_argument("--port", type=int, default=9001, help="Port to listen on")
-    p.add_argument("--ns", "--namespace", default=None,
+    p.add_argument("--ns", "--namespace", default="dynamo",
                    help="Specify Dynamo namespace (default: discover all)")
     p.add_argument("--comp", "--component", default=None,
                    help="Specify component name (default: discover all)")

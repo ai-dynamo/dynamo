@@ -244,36 +244,14 @@ class RequestHandler:
             pass
 
     async def flush_cache(self, request: dict):
-        _ = request  # Suppress mypy unused variable warning
-        print(f"DEBUG: Worker flush_cache called with request: {request}")
-        
-        try:
-            # Add timeout to prevent hanging
-            await asyncio.wait_for(
-                self.engine.tokenizer_manager.flush_cache(), 
-                timeout=10.0
-            )
-            logging.info("Prefill worker cache flushed")
-            print(f"DEBUG: About to yield response")
-            yield {"status": "success", "message": "Cache flushed"}
-            print(f"DEBUG: Yielded response")
-        except asyncio.TimeoutError:
-            print(f"DEBUG: flush_cache timed out after 10 seconds")
-            yield {"status": "error", "message": "Cache flush timed out"}
-        except Exception as e:
-            print(f"DEBUG: flush_cache error: {e}")
-            yield {"status": "error", "message": f"Cache flush failed: {str(e)}"}
-
+        _ = request 
+        asyncio.create_task(self.engine.tokenizer_manager.flush_cache())
+        yield {"status": "success", "message": "Cache flush initiated. Check backend logs for status"}
 
 @dynamo_worker(static=False)
 async def worker(runtime: DistributedRuntime):
     server_args = parse_sglang_args_inc(sys.argv[1:])
     await init(runtime, server_args)
-
-
-async def setup_flush_endpoint(component: Any):
-    flush_endpoint = component.endpoint("flush_cache")
-    return flush_endpoint
 
 async def init(runtime: DistributedRuntime, server_args: ServerArgs):
     """Initialize worker (either prefill or aggregated)"""
@@ -315,11 +293,8 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
 
     tasks = [endpoint.serve_endpoint(handler.generate)]
 
-    if os.environ.get("DYN_SGL_HTTP_SERVER"):
-        flush_endpoint = component.endpoint("flush_cache")
-        tasks.append(flush_endpoint.serve_endpoint(handler.flush_cache))
-        http_server = SglangHttpServer(server_args, runtime)
-        asyncio.create_task(http_server.start_server())
+    flush_endpoint = component.endpoint("flush_cache")
+    tasks.append(flush_endpoint.serve_endpoint(handler.flush_cache))
 
     await asyncio.gather(*tasks)
 
