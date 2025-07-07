@@ -11,6 +11,7 @@ from contextlib import asynccontextmanager
 from queue import Queue
 from typing import Callable, Optional, Union
 
+from dynamo._core import ForwardPassMetrics, KvStats, WorkerStats
 from dynamo.llm import KvEventPublisher, WorkerMetricsPublisher
 
 logging.basicConfig(level=logging.DEBUG)
@@ -157,15 +158,26 @@ class Publisher:
             logging.error("KV metrics publisher not initialized!")
             return
 
-        self.metrics_publisher.publish(
-            request_active_slots,
-            request_total_slots,
-            kv_active_block,
-            kv_total_blocks,
-            num_requests_waiting,
-            gpu_cache_usage_perc,
-            gpu_prefix_cache_hit_rate,
+        worker_stats = WorkerStats(
+            data_parallel_rank=None,
+            request_active_slots=request_active_slots,
+            request_total_slots=request_total_slots,
+            num_requests_waiting=num_requests_waiting,
         )
+
+        kv_stats = KvStats(
+            kv_active_blocks=kv_active_block,
+            kv_total_blocks=kv_total_blocks,
+            gpu_cache_usage_perc=gpu_cache_usage_perc,
+            gpu_prefix_cache_hit_rate=gpu_prefix_cache_hit_rate,
+        )
+
+        metrics = ForwardPassMetrics(
+            worker_stats=worker_stats,
+            kv_stats=kv_stats,
+            spec_decode_stats=None,
+        )
+        self.metrics_publisher.publish(metrics)
 
         # Prepare threads for publishing stats but don't start them yet.
         # TRTLLM needs to start generating tokens first before stats
@@ -224,15 +236,29 @@ class Publisher:
                 f"Publishing stats: request_active_slots: {request_active_slots}, request_total_slots: {request_total_slots}, kv_active_block: {kv_active_block}, kv_total_blocks: {kv_total_blocks}, num_requests_waiting: {num_requests_waiting}, reused_blocks: {reused_blocks}, freeNumBlocks: {freeNumBlocks}, allocTotalBlocks: {allocTotalBlocks}, allocNewBlocks: {allocNewBlocks}, gpu_cache_usage_perc: {gpu_cache_usage_perc}, gpu_prefix_cache_hit_rate: {gpu_prefix_cache_hit_rate}"
             )
 
-            self.metrics_publisher.publish(
-                request_active_slots,
-                request_total_slots,
-                kv_active_block,
-                kv_total_blocks,
-                num_requests_waiting,
-                gpu_cache_usage_perc,
-                gpu_prefix_cache_hit_rate,
+            worker_stats = WorkerStats(
+                data_parallel_rank=None,
+                request_active_slots=request_active_slots,
+                request_total_slots=request_total_slots,
+                num_requests_waiting=num_requests_waiting,
             )
+
+            kv_stats = KvStats(
+                kv_active_blocks=kv_active_block,
+                kv_total_blocks=kv_total_blocks,
+                gpu_cache_usage_perc=gpu_cache_usage_perc,
+                gpu_prefix_cache_hit_rate=gpu_prefix_cache_hit_rate,
+            )
+
+            # TODO: get spec_decode_stats from engine
+            spec_decode_stats = None
+
+            metrics = ForwardPassMetrics(
+                worker_stats=worker_stats,
+                kv_stats=kv_stats,
+                spec_decode_stats=spec_decode_stats,
+            )
+            self.metrics_publisher.publish(metrics)
 
         return True
 

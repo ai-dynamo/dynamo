@@ -227,6 +227,7 @@ import random
 
 from pydantic import BaseModel
 from dynamo.llm import WorkerMetricsPublisher
+from dynamo._core import ForwardPassMetrics, KvStats, SpecDecodeStats, WorkerStats
 from dynamo.sdk import endpoint, service, dynamo_context
 
 logger = logging.getLogger(__name__)
@@ -260,17 +261,28 @@ class YourWorker:
         self.gpu_cache_usage_perc = 0.0
         self.gpu_prefix_cache_hit_rate = 0.0
 
-        # Publish some initial metrics to register
-        # this worker as a candidate for KV Routing.
-        self.metrics_publisher.publish(
+        worker_stats = WorkerStats(
+            data_parallel_rank=None,
             self.request_active_slots,
             self.request_total_slots,
+            self.num_requests_waiting
+        )
+
+        kv_stats = KvStats(
             self.kv_active_blocks,
             self.kv_total_blocks,
-            self.num_requests_waiting,
             self.gpu_cache_usage_perc,
-            self.gpu_prefix_cache_hit_rate,
+            self.gpu_prefix_cache_hit_rate
         )
+
+        # Publish some initial metrics to register
+        # this worker as a candidate for KV Routing.
+        metrics = ForwardPassMetrics(
+            worker_stats=worker_stats,
+            kv_stats=kv_stats,
+            spec_decode_stats=None,
+        )
+        self.metrics_publisher.publish(metrics)
 
     def publish_kv_metrics(self):
         # Populate the frequently changing metrics with random data for
@@ -282,15 +294,26 @@ class YourWorker:
         self.gpu_prefix_cache_hit_rate = random.uniform(0, 1.0)
 
         # Publish the metrics with the current state
-        self.metrics_publisher.publish(
+        worker_stats = WorkerStats(
+            data_parallel_rank=None,
             self.request_active_slots,
             self.request_total_slots,
+            self.num_requests_waiting
+        )
+
+        kv_stats = KvStats(
             self.kv_active_blocks,
             self.kv_total_blocks,
-            self.num_requests_waiting,
             self.gpu_cache_usage_perc,
-            self.gpu_prefix_cache_hit_rate,
+            self.gpu_prefix_cache_hit_rate
         )
+
+        metrics = ForwardPassMetrics(
+            worker_stats=worker_stats,
+            kv_stats=kv_stats,
+            spec_decode_stats=None,
+        )
+        self.metrics_publisher.publish(metrics)
 
     @endpoint()
     async def generate(self, request: RequestType):

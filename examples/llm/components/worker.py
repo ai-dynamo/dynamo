@@ -31,6 +31,7 @@ from vllm.entrypoints.openai.api_server import (
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
+from dynamo._core import ForwardPassMetrics, KvStats, WorkerStats
 from dynamo.llm import WorkerMetricsPublisher
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
@@ -102,17 +103,30 @@ class VllmWorker:
         else:
             raise RuntimeError("Failed to initialize engine client")
         self.engine_client.set_metrics_publisher(self.metrics_publisher)
+
         # Initially send dummy metrics to kick start,
         # vLLM will not update stat until forward pass is triggered
-        self.metrics_publisher.publish(
+        worker_stats = WorkerStats(
+            None,
             0,  # request_active_slots
             1024,  # request_total_slots
+            0,  # num_requests_waiting
+        )
+
+        kv_stats = KvStats(
             0,  # kv_active_blocks
             1024,  # kv_total_blocks
-            0,  # num_requests_waiting
             0.0,  # gpu_cache_usage_perc
             0.0,  # gpu_prefix_cache_hit_rate
         )
+
+        metrics = ForwardPassMetrics(
+            worker_stats=worker_stats,
+            kv_stats=kv_stats,
+            spec_decode_stats=None,
+        )
+
+        self.metrics_publisher.publish(metrics)
         task = asyncio.create_task(self.create_metrics_publisher_endpoint())
         task.add_done_callback(
             lambda _: logger.info("metrics publisher endpoint created")

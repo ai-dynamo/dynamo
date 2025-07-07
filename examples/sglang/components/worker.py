@@ -16,6 +16,7 @@ from sglang.srt.utils import get_ip
 from utils.protocol import DisaggPreprocessedRequest
 from utils.sgl_utils import parse_sglang_args_inc
 
+from dynamo._core import ForwardPassMetrics, KvStats, WorkerStats
 from dynamo.llm import (
     ModelType,
     WorkerMetricsPublisher,
@@ -57,15 +58,26 @@ class RequestHandler:
 
     def setup_metrics(self):
         """Set up metrics publisher - call this after handler creation"""
-        self.metrics_publisher.publish(
+        worker_stats = WorkerStats(
+            data_parallel_rank=None,
             request_active_slots=0,
             request_total_slots=1024,
+            num_requests_waiting=0,
+        )
+
+        kv_stats = KvStats(
             kv_active_blocks=0,
             kv_total_blocks=1024,
-            num_requests_waiting=0,
             gpu_cache_usage_perc=0.0,
             gpu_prefix_cache_hit_rate=0.0,
         )
+
+        metrics = ForwardPassMetrics(
+            worker_stats=worker_stats,
+            kv_stats=kv_stats,
+            spec_decode_stats=None,
+        )
+        self.metrics_publisher.publish(metrics)
         task = asyncio.create_task(self.create_metrics_publisher_endpoint())
         task.add_done_callback(
             lambda _: logging.debug("metrics publisher endpoint created")
@@ -82,15 +94,30 @@ class RequestHandler:
         logging.warning(
             "Publishing placeholder metrics in SGLangWorker; these are NOT real engine metrics yet and will be replaced once upstream support lands."
         )
-        self.metrics_publisher.publish(
-            request_active_slots=1,
-            request_total_slots=100,
+
+        worker_stats = WorkerStats(
+            data_parallel_rank=None,
+            request_active_slots=0,
+            request_total_slots=1024,
+            num_requests_waiting=0,
+        )
+
+        kv_stats = KvStats(
             kv_active_blocks=random.randint(0, 500),
             kv_total_blocks=1000,
-            num_requests_waiting=0,
             gpu_cache_usage_perc=random.uniform(0.1, 0.8),
             gpu_prefix_cache_hit_rate=random.uniform(0.0, 0.5),
         )
+
+        # TODO: get spec_dec_stats from sglang once real engine metrics are available
+        spec_dec_stats = None
+
+        metrics = ForwardPassMetrics(
+            worker_stats=worker_stats,
+            kv_stats=kv_stats,
+            spec_decode_stats=spec_dec_stats,
+        )
+        self.metrics_publisher.publish(metrics)
 
     def _get_bootstrap_info(self):
         """Bootstrap info from tokenizer manager"""
@@ -136,7 +163,7 @@ class RequestHandler:
         is_batch = self._is_batch_request(request)
         batch_size = self._get_request_batch_size(request)
 
-        # TODO: maintain a mapping from SGLang's Ouput struct to LLMEngineOuput
+        # TODO: maintain a mapping from SGLang's Ouput struct to LLMEngineOuputf
         sampling_params = self._build_sampling_params(request)
 
         if self.server_args.disaggregation_mode != "null":
