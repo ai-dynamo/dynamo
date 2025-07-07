@@ -1,8 +1,14 @@
 # Metrics
 
 The `metrics` component is a utility that can collect, aggregate, and publish
-metrics from a Dynamo deployment for use in other applications or visualization
-tools like Prometheus and Grafana.
+metrics from a Dynamo deployment. After collecting and aggregating metrics from
+workers, it exposes them via an HTTP `/metrics` endpoint in Prometheus format
+that other applications or visualization tools like Prometheus server and Grafana can
+pull from.
+
+**Note**: This is a demo implementation. The metrics component is currently under active development and this documentation will change as the implementation evolves.
+- In this demo the metrics names use the prefix "llm", but in production they will be prefixed with "nv_llm" (e.g., the HTTP `/metrics` endpoint will serve metrics with "nv_llm" prefixes)
+- This demo will only work when using examples/llm/configs/agg.yml-- other configurations will not work
 
 <div align="center">
   <img src="images/dynamo_metrics_grafana.png" alt="Dynamo Metrics Dashboard"/>
@@ -22,16 +28,16 @@ For example:
 ```bash
 # Default namespace is "dynamo", but can be configured with --namespace
 # For more detailed output, try setting the env var: DYN_LOG=debug
-metrics --component my_component --endpoint my_endpoint
+metrics --component MyComponent --endpoint my_endpoint
 
-# 2025-03-17T00:07:05.202558Z  INFO metrics: Scraping endpoint dynamo/my_component/my_endpoint for stats
+# 2025-03-17T00:07:05.202558Z  INFO metrics: Scraping endpoint dynamo/MyComponent/my_endpoint for stats
 # 2025-03-17T00:07:05.202955Z  INFO metrics: Prometheus metrics server started at 0.0.0.0:9091/metrics
 # ...
 ```
 
 With no matching endpoints running to collect stats from, you should see warnings in the logs:
 ```bash
-2025-03-17T00:07:06.204756Z  WARN metrics: No endpoints found matching dynamo/my_component/my_endpoint
+2025-03-17T00:07:06.204756Z  WARN metrics: No endpoints found matching dynamo/MyComponent/my_endpoint
 ```
 
 After a worker with a matching endpoint gets started, the endpoint
@@ -44,22 +50,23 @@ so below are some examples of workers and how they can be monitored.
 
 ### Mock Worker
 
-For quick testing and debugging, there is a Rust-based
-[mock worker](src/bin/mock_worker.rs) that registers a mock
-`StatsHandler` under an endpoint named
-`dynamo/my_component/my_endpoint` and publishes random data.
+To try out how `metrics` works, there is a demo Rust-based
+[mock worker](src/bin/mock_worker.rs) that provides sample data through two mechanisms:
+1. Exposes a stats handler at `dynamo/MyComponent/my_endpoint` that responds to polling requests (from `metrics`) with randomly generated `ForwardPassMetrics` data
+2. Publishes mock `KVHitRateEvent` data every second to demonstrate event-based metrics
 
+Step 1: Launch a mock workers via the following command (if already built):
 ```bash
-# Can run multiple workers in separate shells to see aggregation as well.
-# Or to build/run from source: cargo run --bin mock_worker
+# or build/run from source: DYN_LOG=DEBUG cargo run --bin mock_worker
 mock_worker
 
-# 2025-03-16T23:49:28.101668Z  INFO mock_worker: Starting Mock Worker on Endpoint: dynamo/my_component/my_endpoint
+# 2025-03-16T23:49:28.101668Z  INFO mock_worker: Starting Mock Worker on Endpoint: dynamo/MyComponent/my_endpoint
 ```
 
-To monitor the metrics of these mock workers, run:
+Step 2: Monitor the metrics of these mock workers, and prepare its own Prometheus endpoint at
+port 9091 (a default, when --port is not specified) on /metrics:
 ```bash
-metrics --component my_component --endpoint my_endpoint
+metrics --component MyComponent --endpoint my_endpoint
 ```
 
 ### Real Worker
@@ -69,13 +76,14 @@ see the examples in [examples/llm](../../examples/llm).
 
 For example, for a VLLM + KV Routing based deployment that
 exposes statistics on an endpoint labeled
-`dynamo/VllmWorker/load_metrics`:
+`dynamo/VllmWorker/load_metrics` (note: this does NOT currently work
+with any other example such as examples/vllm_v0, vllm_v1, ...):
 ```bash
 cd deploy/examples/llm
-dynamo serve <vllm kv routing example args>
+dynamo serve graphs.agg:Frontend -f configs/agg.yaml
 ```
 
-To monitor the metrics of these VllmWorkers, run:
+Then, to monitor the metrics of these VllmWorkers, run:
 ```bash
 metrics --component VllmWorker --endpoint load_metrics
 ```
@@ -105,10 +113,10 @@ Prometheus server or curl client can pull from:
 
 ```bash
 # Start metrics server on default host (0.0.0.0) and port (9091)
-metrics --component my_component --endpoint my_endpoint
+metrics --component MyComponent --endpoint my_endpoint
 
 # Or specify a custom port
-metrics --component my_component --endpoint my_endpoint --port 9092
+metrics --component MyComponent --endpoint my_endpoint --port 9092
 ```
 
 In pull mode:
@@ -121,12 +129,12 @@ curl localhost:9091/metrics
 
 # # HELP llm_kv_blocks_active Active KV cache blocks
 # # TYPE llm_kv_blocks_active gauge
-# llm_kv_blocks_active{component="my_component",endpoint="my_endpoint",worker_id="7587884888253033398"} 40
-# llm_kv_blocks_active{component="my_component",endpoint="my_endpoint",worker_id="7587884888253033401"} 2
+# llm_kv_blocks_active{component="MyComponent",endpoint="my_endpoint",worker_id="7587884888253033398"} 40
+# llm_kv_blocks_active{component="MyComponent",endpoint="my_endpoint",worker_id="7587884888253033401"} 2
 # # HELP llm_kv_blocks_total Total KV cache blocks
 # # TYPE llm_kv_blocks_total gauge
-# llm_kv_blocks_total{component="my_component",endpoint="my_endpoint",worker_id="7587884888253033398"} 100
-# llm_kv_blocks_total{component="my_component",endpoint="my_endpoint",worker_id="7587884888253033401"} 100
+# llm_kv_blocks_total{component="MyComponent",endpoint="my_endpoint",worker_id="7587884888253033398"} 100
+# llm_kv_blocks_total{component="MyComponent",endpoint="my_endpoint",worker_id="7587884888253033401"} 100
 ```
 
 ### Push Mode
@@ -145,7 +153,7 @@ Start the metrics component in `--push` mode, specifying the host and port of yo
 ```bash
 # Push metrics to a Prometheus PushGateway every --push-interval seconds
 metrics \
-    --component my_component \
+    --component MyComponent \
     --endpoint my_endpoint \
     --host 127.0.0.1 \
     --port 9091 \
@@ -173,7 +181,7 @@ For easy iteration while making edits to the metrics component, you can use `car
 to build and run with your local changes:
 
 ```bash
-cargo run --bin metrics -- --component my_component --endpoint my_endpoint
+cargo run --bin metrics -- --component MyComponent --endpoint my_endpoint
 ```
 
 

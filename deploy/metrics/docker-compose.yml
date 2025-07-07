@@ -83,6 +83,18 @@ services:
     networks:
       - monitoring
 
+  myshell:
+    image: ubuntu:latest
+    container_name: myshell
+    command: ["/bin/bash", "-c", "while true; do sleep 36000; done"]
+    networks:
+      - monitoring
+    profiles: [metrics]
+    extra_hosts:
+    - "host.docker.internal:host-gateway"
+
+  # To access Prometheus from another machine, you may need to disable te firewall on your host. On Ubuntu:
+  # sudo ufw allow 9090/tcp
   prometheus:
     image: prom/prometheus:v3.4.1
     container_name: prometheus
@@ -98,29 +110,33 @@ services:
     restart: unless-stopped
     # Example to pull from the /query endpoint:
     # {__name__=~"DCGM.*", job="dcgm-exporter"}
-    ports:
-      - "9090:9090"
     networks:
       - monitoring
+    ports:
+      - "9090:9090"
     profiles: [metrics]
+    extra_hosts:
+    - "host.docker.internal:host-gateway"
     depends_on:
       - dcgm-exporter
       - nats-prometheus-exporter
       - etcd-server
 
+  # To access Grafana from another machine, you may need to disable te firewall on your host. On Ubuntu:
+  # sudo ufw allow 3001/tcp
   # grafana connects to prometheus via the /query endpoint.
   # Default credentials are dynamo/dynamo.
   grafana:
     image: grafana/grafana-enterprise:12.0.1
     container_name: grafana
     volumes:
-      - ./grafana.json:/etc/grafana/provisioning/dashboards/llm-worker-dashboard.json
-      - ./grafana-dcgm-dashboard.json:/etc/grafana/provisioning/dashboards/dcgm-dashboard.json
+      - ./grafana_dashboards:/etc/grafana/provisioning/dashboards:rw
       - ./grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
-      - ./grafana-dashboard-providers.yml:/etc/grafana/provisioning/dashboards/dashboard-providers.yml
+      # - ./grafana-dashboard-providers.yml:/etc/grafana/provisioning/dashboards/dashboard-providers.yml
     environment:
       # Port 3000 is already used by "dynamo serve", so use 3001
       - GF_SERVER_HTTP_PORT=3001
+      # do not make it admin/admin, because you will be prompted to change the password every time
       - GF_SECURITY_ADMIN_USER=dynamo
       - GF_SECURITY_ADMIN_PASSWORD=dynamo
       - GF_USERS_ALLOW_SIGN_UP=false
