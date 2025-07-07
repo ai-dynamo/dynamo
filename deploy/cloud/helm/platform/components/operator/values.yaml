@@ -59,8 +59,9 @@ controllerManager:
         drop:
         - ALL
     image:
-      repository: controller
-      tag: latest
+      repository: nvcr.io/nvidia/ai-dynamo/kubernetes-operator
+      # tag is optional - if not set, will use Chart.AppVersion
+      tag: ""
     resources:
       limits:
         cpu: 1024m

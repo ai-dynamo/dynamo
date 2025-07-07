@@ -26,7 +26,7 @@ dynamo-operator:
     manager:
       image:
         repository: "nvcr.io/nvidia/ai-dynamo/kubernetes-operator"
-        tag: "latest"
+        tag: ""
         pullPolicy: IfNotPresent
       args:
         - --health-probe-bind-address=:8081
