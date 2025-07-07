@@ -14,7 +14,9 @@
 // limitations under the License.
 
 use dynamo_llm::kv_router::{
-    protocols::ForwardPassMetrics, scheduler::KVHitRateEvent, KV_HIT_RATE_SUBJECT,
+    protocols::{ForwardPassMetrics, KvStats, WorkerStats},
+    scheduler::KVHitRateEvent,
+    KV_HIT_RATE_SUBJECT,
 };
 use dynamo_runtime::{
     component::{service::EndpointStats, Namespace},
@@ -114,15 +116,27 @@ fn mock_stats_handler(_stats: EndpointStats) -> serde_json::Value {
     let num_requests_waiting = rand::rng().random_range(0..=100);
     let gpu_cache_usage_perc = rand::rng().random_range(0.0..=1.0);
     let gpu_prefix_cache_hit_rate = rand::rng().random_range(0.0..=1.0);
-    let stats = ForwardPassMetrics {
+
+    let worker_stats = WorkerStats {
         data_parallel_rank: None, // Default for backwards compatibility
         request_active_slots,
         request_total_slots,
+        num_requests_waiting,
+    };
+
+    let kv_stats = KvStats {
         kv_active_blocks,
         kv_total_blocks,
-        num_requests_waiting,
         gpu_cache_usage_perc,
         gpu_prefix_cache_hit_rate,
+    };
+
+    let spec_decode_stats = None;
+
+    let stats = ForwardPassMetrics {
+        worker_stats,
+        kv_stats,
+        spec_decode_stats,
     };
     tracing::info!("Stats: {stats:?}");
     serde_json::to_value(stats).unwrap()
