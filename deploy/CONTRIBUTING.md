@@ -46,7 +46,7 @@ deploy/
 commit -S
 ```
 
-- Every time you modify deploy/cloud/helm/crds/templates/*.yaml please bump up the version of the CRD helm chart in
+- Every time you modify `deploy/cloud/helm/crds/templates/*.yaml`, please bump up the version of the CRD helm chart in
     1. deploy/cloud/helm/platform/components/operator/Chart.yaml
     2. deploy/cloud/helm/platform/Chart.yaml
 then
