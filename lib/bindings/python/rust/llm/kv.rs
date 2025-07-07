@@ -117,7 +117,6 @@ impl WorkerMetricsPublisher {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[pyo3(signature = (metrics))]
     fn publish(&self, _py: Python, metrics: &ForwardPassMetrics) -> PyResult<()> {
         // Create and publish the complete metrics
