@@ -148,6 +148,9 @@ pub fn try_parse_call_common(message: &str) -> anyhow::Result<Option<ToolCallRes
     let json = if trimmed.starts_with("<TOOLCALL>[") && trimmed.ends_with("]</TOOLCALL>") {
         tracing::info!("Stripping <TOOLCALL> wrapper from tool call payload");
         &trimmed["<TOOLCALL>[".len()..trimmed.len() - "]</TOOLCALL>".len()]
+    } else if let Some(stripped) = trimmed.strip_prefix("<|python_tag|>") {
+        tracing::info!("Stripping <|python_tag|> prefix from tool call payload");
+        stripped
     } else {
         trimmed
     };
@@ -190,7 +193,7 @@ pub fn try_parse_tool_call_aggregate(
     if let Some(parsed) = parsed {
         Ok(Some(async_openai::types::ChatCompletionMessageToolCall {
             id: parsed.id,
-            r#type: ChatCompletionToolType::Function,
+            r#type: async_openai::types::ChatCompletionToolType::Function,
             function: async_openai::types::FunctionCall {
                 name: parsed.function.name,
                 arguments: parsed.function.arguments,
