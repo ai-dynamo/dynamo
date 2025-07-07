@@ -596,8 +596,8 @@ impl KvMetricsAggregator {
         let endpoint_kv_metrics = endpoints
             .endpoints
             .into_iter()
-            .map(|(worker_id, x)| {
-                let metrics = x.data;
+            .map(|(worker_id, endpoint)| {
+                let metrics = endpoint.data;
                 let LoadMetrics::ForwardPassMetrics(fwd_pass_metrics) = metrics else {
                     panic!("Endpoints do not contain forward pass metrics.");
                 };

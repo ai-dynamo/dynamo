@@ -59,11 +59,11 @@ pub trait WorkerSelector {
 /// KV Router configuration parameters
 #[derive(Debug, Clone)]
 pub struct KvRouterConfig {
-    /// Weight for overlap score in worker selection.
-    /// Higher values prioritize KV cache reuse. Default: 2.0
     pub overlap_score_weight: f64,
 
     pub router_temperature: f64,
+
+    pub max_num_batched_tokens: u32,
 }
 
 impl Default for KvRouterConfig {
@@ -71,6 +71,7 @@ impl Default for KvRouterConfig {
         Self {
             overlap_score_weight: 1.0,
             router_temperature: 0.5,
+            max_num_batched_tokens: 8192,
         }
     }
 }
@@ -78,11 +79,17 @@ impl Default for KvRouterConfig {
 impl KvRouterConfig {
     /// Create a new KvRouterConfig with optional weight values.
     /// If a weight is None, the default value will be used.
-    pub fn new(overlap_score_weight: Option<f64>, temperature: Option<f64>) -> Self {
+    pub fn new(
+        overlap_score_weight: Option<f64>,
+        temperature: Option<f64>,
+        max_num_batched_tokens: Option<u32>,
+    ) -> Self {
         let default = Self::default();
         Self {
             overlap_score_weight: overlap_score_weight.unwrap_or(default.overlap_score_weight),
             router_temperature: temperature.unwrap_or(default.router_temperature),
+            max_num_batched_tokens: max_num_batched_tokens
+                .unwrap_or(default.max_num_batched_tokens),
         }
     }
 }

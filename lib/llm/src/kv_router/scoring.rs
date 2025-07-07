@@ -33,7 +33,7 @@ impl ProcessedEndpoints {
         // compute some basic statistics
         let load_values: Vec<f64> = endpoints
             .iter()
-            .map(|x| x.data.kv_active_blocks() as f64)
+            .map(|endpoint| endpoint.data.kv_active_blocks() as f64)
             .collect();
         let load_avg = load_values.iter().copied().sum::<f64>() / load_values.len() as f64;
         let variance = load_values

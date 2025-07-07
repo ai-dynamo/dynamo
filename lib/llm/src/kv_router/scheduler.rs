@@ -19,6 +19,7 @@ use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 use super::protocols::WorkerSelectionResult;
@@ -180,16 +181,8 @@ impl KvScheduler {
                         }
                         Err(KvSchedulerError::AllWorkersBusy) => {
                             tracing::trace!("all workers busy; waiting for more capacity");
-                            match endpoints_rx.changed().await {
-                                Ok(_) => {
-                                    endpoints = endpoints_rx.borrow_and_update().clone();
-                                    pending_endpoint_update = Some(endpoints.worker_ids());
-                                }
-                                Err(e) => {
-                                    tracing::error!("error waiting for endpoints change: {:?}", e);
-                                    break 'outer;
-                                }
-                            };
+                            tokio::time::sleep(Duration::from_millis(5)).await;
+                            continue;
                         }
                         Err(e) => {
                             tracing::error!("error scheduling request: {:?}", e);
