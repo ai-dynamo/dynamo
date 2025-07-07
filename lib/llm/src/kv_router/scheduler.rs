@@ -388,7 +388,10 @@ impl WorkerSelector for DefaultWorkerSelector {
             let cached_blocks = request.overlap.scores.get(worker_id).copied().unwrap_or(0) as f64;
             let prefill_blocks = request_blocks as f64 - cached_blocks;
 
-            let decode_blocks = *potential_active_blocks.get(worker_id).unwrap() as f64;
+            let decode_blocks = *potential_active_blocks.get(worker_id).unwrap_or_else(||
+                {tracing::warn!("assuming 0 decoding blocks for {worker_id}, as the load metrics endpoint does not exist yet");
+                &0
+            }) as f64;
 
             // Calculate logit (lower is better)
             let logit = self.kv_router_config.overlap_score_weight * prefill_blocks + decode_blocks;
