@@ -135,7 +135,7 @@ RUN if [ "$ARCH" = "arm64" ]; then \
 
 # Install PyTorch from the official PyTorch index, in order to specify the correct CUDA (12.8) version, as SGLang by default uses PyTorch 2.6.x.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+    uv pip install torch=2.7.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
 
 # Install sglang
 # This commit references a NIXL fix that was releasted after the 0.4.8.post1 release https://github.com/sgl-project/sglang/pull/7330
