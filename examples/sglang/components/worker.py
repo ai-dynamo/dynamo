@@ -163,7 +163,7 @@ class RequestHandler:
         is_batch = self._is_batch_request(request)
         batch_size = self._get_request_batch_size(request)
 
-        # TODO: maintain a mapping from SGLang's Ouput struct to LLMEngineOuputf
+        # TODO: maintain a mapping from SGLang's Ouput struct to LLMEngineOuput
         sampling_params = self._build_sampling_params(request)
 
         if self.server_args.disaggregation_mode != "null":
