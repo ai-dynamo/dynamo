@@ -3,6 +3,8 @@
 
 import logging
 import os
+from dataclasses import dataclass
+from typing import List, Any
 
 import pytest
 import requests
@@ -12,10 +14,19 @@ from tests.utils.managed_process import ManagedProcess
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class SGLangConfig:
+    """Configuration for SGLang test scenarios"""
+    script_name: str
+    marks: List[Any]
+    name: str  
+
+
 class SGLangProcess(ManagedProcess):
     """Simple process manager for sglang shell scripts"""
 
-    def __init__(self, script_name, request, port=8000):
+    def __init__(self, script_name, request):
+        self.port = 8000
         sglang_dir = "/workspace/examples/sglang"
         script_path = os.path.join(sglang_dir, "launch", script_name)
 
@@ -24,10 +35,7 @@ class SGLangProcess(ManagedProcess):
             raise FileNotFoundError(f"SGLang script not found: {script_path}")
 
         # Make script executable and run it
-        os.chmod(script_path, 0o755)
         command = ["bash", script_path]
-
-        self.port = port
 
         super().__init__(
             command=command,
@@ -36,7 +44,7 @@ class SGLangProcess(ManagedProcess):
             working_dir=sglang_dir,
             health_check_ports=[],  # Disable port health check
             health_check_urls=[
-                (f"http://localhost:{port}/v1/models", self._check_models_api)
+                (f"http://localhost:{self.port}/v1/models", self._check_models_api)
             ],
             delayed_start=60,  # Give SGLang more time to fully start
             terminate_existing=False,
@@ -55,22 +63,48 @@ class SGLangProcess(ManagedProcess):
             return False
 
 
+# SGLang test configurations
+sglang_configs = {
+    "aggregated": SGLangConfig(
+        script_name="agg.sh",
+        marks=[pytest.mark.gpu_1],
+        name="aggregated"
+    ),
+    "disaggregated": SGLangConfig(
+        script_name="disagg.sh", 
+        marks=[pytest.mark.gpu_2],
+        name="disaggregated"
+    ),
+}
+
+
+@pytest.fixture(
+    params=[
+        pytest.param("aggregated", marks=[pytest.mark.gpu_1]),
+        pytest.param("disaggregated", marks=[pytest.mark.gpu_2]),
+    ]
+)
+def sglang_config_test(request):
+    """Fixture that provides different SGLang test configurations"""
+    return sglang_configs[request.param]
+
+
 @pytest.mark.e2e
 @pytest.mark.slow
 @pytest.mark.sglang
-@pytest.mark.gpu_1
-def test_sglang_aggregated(request, runtime_services):
-    """Test sglang aggregated deployment"""
-
+def test_sglang_deployment(request, runtime_services, sglang_config_test):
+    """Test SGLang deployment scenarios"""
+    
     # First check if sglang is available
     try:
         import sglang
-
         logger.info(f"SGLang version: {sglang.__version__}")
     except ImportError:
         pytest.skip("SGLang not available")
 
-    with SGLangProcess("agg.sh", request) as server:
+    config = sglang_config_test
+    
+    with SGLangProcess(config.script_name, request) as server:
         # Test chat completions
         response = requests.post(
             f"http://localhost:{server.port}/v1/chat/completions",
@@ -88,65 +122,30 @@ def test_sglang_aggregated(request, runtime_services):
         assert len(result["choices"]) > 0
         content = result["choices"][0]["message"]["content"]
         assert len(content) > 0
-        logger.info(f"SGLang aggregated response: {content}")
+        logger.info(f"SGLang {config.name} response: {content}")
+
+        # Test completions endpoint for disaggregated only
+        if config.name == "disaggregated":
+            response = requests.post(
+                f"http://localhost:{server.port}/v1/completions",
+                json={
+                    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", 
+                    "prompt": "The future of AI is",
+                    "max_tokens": 30,
+                },
+                timeout=120,
+            )
+
+            assert response.status_code == 200
+            result = response.json()
+            assert "choices" in result
+            assert len(result["choices"]) > 0
+            text = result["choices"][0]["text"]
+            assert len(text) > 0
+            logger.info(f"SGLang completions response: {text}")
 
 
-@pytest.mark.e2e
-@pytest.mark.slow
-@pytest.mark.sglang
-@pytest.mark.gpu_2
-def test_sglang_disaggregated(request, runtime_services):
-    """Test sglang disaggregated deployment (requires 2 GPUs)"""
-
-    # First check if sglang is available
-    try:
-        import sglang
-
-        logger.info(f"SGLang version: {sglang.__version__}")
-    except ImportError:
-        pytest.skip("SGLang not available")
-
-    with SGLangProcess("disagg.sh", request) as server:
-        # Test chat completions
-        response = requests.post(
-            f"http://localhost:{server.port}/v1/chat/completions",
-            json={
-                "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-                "messages": [{"role": "user", "content": "Tell me a joke about AI"}],
-                "max_tokens": 50,
-            },
-            timeout=120,
-        )
-
-        assert response.status_code == 200
-        result = response.json()
-        assert "choices" in result
-        assert len(result["choices"]) > 0
-        content = result["choices"][0]["message"]["content"]
-        assert len(content) > 0
-        logger.info(f"SGLang disaggregated response: {content}")
-
-        # Test completions endpoint too
-        response = requests.post(
-            f"http://localhost:{server.port}/v1/completions",
-            json={
-                "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-                "prompt": "The future of AI is",
-                "max_tokens": 30,
-            },
-            timeout=120,
-        )
-
-        assert response.status_code == 200
-        result = response.json()
-        assert "choices" in result
-        assert len(result["choices"]) > 0
-        text = result["choices"][0]["text"]
-        assert len(text) > 0
-        logger.info(f"SGLang completions response: {text}")
-
-
-@pytest.mark.skip(reason="Requires 4 GPUs - enable when hardware available")
+@pytest.mark.skip(reason="Requires 4 GPUs - enable when hardware is consistently available")
 def test_sglang_disagg_dp_attention(request, runtime_services):
     """Test sglang disaggregated with DP attention (requires 4 GPUs)"""
 
