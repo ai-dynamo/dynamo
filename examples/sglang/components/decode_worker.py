@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 import sys
 
 import msgspec
@@ -55,9 +54,12 @@ class DecodeRequestHandler:
             yield result
 
     async def flush_cache(self, request: dict):
-        _ = request 
+        _ = request
         asyncio.create_task(self.engine.tokenizer_manager.flush_cache())
-        yield {"status": "success", "message": "Cache flush initiated. Check backend logs for status"}
+        yield {
+            "status": "success",
+            "message": "Cache flush initiated. Check backend logs for status",
+        }
 
 
 @dynamo_worker(static=False)
@@ -81,7 +83,7 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
 
     tasks = [gen_endpoint.serve_endpoint(handler.generate)]
     tasks.append(flush_endpoint.serve_endpoint(handler.flush_cache))
-    
+
     await asyncio.gather(*tasks)
 
 

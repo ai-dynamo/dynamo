@@ -1,15 +1,18 @@
-import logging
-import uvicorn
-from fastapi import FastAPI, HTTPException
-import asyncio
 import argparse
+import asyncio
+import logging
+
+import uvicorn
 import uvloop
+from fastapi import FastAPI
+
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
 FLUSH_CACHE_ENDPOINT = "flush_cache"
 
 configure_dynamo_logging()
+
 
 class SglangHttpServer:
     def __init__(self, port: int, runtime: DistributedRuntime, args):
@@ -18,7 +21,7 @@ class SglangHttpServer:
         self.runtime = runtime
         self.args = args
         self.setup_routes()
-        
+
     async def _discover_endpoints(self):
         """Discover endpoints that match the pattern"""
         etcd_client = self.runtime.etcd_client()
@@ -53,7 +56,9 @@ class SglangHttpServer:
                 discovered.add((ns, comp))
                 logging.debug(f"Discovered endpoint: {ns}.{comp}")
 
-        logging.debug(f"Endpoint discovery complete. Found {len(discovered)} matching endpoints")
+        logging.debug(
+            f"Endpoint discovery complete. Found {len(discovered)} matching endpoints"
+        )
         return discovered
 
     def setup_routes(self):
@@ -62,14 +67,20 @@ class SglangHttpServer:
             """Flush the radix cache."""
             try:
                 discovered = await self._discover_endpoints()
-                
+
                 if not discovered:
                     return {"message": "No matching endpoints found", "success": False}
 
-                logging.debug(f"Found components: {', '.join([f'{ns}.{comp}' for ns, comp in discovered])}")
+                logging.debug(
+                    f"Found components: {', '.join([f'{ns}.{comp}' for ns, comp in discovered])}"
+                )
 
                 for ns, comp in discovered:
-                    ep = self.runtime.namespace(ns).component(comp).endpoint(self.args.endpoint)
+                    ep = (
+                        self.runtime.namespace(ns)
+                        .component(comp)
+                        .endpoint(self.args.endpoint)
+                    )
                     client = await ep.client()
                     await client.wait_for_instances()
                     ids = client.instance_ids()
@@ -88,38 +99,52 @@ class SglangHttpServer:
             except Exception as e:
                 logging.error(f"Cache flush error: {e}")
                 return {"message": f"Cache flush failed: {str(e)}", "success": False}
-        
+
     async def start_server(self):
         """Start the HTTP server"""
         config = uvicorn.Config(
-            self.app, 
-            host="0.0.0.0", 
-            port=self.port, 
+            self.app,
+            host="0.0.0.0",
+            port=self.port,
         )
         server = uvicorn.Server(config)
-        
+
         # Single nice log with available endpoints
-        logging.info(f"🚀 SGL engine HTTP server running on http://0.0.0.0:{self.port} - Endpoints: POST /flush_cache")
-        
+        logging.info(
+            f"🚀 SGL engine HTTP server running on http://0.0.0.0:{self.port} - Endpoints: POST /flush_cache"
+        )
+
         await server.serve()
+
 
 def parse_args():
     p = argparse.ArgumentParser(description="SGLang HTTP server for cache management")
     p.add_argument("--port", type=int, default=9001, help="Port to listen on")
-    p.add_argument("--ns", "--namespace", default="dynamo",
-                   help="Specify Dynamo namespace (default: discover all)")
-    p.add_argument("--comp", "--component", default=None,
-                   help="Specify component name (default: discover all)")
-    p.add_argument("--endpoint", default=FLUSH_CACHE_ENDPOINT,
-                   help="Specify endpoint name")
+    p.add_argument(
+        "--ns",
+        "--namespace",
+        default="dynamo",
+        help="Specify Dynamo namespace (default: discover all)",
+    )
+    p.add_argument(
+        "--comp",
+        "--component",
+        default=None,
+        help="Specify component name (default: discover all)",
+    )
+    p.add_argument(
+        "--endpoint", default=FLUSH_CACHE_ENDPOINT, help="Specify endpoint name"
+    )
     return p.parse_args()
+
 
 @dynamo_worker(static=False)
 async def main(runtime: DistributedRuntime):
     args = parse_args()
-    
+
     http_server = SglangHttpServer(args.port, runtime, args)
     await http_server.start_server()
+
 
 if __name__ == "__main__":
     uvloop.install()

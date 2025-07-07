@@ -5,7 +5,6 @@ import asyncio
 import logging
 import random
 import socket
-import os
 import sys
 from typing import Any, Dict, Optional, Union
 
@@ -15,7 +14,6 @@ from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_ip
 from utils.protocol import DisaggPreprocessedRequest
 from utils.sgl_utils import parse_sglang_args_inc
-from utils.sgl_http_server import SglangHttpServer
 
 from dynamo.llm import (
     ModelType,
@@ -244,14 +242,19 @@ class RequestHandler:
             pass
 
     async def flush_cache(self, request: dict):
-        _ = request 
+        _ = request
         asyncio.create_task(self.engine.tokenizer_manager.flush_cache())
-        yield {"status": "success", "message": "Cache flush initiated. Check backend logs for status"}
+        yield {
+            "status": "success",
+            "message": "Cache flush initiated. Check backend logs for status",
+        }
+
 
 @dynamo_worker(static=False)
 async def worker(runtime: DistributedRuntime):
     server_args = parse_sglang_args_inc(sys.argv[1:])
     await init(runtime, server_args)
+
 
 async def init(runtime: DistributedRuntime, server_args: ServerArgs):
     """Initialize worker (either prefill or aggregated)"""
