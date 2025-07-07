@@ -133,10 +133,6 @@ RUN if [ "$ARCH" = "arm64" ]; then \
         cd /opt/nixl && uv pip install . ; \
     fi
 
-# Install PyTorch from the official PyTorch index, in order to specify the correct CUDA (12.8) version, as SGLang by default uses PyTorch 2.6.x.
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install torch=2.7.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
-
 # Install sglang
 # This commit references a NIXL fix that was releasted after the 0.4.8.post1 release https://github.com/sgl-project/sglang/pull/7330
 ARG SGLANG_COMMIT="bb9b608c86ebad7d9d01e29fe058bc184dc7285f"
@@ -145,7 +141,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     git clone https://github.com/sgl-project/sglang.git && \
     cd sglang && \
     git checkout ${SGLANG_COMMIT} && \
-    uv pip install -e "python[all]"
+    uv pip install -e "python[all]" && \
+    # NOTE: Install PyTorch from the official PyTorch index, in order to specify the correct CUDA (12.8) version, as SGLang by default uses PyTorch 2.6.x.
+    uv pip install torch==2.7.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 --force-reinstall
 
 # Set env var that allows for forceful shutdown of inflight requests in SGL's TokenizerManager
 ENV SGL_FORCE_SHUTDOWN=1
