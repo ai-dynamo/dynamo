@@ -79,7 +79,7 @@ Dive in: Examples
    Disaggregated Serving <architecture/disagg_serving.md>
    KV Block Manager <architecture/kvbm_intro.rst>
    KV Cache Routing <architecture/kv_cache_routing.md>
-   Planner <architecture/planner.md>
+   Planner <architecture/planner_intro.rst>
 
 .. toctree::
    :hidden:
@@ -135,5 +135,11 @@ Dive in: Examples
    Multinode Examples <examples/multinode.md>
    LLM Deployment Examples using TensorRT-LLM <examples/trtllm.md>
 
+.. toctree::
+   :hidden:
+   :caption: Reference
+
+   Glossary <dynamo_glossary.md>
+   KVBM Reading <architecture/kvbm_reading.md>
 
 
