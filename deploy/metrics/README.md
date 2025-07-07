@@ -100,16 +100,18 @@ Note: You may need to adjust the target based on your host configuration and net
 Grafana is pre-configured with:
 - Prometheus datasource
 - Sample dashboard for visualizing service metrics
-![grafana image](./grafana1.png)
+![grafana image](./grafana-dynamo-composite.png)
 
 ## Required Files
 
 The following configuration files should be present in this directory:
 - [docker-compose.yml](./docker-compose.yml): Defines the Prometheus and Grafana services
 - [prometheus.yml](./prometheus.yml): Contains Prometheus scraping configuration
-- [grafana.json](./grafana.json): Contains Grafana dashboard configuration
 - [grafana-datasources.yml](./grafana-datasources.yml): Contains Grafana datasource configuration
-- [grafana-dashboard-providers.yml](./grafana-dashboard-providers.yml): Contains Grafana dashboard provider configuration
+- [grafana_dashboards/grafana-dashboard-providers.yml](./grafana_dashboards/grafana-dashboard-providers.yml): Contains Grafana dashboard provider configuration
+- [grafana_dashboards/grafana-dynamo-dashboard.json](./grafana_dashboards/grafana-dynamo-dashboard.json): Contains Grafana dashboard configuration for various composite metrics (HW and SW)
+- [grafana_dashboards/grafana-llm-dashboard.json](./grafana_dashboards/grafana-llm-dashboard.json): Contains Grafana dashboard configuration
+- [grafana_dashboards/grafana-dcgm-dashboard.json](./grafana_dashboards/grafana-dcgm-dashboard.json): Contains Grafana dashboard configuration for DCGM GPU metrics
 
 ## Running the example `metrics` component
 
