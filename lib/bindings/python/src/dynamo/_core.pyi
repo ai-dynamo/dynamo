@@ -839,10 +839,6 @@ async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: st
     """Attach the model at path to the given endpoint, and advertise it as model_type"""
     ...
 
-class EngineType:
-    """Enum saying which backend to us: Echo, MistralRs, Dyn, etc."""
-    ...
-
 class EngineConfig:
     """Holds internal configuration for a Dynamo engine."""
     ...
@@ -851,7 +847,7 @@ async def make_engine(args: EntrypointArgs) -> EngineConfig:
     """Make an engine matching the args"""
     ...
 
-async def run_input(input: str, runtime: Runtime, engine_config: EngineConfig) -> None:
+async def run_input(runtime: DistributedRuntime, input: str, engine_config: EngineConfig) -> None:
     """Start an engine, connect it to an input, and run until stopped."""
     ...
 
@@ -1168,4 +1164,3 @@ class EntrypointArgs:
     """
 
     ...
-

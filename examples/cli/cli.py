@@ -7,13 +7,14 @@
 # Must be in a virtualenv with the bindings (or wheel) installed.
 
 import argparse
+import asyncio
 import sys
 from pathlib import Path
 
 import uvloop
 
 from dynamo.llm import EngineType, EntrypointArgs, make_engine, run_input
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime import DistributedRuntime
 
 
 def parse_args():
@@ -72,22 +73,23 @@ def parse_args():
     return args
 
 
-@dynamo_worker(static=False)
-async def run(runtime: DistributedRuntime):
+async def run():
+    loop = asyncio.get_running_loop()
+    runtime = DistributedRuntime(loop, False)
+
     args = parse_args()
 
     input = args.input_source
     output = args.output_type
 
-    if output == "echo":
-        engine_type = EngineType.Echo
-    elif output == "mistralrs":
-        engine_type = EngineType.MistralRs
-    elif output == "llamacpp":
-        engine_type = EngineType.LlamaCpp
-    elif output == "dyn":
-        engine_type = EngineType.Dynamic
-    else:
+    engine_type_map = {
+        "echo": EngineType.Echo,
+        "mistralrs": EngineType.MistralRs,
+        "llamacpp": EngineType.LlamaCpp,
+        "dyn": EngineType.Dynamic,
+    }
+    engine_type = engine_type_map.get(output)
+    if engine_type is None:
         print(f"Unsupported output type: {output}")
         sys.exit(1)
 

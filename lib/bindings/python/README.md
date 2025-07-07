@@ -46,7 +46,7 @@ uv pip install maturin
 maturin develop --uv
 ```
 
-5. Experimental: To allow using mistral.rs and llama.cpp via the bindings, build with feature flags
+5. Experimental: To allow using mistral.rs and llama.cpp via the bindings, build with feature flags:
 
 ```
 maturin develop --features mistralrs,llamacpp
@@ -61,7 +61,7 @@ the stub `libcuda.so` is earlier on the library search path than the real libcud
 patchelf --set-rpath '' _core.cpython-312-x86_64-linux-gnu.so
 ```
 
-If you include `llamacpp` feature flag, `libllama.so` and `libggml.so` (and family) will need to be available at runtime.
+If you include the `llamacpp` feature flag, `libllama.so` and `libggml.so` (and family) will need to be available at runtime.
 
 
 ## Run Examples

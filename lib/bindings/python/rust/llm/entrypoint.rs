@@ -52,9 +52,16 @@ impl EntrypointArgs {
         //router_config: Option<RouterConfig>,
         kv_cache_block_size: Option<u32>,
         http_port: Option<u16>,
-    ) -> Self {
-        let endpoint_id_obj: Option<EndpointId> = endpoint_id.and_then(|eid| eid.parse().ok());
-        EntrypointArgs {
+    ) -> PyResult<Self> {
+        let endpoint_id_obj: Option<EndpointId> = match endpoint_id {
+            Some(eid) => Some(eid.parse().map_err(|_| {
+                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
+                    "Invalid endpoint_id format: {eid}"
+                ))
+            })?),
+            None => None,
+        };
+        Ok(EntrypointArgs {
             engine_type,
             model_path,
             model_name,
@@ -65,7 +72,7 @@ impl EntrypointArgs {
             //router_config,
             kv_cache_block_size,
             http_port,
-        }
+        })
     }
 }
 
@@ -154,7 +161,6 @@ async fn select_engine(
     Ok(inner)
 }
 
-// TODO input should be an enum
 #[pyfunction]
 #[pyo3(signature = (distributed_runtime, input, engine_config))]
 pub fn run_input<'p>(

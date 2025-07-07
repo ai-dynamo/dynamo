@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# flake8: noqa
+
 import logging
 
 from dynamo._core import AggregatedMetrics as AggregatedMetrics

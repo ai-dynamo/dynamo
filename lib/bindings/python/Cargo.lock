@@ -1574,7 +1574,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-llamacpp"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "async-stream",
  "dynamo-llm",
@@ -1586,7 +1586,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-mistralrs"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "async-openai",
