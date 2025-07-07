@@ -110,7 +110,7 @@ def test_sglang_deployment(request, runtime_services, sglang_config_test):
             f"http://localhost:{server.port}/v1/chat/completions",
             json={
                 "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-                "messages": [{"role": "user", "content": "Tell me a joke about AI"}],
+                "messages": [{"role": "user", "content": "Why is Roger Federer the best tennis player of all time?"}],
                 "max_tokens": 50,
             },
             timeout=120,
@@ -130,7 +130,7 @@ def test_sglang_deployment(request, runtime_services, sglang_config_test):
                 f"http://localhost:{server.port}/v1/completions",
                 json={
                     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", 
-                    "prompt": "The future of AI is",
+                    "prompt": "Roger Federer is the greatest tennis player of all time",
                     "max_tokens": 30,
                 },
                 timeout=120,
