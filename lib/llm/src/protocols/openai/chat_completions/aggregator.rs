@@ -60,6 +60,8 @@ struct DeltaChoice {
     finish_reason: Option<async_openai::types::FinishReason>,
     /// Optional log probabilities for the chat choice.
     logprobs: Option<async_openai::types::ChatChoiceLogprobs>,
+    // TODO
+    tool_calls: Option<Vec<async_openai::types::ChatCompletionMessageToolCall>>,
 }
 
 impl Default for DeltaAggregator {
@@ -135,11 +137,46 @@ impl DeltaAggregator {
                                     role: choice.delta.role,
                                     finish_reason: None,
                                     logprobs: choice.logprobs,
+                                    tool_calls: None,
                                 });
 
                         // Append content if available.
                         if let Some(content) = &choice.delta.content {
                             state_choice.text.push_str(content);
+                        }
+
+                        // Handle tool_calls
+                        if let Some(tool_calls) = &choice.delta.tool_calls {
+                            let calls: Vec<_> = tool_calls
+                                .iter()
+                                .filter_map(|chunk| {
+                                    Some(async_openai::types::ChatCompletionMessageToolCall {
+                                        id: chunk.id.clone().unwrap_or_else(|| {
+                                            format!("call-{}", uuid::Uuid::new_v4())
+                                        }),
+                                        r#type: chunk.r#type.clone().unwrap_or(
+                                            async_openai::types::ChatCompletionToolType::Function,
+                                        ),
+                                        function: async_openai::types::FunctionCall {
+                                            name: chunk
+                                                .function
+                                                .as_ref()?
+                                                .name
+                                                .clone()
+                                                .unwrap_or_default(),
+                                            arguments: chunk
+                                                .function
+                                                .as_ref()?
+                                                .arguments
+                                                .clone()
+                                                .unwrap_or("{}".to_string()),
+                                        },
+                                    })
+                                })
+                                .collect();
+                            if !calls.is_empty() {
+                                state_choice.tool_calls = Some(calls);
+                            }
                         }
 
                         // Update finish reason if provided.
@@ -196,8 +233,12 @@ impl From<DeltaChoice> for async_openai::types::ChatChoice {
         async_openai::types::ChatChoice {
             message: async_openai::types::ChatCompletionResponseMessage {
                 role: delta.role.expect("delta should have a Role"),
-                content: Some(delta.text),
-                tool_calls: None,
+                content: if delta.tool_calls.is_some() {
+                    None
+                } else {
+                    Some(delta.text)
+                },
+                tool_calls: delta.tool_calls,
                 refusal: None,
                 function_call: None,
                 audio: None,

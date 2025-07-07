@@ -130,6 +130,14 @@ impl DeltaGenerator {
         finish_reason: Option<async_openai::types::FinishReason>,
         logprobs: Option<async_openai::types::ChatChoiceLogprobs>,
     ) -> async_openai::types::CreateChatCompletionStreamResponse {
+        let (content, tool_calls) = match text.as_ref() {
+            Some(t) => match crate::preprocessor::tools::try_parse_tool_call_stream(t) {
+                Ok(Some(tool_call)) => (None, Some(vec![tool_call])),
+                _ => (Some(t.clone()), None),
+            },
+            None => (None, None),
+        };
+
         // TODO: Update for tool calling
         let delta = async_openai::types::ChatCompletionStreamResponseDelta {
             role: if self.msg_counter == 0 {
@@ -137,8 +145,8 @@ impl DeltaGenerator {
             } else {
                 None
             },
-            content: text,
-            tool_calls: None,
+            content,
+            tool_calls,
             function_call: None,
             refusal: None,
         };

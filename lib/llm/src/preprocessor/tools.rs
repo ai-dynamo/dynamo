@@ -13,14 +13,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
+
+use serde_json::Value;
+use uuid::Uuid;
+
 mod request;
 mod response;
 
 pub use request::*;
 pub use response::*;
-use serde_json::Value;
-use std::collections::HashMap;
-use uuid::Uuid;
 
 /// Matches and processes tool calling patterns in LLM responses
 ///
@@ -112,4 +114,60 @@ impl ToolCallingMatcher {
             Ok(Vec::new())
         }
     }
+}
+
+use async_openai::types::{
+    ChatCompletionMessageToolCallChunk, ChatCompletionToolType, FunctionCallStream,
+};
+
+/// Try parsing a string as a structured tool call, for streaming (delta) usage.
+///
+/// If successful, returns a `ChatCompletionMessageToolCallChunk`.
+pub fn try_parse_tool_call_stream(
+    message: &str,
+) -> anyhow::Result<Option<ChatCompletionMessageToolCallChunk>> {
+    let parsed = try_parse_call_common(message)?;
+    if let Some(parsed) = parsed {
+        Ok(Some(ChatCompletionMessageToolCallChunk {
+            index: 0,
+            id: Some(parsed.id),
+            r#type: Some(ChatCompletionToolType::Function),
+            function: Some(FunctionCallStream {
+                name: Some(parsed.function.name),
+                arguments: Some(parsed.function.arguments),
+            }),
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Internal helper that parses any known valid tool call format into a unified form.
+pub fn try_parse_call_common(message: &str) -> anyhow::Result<Option<ToolCallResponse>> {
+    let parse = |name: String, args: HashMap<String, Value>| -> anyhow::Result<_> {
+        Ok(ToolCallResponse {
+            id: format!("call-{}", Uuid::new_v4()),
+            tp: ToolCallType::Function,
+            function: CalledFunction {
+                name,
+                arguments: serde_json::to_string(&args)?,
+            },
+        })
+    };
+
+    if let Ok(single) = serde_json::from_str::<CalledFunctionParameters>(message) {
+        return parse(single.name, single.parameters).map(Some);
+    } else if let Ok(single) = serde_json::from_str::<CalledFunctionArguments>(message) {
+        return parse(single.name, single.arguments).map(Some);
+    } else if let Ok(mut list) = serde_json::from_str::<Vec<CalledFunctionParameters>>(message) {
+        if let Some(item) = list.pop() {
+            return parse(item.name, item.parameters).map(Some);
+        }
+    } else if let Ok(mut list) = serde_json::from_str::<Vec<CalledFunctionArguments>>(message) {
+        if let Some(item) = list.pop() {
+            return parse(item.name, item.arguments).map(Some);
+        }
+    }
+
+    Ok(None)
 }
