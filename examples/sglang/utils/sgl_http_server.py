@@ -1,61 +1,84 @@
 import logging
 import uvicorn
 from fastapi import FastAPI, HTTPException
-import sglang as sgl
 import asyncio
-from sglang.srt.server_args import ServerArgs
-from dynamo.runtime import DistributedRuntime
+import argparse
+import uvloop
+from dynamo.runtime import DistributedRuntime, dynamo_worker
+
+FLUSH_CACHE_ENDPOINT = "flush_cache"
 
 class SglangHttpServer:
-    def __init__(self, server_args: ServerArgs, drt: DistributedRuntime, port: int = 9001):
+    def __init__(self, port: int, runtime: DistributedRuntime, args):
         self.port = port
         self.app = FastAPI()
-        self.server_args = server_args
-        self.drt = drt
-        self.worker_client = None
-        self.decode_flush_client = None
-        self._clients_initialized = False
+        self.runtime = runtime
+        self.args = args
         self.setup_routes()
         
-    async def _ensure_clients(self):
-        if not self._clients_initialized:
-            self.worker_client = await self.drt.namespace("dynamo").component("worker").endpoint("flush_cache").client()
-            if self.server_args.disaggregation_mode != "null":
-                self.decode_flush_client = await self.drt.namespace("dynamo").component("decode").endpoint("flush_cache").client()
-            self._clients_initialized = True
+    async def _discover_endpoints(self):
+        """Discover endpoints that match the pattern"""
+        etcd_client = self.runtime.etcd_client()
+        if etcd_client is None:
+            raise RuntimeError("Runtime has no etcd client; cannot discover endpoints")
+
+        prefix = "instances/"
+        kvs = await etcd_client.kv_get_prefix(prefix)
+
+        # Collect (namespace, component) combos that expose flush_cache
+        discovered = set()
+        for kv in kvs:
+            key = kv["key"] if isinstance(kv, dict) else kv.key
+            if isinstance(key, bytes):
+                key = key.decode()
+            if not key.startswith(prefix):
+                continue
+
+            segments = key.split("/")
+            # Format: instances/<ns>/<comp>/<endpoint:lease>
+            if len(segments) < 4:
+                continue
+            ns, comp, ep_with_lease = segments[1], segments[2], segments[3]
+
+            if self.args.ns and ns != self.args.ns:
+                continue
+            if self.args.comp and comp != self.args.comp:
+                continue
+
+            ep_name = ep_with_lease.split(":", 1)[0]
+            if ep_name == self.args.endpoint:
+                discovered.add((ns, comp))
+
+        return discovered
 
     def setup_routes(self):
         @self.app.post("/flush_cache")
         async def flush_cache():
             """Flush the radix cache."""
-            await self._ensure_clients()
             try:
-                # Flush worker instances
-                await self.worker_client.wait_for_instances()
-                worker_ids = self.worker_client.instance_ids()
-                print(f"DEBUG: Found {len(worker_ids)} worker instances: {worker_ids}")
+                discovered = await self._discover_endpoints()
                 
-                for inst_id in worker_ids:
-                    try:
-                        print(f"DEBUG: Calling worker instance {inst_id}")
-                        stream = await self.worker_client.direct("{}", inst_id)
-                        print(f"DEBUG: Got stream for worker {inst_id}")
-                        
-                        async for payload in stream:
-                            print(f"Worker[{inst_id}] -> {payload}")
-                    except Exception as e:
-                        print(f"DEBUG: Exception for worker {inst_id}: {e}")
-                        logging.error(f"Worker[{inst_id}] flush error: {e}")
-                
-                # Handle decode workers if in disaggregation mode
-                if self.server_args.disaggregation_mode != "null":
-                    await self.decode_flush_client.wait_for_instances()
-                    decode_ids = self.decode_flush_client.instance_ids()
-                    
-                    for inst_id in decode_ids:
-                        stream = await self.decode_flush_client.direct("{}", inst_id)
-                        async for payload in stream:
-                            print(f"Decode[{inst_id}] -> {payload}")
+                if not discovered:
+                    return {"message": "No matching endpoints found", "success": False}
+
+                print("Found components:", ", ".join([f"{ns}.{comp}" for ns, comp in discovered]))
+
+                for ns, comp in discovered:
+                    ep = self.runtime.namespace(ns).component(comp).endpoint(self.args.endpoint)
+                    client = await ep.client()
+                    await client.wait_for_instances()
+                    ids = client.instance_ids()
+
+                    print(f"-- {ns}.{comp} : {len(ids)} instances --")
+
+                    for inst_id in ids:
+                        try:
+                            stream = await client.direct("{}", inst_id)
+                            async for payload in stream:
+                                print(f"[{ns}.{comp}][{inst_id}] -> {payload}")
+                        except Exception as e:
+                            print(f"[{ns}.{comp}][{inst_id}] ERROR:", e)
+                            logging.error(f"[{ns}.{comp}][{inst_id}] flush error: {e}")
 
                 return {"message": "Cache flush initiated", "success": True}
             except Exception as e:
@@ -76,3 +99,25 @@ class SglangHttpServer:
         logging.info(f"🚀 SGL engine HTTP server running on http://0.0.0.0:{self.port} - Endpoints: POST /flush_cache")
         
         await server.serve()
+
+def parse_args():
+    p = argparse.ArgumentParser(description="SGLang HTTP server for cache management")
+    p.add_argument("--port", type=int, default=9001, help="Port to listen on")
+    p.add_argument("--ns", "--namespace", default=None,
+                   help="Specify Dynamo namespace (default: discover all)")
+    p.add_argument("--comp", "--component", default=None,
+                   help="Specify component name (default: discover all)")
+    p.add_argument("--endpoint", default=FLUSH_CACHE_ENDPOINT,
+                   help="Specify endpoint name")
+    return p.parse_args()
+
+@dynamo_worker(static=False)
+async def main(runtime: DistributedRuntime):
+    args = parse_args()
+    
+    http_server = SglangHttpServer(args.port, runtime, args)
+    await http_server.start_server()
+
+if __name__ == "__main__":
+    uvloop.install()
+    asyncio.run(main())
