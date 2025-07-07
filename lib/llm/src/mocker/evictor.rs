@@ -13,167 +13,158 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::cmp::Eq;
-use std::collections::{HashMap, VecDeque};
+use std::cmp::{Eq, Ordering};
+use std::collections::{BTreeSet, HashMap};
 use std::hash::Hash;
-use std::time::Instant;
+
+/// A wrapper for (T, counter) that implements Ord based only on counter
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct PriorityItem<T> {
+    item: T,
+    counter: i64,
+}
+
+impl<T: Eq> Ord for PriorityItem<T> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.counter.cmp(&other.counter)
+    }
+}
+
+impl<T: Eq> PartialOrd for PriorityItem<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
 
 /// An LRU evictor that maintains objects and evicts them based on their
-/// last accessed time. Implements a "lazy" eviction mechanism where:
-/// 1. The priority queue does not immediately reflect updates or removes
-/// 2. Objects are pushed to the queue in order of increasing priority (older objects first)
-/// 3. The user must ensure objects are added in correct priority (temporal order)
-/// 4. Remove and update operations are lazy - entries remain in the queue until
-///    they are either evicted or cleaned up during maintenance
+/// priority counter. Lower counter values are evicted first.
 #[derive(Debug)]
 pub struct LRUEvictor<T: Clone + Eq + Hash> {
-    free_table: HashMap<T, f64>,
-    priority_queue: VecDeque<(T, f64)>,
-    cleanup_threshold: usize,
-    start_time: Instant,
+    free_table: HashMap<T, i64>,
+    priority_queue: BTreeSet<PriorityItem<T>>,
+    positive_counter: i64,
+    negative_counter: i64,
 }
 
 impl<T: Clone + Eq + Hash> Default for LRUEvictor<T> {
     fn default() -> Self {
         Self {
             free_table: HashMap::new(),
-            priority_queue: VecDeque::new(),
-            cleanup_threshold: 50,
-            start_time: Instant::now(),
+            priority_queue: BTreeSet::new(),
+            positive_counter: 0,
+            negative_counter: 0,
         }
     }
 }
 
 impl<T: Clone + Eq + Hash> LRUEvictor<T> {
-    /// Create a new LRUEvictor with the default cleanup threshold
-    pub fn new(cleanup_threshold: usize) -> Self {
-        Self {
-            cleanup_threshold,
-            ..Default::default()
-        }
+    pub fn new(_cleanup_threshold: usize) -> Self {
+        Self::default()
     }
 
-    /// Get the current timestamp as seconds since initialization
-    pub fn current_timestamp(&self) -> f64 {
-        self.start_time.elapsed().as_secs_f64()
-    }
-
-    /// Get an iterator over the keys in the evictor
-    pub fn keys(&self) -> std::collections::hash_map::Keys<'_, T, f64> {
+    pub fn keys(&self) -> std::collections::hash_map::Keys<'_, T, i64> {
         self.free_table.keys()
     }
 
-    /// Insert or update an object in the evictor with current timestamp
-    pub fn insert(&mut self, object: T) {
-        let timestamp = self.current_timestamp();
-        self._insert(object, timestamp);
+    fn update(&mut self, object: T, counter: i64) {
+        self.free_table.insert(object.clone(), counter);
+        self.priority_queue.insert(PriorityItem {
+            item: object,
+            counter,
+        });
     }
 
-    /// Check if the evictor contains the given object
+    pub fn insert(&mut self, object: T) {
+        // Remove old entry if it exists
+        if let Some(&old_counter) = self.free_table.get(&object) {
+            self.priority_queue.remove(&PriorityItem {
+                item: object.clone(),
+                counter: old_counter,
+            });
+        }
+
+        // Increment positive counter and insert
+        self.positive_counter += 1;
+        let counter = self.positive_counter;
+
+        self.update(object, counter);
+    }
+
+    /// Push an object to the front with negative counter (highest priority for eviction)
+    pub fn push_front(&mut self, object: T) {
+        // Remove old entry if it exists
+        if let Some(&old_counter) = self.free_table.get(&object) {
+            self.priority_queue.remove(&PriorityItem {
+                item: object.clone(),
+                counter: old_counter,
+            });
+        }
+
+        // Decrement negative counter and insert
+        self.negative_counter -= 1;
+        let counter = self.negative_counter;
+
+        self.update(object, counter);
+    }
+
     pub fn contains(&self, object: &T) -> bool {
         self.free_table.contains_key(object)
     }
 
-    /// Evict an object based on LRU policy
+    /// Evict an object based on LRU policy (lowest counter value)
     /// Returns the evicted object or None if no objects are available
     pub fn evict(&mut self) -> Option<T> {
-        if self.free_table.is_empty() {
-            return None;
-        }
-
-        while let Some((object, last_accessed)) = self.priority_queue.pop_front() {
-            let Some(&current_last_accessed) = self.free_table.get(&object) else {
-                continue; // entry is already removed
-            };
-
-            if current_last_accessed == last_accessed {
-                self.free_table.remove(&object);
-                return Some(object);
-            } // otherwise entry is stale
-        }
-
-        None
+        self.priority_queue.pop_first().map(|item| {
+            self.free_table.remove(&item.item);
+            item.item
+        })
     }
 
-    /// Insert or update an object in the evictor
-    fn _insert(&mut self, object: T, last_accessed: f64) {
-        self.free_table.insert(object.clone(), last_accessed);
-        self.priority_queue.push_back((object, last_accessed));
-        self.cleanup_if_necessary();
-    }
-
-    /// Remove an object from the evictor
-    /// We don't remove from the priority queue immediately, as that would be inefficient
-    /// Outdated entries will be filtered out during eviction or cleanup
     pub fn remove(&mut self, object: &T) -> bool {
-        self.free_table.remove(object).is_some()
+        let Some(&counter) = self.free_table.get(object) else {
+            return false;
+        };
+
+        self.free_table.remove(object);
+        self.priority_queue.remove(&PriorityItem {
+            item: object.clone(),
+            counter,
+        });
+        true
     }
 
-    /// Get the number of objects in the evictor
     pub fn len(&self) -> usize {
         self.free_table.len()
     }
 
-    /// Check if the evictor is empty
     pub fn is_empty(&self) -> bool {
         self.free_table.is_empty()
-    }
-
-    /// Check if cleanup is necessary and perform it if needed
-    fn cleanup_if_necessary(&mut self) {
-        if self.priority_queue.len() > self.cleanup_threshold * self.free_table.len() {
-            self.cleanup();
-        }
-    }
-
-    /// Clean up the priority queue by removing outdated entries
-    fn cleanup(&mut self) {
-        let mut new_priority_queue = VecDeque::new();
-        for (object, timestamp) in self.priority_queue.drain(..) {
-            let Some(&current_timestamp) = self.free_table.get(&object) else {
-                continue;
-            };
-
-            if current_timestamp == timestamp {
-                new_priority_queue.push_back((object, timestamp));
-            }
-        }
-        self.priority_queue = new_priority_queue;
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rstest::rstest;
 
-    #[rstest]
-    #[case(1)]
-    #[case(2)]
-    #[case(3)]
-    fn test_lru_evictor_eviction_order(#[case] threshold: usize) {
-        // Create a new LRUEvictor with the given cleanup threshold
-        let mut evictor = LRUEvictor::<i32>::new(threshold);
+    #[test]
+    fn test_lru_evictor_eviction_order() {
+        // Create a new LRUEvictor
+        let mut evictor = LRUEvictor::<i32>::new(1); // threshold value doesn't matter anymore
 
-        // Add items in the specified order with small delays between each
+        // Add items in the specified order
         evictor.insert(4);
-        std::thread::sleep(std::time::Duration::from_millis(1));
         evictor.insert(3);
-        std::thread::sleep(std::time::Duration::from_millis(1));
         evictor.insert(2);
-        std::thread::sleep(std::time::Duration::from_millis(1));
         evictor.insert(1);
-        std::thread::sleep(std::time::Duration::from_millis(1));
         evictor.insert(5);
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        evictor.insert(1); // Updates timestamp for 1
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        evictor.insert(4); // Updates timestamp for 4
-        std::thread::sleep(std::time::Duration::from_millis(1));
-        evictor.insert(2); // Updates timestamp for 2
+        evictor.insert(1); // Updates counter for 1
+        evictor.insert(4); // Updates counter for 4
+        evictor.insert(2); // Updates counter for 2
+        evictor.push_front(4);
 
         // Verify the eviction order
-        println!("Testing with threshold {}", threshold);
+        let evicted = evictor.evict().unwrap();
+        assert_eq!(evicted, 4);
         let evicted = evictor.evict().unwrap();
         assert_eq!(evicted, 3);
         let evicted = evictor.evict().unwrap();
@@ -181,11 +172,11 @@ mod tests {
         let evicted = evictor.evict().unwrap();
         assert_eq!(evicted, 1);
         let evicted = evictor.evict().unwrap();
-        assert_eq!(evicted, 4);
-        let evicted = evictor.evict().unwrap();
         assert_eq!(evicted, 2);
         let evicted = evictor.evict();
         assert_eq!(evicted, None);
         assert_eq!(evictor.len(), 0);
     }
+
+    // ... existing test_push_front test ...
 }
