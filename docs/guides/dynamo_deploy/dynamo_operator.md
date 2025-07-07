@@ -12,7 +12,6 @@ Dynamo operator is a Kubernetes operator that simplifies the deployment, configu
 - **Controllers:**
   - `DynamoGraphDeploymentController`: Watches `DynamoGraphDeployment` CRs and orchestrates graph deployments.
   - `DynamoComponentDeploymentController`: Watches `DynamoComponentDeployment` CRs and handles individual component deployments.
-  - `DynamoComponentController`: Watches `DynamoComponent` CRs and manages image builds and artifact tracking.
 
 - **Workflow:**
   1. A custom resource is created by the user or API server.
@@ -29,8 +28,8 @@ Dynamo operator is a Kubernetes operator that simplifies the deployment, configu
 
 | Field            | Type   | Description                                                                                                                                          | Required | Default |
 |------------------|--------|------------------------------------------------------------------------------------------------------------------------------------------------------|----------|---------|
-| `dynamoComponent`| string | Reference to the dynamoComponent identifier                                                                                                          | Yes      |         |
-| `services`       | map    | Map of service names to runtime configurations. This allows the user to override the service configuration defined in the DynamoComponentDeployment. | No       |         |
+| `services`       | map    | Map of service names to runtime configurations. This allows the user to override the service configuration defined in the DynamoComponentDeployment. | Yes      |         |
+| `envs`           | list   | list of global environment variables.                                                                                                                | No       |         |
 
 
 **API Version:** `nvidia.com/v1alpha1`
@@ -43,7 +42,6 @@ kind: DynamoGraphDeployment
 metadata:
   name: disagg
 spec:
-  dynamoComponent: frontend:jh2o6dqzpsgfued4
   envs:
   - name: GLOBAL_ENV_VAR
     value: some_global_value
@@ -80,11 +78,8 @@ spec:
 | Field              | Type     | Description                                                   | Required | Default |
 |--------------------|----------|---------------------------------------------------------------|----------|---------|
 | `dynamoNamespace` | string   | Namespace of the DynamoComponent                               | Yes      |         |
-| `dynamoComponent` | string   | Name of the dynamoComponent artifact                           | Yes      |         |
-| `dynamoTag`       | string   | FQDN of the service to run                                     | Yes      |         |
 | `serviceName`     | string   | Logical name of the service being deployed                     | Yes      |         |
 | `envs`            | array    | Environment variables for runtime                              | No       | `[]`    |
-| `externalServices`| map      | External service dependencies                                  | No       |         |
 | `annotations`     | map      | Additional metadata annotations for the pod                    | No       |         |
 | `labels`          | map      | Custom labels applied to the deployment and pod                | No       |         |
 | `resources`       | object   | Resource limits and requests (CPU, memory, GPU)                | No       |         |
@@ -109,8 +104,6 @@ metadata:
   name: test-41fa991-vllmworker
 spec:
   dynamoNamespace: dynamo
-  dynamoComponent: frontend:jh2o6dqzpsgfued4
-  dynamoTag: graphs.disagg:Frontend
   envs:
     - name: DYN_DEPLOYMENT_CONFIG
       value: '<long JSON config>'
@@ -128,35 +121,6 @@ spec:
       gpu: "1"
       memory: 20Gi
   serviceName: Frontend
-```
-
-### CRD: `DynamoComponent`
-
-| Field                           | Type                     | Description                                                                          | Required | Default |
-|---------------------------------|--------------------------|--------------------------------------------------------------------------------------|----------|---------|
-| `dynamoComponent`               | string                   | Name of the dynamoComponent artifact                                                 | Yes      |         |
-| `image`                         | string                   | Custom container image. If not specified, an image will be built                     | No       |         |
-| `imageBuildTimeout`             | Duration                 | Timeout duration for the image building process                                      | No       |         |
-| `buildArgs`                     | []string                 | Additional arguments to pass to the container image build process                    | No       |         |
-| `imageBuilderExtraPodMetadata`  | ExtraPodMetadata         | Additional metadata to add to the image builder pod                                  | No       |         |
-| `imageBuilderExtraPodSpec`      | ExtraPodSpec             | Additional pod spec configurations for the image builder pod                         | No       |         |
-| `imageBuilderExtraContainerEnv` | []EnvVar                 | Additional environment variables for the image builder container                     | No       |         |
-| `imageBuilderContainerResources`| ResourceRequirements     | Resource requirements (CPU, memory) for the image builder container                  | No       |         |
-| `imagePullSecrets`              | []LocalObjectReference   | Secrets required for pulling private container images                                | No       |         |
-| `dockerConfigJsonSecretName`    | string                   | Name of the secret containing Docker registry credentials                            | No       |         |
-| `downloaderContainerEnvFrom`    | []EnvFromSource          | Environment variables to be sourced for the downloader container                     | No       |         |
-
-**API Version:** `nvidia.com/v1alpha1`
-**Scope:** Namespaced
-
-#### Example
-```yaml
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoComponent
-metadata:
-  name: frontend--jh2o6dqzpsgfued4
-spec:
-  dynamoComponent: frontend:jh2o6dqzpsgfued4
 ```
 
 ## Installation
@@ -214,7 +178,6 @@ kind: DynamoGraphDeployment
 metadata:
   name: llm-agg
 spec:
-  dynamoComponent: frontend:jh2o6dqzpsgfued4  # Use the tag from Step 1
   services:
     Frontend:
       replicas: 1
@@ -245,25 +208,9 @@ Commit and push this file to your Git repository. FluxCD will detect the new CR 
 
 ### Step 3: Update Existing Deployment
 
-To update your pipeline:
+To update your pipeline, just update the associated DynamoGraphDeployment CRD 
 
-1. Build and push a new version of your pipeline:
-```bash
-DYNAMO_TAG=$(dynamo build --push graphs.agg:Frontend | grep "Successfully built" |  awk '{ print $NF }' | sed 's/\.$//')
-```
-
-2. Update the `dynamoComponent` field in your CR with the new tag:
-```yaml
-spec:
-  dynamoComponent: frontend:new_tag_here  # Update with new tag from Step 1
-```
-3. Commit and push the changes to your Git repository.
-
-The Dynamo operator will:
-- Detect the updated CR
-- Build new container images for the updated components
-- Perform a rolling update of the deployments when the new images are ready and the components are ready to serve traffic
-- Preserve existing PVCs and their data
+The Dynamo operator will automatically reconcile it.
 
 ### Monitoring the Deployment
 
@@ -302,13 +249,6 @@ kubectl get dynamocomponentdeployment -n $KUBE_NS
 - **Status Management:**
   - `.status.conditions`: Reflects readiness, failure, progress states
 
-### DynamoComponent
-
-- **Actions:**
-  - Create a job to build the docker image
-- **Status Management:**
-  - `.status.conditions`: Reflects readiness, failure, progress states
-
 ## Configuration
 
 
@@ -316,18 +256,7 @@ kubectl get dynamocomponentdeployment -n $KUBE_NS
 
 | Name                                               | Description                          | Default                                                |
 |----------------------------------------------------|--------------------------------------|--------------------------------------------------------|
-| `ADD_NAMESPACE_PREFIX_TO_IMAGE_NAME`               | Adds namespace prefix to image names | `false`                                                |
-| `DYNAMO_IMAGE_BUILD_ENGINE`                        | Engine used for building images      | `buildkit`                                             |
-| `BUILDKIT_URL`                                     | BuildKit daemon URL                  | `tcp://dynamo-platform-dynamo-operator-buildkitd:1234` |
-| `DOCKER_REGISTRY_DYNAMO_COMPONENTS_REPOSITORY_NAME`| Repository name for dynamo images    | `dynamo-components`                                    |
-| `DOCKER_REGISTRY_SECURE`                           | Use secure connection for registry   | `true`                                                 |
-| `DOCKER_REGISTRY_SERVER`                           | Docker registry server address       | `nvcr.io/nvidian/dynamo`                               |
-| `DOCKER_REGISTRY_USERNAME`                         | Registry authentication username     | `username`                                             |
-| `ESTARGZ_ENABLED`                                  | Enable eStargz image optimization    | `false`                                                |
-| `INTERNAL_IMAGES_BUILDKIT`                         | BuildKit image                       | `moby/buildkit:v0.20.2`                                |
 | `LOG_LEVEL`                                        | Logging verbosity level              | `info`                                                 |
-| `API_STORE_ENDPOINT`                               | Api store service endpoint           | `http://dynamo-store`                                  |
-| `DYNAMO_IMAGE_BUILDER_NAMESPACE`                   | Namespace for image building         | `dynamo`                                               |
 | `DYNAMO_SYSTEM_NAMESPACE`                          | System namespace                     | `dynamo`                                               |
 
 - **Flags:**
