@@ -135,17 +135,11 @@ Export the [Dynamo Base Image](../../get_started.md#building-the-dynamo-base-ima
 export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
 ```
 
-
-# Build the Dynamo deployment package.
-```bash
-cd $PROJECT_ROOT/examples/hello_world
-DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk '{ print $3 }' | sed 's/\.$//')
-```
-
 # Deploy to Kubernetes
+
+Use the provided CRD to deploy
 ```bash
-export DEPLOYMENT_NAME=ci-hw
-dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME
+kubectl apply -f hello-world.yaml
 ```
 
 ### Testing the Deployment

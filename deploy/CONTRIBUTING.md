@@ -16,12 +16,11 @@ The deploy directory contains several key components:
 ```
 deploy/
 ├── cloud/                    # Cloud deployment platform
-│   ├── api-store/           # API store service
 │   ├── helm/                # Cloud platform Helm charts
 │   └── operator/            # Kubernetes operator (Go)
 ├── helm/                    # Manual deployment Helm charts
 ├── metrics/                 # Monitoring and observability
-├── sdk/                     # Python SDK for building services
+├── sdk/                     # Python scripts
 └── inference-gateway/       # Gateway components
 ```
 
