@@ -98,7 +98,7 @@ impl KvRouterConfig {
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
 pub struct KvRouter {
-    indexer: KvIndexer,
+    indexer: Option<KvIndexer>,
     scheduler: KvScheduler,
     block_size: u32,
 }
@@ -108,6 +108,7 @@ impl KvRouter {
         component: Component,
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
+        use_kv_events: bool,
     ) -> Result<Self> {
         let cancellation_token = component
             .drt()
@@ -117,7 +118,9 @@ impl KvRouter {
         let metrics_aggregator =
             EndpointCollector::new(component.clone(), cancellation_token.clone()).await;
 
-        let indexer = KvIndexer::new(cancellation_token.clone(), block_size);
+        let maybe_indexer =
+            use_kv_events.then(|| KvIndexer::new(cancellation_token.clone(), block_size));
+
         let scheduler = KvScheduler::start(
             component.namespace().clone(),
             block_size,
@@ -128,30 +131,35 @@ impl KvRouter {
 
         // [gluo TODO] try subscribe_with_type::<RouterEvent>,
         // error checking below will be different.
-        let mut kv_events_rx = component.subscribe(KV_EVENT_SUBJECT).await?;
-        let kv_events_tx = indexer.event_sender();
+        if let Some(ref indexer) = maybe_indexer {
+            let mut kv_events_rx = component.subscribe(KV_EVENT_SUBJECT).await?;
+            let kv_events_tx = indexer.event_sender();
 
-        tokio::spawn(async move {
-            while let Some(event) = kv_events_rx.next().await {
-                let event: RouterEvent = match serde_json::from_slice(&event.payload) {
-                    Ok(event) => event,
-                    Err(e) => {
-                        tracing::warn!("Failed to deserialize RouterEvent: {:?}", e);
-                        // Choosing warn and continue to process other events from other workers
-                        // A bad event likely signals a problem with a worker, but potentially other workers are still healthy
-                        continue;
+            tokio::spawn(async move {
+                while let Some(event) = kv_events_rx.next().await {
+                    let event: RouterEvent = match serde_json::from_slice(&event.payload) {
+                        Ok(event) => event,
+                        Err(e) => {
+                            tracing::warn!("Failed to deserialize RouterEvent: {:?}", e);
+                            // Choosing warn and continue to process other events from other workers
+                            // A bad event likely signals a problem with a worker, but potentially other workers are still healthy
+                            continue;
+                        }
+                    };
+                    if let Err(e) = kv_events_tx.send(event).await {
+                        tracing::debug!(
+                            "failed to send kv event to indexer; shutting down: {:?}",
+                            e
+                        );
                     }
-                };
-                if let Err(e) = kv_events_tx.send(event).await {
-                    tracing::debug!("failed to send kv event to indexer; shutting down: {:?}", e);
                 }
-            }
-        });
+            });
+        }
 
         tracing::info!("KV Routing initialized");
         Ok(Self {
+            indexer: maybe_indexer,
             scheduler,
-            indexer,
             block_size,
         })
     }
@@ -174,7 +182,10 @@ impl KvRouter {
             .into_iter()
             .map(|block| LocalBlockHash(block.block_hash()))
             .collect();
-        let overlap_scores = self.indexer.find_matches(local_block_hashes).await?;
+        let overlap_scores = match &self.indexer {
+            Some(indexer) => indexer.find_matches(local_block_hashes).await?,
+            None => Default::default(), // Returns empty/default instance
+        };
 
         let best_worker_id = self
             .scheduler
