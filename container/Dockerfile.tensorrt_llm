@@ -397,8 +397,8 @@ COPY --from=build /usr/local/bin/etcd/ /usr/local/bin/etcd/
 COPY --from=build /usr/local/ucx /usr/local/ucx
 # Copy NIXL source from build image (required for NIXL plugins)
 COPY --from=build /usr/local/nixl /usr/local/nixl
-# Copy HPCX from base image
-COPY --from=build /opt/hpcx /opt/hpcx
+# Copy OpenMPI from build image
+COPY --from=build /opt/hpcx/ompi /opt/hpcx/ompi
 # Copy NUMA library from build image
 COPY --from=build /usr/lib/x86_64-linux-gnu/libnuma.so* /usr/lib/x86_64-linux-gnu/
 
@@ -408,21 +408,22 @@ RUN uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 # Common dependencies
+# ToDo: Remove extra install and use pyproject.toml to define all dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     uv pip install --requirement /tmp/requirements.txt
 
 # Install test dependencies
-#TODO: Remove this once we have a functional dev image built on top of the runtime image
+# TODO: Remove this once we have a functional CI image built on top of the runtime image
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
     uv pip install --requirement /tmp/requirements.txt
 
 # Copy CUDA toolkit components needed for nvcc, cudafe, cicc etc.
-COPY --from=build /usr/local/cuda/bin/ /usr/local/cuda/bin/
-COPY --from=build /usr/local/cuda/include /usr/local/cuda/include
+COPY --from=build /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
+COPY --from=build /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
+COPY --from=build /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
+COPY --from=build /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
+COPY --from=build /usr/local/cuda/include/ /usr/local/cuda/include/
 COPY --from=build /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
-COPY --from=build /usr/local/cuda/lib64/libnvvm.so* /usr/local/cuda/lib64/
-COPY --from=build /usr/local/cuda/lib64/libnvvmx.so* /usr/local/cuda/lib64/
-COPY --from=build /usr/local/cuda/lib64/stubs/libcuda.so /usr/local/cuda/lib64/stubs/
 COPY --from=build /usr/local/cuda/nvvm /usr/local/cuda/nvvm
 
 # Copy pytorch installation from NGC PyTorch
@@ -435,7 +436,6 @@ ARG NETWORKX_VER=3.4.2
 ARG SYMPY_VER=1.14.0
 ARG PACKAGING_VER=23.2
 ARG FLASH_ATTN_VER=2.7.3
-ARG MPI4PY_VER
 ARG MPMATH_VER=1.3.0
 COPY --from=build /usr/local/lib/lib* /usr/local/lib/
 COPY --from=build /usr/local/lib/python3.12/dist-packages/torch /usr/local/lib/python3.12/dist-packages/torch
@@ -447,8 +447,8 @@ COPY --from=build /usr/local/lib/python3.12/dist-packages/torchvision.libs /usr/
 COPY --from=build /usr/local/lib/python3.12/dist-packages/setuptools /usr/local/lib/python3.12/dist-packages/setuptools
 COPY --from=build /usr/local/lib/python3.12/dist-packages/setuptools-${SETUPTOOLS_VER}.dist-info /usr/local/lib/python3.12/dist-packages/setuptools-${SETUPTOOLS_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/functorch /usr/local/lib/python3.12/dist-packages/functorch
-COPY --from=build /usr/local/lib/python3.12/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info /usr/local/lib/python3.12/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/triton /usr/local/lib/python3.12/dist-packages/triton
+COPY --from=build /usr/local/lib/python3.12/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info /usr/local/lib/python3.12/dist-packages/pytorch_triton-${PYTORCH_TRITON_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/jinja2 /usr/local/lib/python3.12/dist-packages/jinja2
 COPY --from=build /usr/local/lib/python3.12/dist-packages/jinja2-${JINJA2_VER}.dist-info /usr/local/lib/python3.12/dist-packages/jinja2-${JINJA2_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/networkx /usr/local/lib/python3.12/dist-packages/networkx
@@ -460,20 +460,15 @@ COPY --from=build /usr/local/lib/python3.12/dist-packages/packaging-${PACKAGING_
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn /usr/local/lib/python3.12/dist-packages/flash_attn
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-*-linux-gnu.so /usr/local/lib/python3.12/dist-packages/
-COPY --from=build /usr/local/lib/python3.12/dist-packages/mpmath /usr/local/lib/python3.12/dist-packages/mpmath
-COPY --from=build /usr/local/lib/python3.12/dist-packages/mpmath-${MPMATH_VER}.dist-info /usr/local/lib/python3.12/dist-packages/mpmath-${MPMATH_VER}.dist-info
+# COPY --from=build /usr/local/lib/python3.12/dist-packages/mpmath /usr/local/lib/python3.12/dist-packages/mpmath
+# COPY --from=build /usr/local/lib/python3.12/dist-packages/mpmath-${MPMATH_VER}.dist-info /usr/local/lib/python3.12/dist-packages/mpmath-${MPMATH_VER}.dist-info
 
 # Setup environment variables
 ARG ARCH_ALT
 ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins
 ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:/opt/hpcx/ompi/lib:$LD_LIBRARY_PATH
-ENV OMPI_HOME=/opt/hpcx/ompi
-ENV PATH=/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:$PATH
+ENV PATH=/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 ENV OPAL_PREFIX=/opt/hpcx/ompi
-
-#TODO: Remove this once we have a functional dev image built on top of the runtime image
-COPY . /workspace
-RUN uv pip install /workspace/benchmarks
 
 # Install TensorRT-LLM (same as in build stage)
 ARG HAS_TRTLLM_CONTEXT=0
@@ -490,8 +485,17 @@ RUN uv pip install --index-url "${TENSORRTLLM_INDEX_URL}" \
     uv pip install ai-dynamo --find-links wheelhouse && \
     uv pip install nixl --find-links wheelhouse
 
-# Copy TensorRT-LLM environment setup script
+# Setup TRTLLM environment variables, same as in dev image
+ENV TRTLLM_USE_UCX_KVCACHE=1
 COPY --from=dev /usr/local/bin/set_trtllm_env.sh /usr/local/bin/set_trtllm_env.sh
+RUN echo 'source /usr/local/bin/set_trtllm_env.sh' >> /root/.bashrc
+
+# Copy benchmarks, exmaples and tests for CI
+# TODO: Remove this once we have a functional CI image built on top of the runtime image
+COPY tests /workspace/tests
+COPY benchmarks /workspace/benchmarks
+COPY examples /workspace/examples
+RUN uv pip install /workspace/benchmarks
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
