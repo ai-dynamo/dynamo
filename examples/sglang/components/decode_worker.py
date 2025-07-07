@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import sys
 
 import msgspec
@@ -53,9 +54,35 @@ class DecodeRequestHandler:
         async for result in results:
             yield result
 
+    async def flush_cache(self, request: dict):
+        _ = request
+        asyncio.create_task(self.engine.tokenizer_manager.flush_cache())
+        yield {
+            "status": "success",
+            "message": "Cache flush initiated. Check backend logs for status",
+        }
+
+
+async def graceful_shutdown(runtime):
+    logging.info("Received shutdown signal, shutting down DistributedRuntime")
+    runtime.shutdown()
+    logging.info("DistributedRuntime shutdown complete")
+
 
 @dynamo_worker(static=False)
 async def worker(runtime: DistributedRuntime):
+    # Set up signal handler for graceful shutdown
+    loop = asyncio.get_running_loop()
+
+    def signal_handler():
+        # Schedule the shutdown coroutine instead of calling it directly
+        asyncio.create_task(graceful_shutdown(runtime))
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
+
+    logging.info("Signal handlers set up for graceful shutdown")
+
     server_args = parse_sglang_args_inc(sys.argv[1:])
     await init(runtime, server_args)
 
@@ -70,8 +97,13 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
     component = runtime.namespace("dynamo").component("decode")
     await component.create_service()
 
-    endpoint = component.endpoint("generate")
-    await endpoint.serve_endpoint(handler.generate)
+    gen_endpoint = component.endpoint("generate")
+    flush_endpoint = component.endpoint("flush_cache")
+
+    tasks = [gen_endpoint.serve_endpoint(handler.generate)]
+    tasks.append(flush_endpoint.serve_endpoint(handler.flush_cache))
+
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":

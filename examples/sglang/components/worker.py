@@ -4,6 +4,7 @@
 import asyncio
 import logging
 import random
+import signal
 import socket
 import sys
 from typing import Any, Dict, Optional, Union
@@ -16,8 +17,11 @@ from utils.protocol import DisaggPreprocessedRequest
 from utils.sgl_utils import parse_sglang_args_inc
 
 from dynamo.llm import (
+    ForwardPassMetrics,
+    KvStats,
     ModelType,
     WorkerMetricsPublisher,
+    WorkerStats,
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
     register_llm,
@@ -56,15 +60,26 @@ class RequestHandler:
 
     def setup_metrics(self):
         """Set up metrics publisher - call this after handler creation"""
-        self.metrics_publisher.publish(
+        worker_stats = WorkerStats(
             request_active_slots=0,
             request_total_slots=1024,
+            num_requests_waiting=0,
+            data_parallel_rank=None,
+        )
+
+        kv_stats = KvStats(
             kv_active_blocks=0,
             kv_total_blocks=1024,
-            num_requests_waiting=0,
             gpu_cache_usage_perc=0.0,
             gpu_prefix_cache_hit_rate=0.0,
         )
+
+        metrics = ForwardPassMetrics(
+            worker_stats=worker_stats,
+            kv_stats=kv_stats,
+            spec_decode_stats=None,
+        )
+        self.metrics_publisher.publish(metrics)
         task = asyncio.create_task(self.create_metrics_publisher_endpoint())
         task.add_done_callback(
             lambda _: logging.debug("metrics publisher endpoint created")
@@ -81,15 +96,30 @@ class RequestHandler:
         logging.warning(
             "Publishing placeholder metrics in SGLangWorker; these are NOT real engine metrics yet and will be replaced once upstream support lands."
         )
-        self.metrics_publisher.publish(
-            request_active_slots=1,
-            request_total_slots=100,
+
+        worker_stats = WorkerStats(
+            request_active_slots=0,
+            request_total_slots=1024,
+            num_requests_waiting=0,
+            data_parallel_rank=None,
+        )
+
+        kv_stats = KvStats(
             kv_active_blocks=random.randint(0, 500),
             kv_total_blocks=1000,
-            num_requests_waiting=0,
             gpu_cache_usage_perc=random.uniform(0.1, 0.8),
             gpu_prefix_cache_hit_rate=random.uniform(0.0, 0.5),
         )
+
+        # TODO: get spec_dec_stats from sglang once real engine metrics are available
+        spec_dec_stats = None
+
+        metrics = ForwardPassMetrics(
+            worker_stats=worker_stats,
+            kv_stats=kv_stats,
+            spec_decode_stats=spec_dec_stats,
+        )
+        self.metrics_publisher.publish(metrics)
 
     def _get_bootstrap_info(self):
         """Bootstrap info from tokenizer manager"""
@@ -241,9 +271,35 @@ class RequestHandler:
         async for _ in prefill:
             pass
 
+    async def flush_cache(self, request: dict):
+        _ = request
+        asyncio.create_task(self.engine.tokenizer_manager.flush_cache())
+        yield {
+            "status": "success",
+            "message": "Cache flush initiated. Check backend logs for status",
+        }
+
+
+async def graceful_shutdown(runtime):
+    logging.info("Received shutdown signal, shutting down DistributedRuntime")
+    runtime.shutdown()
+    logging.info("DistributedRuntime shutdown complete")
+
 
 @dynamo_worker(static=False)
 async def worker(runtime: DistributedRuntime):
+    # Set up signal handler for graceful shutdown
+    loop = asyncio.get_running_loop()
+
+    def signal_handler():
+        # Schedule the shutdown coroutine instead of calling it directly
+        asyncio.create_task(graceful_shutdown(runtime))
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
+
+    logging.info("Signal handlers set up for graceful shutdown")
+
     server_args = parse_sglang_args_inc(sys.argv[1:])
     await init(runtime, server_args)
 
@@ -286,7 +342,12 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
     )
     _ = ZmqKvEventPublisher(component=component, config=zmq_config)
 
-    await endpoint.serve_endpoint(handler.generate)
+    tasks = [endpoint.serve_endpoint(handler.generate)]
+
+    flush_endpoint = component.endpoint("flush_cache")
+    tasks.append(flush_endpoint.serve_endpoint(handler.flush_cache))
+
+    await asyncio.gather(*tasks)
 
 
 if __name__ == "__main__":

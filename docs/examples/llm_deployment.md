@@ -147,7 +147,7 @@ This figure shows an overview of the major components to deploy:
 ```
 
 ```{note}
-The planner component is enabled by default for all deployment architectures but is set to no-op mode. This means the planner observes metrics but doesn't take scaling actions. To enable active scaling, you can add `--Planner.no-operation=false` to your `dynamo serve` command. For more details, see [PLanner](../architecture/planner.md).
+The planner component is enabled by default for all deployment architectures but is set to no-op mode. This means the planner observes metrics but doesn't take scaling actions. To enable active scaling, you can add `--Planner.no-operation=false` to your `dynamo serve` command. For more details, see [PLanner](../architecture/planner_intro.rst).
 ```
 
 ### Example architectures

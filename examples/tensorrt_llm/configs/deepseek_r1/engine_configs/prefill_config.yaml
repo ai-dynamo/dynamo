@@ -25,11 +25,7 @@ max_num_tokens: 8192
 max_seq_len: 8192
 
 kv_cache_config:
-  # With dp attention disabled: high free_gpu_memory_fraction is fine.
   free_gpu_memory_fraction: 0.75
-  # With dp attention enabled: large ISL at high concurrency may need
-  # free_gpu_memory_fraction low to have enough available memory.
-  # free_gpu_memory_fraction: 0.30
 
 # NOTE: pytorch_backend_config section flattened since: https://github.com/NVIDIA/TensorRT-LLM/pull/4603
 # NOTE: overlap_scheduler enabled by default since this commit and changed

@@ -41,19 +41,37 @@ pub struct WorkerSelectionResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ForwardPassMetrics {
+    pub worker_stats: WorkerStats,
+    pub kv_stats: KvStats,
+    pub spec_decode_stats: Option<SpecDecodeStats>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct WorkerStats {
     // https://lmsys.org/blog/2024-12-04-sglang-v0-4/#data-parallelism-attention-for-deepseek-models
-    // Data parallel ranks are semi-independent, so we need to track metrics at the DP level
-    pub data_parallel_rank: Option<u32>, // Optional for backwards compatibility
+    pub data_parallel_rank: Option<u32>,
     pub request_active_slots: u64,
     pub request_total_slots: u64,
+    pub num_requests_waiting: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct KvStats {
     pub kv_active_blocks: u64,
     pub kv_total_blocks: u64,
-    // integer from 0 to large number
-    pub num_requests_waiting: u64,
     // percentage represented as a float from 0 to 1
     pub gpu_cache_usage_perc: f32,
     // percentage represented as a float from 0 to 1
     pub gpu_prefix_cache_hit_rate: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct SpecDecodeStats {
+    pub num_spec_tokens: Option<u32>,
+    pub num_drafts: Option<u32>,
+    pub num_draft_tokens: Option<u32>,
+    pub num_accepted_tokens: Option<u32>,
+    pub num_accepted_tokens_per_pos: Option<Vec<u32>>,
 }
 
 /// A [`LocalBlockHash`] is a hash computed from the tokens_ids, extra_token_ids and the optional

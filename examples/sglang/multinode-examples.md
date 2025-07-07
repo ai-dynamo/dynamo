@@ -17,7 +17,7 @@ Node 1: Run HTTP ingress, processor, and 8 shards of the prefill worker
 # run ingress
 dynamo run in=http out=dyn &
 # run prefill worker
-python3 components/worker_inc.py \
+python3 components/worker.py \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --tp 16 \
@@ -40,7 +40,7 @@ export NATS_SERVER="nats://<node-1-ip>"
 export ETCD_ENDPOINTS="<node-1-ip>:2379"
 
 # worker
-python3 components/worker_inc.py \
+python3 components/worker.py \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --tp 16 \
@@ -63,7 +63,7 @@ export NATS_SERVER="nats://<node-1-ip>"
 export ETCD_ENDPOINTS="<node-1-ip>:2379"
 
 # worker
-python3 components/decode_worker_inc.py \
+python3 components/decode_worker.py \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --tp 16 \
@@ -86,7 +86,7 @@ export NATS_SERVER="nats://<node-1-ip>"
 export ETCD_ENDPOINTS="<node-1-ip>:2379"
 
 # worker
-python3 components/decode_worker_inc.py \
+python3 components/decode_worker.py \
   --model-path /model/ \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --tp 16 \

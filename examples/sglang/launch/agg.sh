@@ -15,11 +15,8 @@ trap cleanup EXIT INT TERM
 python3 utils/clear_namespace.py --namespace dynamo
 
 # run ingress
-dynamo run in=http out=dyn &
+dynamo run in=http out=dyn --http-port=8000 &
 DYNAMO_PID=$!
-
-# run ingress
-dynamo run in=http out=dyn &
 
 # run worker
 python3 components/worker.py \

@@ -23,7 +23,7 @@ use std::collections::HashMap;
 use super::protocols::WorkerSelectionResult;
 use super::WorkerSelector;
 use crate::kv_router::indexer::OverlapScores;
-pub use crate::kv_router::protocols::ForwardPassMetrics;
+use crate::kv_router::protocols::ForwardPassMetrics;
 use crate::kv_router::scoring::ProcessedEndpoints;
 use crate::kv_router::KvRouterConfig;
 use crate::kv_router::KV_HIT_RATE_SUBJECT;
@@ -211,7 +211,8 @@ pub fn process_worker_selection(
 
     // Update worker state predictively
     // Will be overwritten on next polling of metrics
-    worker.data.kv_active_blocks += selection
+
+    worker.data.kv_stats.kv_active_blocks += selection
         .required_blocks
         .saturating_sub(selection.overlap_blocks as u64);
 
@@ -319,12 +320,12 @@ impl WorkerSelector for DefaultWorkerSelector {
                 request.overlap.scores.get(&worker_id).copied().unwrap_or(0) as f64;
             let new_blocks = request_blocks as f64 - overlap_blocks;
 
-            let kv_total_blocks = ep.data.kv_total_blocks as f64;
+            let kv_total_blocks = ep.data.kv_stats.kv_total_blocks as f64;
             assert!(kv_total_blocks > 0.0);
 
             let normalized_new_blocks = new_blocks / kv_total_blocks;
-            let gpu_cache_usage = (ep.data.kv_active_blocks as f64) / kv_total_blocks;
-            let num_requests_waiting = ep.data.num_requests_waiting as f64;
+            let gpu_cache_usage = ep.data.kv_stats.gpu_cache_usage_perc as f64;
+            let num_requests_waiting = ep.data.worker_stats.num_requests_waiting as f64;
 
             // Calculate logit (lower is better)
             let logit = self.kv_router_config.overlap_score_weight * normalized_new_blocks
@@ -386,6 +387,7 @@ impl WorkerSelector for DefaultWorkerSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kv_router::protocols::{KvStats, WorkerStats};
 
     #[test]
     fn test_softmax_sample_single_key() {
@@ -424,8 +426,14 @@ mod tests {
             name: format!("worker-{}", worker_id),
             subject: format!("worker-subject-{:x}", worker_id),
             data: ForwardPassMetrics {
-                gpu_cache_usage_perc,
-                num_requests_waiting,
+                kv_stats: KvStats {
+                    gpu_cache_usage_perc,
+                    ..Default::default()
+                },
+                worker_stats: WorkerStats {
+                    num_requests_waiting,
+                    ..Default::default()
+                },
                 // Other fields can be default initialized for this test
                 ..Default::default()
             },
