@@ -42,7 +42,6 @@ impl EndpointCollector {
             watch_tx,
             cancellation_token.clone(),
             "generate".to_string(),
-            false,
         ));
 
         Self {
@@ -74,7 +73,6 @@ impl KvMetricsAggregator {
             watch_tx,
             cancellation_token.clone(),
             KV_METRICS_ENDPOINT.to_string(),
-            true,
         ));
 
         Self {
@@ -128,7 +126,6 @@ pub async fn collect_endpoints_task(
     watch_tx: watch::Sender<ProcessedEndpoints>,
     cancel: CancellationToken,
     subject: String,
-    filter_metrics: bool,
 ) {
     let backoff_delay = Duration::from_millis(100);
     let scrape_timeout = Duration::from_millis(300);
@@ -155,7 +152,7 @@ pub async fn collect_endpoints_task(
                         }
                     };
 
-                let endpoints: Vec<Endpoint> = if filter_metrics {
+                let endpoints: Vec<Endpoint> = if subject == KV_METRICS_ENDPOINT {
                     // Original filtering behavior
                     unfiltered_endpoints
                         .into_iter()
@@ -168,7 +165,7 @@ pub async fn collect_endpoints_task(
                                     data: LoadMetrics::ForwardPassMetrics(data),
                                 })
                                 .inspect_err(|e| {
-                                    tracing::debug!("skip endpoint data that can't be parsed as ForwardPassMetrics: {:?}", e);
+                                    tracing::warn!("skip endpoint data that can't be parsed as ForwardPassMetrics: {:?}", e);
                                 })
                                 .ok()
                         })

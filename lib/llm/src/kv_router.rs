@@ -63,6 +63,7 @@ pub struct KvRouterConfig {
 
     pub router_temperature: f64,
 
+    // note: this is not actually used for now
     pub max_num_batched_tokens: u32,
 }
 

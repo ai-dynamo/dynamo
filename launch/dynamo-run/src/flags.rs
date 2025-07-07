@@ -113,6 +113,7 @@ pub struct Flags {
     /// Maximum number of batched tokens for KV routing
     /// Needed for informing the KV router
     /// TODO: derive from vllm args
+    /// NOTE: this is not actually used for now
     #[arg(long, default_value = "8192")]
     pub max_num_batched_tokens: Option<u32>,
 
