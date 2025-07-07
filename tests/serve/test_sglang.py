@@ -4,7 +4,7 @@
 import logging
 import os
 from dataclasses import dataclass
-from typing import List, Any
+from typing import Any, List
 
 import pytest
 import requests
@@ -17,9 +17,10 @@ logger = logging.getLogger(__name__)
 @dataclass
 class SGLangConfig:
     """Configuration for SGLang test scenarios"""
+
     script_name: str
     marks: List[Any]
-    name: str  
+    name: str
 
 
 class SGLangProcess(ManagedProcess):
@@ -66,14 +67,10 @@ class SGLangProcess(ManagedProcess):
 # SGLang test configurations
 sglang_configs = {
     "aggregated": SGLangConfig(
-        script_name="agg.sh",
-        marks=[pytest.mark.gpu_1],
-        name="aggregated"
+        script_name="agg.sh", marks=[pytest.mark.gpu_1], name="aggregated"
     ),
     "disaggregated": SGLangConfig(
-        script_name="disagg.sh", 
-        marks=[pytest.mark.gpu_2],
-        name="disaggregated"
+        script_name="disagg.sh", marks=[pytest.mark.gpu_2], name="disaggregated"
     ),
 }
 
@@ -94,23 +91,29 @@ def sglang_config_test(request):
 @pytest.mark.sglang
 def test_sglang_deployment(request, runtime_services, sglang_config_test):
     """Test SGLang deployment scenarios"""
-    
+
     # First check if sglang is available
     try:
         import sglang
+
         logger.info(f"SGLang version: {sglang.__version__}")
     except ImportError:
         pytest.skip("SGLang not available")
 
     config = sglang_config_test
-    
+
     with SGLangProcess(config.script_name, request) as server:
         # Test chat completions
         response = requests.post(
             f"http://localhost:{server.port}/v1/chat/completions",
             json={
                 "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-                "messages": [{"role": "user", "content": "Why is Roger Federer the best tennis player of all time?"}],
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": "Why is Roger Federer the best tennis player of all time?",
+                    }
+                ],
                 "max_tokens": 50,
             },
             timeout=120,
@@ -129,7 +132,7 @@ def test_sglang_deployment(request, runtime_services, sglang_config_test):
             response = requests.post(
                 f"http://localhost:{server.port}/v1/completions",
                 json={
-                    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", 
+                    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
                     "prompt": "Roger Federer is the greatest tennis player of all time",
                     "max_tokens": 30,
                 },
@@ -145,7 +148,9 @@ def test_sglang_deployment(request, runtime_services, sglang_config_test):
             logger.info(f"SGLang completions response: {text}")
 
 
-@pytest.mark.skip(reason="Requires 4 GPUs - enable when hardware is consistently available")
+@pytest.mark.skip(
+    reason="Requires 4 GPUs - enable when hardware is consistently available"
+)
 def test_sglang_disagg_dp_attention(request, runtime_services):
     """Test sglang disaggregated with DP attention (requires 4 GPUs)"""
 
