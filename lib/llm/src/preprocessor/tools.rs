@@ -139,6 +139,12 @@ impl ToolCallingMatcher {
 /// - `Ok(None)` if input format is unrecognized or invalid JSON
 /// - `Err(...)` if JSON is valid but deserialization or argument re-serialization fails
 ///
+/// # Note on List Handling
+///
+/// When the input contains a list of tool calls (either with `parameters` or `arguments`),
+/// only the **last item** in the list is returned. This design choice assumes that the
+/// most recent tool call in a list is the one to execute.
+///
 /// # Errors
 ///
 /// Returns a `Result::Err` only if an inner `serde_json::to_string(...)` fails

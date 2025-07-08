@@ -60,7 +60,7 @@ struct DeltaChoice {
     finish_reason: Option<async_openai::types::FinishReason>,
     /// Optional log probabilities for the chat choice.
     logprobs: Option<async_openai::types::ChatChoiceLogprobs>,
-    // TODO
+    // Optional tool calls for the chat choice.
     tool_calls: Option<Vec<async_openai::types::ChatCompletionMessageToolCall>>,
 }
 
