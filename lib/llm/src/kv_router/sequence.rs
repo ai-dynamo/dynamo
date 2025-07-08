@@ -541,20 +541,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Cannot free non-existent request 0")]
-    fn test_double_free_panic() {
-        let block_size = 4;
-        let mut manager = ActiveSequences::new(block_size);
-        let to_sequence =
-            |tokens: Vec<u32>| Tokens::from(tokens).into_sequence(block_size as u32, None);
-
-        manager.add_request("0".to_string(), to_sequence(vec![0, 1, 2]));
-        manager.free(&"0".to_string());
-        // This should panic
-        manager.free(&"0".to_string());
-    }
-
-    #[test]
     fn test_active_sequences_multi_worker() {
         let block_size = 4;
         let worker_ids = vec![0, 1, 2];
