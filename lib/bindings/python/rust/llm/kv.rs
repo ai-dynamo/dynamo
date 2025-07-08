@@ -580,18 +580,18 @@ impl KvMetricsAggregator {
             .into_iter()
             .map(|(worker_id, endpoint)| {
                 let metrics = endpoint.data;
-                let LoadMetrics::ForwardPassMetrics(fwd_pass_metrics) = metrics else {
+                let LoadMetrics::EngineLoadMetrics(fwd_pass_metrics) = metrics else {
                     panic!("Endpoints do not contain forward pass metrics.");
                 };
                 EndpointKvMetrics {
                     worker_id,
-                    request_active_slots: fwd_pass_metrics.request_active_slots,
-                    request_total_slots: fwd_pass_metrics.request_total_slots,
-                    kv_active_blocks: fwd_pass_metrics.kv_active_blocks,
-                    kv_total_blocks: fwd_pass_metrics.kv_total_blocks,
-                    num_requests_waiting: fwd_pass_metrics.num_requests_waiting,
-                    gpu_cache_usage_perc: fwd_pass_metrics.gpu_cache_usage_perc,
-                    gpu_prefix_cache_hit_rate: fwd_pass_metrics.gpu_prefix_cache_hit_rate,
+                    request_active_slots: fwd_pass_metrics.worker_stats.request_active_slots,
+                    request_total_slots: fwd_pass_metrics.worker_stats.request_total_slots,
+                    kv_active_blocks: fwd_pass_metrics.kv_stats.kv_active_blocks,
+                    kv_total_blocks: fwd_pass_metrics.kv_stats.kv_total_blocks,
+                    num_requests_waiting: fwd_pass_metrics.worker_stats.num_requests_waiting,
+                    gpu_cache_usage_perc: fwd_pass_metrics.kv_stats.gpu_cache_usage_perc,
+                    gpu_prefix_cache_hit_rate: fwd_pass_metrics.kv_stats.gpu_prefix_cache_hit_rate,
                 }
             })
             .collect();

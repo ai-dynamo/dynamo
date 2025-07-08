@@ -162,7 +162,7 @@ pub async fn collect_endpoints_task(
                                 .map(|data| Endpoint {
                                     name: s.name,
                                     subject: s.subject,
-                                    data: LoadMetrics::ForwardPassMetrics(data),
+                                    data: LoadMetrics::EngineLoadMetrics(data),
                                 })
                                 .inspect_err(|e| {
                                     tracing::warn!("skip endpoint data that can't be parsed as ForwardPassMetrics: {:?}", e);

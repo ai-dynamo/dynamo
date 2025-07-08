@@ -33,7 +33,7 @@ impl ProcessedEndpoints {
         // compute some basic statistics
         let load_values: Vec<f64> = endpoints
             .iter()
-            .map(|endpoint| endpoint.data.kv_stats.kv_active_blocks() as f64)
+            .map(|endpoint| endpoint.data.kv_active_blocks() as f64)
             .collect();
         let load_avg = load_values.iter().copied().sum::<f64>() / load_values.len() as f64;
         let variance = load_values
@@ -66,8 +66,8 @@ impl ProcessedEndpoints {
     pub fn update_active_blocks(&mut self, worker_id: i64, active_blocks: usize) {
         if let Some(endpoint) = self.endpoints.get_mut(&worker_id) {
             match &mut endpoint.data {
-                LoadMetrics::ForwardPassMetrics(metrics) => {
-                    metrics.kv_active_blocks = active_blocks as u64;
+                LoadMetrics::EngineLoadMetrics(metrics) => {
+                    metrics.kv_stats.kv_active_blocks = active_blocks as u64;
                 }
                 LoadMetrics::PredictiveLoadMetrics(metrics) => {
                     metrics.kv_active_blocks = active_blocks as u64;

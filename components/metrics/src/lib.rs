@@ -450,7 +450,7 @@ impl PrometheusMetrics {
         for (worker_id, endpoint) in processed.endpoints.iter() {
             let worker_id = worker_id.to_string();
             let load_metrics = endpoint.data.clone();
-            let LoadMetrics::ForwardPassMetrics(metrics) = load_metrics else {
+            let LoadMetrics::EngineLoadMetrics(metrics) = load_metrics else {
                 panic!("Can only update with ForwardPassMetrics");
             };
 
@@ -605,7 +605,7 @@ pub fn postprocess_metrics(
             e.id().ok().map(|id| Endpoint {
                 name: format!("worker-{id}"),
                 subject: e.subject.clone(),
-                data: LoadMetrics::ForwardPassMetrics(m.clone()),
+                data: LoadMetrics::EngineLoadMetrics(m.clone()),
             })
         })
         .collect();
