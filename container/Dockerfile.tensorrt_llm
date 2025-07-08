@@ -382,10 +382,9 @@ RUN apt-get update && \
         openssh-server && \
     rm -rf /var/lib/apt/lists/*
 
-### COPY BINDINGS ###
 # Copy all bindings (wheels, lib, include) from dev image
 COPY --from=dev /opt/dynamo/bindings /opt/dynamo/bindings
-### COPY NATS & ETCD ###
+
 # Copy nats and etcd from build image
 COPY --from=build /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=build /usr/local/bin/etcd/ /usr/local/bin/etcd/
