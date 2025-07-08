@@ -550,8 +550,12 @@ mod tests {
         assert_eq!(slot.num_tokens(SlotPosition::Prefill), 4);
         assert_eq!(slot.num_tokens(SlotPosition::All), 4);
 
+        assert_eq!(slot.mutable.len(), 0);
+        assert_eq!(slot.immutable.len(), 1);
+
         // Now we're in decode mode - add new tokens one at a time
-        for i in 0..3 {
+        for i in 0..5 {
+            println!("=== Decode Pass {} ===", i);
             let decode_token = 100 + i as u32; // Use distinct tokens for decode
 
             // Allocate space for the new token
@@ -561,6 +565,8 @@ mod tests {
                 "Failed to allocate block for decode token {}",
                 i
             );
+
+            assert_eq!(slot.mutable.len(), 1);
 
             // Apply the decode token
             let result = slot.apply_computed_tokens(vec![decode_token], &fixture.pool);
@@ -577,6 +583,14 @@ mod tests {
             assert_eq!(slot.num_tokens(SlotPosition::All), expected_total);
             // Prefill count should remain unchanged
             assert_eq!(slot.num_tokens(SlotPosition::Prefill), 4);
+
+            if expected_total % BLOCK_SIZE == 0 {
+                assert_eq!(slot.mutable.len(), 0);
+                assert_eq!(slot.immutable.len(), expected_total / BLOCK_SIZE);
+            } else {
+                assert_eq!(slot.mutable.len(), 1);
+                assert_eq!(slot.immutable.len(), expected_total / BLOCK_SIZE);
+            }
         }
 
         // Final verification
