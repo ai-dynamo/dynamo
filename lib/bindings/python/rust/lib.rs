@@ -63,6 +63,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
+    m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
+    m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
 
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<CancellationToken>()?;
@@ -73,6 +75,9 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<EtcdClient>()?;
     m.add_class::<AsyncResponseStream>()?;
     m.add_class::<llm::disagg_router::DisaggregatedRouter>()?;
+    m.add_class::<llm::entrypoint::EntrypointArgs>()?;
+    m.add_class::<llm::entrypoint::EngineConfig>()?;
+    m.add_class::<llm::entrypoint::EngineType>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?;
     m.add_class::<llm::preprocessor::OAIChatPreprocessor>()?;

@@ -69,7 +69,8 @@ RUN apt-get update -y && \
     tmux \
     vim \
     autoconf \
-    libtool
+    libtool \
+    net-tools
 
 # These headers are missing with the hpcx installer, required
 # by UCX to find RDMA devices

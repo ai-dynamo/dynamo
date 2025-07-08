@@ -1789,6 +1789,7 @@ dependencies = [
  "dynamo-engine-mistralrs",
  "dynamo-llm",
  "dynamo-runtime",
+ "either",
  "futures",
  "futures-util",
  "libc",

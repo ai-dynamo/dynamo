@@ -24,7 +24,8 @@ RUN apt-get update -y && \
     meson \
     ninja-build \
     pybind11-dev \
-    patchelf
+    patchelf \
+    net-tools
 
 # Install Python build dependencies
 RUN pip install --break-system-packages meson-python wheel build

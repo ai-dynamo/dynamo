@@ -69,7 +69,8 @@ RUN apt-get update -y && \
     tmux \
     vim \
     autoconf \
-    libtool
+    libtool \
+    net-tools
 
 WORKDIR /workspace
 

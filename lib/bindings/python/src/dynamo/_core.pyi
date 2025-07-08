@@ -839,6 +839,18 @@ async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: st
     """Attach the model at path to the given endpoint, and advertise it as model_type"""
     ...
 
+class EngineConfig:
+    """Holds internal configuration for a Dynamo engine."""
+    ...
+
+async def make_engine(args: EntrypointArgs) -> EngineConfig:
+    """Make an engine matching the args"""
+    ...
+
+async def run_input(runtime: DistributedRuntime, input: str, engine_config: EngineConfig) -> None:
+    """Start an engine, connect it to an input, and run until stopped."""
+    ...
+
 class NatsQueue:
     """
     A queue implementation using NATS JetStream for task distribution
@@ -1144,3 +1156,11 @@ class ZmqKvEventListener:
             ValueError: If events cannot be serialized to JSON
         """
         ...
+
+class EntrypointArgs:
+    """
+    Settings to connect an input to a worker and run them.
+    Use by `dynamo run`.
+    """
+
+    ...
