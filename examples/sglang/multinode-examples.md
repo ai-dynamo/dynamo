@@ -4,13 +4,19 @@
 
 SGLang allows you to deploy multi-node sized models by adding in the `dist-init-addr`, `nnodes`, and `node-rank` arguments. Below we demonstrate and example of deploying DeepSeek R1 for disaggregated serving across 4 nodes. This example requires 4 nodes of 8xH100 GPUs.
 
-**Step 1**: Start NATS/ETCD on your head node. Ensure you have the correct firewall rules to allow communication between the nodes as you will need the NATS/ETCD endpoints to be accessible by all other nodes.
+**Step 1**: Start NATS/ETCD on your head prefill node. Ensure you have the correct firewall rules to allow communication between the nodes as you will need the NATS/ETCD endpoints to be accessible by all other nodes.
 ```bash
 # node 1
 docker compose -f lib/runtime/docker-compose.yml up -d
 ```
 
-**Step 2**: Ensure that your configuration file has the required arguments. Here's an example configuration that runs prefill and the model in TP16:
+**Step 2**: Run the helper `gen_env_vars.sh` script to generate the environment variables for each node.
+```bash
+./gen_env_vars.sh
+```
+You can then copy and paste each command from the script onto each node
+
+**Step 3**: Ensure that your configuration file has the required arguments. Here's an example configuration that runs prefill and the model in TP16:
 
 Node 1: Run HTTP ingress, processor, and 8 shards of the prefill worker
 ```bash
@@ -22,7 +28,7 @@ python3 components/worker.py \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --tp 16 \
   --dp-size 16 \
-  --dist-init-addr HEAD_PREFILL_NODE_IP:29500 \
+  --dist-init-addr ${HEAD_PREFILL_NODE_IP}:29500 \
   --nnodes 2 \
   --node-rank 0 \
   --enable-dp-attention \
@@ -31,7 +37,7 @@ python3 components/worker.py \
   --disaggregation-mode prefill \
   --disaggregation-transfer-backend nixl \
   --disaggregation-bootstrap-port 30001 \
-  --mem-fraction-static 0.82 \
+  --mem-fraction-static 0.82
 ```
 
 Node 2: Run the remaining 8 shards of the prefill worker
@@ -46,7 +52,7 @@ python3 components/worker.py \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --tp 16 \
   --dp-size 16 \
-  --dist-init-addr HEAD_PREFILL_NODE_IP:29500 \
+  --dist-init-addr ${HEAD_PREFILL_NODE_IP}:29500 \
   --nnodes 2 \
   --node-rank 1 \
   --enable-dp-attention \
@@ -70,7 +76,7 @@ python3 components/decode_worker.py \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --tp 16 \
   --dp-size 16 \
-  --dist-init-addr HEAD_DECODE_NODE_IP:29500 \
+  --dist-init-addr ${HEAD_DECODE_NODE_IP}:29500 \
   --nnodes 2 \
   --node-rank 0 \
   --enable-dp-attention \
@@ -94,7 +100,7 @@ python3 components/decode_worker.py \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --tp 16 \
   --dp-size 16 \
-  --dist-init-addr HEAD_DECODE_NODE_IP:29500 \
+  --dist-init-addr ${HEAD_DECODE_NODE_IP}:29500 \
   --nnodes 2 \
   --node-rank 1 \
   --enable-dp-attention \
@@ -106,7 +112,7 @@ python3 components/decode_worker.py \
   --mem-fraction-static 0.82
 ```
 
-**Step 3**: Run inference
+**Step 4**: Run inference
 SGLang typically requires a warmup period to ensure the DeepGEMM kernels are loaded. We recommend running a few warmup requests and ensuring that the DeepGEMM kernels load in.
 
 ```bash
