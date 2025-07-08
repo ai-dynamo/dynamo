@@ -594,9 +594,12 @@ mod tests {
         }
 
         // Final verification
-        assert_eq!(slot.num_tokens(SlotPosition::Computed), 7);
-        assert_eq!(slot.num_tokens(SlotPosition::All), 7);
+        assert_eq!(slot.num_tokens(SlotPosition::Computed), 9);
+        assert_eq!(slot.num_tokens(SlotPosition::All), 9);
         assert_eq!(slot.num_tokens(SlotPosition::Prefill), 4);
+
+        assert_eq!(slot.mutable.len(), 1);
+        assert_eq!(slot.immutable.len(), 2);
     }
 
     // Debug Assertion Bug Analysis - demonstrates the issue
