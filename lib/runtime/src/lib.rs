@@ -34,8 +34,10 @@ mod config;
 pub use config::RuntimeConfig;
 
 pub mod component;
+pub mod descriptor;
 pub mod discovery;
 pub mod engine;
+pub mod entity;
 pub mod logging;
 pub mod pipeline;
 pub mod prelude;
