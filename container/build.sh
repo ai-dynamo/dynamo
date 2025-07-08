@@ -424,12 +424,14 @@ else
     fi
 fi
 
-cd "$NIXL_DIR" || exit
+pushd "$NIXL_DIR" || exit
 if ! git checkout ${NIXL_COMMIT}; then
     echo "ERROR: Failed to checkout NIXL commit ${NIXL_COMMIT}. The cached directory may be out of date."
     echo "Please delete $NIXL_DIR and re-run the build script."
     exit 1
 fi
+
+popd
 
 BUILD_CONTEXT_ARG+=" --build-context nixl=$NIXL_DIR"
 
@@ -454,6 +456,7 @@ fi
 
 
 check_wheel_file() {
+    echo "pwd: $(pwd)"
     local wheel_dir="$1"
     # Check if directory exists
     if [ ! -d "$wheel_dir" ]; then
@@ -562,6 +565,6 @@ if [ -z "$RUN_PREFIX" ]; then
     set -x
 fi
 
-$RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE
+$RUN_PREFIX docker build -f $DOCKERFILE $TARGET_STR $PLATFORM $BUILD_ARGS $CACHE_FROM $CACHE_TO $TAG $LATEST_TAG $BUILD_CONTEXT_ARG $BUILD_CONTEXT $NO_CACHE --progress=plain
 
 { set +x; } 2>/dev/null
