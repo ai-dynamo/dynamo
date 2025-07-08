@@ -30,6 +30,7 @@ python3 components/worker.py \
   --skip-tokenizer-init \
   --disaggregation-mode prefill \
   --disaggregation-transfer-backend nixl \
+  --disaggregation-bootstrap-port 30001 \
   --mem-fraction-static 0.82 \
 ```
 
@@ -53,6 +54,7 @@ python3 components/worker.py \
   --skip-tokenizer-init \
   --disaggregation-mode prefill \
   --disaggregation-transfer-backend nixl \
+  --disaggregation-bootstrap-port 30001 \
   --mem-fraction-static 0.82
 ```
 
@@ -76,6 +78,7 @@ python3 components/decode_worker.py \
   --skip-tokenizer-init \
   --disaggregation-mode decode \
   --disaggregation-transfer-backend nixl \
+  --disaggregation-bootstrap-port 30001 \
   --mem-fraction-static 0.82
 ```
 
@@ -99,6 +102,7 @@ python3 components/decode_worker.py \
   --skip-tokenizer-init \
   --disaggregation-mode decode \
   --disaggregation-transfer-backend nixl \
+  --disaggregation-bootstrap-port 30001 \
   --mem-fraction-static 0.82
 ```
 
