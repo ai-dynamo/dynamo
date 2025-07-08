@@ -90,7 +90,7 @@ python3 components/decode_worker.py \
   --mem-fraction-static 0.82
 ```
 
-**Step 4**: Run inference
+**Step 3**: Run inference
 SGLang typically requires a warmup period to ensure the DeepGEMM kernels are loaded. We recommend running a few warmup requests and ensuring that the DeepGEMM kernels load in.
 
 ```bash
