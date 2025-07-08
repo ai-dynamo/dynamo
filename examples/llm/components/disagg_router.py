@@ -28,11 +28,13 @@ class PyDisaggregatedRouter:
         namespace,
         max_local_prefill_length=1000,
         max_prefill_queue_size=2,
+        must_remote_prefill_length=0,
     ):
         self.runtime = runtime
         self.namespace = namespace
         self.max_local_prefill_length = max_local_prefill_length
         self.max_prefill_queue_size = max_prefill_queue_size
+        self.must_remote_prefill_length = must_remote_prefill_length
 
     async def async_init(self):
         runtime = dynamo_context["runtime"]
@@ -42,6 +44,7 @@ class PyDisaggregatedRouter:
             {
                 "max_local_prefill_length": str(self.max_local_prefill_length),
                 "max_prefill_queue_size": str(self.max_prefill_queue_size),
+                "must_remote_prefill_length": str(self.must_remote_prefill_length),
             },
         )
 
@@ -54,13 +57,20 @@ class PyDisaggregatedRouter:
         max_prefill_queue_size = int(
             await self.etcd_kv_cache.get("max_prefill_queue_size")
         )
+        must_remote_prefill_length = int(
+            await self.etcd_kv_cache.get("must_remote_prefill_length")
+        )
         absolute_prefill_length = int(prompt_length * (1 - prefix_hit_rate))
+        must_remote_prefill = (
+            must_remote_prefill_length > 0
+            and absolute_prefill_length > must_remote_prefill_length
+        )
         # TODO: consider size of each request in the queue when making the decision
-        decision = (
+        decision = must_remote_prefill or (
             absolute_prefill_length > max_local_prefill_length
             and queue_size < max_prefill_queue_size
         )
         logger.info(
-            f"Remote prefill: {decision} (prefill length: {absolute_prefill_length}/{max_local_prefill_length}, prefill queue size: {queue_size}/{max_prefill_queue_size})"
+            f"Remote prefill: {decision} (prefill length: {absolute_prefill_length}/{max_local_prefill_length}, prefill queue size: {queue_size}/{max_prefill_queue_size}, must remote: {must_remote_prefill_length}))"
         )
         return decision
