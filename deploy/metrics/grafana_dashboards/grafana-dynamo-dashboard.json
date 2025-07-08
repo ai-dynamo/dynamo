@@ -37,7 +37,7 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisLabel": "",
+            "axisLabel": "Requests",
             "axisPlacement": "auto",
             "barAlignment": 0,
             "barWidthFactor": 0.6,
@@ -83,7 +83,7 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 7,
+        "h": 8,
         "w": 8,
         "x": 0,
         "y": 0
@@ -106,13 +106,13 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(nv_llm_http_service_requests_total[1m])",
+          "expr": "rate(nv_llm_http_service_requests_total[30s])",
           "legendFormat": "{{request_type}}, {{status}},",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Req rate/sec",
+      "title": "Requests / Sec",
       "type": "timeseries"
     },
     {
@@ -120,6 +120,7 @@
         "type": "prometheus",
         "uid": "P1809F7CD0C75ACF3"
       },
+      "description": "nv_llm_http_service_time_to_first_token_seconds (sum/count)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -129,7 +130,7 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisLabel": "",
+            "axisLabel": "milliseconds",
             "axisPlacement": "auto",
             "barAlignment": 0,
             "barWidthFactor": 0.6,
@@ -175,7 +176,7 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 7,
+        "h": 8,
         "w": 8,
         "x": 8,
         "y": 0
@@ -198,13 +199,13 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "nv_llm_http_service_time_to_first_token_seconds_sum/nv_llm_http_service_time_to_first_token_seconds_count",
-          "legendFormat": "{{le}}",
+          "expr": "1000*(nv_llm_http_service_time_to_first_token_seconds_sum/nv_llm_http_service_time_to_first_token_seconds_count)",
+          "legendFormat": "{{model}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "TTFT (time to first token sum/count)",
+      "title": "Avg Time to First Token",
       "type": "timeseries"
     },
     {
@@ -212,6 +213,7 @@
         "type": "prometheus",
         "uid": "P1809F7CD0C75ACF3"
       },
+      "description": "nv_llm_http_service_inter_token_latency_seconds (sum/count)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -221,7 +223,7 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisLabel": "",
+            "axisLabel": "milliseconds",
             "axisPlacement": "auto",
             "barAlignment": 0,
             "barWidthFactor": 0.6,
@@ -267,7 +269,7 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 7,
+        "h": 8,
         "w": 8,
         "x": 16,
         "y": 0
@@ -290,13 +292,13 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "nv_llm_http_service_inter_token_latency_seconds_sum/nv_llm_http_service_inter_token_latency_seconds_count",
-          "legendFormat": "__auto",
+          "expr": "1000*(nv_llm_http_service_inter_token_latency_seconds_sum/nv_llm_http_service_inter_token_latency_seconds_count)",
+          "legendFormat": "{{model}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "ITL (inter-token latency sum/count) nv_llm_http_service_inter_token_latency_seconds",
+      "title": "Avg Inter-Token Latency",
       "type": "timeseries"
     },
     {
@@ -304,7 +306,7 @@
         "type": "prometheus",
         "uid": "P1809F7CD0C75ACF3"
       },
-      "description": "nv_llm_http_service_request_duration",
+      "description": "nv_llm_http_service_request_duration (sum/count)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -314,7 +316,7 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisLabel": "",
+            "axisLabel": "milliseconds",
             "axisPlacement": "auto",
             "barAlignment": 0,
             "barWidthFactor": 0.6,
@@ -360,10 +362,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 7,
+        "h": 8,
         "w": 8,
         "x": 0,
-        "y": 7
+        "y": 8
       },
       "id": 17,
       "options": {
@@ -383,13 +385,13 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "nv_llm_http_service_request_duration_seconds_sum / nv_llm_http_service_request_duration_seconds_count",
-          "legendFormat": "__auto",
+          "expr": "1000*(nv_llm_http_service_request_duration_seconds_sum / nv_llm_http_service_request_duration_seconds_count)",
+          "legendFormat": "{{model}}",
           "range": true,
           "refId": "A"
         }
       ],
-      "title": "Req duration (latency)",
+      "title": "Avg Request Duration",
       "type": "timeseries"
     },
     {
@@ -397,6 +399,7 @@
         "type": "prometheus",
         "uid": "P1809F7CD0C75ACF3"
       },
+      "description": "The length is the number of tokens. nv_llm_http_service_input_sequence_tokens",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -406,7 +409,7 @@
             "axisBorderShow": false,
             "axisCenteredZero": false,
             "axisColorMode": "text",
-            "axisLabel": "",
+            "axisLabel": "Tokens",
             "axisPlacement": "auto",
             "barAlignment": 0,
             "barWidthFactor": 0.6,
@@ -419,7 +422,7 @@
               "viz": false
             },
             "insertNulls": false,
-            "lineInterpolation": "smooth",
+            "lineInterpolation": "linear",
             "lineWidth": 1,
             "pointSize": 5,
             "scaleDistribution": {
@@ -452,10 +455,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 7,
+        "h": 8,
         "w": 8,
         "x": 8,
-        "y": 7
+        "y": 8
       },
       "id": 11,
       "options": {
@@ -475,7 +478,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "nv_llm_http_service_input_sequence_tokens_sum/nv_llm_http_service_input_sequence_tokens_count",
+          "expr": "nv_llm_http_service_input_sequence_tokens_sum / nv_llm_http_service_input_sequence_tokens_count",
           "legendFormat": "ISL",
           "range": true,
           "refId": "A"
@@ -494,7 +497,7 @@
           "refId": "B"
         }
       ],
-      "title": "IST, OST rate(...count[1m])",
+      "title": "Avg Input/Output Sequence Length",
       "type": "timeseries"
     },
     {
@@ -512,7 +515,7 @@
             "axisCenteredZero": false,
             "axisColorMode": "text",
             "axisLabel": "",
-            "axisPlacement": "auto",
+            "axisPlacement": "left",
             "barAlignment": 0,
             "barWidthFactor": 0.6,
             "drawStyle": "line",
@@ -557,10 +560,10 @@
         "overrides": []
       },
       "gridPos": {
-        "h": 7,
+        "h": 8,
         "w": 8,
         "x": 16,
-        "y": 7
+        "y": 8
       },
       "id": 1,
       "options": {
@@ -587,7 +590,7 @@
           "exemplar": false,
           "expr": "DCGM_FI_DEV_GPU_UTIL",
           "instant": false,
-          "legendFormat": "{{__name__}}",
+          "legendFormat": "{{__name__}} (%)",
           "range": true,
           "refId": "A"
         },
@@ -601,7 +604,7 @@
           "expr": "DCGM_FI_DEV_POWER_USAGE",
           "hide": false,
           "instant": false,
-          "legendFormat": "{{__name__}}",
+          "legendFormat": "{{__name__}} (Watts)",
           "range": true,
           "refId": "B"
         }
@@ -623,12 +626,12 @@
     "list": []
   },
   "time": {
-    "from": "now-3h",
+    "from": "now-30m",
     "to": "now"
   },
   "timepicker": {},
   "timezone": "browser",
   "title": "Dynamo Dashboard",
   "uid": "a7d3733f-f8e7-423a-ab4b-b18e3d7d0357",
-  "version": 4
+  "version": 5
 }
