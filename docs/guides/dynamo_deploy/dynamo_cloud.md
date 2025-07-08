@@ -41,8 +41,30 @@ Before getting started with the Dynamo cloud platform, ensure you have:
 - `kubectl` configured to access your cluster
 - Helm installed (version 3.0 or later)
 
-```{tip}
-Don't have a Kubernetes cluster? Check out our [Minikube setup guide](./minikube.md) to set up a local environment!
+
+> [!TIP]
+> Don't have a Kubernetes cluster? Check out our [Minikube setup guide](../../../docs/guides/dynamo_deploy/minikube.md) to set up a local environment! 🏠
+
+#### 🏗️ Build Dynamo inference runtime.
+
+[One-time Action]
+Before you could use Dynamo make sure you have setup the Inference Runtime Image.
+For basic cases you could use the prebuilt image for the Dynamo Inference Runtime.
+Just export the environment variable. This will be the image used by your individual components. You pick whatever dynamo version you want or use the latest (default)
+
+```bash
+export DYNAMO_IMAGE=nvcr.io/nvidia/dynamo:latest-vllm
+```
+
+For advanced examples make sure you have first built and pushed to your registry Dynamo Base Image for Dynamo inference runtime. This is a one-time operation.
+
+```bash
+# Run the script to build the default dynamo:latest-vllm image.
+./container/build.sh
+export IMAGE_TAG=<TAG>
+# retag the image
+docker tag dynamo:latest-vllm <your-registry>/dynamo:${IMAGE_TAG}
+docker push <your-registry>/dynamo:${IMAGE_TAG}
 ```
 
 ## Building Docker Images for Dynamo Cloud Components
@@ -60,9 +82,12 @@ export DOCKER_SERVER=<CONTAINER_REGISTRY>
 export IMAGE_TAG=<TAG>
 ```
 
-Where:
+As a description of the placeholders:
 - `<CONTAINER_REGISTRY>`: Your container registry (e.g., `nvcr.io`, `docker.io/<your-username>`, etc.)
-- `<TAG>`: The version tag for your images (e.g., `latest`, `0.0.1`, `v1.0.0`)
+- `<TAG>`: The tag you want to use for the images of the Dynamo cloud components (e.g., `latest`, `0.0.1`, etc.)
+If the runtime image tag is not explicitly set, the default is the `latest`.
+
+The tag will go into the dynamo-operator:<IMAGE_TAG> image for the Operator.  The runtime (base) image handles the inference toolchain and the sdk and built by the (`build.sh`). The tags do not have to match the runtime  image tag but the images must be compatible.
 
 **Important** Make sure you're logged in to your container registry before pushing images. For example:
 
@@ -78,7 +103,7 @@ You can build and push all platform components at once:
 earthly --push +all-docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 ```
 
-## Deploying the Dynamo Cloud Platform
+### 🚀 Deploying the Dynamo Cloud Platform
 
 Once you've built and pushed the components, you can deploy the platform to your Kubernetes cluster.
 
@@ -86,7 +111,18 @@ Once you've built and pushed the components, you can deploy the platform to your
 
 Before deploying Dynamo Cloud, ensure your Kubernetes cluster meets the following requirements:
 
-#### PVC Support with Default Storage Class
+#### 1. 🛡️ Istio Installation
+Dynamo Cloud requires Istio for service mesh capabilities. Verify Istio is installed and running:
+
+```bash
+# Check if Istio is installed
+kubectl get pods -n istio-system
+
+# Expected output should show running Istio pods
+# istiod-* pods should be in Running state
+```
+
+#### 2. 💾 PVC Support with Default Storage Class
 Dynamo Cloud requires Persistent Volume Claim (PVC) support with a default storage class. Verify your cluster configuration:
 
 ```bash
@@ -99,21 +135,19 @@ kubectl get storageclass
 # standard (default)   kubernetes.io/gce-pd    Delete          Immediate              true                   1d
 ```
 
-### Cloud Provider-Specific deployment
 
-#### Google Kubernetes Engine (GKE) deployment
-
-You can find detailed instructions for deployment in GKE [here](../dynamo_deploy/gke_setup.md)
 
 ### Installation using helper script
 
 1. Set the required environment variables:
 ```bash
+export PROJECT_ROOT=$(pwd)
 export DOCKER_USERNAME=<your-docker-username>
 export DOCKER_PASSWORD=<your-docker-password>
 export DOCKER_SERVER=<your-docker-server>
 export IMAGE_TAG=<TAG>  # Use the same tag you used when building the images
 export NAMESPACE=dynamo-cloud    # change this to whatever you want!
+export DYNAMO_INGRESS_SUFFIX=dynamo-cloud.com # change this to whatever you want!
 ```
 
 ``` {note}
@@ -168,6 +202,12 @@ if you want guidance during the process, run the deployment script with the `--i
 ```
 
 omitting `--crds` will skip the CRDs installation/upgrade. This is useful when installing on a shared cluster as CRDs are cluster-scoped resources.
+
+If you'd like to only generate the generated-values.yaml file without deploying to Kubernetes (e.g., for inspection, CI workflows, or dry-run testing), use:
+
+```bash
+./deploy_dynamo_cloud.py --yaml-only
+```
 
 ## Next Steps
 
@@ -244,3 +284,8 @@ helm install dynamo-platform dynamo-platform-helm-chart.tgz \
   --set "dynamo-operator.imagePullSecrets[0].name=${DOCKER_SECRET_NAME}"
 ```
 
+### Cloud Provider-Specific deployment
+
+#### Google Kubernetes Engine (GKE) deployment
+
+You can find detailed instructions for deployment in GKE [here](../dynamo_deploy/gke_setup.md)
