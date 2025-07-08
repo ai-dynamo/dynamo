@@ -19,6 +19,7 @@ package dynamo
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"sort"
 	"testing"
@@ -513,7 +514,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 							Envs: []corev1.EnvVar{
 								{
 									Name:  "DYN_DEPLOYMENT_CONFIG",
-									Value: `{"service1":{"ServiceArgs":{"Resources":{"CPU":"2","GPU":"2","Memory":"2Gi"},"Workers":2},"port":3000}}`,
+									Value: fmt.Sprintf(`{"service1":{"ServiceArgs":{"Resources":{"CPU":"2","GPU":"2","Memory":"2Gi"},"Workers":2},"port":%d}}`, commonconsts.DynamoServicePort),
 								},
 							},
 						},
@@ -770,9 +771,9 @@ func Test_updateDynDeploymentConfig(t *testing.T) {
 						},
 					},
 				},
-				newPort: 3000,
+				newPort: commonconsts.DynamoServicePort,
 			},
-			want:    []byte(`{"Frontend":{"port":3000},"Planner":{"environment":"kubernetes"}}`),
+			want:    []byte(fmt.Sprintf(`{"Frontend":{"port":%d},"Planner":{"environment":"kubernetes"}}`, commonconsts.DynamoServicePort)),
 			wantErr: false,
 		},
 		{
@@ -792,9 +793,9 @@ func Test_updateDynDeploymentConfig(t *testing.T) {
 						},
 					},
 				},
-				newPort: 3000,
+				newPort: commonconsts.DynamoServicePort,
 			},
-			want:    []byte(`{"Frontend":{"port":8000},"Planner":{"environment":"kubernetes"}}`),
+			want:    []byte(fmt.Sprintf(`{"Frontend":{"port":%d},"Planner":{"environment":"kubernetes"}}`, commonconsts.DynamoServicePort)),
 			wantErr: false,
 		},
 		{

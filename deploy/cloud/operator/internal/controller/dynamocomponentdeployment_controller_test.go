@@ -308,7 +308,7 @@ func TestDynamoComponentDeploymentReconciler_generateIngress(t *testing.T) {
 											Backend: networkingv1.IngressBackend{
 												Service: &networkingv1.IngressServiceBackend{
 													Name: "service1",
-													Port: networkingv1.ServiceBackendPort{Number: 3000},
+													Port: networkingv1.ServiceBackendPort{Number: commonconsts.DynamoServicePort},
 												},
 											},
 										},
@@ -465,7 +465,7 @@ func TestDynamoComponentDeploymentReconciler_generateVirtualService(t *testing.T
 									Destination: &istioNetworking.Destination{
 										Host: "service1",
 										Port: &istioNetworking.PortSelector{
-											Number: 3000,
+											Number: commonconsts.DynamoServicePort,
 										},
 									},
 								},
@@ -898,7 +898,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Image:   "test-image:latest",
 										Command: []string{"sh", "-c"},
 										Args:    []string{"ray start --head --port=6379 && cd src && uv run dynamo serve --system-app-port 5000 --enable-system-app --use-default-health-checks --service-name test-lws-deploy-service test-tag --test-lws-deploy-service.ServiceArgs.dynamo.namespace=default"},
-										Env:     []corev1.EnvVar{{Name: "DYNAMO_PORT", Value: "3000"}},
+										Env:     []corev1.EnvVar{{Name: "DYNAMO_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort)}},
 										VolumeMounts: []corev1.VolumeMount{
 											{
 												Name: "shared-memory", MountPath: "/dev/shm",
@@ -950,7 +950,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Image:        "test-image:latest",
 										Command:      []string{"sh", "-c"},
 										Args:         []string{"ray start --address=$(LWS_LEADER_ADDRESS):6379 --block"},
-										Env:          []corev1.EnvVar{{Name: "DYNAMO_PORT", Value: "3000"}},
+										Env:          []corev1.EnvVar{{Name: "DYNAMO_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort)}},
 										VolumeMounts: []corev1.VolumeMount{{Name: "shared-memory", MountPath: "/dev/shm"}},
 										Ports: []corev1.ContainerPort{{Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoServicePortName, ContainerPort: commonconsts.DynamoServicePort}, {
 											Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoHealthPortName, ContainerPort: commonconsts.DynamoHealthPort,
