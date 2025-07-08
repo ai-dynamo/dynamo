@@ -186,7 +186,7 @@ In another terminal:
 ```bash
 # this test request has around 200 tokens isl
 
-curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+curl localhost:3000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "messages": [
     {
@@ -260,7 +260,7 @@ export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-
 kubectl port-forward svc/$FRONTEND_SVC 3000:3000 -n ${KUBE_NS}
 
 # Test the API endpoint
-curl localhost:8000/v1/chat/completions \
+curl localhost:3000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",

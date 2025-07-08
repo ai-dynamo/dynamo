@@ -85,7 +85,7 @@ The `dynamo serve` command deploys the entire service graph, automatically handl
 
 ```bash
 curl -X 'POST' \
-  'http://localhost:8000/generate' \
+  'http://localhost:3000/generate' \
   -H 'accept: text/event-stream' \
   -H 'Content-Type: application/json' \
   -d '{
@@ -154,7 +154,7 @@ export FRONTEND_POD=$(kubectl get pods -n ${NAMESPACE} | grep "${DEPLOYMENT_NAME
 kubectl port-forward svc/$FRONTEND_SVC 3000:3000 -n ${NAMESPACE}
 
 # Test the API endpoint
-curl -N -X POST http://localhost:8000/generate \
+curl -N -X POST http://localhost:3000/generate \
   -H "accept: text/event-stream" \
   -H "Content-Type: application/json" \
   -d '{"text": "test"}'
