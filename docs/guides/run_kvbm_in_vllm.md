@@ -37,11 +37,11 @@ To use KVBM in vLLM, you can follow the steps below:
 export DYNAMO_KVBM_MANAGER=kvbm
 
 # enable kv offloading to CPU memory
-# 4 means 4GP of CPU memory would be used
+# 4 means 4GB of CPU memory would be used
 export DYNAMO_KVBM_CPU_CACHE=4
 
 # enable kv offloading to disk
-# 8 means *GP of disk would be used
+# 8 means 8GB of disk would be used
 export DYNAMO_KVBM_DISK_CACHE=8
 
 # serve an example LLM model
