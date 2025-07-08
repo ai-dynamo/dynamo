@@ -167,6 +167,8 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         duplication_setting: BlockRegistrationDuplicationSetting,
         return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
     ) -> Result<Vec<ImmutableBlock<S, L, M>>, BlockPoolError> {
+        assert!(!blocks.is_empty(), "no blocks to register");
+
         let expected_len = blocks.len();
         let mut immutable_blocks = Vec::new();
 

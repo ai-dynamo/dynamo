@@ -576,7 +576,7 @@ mod tests {
             locality::Local, BasicMetadata, BlockDataExt, BlockDataProvider, Blocks, MutableBlock,
         },
         layout::{nixl::NixlLayout, FullyContiguous, LayerSeparate, LayoutType},
-        pool::BlockPool,
+        pool::{BlockPool, BlockRegistrationDuplicationSetting},
         storage::{
             DeviceAllocator, DeviceStorage, DiskAllocator, DiskStorage, PinnedAllocator,
             PinnedStorage, StorageAllocator, StorageType,
@@ -620,20 +620,31 @@ mod tests {
         layout_type: LayoutType,
         agent: &NixlAgent,
         allocator: &dyn StorageAllocator<S>,
+        duplication_setting: BlockRegistrationDuplicationSetting,
     ) -> Result<Arc<BlockPool<S, Local, BasicMetadata>>> {
         match layout_type {
             LayoutType::FullyContiguous => {
                 let mut pool_layout = FullyContiguous::allocate(config.clone(), allocator)?;
                 pool_layout.nixl_register(agent, None)?;
                 let blocks = Blocks::new(pool_layout, 42, 0)?.into_blocks()?;
-                Ok(Arc::new(BlockPool::builder().blocks(blocks).build()?))
+                Ok(Arc::new(
+                    BlockPool::builder()
+                        .blocks(blocks)
+                        .default_duplication_setting(duplication_setting)
+                        .build()?,
+                ))
             }
             LayoutType::LayerSeparate { outer_contiguous } => {
                 let mut pool_layout =
                     LayerSeparate::allocate(config.clone(), allocator, outer_contiguous)?;
                 pool_layout.nixl_register(agent, None)?;
                 let blocks = Blocks::new(pool_layout, 42, 0)?.into_blocks()?;
-                Ok(Arc::new(BlockPool::builder().blocks(blocks).build()?))
+                Ok(Arc::new(
+                    BlockPool::builder()
+                        .blocks(blocks)
+                        .default_duplication_setting(duplication_setting)
+                        .build()?,
+                ))
             }
         }
     }
@@ -656,6 +667,7 @@ mod tests {
             disk_blocks,
             inner_dim,
             LayoutType::FullyContiguous,
+            BlockRegistrationDuplicationSetting::Disabled,
         )
     }
 
@@ -666,6 +678,7 @@ mod tests {
         disk_blocks: Option<usize>,
         inner_dim: Option<usize>,
         layout_type: LayoutType,
+        duplication_setting: BlockRegistrationDuplicationSetting,
     ) -> Result<(
         Arc<OffloadManager<Local, BasicMetadata>>,
         DevicePool,
@@ -690,6 +703,7 @@ mod tests {
             layout_type,
             agent,
             &DeviceAllocator::default(),
+            duplication_setting,
         )?);
 
         let host_pool = if let Some(host_blocks) = host_blocks {
@@ -699,6 +713,7 @@ mod tests {
                 layout_type,
                 agent,
                 &PinnedAllocator::default(),
+                duplication_setting,
             )?)
         } else {
             None
@@ -706,7 +721,13 @@ mod tests {
 
         let disk_pool = if let Some(disk_blocks) = disk_blocks {
             config.num_blocks = disk_blocks;
-            Some(build_layout(config, layout_type, agent, &DiskAllocator)?)
+            Some(build_layout(
+                config,
+                layout_type,
+                agent,
+                &DiskAllocator,
+                duplication_setting,
+            )?)
         } else {
             None
         };
@@ -888,8 +909,14 @@ mod tests {
     #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
     #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
     async fn test_offload_registered_blocks(#[case] layout_type: LayoutType) -> Result<()> {
-        let (offload_manager, device_pool, host_pool, _) =
-            build_pools_with_layout(4, Some(4), None, None, layout_type)?;
+        let (offload_manager, device_pool, host_pool, _) = build_pools_with_layout(
+            4,
+            Some(4),
+            None,
+            None,
+            layout_type,
+            BlockRegistrationDuplicationSetting::Disabled,
+        )?;
 
         let device_pool = device_pool.as_ref().unwrap();
         let host_pool = host_pool.as_ref().unwrap();
@@ -984,8 +1011,14 @@ mod tests {
     #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
     #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
     async fn test_onboard(#[case] layout_type: LayoutType) -> Result<()> {
-        let (offload_manager, device_pool, host_pool, _) =
-            build_pools_with_layout(4, Some(4), None, None, layout_type)?;
+        let (offload_manager, device_pool, host_pool, _) = build_pools_with_layout(
+            4,
+            Some(4),
+            None,
+            None,
+            layout_type,
+            BlockRegistrationDuplicationSetting::Disabled,
+        )?;
 
         let device_pool = device_pool.as_ref().unwrap();
         let host_pool = host_pool.as_ref().unwrap();
@@ -1043,8 +1076,14 @@ mod tests {
     #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
     #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
     async fn test_offload_onboard(#[case] layout_type: LayoutType) -> Result<()> {
-        let (offload_manager, device_pool, host_pool, _) =
-            build_pools_with_layout(4, Some(4), None, None, layout_type)?;
+        let (offload_manager, device_pool, host_pool, _) = build_pools_with_layout(
+            4,
+            Some(4),
+            None,
+            None,
+            layout_type,
+            BlockRegistrationDuplicationSetting::Disabled,
+        )?;
 
         let device_pool = device_pool.as_ref().unwrap();
         let host_pool = host_pool.as_ref().unwrap();
@@ -1165,8 +1204,14 @@ mod tests {
     #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
     #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
     async fn test_offload_disk(#[case] layout_type: LayoutType) -> Result<()> {
-        let (offload_manager, _, host_pool, disk_pool) =
-            build_pools_with_layout(4, Some(4), Some(4), None, layout_type)?;
+        let (offload_manager, _, host_pool, disk_pool) = build_pools_with_layout(
+            4,
+            Some(4),
+            Some(4),
+            None,
+            layout_type,
+            BlockRegistrationDuplicationSetting::Disabled,
+        )?;
 
         let host_pool = host_pool.as_ref().unwrap();
         let disk_pool = disk_pool.as_ref().unwrap();
@@ -1205,8 +1250,14 @@ mod tests {
     #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
     #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
     async fn test_onboard_disk(#[case] layout_type: LayoutType) -> Result<()> {
-        let (offload_manager, device_pool, _, disk_pool) =
-            build_pools_with_layout(4, None, Some(4), None, layout_type)?;
+        let (offload_manager, device_pool, _, disk_pool) = build_pools_with_layout(
+            4,
+            None,
+            Some(4),
+            None,
+            layout_type,
+            BlockRegistrationDuplicationSetting::Disabled,
+        )?;
 
         let device_pool = device_pool.as_ref().unwrap();
         let disk_pool = disk_pool.as_ref().unwrap();
@@ -1249,8 +1300,14 @@ mod tests {
     #[case(LayoutType::LayerSeparate { outer_contiguous: true })]
     #[case(LayoutType::LayerSeparate { outer_contiguous: false })]
     async fn test_bulk_transfer_disk(#[case] layout_type: LayoutType) -> Result<()> {
-        let (offload_manager, device_pool, host_pool, disk_pool) =
-            build_pools_with_layout(8, Some(8), Some(8), None, layout_type)?;
+        let (offload_manager, device_pool, host_pool, disk_pool) = build_pools_with_layout(
+            8,
+            Some(8),
+            Some(8),
+            None,
+            layout_type,
+            BlockRegistrationDuplicationSetting::Disabled,
+        )?;
 
         let disk_pool = disk_pool.as_ref().unwrap();
         let host_pool = host_pool.as_ref().unwrap();

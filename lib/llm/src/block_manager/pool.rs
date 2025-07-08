@@ -182,6 +182,9 @@ pub enum BlockPoolError {
 
     #[error("Unsupported cache level: {0:?}")]
     UnsupportedCacheLevel(CacheLevel),
+
+    #[error("No blocks to register")]
+    NoBlocksToRegister,
 }
 
 #[derive(Builder, Dissolve)]
@@ -562,6 +565,10 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M> {
         blocks: Vec<MutableBlock<S, L, M>>,
         duplication_setting: BlockRegistrationDuplicationSetting,
     ) -> AsyncResponse<BlockPoolResult<ImmutableBlocks<S, L, M>>> {
+        if blocks.is_empty() {
+            return Err(BlockPoolError::NoBlocksToRegister);
+        }
+
         let (req, resp_rx) = RegisterBlocksReq::new((blocks, duplication_setting));
 
         self.priority_tx
