@@ -137,7 +137,7 @@ kubectl get storageclass
 
 
 
-### Installation using helper script
+### Installation using the helper script
 
 1. Set the required environment variables:
 ```bash
@@ -209,16 +209,6 @@ If you'd like to only generate the generated-values.yaml file without deploying 
 ./deploy_dynamo_cloud.py --yaml-only
 ```
 
-## Next Steps
-
-After deploying the Dynamo cloud platform, you can:
-
-1. Deploy your first inference graph using the [Dynamo CLI](operator_deployment.md)
-2. Deploy Dynamo LLM graphs to Kubernetes using the [Dynamo CLI](../../examples/llm_deployment.md)
-3. Manage your deployments using the Dynamo CLI
-
-For more detailed information about deploying inference graphs, see the [Dynamo Deploy Guide](README.md).
-
 
 ### Installation using published helm chart
 
@@ -289,3 +279,13 @@ helm install dynamo-platform dynamo-platform-helm-chart.tgz \
 #### Google Kubernetes Engine (GKE) deployment
 
 You can find detailed instructions for deployment in GKE [here](../dynamo_deploy/gke_setup.md)
+
+## Next Steps
+
+After deploying the Dynamo cloud platform, you can:
+
+1. Deploy your first inference graph using the [Dynamo CLI](operator_deployment.md)
+2. Deploy Dynamo LLM graphs to Kubernetes using the [Dynamo CLI](../../examples/llm_deployment.md)
+3. Manage your deployments using the Dynamo CLI
+
+For more detailed information about deploying inference graphs, see the [Dynamo Deploy Guide](README.md).
