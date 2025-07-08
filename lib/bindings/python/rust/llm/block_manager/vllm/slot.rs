@@ -137,6 +137,7 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
 
         let mut blocks_to_register = Vec::new();
         tracing::debug!("registering {} blocks", num_blocks_to_register);
+        assert!(self.mutable.len() >= num_blocks_to_register);
 
         // create an iterator over the mutable blocks zipped with the token blocks
         let zipped_blocks = self
