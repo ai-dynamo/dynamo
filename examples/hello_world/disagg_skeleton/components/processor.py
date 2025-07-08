@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import logging
-from typing import Protocol
 
 from components.kv_router import Router
 from components.utils import GeneralRequest, GeneralResponse, check_required_workers
@@ -34,7 +33,7 @@ logger = logging.getLogger(__name__)
     },
     workers=1,
 )
-class Processor(Protocol):
+class Processor:
     """
     vLLM pre and post processing
     """
@@ -71,7 +70,7 @@ class Processor(Protocol):
             async for route_response in self.router.check_hit_rate(raw_request.prompt):
                 worker_id, prefix_hit_rate = route_response.split("_")
                 prefix_hit_rate = float(prefix_hit_rate)
-                print(
+                logger.info(
                     f"Worker ID: {worker_id} with estimated prefix hit rate: {prefix_hit_rate}"
                 )
                 break
@@ -98,5 +97,6 @@ class Processor(Protocol):
 
     @endpoint()
     async def processor_generate(self, raw_request: GeneralRequest):
+        logger.info(f"processor_generate: {raw_request}")
         async for response in self._generate(raw_request):
             yield response.model_dump_json()

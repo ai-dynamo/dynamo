@@ -21,10 +21,10 @@ from typing import AsyncIterator
 from components.utils import check_required_workers
 from components.worker import DummyWorker
 
+from dynamo.llm import KvMetricsAggregator
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 WorkerId = str
-
 logger = logging.getLogger(__name__)
 
 
@@ -49,7 +49,6 @@ class Router:
 
     @async_on_start
     async def async_init(self):
-        print("in kv router async_init")
         self.runtime = dynamo_context["runtime"]
         self.workers_client = (
             await self.runtime.namespace("dynamo-demo")
@@ -60,9 +59,13 @@ class Router:
 
         await check_required_workers(self.workers_client, self.min_workers, "kv router")
 
-        print("KV Router initialized")
+        kv_listener = self.runtime.namespace("dynamo-demo").component("DummyWorker")
+        await kv_listener.create_service()
+        self.metrics_aggregator = KvMetricsAggregator(kv_listener)
+        logger.info("KV Router initialized")
 
-    def _cost_function(self, request_prompt):
+    def _cost_function(self, request_prompt, metrics=None):
+        # The metrics are not used in this example
         worker_ids = self.workers_client.instance_ids()
         num_workers = len(worker_ids)
         max_hit_rate = -1.0
@@ -74,7 +77,7 @@ class Router:
             if hit_rate > max_hit_rate:
                 max_hit_rate = hit_rate
                 max_id = curr_id
-        print(f"{max_hit_rate=},{len(self.kv_cache.keys())=}")
+        logger.info(f"{max_hit_rate=},{len(self.kv_cache.keys())=}")
         if max_hit_rate > self.threshold:
             # Found the hit rate larger than the threshold
             return max_id, max_hit_rate
@@ -94,5 +97,10 @@ class Router:
     # See details at examples/llm/components/kv_router.py
     @endpoint()
     async def check_hit_rate(self, request_prompt: str) -> AsyncIterator[WorkerId]:
-        max_id, max_hit_rate = self._cost_function(request_prompt)
+        metrics = await self.metrics_aggregator.get_metrics()
+        for metrics_endpoint in metrics.endpoints:
+            logger.info(
+                f"KV metrics:{metrics_endpoint.worker_id}, {metrics_endpoint.num_requests_waiting}"
+            )
+        max_id, max_hit_rate = self._cost_function(request_prompt, metrics)
         yield f"{max_id}_{max_hit_rate}"
