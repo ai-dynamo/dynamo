@@ -85,7 +85,7 @@ The `dynamo serve` command deploys the entire service graph, automatically handl
 
 ```bash
 curl -X 'POST' \
-  'http://localhost:3000/generate' \
+  'http://localhost:8000/generate' \
   -H 'accept: text/event-stream' \
   -H 'Content-Type: application/json' \
   -d '{

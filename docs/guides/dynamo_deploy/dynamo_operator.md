@@ -208,7 +208,7 @@ Commit and push this file to your Git repository. FluxCD will detect the new CR 
 
 ### Step 3: Update Existing Deployment
 
-To update your pipeline, just update the associated DynamoGraphDeployment CRD 
+To update your pipeline, just update the associated DynamoGraphDeployment CRD
 
 The Dynamo operator will automatically reconcile it.
 

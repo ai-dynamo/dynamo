@@ -186,7 +186,7 @@ In another terminal:
 ```bash
 # this test request has around 200 tokens isl
 
-curl localhost:3000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "messages": [
     {
