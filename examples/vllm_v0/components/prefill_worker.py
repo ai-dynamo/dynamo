@@ -30,7 +30,7 @@ from vllm.entrypoints.openai.api_server import (
 from vllm.inputs.data import TokensPrompt
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 
-from dynamo.sdk import async_on_start, dynamo_context, endpoint, service
+from dynamo.sdk import async_on_start, endpoint, service, serve, DynamoContext
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +47,9 @@ class RequestType(BaseModel):
     workers=1,
 )
 class PrefillWorker:
-    def __init__(self):
+    def __init__(self, dynamo_context: DynamoContext):
+        self.runtime = dynamo_context.runtime
+        self.component = dynamo_context.component
         class_name = self.__class__.__name__
         self.engine_args = parse_vllm_args(class_name, "")
         self._loaded_metadata = set()
@@ -83,9 +85,8 @@ class PrefillWorker:
             self.engine_client = await self._engine_context.__aenter__()
         else:
             raise RuntimeError("Failed to initialize engine client")
-        runtime = dynamo_context["runtime"]
         metadata = self.engine_client.nixl_metadata
-        self._metadata_store = NixlMetadataStore("dynamo", runtime)
+        self._metadata_store = NixlMetadataStore("dynamo", self.runtime)
         await self._metadata_store.put(metadata.engine_id, metadata)
         self.task = asyncio.create_task(self.prefill_queue_handler())
 
@@ -107,7 +108,7 @@ class PrefillWorker:
 
         def signal_handler():
             # Schedule the shutdown coroutine instead of calling it directly
-            asyncio.create_task(self.graceful_shutdown(runtime))
+            asyncio.create_task(self.graceful_shutdown(self.runtime))
 
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, signal_handler)
@@ -209,3 +210,44 @@ class PrefillWorker:
     @endpoint()
     async def mock(self, req: RequestType):
         yield f"mock_response: {req}"
+
+
+if __name__ == "__main__":
+    """
+    Example of running PrefillWorker component with python command
+    $ python prefill_worker.py [-f CONFIG_FILE] [--key1=value1 --key2=value2 ...]
+    """
+    import os
+    from pathlib import Path
+    from typing import Optional
+
+    import typer
+    import uvloop
+    from dynamo.sdk.cli.serve_standalone import setup_service_config
+
+    app = typer.Typer(
+        context_settings={
+            "allow_extra_args": True,
+            "ignore_unknown_options": True,
+            "help_option_names": ["-h", "--help"],
+        },
+        no_args_is_help=True,
+    )
+
+    @app.command()
+    def main(
+        ctx: typer.Context,
+        config_file: Optional[Path] = typer.Option(
+            None,
+            "--config-file",
+            "-f",
+            help="Path to YAML config file for service configuration",
+            exists=True,
+        ),
+    ):
+        """Run PrefillWorker in standalone mode."""
+        setup_service_config(ctx, config_file)
+        uvloop.install()
+        asyncio.run(serve(PrefillWorker))
+
+    app()
