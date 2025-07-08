@@ -410,7 +410,7 @@ RUN uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 # Common dependencies
-# ToDo: Remove extra install and use pyproject.toml to define all dependencies
+# TODO: Remove extra install and use pyproject.toml to define all dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     uv pip install --requirement /tmp/requirements.txt
 
@@ -488,7 +488,7 @@ ENV TRTLLM_USE_UCX_KVCACHE=1
 COPY --from=dev /usr/local/bin/set_trtllm_env.sh /usr/local/bin/set_trtllm_env.sh
 RUN echo 'source /usr/local/bin/set_trtllm_env.sh' >> /root/.bashrc
 
-# Copy benchmarks, exmaples and tests for CI
+# Copy benchmarks, examples and tests for CI
 # TODO: Remove this once we have a functional CI image built on top of the runtime image
 COPY tests /workspace/tests
 COPY benchmarks /workspace/benchmarks
