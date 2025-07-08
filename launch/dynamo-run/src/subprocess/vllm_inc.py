@@ -19,7 +19,6 @@ import uuid
 from typing import Optional
 
 import uvloop
-
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.api_server import (
