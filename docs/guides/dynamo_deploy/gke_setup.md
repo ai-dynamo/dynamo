@@ -145,7 +145,7 @@ dynamo-operator:
 ....
 ```
 
-You can use it during helm installation (last step of /deploy/cloud/helm/deploy_dynamo_cloud.sh)
+You can use it during helm installation (last step of /deploy/cloud/helm/deploy.sh)
 
 ```bash
 helm upgrade --install ${RELEASE} platform/ -f values.yaml --namespace ${NAMESPACE}

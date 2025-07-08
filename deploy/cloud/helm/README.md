@@ -36,7 +36,7 @@ docker login <CONTAINER_REGISTRY>
 #### 🛠️ Build and push images for the Dynamo Cloud platform components
 
 [One-time Action]
-You should also setup or build (advanced case) the images for the Dynamo Cloud Platform.
+You should build the images for the Dynamo Cloud Platform.
 If you are a **👤 Dynamo User** you would do this step once.
 
 ```bash
@@ -73,13 +73,13 @@ kubectl config set-context --current --namespace=$NAMESPACE
 To deploy the Dynamo Cloud Platform on Kubernetes, run:
 
 ```bash
-./deploy_dynamo_cloud.sh --crds
+./deploy.sh --crds
 ```
 
 if you want guidance during the process, run the deployment script with the `--interactive` flag:
 
 ```bash
-./deploy_dynamo_cloud.sh --crds --interactive
+./deploy.sh --crds --interactive
 ```
 
 omitting `--crds` will skip the CRDs installation/upgrade. This is useful when installing on a shared cluster as CRDs are cluster-scoped resources.

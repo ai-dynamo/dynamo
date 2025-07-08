@@ -102,7 +102,7 @@ Dynamo Cloud acts as an orchestration layer between the end user and Kubernetes,
 
 You must have first followed the instructions in [deploy/cloud/helm/README.md](../../deploy/cloud/helm/README.md) to create your Dynamo cloud deployment.
 
-Make sure your dynamo cloud the `deploy_dynamo_cloud.sh --crds --interactive` script finished successfully.
+Make sure your dynamo cloud the `deploy.sh --crds --interactive` script finished successfully.
 
 ### Now deploy your Hello World graph.
 
