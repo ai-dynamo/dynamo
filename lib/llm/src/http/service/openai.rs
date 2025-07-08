@@ -10,7 +10,7 @@ use std::{
 
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
@@ -121,6 +121,15 @@ impl From<HttpError> for ErrorResponse {
     }
 }
 
+/// Extract request ID from X-Request-Id header or generate a new UUID
+fn extract_or_generate_request_id(headers: &HeaderMap) -> String {
+    headers
+        .get("x-request-id")
+        .and_then(|value| value.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+}
+
 /// OpenAI Completions Request Handler
 ///
 /// This method will handle the incoming request for the `/v1/completions endpoint`. The endpoint is a "source"
@@ -132,13 +141,14 @@ impl From<HttpError> for ErrorResponse {
 #[tracing::instrument(skip_all)]
 async fn completions(
     State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
     Json(request): Json<NvCreateCompletionRequest>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // todo - extract distributed tracing id and context id from headers
-    let request_id = uuid::Uuid::new_v4().to_string();
+    // Extract or generate request ID from X-Request-Id header
+    let request_id = extract_or_generate_request_id(&headers);
 
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
@@ -172,7 +182,8 @@ async fn completions(
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     // setup context
-    // todo - inherit request_id from distributed trace details
+
+    // setup context with request ID for distributed tracing
     let request = Context::with_id(request, request_id.clone());
 
     // issue the generate call on the engine
@@ -199,22 +210,28 @@ async fn completions(
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
 
-        Ok(sse_stream.into_response())
+        // Add X-Request-Id header to response
+        let mut response = sse_stream.into_response();
+        response
+            .headers_mut()
+            .insert("x-request-id", request_id.parse().unwrap());
+        Ok(response)
     } else {
         // TODO: report ISL/OSL for non-streaming requests
         let response = NvCreateCompletionResponse::from_annotated_stream(stream.into())
             .await
             .map_err(|e| {
-                tracing::error!(
-                    "Failed to fold completions stream for {}: {:?}",
-                    request_id,
-                    e
-                );
+                tracing::error!(request_id, "Failed to fold completions stream for: {:?}", e);
                 ErrorResponse::internal_server_error("Failed to fold completions stream")
             })?;
 
         inflight_guard.mark_ok();
-        Ok(Json(response).into_response())
+        let mut json_response = Json(response).into_response();
+        // Add X-Request-Id header to response
+        json_response
+            .headers_mut()
+            .insert("x-request-id", request_id.parse().unwrap());
+        Ok(json_response)
     }
 }
 
@@ -286,6 +303,7 @@ async fn embeddings(
 #[tracing::instrument(skip_all)]
 async fn chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    headers: HeaderMap,
     Json(mut request): Json<NvCreateChatCompletionRequest>,
 ) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
     // return a 503 if the service is not ready
@@ -305,8 +323,8 @@ async fn chat_completions(
     }
     tracing::trace!("Received chat completions request: {:?}", request.inner);
 
-    // todo - extract distributed tracing id and context id from headers
-    let request_id = uuid::Uuid::new_v4().to_string();
+    // Extract or generate request ID from X-Request-Id header
+    let request_id = extract_or_generate_request_id(&headers);
 
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
@@ -342,7 +360,8 @@ async fn chat_completions(
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     // setup context
-    // todo - inherit request_id from distributed trace details
+
+    // setup context with request ID for distributed tracing
     let request = Context::with_id(request, request_id.clone());
 
     tracing::trace!("Issuing generate call for chat completions");
@@ -371,7 +390,12 @@ async fn chat_completions(
             sse_stream = sse_stream.keep_alive(KeepAlive::default().interval(keep_alive));
         }
 
-        Ok(sse_stream.into_response())
+        // Add X-Request-Id header to response
+        let mut response = sse_stream.into_response();
+        response
+            .headers_mut()
+            .insert("x-request-id", request_id.parse().unwrap());
+        Ok(response)
     } else {
         // TODO: report ISL/OSL for non-streaming requests
         let response = NvCreateChatCompletionResponse::from_annotated_stream(stream.into())
@@ -389,7 +413,12 @@ async fn chat_completions(
             })?;
 
         inflight_guard.mark_ok();
-        Ok(Json(response).into_response())
+        let mut json_response = Json(response).into_response();
+        // Add X-Request-Id header to response
+        json_response
+            .headers_mut()
+            .insert("x-request-id", request_id.parse().unwrap());
+        Ok(json_response)
     }
 }
 
