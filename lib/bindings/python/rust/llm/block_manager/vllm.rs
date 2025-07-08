@@ -108,10 +108,14 @@ impl KvbmCacheManager {
 
     /// Get the computed blocks for the given sequence hashes.
     /// This is used to get the blocks for the request.
+    #[tracing::instrument(level = "debug", skip_all, fields(sequence_hashes = ?sequence_hashes))]
     pub fn get_computed_blocks(
         &self,
         sequence_hashes: Vec<SequenceHash>,
     ) -> PyResult<KvbmBlockList> {
+        // Unfortunately, we cannot associate the sequence hashes with the request ID due to the calling
+        // structure of the vLLM scheduler.
+
         let blocks = self
             .block_manager()
             .device()
@@ -409,9 +413,8 @@ impl<R: RequestKey> SlotManager<R> {
         salt_hash: SaltHash,
         tokens: Vec<u32>,
     ) -> Result<Vec<SequenceHash>, SlotError> {
-        tracing::debug!(request_id, "creating slot");
-
         if !self.slots.contains_key(request_id) {
+            tracing::debug!(request_id, "creating slot");
             self.slots.insert(
                 request_id.clone(),
                 Slot::new(tokens.into(), self.block_size, salt_hash),
@@ -422,6 +425,7 @@ impl<R: RequestKey> SlotManager<R> {
         Ok(slot.sequence_hashes(SlotPosition::All))
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(request_id = %update.request_id))]
     pub fn update_slot(
         &mut self,
         update: GenericSlotUpdate<R>,

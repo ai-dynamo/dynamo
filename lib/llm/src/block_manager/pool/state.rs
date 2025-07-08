@@ -160,6 +160,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         Ok(blocks)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(blocks = ?blocks))]
     pub async fn register_blocks(
         &mut self,
         blocks: Vec<MutableBlock<S, L, M>>,
@@ -188,6 +189,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                     }
                     immutable
                 };
+
                 immutable_blocks.push(immutable);
                 continue;
             }

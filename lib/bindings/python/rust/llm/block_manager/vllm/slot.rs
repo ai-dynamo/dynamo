@@ -57,6 +57,7 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
 
     /// Updates the sequence with the given tokens.
     /// These tokens will advance the computed sequence position.
+    #[tracing::instrument(level = "debug", skip_all, fields(tokens_to_append = ?tokens_to_append))]
     pub fn apply_computed_tokens(
         &mut self,
         mut tokens_to_append: Vec<u32>,
@@ -79,8 +80,6 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
 
         // if we are still prefilling, we don't extend the sequence, but verify the tokens match what is already present.
         if self.computed_position < self.prefill_position {
-            tracing::debug!("applying {} prefill tokens", tokens_to_append.len());
-
             // In chunked prefill, vLLM may combine the final prefill chunk with some decode tokens.
             // We need to split off the decode tokens and apply them below.
             let remaining_decode_tokens = if self.computed_position + tokens_to_append.len()
@@ -100,11 +99,15 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
                 &tokens_to_append,
             );
             self.computed_position += tokens_to_append.len();
+            tracing::debug!(
+                "applying {} prefill tokens; new computed_position: {}",
+                tokens_to_append.len(),
+                self.computed_position
+            );
             tokens_to_append = remaining_decode_tokens;
         }
 
         if !tokens_to_append.is_empty() {
-            tracing::debug!("applying {} tokens", tokens_to_append.len());
             // if we are not prefilling, we extend the sequence and advance the sequence position.
             // first advance the sequence, then the position -- this covers the case where the extend fails.
             let count = tokens_to_append.len();
@@ -112,6 +115,12 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
                 .extend(tokens_to_append.into())
                 .map_err(|e| SlotError::from_str(&format!("failed to extend sequence: {:?}", e)))?;
             self.computed_position += count;
+
+            tracing::debug!(
+                "applied {} tokens; new computed_position: {}",
+                count,
+                self.computed_position
+            );
         }
 
         // determine if we need to register any blocks
@@ -147,10 +156,20 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
             blocks_to_register.push(mutable_block);
         }
 
+        assert_eq!(blocks_to_register.len(), num_blocks_to_register);
+
         // register the mutable blocks and extend the slot's immutable blocks
         let immutable_blocks = block_pool
             .register_blocks_blocking(blocks_to_register)
             .map_err(|e| SlotError::from_str(&format!("failed to register blocks: {:?}", e)))?;
+
+        assert_eq!(immutable_blocks.len(), num_blocks_to_register);
+
+        tracing::debug!(
+            "registered {} blocks; new computed_position: {}",
+            immutable_blocks.len(),
+            self.computed_position
+        );
 
         self.immutable.extend(immutable_blocks);
 
@@ -163,6 +182,7 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
     /// Here we clear the list of immutable blocks before applying them because vLLM can try to apply
     /// this multiple times if the slot was unable acquire blocks for the remainder of the sequence.
     // TODO: What about something like chunked prefill?
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn apply_computed_blocks(
         &mut self,
         computed_blocks: Vec<ImmutableBlock<S, L, BasicMetadata>>,
@@ -194,6 +214,7 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
     /// otherwise returns the block ids of the new blocks.
     ///
     /// An empty vector is returned if no new blocks are required.
+    #[tracing::instrument(level = "debug", skip_all, fields(num_new_tokens = %num_new_tokens))]
     pub fn allocate_blocks(
         &mut self,
         num_new_tokens: usize,
@@ -222,6 +243,7 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
 
     /// Frees the blocks in the slot.
     /// This will return the blocks in reverse order so that the tail blocks are evicted first.
+    #[tracing::instrument(level = "debug", skip_all)]
     pub fn free_blocks(&mut self) {
         self.mutable.clear();
         let mut immutable_blocks = std::mem::take(&mut self.immutable);

@@ -77,6 +77,7 @@ use super::metrics::{BlockManagerMetrics, PoolMetrics};
 use super::storage::Storage;
 
 use crate::block_manager::block::locality::LocalityProvider;
+use crate::block_manager::CacheLevel;
 use crate::tokens::{SequenceHash, TokenBlock};
 
 use prometheus::Registry;
@@ -178,6 +179,9 @@ pub enum BlockPoolError {
 
     #[error("Block is not returnable")]
     NotReturnable,
+
+    #[error("Unsupported cache level: {0:?}")]
+    UnsupportedCacheLevel(CacheLevel),
 }
 
 #[derive(Builder, Dissolve)]
