@@ -49,8 +49,10 @@ maturin develop --uv
 5. Experimental: To allow using mistral.rs and llama.cpp via the bindings, build with feature flags:
 
 ```
-maturin develop --features mistralrs,llamacpp
+maturin develop --features mistralrs,llamacpp --release
 ```
+
+`--release` is optional. It builds slower but the resulting library is significantly faster.
 
 See `examples/cli/cli.py` for usage.
 
