@@ -104,11 +104,11 @@ spec:
         requests:
           cpu: "10"
           memory: "20Gi"
-          nvidia.com/gpu: "1"
+          gpu: "1"
         limits:
           cpu: "10"
           memory: "20Gi"
-          nvidia.com/gpu: "1"
+          gpu: "1"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
@@ -131,11 +131,11 @@ spec:
         requests:
           cpu: "10"
           memory: "20Gi"
-          nvidia.com/gpu: "1"
+          gpu: "1"
         limits:
           cpu: "10"
           memory: "20Gi"
-          nvidia.com/gpu: "1"
+          gpu: "1"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest

@@ -55,11 +55,11 @@ spec:
         requests:
           cpu: "20"
           memory: "40Gi"
-          nvidia.com/gpu: "2"
+          gpu: "2"
         limits:
           cpu: "20"
           memory: "40Gi"
-          nvidia.com/gpu: "2"
+          gpu: "2"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
@@ -83,11 +83,11 @@ spec:
         requests:
           cpu: "20"
           memory: "40Gi"
-          nvidia.com/gpu: "2"
+          gpu: "2"
         limits:
           cpu: "20"
           memory: "40Gi"
-          nvidia.com/gpu: "2"
+          gpu: "2"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
