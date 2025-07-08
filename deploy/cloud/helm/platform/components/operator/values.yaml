@@ -59,8 +59,9 @@ controllerManager:
         drop:
         - ALL
     image:
-      repository: controller
-      tag: latest
+      repository: nvcr.io/nvidia/ai-dynamo/kubernetes-operator
+      # tag is optional - if not set, will use Chart.AppVersion
+      tag: ""
     resources:
       limits:
         cpu: 1024m
@@ -81,15 +82,8 @@ dynamo:
       annotations: {}
 
   enableLWS: false
-  apiStore:
-    endpoint: http://dynamo-server.dynamo-system.svc.cluster.local
-    clusterName: default
 
   internalImages:
-    dynamoComponentsDownloader: rapidfort/curl:latest
-    kaniko: gcr.io/kaniko-project/executor:debug
-    buildkit: moby/buildkit:v0.20.2
-    buildkitRootless: moby/buildkit:v0.20.2-rootless
     debugger: python:3.12-slim
 
   enableRestrictedSecurityContext: false
@@ -103,17 +97,7 @@ dynamo:
     password: ""
     existingSecretName: ''
     secure: true
-    dynamoComponentsRepositoryName: dynamo-pipelines
 
-  imageBuildEngine: buildkit # options: kaniko, buildkit, buildkit-rootless
-  addNamespacePrefixToImageName: false
-
-  estargz:
-    enabled: false
-
-  kaniko:
-    cacheRepo: ''
-    snapshotMode: '' # options: full, redo, time
 
 #imagePullSecrets: []
 kubernetesClusterDomain: cluster.local

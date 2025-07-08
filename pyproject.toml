@@ -138,7 +138,6 @@ addopts = [
     "--mypy",
     "--ignore-glob=*model.py",
     "--ignore-glob=*_inc.py",
-    "--ignore-glob=deploy/cloud/api-store/*",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
     # FIXME: Get relative/generic blob paths to work here
