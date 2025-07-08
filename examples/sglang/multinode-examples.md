@@ -6,7 +6,7 @@ SGLang allows you to deploy multi-node sized models by adding in the `dist-init-
 
 **Step 1**: Use the provided helper script to generate commands to start NATS/ETCD on your head prefill node. This script will also give you environment variables to export on each other node. You will need the IP addresses of your head prefill and head decode node to run this script.
 ```bash
-./gen_env_vars.sh
+./utils/gen_env_vars.sh
 ```
 
 **Step 2**: Ensure that your configuration file has the required arguments. Here's an example configuration that runs prefill and the model in TP16:
