@@ -14,7 +14,7 @@ type TransferRequest = (BlockTransferRequest, oneshot::Sender<()>);
 #[derive(Clone)]
 pub struct DistributedLeaderWorkerResources {
     /// Make this an option to make testing easier.
-    // TODO(jothomson): We should be using NullResources for this.
+    // TODO(jthomson04): We should be using NullResources for this.
     transfer_tx: Option<mpsc::UnboundedSender<TransferRequest>>,
 }
 

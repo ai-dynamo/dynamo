@@ -18,7 +18,6 @@ use std::sync::atomic::AtomicU64;
 use crate::block_manager::block::{locality::LocalityProvider, BlockState};
 
 use super::*;
-use std::collections::HashSet;
 use tracing::instrument;
 
 #[derive(Default)]
@@ -26,12 +25,8 @@ pub struct InactiveBlockPool<S: Storage, L: LocalityProvider, M: BlockMetadata> 
     // Direct lookup by sequence_hash.
     lookup_map: HashMap<SequenceHash, Block<S, L, M>>,
 
-    // A priority ordering for the leaf nodes.
-    // Leaf nodes are defined as blocks that have no children in the inactive pool.
-    leaf_set: BTreeSet<PriorityKey<M>>,
-
-    // Mapping from parents to their children.
-    parent_children: HashMap<SequenceHash, HashSet<SequenceHash>>,
+    // Ordered by timestamp (oldest first)
+    priority_set: BTreeSet<PriorityKey<M>>,
 
     // Fully Uninitialized
     uninitialized_set: VecDeque<Block<S, L, M>>,
@@ -55,8 +50,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
     pub(crate) fn new() -> Self {
         Self {
             lookup_map: HashMap::new(),
-            leaf_set: BTreeSet::new(),
-            parent_children: HashMap::new(),
+            priority_set: BTreeSet::new(),
             uninitialized_set: VecDeque::new(),
             return_tick: 0,
             total_blocks: Arc::new(AtomicU64::new(0)),
@@ -78,7 +72,6 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
     /// # Returns
     ///
     /// A counter for the total number of blocks as an [`Arc<AtomicU64>`].
-    #[expect(dead_code)]
     pub fn total_blocks_counter(&self) -> Arc<AtomicU64> {
         self.total_blocks.clone()
     }
@@ -109,8 +102,6 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
     /// If an entry with the same sequence hash already exists in the [`lookup_map`]
     /// the block is reset and moved to the [`uninitialized_set`].
     /// Otherwise, the block is added to the [`lookup_map`].
-    /// If there are no children of the block, it is added to the [`leaf_set`].
-    /// If the parent of the block is in the [`leaf_set`], it is removed from the [`leaf_set`].
     ///
     /// # Arguments
     ///
@@ -119,7 +110,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
     #[instrument(level = "trace", skip(self, block), fields(sequence_hash = ?sequence_hash))]
     fn insert_with_sequence_hash(&mut self, block: Block<S, L, M>, sequence_hash: SequenceHash) {
         let priority_key = PriorityKey::new(block.metadata().clone(), sequence_hash);
-        if self.lookup_map.contains_key(&sequence_hash) {
+        if self.priority_set.contains(&priority_key) {
             tracing::trace!("multiple entries with the same sequence hash, resetting block and inserting into uninitialized set");
             let mut block = block;
             block.reset();
@@ -127,27 +118,8 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
         } else {
             tracing::trace!("inserting block to map and priority set");
 
-            if let Ok(Some(parent)) = block.parent_sequence_hash() {
-                // Add the entry for the parent->child link.
-                self.parent_children
-                    .entry(parent)
-                    .or_default()
-                    .insert(sequence_hash);
-
-                // If the parent is currently in the inactive pool, remove it from the leaf set.
-                if let Some(parent_block) = self.lookup_map.get_mut(&parent) {
-                    self.leaf_set
-                        .remove(&PriorityKey::new(parent_block.metadata().clone(), parent));
-                }
-            }
-
-            // Create the entry for the block in the lookup map.
+            self.priority_set.insert(priority_key);
             self.lookup_map.insert(sequence_hash, block);
-
-            // If the block has no children, it is a leaf.
-            if !self.parent_children.contains_key(&sequence_hash) {
-                self.leaf_set.insert(priority_key);
-            }
         }
     }
 
@@ -270,7 +242,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
     }
 
     /// Attempts to remove and return a block associated with the given sequence hash
-    /// from the [`lookup_map`] and [`leaf_set`].
+    /// from the [`lookup_map`] and [`priority_set`].
     ///
     /// # Arguments
     ///
@@ -283,9 +255,10 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
     fn take_with_sequence_hash(&mut self, sequence_hash: SequenceHash) -> Option<Block<S, L, M>> {
         match self.lookup_map.remove(&sequence_hash) {
             Some(block) => {
-                // Remove from leaf set, if it exists.
-                self.leaf_set
-                    .remove(&PriorityKey::new(block.metadata().clone(), sequence_hash));
+                // Remove from priority set.
+                let priority_key = PriorityKey::new(block.metadata().clone(), sequence_hash);
+                // Remove from priority set, if it exists.
+                self.priority_set.remove(&priority_key);
 
                 self.available_blocks.fetch_sub(1, Ordering::Relaxed);
                 Some(block)
@@ -414,39 +387,12 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
             return Some(block);
         }
 
-        // if we have blocks in the leaf set, pop the first (it's sorted by priority)
+        // if we have blocks in the priority set, pop the first (it's sorted by priority)
         // a fatal error will occur if the block is not found in the lookup map
-        if let Some(key) = self.leaf_set.pop_first() {
+        if let Some(key) = self.priority_set.pop_first() {
             tracing::trace!("Acquired priority/registered block map; resetting block");
             match self.lookup_map.remove(&key.sequence_hash()) {
                 Some(mut block) => {
-                    if let Some(children) = self.parent_children.get(&key.sequence_hash()) {
-                        panic!(
-                            "Block has {} inactive children, but should have none.",
-                            children.len()
-                        );
-                    }
-
-                    if let Ok(Some(parent)) = block.parent_sequence_hash() {
-                        let is_leaf = match self.parent_children.get_mut(&parent) {
-                            Some(children) => {
-                                children.remove(&key.sequence_hash());
-                                children.is_empty()
-                            }
-                            None => true,
-                        };
-
-                        if is_leaf {
-                            self.parent_children.remove(&parent);
-                            if let Some(parent_block) = self.lookup_map.get(&parent) {
-                                self.leaf_set.insert(PriorityKey::new(
-                                    parent_block.metadata().clone(),
-                                    parent,
-                                ));
-                            }
-                        }
-                    }
-
                     block.reset();
                     self.return_tick += 1;
                     block.metadata_on_acquired(self.return_tick);
@@ -558,6 +504,31 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
         }
 
         Ok(blocks)
+    }
+
+    /// Resets the pool to its initial state.
+    ///
+    /// This function will acquire all blocks, which will reset their state, then return them.
+    ///
+    /// A [`Result`] containing `Ok(())` if the reset was successful, otherwise an error.
+    pub fn reset(&mut self) -> Result<(), BlockPoolError> {
+        let total_blocks = self.total_blocks.load(Ordering::Relaxed);
+        let available_blocks = self.available_blocks.load(Ordering::Relaxed);
+
+        if total_blocks != available_blocks {
+            return Err(BlockPoolError::ResetError(format!(
+                "total blocks: {}, available blocks: {}",
+                total_blocks, available_blocks
+            )));
+        }
+
+        let blocks = self.acquire_free_blocks(total_blocks as usize)?;
+
+        for block in blocks.into_iter() {
+            self.return_block(block);
+        }
+
+        Ok(())
     }
 }
 

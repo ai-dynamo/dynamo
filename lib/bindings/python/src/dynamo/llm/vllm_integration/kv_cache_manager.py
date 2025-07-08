@@ -92,25 +92,19 @@ class KvbmCacheManager(KVConnectorBase_V1):
 
         sequence_hashes = self._create_slot(request)
 
+        # We need to ensure there's at least 1 token that we don't match against.
+        if (
+            len(request.all_token_ids) > 0
+            and len(request.all_token_ids) % self.block_size == 0
+        ):
+            sequence_hashes = sequence_hashes[:-1]
+
         owned_blocks = self.cache_manager.get_computed_blocks(sequence_hashes)
         block_count = owned_blocks.block_count()
 
         num_computed_tokens = block_count * self.block_size
 
-        if self.log_stats:
-            assert self.prefix_cache_stats is not None
-            self.prefix_cache_stats.queries += request.num_tokens
-            self.prefix_cache_stats.hits += num_computed_tokens
-
         return KvbmCacheBlocks(owned_blocks), num_computed_tokens
-
-    def onboard_computed_blocks(
-        self, host_blocks: KvbmCacheBlocks, disk_blocks: KvbmCacheBlocks
-    ) -> KvbmCacheBlocks:
-        """
-        Onboard the computed blocks to the block manager.
-        """
-        return self.cache_manager.onboard_blocks(host_blocks, disk_blocks)
 
     def _create_slot(self, request: Request) -> list[int]:
         """Create a slot for the request."""
@@ -333,10 +327,14 @@ class KvbmCacheManager(KVConnectorBase_V1):
         """
         sequence_hashes = self._create_slot(request)
 
+        num_device_blocks = num_computed_tokens // self.block_size
+
         (
             host_computed_blocks,
             disk_computed_blocks,
-        ) = self.cache_manager.get_num_offloaded_computed_blocks(sequence_hashes)
+        ) = self.cache_manager.get_num_offloaded_computed_blocks(
+            sequence_hashes, num_device_blocks
+        )
 
         if host_computed_blocks is not None:
             num_host_computed_blocks = host_computed_blocks.block_count()
@@ -348,31 +346,25 @@ class KvbmCacheManager(KVConnectorBase_V1):
         else:
             num_disk_computed_blocks = 0
 
-        num_host_computed_tokens = num_host_computed_blocks * self.block_size
-        num_disk_computed_tokens = num_disk_computed_blocks * self.block_size
+        if self.log_stats:
+            assert self.prefix_cache_stats is not None
+            self.prefix_cache_stats.queries += request.num_tokens
+            self.prefix_cache_stats.hits += (
+                num_device_blocks + num_host_computed_blocks + num_disk_computed_blocks
+            ) * self.block_size
 
-        num_external_hit_tokens = max(
-            num_disk_computed_tokens, num_host_computed_tokens
-        )
-
-        need_to_allocate = num_external_hit_tokens - num_computed_tokens
+        need_to_allocate = (
+            num_host_computed_blocks + num_disk_computed_blocks
+        ) * self.block_size
 
         # In a full-prompt-hit case, we need to recompute the last token,
         # to get the logits to generate the next token.
-        if num_external_hit_tokens == request.num_tokens:
-            # NOTE: since num_external_hit_tokens and num_computed_tokens are both block aligned,
-            # need_to_allocate is also block aligned
+        if num_computed_tokens + need_to_allocate == request.num_tokens:
             need_to_allocate -= 1
-
-            # since need_to_allocate is block aligned, we need avoid onboarding the last block in this case
-            if host_computed_blocks is not None:
-                host_computed_blocks = host_computed_blocks[:-1]
-            if disk_computed_blocks is not None:
-                disk_computed_blocks = disk_computed_blocks[:-1]
 
         if need_to_allocate > 0:
             self.pending_onboard_blocks[request.request_id] = (
-                num_computed_tokens // self.block_size,
+                need_to_allocate // self.block_size,
                 host_computed_blocks,
                 disk_computed_blocks,
             )
@@ -387,12 +379,12 @@ class KvbmCacheManager(KVConnectorBase_V1):
         if request.request_id not in self.pending_onboard_blocks:
             return
 
-        num_device_blocks, host_blocks, disk_blocks = self.pending_onboard_blocks.pop(
+        num_onboard_blocks, host_blocks, disk_blocks = self.pending_onboard_blocks.pop(
             request.request_id
         )
 
         self.cache_manager.onboard_into_slot(
-            request.request_id, num_device_blocks, host_blocks, disk_blocks
+            request.request_id, num_onboard_blocks, host_blocks, disk_blocks
         )
 
     def build_connector_meta(

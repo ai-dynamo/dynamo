@@ -52,8 +52,10 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                 }
             }
             PriorityRequest::RegisterBlocks(req) => {
-                let (blocks, resp_tx) = req.dissolve();
-                let immutable_blocks = self.register_blocks(blocks, return_rx).await;
+                let ((blocks, duplication_setting), resp_tx) = req.dissolve();
+                let immutable_blocks = self
+                    .register_blocks(blocks, duplication_setting, return_rx)
+                    .await;
                 if resp_tx.send(immutable_blocks).is_err() {
                     tracing::error!("failed to send response to register blocks");
                 }
@@ -63,6 +65,29 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                 let immutable_blocks = self.match_sequence_hashes(sequence_hashes, return_rx).await;
                 if resp_tx.send(Ok(immutable_blocks)).is_err() {
                     tracing::error!("failed to send response to match sequence hashes");
+                }
+            }
+            PriorityRequest::TouchBlocks(req) => {
+                let (sequence_hashes, resp_tx) = req.dissolve();
+                self.touch_blocks(&sequence_hashes, return_rx).await;
+                if resp_tx.send(Ok(())).is_err() {
+                    tracing::error!("failed to send response to touch blocks");
+                }
+            }
+            PriorityRequest::Reset(req) => {
+                let (_req, resp_tx) = req.dissolve();
+                let result = self.inactive.reset();
+                if resp_tx.send(result).is_err() {
+                    tracing::error!("failed to send response to reset");
+                }
+            }
+            PriorityRequest::ReturnBlock(req) => {
+                let (returnable_blocks, resp_tx) = req.dissolve();
+                for block in returnable_blocks {
+                    self.return_block(block);
+                }
+                if resp_tx.send(Ok(())).is_err() {
+                    tracing::error!("failed to send response to return block");
                 }
             }
         }
@@ -135,11 +160,15 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         Ok(blocks)
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(blocks = ?blocks))]
     pub async fn register_blocks(
         &mut self,
         blocks: Vec<MutableBlock<S, L, M>>,
+        duplication_setting: BlockRegistrationDuplicationSetting,
         return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
     ) -> Result<Vec<ImmutableBlock<S, L, M>>, BlockPoolError> {
+        assert!(!blocks.is_empty(), "no blocks to register");
+
         let expected_len = blocks.len();
         let mut immutable_blocks = Vec::new();
 
@@ -151,44 +180,81 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
 
             // If the block is already registered, acquire a clone of the immutable block
             if let Some(immutable) = self.active.match_sequence_hash(sequence_hash) {
+                let immutable = if duplication_setting
+                    == BlockRegistrationDuplicationSetting::Allowed
+                {
+                    immutable.with_duplicate(block.into()).expect("incompatible immutable block; only primary should be returned from match_sequence_hash")
+                } else {
+                    // immediate return the block to the pool if duplicates are disabled
+                    if let Some(blocks) = block.try_take_block(private::PrivateToken) {
+                        self.inactive.return_blocks(blocks);
+                    }
+                    immutable
+                };
+
                 immutable_blocks.push(immutable);
                 continue;
             }
 
             let mut offload = true;
 
-            let mutable = if let Some(raw_block) = self.inactive.match_sequence_hash(sequence_hash)
-            {
-                assert!(matches!(raw_block.state(), BlockState::Registered(_, _)));
-                MutableBlock::new(raw_block, self.return_tx.clone())
-            } else {
-                // Attempt to register the block
-                // On the very rare chance that the block is registered, but in the process of being returned,
-                // we will wait for it to be returned and then register it.
-                let result = block.register(&mut self.registry);
+            let (mutable, duplicate) =
+                if let Some(raw_block) = self.inactive.match_sequence_hash(sequence_hash) {
+                    // We already have a match, so our block is a duplicate.
+                    assert!(matches!(raw_block.state(), BlockState::Registered(_, _)));
+                    (
+                        MutableBlock::new(raw_block, self.return_tx.clone()),
+                        Some(block),
+                    )
+                } else {
+                    // Attempt to register the block
+                    // On the very rare chance that the block is registered, but in the process of being returned,
+                    // we will wait for it to be returned and then register it.
+                    let result = block.register(&mut self.registry);
 
-                match result {
-                    Ok(handle) => {
-                        // Only create our publish handle if this block is new, and not transfered.
-                        if let Some(handle) = handle {
-                            publish_handles.take_handle(handle);
+                    match result {
+                        Ok(handle) => {
+                            // Only create our publish handle if this block is new, and not transfered.
+                            if let Some(handle) = handle {
+                                publish_handles.take_handle(handle);
+                            }
+                            (block, None)
                         }
-                        block
+                        Err(BlockRegistrationError::BlockAlreadyRegistered(_)) => {
+                            // Block is already registered, wait for it to be returned
+                            // Return the original block as the primary, and the block we passed in as the duplicate.
+                            offload = false;
+                            let raw_block =
+                                self.wait_for_returned_block(sequence_hash, return_rx).await;
+                            (
+                                MutableBlock::new(raw_block, self.return_tx.clone()),
+                                Some(block),
+                            )
+                        }
+                        Err(e) => {
+                            return Err(BlockPoolError::FailedToRegisterBlock(e.to_string()));
+                        }
                     }
-                    Err(BlockRegistrationError::BlockAlreadyRegistered(_)) => {
-                        // Block is already registered, wait for it to be returned
-                        offload = false;
-                        let raw_block =
-                            self.wait_for_returned_block(sequence_hash, return_rx).await;
-                        MutableBlock::new(raw_block, self.return_tx.clone())
-                    }
-                    Err(e) => {
-                        return Err(BlockPoolError::FailedToRegisterBlock(e.to_string()));
+                };
+
+            let mut immutable = self.active.register(mutable)?;
+
+            match duplication_setting {
+                BlockRegistrationDuplicationSetting::Allowed => {
+                    if let Some(duplicate) = duplicate {
+                        immutable = immutable
+                            .with_duplicate(duplicate.into())
+                            .expect("incompatible immutable block; only primary should be returned from ActiveBlockPool::register");
                     }
                 }
-            };
-
-            let immutable = self.active.register(mutable)?;
+                BlockRegistrationDuplicationSetting::Disabled => {
+                    if let Some(block) = duplicate {
+                        if let Some(raw_blocks) = block.try_take_block(private::PrivateToken) {
+                            self.inactive.return_blocks(raw_blocks);
+                        }
+                    }
+                }
+            }
 
             if offload {
                 if let Some(priority) = immutable.metadata().offload_priority() {
@@ -260,6 +326,29 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         immutable_blocks
     }
 
+    async fn touch_blocks(
+        &mut self,
+        sequence_hashes: &[SequenceHash],
+        return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
+    ) {
+        for sequence_hash in sequence_hashes {
+            if !self.registry.is_registered(*sequence_hash) {
+                break;
+            }
+
+            let block = if let Some(block) = self.inactive.match_sequence_hash(*sequence_hash) {
+                block
+            } else if self.active.match_sequence_hash(*sequence_hash).is_none() {
+                self.wait_for_returned_block(*sequence_hash, return_rx)
+                    .await
+            } else {
+                continue;
+            };
+
+            self.inactive.return_block(block);
+        }
+    }
+
     /// Returns a block to the inactive pool
     pub fn return_block(&mut self, mut block: Block<S, L, M>) {
         self.active.remove(&mut block);
@@ -298,7 +387,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine
         state.inactive.add_blocks(blocks);
 
         let available_blocks_counter = state.inactive.available_blocks_counter();
-        let total_blocks_counter = state.inactive.available_blocks_counter();
+        let total_blocks_counter = state.inactive.total_blocks_counter();
 
         Self {
             priority_rx,

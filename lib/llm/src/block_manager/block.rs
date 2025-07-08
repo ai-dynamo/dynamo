@@ -52,6 +52,7 @@ use std::{
 use thiserror::Error;
 
 pub mod private {
+    #[derive(Clone, Copy)]
     pub struct PrivateToken;
 }
 
@@ -87,6 +88,9 @@ pub enum BlockError {
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+
+    #[error("Immutable block already has a duplicate")]
+    IncompatibleImmutableBlock,
 }
 
 pub trait BlockMetadata: Default + std::fmt::Debug + Clone + Ord + Send + Sync + 'static {
@@ -103,6 +107,23 @@ pub trait BlockMetadata: Default + std::fmt::Debug + Clone + Ord + Send + Sync +
     /// The offload priority of the block. Higher priority blocks are offloaded first.
     /// If the block should not be offloaded, return None.
     fn offload_priority(&self) -> Option<u64>;
+}
+
+/// A trait for blocks that can be returned to the pool.
+///
+/// This is used to determine if a block can be dropped when it is returned to the pool.
+/// If the block is droppable, it will be returned to the pool.
+/// If the block is not droppable, it will be kept alive until the pool is reset.
+pub trait MaybeReturnableBlock<S: Storage, L: LocalityProvider, M: BlockMetadata> {
+    /// At the time of the call, the block is singularly owned and therefore will be returned to the pool
+    /// if dropped.
+    fn is_returnable(&self) -> bool;
+
+    /// Try to take ownership of the block.
+    ///
+    /// This is an internal function guarded by the PrivateToken and is used to implement the public facing
+    /// [`super::pool::BlockPool::return_block`] and [`super::pool::BlockPool::return_block_blocking`] functions.
+    fn try_take_block(self, token: private::PrivateToken) -> Option<Vec<Block<S, L, M>>>;
 }
 
 /// Marker trait for types that are mutable blocks
@@ -716,10 +737,23 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> IntoReadableBlocks<L, M>
     }
 }
 
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> MaybeReturnableBlock<S, L, M>
+    for MutableBlock<S, L, M>
+{
+    fn is_returnable(&self) -> bool {
+        self.block.is_some()
+    }
+
+    fn try_take_block(mut self, _: private::PrivateToken) -> Option<Vec<Block<S, L, M>>> {
+        self.block.take().map(|block| vec![block])
+    }
+}
+
 #[derive(Debug)]
 pub struct ImmutableBlock<S: Storage, L: LocalityProvider, M: BlockMetadata> {
     block: Arc<MutableBlock<S, L, M>>,
     sequence_hash: SequenceHash,
+    duplicate: Option<Arc<MutableBlock<S, L, M>>>,
 }
 
 // ImmutableBlock inherits identification methods from Block via Deref
@@ -729,6 +763,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Clone for ImmutableBlock
         Self {
             block: self.block.clone(),
             sequence_hash: self.sequence_hash,
+            duplicate: self.duplicate.clone(),
         }
     }
 }
@@ -739,7 +774,22 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ImmutableBlock<S, L, M> 
         Self {
             block,
             sequence_hash,
+            duplicate: None,
         }
+    }
+
+    /// Attempts to add a duplicate block to the ImmutableBlock.
+    pub(crate) fn with_duplicate(
+        self,
+        duplicate: Arc<MutableBlock<S, L, M>>,
+    ) -> Result<Self, BlockError> {
+        if self.duplicate.is_some() {
+            return Err(BlockError::IncompatibleImmutableBlock);
+        }
+        Ok(Self {
+            duplicate: Some(duplicate),
+            ..self
+        })
     }
 
     pub(crate) fn mutable_block(&self) -> &Arc<MutableBlock<S, L, M>> {
@@ -748,6 +798,20 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ImmutableBlock<S, L, M> 
 
     pub fn sequence_hash(&self) -> SequenceHash {
         self.sequence_hash
+    }
+
+    /// If the ImmutableBlock is a duplicate, returns the block ID of the duplicate;
+    /// otherwise, returns the block ID of the primary block.
+    pub fn block_id(&self) -> BlockId {
+        self.duplicate
+            .as_ref()
+            .map_or(self.block.block_id(), |duplicate| duplicate.block_id())
+    }
+
+    /// Returns true if the ImmutableBlock holds a duplicate block.
+    #[allow(unused)]
+    pub(crate) fn is_duplicate(&self) -> bool {
+        self.duplicate.is_some()
     }
 }
 
@@ -817,6 +881,40 @@ impl<S: Storage + 'static, L: LocalityProvider, M: BlockMetadata> ImmutableBlock
             tracing::warn!("Block is not managed. Unable to enqueue offload.");
         }
         Ok(())
+    }
+}
+
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> MaybeReturnableBlock<S, L, M>
+    for ImmutableBlock<S, L, M>
+{
+    fn is_returnable(&self) -> bool {
+        // determine if the arc use count is 1; if duplicate, evaluate that arc, otherwise evaluate the primary
+        match &self.duplicate {
+            Some(duplicate) => Arc::strong_count(duplicate) == 1,
+            None => Arc::strong_count(&self.block) == 1,
+        }
+    }
+
+    fn try_take_block(mut self, token: private::PrivateToken) -> Option<Vec<Block<S, L, M>>> {
+        let blocks = [
+            Arc::try_unwrap(self.block).ok(),
+            self.duplicate
+                .take()
+                .and_then(|duplicate| Arc::try_unwrap(duplicate).ok()),
+        ];
+
+        let blocks = blocks
+            .into_iter()
+            .flatten()
+            .filter_map(|block| block.try_take_block(token))
+            .flatten()
+            .collect::<Vec<_>>();
+
+        if blocks.is_empty() {
+            None
+        } else {
+            Some(blocks)
+        }
     }
 }
 

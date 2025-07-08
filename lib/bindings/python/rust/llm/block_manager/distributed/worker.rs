@@ -40,6 +40,8 @@ impl VllmTensor {
                 .call_method0(py, "stride")?
                 .extract::<Vec<usize>>(py)?;
 
+            tracing::debug!("VllmTensor: {data_ptr}, {size_bytes}, {shape:?}, {stride:?}");
+
             Ok(Self {
                 _py_tensor: py_tensor,
                 device,

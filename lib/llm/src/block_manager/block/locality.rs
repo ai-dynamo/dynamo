@@ -80,7 +80,7 @@ pub struct Logical<R: LogicalResources> {
 }
 
 impl<R: LogicalResources> Logical<R> {
-    // TODO(jothomson): Refactor these???
+    // TODO(jthomson04): Refactor these???
     fn load_resources<B: BlockDataProvider<Locality = Logical<R>>>(blocks: &[B]) -> Vec<Arc<R>> {
         blocks
             .iter()
