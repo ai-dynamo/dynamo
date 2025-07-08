@@ -109,9 +109,9 @@ The following configuration files should be present in this directory:
 - [prometheus.yml](./prometheus.yml): Contains Prometheus scraping configuration
 - [grafana-datasources.yml](./grafana-datasources.yml): Contains Grafana datasource configuration
 - [grafana_dashboards/grafana-dashboard-providers.yml](./grafana_dashboards/grafana-dashboard-providers.yml): Contains Grafana dashboard provider configuration
-- [grafana_dashboards/grafana-dynamo-dashboard.json](./grafana_dashboards/grafana-dynamo-dashboard.json): Contains Grafana dashboard configuration for various composite metrics (HW and SW)
-- [grafana_dashboards/grafana-llm-dashboard.json](./grafana_dashboards/grafana-llm-dashboard.json): Contains Grafana dashboard configuration for LLM specific metrics.
-- [grafana_dashboards/grafana-dcgm-dashboard.json](./grafana_dashboards/grafana-dcgm-dashboard.json): Contains Grafana dashboard configuration for DCGM GPU metrics
+- [grafana_dashboards/grafana-dynamo-dashboard.json](./grafana_dashboards/grafana-dynamo-dashboard.json): A general Dynamo Dashboard for both SW and HW metrics.
+- [grafana_dashboards/grafana-llm-metrics.json](./grafana_dashboards/grafana-llm-metrics.json): Contains Grafana dashboard configuration for LLM specific metrics.
+- [grafana_dashboards/grafana-dcgm-metrics.json](./grafana_dashboards/grafana-dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
 
 ## Running the example `metrics` component
 
