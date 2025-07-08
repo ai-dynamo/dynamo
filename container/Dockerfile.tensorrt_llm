@@ -397,7 +397,7 @@ COPY --from=build /usr/local/nixl /usr/local/nixl
 # Copy OpenMPI from build image
 COPY --from=build /opt/hpcx/ompi /opt/hpcx/ompi
 # Copy NUMA library from build image
-COPY --from=build /usr/lib/x86_64-linux-gnu/libnuma.so* /usr/lib/x86_64-linux-gnu/
+COPY --from=build /usr/lib/${ARCH_ALT}-linux-gnu/libnuma.so* /usr/lib/${ARCH_ALT}-linux-gnu/
 
 # Setup the python environment
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
