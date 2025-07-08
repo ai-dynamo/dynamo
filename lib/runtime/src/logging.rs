@@ -57,6 +57,7 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::{filter::Directive, fmt};
+use tracing_subscriber::fmt::format::FmtSpan;
 
 /// ENV used to set the log level
 const FILTER_ENV: &str = "DYN_LOG";
@@ -124,6 +125,7 @@ pub fn init() {
         if crate::config::jsonl_logging_enabled() {
             let l = fmt::layer()
                 .with_ansi(false) // ansi terminal escapes and colors always disabled
+		.with_span_events(FmtSpan::CLOSE) // Enable span timing
                 .event_format(CustomJsonFormatter::new())
                 .with_writer(std::io::stderr)
                 .with_filter(filter_layer);
@@ -131,6 +133,7 @@ pub fn init() {
         } else {
             let l = fmt::layer()
                 .with_ansi(!crate::config::disable_ansi_logging())
+		.with_span_events(FmtSpan::CLOSE) // Enable span timing
                 .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
                 .with_writer(std::io::stderr)
                 .with_filter(filter_layer);
@@ -249,6 +252,7 @@ where
             .parent()
             .and_then(|id| ctx.span(id))
             .or_else(|| ctx.lookup_current());
+
         if let Some(span) = current_span {
             let ext = span.extensions();
             let data = ext.get::<FormattedFields<N>>().unwrap();

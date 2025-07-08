@@ -22,6 +22,7 @@ where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
     U: Data + Serialize + std::fmt::Debug,
 {
+    #[tracing::instrument(name="neelay",skip(self))]
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError> {
         // decode the control message and the request
         let msg = TwoPartCodec::default()
