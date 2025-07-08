@@ -280,11 +280,20 @@ fn softmax_sample(logits: &HashMap<i64, f64>, temperature: f64) -> i64 {
 
     // Guard: if temperature is 0, return the key with the smallest logit value
     if temperature == 0.0 {
-        return *logits
+        // Find the minimum logit value
+        let min_logit = logits.values().fold(f64::INFINITY, |a, &b| a.min(b));
+
+        // Collect all keys with the minimum logit value (to handle ties)
+        let min_keys: Vec<_> = logits
             .iter()
-            .min_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
-            .map(|(k, _)| k)
-            .unwrap();
+            .filter(|(_, &v)| v == min_logit)
+            .map(|(k, _)| *k)
+            .collect();
+
+        // Randomly select from the minimum keys (handles single key case naturally)
+        let mut rng = rand::rng();
+        let index = rng.random_range(0..min_keys.len());
+        return min_keys[index];
     }
 
     let keys: Vec<_> = logits.keys().copied().collect();
@@ -425,7 +434,6 @@ impl WorkerSelector for DefaultWorkerSelector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kv_router::protocols::{KvStats, WorkerStats};
 
     #[test]
     fn test_softmax_sample_single_key() {
