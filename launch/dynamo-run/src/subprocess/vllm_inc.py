@@ -19,6 +19,7 @@ import uuid
 from typing import Optional
 
 import uvloop
+
 from vllm import SamplingParams
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.api_server import (
@@ -26,14 +27,15 @@ from vllm.entrypoints.openai.api_server import (
 )
 from vllm.inputs import TokensPrompt
 
-from dynamo.llm import (
-    ForwardPassMetrics,
-    KvStats,
-    ModelType,
-    WorkerMetricsPublisher,
-    WorkerStats,
-    register_llm,
-)
+# Import ForwardPassMetrics and related classes from dynamo
+try:
+    from dynamo.llm import ForwardPassMetrics, KvStats, WorkerStats
+except ImportError:
+    # Fallback if dynamo imports are not available
+    ForwardPassMetrics = None
+    WorkerStats = None
+    KvStats = None
+
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
