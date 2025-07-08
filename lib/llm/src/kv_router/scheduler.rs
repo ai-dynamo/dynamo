@@ -92,7 +92,7 @@ pub struct SchedulingRequest {
 impl SchedulingRequest {
     pub fn respond(self, response: SchedulingResponse) {
         if self.resp_tx.send(response).is_err() {
-            tracing::trace!("failed to send response to requestor");
+            tracing::error!("failed to send response to requestor");
         }
     }
 }
@@ -239,7 +239,7 @@ impl KvScheduler {
         Ok(response.best_worker_id)
     }
 
-    /// Add a new request with its initial tokens to a specific worker
+    /// Find the potential blocks for each worker if the sequence were routed there
     pub async fn potential_blocks(
         &self,
         token_sequence: TokenBlockSequence,
@@ -396,7 +396,7 @@ impl WorkerSelector for DefaultWorkerSelector {
         }
 
         // Use softmax sampling to select worker
-        let temperature = self.kv_router_config.router_temperature; // You can make this configurable if needed
+        let temperature = self.kv_router_config.router_temperature;
         let best_worker_id = softmax_sample(&worker_logits, temperature);
 
         let overlap_blocks = request

@@ -18,7 +18,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::kv_router::protocols::LoadMetrics;
 use crate::kv_router::scheduler::Endpoint;
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
@@ -61,24 +60,5 @@ impl ProcessedEndpoints {
             .iter()
             .map(|(&worker_id, endpoint)| (worker_id, endpoint.data.kv_active_blocks() as usize))
             .collect()
-    }
-
-    pub fn update_active_blocks(&mut self, worker_id: i64, active_blocks: usize) {
-        if let Some(endpoint) = self.endpoints.get_mut(&worker_id) {
-            match &mut endpoint.data {
-                LoadMetrics::EngineLoadMetrics(metrics) => {
-                    metrics.kv_stats.kv_active_blocks = active_blocks as u64;
-                }
-                LoadMetrics::PredictiveLoadMetrics(metrics) => {
-                    metrics.kv_active_blocks = active_blocks as u64;
-                }
-            }
-        }
-    }
-
-    pub fn update_active_blocks_all(&mut self, worker_blocks: HashMap<i64, usize>) {
-        for (worker_id, blocks) in worker_blocks {
-            self.update_active_blocks(worker_id, blocks);
-        }
     }
 }

@@ -13,7 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::mocker::protocols::{MoveBlock, UniqueBlock};
+use crate::mocker::protocols::MoveBlock;
+use crate::tokens::blocks::UniqueBlock;
 use crate::tokens::{TokenBlockSequence, Tokens};
 use derive_getters::Getters;
 use rand::random;

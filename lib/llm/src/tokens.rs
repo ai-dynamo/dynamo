@@ -22,6 +22,8 @@ use derive_getters::Dissolve;
 use rayon::prelude::*;
 use std::ops::Range;
 
+pub mod blocks;
+
 /// A token is represented as a 32-bit unsigned integer.
 pub type Token = u32;
 

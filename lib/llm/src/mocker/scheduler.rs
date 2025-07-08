@@ -43,11 +43,10 @@
 use crate::kv_router::protocols::{ForwardPassMetrics, KvCacheEventData, KvStats, WorkerStats};
 use crate::mocker::evictor::LRUEvictor;
 use crate::mocker::kv_manager::KvManager;
-use crate::mocker::protocols::{
-    block_response_to_kv_event, MoveBlock, OutputSignal, PrefillCost, UniqueBlock,
-};
+use crate::mocker::protocols::{block_response_to_kv_event, MoveBlock, OutputSignal, PrefillCost};
 use crate::mocker::protocols::{DirectRequest, MockEngineArgs, MoveBlockResponse};
 use crate::mocker::sequence::ActiveSequence;
+use crate::tokens::blocks::UniqueBlock;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;

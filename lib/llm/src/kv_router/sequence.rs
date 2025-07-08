@@ -13,8 +13,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+//! KV Cache Sequence Management for LLM Inference
+//!
+//! This module provides efficient management of token sequences and their associated KV cache blocks
+//! for distributed LLM inference. It implements a shared block system where multiple requests can
+//! reuse the same KV cache blocks for common token prefixes, significantly reducing memory usage.
+//!
+//! # Key Components
+//!
+//! - [`ActiveSequences`]: Single-threaded sequence manager that tracks active requests and their
+//!   token sequences, managing shared KV cache blocks efficiently.
+//!
+//! - [`ActiveSequencesMultiWorker`]: Multi-threaded extension that distributes sequence management
+//!   across multiple worker threads, enabling parallel processing of requests while maintaining
+//!   consistency.
+//!
+//! # Architecture
+//!
+//! The system uses a block-based approach where token sequences are divided into fixed-size blocks.
+//! Each block is identified by a hash of its contents, allowing for deduplication when multiple
+//! requests share common prefixes (e.g., system prompts, few-shot examples).
+
 use crate::kv_router::indexer::WorkerId;
-use crate::mocker::protocols::UniqueBlock;
+use crate::tokens::blocks::UniqueBlock;
 use crate::tokens::TokenBlockSequence;
 use derive_getters::Getters;
 use std::collections::{HashMap, HashSet};
@@ -67,6 +88,7 @@ pub struct ActiveSequences {
 impl ActiveSequences {
     /// Create a new SharedSequenceManager instance
     pub fn new(block_size: usize) -> Self {
+        // TODO: make this not a hard req
         assert!(block_size > 1, "block_size must be greater than 1");
 
         Self {
@@ -144,7 +166,8 @@ impl ActiveSequences {
     /// Free all blocks associated with a request
     pub fn free(&mut self, request_id: &RequestId) -> usize {
         let Some(token_seq) = self.active_seqs.get(request_id) else {
-            panic!("Cannot free non-existent request {request_id}");
+            tracing::warn!("Trying to free free non-existent request {request_id}");
+            return 0;
         };
 
         let blocks = create_unique_blocks_from_sequence(token_seq, None, self.block_size);
@@ -220,7 +243,7 @@ enum UpdateSequences {
     Shutdown,
 }
 
-/// Multi-worker wrapper around ActiveSequences that distributes requests across multiple threads
+/// Multi-worker extension of ActiveSequences that distributes requests across multiple threads
 pub struct ActiveSequencesMultiWorker {
     senders: HashMap<WorkerId, mpsc::Sender<UpdateSequences>>,
     request_to_worker: HashMap<RequestId, WorkerId>,
