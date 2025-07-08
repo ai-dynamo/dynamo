@@ -26,15 +26,14 @@ from vllm.entrypoints.openai.api_server import (
 )
 from vllm.inputs import TokensPrompt
 
-# Import ForwardPassMetrics and related classes from dynamo
-try:
-    from dynamo.llm import ForwardPassMetrics, KvStats, WorkerStats
-except ImportError:
-    # Fallback if dynamo imports are not available
-    ForwardPassMetrics = None
-    WorkerStats = None
-    KvStats = None
-
+from dynamo.llm import (
+    ForwardPassMetrics,
+    KvStats,
+    ModelType,
+    WorkerMetricsPublisher,
+    WorkerStats,
+    register_llm,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
