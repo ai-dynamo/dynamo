@@ -3,9 +3,9 @@
 # For more information about CODEOWNERS files, see:
 # https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
-# Rust
+# Rust - Keep these two the same. Or better make an alias like devops have.
 *.rs @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @alec-flowers @kkranen @oandreeva-nv @ai-dynamo/Devops @jthomson04 @PeaBrane
-Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @kkranen @oandreeva-nv @ai-dynamo/Devops
+Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @alec-flowers @kkranen @oandreeva-nv @ai-dynamo/Devops @jthomson04 @PeaBrane
 
 # Python Libraries
 *.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen @ai-dynamo/Devops @jthomson04 @ishandhanani @PeaBrane
@@ -18,7 +18,7 @@ Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo 
 
 # Examples
 /examples/ @ai-dynamo/Devops @nnshah1 @rmccorm4 @whoisj
-/examples/common/ @tedzhouhk
+/examples/common/ @ai-dynamo/Devops @tedzhouhk
 /examples/hello_world/ @alec-flowers @biswapanda @grahamking @hhzhang16 @ishandhanani @julienmancuso @kkranen @mohammedabdulwahhab @nnshah1 @tedzhouhk
 /examples/llm/ @alec-flowers @biswapanda @grahamking @guanluo @hhzhang16 @ishandhanani @julienmancuso @kkranen @mohammedabdulwahhab @nnshah1 @piotrm-nvidia @ptarasiewiczNV @rmccorm4 @tanmayv25 @tedzhouhk @PeaBrane
 /examples/multimodal/ @indrajit96 @krishung5 @whoisj
@@ -29,7 +29,7 @@ Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo 
 
 # CI/CD
 /.github/ @ai-dynamo/Devops @nnshah1
-/.github/workflows/*.ps1 @whoisj
+/.github/workflows/*.ps1 @ai-dynamo/Devops @whoisj
 CODEOWNERS @ai-dynamo/Devops @nnshah1
 
 # Legal
