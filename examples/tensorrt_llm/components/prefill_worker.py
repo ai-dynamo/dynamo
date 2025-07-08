@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import signal
 
 from common.base_engine import BaseEngineConfig, BaseTensorrtLLMEngine
 from common.parser import parse_tensorrt_llm_args
@@ -55,6 +56,9 @@ class TensorRTLLMPrefillWorker(BaseTensorrtLLMEngine):
             lease_id=lease_id,
         )
 
+        signal.signal(signal.SIGTERM, self.graceful_shutdown)
+        signal.signal(signal.SIGINT, self.graceful_shutdown)
+
         super().__init__(config=engine_config)
 
     @async_on_start
@@ -62,6 +66,19 @@ class TensorRTLLMPrefillWorker(BaseTensorrtLLMEngine):
         runtime = dynamo_context["runtime"]
         await self.initialize(runtime)
         logger.info("TensorRT-LLM Prefill Worker initialized")
+
+    def graceful_shutdown(self, signum, frame):
+        """
+        Gracefully shutdown the worker by shutting down the dynamo runtime.
+        This will
+            1. disable the generate endpoint so no new requests are accepted.
+            2. wait until all in-flight requests are completed.
+            3. finish the awaiting for the endpoint service.
+            4. rely on python's garbage collection to clean up the GPU.
+        """
+        logger.info("Shutting down dynamo runtime...")
+        dynamo_context["runtime"].shutdown()
+        logger.info("Dynamo runtime shutdown complete.")
 
     @on_shutdown
     async def async_cleanup(self):
