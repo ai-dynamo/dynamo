@@ -31,7 +31,7 @@ spec:
           memory: "4Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
           workingDir: /workspace/examples/vllm_v0
           args:
             - dynamo
@@ -59,7 +59,7 @@ spec:
           gpu: "2"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
           workingDir: /workspace/examples/vllm_v0
           args:
             - dynamo
@@ -88,7 +88,7 @@ spec:
           gpu: "2"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
           workingDir: /workspace/examples/vllm_v0
           args:
             - dynamo
@@ -115,7 +115,7 @@ spec:
           memory: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
           workingDir: /workspace/examples/vllm_v0
           args:
             - dynamo
@@ -142,7 +142,7 @@ spec:
           memory: "1000Mi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
           workingDir: /workspace/examples/vllm_v0
           args:
             - dynamo
