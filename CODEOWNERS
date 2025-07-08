@@ -4,8 +4,8 @@
 # https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
 # Rust - Keep these two the same. Or better make an alias like devops have.
-*.rs @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @alec-flowers @kkranen @oandreeva-nv @ai-dynamo/Devops @jthomson04 @PeaBrane
-Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @alec-flowers @kkranen @oandreeva-nv @ai-dynamo/Devops @jthomson04 @PeaBrane
+*.rs @ai-dynamo/dynamo-rust-codeowners
+Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 
 # Python Libraries
 *.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen @ai-dynamo/Devops @jthomson04 @ishandhanani @PeaBrane
@@ -17,7 +17,7 @@ Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo 
 /deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @nnshah1 @mohammedabdulwahhab
 
 # Examples
-/examples/ @ai-dynamo/Devops @nnshah1 @rmccorm4 @whoisj
+/examples/ @ai-dynamo/Devops @nnshah1 @whoisj @ai-dynamo/dynamo-rust-codeowners
 /examples/common/ @ai-dynamo/Devops @tedzhouhk
 /examples/hello_world/ @alec-flowers @biswapanda @grahamking @hhzhang16 @ishandhanani @julienmancuso @kkranen @mohammedabdulwahhab @nnshah1 @tedzhouhk
 /examples/llm/ @alec-flowers @biswapanda @grahamking @guanluo @hhzhang16 @ishandhanani @julienmancuso @kkranen @mohammedabdulwahhab @nnshah1 @piotrm-nvidia @ptarasiewiczNV @rmccorm4 @tanmayv25 @tedzhouhk @PeaBrane
