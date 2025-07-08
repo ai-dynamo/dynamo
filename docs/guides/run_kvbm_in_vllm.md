@@ -30,7 +30,6 @@ To use KVBM in vLLM, you can follow the steps below:
 ./container/build.sh --framework kvbm
 
 # launch the container
-# NOTE: if not using --mount-workspace, need to add --privileged to avoid GDS errors
 ./container/run.sh --framework kvbm -it --mount-workspace --use-nixl-gds
 
 # enable using kvbm instead of vllm's own kv cache manager
