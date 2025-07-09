@@ -236,7 +236,7 @@ def setup_prefill_node(
     # NOTE: This implements the example in examples/sglang/dsr1-wideep.md
     # For other examples, the command might have to be modified.
     dynamo_cmd = (
-        f"python3 main.py "
+        f"python3 examples/vllm_v1/components/main.py "
         f"--model {model_name} "
         f"--tensor-parallel-size {total_gpus // total_nodes} "
         "--enforce-eager "
@@ -262,7 +262,7 @@ def setup_decode_node(
         raise RuntimeError("Failed to connect to etcd")
 
     dynamo_cmd = (
-        "python3 main.py "
+        "python3 examples/vllm_v1/components/main.py "
         f"--model {model_name} "
         f"--tensor-parallel-size {total_gpus // total_nodes} "
         "--enforce-eager "

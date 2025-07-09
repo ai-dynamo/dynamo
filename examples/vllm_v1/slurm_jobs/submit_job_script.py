@@ -103,9 +103,6 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     parser.add_argument(
         "--model-name", required=True, help="Model name"
     )
-    parser.add_argument(
-        "--extra-engine-args", required=True, help="Extra engine arguments"
-    )
     parser.add_argument("--dry-run", action="store_true", help="Dry run the job script")
     return parser.parse_args(args)
 
@@ -127,6 +124,7 @@ def main(input_args: list[str] | None = None):
         "container_image": args.container_image,
         "gpus_per_node": args.gpus_per_node,
         "network_interface": args.network_interface,
+        "model_name": args.model_name,
     }
 
     if args.dry_run:
