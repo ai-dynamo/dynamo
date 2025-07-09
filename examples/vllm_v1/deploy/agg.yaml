@@ -17,9 +17,6 @@ kind: DynamoGraphDeployment
 metadata:
   name: agg
 spec:
-  envs:
-    - name: DYN_DEPLOYMENT_CONFIG
-      value: '{"Common":{"model":"deepseek-ai/DeepSeek-R1-Distill-Llama-8B","block-size":64,"max-model-len":16384},"Frontend":{"served_model_name":"deepseek-ai/DeepSeek-R1-Distill-Llama-8B","endpoint":"dynamo.VllmWorker.generate","port":8000,"router":"round-robin","common-configs":["block-size"]},"VllmWorker":{"enforce-eager":true,"max-num-batched-tokens":16384,"enable-prefix-caching":true,"common-configs":["model","block-size","max-model-len"]}}'
   services:
     Frontend:
       dynamoNamespace: vllm-v1-agg
@@ -46,6 +43,8 @@ spec:
             - --use-default-health-checks
             - --service-name
             - Frontend
+            - -f
+            - ./configs/agg.yaml
     SimpleLoadBalancer:
       envFromSecret: hf-token-secret
       dynamoNamespace: vllm-v1-agg
@@ -71,6 +70,8 @@ spec:
             - --use-default-health-checks
             - --service-name
             - SimpleLoadBalancer
+            - -f
+            - ./configs/agg.yaml
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: vllm-v1-agg
@@ -98,3 +99,5 @@ spec:
             - --use-default-health-checks
             - --service-name
             - VllmDecodeWorker
+            - -f
+            - ./configs/agg.yaml
