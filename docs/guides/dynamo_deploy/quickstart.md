@@ -8,6 +8,7 @@ Use this approach when installing from pre-built helm charts and docker images p
 
 ```bash
 export NAMESPACE=dynamo-cloud
+export RELEASE_VERSION=0.3.2
 ```
 
 ### Authenticate with NGC
@@ -20,10 +21,10 @@ helm repo add nvidia https://helm.ngc.nvidia.com/nvidia --username='$oauthtoken'
 
 ```bash
 # Fetch the CRDs helm chart
-helm fetch https://helm.ngc.nvidia.com/nvidia/charts/dynamo-crds-v0.3.2.tgz
+helm fetch https://helm.ngc.nvidia.com/nvidia/charts/dynamo-crds-v${RELEASE_VERSION}.tgz
 
 # Fetch the platform helm chart  
-helm fetch https://helm.ngc.nvidia.com/nvidia/charts/dynamo-platform-v0.3.2.tgz
+helm fetch https://helm.ngc.nvidia.com/nvidia/charts/dynamo-platform-v${RELEASE_VERSION}.tgz
 ```
 
 ### Install Dynamo Cloud
@@ -31,7 +32,7 @@ helm fetch https://helm.ngc.nvidia.com/nvidia/charts/dynamo-platform-v0.3.2.tgz
 **Step 1: Install Custom Resource Definitions (CRDs)**
 
 ```bash
-helm install dynamo-crds dynamo-crds-v0.3.2.tgz \
+helm install dynamo-crds dynamo-crds-v${RELEASE_VERSION}.tgz \
   --namespace default \
   --wait \
   --atomic
@@ -42,7 +43,7 @@ helm install dynamo-crds dynamo-crds-v0.3.2.tgz \
 ```bash
 kubectl create namespace ${NAMESPACE}
 
-helm install dynamo-platform dynamo-platform-v0.3.2.tgz --namespace ${NAMESPACE}
+helm install dynamo-platform dynamo-platform-v${RELEASE_VERSION}.tgz --namespace ${NAMESPACE}
 ```
 
 ## 2. Installing from Source
