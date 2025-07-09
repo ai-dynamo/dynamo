@@ -47,6 +47,7 @@ The simplest way to deploy the pre-requisite services is using
 defined in [deploy/metrics/docker-compose.yml](../../deploy/metrics/docker-compose.yml).
 
 ```
+# At the root of the repository:
 docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
