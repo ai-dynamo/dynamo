@@ -13,6 +13,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::{AsyncEngineContextProvider, ResponseStream};
+use crate::{
+    component::{Client, Endpoint, InstanceSource},
+    engine::{AsyncEngine, Data},
+    pipeline::{
+        error::PipelineErrorExt, AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
+    },
+    protocols::maybe_error::MaybeError,
+    traits::DistributedRuntimeProvider,
+};
 use async_nats::client::{
     RequestError as NatsRequestError, RequestErrorKind::NoResponders as NatsNoResponders,
 };
@@ -27,15 +37,7 @@ use std::{
         Arc,
     },
 };
-
-use crate::{
-    component::{Client, Endpoint, InstanceSource},
-    engine::{AsyncEngine, Data},
-    pipeline::{
-        error::PipelineErrorExt, AddressedPushRouter, AddressedRequest, Error, ManyOut, SingleIn,
-    },
-    traits::DistributedRuntimeProvider,
-};
+use tokio_stream::StreamExt;
 
 #[derive(Clone)]
 pub struct PushRouter<T, U>
@@ -94,7 +96,7 @@ async fn addressed_router(endpoint: &Endpoint) -> anyhow::Result<Arc<AddressedPu
 impl<T, U> PushRouter<T, U>
 where
     T: Data + Serialize,
-    U: Data + for<'de> Deserialize<'de>,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
     pub async fn from_client(client: Client, router_mode: RouterMode) -> anyhow::Result<Self> {
         let addressed = addressed_router(&client.endpoint).await?;
@@ -109,51 +111,44 @@ where
 
     /// Issue a request to the next available instance in a round-robin fashion
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let slf = self;
-        let routing_algorithm = move || async move {
-            let counter = slf.round_robin_counter.fetch_add(1, Ordering::Relaxed);
+        let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
 
-            let instance_id = {
-                let instances = slf.client.instances_avail().await;
-                let count = instances.len();
-                if count == 0 {
-                    return Err(anyhow::anyhow!(
-                        "no instances found for endpoint {:?}",
-                        slf.client.endpoint.etcd_root()
-                    ));
-                }
-                let offset = counter % count as u64;
-                instances[offset as usize].id()
-            };
-            tracing::trace!("round robin router selected {instance_id}");
-
-            Ok(instance_id)
+        let instance_id = {
+            let instances = self.client.instances_avail().await;
+            let count = instances.len();
+            if count == 0 {
+                return Err(anyhow::anyhow!(
+                    "no instances found for endpoint {:?}",
+                    self.client.endpoint.etcd_root()
+                ));
+            }
+            let offset = counter % count as u64;
+            instances[offset as usize].id()
         };
-        self.generate_with_fault_tolerance(routing_algorithm, request)
+        tracing::trace!("round robin router selected {instance_id}");
+
+        self.generate_with_fault_detection(instance_id, request)
             .await
     }
 
     /// Issue a request to a random endpoint
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let slf = self;
-        let routing_algorithm = move || async move {
-            let instance_id = {
-                let instances = slf.client.instances_avail().await;
-                let count = instances.len();
-                if count == 0 {
-                    return Err(anyhow::anyhow!(
-                        "no instances found for endpoint {:?}",
-                        slf.client.endpoint.etcd_root()
-                    ));
-                }
-                let counter = rand::rng().random::<u64>();
-                let offset = counter % count as u64;
-                instances[offset as usize].id()
-            };
-            tracing::trace!("random router selected {instance_id}");
-            Ok(instance_id)
+        let instance_id = {
+            let instances = self.client.instances_avail().await;
+            let count = instances.len();
+            if count == 0 {
+                return Err(anyhow::anyhow!(
+                    "no instances found for endpoint {:?}",
+                    self.client.endpoint.etcd_root()
+                ));
+            }
+            let counter = rand::rng().random::<u64>();
+            let offset = counter % count as u64;
+            instances[offset as usize].id()
         };
-        self.generate_with_fault_tolerance(routing_algorithm, request)
+        tracing::trace!("random router selected {instance_id}");
+
+        self.generate_with_fault_detection(instance_id, request)
             .await
     }
 
@@ -163,22 +158,19 @@ where
         request: SingleIn<T>,
         instance_id: i64,
     ) -> anyhow::Result<ManyOut<U>> {
-        let slf = self;
-        let routing_algorithm = move || async move {
-            let found = {
-                let instances = slf.client.instances_avail().await;
-                instances.iter().any(|ep| ep.id() == instance_id)
-            };
-
-            if !found {
-                return Err(anyhow::anyhow!(
-                    "instance_id={instance_id} not found for endpoint {:?}",
-                    slf.client.endpoint.etcd_root()
-                ));
-            }
-            Ok(instance_id)
+        let found = {
+            let instances = self.client.instances_avail().await;
+            instances.iter().any(|ep| ep.id() == instance_id)
         };
-        self.generate_with_fault_tolerance(routing_algorithm, request)
+
+        if !found {
+            return Err(anyhow::anyhow!(
+                "instance_id={instance_id} not found for endpoint {:?}",
+                self.client.endpoint.etcd_root()
+            ));
+        }
+
+        self.generate_with_fault_detection(instance_id, request)
             .await
     }
 
@@ -190,29 +182,45 @@ where
         self.addressed.generate(request).await
     }
 
-    async fn generate_with_fault_tolerance<F, R>(
+    async fn generate_with_fault_detection(
         &self,
-        routing_algorithm: F,
+        instance_id: i64,
         request: SingleIn<T>,
-    ) -> anyhow::Result<ManyOut<U>>
-    where
-        F: FnOnce() -> R,
-        R: Future<Output = anyhow::Result<i64>>,
-    {
-        let instance_id = routing_algorithm().await?;
-
+    ) -> anyhow::Result<ManyOut<U>> {
         let subject = self.client.endpoint.subject_to(instance_id);
         let request = request.map(|req| AddressedRequest::new(req, subject));
 
-        let stream = self.addressed.generate(request).await;
-        if let Some(err) = stream.as_ref().err() {
-            if let Some(req_err) = err.downcast_ref::<NatsRequestError>() {
-                if matches!(req_err.kind(), NatsNoResponders) {
-                    self.client.report_instance_down(instance_id).await;
+        let stream: anyhow::Result<ManyOut<U>> = self.addressed.generate(request).await;
+        match stream {
+            Ok(stream) => {
+                let engine_ctx = stream.context();
+                let client = self.client.clone();
+                let stream = stream.then(move |res| {
+                    let mut report_instance_down: Option<(Client, i64)> = None;
+                    if let Some(err) = res.err() {
+                        const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
+                        if format!("{:?}", err) == STREAM_ERR_MSG {
+                            report_instance_down = Some((client.clone(), instance_id));
+                        }
+                    }
+                    async move {
+                        if let Some((client, instance_id)) = report_instance_down {
+                            client.report_instance_down(instance_id).await;
+                        }
+                        res
+                    }
+                });
+                Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
+            }
+            Err(err) => {
+                if let Some(req_err) = err.downcast_ref::<NatsRequestError>() {
+                    if matches!(req_err.kind(), NatsNoResponders) {
+                        self.client.report_instance_down(instance_id).await;
+                    }
                 }
+                Err(err)
             }
         }
-        stream
     }
 }
 
@@ -220,7 +228,7 @@ where
 impl<T, U> AsyncEngine<SingleIn<T>, ManyOut<U>, Error> for PushRouter<T, U>
 where
     T: Data + Serialize,
-    U: Data + for<'de> Deserialize<'de>,
+    U: Data + for<'de> Deserialize<'de> + MaybeError,
 {
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
         match self.client.instance_source.as_ref() {

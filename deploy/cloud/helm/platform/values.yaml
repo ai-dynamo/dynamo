@@ -25,8 +25,8 @@ dynamo-operator:
   controllerManager:
     manager:
       image:
-        repository: ""
-        tag: "latest"
+        repository: "nvcr.io/nvidia/ai-dynamo/kubernetes-operator"
+        tag: ""
         pullPolicy: IfNotPresent
       args:
         - --health-probe-bind-address=:8081
@@ -34,31 +34,16 @@ dynamo-operator:
   imagePullSecrets: []
   dynamo:
     enableLWS: false
-    apiStore:
-      endpoint:
-      clusterName: default
     internalImages:
-      dynamoComponentsDownloader: rapidfort/curl:latest
-      kaniko: gcr.io/kaniko-project/executor:debug
-      buildkit: moby/buildkit:v0.20.2
-      buildkitRootless: moby/buildkit:v0.20.2-rootless
       debugger: python:3.12-slim
     enableRestrictedSecurityContext: false
     dockerRegistry:
-      useKubernetesSecret: true
+      useKubernetesSecret: false
       server:
       username:
       password:
       existingSecretName:
       secure: true
-      dynamoComponentsRepositoryName: dynamo-pipelines
-    imageBuildEngine: buildkit
-    addNamespacePrefixToImageName: false
-    estargz:
-      enabled: false
-    kaniko:
-      cacheRepo: ""
-      snapshotMode: ""
     ingress:
       enabled: false
       className:
@@ -68,32 +53,6 @@ dynamo-operator:
       gateway:
     ingressHostSuffix: ""
     virtualServiceSupportsHTTPS: false
-
-dynamo-api-store:
-  enabled: true
-  namespaceRestriction:
-    enabled: true
-    targetNamespace:
-  istio:
-    enabled: false
-    host: ""
-    gateway: ""
-  dynamo:
-    env:
-      resource_scope: "user"
-  image:
-    repository: ""
-    tag: "latest"
-    pullPolicy: IfNotPresent
-  imagePullSecrets: []
-  ingress:
-    enabled: false
-    className: nginx
-    hosts:
-      - host: ""
-        paths:
-          - path: /
-            pathType: Prefix
 
 ## In-cluster minio deployment configuration
 ## ref: https://github.com/bitnami/charts/blob/minio/13.3.1/bitnami/minio/values.yaml
@@ -146,18 +105,6 @@ minio:
     ports:
       api: 9000
       console: 9001
-
-postgresql:
-  enabled: true
-  auth:
-    existingSecret: ""
-    postgresPassword: ""
-    username: "admin"
-    password: "password"
-    database: "dynamo"
-  primary:
-    persistence:
-      enabled: false
 
 etcd:
   enabled: true

@@ -43,7 +43,7 @@ impl BlockState {
             return Err(BlockStateInvalid("Block is not reset".to_string()));
         }
 
-        let block = PartialTokenBlock::create_sequence_root(page_size, salt_hash);
+        let block = PartialTokenBlock::create_sequence_root(page_size as u32, salt_hash);
         *self = BlockState::Partial(PartialState::new(block));
         Ok(())
     }

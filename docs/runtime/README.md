@@ -47,7 +47,8 @@ The simplest way to deploy the pre-requisite services is using
 defined in [deploy/metrics/docker-compose.yml](../../deploy/metrics/docker-compose.yml).
 
 ```
-docker-compose up -d
+# At the root of the repository:
+docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
 This will deploy a [NATS.io](https://nats.io/) server and an [etcd](https://etcd.io/)

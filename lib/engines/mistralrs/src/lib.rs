@@ -13,8 +13,8 @@ use mistralrs::{
     AutoDeviceMapParams, Constraint, DefaultSchedulerMethod, Device, DeviceMapSetting,
     GGUFLoaderBuilder, GGUFSpecificConfig, IsqType, MemoryGpuConfig, MistralRs, MistralRsBuilder,
     ModelDType, NormalLoaderBuilder, NormalRequest, NormalSpecificConfig, PagedAttentionConfig,
-    Request, RequestMessage, ResponseOk, SamplingParams, SchedulerConfig, StopTokens, TokenSource,
-    VisionLoaderBuilder, VisionLoaderType, VisionSpecificConfig,
+    PagedCacheType, Request, RequestMessage, ResponseOk, SamplingParams, SchedulerConfig,
+    StopTokens, TokenSource, VisionLoaderBuilder, VisionLoaderType, VisionSpecificConfig,
 };
 use tokio::sync::mpsc::channel;
 
@@ -66,6 +66,7 @@ fn best_device() -> pipeline_error::Result<Device> {
 struct MistralRsEngine {
     mistralrs: Arc<MistralRs>,
     context_length: usize,
+    display_name: String,
 }
 
 impl MistralRsEngine {
@@ -114,7 +115,7 @@ impl MistralRsEngine {
                 Some(model_path.display().to_string()),
                 jinja_explicit,
             )
-            .build(vlt)
+            .build(Some(vlt))
         } else {
             // Load from a HF repo dir
             NormalLoaderBuilder::new(
@@ -128,7 +129,7 @@ impl MistralRsEngine {
             .build(None)?
         };
 
-        let mut max_seq_len = model.card().context_length;
+        let mut max_seq_len = model.card().context_length as usize;
         if max_seq_len == 0 {
             tracing::info!("context_length is 0. Probably error reading from model.");
             max_seq_len = AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN;
@@ -140,6 +141,7 @@ impl MistralRsEngine {
                 None, // Block size, default 32
                 4096, // CPU memory in MiB
                 MemoryGpuConfig::ContextSize(max_seq_len),
+                PagedCacheType::Auto,
             )?)
         } else {
             None
@@ -203,8 +205,9 @@ impl MistralRsEngine {
         )
         .with_prefix_cache_n(16);
         let engine = MistralRsEngine {
-            mistralrs: builder.build(),
+            mistralrs: builder.build().await,
             context_length: max_seq_len,
+            display_name: display_name.to_string(),
         };
 
         // skip the id used for dummy run https://github.com/EricLBuehler/mistral.rs/issues/1218
@@ -213,8 +216,9 @@ impl MistralRsEngine {
         // Perform warmup request
         let (tx, mut rx) = channel(1);
         let request_id = engine.mistralrs.next_request_id();
-        let warmup_request = Request::Normal(NormalRequest {
+        let warmup_request = Request::Normal(Box::new(NormalRequest {
             id: request_id,
+            model_id: Some(display_name.to_string()),
             messages: RequestMessage::Chat {
                 messages: vec![IndexMap::from([
                     ("role".to_string(), Either::Left("user".to_string())),
@@ -236,10 +240,10 @@ impl MistralRsEngine {
             logits_processors: None,
             return_raw_logits: false,
             web_search_options: None,
-        });
+        }));
 
         // Send warmup request and consume response
-        if let Ok(sender) = engine.mistralrs.get_sender() {
+        if let Ok(sender) = engine.mistralrs.get_sender(None) {
             if let Ok(()) = sender.send(warmup_request).await {
                 if let Some(response) = rx.recv().await {
                     match response.as_result() {
@@ -339,8 +343,9 @@ impl
             dry_params: det.dry_params,
         };
         let request_id = self.mistralrs.next_request_id();
-        let mistralrs_request = Request::Normal(NormalRequest {
+        let mistralrs_request = Request::Normal(Box::new(NormalRequest {
             id: request_id,
+            model_id: Some(self.display_name.clone()),
             messages: RequestMessage::Chat {
                 messages,
                 enable_thinking: None,
@@ -356,9 +361,12 @@ impl
             logits_processors: None,
             return_raw_logits: false,
             web_search_options: None,
-        });
+        }));
 
-        self.mistralrs.get_sender()?.send(mistralrs_request).await?;
+        self.mistralrs
+            .get_sender(None)?
+            .send(mistralrs_request)
+            .await?;
 
         let output = stream! {
             while let Some(response) = rx.recv().await {
@@ -536,8 +544,9 @@ impl
         };
 
         let request_id = self.mistralrs.next_request_id();
-        let mistralrs_request = Request::Normal(NormalRequest {
+        let mistralrs_request = Request::Normal(Box::new(NormalRequest {
             id: request_id,
+            model_id: Some(self.display_name.clone()),
             messages,
             sampling_params,
             response: tx,
@@ -550,9 +559,12 @@ impl
             logits_processors: None,
             return_raw_logits: false,
             web_search_options: None,
-        });
+        }));
 
-        self.mistralrs.get_sender()?.send(mistralrs_request).await?;
+        self.mistralrs
+            .get_sender(None)?
+            .send(mistralrs_request)
+            .await?;
 
         let output = stream! {
             while let Some(response) = rx.recv().await {

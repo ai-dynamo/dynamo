@@ -19,53 +19,15 @@ use std::sync::atomic::AtomicU32;
 use super::*;
 use llm_rs::kv_router::indexer::compute_block_hash_for_seq;
 use llm_rs::kv_router::indexer::KvIndexerInterface;
+use llm_rs::kv_router::protocols::ForwardPassMetrics as RsForwardPassMetrics;
+use llm_rs::kv_router::protocols::KvStats as RsKvStats;
+use llm_rs::kv_router::protocols::SpecDecodeStats as RsSpecDecodeStats;
+use llm_rs::kv_router::protocols::WorkerStats as RsWorkerStats;
 use rs::traits::events::EventSubscriber;
 use tracing;
 
 use llm_rs::kv_router::protocols::*;
 use llm_rs::kv_router::publisher::{create_stored_blocks, KvEventSourceConfig};
-
-#[pyclass]
-pub(crate) struct KvRouter {
-    inner: Arc<llm_rs::kv_router::KvRouter>,
-}
-
-#[pymethods]
-impl KvRouter {
-    #[new]
-    fn new(component: Component, kv_block_size: usize) -> PyResult<Self> {
-        if kv_block_size == 0 {
-            return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
-        };
-
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        runtime.block_on(async {
-            let inner =
-                llm_rs::kv_router::KvRouter::new(component.inner.clone(), kv_block_size, None)
-                    .await
-                    .map_err(to_pyerr)?;
-            Ok(Self {
-                inner: Arc::new(inner),
-            })
-        })
-    }
-
-    fn schedule<'p>(
-        &self,
-        py: Python<'p>,
-        token_ids: Vec<u32>,
-        lora_id: u64,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let router = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let worker_id = router
-                .schedule(&token_ids, lora_id)
-                .await
-                .map_err(to_pyerr)?;
-            Ok(worker_id)
-        })
-    }
-}
 
 #[pyfunction]
 pub fn compute_block_hash_for_seq_py(tokens: Vec<u32>, kv_block_size: usize) -> PyResult<Vec<u64>> {
@@ -73,7 +35,7 @@ pub fn compute_block_hash_for_seq_py(tokens: Vec<u32>, kv_block_size: usize) -> 
         return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
     }
 
-    let hashes = compute_block_hash_for_seq(&tokens, kv_block_size);
+    let hashes = compute_block_hash_for_seq(&tokens, kv_block_size as u32);
     Ok(hashes.into_iter().map(|h| h.0).collect())
 }
 
@@ -110,34 +72,11 @@ impl WorkerMetricsPublisher {
         })
     }
 
-    #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (request_active_slots, request_total_slots, kv_active_blocks, kv_total_blocks, num_requests_waiting, gpu_cache_usage_perc, gpu_prefix_cache_hit_rate, data_parallel_rank = 0))]
-    fn publish(
-        &self,
-        _py: Python,
-        request_active_slots: u64,
-        request_total_slots: u64,
-        kv_active_blocks: u64,
-        kv_total_blocks: u64,
-        num_requests_waiting: u64,
-        gpu_cache_usage_perc: f32,
-        gpu_prefix_cache_hit_rate: f32,
-        data_parallel_rank: u32,
-    ) -> PyResult<()> {
+    #[pyo3(signature = (metrics))]
+    fn publish(&self, _py: Python, metrics: &ForwardPassMetrics) -> PyResult<()> {
+        // Create and publish the complete metrics
         self.inner
-            .publish(
-                llm_rs::kv_router::protocols::ForwardPassMetrics {
-                    data_parallel_rank: Some(data_parallel_rank),
-                    request_active_slots,
-                    request_total_slots,
-                    kv_active_blocks,
-                    kv_total_blocks,
-                    num_requests_waiting,
-                    gpu_cache_usage_perc,
-                    gpu_prefix_cache_hit_rate,
-                }
-                .into(),
-            )
+            .publish(metrics.0.clone().into())
             .map_err(to_pyerr)
     }
 }
@@ -191,7 +130,7 @@ impl ZmqKvEventPublisher {
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
             component.inner,
             config.worker_id,
-            config.kv_block_size,
+            config.kv_block_size as u32,
             Some(KvEventSourceConfig::Zmq {
                 endpoint: config.zmq_endpoint,
                 topic: config.zmq_topic,
@@ -232,7 +171,7 @@ impl ZmqKvEventListener {
                 zmq_topic,
                 tx,
                 shutdown_token.clone(),
-                kv_block_size,
+                kv_block_size as u32,
             ));
 
             Ok(Self {
@@ -293,7 +232,7 @@ impl KvEventPublisher {
         let inner = llm_rs::kv_router::publisher::KvEventPublisher::new(
             component.inner,
             worker_id,
-            kv_block_size,
+            kv_block_size as u32,
             None,
         )
         .map_err(to_pyerr)?;
@@ -322,7 +261,7 @@ impl KvEventPublisher {
             data: KvCacheEventData::Stored(KvCacheStoreData {
                 parent_hash: parent_hash.map(ExternalSequenceBlockHash::from),
                 blocks: create_stored_blocks(
-                    self.kv_block_size,
+                    self.kv_block_size as u32,
                     &token_ids,
                     &num_block_tokens,
                     &block_hashes,
@@ -446,7 +385,7 @@ impl KvIndexer {
             let inner: Arc<llm_rs::kv_router::indexer::KvIndexer> =
                 llm_rs::kv_router::indexer::KvIndexer::new(
                     component.inner.drt().runtime().child_token(),
-                    kv_block_size,
+                    kv_block_size as u32,
                 )
                 .into();
             // [gluo TODO] try subscribe_with_type::<RouterEvent>,
@@ -478,7 +417,7 @@ impl KvIndexer {
     }
 
     fn block_size(&self) -> usize {
-        self.inner.block_size()
+        self.inner.block_size() as usize
     }
 
     fn find_matches<'p>(&self, py: Python<'p>, sequence: Vec<u64>) -> PyResult<Bound<'p, PyAny>> {
@@ -514,6 +453,64 @@ impl KvIndexer {
             Ok(OverlapScores {
                 inner: rs_overlap_scores,
             })
+        })
+    }
+}
+
+/// Bindings for the approximate KV indexer. We need to exactly match the regular KV Indexer
+/// interface, so that the router can switch between the two.
+#[pyclass]
+pub(crate) struct ApproxKvIndexer {
+    inner: Arc<llm_rs::kv_router::approx::ApproxKvIndexer>,
+}
+
+#[pymethods]
+impl ApproxKvIndexer {
+    #[new]
+    fn new(component: Component, kv_block_size: usize, ttl_secs: f64) -> PyResult<Self> {
+        let ttl = tokio::time::Duration::from_secs_f64(ttl_secs);
+        let inner = Arc::new(llm_rs::kv_router::approx::ApproxKvIndexer::new(
+            component.inner.drt().runtime().child_token(),
+            kv_block_size as u32,
+            ttl,
+        ));
+        Ok(Self { inner })
+    }
+
+    fn block_size(&self) -> u32 {
+        self.inner.block_size()
+    }
+
+    fn find_matches_for_request<'p>(
+        &self,
+        py: Python<'p>,
+        token_ids: Vec<u32>,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let indexer = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            let rs_overlap_scores = indexer
+                .find_matches_for_request(token_ids.as_slice())
+                .await
+                .map_err(to_pyerr)?;
+            Ok(OverlapScores {
+                inner: rs_overlap_scores,
+            })
+        })
+    }
+
+    fn process_routing_decision_for_request<'p>(
+        &self,
+        py: Python<'p>,
+        tokens: Vec<u32>,
+        worker_id: i64,
+    ) -> PyResult<Bound<'p, PyAny>> {
+        let indexer = self.inner.clone();
+        pyo3_async_runtimes::tokio::future_into_py(py, async move {
+            indexer
+                .process_routing_decision_for_request(tokens.as_slice(), worker_id)
+                .await
+                .map_err(to_pyerr)?;
+            Ok(())
         })
     }
 }
@@ -573,26 +570,36 @@ impl KvMetricsAggregator {
     }
 
     fn get_metrics<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
+        // TODO: update EndpointKvMetrics to match the new ForwardPassMetrics struct
         let endpoints = self.inner.get_endpoints();
+        let load_avg = endpoints.load_avg;
+        let load_std = endpoints.load_std;
+
         let endpoint_kv_metrics = endpoints
             .endpoints
-            .iter()
-            .map(|(worker_id, x)| EndpointKvMetrics {
-                worker_id: *worker_id,
-                request_active_slots: x.data.request_active_slots,
-                request_total_slots: x.data.request_total_slots,
-                kv_active_blocks: x.data.kv_active_blocks,
-                kv_total_blocks: x.data.kv_total_blocks,
-                num_requests_waiting: x.data.num_requests_waiting,
-                gpu_cache_usage_perc: x.data.gpu_cache_usage_perc,
-                gpu_prefix_cache_hit_rate: x.data.gpu_prefix_cache_hit_rate,
+            .into_iter()
+            .map(|(worker_id, endpoint)| {
+                let metrics = endpoint.data;
+                let LoadMetrics::EngineLoadMetrics(fwd_pass_metrics) = metrics else {
+                    panic!("Endpoints do not contain forward pass metrics.");
+                };
+                EndpointKvMetrics {
+                    worker_id,
+                    request_active_slots: fwd_pass_metrics.worker_stats.request_active_slots,
+                    request_total_slots: fwd_pass_metrics.worker_stats.request_total_slots,
+                    kv_active_blocks: fwd_pass_metrics.kv_stats.kv_active_blocks,
+                    kv_total_blocks: fwd_pass_metrics.kv_stats.kv_total_blocks,
+                    num_requests_waiting: fwd_pass_metrics.worker_stats.num_requests_waiting,
+                    gpu_cache_usage_perc: fwd_pass_metrics.kv_stats.gpu_cache_usage_perc,
+                    gpu_prefix_cache_hit_rate: fwd_pass_metrics.kv_stats.gpu_prefix_cache_hit_rate,
+                }
             })
             .collect();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             Ok(AggregatedMetrics {
                 endpoints: endpoint_kv_metrics,
-                load_avg: endpoints.load_avg,
-                load_std: endpoints.load_std,
+                load_avg,
+                load_std,
             })
         })
     }
@@ -714,5 +721,97 @@ impl KvRecorder {
     fn shutdown(&self) -> PyResult<()> {
         self.inner.shutdown();
         Ok(())
+    }
+}
+
+#[pyclass]
+#[repr(transparent)]
+pub struct ForwardPassMetrics(pub RsForwardPassMetrics);
+
+#[pyclass]
+#[repr(transparent)]
+pub struct WorkerStats(pub RsWorkerStats);
+
+#[pyclass]
+#[repr(transparent)]
+pub struct KvStats(pub RsKvStats);
+
+#[pyclass]
+#[repr(transparent)]
+pub struct SpecDecodeStats(pub RsSpecDecodeStats);
+
+#[pymethods]
+impl ForwardPassMetrics {
+    #[new]
+    #[pyo3(signature = (worker_stats, kv_stats, spec_decode_stats = None))]
+    fn new(
+        worker_stats: &WorkerStats,
+        kv_stats: &KvStats,
+        spec_decode_stats: Option<&SpecDecodeStats>,
+    ) -> Self {
+        Self(RsForwardPassMetrics {
+            worker_stats: worker_stats.0.clone(),
+            kv_stats: kv_stats.0.clone(),
+            spec_decode_stats: spec_decode_stats.map(|s| s.0.clone()),
+        })
+    }
+}
+
+#[pymethods]
+impl WorkerStats {
+    #[new]
+    #[pyo3(signature = (request_active_slots, request_total_slots, num_requests_waiting, data_parallel_rank=None))]
+    fn new(
+        request_active_slots: u64,
+        request_total_slots: u64,
+        num_requests_waiting: u64,
+        data_parallel_rank: Option<u32>,
+    ) -> Self {
+        Self(RsWorkerStats {
+            data_parallel_rank,
+            request_active_slots,
+            request_total_slots,
+            num_requests_waiting,
+        })
+    }
+}
+
+#[pymethods]
+impl KvStats {
+    #[new]
+    #[pyo3(signature = (kv_active_blocks, kv_total_blocks, gpu_cache_usage_perc, gpu_prefix_cache_hit_rate))]
+    fn new(
+        kv_active_blocks: u64,
+        kv_total_blocks: u64,
+        gpu_cache_usage_perc: f32,
+        gpu_prefix_cache_hit_rate: f32,
+    ) -> Self {
+        Self(RsKvStats {
+            kv_active_blocks,
+            kv_total_blocks,
+            gpu_cache_usage_perc,
+            gpu_prefix_cache_hit_rate,
+        })
+    }
+}
+
+#[pymethods]
+impl SpecDecodeStats {
+    #[new]
+    #[pyo3(signature = (num_spec_tokens, num_drafts, num_draft_tokens, num_accepted_tokens, num_accepted_tokens_per_pos))]
+    fn new(
+        num_spec_tokens: Option<u32>,
+        num_drafts: Option<u32>,
+        num_draft_tokens: Option<u32>,
+        num_accepted_tokens: Option<u32>,
+        num_accepted_tokens_per_pos: Option<Vec<u32>>,
+    ) -> Self {
+        Self(RsSpecDecodeStats {
+            num_spec_tokens,
+            num_drafts,
+            num_draft_tokens,
+            num_accepted_tokens,
+            num_accepted_tokens_per_pos,
+        })
     }
 }

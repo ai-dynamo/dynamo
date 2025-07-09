@@ -73,6 +73,17 @@ impl Encoder for SentencePieceTokenizer {
             spans,
         })
     }
+
+    /// Encodes multiple string inputs into tokens using the SentencePiece model.
+    ///
+    /// # Arguments
+    /// * `inputs` - The texts to encode
+    ///
+    /// # Returns
+    /// * `Result<Vec<Encoding>>` - The encoded tokens for each input
+    fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>> {
+        inputs.iter().map(|input| self.encode(input)).collect()
+    }
 }
 
 impl Decoder for SentencePieceTokenizer {
@@ -81,7 +92,7 @@ impl Decoder for SentencePieceTokenizer {
     /// # Arguments
     /// * `token_ids` - The sequence of token IDs to decode
     /// * `skip_special_tokens` - Currently unsupported in SentencePieceTokenizer and
-    /// it will return an error if true
+    ///   it will return an error if true
     ///
     /// # Returns
     /// * `Result<String>` - The decoded text

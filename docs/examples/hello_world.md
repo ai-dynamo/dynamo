@@ -134,10 +134,7 @@ export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
 ```
 
 # Deploy to Kubernetes
-
-Use the provided CRD to deploy (TODO)
-```bash
-kubectl apply -f hello-world.yaml
+# TODO: Deploy your service using a DynamoGraphDeployment CR.
 ```
 
 ### Testing the Deployment

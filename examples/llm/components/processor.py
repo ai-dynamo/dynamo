@@ -102,7 +102,11 @@ class Processor(ProcessMixIn):
             .client()
         )
 
-        self.use_router = self.engine_args.router in (RouterType.KV, RouterType.KV_LOAD)
+        self.use_router = self.engine_args.router in (
+            RouterType.KV,
+            RouterType.KV_LOAD,
+            RouterType.APPROX_KV,
+        )
         if self.use_router:
             router_ns, router_name = Router.dynamo_address()  # type: ignore
             self.router_client = (
@@ -238,7 +242,11 @@ class Processor(ProcessMixIn):
                 # TODO: queue request at processor when engines are full
                 router_mode = (await self.etcd_kv_cache.get("router")).decode()
 
-                self.use_router = router_mode in (RouterType.KV, RouterType.KV_LOAD)
+                self.use_router = router_mode in (
+                    RouterType.KV,
+                    RouterType.KV_LOAD,
+                    RouterType.APPROX_KV,
+                )
 
                 prefix_hit_rate = 0.0  # Default value
                 if self.use_router:
@@ -248,6 +256,7 @@ class Processor(ProcessMixIn):
                             hashes=compute_block_hash_for_seq_py(
                                 token_ids, self.engine_args.block_size
                             ),
+                            tokens=token_ids,
                             num_tokens=len(token_ids),
                         ).model_dump_json()
                     )

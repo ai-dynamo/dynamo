@@ -143,6 +143,7 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
         Endpoint::Completions => 0,
         Endpoint::ChatCompletions => 1,
         Endpoint::Embeddings => todo!(),
+        Endpoint::Responses => todo!(),
     };
 
     let request_type = match request_type {

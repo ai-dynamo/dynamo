@@ -26,7 +26,7 @@ keywords.workspace = true
 
 [features]
 default = []
-cuda = ["mistralrs/cuda", "candle-core/cuda"]
+cuda = ["mistralrs/cuda"]
 metal = ["mistralrs/metal"]
 
 [dependencies]
@@ -34,13 +34,12 @@ dynamo-runtime = { workspace = true }
 dynamo-llm = { workspace = true }
 
 anyhow = { workspace = true }
-async-openai = "0.27.2"
+async-openai = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
-candle-core = { version = "0.8.0" }
 either = { workspace = true }
-indexmap = { version = "2.6" }
-mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs.git", rev = "ebd50e35e" }
+indexmap = { version = "2.9.0", features = ["serde"] }
+mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs.git", version = "0.6.0" }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }

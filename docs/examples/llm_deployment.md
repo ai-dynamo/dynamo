@@ -147,7 +147,7 @@ This figure shows an overview of the major components to deploy:
 ```
 
 ```{note}
-The planner component is enabled by default for all deployment architectures but is set to no-op mode. This means the planner observes metrics but doesn't take scaling actions. To enable active scaling, you can add `--Planner.no-operation=false` to your `dynamo serve` command. For more details, see [PLanner](../architecture/planner.md).
+The planner component is enabled by default for all deployment architectures but is set to no-op mode. This means the planner observes metrics but doesn't take scaling actions. To enable active scaling, you can add `--Planner.no-operation=false` to your `dynamo serve` command. For more details, see [PLanner](../architecture/planner_intro.rst).
 ```
 
 ### Example architectures
@@ -243,7 +243,7 @@ DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk
 
 # Deploy to Kubernetes
 export DEPLOYMENT_NAME=llm-agg
-dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
+# TODO: Deploy your service using a DynamoGraphDeployment CR.
 ```
 
 **Note**: Optionally add `--Planner.no-operation=false` at the end of the deployment command to enable the planner component to take scaling actions on your deployment.

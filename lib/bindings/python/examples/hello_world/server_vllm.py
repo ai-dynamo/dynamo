@@ -44,6 +44,7 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
+DEFAULT_TEMPERATURE = 0.7
 
 
 class Config:
@@ -69,7 +70,8 @@ class RequestHandler:
         # print(f"Received request: {request}")
         prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
         sampling_params = SamplingParams(
-            temperature=request["sampling_options"]["temperature"],
+            temperature=request["sampling_options"]["temperature"]
+            or DEFAULT_TEMPERATURE,
             # vllm defaults this to 16
             max_tokens=request["stop_conditions"]["max_tokens"],
         )

@@ -65,7 +65,7 @@ If you don't want to use the dev container, you can set the environment up manua
    - etcd
    - NATS.io
 
-   Before starting dyanmo, run both etcd and NATS.io in seperate processes.
+   Before starting dynamo, run both etcd and NATS.io in separate processes.
 
 3. Install required system packages:
    ```bash

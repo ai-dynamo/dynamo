@@ -18,6 +18,7 @@
 class BasePlannerDefaults:
     namespace = "dynamo"
     environment = "local"
+    backend = "vllm_v0"
     no_operation = False
     log_dir = None
     adjustment_interval = 180  # in seconds
@@ -48,12 +49,16 @@ class SLAPlannerDefaults(BasePlannerDefaults):
 
 class VllmV0ComponentName:
     prefill_worker = "PrefillWorker"
+    prefill_worker_endpoint = "mock"
     decode_worker = "VllmWorker"
+    decode_worker_endpoint = "generate"
 
 
 class VllmV1ComponentName:
     prefill_worker = "VllmPrefillWorker"
+    prefill_worker_endpoint = "generate"
     decode_worker = "VllmDecodeWorker"
+    decode_worker_endpoint = "generate"
 
 
 WORKER_COMPONENT_NAMES = {

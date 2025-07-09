@@ -57,7 +57,7 @@ class DisaggregatedTypeConverter:
         else:
             encoded_opaque_state = (
                 base64.b64encode(tllm_disagg_params.opaque_state).decode("utf-8")
-                if tllm_disagg_params is not None
+                if tllm_disagg_params.opaque_state is not None
                 else None
             )
             return DisaggregatedParams(

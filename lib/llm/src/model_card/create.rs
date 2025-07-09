@@ -76,7 +76,7 @@ impl ModelDeploymentCard {
         let content = super::model::load_gguf(gguf_file)?;
         let context_length = content.get_metadata()[&format!("{}.context_length", content.arch())]
             .to_u32()
-            .unwrap_or(0) as usize;
+            .unwrap_or(0);
         tracing::debug!(context_length, "Loaded context length from GGUF");
 
         Ok(Self {
