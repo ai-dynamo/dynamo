@@ -162,12 +162,12 @@ pub fn try_parse_call_common(message: &str) -> anyhow::Result<Option<ToolCallRes
 
     // Support <TOOLCALL>[ ... ] or <tool_call>[ ... ]
     let json = if trimmed.starts_with("<TOOLCALL>[") && trimmed.ends_with("]</TOOLCALL>") {
-        tracing::info!("Stripping <TOOLCALL> wrapper from tool call payload");
+        tracing::debug!("Stripping <TOOLCALL> wrapper from tool call payload");
         &trimmed["<TOOLCALL>[".len()..trimmed.len() - "]</TOOLCALL>".len()]
 
     // Support custom/LLM-formatted `<|python_tag|>` preamble
     } else if let Some(stripped) = trimmed.strip_prefix("<|python_tag|>") {
-        tracing::info!("Stripping <|python_tag|> prefix from tool call payload");
+        tracing::debug!("Stripping <|python_tag|> prefix from tool call payload");
         stripped
 
     // Otherwise, assume input is clean JSON
