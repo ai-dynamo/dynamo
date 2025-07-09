@@ -22,6 +22,8 @@ use derive_getters::Dissolve;
 use rayon::prelude::*;
 use std::ops::Range;
 
+pub mod blocks;
+
 /// A token is represented as a 32-bit unsigned integer.
 pub type Token = u32;
 
@@ -844,6 +846,18 @@ impl TokenBlockSequence {
         };
 
         (result_blocks, current_block)
+    }
+
+    pub fn from_slice(tokens: &[Token], block_size: u32, salt_hash: Option<SaltHash>) -> Self {
+        assert!(block_size > 0, "block_size must be greater than 0");
+        let salt_hash = salt_hash.unwrap_or(0);
+        let (blocks, current_block) = Self::split_tokens(tokens, block_size, salt_hash);
+
+        Self {
+            blocks,
+            current_block,
+            salt_hash,
+        }
     }
 }
 

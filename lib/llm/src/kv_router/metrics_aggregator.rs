@@ -15,7 +15,7 @@
 
 use std::sync::Once;
 
-pub use crate::kv_router::protocols::ForwardPassMetrics;
+pub use crate::kv_router::protocols::{ForwardPassMetrics, LoadMetrics, PredictiveLoadMetrics};
 use crate::kv_router::KV_METRICS_ENDPOINT;
 
 use crate::kv_router::scheduler::Endpoint;
@@ -27,6 +27,37 @@ use tokio_util::sync::CancellationToken;
 
 static METRICS_WAITING_MESSAGE: Once = Once::new();
 static METRICS_FOUND_MESSAGE: Once = Once::new();
+
+pub struct EndpointCollector {
+    pub service_name: String,
+    pub endpoints_rx: watch::Receiver<ProcessedEndpoints>,
+}
+
+impl EndpointCollector {
+    pub async fn new(component: Component, cancellation_token: CancellationToken) -> Self {
+        let (watch_tx, watch_rx) = watch::channel(ProcessedEndpoints::default());
+
+        tokio::spawn(collect_endpoints_task(
+            component.clone(),
+            watch_tx,
+            cancellation_token.clone(),
+            "generate".to_string(),
+        ));
+
+        Self {
+            service_name: component.service_name(),
+            endpoints_rx: watch_rx,
+        }
+    }
+
+    pub fn get_endpoints(&self) -> ProcessedEndpoints {
+        self.endpoints_rx.borrow().clone()
+    }
+
+    pub fn endpoints_watcher(&self) -> watch::Receiver<ProcessedEndpoints> {
+        self.endpoints_rx.clone()
+    }
+}
 
 pub struct KvMetricsAggregator {
     pub service_name: String,
@@ -41,6 +72,7 @@ impl KvMetricsAggregator {
             component.clone(),
             watch_tx,
             cancellation_token.clone(),
+            KV_METRICS_ENDPOINT.to_string(),
         ));
 
         Self {
@@ -93,11 +125,15 @@ pub async fn collect_endpoints_task(
     component: Component,
     watch_tx: watch::Sender<ProcessedEndpoints>,
     cancel: CancellationToken,
+    subject: String,
 ) {
     let backoff_delay = Duration::from_millis(100);
     let scrape_timeout = Duration::from_millis(300);
-    let endpoint = component.endpoint(KV_METRICS_ENDPOINT);
+    let endpoint = component.endpoint(&subject);
     let service_subject = endpoint.subject();
+
+    // Keep track of the last sent value to avoid unnecessary updates
+    let mut last_sent: Option<ProcessedEndpoints> = None;
 
     loop {
         tokio::select! {
@@ -115,30 +151,58 @@ pub async fn collect_endpoints_task(
                             continue;
                         }
                     };
-                let endpoints: Vec<Endpoint> = unfiltered_endpoints
-                    .into_iter()
-                    .filter(|s| s.data.is_some())
-                    .filter_map(|s|
-                        match s.data.unwrap().decode::<ForwardPassMetrics>() {
-                            Ok(data) => Some(Endpoint {
-                                name: s.name,
-                                subject: s.subject,
-                                data,
-                            }),
-                            Err(e) => {
-                                tracing::debug!("skip endpoint data that can't be parsed as ForwardPassMetrics: {:?}", e);
-                                None
-                            }
-                        }
-                    )
-                    .collect();
+
+                let endpoints: Vec<Endpoint> = if subject == KV_METRICS_ENDPOINT {
+                    // Original filtering behavior
+                    unfiltered_endpoints
+                        .into_iter()
+                        .filter_map(|s| {
+                            s.data?
+                                .decode::<ForwardPassMetrics>()
+                                .map(|data| Endpoint {
+                                    name: s.name,
+                                    subject: s.subject,
+                                    data: LoadMetrics::EngineLoadMetrics(data),
+                                })
+                                .inspect_err(|e| {
+                                    tracing::warn!("skip endpoint data that can't be parsed as ForwardPassMetrics: {:?}", e);
+                                })
+                                .ok()
+                        })
+                        .collect()
+                } else {
+                    // No filtering - just use default LoadMetrics
+                    unfiltered_endpoints
+                        .into_iter()
+                        .map(|s| Endpoint {
+                            name: s.name,
+                            subject: s.subject,
+                            data: LoadMetrics::default(),
+                        })
+                        .collect()
+                };
+
                 tracing::trace!("Found {} endpoints for service: {service_subject}", endpoints.len());
 
                 let processed = ProcessedEndpoints::new(endpoints);
 
-                if watch_tx.send(processed).is_err() {
-                    tracing::trace!("failed to send processed endpoints; shutting down");
-                    break;
+                // Only send if different from last sent value
+                // This is necessary because the watch channel does not track changes
+                // https://docs.rs/tokio/latest/tokio/sync/watch/struct.Receiver.html#method.has_changed
+                let should_send = match &last_sent {
+                    Some(last) => last != &processed,
+                    None => true,
+                };
+
+                if should_send {
+                    tracing::trace!("Endpoints changed, sending update for service: {service_subject}");
+                    if watch_tx.send(processed.clone()).is_err() {
+                        tracing::error!("failed to send processed endpoints; shutting down");
+                        break;
+                    }
+                    last_sent = Some(processed);
+                } else {
+                    tracing::trace!("Endpoints unchanged, skipping update for service: {service_subject}");
                 }
             }
         }

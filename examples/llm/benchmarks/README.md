@@ -43,7 +43,7 @@ This guide provides detailed steps on benchmarking Large Language Models (LLMs) 
  3. Start NATS and ETCD
 
     ```bash
-    docker compose -f deploy/docker_compose.yml up -d
+    docker compose -f deploy/metrics/docker-compose.yml up -d
     ```
 
 > [!NOTE]

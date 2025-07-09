@@ -258,8 +258,6 @@ pkill srun
 - This example has only been tested on a 4xGB200 node setup with 16 GPUs using
   FP4 weights. In theory, the example should work on alternative setups such as
   H100 nodes with FP8 weights, but this hasn't been tested yet.
-- This example only tests an aggregated model setup for now. A disaggregated
-  serving example will be added in the near future.
 - WideEP configs in this directory are still being tested. A WideEP specific
   example with documentation will be added once ready.
 - There are known issues where WideEP workers may not cleanly shut down:

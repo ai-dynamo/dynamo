@@ -15,6 +15,7 @@
 
 use super::*;
 use crate::{error, Result};
+use maybe_error::MaybeError;
 
 pub trait AnnotationsProvider {
     fn annotations(&self) -> Option<Vec<String>>;
@@ -28,7 +29,7 @@ pub trait AnnotationsProvider {
 /// Our services have the option of returning an "annotated" stream, which allows use
 /// to include additional information with each delta. This is useful for debugging,
 /// performance benchmarking, and improved observability.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Annotated<R> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<R>,
@@ -146,6 +147,28 @@ impl<R> Annotated<R> {
     }
 }
 
+impl<R> MaybeError for Annotated<R>
+where
+    R: for<'de> Deserialize<'de> + Serialize,
+{
+    fn from_err(err: Box<dyn std::error::Error>) -> Self {
+        Annotated::from_error(format!("{:?}", err))
+    }
+
+    fn err(&self) -> Option<Box<dyn std::error::Error>> {
+        if self.is_error() {
+            if let Some(comment) = &self.comment {
+                if !comment.is_empty() {
+                    return Some(anyhow::Error::msg(comment.join("; ")).into());
+                }
+            }
+            Some(anyhow::Error::msg("unknown error").into())
+        } else {
+            None
+        }
+    }
+}
+
 // impl<R> Annotated<R>
 // where
 //     R: for<'de> Deserialize<'de> + Serialize,
@@ -166,3 +189,27 @@ impl<R> Annotated<R> {
 //         Box::pin(stream)
 //     }
 // }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_maybe_error() {
+        let annotated = Annotated::from_data("Test data".to_string());
+        assert!(annotated.err().is_none());
+        assert!(annotated.is_ok());
+        assert!(!annotated.is_err());
+
+        let annotated = Annotated::<String>::from_error("Test error 2".to_string());
+        assert_eq!(format!("{}", annotated.err().unwrap()), "Test error 2");
+        assert!(!annotated.is_ok());
+        assert!(annotated.is_err());
+
+        let annotated =
+            Annotated::<String>::from_err(anyhow::Error::msg("Test error 3".to_string()).into());
+        assert_eq!(format!("{}", annotated.err().unwrap()), "Test error 3");
+        assert!(!annotated.is_ok());
+        assert!(annotated.is_err());
+    }
+}

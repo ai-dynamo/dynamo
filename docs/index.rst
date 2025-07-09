@@ -79,7 +79,8 @@ Dive in: Examples
    Disaggregated Serving <architecture/disagg_serving.md>
    KV Block Manager <architecture/kvbm_intro.rst>
    KV Cache Routing <architecture/kv_cache_routing.md>
-   Planner <architecture/planner.md>
+   Planner <architecture/planner_intro.rst>
+   Dynamo Architecture Flow <architecture/dynamo_flow.md>
 
 .. toctree::
    :hidden:

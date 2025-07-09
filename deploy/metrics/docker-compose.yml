@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# IMPORT NOTE: Make sure this is in sync with lib/runtime/docker-compose.yml
 networks:
   server:
     driver: bridge
@@ -83,6 +84,8 @@ services:
     networks:
       - monitoring
 
+  # To access Prometheus from another machine, you may need to disable te firewall on your host. On Ubuntu:
+  # sudo ufw allow 9090/tcp
   prometheus:
     image: prom/prometheus:v3.4.1
     container_name: prometheus
@@ -98,11 +101,13 @@ services:
     restart: unless-stopped
     # Example to pull from the /query endpoint:
     # {__name__=~"DCGM.*", job="dcgm-exporter"}
-    ports:
-      - "9090:9090"
     networks:
       - monitoring
+    ports:
+      - "9090:9090"
     profiles: [metrics]
+    extra_hosts:
+    - "host.docker.internal:host-gateway"
     depends_on:
       - dcgm-exporter
       - nats-prometheus-exporter
@@ -110,23 +115,29 @@ services:
 
   # grafana connects to prometheus via the /query endpoint.
   # Default credentials are dynamo/dynamo.
+  # To access Grafana from another machine, you may need to disable te firewall on your host. On Ubuntu:
+  # sudo ufw allow 3001/tcp
   grafana:
     image: grafana/grafana-enterprise:12.0.1
     container_name: grafana
     volumes:
-      - ./grafana.json:/etc/grafana/provisioning/dashboards/llm-worker-dashboard.json
-      - ./grafana-dcgm-dashboard.json:/etc/grafana/provisioning/dashboards/dcgm-dashboard.json
+      - ./grafana_dashboards:/etc/grafana/provisioning/dashboards
       - ./grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
-      - ./grafana-dashboard-providers.yml:/etc/grafana/provisioning/dashboards/dashboard-providers.yml
     environment:
       # Port 3000 is already used by "dynamo serve", so use 3001
       - GF_SERVER_HTTP_PORT=3001
+      # do not make it admin/admin, because you will be prompted to change the password every time
       - GF_SECURITY_ADMIN_USER=dynamo
       - GF_SECURITY_ADMIN_PASSWORD=dynamo
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_INSTALL_PLUGINS=grafana-piechart-panel
       # Default min interval is 5s, but can be configured lower
       - GF_DASHBOARDS_MIN_REFRESH_INTERVAL=2s
+      # Disable password change requirement
+      - GF_SECURITY_DISABLE_INITIAL_ADMIN_CREATION=false
+      - GF_SECURITY_ADMIN_PASSWORD_POLICY=false
+      - GF_AUTH_DISABLE_LOGIN_FORM=false
+      - GF_AUTH_DISABLE_SIGNOUT_MENU=false
     restart: unless-stopped
     ports:
       - "3001:3001"
