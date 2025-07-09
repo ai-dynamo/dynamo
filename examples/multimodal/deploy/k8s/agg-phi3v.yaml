@@ -18,8 +18,6 @@ metadata:
   name: agg-phi3v
 spec:
   envs:
-    - name: DYN_DEPLOYMENT_CONFIG
-      value: '{ "Common": {"model": "microsoft/Phi-3.5-vision-instruct", "block-size": 64, "max-model-len": 4096, "trust-remote-code": true}, "Frontend": { "common-configs": [ "model" ] }, "Processor": { "router": "round-robin", "prompt-template": "<|user|>\n<|image_1|>\n<prompt><|end|>\n<|assistant|>\n", "common-configs": [ "model", "block-size", "max-model-len", "trust-remote-code" ] }, "VllmDecodeWorker": { "enforce-eager": true, "max-num-batched-tokens": 16384, "max-num-seqs": 2, "mm-processor-kwargs": { "num_crops": 16 }, "enable-prefix-caching": true, "image-token-id": 32000, "num-patches": 757, "router": "random", "tensor-parallel-size": 1, "ServiceArgs": { "workers": 1, "resources": { "gpu": "1" } }, "common-configs": [ "model", "block-size", "max-model-len", "trust-remote-code" ] }, "VllmEncodeWorker": { "tensor-parallel-size": 1, "router": "random", "ServiceArgs": { "workers": 1, "resources": { "gpu": "1" } }, "common-configs": [ "model" ] } }'
   services:
     Frontend:
       dynamoNamespace: agg-phi3v
@@ -46,6 +44,8 @@ spec:
             - --use-default-health-checks
             - --service-name
             - Frontend
+            - -f
+            - ./configs/agg-phi3v.yaml
     Processor:
       dynamoNamespace: agg-phi3v
       componentType: worker
@@ -71,6 +71,8 @@ spec:
             - --use-default-health-checks
             - --service-name
             - Processor
+            - -f
+            - ./configs/agg-phi3v.yaml
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: agg-phi3v
@@ -98,6 +100,8 @@ spec:
             - --use-default-health-checks
             - --service-name
             - VllmDecodeWorker
+            - -f
+            - ./configs/agg-phi3v.yaml
     VllmEncodeWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: agg-phi3v
@@ -125,3 +129,5 @@ spec:
             - --use-default-health-checks
             - --service-name
             - VllmEncodeWorker
+            - -f
+            - ./configs/agg-phi3v.yaml
