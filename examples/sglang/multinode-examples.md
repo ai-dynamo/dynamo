@@ -14,7 +14,7 @@ SGLang allows you to deploy multi-node sized models by adding in the `dist-init-
 Node 1: Run HTTP ingress, processor, and 8 shards of the prefill worker
 ```bash
 # run ingress
-dynamo run in=http out=dyn &
+dynamo run in=http out=dyn --http-port=8000 &
 # run prefill worker
 python3 components/worker.py \
   --model-path /model/ \
