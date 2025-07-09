@@ -185,6 +185,11 @@ class Router:
         This allows the router to account for requests that have been dispatched but
         not yet reflected in the polled metrics.
         """
+        # Initialize if worker_id is not present
+        if worker_id not in self.active_blocks_dict:
+            self.active_blocks_dict[worker_id] = [polled_value, polled_value]
+            return polled_value
+    
         old_value, predictive_value = self.active_blocks_dict[worker_id]
 
         # Check if polled value is different from old value
