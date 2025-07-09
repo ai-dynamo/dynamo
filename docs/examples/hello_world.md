@@ -93,47 +93,12 @@ curl -X 'POST' \
 }'
 ```
 
-## Deploying to and Running the Example in Kubernetes
-
-This example can be deployed to a Kubernetes cluster using [Dynamo Cloud](../../docs/guides/dynamo_deploy/dynamo_cloud.md) and the Dynamo CLI.
-Dynamo Cloud acts as an orchestration layer between the end user and Kubernetes, handling the complexity of deploying your graphs for you.
-
-### Prerequisites
-
-You must have first followed the instructions in [deploy/cloud/helm/README.md](../../deploy/cloud/helm/README.md) to create your Dynamo cloud deployment.
-
-Make sure your dynamo cloud the `deploy.sh --crds --interactive` script finished successfully.
-
-### Now deploy your Hello World graph.
-
-
-```bash
-# Set your dynamo root directory
-cd <root-dynamo-folder>
-export PROJECT_ROOT=$(pwd)
-export NAMESPACE=hello-world # the namespace you used to deploy Dynamo cloud to.
-```
-
-Pick your deployment destination.
-
-If local
-
-```bash
-export DYNAMO_CLOUD=http://localhost:8080
-```
-
-If kubernetes
-```bash
-export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com
-```
-
-Export the [Dynamo Base Image](../../get_started.md#building-the-dynamo-base-image) you want to use (or built during the prerequisites step) as the `DYNAMO_IMAGE` environment variable.
-
-```bash
-export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
-```
-
 # Deploy to Kubernetes
+
+You should build the images for the Dynamo Cloud Platform.
+If you are a **👤 Dynamo User** first follow the [Quickstart Guide](../guides/dynamo_deploy/quickstart.md) first.
+If you are a **🧑‍💻 Dynamo Contributor** you would have to rebuild the dynamo platform images as the code evolves. To do so please look at the [Cloud Guide](../../../docs/guides/dynamo_deploy/dynamo_cloud.md).
+
 # TODO: Deploy your service using a DynamoGraphDeployment CR.
 ```
 
