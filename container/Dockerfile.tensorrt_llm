@@ -371,6 +371,8 @@ CMD []
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
+ARG ARCH_ALT
+
 WORKDIR /workspace
 ENV DYNAMO_HOME=/workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
@@ -408,7 +410,7 @@ RUN uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 # Common dependencies
-# ToDo: Remove extra install and use pyproject.toml to define all dependencies
+# TODO: Remove extra install and use pyproject.toml to define all dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     uv pip install --requirement /tmp/requirements.txt
 
@@ -462,7 +464,6 @@ COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATT
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-*-linux-gnu.so /usr/local/lib/python3.12/dist-packages/
 
 # Setup environment variables
-ARG ARCH_ALT
 ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins
 ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:/opt/hpcx/ompi/lib:$LD_LIBRARY_PATH
 ENV PATH=/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
@@ -480,15 +481,14 @@ COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 RUN uv pip install --index-url "${TENSORRTLLM_INDEX_URL}" \
     --extra-index-url https://pypi.org/simple \
     "${TENSORRTLLM_PIP_WHEEL}" && \
-    uv pip install ai-dynamo --find-links wheelhouse && \
-    uv pip install nixl --find-links wheelhouse
+    uv pip install ai-dynamo nixl --find-links wheelhouse
 
 # Setup TRTLLM environment variables, same as in dev image
 ENV TRTLLM_USE_UCX_KVCACHE=1
 COPY --from=dev /usr/local/bin/set_trtllm_env.sh /usr/local/bin/set_trtllm_env.sh
 RUN echo 'source /usr/local/bin/set_trtllm_env.sh' >> /root/.bashrc
 
-# Copy benchmarks, exmaples and tests for CI
+# Copy benchmarks, examples and tests for CI
 # TODO: Remove this once we have a functional CI image built on top of the runtime image
 COPY tests /workspace/tests
 COPY benchmarks /workspace/benchmarks

@@ -22,6 +22,12 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use validator::Validate;
 
+/// Default HTTP server host
+const DEFAULT_HTTP_SERVER_HOST: &str = "0.0.0.0";
+
+/// Default HTTP server port
+const DEFAULT_HTTP_SERVER_PORT: u16 = 9090;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerConfig {
     /// Grace shutdown period for http-service.
@@ -71,6 +77,22 @@ pub struct RuntimeConfig {
     #[builder(default = "512")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub max_blocking_threads: usize,
+
+    /// HTTP server host for health and metrics endpoints
+    #[builder(default = "DEFAULT_HTTP_SERVER_HOST.to_string()")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub http_server_host: String,
+
+    /// HTTP server port for health and metrics endpoints
+    /// If set to 0, the system will assign a random available port
+    #[builder(default = "DEFAULT_HTTP_SERVER_PORT")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub http_server_port: u16,
+
+    /// Health and metrics HTTP server enabled
+    #[builder(default = "false")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub http_enabled: bool,
 }
 
 impl RuntimeConfig {
@@ -107,10 +129,20 @@ impl RuntimeConfig {
         Ok(config)
     }
 
+    /// Check if HTTP server should be enabled
+    /// HTTP server is enabled by default, but can be disabled by setting DYN_RUNTIME_HTTP_ENABLED to false
+    /// If a port is explicitly provided, HTTP server will be enabled regardless
+    pub fn http_server_enabled(&self) -> bool {
+        self.http_enabled
+    }
+
     pub fn single_threaded() -> Self {
         RuntimeConfig {
             num_worker_threads: 1,
             max_blocking_threads: 1,
+            http_server_host: DEFAULT_HTTP_SERVER_HOST.to_string(),
+            http_server_port: DEFAULT_HTTP_SERVER_PORT,
+            http_enabled: false,
         }
     }
 
@@ -129,6 +161,9 @@ impl Default for RuntimeConfig {
         Self {
             num_worker_threads: 16,
             max_blocking_threads: 16,
+            http_server_host: DEFAULT_HTTP_SERVER_HOST.to_string(),
+            http_server_port: DEFAULT_HTTP_SERVER_PORT,
+            http_enabled: false,
         }
     }
 }
@@ -142,6 +177,22 @@ impl RuntimeConfigBuilder {
     }
 }
 
+/// Check if a string is truthy
+/// This will be used to evaluate environment variables or any other subjective
+/// configuration parameters that can be set by the user that should be evaluated
+/// as a boolean value.
+pub fn is_truthy(val: &str) -> bool {
+    matches!(val.to_lowercase().as_str(), "1" | "true" | "on" | "yes")
+}
+
+/// Check if a string is falsey
+/// This will be used to evaluate environment variables or any other subjective
+/// configuration parameters that can be set by the user that should be evaluated
+/// as a boolean value (opposite of is_truthy).
+pub fn is_falsey(val: &str) -> bool {
+    matches!(val.to_lowercase().as_str(), "0" | "false" | "off" | "no")
+}
+
 /// Check if an environment variable is truthy
 pub fn env_is_truthy(env: &str) -> bool {
     match std::env::var(env) {
@@ -150,12 +201,12 @@ pub fn env_is_truthy(env: &str) -> bool {
     }
 }
 
-/// Check if a string is truthy
-/// This will be used to evaluate environment variables or any other subjective
-/// configuration parameters that can be set by the user that should be evaluated
-/// as a boolean value.
-pub fn is_truthy(val: &str) -> bool {
-    matches!(val.to_lowercase().as_str(), "1" | "true" | "on" | "yes")
+/// Check if an environment variable is falsey
+pub fn env_is_falsey(env: &str) -> bool {
+    match std::env::var(env) {
+        Ok(val) => is_falsey(val.as_str()),
+        Err(_) => false,
+    }
 }
 
 /// Check whether JSONL logging enabled
@@ -238,5 +289,92 @@ mod tests {
                 Ok(())
             },
         )
+    }
+
+    #[test]
+    fn test_runtime_config_http_server_env_vars() -> Result<()> {
+        temp_env::with_vars(
+            vec![
+                ("DYN_RUNTIME_HTTP_SERVER_HOST", Some("127.0.0.1")),
+                ("DYN_RUNTIME_HTTP_SERVER_PORT", Some("9090")),
+            ],
+            || {
+                let config = RuntimeConfig::from_settings()?;
+                assert_eq!(config.http_server_host, "127.0.0.1");
+                assert_eq!(config.http_server_port, 9090);
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn test_http_server_enabled_by_default() {
+        temp_env::with_vars(vec![("DYN_RUNTIME_HTTP_ENABLED", None::<&str>)], || {
+            let config = RuntimeConfig::from_settings().unwrap();
+            assert!(!config.http_server_enabled());
+        });
+    }
+
+    #[test]
+    fn test_http_server_disabled_explicitly() {
+        temp_env::with_vars(vec![("DYN_RUNTIME_HTTP_ENABLED", Some("false"))], || {
+            let config = RuntimeConfig::from_settings().unwrap();
+            assert!(!config.http_server_enabled());
+        });
+    }
+
+    #[test]
+    fn test_http_server_enabled_explicitly() {
+        temp_env::with_vars(vec![("DYN_RUNTIME_HTTP_ENABLED", Some("true"))], || {
+            let config = RuntimeConfig::from_settings().unwrap();
+            assert!(config.http_server_enabled());
+        });
+    }
+
+    #[test]
+    fn test_http_server_enabled_by_port() {
+        temp_env::with_vars(vec![("DYN_RUNTIME_HTTP_SERVER_PORT", Some("8080"))], || {
+            let config = RuntimeConfig::from_settings().unwrap();
+            assert!(!config.http_server_enabled());
+            assert_eq!(config.http_server_port, 8080);
+        });
+    }
+
+    #[test]
+    fn test_is_truthy_and_falsey() {
+        // Test truthy values
+        assert!(is_truthy("1"));
+        assert!(is_truthy("true"));
+        assert!(is_truthy("TRUE"));
+        assert!(is_truthy("on"));
+        assert!(is_truthy("yes"));
+
+        // Test falsey values
+        assert!(is_falsey("0"));
+        assert!(is_falsey("false"));
+        assert!(is_falsey("FALSE"));
+        assert!(is_falsey("off"));
+        assert!(is_falsey("no"));
+
+        // Test opposite behavior
+        assert!(!is_truthy("0"));
+        assert!(!is_falsey("1"));
+
+        // Test env functions
+        temp_env::with_vars(vec![("TEST_TRUTHY", Some("true"))], || {
+            assert!(env_is_truthy("TEST_TRUTHY"));
+            assert!(!env_is_falsey("TEST_TRUTHY"));
+        });
+
+        temp_env::with_vars(vec![("TEST_FALSEY", Some("false"))], || {
+            assert!(!env_is_truthy("TEST_FALSEY"));
+            assert!(env_is_falsey("TEST_FALSEY"));
+        });
+
+        // Test missing env vars
+        temp_env::with_vars(vec![("TEST_MISSING", None::<&str>)], || {
+            assert!(!env_is_truthy("TEST_MISSING"));
+            assert!(!env_is_falsey("TEST_MISSING"));
+        });
     }
 }

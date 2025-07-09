@@ -1816,6 +1816,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "async_zmq",
+ "axum 0.8.3",
  "blake3",
  "bytes",
  "chrono",

@@ -276,10 +276,8 @@ class DynamoServeProcess(ManagedProcess):
 
         # Handle multimodal deployments differently
         if "multimodal" in graph.directory:
-            # Set DYNAMO_PORT environment variable for multimodal
-            env = os.environ.copy()
-            env["DYNAMO_PORT"] = str(port)
-            # Don't add health check on port since multimodal uses DYNAMO_PORT
+            # port is currently required to be 8000
+            assert port == 8000
         else:
             # Regular LLM deployments
             command.extend(["--Frontend.port", str(port)])
