@@ -1,5 +1,6 @@
 # Quickstart
 
+
 ## Set Environment Variables
 
 ```bash
@@ -26,11 +27,26 @@ helm install dynamo-crds dynamo-crds-v0.3.2.tgz \
 
 **Step 2: Install Dynamo Platform**
 
-Run the following helm command:
+Run the following helm command to install from published docker images:
 
 ```bash
 helm install dynamo-platform dynamo-platform-v0.3.2.tgz --namespace ${NAMESPACE}
 ```
+
+Run the following helm commands to install from custom docker images:
+
+```bash
+# create a secret for the docker registry (you can reuse an existing secret if you have one)
+kubectl create secret docker-registry <docker-secret-name> \
+  --docker-server=<docker-registry> \
+  --docker-username=<docker-username> \
+  --docker-password=<docker-password> \
+  --namespace=${NAMESPACE}
+
+helm install dynamo-platform dynamo-platform-v0.3.2.tgz --namespace ${NAMESPACE} --set "dynamo-operator.controllerManager.manager.image.repository=<docker-registry>/<image-name>" --set "dynamo-operator.controllerManager.manager.image.tag=<image-tag>" --set "dynamo-operator.imagePullSecrets[0].name=<docker-secret-name>"
+```
+
+
 
 ## Install Dynamo Components
 
