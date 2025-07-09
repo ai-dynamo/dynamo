@@ -38,7 +38,8 @@ pub struct PreprocessedRequest {
     /// are needed.
     pub sampling_options: SamplingOptions,
 
-    /// OutputOptions are options that control the output of the inference engine.
+    /// OutputOptions are options that control the output of the inference engine such as whether
+    /// to return log probabilities, or whether to skip special tokens in output.
     pub output_options: OutputOptions,
 
     /// The EOS token ID(s) for the Model

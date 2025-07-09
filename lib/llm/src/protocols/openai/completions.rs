@@ -290,16 +290,10 @@ impl OpenAIOutputOptionsProvider for NvCreateCompletionRequest {
     }
 
     fn get_prompt_logprobs(&self) -> Option<u32> {
-        match self.inner.echo {
-            Some(echo) => {
-                if echo {
-                    Some(1_u32)
-                } else {
-                    None
-                }
-            }
-            None => None,
-        }
+        self.inner.echo.map(|echo| match echo {
+            true => 1,
+            false => 0,
+        })
     }
 
     fn get_skip_special_tokens(&self) -> Option<bool> {

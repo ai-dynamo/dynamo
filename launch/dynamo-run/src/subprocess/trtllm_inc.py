@@ -443,15 +443,7 @@ def process_sampling_params(
     request, default_sampling_params: SamplingParams
 ) -> SamplingParams:
     """
-    Process sampling parameters from vllm to a common format.
-    Returns a dictionary with processed parameter values that can be used to construct
-    either tensorrt_llm.SamplingParams or trtllm.SamplingConfig
-
-    Args:
-        sampling_params: vllm SamplingParams object
-
-    Returns:
-        dict: A dictionary with processed parameter values
+    Process sampling parameters from request to trtllm.SamplingParams.
     """
     sampling_params = request["sampling_options"]
     output_options = request["output_options"]
@@ -530,7 +522,6 @@ def process_sampling_params(
         n_seq = 1
 
     trtllm_sampling_params = default_sampling_params
-    trtllm_sampling_params.use_beam_search = False
     trtllm_sampling_params.use_beam_search = False  #  changes output if set to True
     trtllm_sampling_params.top_k = top_k
     trtllm_sampling_params.top_p = top_p
