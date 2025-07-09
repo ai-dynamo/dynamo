@@ -1,11 +1,15 @@
 # Quickstart
 
-
 ## Set Environment Variables
 
 ```bash
 export NAMESPACE=dynamo-cloud
 ```
+
+
+if the charts are published.
+
+## Install with helm.
 
 ### Authenticate with NGC
 
@@ -21,7 +25,6 @@ helm fetch https://helm.ngc.nvidia.com/nvidia/charts/dynamo-crds-v0.3.2.tgz
 
 # fetch the platform helm chart
 helm fetch https://helm.ngc.nvidia.com/nvidia/charts/dynamo-platform-v0.3.2.tgz
-
 ```
 
 ## Install Dynamo Cloud
@@ -37,23 +40,24 @@ helm install dynamo-crds dynamo-crds-v0.3.2.tgz \
 
 **Step 2: Install Dynamo Platform**
 
-Run the following helm command to install from published docker images:
-
 ```bash
-helm install dynamo-platform dynamo-platform-v0.3.2.tgz --namespace ${NAMESPACE}
-```
+export NAMESPACE=your-kubernetes-namespace
 
-Run the following helm commands to install from custom docker images:
+export DOCKER_USERNAME=your-name
+export DOCKER_PASSWORD=your-password
+export DOCKER_SERVER=gitlab-master.nvidia.com:5005/aire/microservices/compoundai
+export IMAGE_TAG=3a4adda55d8ed0c0d03f280b6644566002bec026
+export DOCKER_SECRET_NAME="my-pull-secret"
 
-```bash
-# create a secret for the docker registry (you can reuse an existing secret if you have one)
-kubectl create secret docker-registry <docker-secret-name> \
-  --docker-server=<docker-registry> \
-  --docker-username=<docker-username> \
-  --docker-password=<docker-password> \
+kubectl create namespace ${NAMESPACE}
+
+kubectl create secret docker-registry ${DOCKER_SECRET_NAME} \
+  --docker-server=${DOCKER_SERVER} \
+  --docker-username=${DOCKER_USERNAME} \
+  --docker-password=${DOCKER_PASSWORD} \
   --namespace=${NAMESPACE}
 
-helm install dynamo-platform dynamo-platform-v0.3.2.tgz --namespace ${NAMESPACE} --set "dynamo-operator.controllerManager.manager.image.repository=<docker-registry>/<image-name>" --set "dynamo-operator.controllerManager.manager.image.tag=<image-tag>" --set "dynamo-operator.imagePullSecrets[0].name=<docker-secret-name>"
+helm install dynamo-platform ./deploy/cloud/helm/platform   --namespace ${NAMESPACE}   --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator"   --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}"   --set "dynamo-operator.imagePullSecrets[0].name=${DOCKER_SECRET_NAME}"
 ```
 
 
