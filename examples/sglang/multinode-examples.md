@@ -97,7 +97,7 @@ SGLang typically requires a warmup period to ensure the DeepGEMM kernels are loa
 curl ${HEAD_PREFILL_NODE_IP}:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "model": "deepseek-ai/DeepSeek-R1",
     "messages": [
     {
         "role": "user",
