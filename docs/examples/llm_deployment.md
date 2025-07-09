@@ -257,10 +257,10 @@ Once the deployment is complete, you can test it using:
 export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
 
 # Forward the pod's port to localhost
-kubectl port-forward svc/$FRONTEND_SVC 3000:3000 -n ${KUBE_NS}
+kubectl port-forward svc/$FRONTEND_SVC 8000:8000 -n ${KUBE_NS}
 
 # Test the API endpoint
-curl localhost:3000/v1/chat/completions \
+curl localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
