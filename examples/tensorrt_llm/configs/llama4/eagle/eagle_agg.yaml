@@ -23,7 +23,7 @@ Frontend:
 TensorRTLLMWorker:
   served_model_name: "nvidia/Llama-4-Maverick-17B-128E-Eagle3"
   model-path: "nvidia/Llama-4-Maverick-17B-128E-Eagle3"
-  extra-engine-args: "configs/llama4/engine_configs/agg_config.yaml"
+  extra-engine-args: "configs/llama4/eagle/engine_configs/agg_config.yaml"
   router: round-robin
   ServiceArgs:
     workers: 1

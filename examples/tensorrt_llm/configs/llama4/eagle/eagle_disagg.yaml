@@ -34,7 +34,7 @@ TensorRTLLMWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 4
+      gpu: 8
 
 TensorRTLLMPrefillWorker:
   # NOTE: FP4 only supported starting with Blackwell GPUs.
@@ -49,4 +49,4 @@ TensorRTLLMPrefillWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 4
+      gpu: 8
