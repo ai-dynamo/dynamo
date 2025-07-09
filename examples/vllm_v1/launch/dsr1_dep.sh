@@ -99,8 +99,7 @@ for ((i=0; i<GPUS_PER_NODE; i++)); do
         VLLM_USE_DEEP_GEMM=1 \
         VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1 \
         python3 components/main.py \
-        --model /lustre/share/coreai_dlalgo_ci/artifacts/model/deepseek-r1_pyt/safetensors_mode-instruct/hf-5dde110-nim_fp8 \
-        --served-model-name deepseek-ai/DeepSeek-R1 \
+        --model deepseek-ai/DeepSeek-R1 \
         --data_parallel_size $DATA_PARALLEL_SIZE \
         --data-parallel-rank $dp_rank \
         --enable-expert-parallel \
