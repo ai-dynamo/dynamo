@@ -98,11 +98,6 @@ spec:
             - --use-default-health-checks
             - --service-name
             - VllmDecodeWorker
-            - "5000"
-            - --enable-system-app
-            - --use-default-health-checks
-            - --service-name
-            - VllmDecodeWorker
     VllmEncodeWorker:
       envFromSecret: hf-token-secret
       dynamoNamespace: agg-phi3v
@@ -125,11 +120,6 @@ spec:
             - serve
             - graphs.agg:VllmEncodeWorker
             - --system-app-port
-            - "5000"
-            - --enable-system-app
-            - --use-default-health-checks
-            - --service-name
-            - VllmEncodeWorker
             - "5000"
             - --enable-system-app
             - --use-default-health-checks
