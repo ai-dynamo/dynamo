@@ -139,8 +139,6 @@ retry_command() {
 
 # Update the helm repo and build the dependencies
 retry_command "$HELM_CMD repo add nats https://nats-io.github.io/k8s/helm/charts/" 5 5 && \
-retry_command "$HELM_CMD repo add bitnami https://charts.bitnami.com/bitnami" 5 5 && \
-retry_command "$HELM_CMD repo add minio https://charts.min.io/" 5 5 && \
 retry_command "$HELM_CMD repo update" 5 5
 
 
@@ -187,11 +185,15 @@ if [ "$INSTALL_CRDS" = true ]; then
   $HELM_CMD upgrade --install dynamo-crds crds/ --namespace default --wait --atomic
 fi
 
-# Install/upgrade the helm chart
-echo "Installing/upgrading helm chart..."
-$HELM_CMD upgrade --install $RELEASE_NAME platform/ \
-  -f generated-values.yaml \
-  --create-namespace \
-  --namespace ${NAMESPACE}
+# Build Platform
+echo "Building platform..."
+$HELM_CMD dep build ./platform/
 
+# Install platform
+echo "Installing platform..."
+helm install dynamo-platform ./platform/ \
+  --namespace ${NAMESPACE} \
+  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
+  --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
+  --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret"
 echo "Helm chart deployment complete"
