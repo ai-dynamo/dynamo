@@ -16,8 +16,8 @@ import uvloop
 from dynamo.llm import EngineType, EntrypointArgs, make_engine, run_input
 from dynamo.runtime import DistributedRuntime
 
-# Global process reference for cleanup
-subprocess_ref = None
+subprocess_ref = None  # Global process reference for cleanup
+subprocess_task = None  # Global async task reference for cleanup
 
 
 def parse_args():
@@ -138,6 +138,7 @@ def signal_handler():
 
 async def run():
     global subprocess_ref
+    global subprocess_task
 
     # Register signal handlers
     loop = asyncio.get_running_loop()
@@ -193,9 +194,10 @@ async def run():
             )
 
             try:
-                async for line in subprocess_ref.stdout:
-                    print(line.decode().rstrip())
-                await subprocess_ref.wait()
+                if subprocess_ref.stdout is not None:
+                    async for line in subprocess_ref.stdout:
+                        print(f"Engine: {line.decode().rstrip()}")
+                    await subprocess_ref.wait()
             except asyncio.CancelledError:
                 # Task was cancelled, terminate the subprocess
                 await cleanup_subprocess_async()
@@ -204,7 +206,7 @@ async def run():
         task = asyncio.create_task(stream_subprocess_output())
 
         # Store the task reference for potential cleanup
-        loop.subprocess_task = task
+        subprocess_task = task
 
         # Set out_mode to "dyn" because we talk to the subprocess over NATS
         out_mode = "dyn"
@@ -240,10 +242,10 @@ async def run():
         await cleanup_subprocess_async()
 
         # Cancel the subprocess task if it exists
-        if hasattr(loop, "subprocess_task"):
-            loop.subprocess_task.cancel()
+        if subprocess_task:
+            subprocess_task.cancel()
             try:
-                await loop.subprocess_task
+                await subprocess_task
             except asyncio.CancelledError:
                 pass
 
