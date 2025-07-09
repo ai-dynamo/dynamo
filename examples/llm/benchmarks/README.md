@@ -25,9 +25,6 @@ This guide provides detailed steps on benchmarking Large Language Models (LLMs) 
 
 ## Prerequisites
 
-> [!Important]
-> At least one 8xH100-80GB node is required for the following instructions.
-
  1. Build benchmarking image
 
     ```bash
@@ -45,6 +42,48 @@ This guide provides detailed steps on benchmarking Large Language Models (LLMs) 
     ```bash
     docker compose -f deploy/metrics/docker-compose.yml up -d
     ```
+
+## Quick-start: Aggregated Single Node Benchmarking
+
+Don't have 8xH100 GPUs? The following benchmark can be run on a single GPU. See sections below for large-scale experiments.
+
+1. **Run a development container**
+
+   ```bash
+   ./container/run.sh --mount-workspace --hf-cache ~/.cache/huggingface
+   ```
+
+2. **Start Dynamo in aggregated mode**
+
+   ```bash
+   cd /workspace/examples/llm
+   dynamo serve graphs.agg:Frontend \
+   -f configs/agg.yaml \
+   --Common.model=Qwen/Qwen3-0.6B \
+   --Frontend.served_model_name=Qwen/Qwen3-0.6B
+   ```
+
+
+3. **Run the benchmark**
+
+   Change `--model` to match the model defined in `examples/llm/configs/agg.yaml`.
+
+   ```bash
+   bash -x /workspace/benchmarks/llm/perf.sh \
+     --mode aggregated \
+     --tensor-parallelism 1 \
+     --data-parallelism 1 \
+     --model Qwen/Qwen3-0.6B \
+   ```
+
+The script writes its results under `artifacts_root/artifacts_<N>/`; you can immediately plot a Pareto curve with:
+
+```bash
+python3 /workspace/benchmarks/llm/plot_pareto.py --artifacts-root-dir artifacts_root --title "Aggregated Single GPU"
+```
+
+> [!Important]
+> At least one 8xH100-80GB node is required for the following instructions.
 
 > [!NOTE]
 > This guide was tested on node(s) with the following hardware configuration:
