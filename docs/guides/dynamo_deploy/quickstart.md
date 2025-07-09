@@ -47,7 +47,14 @@ helm install dynamo-platform dynamo-platform-v0.3.2.tgz --namespace ${NAMESPACE}
 ```
 
 
-## Create a Kubernetes secret containing your sensitive values if needed:
+## Explore Examples
+
+### Hello World
+
+For a basic example that doesn't require a GPU, see the [Hello World](../../examples/hello_world.md)
+
+### LLM example
+Create a Kubernetes secret containing your sensitive values if needed:
 
 ```bash
 export HF_TOKEN=your_hf_token
@@ -56,9 +63,6 @@ kubectl create secret generic dynamo-env-secrets \
   --from-literal=another_secret.key=value \
   -n $NAMESPACE
 ```
-
-
-## Install Dynamo Components
 
 ```bash
 kubectl apply -f examples/llm/deploy/agg.yaml

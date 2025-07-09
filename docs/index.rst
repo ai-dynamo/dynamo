@@ -30,6 +30,11 @@ The NVIDIA Dynamo Platform is a high-performance, low-latency inference framewor
    - `Dynamo examples repo <https://github.com/ai-dynamo/examples>`_
 
 
+Quick Start
+-----------------
+Follow the :doc:`Quick Guide to install Dynamo Platform <guides/dynamo_deploy/quickstart>`.
+
+
 Dive in: Examples
 -----------------
 
@@ -119,6 +124,7 @@ and is driven by a transparent development approach. Check out our repo at https
    :hidden:
    :caption: Deployment Guides
 
+   Dynamo Deploy Quickstart <guides/dynamo_deploy/quickstart.md>
    Dynamo Cloud Kubernetes Platform <guides/dynamo_deploy/dynamo_cloud.md>
    Deploying Dynamo Inference Graphs to Kubernetes using the Dynamo Cloud Platform <guides/dynamo_deploy/operator_deployment.md>
    Manual Helm Deployment <guides/dynamo_deploy/manual_helm_deployment.md>

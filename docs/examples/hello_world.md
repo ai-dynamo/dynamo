@@ -106,8 +106,6 @@ Make sure your dynamo cloud the `deploy.sh --crds --interactive` script finished
 
 ### Now deploy your Hello World graph.
 
-For details, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md) but it is sufficient to follow the instructions below.
-
 
 ```bash
 # Set your dynamo root directory
@@ -137,7 +135,7 @@ export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
 
 # Deploy to Kubernetes
 
-Use the provided CRD to deploy
+Use the provided CRD to deploy (TODO)
 ```bash
 kubectl apply -f hello-world.yaml
 ```
