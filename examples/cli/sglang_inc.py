@@ -57,10 +57,8 @@ class RequestHandler:
         sampling_params = {}
         if request["sampling_options"]["temperature"] is not None:
             sampling_params["temperature"] = request["sampling_options"]["temperature"]
-        sampling_params = {
-            # sglang defaults this to 128
-            "max_new_tokens": request["stop_conditions"]["max_tokens"],
-        }
+        # sglang defaults this to 128
+        sampling_params["max_new_tokens"] = request["stop_conditions"]["max_tokens"]
 
         # Check if this is a batch request
         is_batch = "batch_token_ids" in request and request["batch_token_ids"]
@@ -68,7 +66,6 @@ class RequestHandler:
         if is_batch:
             # Track tokens separately for each batch item
             num_output_tokens_so_far = {}
-            logging.debug("received batch token ids")
             gen = await self.engine_client.async_generate(
                 input_ids=request["batch_token_ids"],
                 sampling_params=sampling_params,
@@ -76,7 +73,6 @@ class RequestHandler:
             )
         else:
             num_output_tokens_so_far = 0
-            logging.debug("received token ids")
             gen = await self.engine_client.async_generate(
                 input_ids=request["token_ids"],
                 sampling_params=sampling_params,
@@ -85,7 +81,6 @@ class RequestHandler:
 
         async for res in gen:
             # res is a dict
-            logging.debug(f"res: {res}")
             finish_reason = res["meta_info"]["finish_reason"]
 
             if is_batch:
