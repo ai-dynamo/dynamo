@@ -124,12 +124,50 @@ async def run():
         "dyn": EngineType.Dynamic,
     }
     out_mode = args["out_mode"]
+
+    # Handle subprocess execution for sglang and vllm
+    if out_mode in ["sglang", "vllm", "trtllm"]:
+        # Determine which script to run
+        script_name = f"{out_mode}_inc.py"
+        script_path = Path(__file__).parent / script_name
+
+        # Build command with all relevant arguments
+        cmd = [sys.executable, str(script_path)]
+
+        # Add arguments if they exist
+        if args["model_path"]:
+            cmd.extend(["--model-path", args["model_path"]])
+
+        flags = args["flags"]
+        if flags.model_name:
+            cmd.extend(["--model-name", flags.model_name])
+        if flags.context_length:
+            cmd.extend(["--context-length", str(flags.context_length)])
+        if flags.kv_cache_block_size:
+            cmd.extend(["--kv-cache-block-size", str(flags.kv_cache_block_size)])
+
+        # Start subprocess in background and stream output
+        print(f"Starting {out_mode} subprocess: {' '.join(cmd)}")
+
+        async def stream_subprocess_output():
+            process = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT
+            )
+
+            async for line in process.stdout:
+                print(line.decode().rstrip())
+
+            await process.wait()
+
+        asyncio.create_task(stream_subprocess_output())
+
+        # Set out_mode to "dyn" because we talk to the subprocess over NATS
+        out_mode = "dyn"
+
     engine_type = engine_type_map.get(out_mode)
     if engine_type is None:
         print(f"Unsupported output type: {out_mode}")
         sys.exit(1)
-
-    # TODO: The "vllm", "sglang" and "trtllm" cases should call Python directly
 
     entrypoint_kwargs = {"model_path": args["model_path"]}
 
