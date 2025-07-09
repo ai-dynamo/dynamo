@@ -15,7 +15,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: jsm-agg
+  name: agg
 spec:
   services:
     Frontend:
