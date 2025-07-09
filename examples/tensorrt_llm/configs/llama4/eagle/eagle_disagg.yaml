@@ -14,18 +14,14 @@
 # limitations under the License.
 
 Frontend:
-  served_model_name: "nvidia/Llama-4-Maverick-17B-128E-Eagle3"
+  served_model_name: "meta-llama/Llama-4-Maverick-17B-128E"
   endpoint: dynamo.TensorRTLLMWorker.generate
   port: 8000
   router: round-robin
 
 TensorRTLLMWorker:
-  served_model_name: "nvidia/Llama-4-Maverick-17B-128E-Eagle3"
-  # NOTE: FP4 only supported starting with Blackwell GPUs.
-  # https://huggingface.co/nvidia/DeepSeek-R1-FP4
-  # You can also specify the full path to locally downloaded weights
-  # instead of a HuggingFace ID here.
-  model-path: "nvidia/Llama-4-Maverick-17B-128E-Eagle3"
+  served_model_name: "meta-llama/Llama-4-Maverick-17B-128E"
+  model-path: "meta-llama/Llama-4-Maverick-17B-128E"
   # Path to a YAML file containing additional keyword arguments to pass to the TRTLLM engine.
   # The fields in `extra-engine-args` holds higher priority than the above TRTLLM engine fields.
   extra-engine-args: "configs/llama4/eagle/engine_configs/decode_config.yaml"
@@ -41,7 +37,7 @@ TensorRTLLMPrefillWorker:
   # https://huggingface.co/nvidia/DeepSeek-R1-FP4
   # You can also specify the full path to locally downloaded weights
   # instead of a HuggingFace ID here.
-  model-path: "nvidia/Llama-4-Maverick-17B-128E-Eagle3"
+  model-path: "meta-llama/Llama-4-Maverick-17B-128E"
   # Path to a YAML file containing additional keyword arguments to pass to the TRTLLM engine.
   # The fields in `extra-engine-args` holds higher priority than the above TRTLLM engine fields.
   extra-engine-args: "configs/llama4/eagle/engine_configs/prefill_config.yaml"

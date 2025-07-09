@@ -31,7 +31,7 @@ kv_cache_config:
 
 # Enable the MTP(Multi-Token Prediction) in the model engine
 speculative_config:
-  decoding_type: MTP
+  decoding_type: Eagle
   num_nextn_predict_layers: 1
 
 use_cuda_graph: true
