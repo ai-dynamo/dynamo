@@ -18,6 +18,7 @@ import logging
 import math
 import os
 import subprocess
+import time
 
 import numpy as np
 import yaml
@@ -32,6 +33,7 @@ from utils.plot import (
 )
 from utils.utils import (
     get_available_gpu_count,
+    get_dynamo_env,
     get_dynamo_serve_cmd,
     shutdown_deployment,
     wait_for_server_ready,
@@ -102,6 +104,12 @@ if __name__ == "__main__":
         default=6,
         help="how many samples to benchmark to interpolate ITL under different active kv cache size and decode context length",
     )
+    parser.add_argument(
+        "--disaggregated",
+        action="store_true",
+        default=False,
+        help="Use disaggregated mode (graphs.disagg:Frontend) instead of aggregated mode (graphs.agg:Frontend). Default is aggregated mode.",
+    )
     args = parser.parse_args()
 
     config_modifier = CONFIG_MODIFIERS[args.backend]
@@ -117,6 +125,7 @@ if __name__ == "__main__":
                 "Failed to infer example directory, please provide explicitly using --example-dir <path-to-example-dir>"
             )
             exit(1)
+    logger.debug(f"Example directory: {args.example_dir}")
 
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
@@ -124,7 +133,15 @@ if __name__ == "__main__":
     # Get the number of available GPUs
     available_gpus = get_available_gpu_count()
 
-    profile_tp_size = [2**i for i in range(int(math.log2(available_gpus)) + 1)]
+    if available_gpus == 0:
+        logger.error("No GPUs detected. This could be due to:")
+        logger.error("1. NVML library not available in the container")
+        logger.error("2. No GPUs actually available")
+        logger.error("3. GPU access not properly configured")
+        exit(1)
+    else:
+        profile_tp_size = [2**i for i in range(int(math.log2(available_gpus)) + 1)]
+
     logger.info(f"Profiling TP sizes: {profile_tp_size}")
 
     os.makedirs(args.output_dir, exist_ok=True)
@@ -153,7 +170,7 @@ if __name__ == "__main__":
 
         # Start the dynamo serve process
         logger.info(f"Starting dynamo serve with TP size {tp_size}...")
-        dynamo_serve_cmd = get_dynamo_serve_cmd(prefill_config_fn)
+        dynamo_serve_cmd = get_dynamo_serve_cmd(prefill_config_fn, args.disaggregated)
         with open(dynamo_log_fn, "w") as dynamo_log_f:
             dynamo_process = subprocess.Popen(
                 dynamo_serve_cmd,
@@ -161,12 +178,19 @@ if __name__ == "__main__":
                 stderr=subprocess.STDOUT,
                 text=True,
                 cwd=args.example_dir,
+                env=get_dynamo_env(),
                 preexec_fn=os.setsid,  # Use process group for clean termination
             )
 
         if not wait_for_server_ready(model_name, port):
             logger.error(f"Server did not become ready, skip profiling tp={tp_size}")
             break
+
+        # Additional wait for vLLM to fully initialize after server reports ready
+        logger.info(
+            "Server reported ready, waiting additional time for vLLM to fully initialize..."
+        )
+        time.sleep(30)
 
         # run genai-perf
         genai_perf_artifact_dir = f"{work_dir}/gap_isl{args.isl}"
@@ -215,7 +239,8 @@ if __name__ == "__main__":
 
         # Start the dynamo serve process
         logger.info(f"Starting dynamo serve with TP size {tp_size}...")
-        dynamo_serve_cmd = get_dynamo_serve_cmd(decode_config_fn)
+        dynamo_serve_cmd = get_dynamo_serve_cmd(decode_config_fn, args.disaggregated)
+        logger.debug(f"Dynamo serve command: {dynamo_serve_cmd}")
         with open(dynamo_log_fn, "w") as dynamo_log_f:
             dynamo_process = subprocess.Popen(
                 dynamo_serve_cmd,
@@ -223,12 +248,19 @@ if __name__ == "__main__":
                 stderr=subprocess.STDOUT,
                 text=True,
                 cwd=args.example_dir,
+                env=get_dynamo_env(),
                 preexec_fn=os.setsid,  # Use process group for clean termination
             )
 
         if not wait_for_server_ready(model_name, port):
             logger.error(f"Server did not become ready, skip profiling tp={tp_size}")
             break
+
+        # Additional wait for vLLM to fully initialize after server reports ready
+        logger.info(
+            "Server reported ready, waiting additional time for vLLM to fully initialize..."
+        )
+        time.sleep(30)
 
         max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(dynamo_log_fn)
         max_concurrency = max_kv_tokens // (args.isl + args.osl)
@@ -238,6 +270,9 @@ if __name__ == "__main__":
         logger.info(
             f"Sweeping num_request range based on maximum number of kv tokens: {sweep_num_request}"
         )
+        if len(sweep_num_request) == 0:
+            logger.error("No num_request to sweep")  # TODO: add a potential fix
+            exit(1)
 
         engine_decode_itl = []
         engine_decode_thpt_per_gpu = []
@@ -350,7 +385,7 @@ if __name__ == "__main__":
 
     # Start the dynamo serve process
     logger.info(f"Starting dynamo serve with TP size {tp_size}...")
-    dynamo_serve_cmd = get_dynamo_serve_cmd(prefill_config_fn)
+    dynamo_serve_cmd = get_dynamo_serve_cmd(prefill_config_fn, args.disaggregated)
     with open(dynamo_log_fn, "w") as dynamo_log_f:
         dynamo_process = subprocess.Popen(
             dynamo_serve_cmd,
@@ -358,12 +393,19 @@ if __name__ == "__main__":
             stderr=subprocess.STDOUT,
             text=True,
             cwd=args.example_dir,
+            env=get_dynamo_env(),
             preexec_fn=os.setsid,  # Use process group for clean termination
         )
 
     if not wait_for_server_ready(model_name, port):
         logger.error(f"Server did not become ready, skip profiling tp={tp_size}")
     else:
+        # Additional wait for vLLM to fully initialize after server reports ready
+        logger.info(
+            "Server reported ready, waiting additional time for vLLM to fully initialize..."
+        )
+        time.sleep(30)
+
         for isl in range(
             100,
             args.max_context_length,
@@ -428,7 +470,7 @@ if __name__ == "__main__":
 
     # Start the dynamo serve process
     logger.info(f"Starting dynamo serve with TP size {tp_size}...")
-    dynamo_serve_cmd = get_dynamo_serve_cmd(decode_config_fn)
+    dynamo_serve_cmd = get_dynamo_serve_cmd(decode_config_fn, args.disaggregated)
     with open(dynamo_log_fn, "w") as dynamo_log_f:
         dynamo_process = subprocess.Popen(
             dynamo_serve_cmd,
@@ -436,12 +478,19 @@ if __name__ == "__main__":
             stderr=subprocess.STDOUT,
             text=True,
             cwd=args.example_dir,
+            env=get_dynamo_env(),
             preexec_fn=os.setsid,  # Use process group for clean termination
         )
 
     if not wait_for_server_ready(model_name, port):
         logger.error(f"Server did not become ready, skip profiling tp={tp_size}")
     else:
+        # Additional wait for vLLM to fully initialize after server reports ready
+        logger.info(
+            "Server reported ready, waiting additional time for vLLM to fully initialize..."
+        )
+        time.sleep(30)
+
         max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(dynamo_log_fn)
 
         osl = 500  # not too large to reduce ITL variance, not too small to have stable measurement

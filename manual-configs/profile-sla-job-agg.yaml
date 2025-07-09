@@ -1,0 +1,51 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: profile-sla-agg
+  namespace: hannahz-dynamo
+spec:
+  template:
+    spec:
+      imagePullSecrets:
+        - name: docker-imagepullsecret
+      containers:
+      - name: profile-sla-agg
+        image: nvcr.io/nvidian/nim-llm-dev/dynamo-base-docker-llm:dep-178.14
+        resources:
+          requests:
+            nvidia.com/gpu: 2
+          limits:
+            nvidia.com/gpu: 2
+        env:
+          - name: HF_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: dynamo-env-secrets
+                key: huggingface.token
+          - name: NATS_SERVER
+            value: nats://hannahz-dynamo-nats:4222
+          - name: ETCD_ENDPOINTS
+            value: hannahz-dynamo-etcd:2379
+        command: ["python", "/workspace/benchmarks/profiler/profile_sla.py"]
+        args:
+          - --config
+          - /workspace/examples/llm/configs/agg.yaml
+          - --output-dir
+          - /workspace/profiling_results
+          - --isl
+          - "512"
+          - --osl
+          - "32"
+          - --ttft
+          - "500"
+          - --itl
+          - "50"
+        volumeMounts:
+          - name: output-volume
+            mountPath: /workspace/profiling_results
+      restartPolicy: Never
+      volumes:
+        - name: output-volume
+          persistentVolumeClaim:
+            claimName: profiling-pvc
+  backoffLimit: 1

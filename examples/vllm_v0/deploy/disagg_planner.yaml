@@ -16,10 +16,11 @@ apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
   name: disagg-planner
+  namespace: ${NAMESPACE}
 spec:
   envs:
     - name: DYN_DEPLOYMENT_CONFIG
-      value: '{"Common":{"model":"deepseek-ai/DeepSeek-R1-Distill-Llama-8B","block-size":64,"max-model-len":16384,"kv-transfer-config":"{\"kv_connector\":\"DynamoNixlConnector\"}"},"Frontend":{"served_model_name":"deepseek-ai/DeepSeek-R1-Distill-Llama-8B","endpoint":"dynamo.VllmWorker.generate","port":8000,"router":"round-robin","common-configs":["block-size"]},"VllmWorker":{"remote-prefill":true,"conditional-disagg":true,"max-local-prefill-length":10,"max-prefill-queue-size":2,"enable-prefix-caching":true,"common-configs":["model","block-size","max-model-len","kv-transfer-config"]},"PrefillWorker":{"max-num-batched-tokens":16384,"common-configs":["model","block-size","max-model-len","kv-transfer-config"]},"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:9090"]}]},{"job_name":"frontend","static_configs":[{"targets":["localhost:8000"]}]}]},"Planner":{"adjustment-interval":180,"profile-results-dir":"/workspace/examples/profiling_results","isl":3000,"osl":150,"ttft":0.5,"itl":0.05,"load-predictor":"arima"}}'
+      value: '{"Common":{"model":"deepseek-ai/DeepSeek-R1-Distill-Llama-8B","block-size":64,"max-model-len":16384,"kv-transfer-config":"{\"kv_connector\":\"DynamoNixlConnector\"}"},"Frontend":{"served_model_name":"deepseek-ai/DeepSeek-R1-Distill-Llama-8B","endpoint":"dynamo.VllmWorker.generate","port":8000,"router":"round-robin","common-configs":["block-size"]},"VllmWorker":{"remote-prefill":true,"conditional-disagg":true,"max-local-prefill-length":10,"max-prefill-queue-size":2,"enable-prefix-caching":true,"common-configs":["model","block-size","max-model-len","kv-transfer-config"]},"PrefillWorker":{"max-num-batched-tokens":16384,"common-configs":["model","block-size","max-model-len","kv-transfer-config"]},"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:9090"]}]},{"job_name":"frontend","static_configs":[{"targets":["localhost:8000"]}]}]},"Planner":{"adjustment-interval":180,"profile-results-dir":"/workspace/profiling_results","isl":3000,"osl":150,"ttft":0.5,"itl":0.05,"load-predictor":"arima"}}'
   services:
     Frontend:
       dynamoNamespace: vllm-v0-disagg-planner
@@ -129,6 +130,14 @@ spec:
             - --service-name
             - Planner
             - --Planner.environment=kubernetes
+          volumeMounts:
+          - name: profiling-results
+            mountPath: /workspace/profiling_results
+            readOnly: true
+        volumes:
+        - name: profiling-results
+          persistentVolumeClaim:
+            claimName: profiling-pvc
 
     Prometheus:
       dynamoNamespace: vllm-v0-disagg-planner

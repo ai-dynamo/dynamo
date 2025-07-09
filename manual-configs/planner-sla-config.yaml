@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: planner-config
+  namespace: hannahz-dynamo
+data:
+  planner.yaml: |
+    Planner:
+      environment: kubernetes
+      prometheus-endpoint: "http://prometheus:9090"
+      profile-results-dir: "/workspace/profiling_results"

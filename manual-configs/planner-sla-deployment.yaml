@@ -1,0 +1,34 @@
+# planner-sla-deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: planner-sla
+  namespace: hannahz-dynamo
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: planner-sla
+  template:
+    metadata:
+      labels:
+        app: planner-sla
+    spec:
+      imagePullSecrets:
+        - name: docker-imagepullsecret
+      containers:
+      - name: planner-sla
+        image: nvcr.io/nvidian/nim-llm-dev/dynamo-base-docker-llm:dep-178.2
+        command: ["python", "/workspace/examples/common/components/planner_sla.py"]
+        env:
+          - name: PROMETHEUS_ENDPOINT
+            value: "http://prometheus:9090"
+          - name: PROFILE_RESULTS_DIR
+            value: "/workspace/profiling_results"
+        volumeMounts:
+          - name: profiling-results
+            mountPath: /workspace/profiling_results
+      volumes:
+        - name: profiling-results
+          persistentVolumeClaim:
+            claimName: profiling-pvc

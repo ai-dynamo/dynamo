@@ -17,7 +17,7 @@ limitations under the License.
 
 # Planner
 
-The planner is a component that monitors the state of the system and makes adjustments to the number of workers to ensure that the system is running efficiently. It can dynamically scale prefill/decode workers up and down based on a variety of KV metrics. You can find documentation and benchmarking examples in the [planner docs](../../docs/guides/planner.md).
+The planner is a component that monitors the state of the system and makes adjustments to the number of workers to ensure that the system is running efficiently. It can dynamically scale prefill/decode workers up and down based on a variety of KV metrics. You can find documentation in the [load planner docs](../../docs/architecture/load_planner.md) and [SLA planner docs](../../docs/architecture/sla_planner.md), and benchmarking examples in the [planner benchmark docs](../../docs/guides/planner_benchmark/README.md).
 
 ## Usage
 
