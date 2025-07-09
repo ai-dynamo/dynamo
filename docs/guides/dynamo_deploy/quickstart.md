@@ -5,7 +5,17 @@
 
 ```bash
 export NAMESPACE=dynamo-cloud
+```
 
+### Authenticate with NGC
+
+```bash
+helm repo add nvidia https://helm.ngc.nvidia.com/nvidia --username='$oauthtoken' --password=<YOUR_NGC_API_KEY>
+```
+
+### Fetch helm charts
+
+```bash
 # fetch the crds helm chart
 helm fetch https://helm.ngc.nvidia.com/nvidia/charts/dynamo-crds-v0.3.2.tgz
 
