@@ -63,8 +63,9 @@ services:
   dcgm-exporter:
     image: nvidia/dcgm-exporter:4.2.3-4.1.3-ubi9
     ports:
-      # Remap from 9400 to 9401 (public port) to avoid conflict with an existing dcgm-exporter
-      # on a distributed environment. To access dcgm:
+      # Expose dcgm-exporter on port 9401 both inside and outside the container
+      # to avoid conflicts with other dcgm-exporter instances in distributed environments.
+      # To access DCGM metrics:
       # Outside the container: curl http://localhost:9401/metrics (or the host IP)
       # Inside the container (container-to-container): curl http://dcgm-exporter:9401/metrics
       - 9401:9401
