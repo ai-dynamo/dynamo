@@ -525,7 +525,7 @@ mod integration_tests {
     use super::*;
     use crate::kv_router::indexer::RouterEvent;
     use crate::kv_router::KV_EVENT_SUBJECT;
-    use crate::protocols::common::{SamplingOptions, StopConditions};
+    use crate::protocols::common::{OutputOptions, SamplingOptions, StopConditions};
     use dynamo_runtime::{
         pipeline::Context,
         pipeline::{network::Ingress, PushRouter},
@@ -640,6 +640,7 @@ mod integration_tests {
                 ..Default::default()
             },
             sampling_options: SamplingOptions::default(),
+            output_options: OutputOptions::default(),
             eos_token_ids: vec![],
             mdc_sum: None,
             annotations: vec![format!("dp_rank:{dp_rank}")],
