@@ -178,13 +178,7 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         help="File to log GPU utilization (default: None)",
     )
     parser.add_argument(
-        "--extra-engine-args",
-        type=str,
-        default="",
-        help="Path to a JSON file containing additional keyword arguments to pass to the vLLM AsyncLLMEngine.",
-    )
-    parser.add_argument(
-        "--model-name",
+        "--model",
         type=str,
         default="",
         help="Name to serve the model under. Defaults to deriving it from model path.",
@@ -206,7 +200,7 @@ def _validate_args(args: argparse.Namespace) -> None:
 
 
 def setup_prefill_node(
-    rank: int, prefill_host_ip: str, total_nodes: int, total_gpus: int, model_name: str, extra_engine_args: str
+    rank: int, prefill_host_ip: str, total_nodes: int, total_gpus: int, model_name: str
 ) -> int:
     """
     Setup the prefill node.
@@ -243,9 +237,9 @@ def setup_prefill_node(
     # For other examples, the command might have to be modified.
     dynamo_cmd = (
         f"python3 main.py "
-        f"--model-name /models/{model_name} "
+        f"--model {model_name} "
         f"--tensor-parallel-size {total_gpus // total_nodes} "
-        f"--extra-engine-args {extra_engine_args} "
+        "--enforce-eager "
         f"--is-prefill-worker "
     )
     return run_command(dynamo_cmd)
@@ -258,7 +252,6 @@ def setup_decode_node(
     total_nodes: int,
     total_gpus: int,
     model_name: str,
-    extra_engine_args: str,
 ) -> int:
     """
     Setup the decode node.
@@ -270,9 +263,9 @@ def setup_decode_node(
 
     dynamo_cmd = (
         "python3 main.py "
-        f"--model-name /models/{model_name} "
+        f"--model {model_name} "
         f"--tensor-parallel-size {total_gpus // total_nodes} "
-        f"--extra-engine-args {extra_engine_args} "
+        "--enforce-eager "
     )
 
     return run_command(dynamo_cmd)
@@ -310,8 +303,7 @@ def main(input_args: list[str] | None = None):
             args.prefill_host_ip,
             args.total_nodes,
             args.total_nodes * args.gpus_per_node,
-            args.model_path,
-            args.extra_engine_args,
+            args.model,
         )
     else:
         setup_decode_node(
@@ -320,8 +312,7 @@ def main(input_args: list[str] | None = None):
             args.prefill_host_ip,
             args.total_nodes,
             args.total_nodes * args.gpus_per_node,
-            args.model_path,
-            args.extra_engine_args,
+            args.model,
         )
 
     logging.info(f"{args.worker_type.capitalize()} node setup complete")
