@@ -238,8 +238,7 @@ class KvbmCacheManager(KVConnectorBase_V1):
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
-        # self.cache_manager.reset_prefix_cache()
-        return False
+        return self.cache_manager.reset_prefix_cache()
 
     def get_num_common_prefix_blocks(
         self,
@@ -325,64 +324,16 @@ class KvbmCacheManager(KVConnectorBase_V1):
                 - `True` if external KV cache tokens will be loaded
                   asynchronously (between scheduler steps).
         """
-        sequence_hashes = self._create_slot(request)
-
-        num_device_blocks = num_computed_tokens // self.block_size
-
-        (
-            host_computed_blocks,
-            disk_computed_blocks,
-        ) = self.cache_manager.get_num_offloaded_computed_blocks(
-            sequence_hashes, num_device_blocks
+        return self.cache_manager.get_num_new_matched_tokens(
+            request.request_id,
+            request.num_tokens,
+            num_computed_tokens,
         )
-
-        if host_computed_blocks is not None:
-            num_host_computed_blocks = host_computed_blocks.block_count()
-        else:
-            num_host_computed_blocks = 0
-
-        if disk_computed_blocks is not None:
-            num_disk_computed_blocks = disk_computed_blocks.block_count()
-        else:
-            num_disk_computed_blocks = 0
-
-        if self.log_stats:
-            assert self.prefix_cache_stats is not None
-            self.prefix_cache_stats.queries += request.num_tokens
-            self.prefix_cache_stats.hits += (
-                num_device_blocks + num_host_computed_blocks + num_disk_computed_blocks
-            ) * self.block_size
-
-        need_to_allocate = (
-            num_host_computed_blocks + num_disk_computed_blocks
-        ) * self.block_size
-
-        # In a full-prompt-hit case, we need to recompute the last token,
-        # to get the logits to generate the next token.
-        if num_computed_tokens + need_to_allocate == request.num_tokens:
-            need_to_allocate -= 1
-
-        if need_to_allocate > 0:
-            self.pending_onboard_blocks[request.request_id] = (
-                host_computed_blocks,
-                disk_computed_blocks,
-            )
-
-            return need_to_allocate, False
-
-        return 0, False
 
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
-        if request.request_id not in self.pending_onboard_blocks:
-            return
-
-        host_blocks, disk_blocks = self.pending_onboard_blocks.pop(request.request_id)
-
-        self.cache_manager.onboard_into_slot(
-            request.request_id, host_blocks, disk_blocks
-        )
+        self.cache_manager.trigger_onboard(request.request_id)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput

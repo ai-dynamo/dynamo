@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::block_manager::{DiskStorage, PinnedStorage};
+
 use super::*;
 
 #[allow(dead_code)]
@@ -34,6 +36,14 @@ pub struct Slot<S: Storage, L: LocalityProvider> {
 
     /// The mutable blocks
     mutable: VecDeque<MutableBlock<S, L, BasicMetadata>>,
+
+    /// Blocks to be onboarded from the host
+    /// We must hold these blocks in the slot state until the scheduler trigger the onboarding.
+    onboard_from_host: Option<Vec<ImmutableBlock<PinnedStorage, L, BasicMetadata>>>,
+
+    /// Blocks to be onboarded from the disk
+    /// We must hold these blocks in the slot state until the scheduler trigger the onboarding.
+    onboard_from_disk: Option<Vec<ImmutableBlock<DiskStorage, L, BasicMetadata>>>,
 }
 
 impl<S: Storage, L: LocalityProvider> std::fmt::Debug for Slot<S, L> {
@@ -64,6 +74,8 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
             sequence,
             immutable: Vec::new(),
             mutable: VecDeque::new(),
+            onboard_from_host: None,
+            onboard_from_disk: None,
         }
     }
 
@@ -311,6 +323,29 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
 }
 
 impl<L: LocalityProvider> Slot<DeviceStorage, L> {
+    #[tracing::instrument(level = "debug", skip(self, block_manager), ret)]
+    pub fn trigger_onboard(
+        &mut self,
+        block_manager: &dynamo_llm::block_manager::KvBlockManager<L, BasicMetadata>,
+    ) -> Result<(), SlotError> {
+        if self.onboard_from_host.is_none() && self.onboard_from_disk.is_none() {
+            return Err(SlotError::from_str("no onboard blocks to trigger"));
+        }
+
+        if let Some(host_blocks) = self.onboard_from_host.take() {
+            self.onboard_blocks_to_slot(host_blocks, block_manager)?;
+        }
+
+        if let Some(disk_blocks) = self.onboard_from_disk.take() {
+            self.onboard_blocks_to_slot(disk_blocks, block_manager)?;
+        }
+
+        tracing::debug!("onboarded blocks to slot {:?}", self);
+
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, bm), ret)]
     pub fn onboard_blocks_to_slot<T: Storage>(
         &mut self,
         offloaded_blocks: Vec<ImmutableBlock<T, L, BasicMetadata>>,
@@ -333,6 +368,21 @@ impl<L: LocalityProvider> Slot<DeviceStorage, L> {
             .map_err(|e| SlotError::from_str(&format!("failed to onboard blocks: {:?}", e)))?;
 
         self.immutable.extend(immutable_device_blocks);
+
+        Ok(())
+    }
+
+    pub fn store_onboard_blocks(
+        &mut self,
+        host_blocks: Vec<ImmutableBlock<PinnedStorage, L, BasicMetadata>>,
+        disk_blocks: Vec<ImmutableBlock<DiskStorage, L, BasicMetadata>>,
+    ) -> Result<(), SlotError> {
+        if self.onboard_from_host.is_some() || self.onboard_from_disk.is_some() {
+            return Err(SlotError::from_str("onboard blocks already stored"));
+        }
+
+        self.onboard_from_host = Some(host_blocks);
+        self.onboard_from_disk = Some(disk_blocks);
 
         Ok(())
     }
