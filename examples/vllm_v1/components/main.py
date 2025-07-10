@@ -113,6 +113,17 @@ def set_side_channel_host_and_port(
     """
     if hostname is None:
         hostname = socket.gethostname()
+        # Test if hostname is usable by attempting to bind to it
+        try:
+            test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            test_socket.bind((hostname, 0))
+            test_socket.close()
+        except (socket.error, socket.gaierror):
+            # If hostname is not usable, fall back to localhost
+            logger.warning(
+                f"Hostname '{hostname}' is not usable, falling back to '127.0.0.1'"
+            )
+            hostname = "127.0.0.1"
     if port is None:
         port = find_free_port()
     logger.debug("Setting VLLM_NIXL_SIDE_CHANNEL_HOST to %s", hostname)
