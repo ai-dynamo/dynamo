@@ -245,7 +245,12 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
         let expected_immutable_count = self.immutable.len() + computed_blocks.len();
 
         // create an iterator over the mutable blocks zipped with the token blocks
-        let zipped_blocks = self.sequence.blocks().iter().zip(computed_blocks);
+        let zipped_blocks = self
+            .sequence
+            .blocks()
+            .iter()
+            .skip(self.immutable.len())
+            .zip(computed_blocks);
 
         // validate the sequence hashes of the incoming immutable computed blocks
         // against the sequence hashes of blocks in the sequence.
