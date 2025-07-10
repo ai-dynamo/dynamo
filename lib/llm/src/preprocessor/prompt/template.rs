@@ -39,7 +39,9 @@ impl PromptFormatter {
                     .with_context(|| format!("fs:read_to_string '{file}'"))?;
                 let mut config: ChatTemplate = serde_json::from_str(&content)?;
                 // chat template may be stored in a separate file
-                if let Some(PromptFormatterArtifact::HfChatTemplate(chat_template_file)) = mdc.chat_template_file {
+                if let Some(PromptFormatterArtifact::HfChatTemplate(chat_template_file)) =
+                    mdc.chat_template_file
+                {
                     let chat_template = std::fs::read_to_string(&chat_template_file)
                         .with_context(|| format!("fs:read_to_string '{}'", chat_template_file))?;
                     // clean up the string to remove newlines
@@ -52,11 +54,9 @@ impl PromptFormatter {
                         .map_or(ContextMixins::default(), |x| ContextMixins::new(&x)),
                 )
             }
-            PromptFormatterArtifact::HfChatTemplate(_) => {
-                Err(anyhow::anyhow!(
-                    "prompt_formatter should not have type HfChatTemplate"
-                ))
-            }
+            PromptFormatterArtifact::HfChatTemplate(_) => Err(anyhow::anyhow!(
+                "prompt_formatter should not have type HfChatTemplate"
+            )),
             PromptFormatterArtifact::GGUF(gguf_path) => {
                 let config = ChatTemplate::from_gguf(&gguf_path)?;
                 Self::from_parts(config, ContextMixins::default())

@@ -163,13 +163,14 @@ impl PromptFormatterArtifact {
         // Some HF model (i.e. meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8)
         // stores the chat template as a separate file, we want to optionally store
         // the content if it exists and put the chat template into config as normalization
-        let template : anyhow::Result<Self> = Ok(Self::HfChatTemplate(
+        let template: anyhow::Result<Self> = Ok(Self::HfChatTemplate(
             check_for_file(repo_id, "chat_template.jinja").await?,
         ));
-        Ok(template.with_context(|| format!("unable to extract prompt format from repo {}", repo_id))
+        Ok(template
+            .with_context(|| format!("unable to extract prompt format from repo {}", repo_id))
             .ok())
     }
-    
+
     async fn try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
         Ok(Self::HfTokenizerConfigJson(
             check_for_file(repo, "tokenizer_config.json").await?,
