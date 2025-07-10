@@ -20,6 +20,12 @@ limitations under the License.
 This directory contains Helm charts for manually deploying Dynamo inference graphs to Kubernetes.
 This approach allows you to install Dynamo directly using a DynamoGraphDeploymentCRD values file, which is useful for quick deployments or testing specific configurations.
 
+### Prerequisites
+
+- Helm 3.0+
+- Kubernetes 1.16+
+- ETCD (without auth) and NATS (with jetstream enabled) services running in the cluster
+
 ### Basic Installation
 
 ```bash
