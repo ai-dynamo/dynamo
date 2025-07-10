@@ -185,32 +185,50 @@ impl ActiveSequences {
         self.active_blocks
     }
 
-    /// Push a token to a specific request's sequence
-    pub fn push(&mut self, request_id: &RequestId, token: u32) -> usize {
-        let token_seq = self
-            .active_seqs
-            .get_mut(request_id)
-            .expect("Request ID not found for token push");
-        token_seq.append(token).expect("Token push failed.");
+    /// Push tokens to a specific request's sequence
+    pub fn push(&mut self, request_id: &RequestId, tokens: &[u32]) -> usize {
+        // Collect operations to perform after releasing the borrow
+        let mut blocks_to_remove = Vec::new();
+        let mut blocks_to_add = Vec::new();
 
-        // No need to update anything
-        if token_seq.total_tokens() % self.block_size != 1 {
-            return self.active_blocks;
+        {
+            let token_seq = self
+                .active_seqs
+                .get_mut(request_id)
+                .expect("Request ID not found for token push");
+
+            for &token in tokens {
+                token_seq.append(token).expect("Token push failed.");
+
+                // Guard: skip if we didn't cross a block boundary
+                if token_seq.total_tokens() % self.block_size != 1 {
+                    continue;
+                }
+
+                let last_seq_hash = token_seq
+                    .last_complete_block()
+                    .map(|block| block.sequence_hash());
+
+                // Queue operations for later
+                if let Some(partial_block) = self.partial_blocks.get(request_id).cloned() {
+                    blocks_to_remove.push(partial_block);
+                }
+                if let Some(full_block) = last_seq_hash {
+                    blocks_to_add.push(UniqueBlock::FullBlock(full_block));
+                }
+
+                blocks_to_add.push(UniqueBlock::default());
+            }
+        } // token_seq borrow is dropped here
+
+        // Now perform all the queued operations
+        for block in blocks_to_remove {
+            self.remove_block(request_id, &block);
         }
 
-        let last_seq_hash = token_seq
-            .last_complete_block()
-            .map(|block| block.sequence_hash());
-
-        // Promote a partial block into a full block if not already
-        if let Some(partial_block) = self.partial_blocks.get(request_id).cloned() {
-            self.remove_block(request_id, &partial_block);
+        for block in blocks_to_add {
+            self.add_block(request_id.clone(), &block);
         }
-        if let Some(full_block) = last_seq_hash {
-            self.add_block(request_id.clone(), &UniqueBlock::FullBlock(full_block));
-        }
-
-        self.add_block(request_id.clone(), &UniqueBlock::default());
 
         self.active_blocks
     }
@@ -227,7 +245,7 @@ enum UpdateSequences {
     },
     Push {
         request_id: RequestId,
-        token: u32,
+        tokens: Vec<u32>, // Changed from token: u32
     },
     NewBlocks {
         token_sequence: Arc<TokenBlockSequence>,
@@ -290,8 +308,8 @@ impl ActiveSequencesMultiWorker {
                     UpdateSequences::Free { request_id } => {
                         active_sequences.free(&request_id);
                     }
-                    UpdateSequences::Push { request_id, token } => {
-                        active_sequences.push(&request_id, token);
+                    UpdateSequences::Push { request_id, tokens } => {
+                        active_sequences.push(&request_id, &tokens); // Changed to pass tokens slice
                     }
                     UpdateSequences::NewBlocks {
                         token_sequence,
@@ -393,7 +411,7 @@ impl ActiveSequencesMultiWorker {
         self.request_to_worker.remove(request_id);
     }
 
-    pub fn push(&mut self, request_id: &RequestId, token: u32) {
+    pub fn push(&mut self, request_id: &RequestId, tokens: &[u32]) {
         let worker_id = self
             .request_to_worker
             .get(request_id)
@@ -402,7 +420,7 @@ impl ActiveSequencesMultiWorker {
         self.senders[&worker_id]
             .send(UpdateSequences::Push {
                 request_id: request_id.clone(),
-                token,
+                tokens: tokens.to_vec(), // Convert to Vec
             })
             .expect("Failed to send push command to worker");
     }
@@ -498,8 +516,7 @@ mod tests {
 
         // Step 1: Add request 0 with tokens [0, 1, 2], then push 3 and 4
         manager.add_request("0".to_string(), to_sequence(vec![0, 1, 2]));
-        manager.push(&"0".to_string(), 3);
-        manager.push(&"0".to_string(), 4);
+        manager.push(&"0".to_string(), &[3, 4]); // Push both tokens at once
 
         assert_eq!(manager.active_blocks(), 2);
         assert_eq!(manager.partial_blocks.len(), 1);
@@ -551,10 +568,9 @@ mod tests {
         // Send request [0, 1, 2, 3] to worker 0
         manager.add_request("req0".to_string(), to_sequence(vec![0, 1, 2, 3]), 0);
 
-        // Send request [0, 1, 2] to worker 1, then push 3 and push 4
+        // Send request [0, 1, 2] to worker 1, then push 3 and 4
         manager.add_request("req1".to_string(), to_sequence(vec![0, 1, 2]), 1);
-        manager.push(&"req1".to_string(), 3);
-        manager.push(&"req1".to_string(), 4);
+        manager.push(&"req1".to_string(), &[3, 4]); // Push both tokens at once
 
         // Send request [0, 1, 2] to worker 2
         manager.add_request("req2".to_string(), to_sequence(vec![0, 1, 2]), 2);
