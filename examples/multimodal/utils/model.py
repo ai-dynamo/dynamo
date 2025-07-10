@@ -21,7 +21,6 @@ from transformers import AutoConfig
 from utils.protocol import EncodeResponse
 from vllm import AsyncEngineArgs
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
-from vllm.worker.worker import Worker
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +29,9 @@ def load_vision_model(model_id: str) -> torch.nn.Module:
     """
     Load a vision model from a HuggingFace model ID.
     """
+    # lazy import to avoid cuda error if not on gpu
+    from vllm.worker.worker import Worker
+
     engine_args = AsyncEngineArgs(model=model_id, trust_remote_code=True)
 
     engine_config = engine_args.create_engine_config()
