@@ -195,5 +195,6 @@ helm install dynamo-platform ./platform/ \
   --namespace ${NAMESPACE} \
   --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
   --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
-  --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret"
+  --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret" \
+  --set controller.env.DYNAMO_CLOUD=${DYNAMO_CLOUD}
 echo "Helm chart deployment complete"
