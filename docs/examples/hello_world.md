@@ -26,7 +26,7 @@ This example demonstrates the basic concepts of Dynamo by creating a simple mult
 3. Set up a simple HTTP API endpoint
 4. Deploy and interact with a Dynamo service graph
 
-Pipeline Architecture:
+Graph Architecture:
 
 ```
 Users/Clients (HTTP)
@@ -95,24 +95,30 @@ curl -X 'POST' \
 
 # Deploy to Kubernetes
 
-You should build the images for the Dynamo Cloud Platform.
-If you are a **👤 Dynamo User** first follow the [Quickstart Guide](../guides/dynamo_deploy/quickstart.md) first.
-If you are a **🧑‍💻 Dynamo Contributor** you would have to rebuild the dynamo platform images as the code evolves. To do so please look at the [Cloud Guide](../../../docs/guides/dynamo_deploy/dynamo_cloud.md).
+You should first deploy the Dynamo Cloud Platform.
+If you are a **👤 Dynamo User** first follow the [Quickstart Guide](../guides/dynamo_deploy/quickstart.md).
+If you are a **🧑‍💻 Dynamo Contributor** and you have changed the platform code you would have to rebuild the dynamo platform. To do so please look at the [Cloud Guide](../guides/dynamo_deploy/dynamo_cloud.md).
 
-# TODO: Deploy your service using a DynamoGraphDeployment CR.
+## Deploy your service using a DynamoGraphDeployment CR.
+
+```bash
+kubectl apply -f examples/hello_world/deploy/hello_world.yaml -n ${NAMESPACE}
 ```
 
-### Testing the Deployment
+## Testing the Deployment
 
 Once the deployment is complete, you can test it using commands below.
+Do the port forward in another terminal if needed.
 
 ```bash
 # Find your frontend pod
-export FRONTEND_POD=$(kubectl get pods -n ${NAMESPACE} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
+export FRONTEND_POD=$(kubectl get pods -n ${NAMESPACE} | grep "hello-world-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
 
 # Forward the pod's port to localhost
-kubectl port-forward svc/$FRONTEND_SVC 8000:8000 -n ${NAMESPACE}
+kubectl port-forward pod/${FRONTEND_POD} 8000:8000 -n ${NAMESPACE}
+```
 
+```bash
 # Test the API endpoint
 curl -N -X POST http://localhost:8000/generate \
   -H "accept: text/event-stream" \
@@ -120,7 +126,6 @@ curl -N -X POST http://localhost:8000/generate \
   -d '{"text": "test"}'
 ```
 
-For more details on managing deployments, testing, and troubleshooting, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md).
 
 ## Expected Output
 
