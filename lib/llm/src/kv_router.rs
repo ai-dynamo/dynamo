@@ -15,6 +15,7 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 use futures::stream::{self, StreamExt};
+use tokio::sync::Mutex;
 
 pub mod approx;
 pub mod indexer;
@@ -103,6 +104,8 @@ pub struct KvRouter {
     maybe_indexer: Option<ApproxKvIndexer>,
     scheduler: KvScheduler,
     block_size: u32,
+    // Add mutex for serializing find_best_match calls
+    find_best_match_mutex: Mutex<()>,
 }
 
 impl KvRouter {
@@ -171,6 +174,7 @@ impl KvRouter {
             maybe_indexer,
             scheduler,
             block_size,
+            find_best_match_mutex: Mutex::new(()), // Add this
         })
     }
 
@@ -182,6 +186,9 @@ impl KvRouter {
         context_id: &str,
         tokens: &[u32],
     ) -> anyhow::Result<(i64, u32)> {
+        // Acquire mutex to serialize access
+        let _guard = self.find_best_match_mutex.lock().await;
+
         let isl_tokens = tokens.len();
         let block_size = self.block_size;
 
