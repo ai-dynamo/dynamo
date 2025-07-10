@@ -24,7 +24,8 @@ This approach allows you to install Dynamo directly using a DynamoGraphDeploymen
 
 - Helm 3.0+
 - Kubernetes 1.16+
-- ETCD (without auth) and NATS (with jetstream enabled) services running in the cluster
+- ETCD v3.5+ (without auth)
+- NATS v2.10+ (with jetstream enabled)
 
 ### Basic Installation
 
