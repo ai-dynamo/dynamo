@@ -37,6 +37,7 @@ async-nats = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 async_zmq = { workspace = true }
+axum = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }

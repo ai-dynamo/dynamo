@@ -32,7 +32,7 @@ import (
 // DynamoGraphDeploymentSpec defines the desired state of DynamoGraphDeployment.
 type DynamoGraphDeploymentSpec struct {
 	// required
-	DynamoGraph string `json:"dynamoGraph"`
+	DynamoGraph string `json:"dynamoGraph,omitempty"`
 	// optional
 	// key is the name of the service defined in DynamoComponent
 	// value is the DynamoComponentDeployment override for that service

@@ -44,7 +44,11 @@ use dynamo_runtime::{
 
 use crate::protocols::{
     common::{
-        llm_backend::{BackendOutput, FinishReason, LLMEngineOutput, PreprocessedRequest},
+        llm_backend::{
+            BackendOutput, EmbeddingsEngineOutput, FinishReason, LLMEngineOutput,
+            PreprocessedRequest,
+        },
+        preprocessor::PreprocessedEmbeddingRequest,
         StopConditions,
     },
     TokenIdType,
@@ -230,6 +234,36 @@ impl
         });
 
         Ok(ResponseStream::new(Box::pin(stream), context))
+    }
+}
+
+#[async_trait]
+impl
+    Operator<
+        SingleIn<PreprocessedEmbeddingRequest>,
+        ManyOut<Annotated<EmbeddingsEngineOutput>>,
+        SingleIn<PreprocessedEmbeddingRequest>,
+        ManyOut<Annotated<EmbeddingsEngineOutput>>,
+    > for Backend
+{
+    async fn generate(
+        &self,
+        request: SingleIn<PreprocessedEmbeddingRequest>,
+        next: ServerStreamingEngine<
+            PreprocessedEmbeddingRequest,
+            Annotated<EmbeddingsEngineOutput>,
+        >,
+    ) -> Result<ManyOut<Annotated<EmbeddingsEngineOutput>>> {
+        // For embeddings, we mostly pass through since no detokenization is needed
+        // But we could add validation, logging, or other post-processing here
+        let response_stream = next.generate(request).await?;
+
+        // Could add embedding-specific post-processing here:
+        // - Validation of embedding dimensions
+        // - Normalization if requested
+        // - Usage statistics validation
+
+        Ok(response_stream)
     }
 }
 
@@ -432,7 +466,7 @@ impl Decoder {
 
     pub fn process_token_ids(&mut self, token_ids: &[TokenIdType]) -> Result<SeqResult> {
         let mut text: Option<String> = None;
-        let mut tokens = Vec::new();
+        let mut tokens = Vec::with_capacity(token_ids.len());
 
         for token_id in token_ids {
             let StepResult {
@@ -447,7 +481,8 @@ impl Decoder {
 
             if !hide_text {
                 if let Some(token) = &token {
-                    text.get_or_insert_with(String::new).push_str(token);
+                    text.get_or_insert_with(|| String::with_capacity(token_ids.len()))
+                        .push_str(token);
                 }
             }
             tokens.push(token);

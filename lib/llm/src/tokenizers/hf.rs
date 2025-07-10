@@ -39,29 +39,37 @@ impl HuggingFaceTokenizer {
 
 impl Encoder for HuggingFaceTokenizer {
     fn encode(&self, input: &str) -> Result<Encoding> {
+        // This self.tokenizer is the library
         let encoding = self
             .tokenizer
             .encode(input, false)
-            .map_err(|err| Error::msg(format!("Error encoding input: {}", err)))?;
+            .map_err(|err| Error::msg(format!("Error tokenizing input: {err}")))?;
 
-        let token_ids = encoding.get_ids().to_vec();
-        let tokens = encoding.get_tokens().to_vec();
-        let spans = encoding.get_offsets().to_vec();
+        Ok(Encoding::Hf(Box::new(encoding)))
+    }
 
-        Ok(Encoding {
-            token_ids,
-            tokens,
-            spans,
-        })
+    fn encode_batch(&self, inputs: &[&str]) -> Result<Vec<Encoding>> {
+        let hf_encodings = self
+            .tokenizer
+            .encode_batch(inputs.to_vec(), false)
+            .map_err(|err| Error::msg(format!("Error batch tokenizing input: {err}")))?;
+
+        let encodings = hf_encodings
+            .into_iter()
+            .map(|enc| Encoding::Hf(Box::new(enc)))
+            .collect();
+
+        Ok(encodings)
     }
 }
 
 impl Decoder for HuggingFaceTokenizer {
     fn decode(&self, token_ids: &[TokenIdType], skip_special_tokens: bool) -> Result<String> {
+        // This calls into the library
         let text = self
             .tokenizer
             .decode(token_ids, skip_special_tokens)
-            .map_err(|err| Error::msg(format!("Error decoding input: {}", err)))?;
+            .map_err(|err| Error::msg(format!("Error de-tokenizing input: {err}")))?;
 
         Ok(text)
     }

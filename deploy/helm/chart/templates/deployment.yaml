@@ -12,89 +12,71 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-{{- range .Values.services }}
+{{- range $serviceName, $serviceSpec := .Values.spec.services }}
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: {{ $.Release.Name }}-{{ .name | lower }}
+  name: {{ $.Release.Name }}-{{ $serviceName | lower }}
   labels:
-    app: {{ $.Release.Name }}-{{ .name | lower }}
+    app: {{ $.Release.Name }}-{{ $serviceName | lower }}
 spec:
-  replicas: {{ .config.workers | default 1 }}
+  replicas: {{ $serviceSpec.replicas }}
   selector:
     matchLabels:
-      app: {{ $.Release.Name }}-{{ .name | lower }}
+      app: {{ $.Release.Name }}-{{ $serviceName | lower }}
   template:
     metadata:
       labels:
-        app: {{ $.Release.Name }}-{{ .name | lower }}
+        app: {{ $.Release.Name }}-{{ $serviceName | lower }}
     spec:
-      # pull secrets
+      {{- if $.Values.imagePullSecrets }}
       imagePullSecrets:
-      {{- range $.Values.imagePullSecrets }}
-        - name: {{ .name }}
+        {{ $.Values.imagePullSecrets | toYaml | nindent 8 }}
       {{- end }}
-      securityContext:
-        runAsUser: 0
       containers:
-      - name: {{ $.Release.Name }}-{{ .name | lower }}
-        image: {{ $.Values.image }}
+      - name: {{ $.Release.Name }}-{{ $serviceName | lower }}
+        image: {{ $serviceSpec.extraPodSpec.mainContainer.image }}
+        workingDir: {{ $serviceSpec.extraPodSpec.mainContainer.workingDir }}
         args:
-        {{ if $.Values.configFilePath }}
-        - cd src && uv run dynamo serve --service-name {{ .name }} {{ $.Values.dynamoIdentifier }} -f {{ $.Values.configFilePath }}
-        {{ else }}
-        - cd src && uv run dynamo serve --service-name {{ .name }} {{ $.Values.dynamoIdentifier }}
-        {{ end }}
-        command:
-        - sh
-        - -c
-        {{ if .config.resources }}
+        {{- $serviceSpec.extraPodSpec.mainContainer.args | toYaml | nindent 8 }}
+        {{ if $serviceSpec.resources }}
         resources:
           requests:
-            {{ if .config.resources.cpu }}
-            cpu: "{{ .config.resources.cpu }}"
+            {{ if $serviceSpec.resources.cpu }}
+            cpu: "{{ $serviceSpec.resources.cpu }}"
             {{ end }}
-            {{ if .config.resources.memory }}
-            memory: "{{ .config.resources.memory }}"
+            {{ if $serviceSpec.resources.memory }}
+            memory: "{{ $serviceSpec.resources.memory }}"
             {{ end }}
-            {{ if .config.resources.gpu }}
-            nvidia.com/gpu: "{{ .config.resources.gpu }}"
+            {{ if $serviceSpec.resources.gpu }}
+            nvidia.com/gpu: "{{ $serviceSpec.resources.gpu }}"
             {{ end }}
           limits:
-            {{ if .config.resources.cpu }}
-            cpu: "{{ .config.resources.cpu }}"
+            {{ if $serviceSpec.resources.cpu }}
+            cpu: "{{ $serviceSpec.resources.cpu }}"
             {{ end }}
-            {{ if .config.resources.memory }}
-            memory: "{{ .config.resources.memory }}"
+            {{ if $serviceSpec.resources.memory }}
+            memory: "{{ $serviceSpec.resources.memory }}"
             {{ end }}
-            {{ if .config.resources.gpu }}
-            nvidia.com/gpu: "{{ .config.resources.gpu }}"
+            {{ if $serviceSpec.resources.gpu }}
+            nvidia.com/gpu: "{{ $serviceSpec.resources.gpu }}"
             {{ end }}
         {{ end }}
+        {{- if $serviceSpec.envFromSecret }}
+        envFrom:
+        - secretRef:
+            name: {{ $serviceSpec.envFromSecret }}
+        {{- end }}
         env:
-        {{- if and .config.traffic .config.traffic.timeout }}
-        - name: TRAFFIC_TIMEOUT
-          value: "{{ .config.traffic.timeout }}"
-        {{- end }}
-        {{- if and .config.dynamo .config.dynamo.enabled }}
-        - name: DYNAMO_NAMESPACE
-          value: "{{ .config.dynamo.namespace }}"
-        - name: DYNAMO_NAME
-          value: "{{ .config.dynamo.name }}"
-        {{- end }}
-        {{- if .config.workers }}
-        - name: WORKERS
-          value: "{{ .config.workers }}"
-        {{- end }}
         - name: DYNAMO_PORT
-          value: "3000"
-        {{- if $.Values.natsAddr }}
-        - name: NATS_SERVER
-          value: {{ $.Values.natsAddr }}
-        {{- end }}
+          value: "{{ $.Values.dynamoPort | default 8000 }}"
         {{- if $.Values.etcdAddr }}
         - name: ETCD_ENDPOINTS
-          value: {{ $.Values.etcdAddr }}
+          value: "{{ $.Values.etcdAddr }}"
         {{- end }}
----
+        {{- if $.Values.natsAddr }}
+        - name: NATS_SERVER
+          value: "{{ $.Values.natsAddr }}"
+        {{- end }}
 {{- end }}

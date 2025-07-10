@@ -130,16 +130,15 @@ impl DeltaGenerator {
         finish_reason: Option<async_openai::types::FinishReason>,
         logprobs: Option<async_openai::types::ChatChoiceLogprobs>,
     ) -> async_openai::types::CreateChatCompletionStreamResponse {
-        // TODO: Update for tool calling
         let delta = async_openai::types::ChatCompletionStreamResponseDelta {
+            content: text,
+            function_call: None,
+            tool_calls: None,
             role: if self.msg_counter == 0 {
                 Some(async_openai::types::Role::Assistant)
             } else {
                 None
             },
-            content: text,
-            tool_calls: None,
-            function_call: None,
             refusal: None,
         };
 

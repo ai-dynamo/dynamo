@@ -21,26 +21,11 @@ use crate::kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
     KvCacheStoredBlockData, LocalBlockHash,
 };
+use crate::tokens::blocks::UniqueBlock;
 
 pub type Token = u32;
 pub type GlobalHash = u64;
 pub type NumBlocks = usize;
-
-/// Represents an active block in the cache with a reference count
-#[derive(Debug, Clone, Hash, Eq, PartialEq, Serialize, Deserialize)]
-pub enum UniqueBlock {
-    /// Block identified by UUID
-    PartialBlock(Uuid),
-    /// Block identified by hash
-    FullBlock(GlobalHash),
-}
-
-impl Default for UniqueBlock {
-    fn default() -> Self {
-        // Generate a random UUID when default is used
-        Self::PartialBlock(Uuid::new_v4())
-    }
-}
 
 /// Represents different block movement operations in the cache
 /// For Use and Promote variants, parent hash is the second field

@@ -12,17 +12,22 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-{{- range .Values.services }}
+{{- range $serviceName, $serviceSpec := .Values.spec.services }}
+{{- if eq $serviceSpec.componentType "main" }}
+---
 apiVersion: v1
 kind: Service
 metadata:
-  name: {{ $.Release.Name }}-{{ .name | lower }}
+  name: {{ $.Release.Name }}-{{ $serviceName | lower }}
+  labels:
+    app: {{ $.Release.Name }}-{{ $serviceName | lower }}
 spec:
   selector:
-    app: {{ $.Release.Name }}-{{ .name | lower }}
+    app: {{ $.Release.Name }}-{{ $serviceName | lower }}
   ports:
-  - protocol: TCP
-    port: 80
-    targetPort: 3000
----
+    - port: {{ $serviceSpec.port | default 8000 }}
+      targetPort: {{ $serviceSpec.port | default 8000 }}
+      protocol: TCP
+  type: ClusterIP
+{{- end }}
 {{- end }}
