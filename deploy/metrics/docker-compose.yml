@@ -63,11 +63,12 @@ services:
   dcgm-exporter:
     image: nvidia/dcgm-exporter:4.2.3-4.1.3-ubi9
     ports:
-      # Remap from 9400 to 9401 (public port) to avoid conflict with an existing dcgm-exporter
-      # on dlcluster. To access dcgm:
-      # Outside the container: curl http://localhost:9401/metrics
-      # Inside the container (container-to-container): curl http://dcgm-exporter:9400/metrics
-      - 9401:9400
+      # Expose dcgm-exporter on port 9401 both inside and outside the container
+      # to avoid conflicts with other dcgm-exporter instances in distributed environments.
+      # To access DCGM metrics:
+      # Outside the container: curl http://localhost:9401/metrics (or the host IP)
+      # Inside the container (container-to-container): curl http://dcgm-exporter:9401/metrics
+      - 9401:9401
     cap_add:
       - SYS_ADMIN
     deploy:
@@ -80,6 +81,7 @@ services:
     environment:
       # dcgm uses NVIDIA_VISIBLE_DEVICES variable but normally it is CUDA_VISIBLE_DEVICES
       - NVIDIA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-all}
+      - DCGM_EXPORTER_LISTEN=:9401
     runtime: nvidia  # Specify the NVIDIA runtime
     networks:
       - monitoring

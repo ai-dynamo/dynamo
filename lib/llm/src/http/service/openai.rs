@@ -291,6 +291,14 @@ async fn chat_completions(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
+    // Handle unsupported fields - if Some(resp) is returned by
+    // validate_chat_completion_unsupported_fields,
+    // then a field was used that is unsupported. We will log an error message
+    // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceeed.
+    if let Some(resp) = validate_chat_completion_unsupported_fields(&request) {
+        return Ok(resp.into_response());
+    }
+
     // Apply template values if present
     if let Some(template) = template {
         if request.inner.model.is_empty() {
@@ -393,6 +401,41 @@ async fn chat_completions(
     }
 }
 
+/// Checks for unsupported fields in the request.
+/// Returns Some(response) if unsupported fields are present.
+#[allow(deprecated)]
+pub fn validate_chat_completion_unsupported_fields(
+    request: &NvCreateChatCompletionRequest,
+) -> Option<impl IntoResponse> {
+    let inner = &request.inner;
+
+    if inner.parallel_tool_calls == Some(true) {
+        return Some(ErrorResponse::not_implemented_error(
+            "`parallel_tool_calls: true` is not supported.",
+        ));
+    }
+
+    if inner.stream == Some(true) && inner.tools.is_some() {
+        return Some(ErrorResponse::not_implemented_error(
+            "`stream: true` is not supported when `tools` are provided.",
+        ));
+    }
+
+    if inner.function_call.is_some() {
+        return Some(ErrorResponse::not_implemented_error(
+            "`function_call` is deprecated. Please migrate to use `tool_choice` instead.",
+        ));
+    }
+
+    if inner.functions.is_some() {
+        return Some(ErrorResponse::not_implemented_error(
+            "`functions` is deprecated. Please migrate to use `tools` instead.",
+        ));
+    }
+
+    None
+}
+
 /// OpenAI Responses Request Handler
 ///
 /// This method will handle the incoming request for the /v1/responses endpoint.
@@ -407,7 +450,7 @@ async fn responses(
     // Handle unsupported fields - if Some(resp) is returned by validate_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
     // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceeed.
-    if let Some(resp) = validate_unsupported_fields(&request) {
+    if let Some(resp) = validate_response_unsupported_fields(&request) {
         return Ok(resp.into_response());
     }
 
@@ -415,7 +458,7 @@ async fn responses(
     // validate_input_is_text_only, then we are handling something other than Input::Text(_).
     // We will log an error message and early return a 501 NOT_IMPLEMENTED status code.
     // Otherwise, proceeed.
-    if let Some(resp) = validate_input_is_text_only(&request) {
+    if let Some(resp) = validate_response_input_is_text_only(&request) {
         return Ok(resp.into_response());
     }
 
@@ -504,7 +547,9 @@ async fn responses(
     Ok(Json(response).into_response())
 }
 
-pub fn validate_input_is_text_only(request: &NvCreateResponse) -> Option<impl IntoResponse> {
+pub fn validate_response_input_is_text_only(
+    request: &NvCreateResponse,
+) -> Option<impl IntoResponse> {
     match &request.inner.input {
         async_openai::types::responses::Input::Text(_) => None,
         _ => Some(ErrorResponse::not_implemented_error("Only `Input::Text` is supported. Structured, multimedia, or custom input types are not yet implemented.")),
@@ -513,7 +558,9 @@ pub fn validate_input_is_text_only(request: &NvCreateResponse) -> Option<impl In
 
 /// Checks for unsupported fields in the request.
 /// Returns Some(response) if unsupported fields are present.
-pub fn validate_unsupported_fields(request: &NvCreateResponse) -> Option<impl IntoResponse> {
+pub fn validate_response_unsupported_fields(
+    request: &NvCreateResponse,
+) -> Option<impl IntoResponse> {
     let inner = &request.inner;
 
     if inner.background == Some(true) {
@@ -936,7 +983,7 @@ mod tests {
     #[test]
     fn test_validate_input_is_text_only_accepts_text() {
         let request = make_base_request();
-        let result = validate_input_is_text_only(&request);
+        let result = validate_response_input_is_text_only(&request);
         assert!(result.is_none());
     }
 
@@ -948,14 +995,14 @@ mod tests {
             role: ResponseRole::User,
             content: InputContent::TextInput("structured".into()),
         })]);
-        let result = validate_input_is_text_only(&request);
+        let result = validate_response_input_is_text_only(&request);
         assert!(result.is_some());
     }
 
     #[test]
     fn test_validate_unsupported_fields_accepts_clean_request() {
         let request = make_base_request();
-        let result = validate_unsupported_fields(&request);
+        let result = validate_response_unsupported_fields(&request);
         assert!(result.is_none());
     }
 
@@ -1025,7 +1072,7 @@ mod tests {
         for (field, set_field) in unsupported_cases {
             let mut req = make_base_request();
             (set_field)(&mut req.inner);
-            let result = validate_unsupported_fields(&req);
+            let result = validate_response_unsupported_fields(&req);
             assert!(result.is_some(), "Expected rejection for `{field}`");
         }
     }
