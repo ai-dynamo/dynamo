@@ -13,6 +13,8 @@ export NAMESPACE=dynamo-cloud
 export RELEASE_VERSION=0.3.2
 ```
 
+Install `envsubst`, `kubectl`, `helm`
+
 ### Authenticate with NGC
 
 ```bash
@@ -74,12 +76,17 @@ export IMAGE_TAG=your-image-tag
 
 You could run the `deploy.sh` or use the manual commands under Step 1 and Step 2.
 
-**Installing with a script (alternative to Step 1 and Step 2)**
+**Installing with a script (alternative to the Step 1 and Step 2)**
 
-Install Prerequisites: envsubst, kubectl, helm
+Create the namespace and the docker registry secret.
 
 ```bash
 kubectl create namespace ${NAMESPACE}
+kubectl create secret docker-registry docker-imagepullsecret \
+  --docker-server=${DOCKER_SERVER} \
+  --docker-username=${DOCKER_USERNAME} \
+  --docker-password=${DOCKER_PASSWORD} \
+  --namespace=${NAMESPACE}
 ```
 
 ```bash
@@ -132,7 +139,7 @@ helm install dynamo-platform ./platform/ \
 
 For a basic example that doesn't require a GPU, see the [Hello World](../../examples/hello_world.md)
 
-### LLM Example
+### LLM
 
 Create a Kubernetes secret containing your sensitive values if needed:
 
