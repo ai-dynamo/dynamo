@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use super::Result;
 use derive_builder::Builder;
@@ -20,6 +8,7 @@ use figment::{
     Figment,
 };
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use validator::Validate;
 
 /// Default HTTP server host
@@ -66,33 +55,56 @@ impl Default for WorkerConfig {
 pub struct RuntimeConfig {
     /// Number of async worker threads
     /// If set to 1, the runtime will run in single-threaded mode
+    /// Set this at runtime with environment variable DYN_RUNTIME_NUM_WORKER_THREADS. Defaults to
+    /// number of cores.
     #[validate(range(min = 1))]
-    #[builder(default = "16")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
-    pub num_worker_threads: usize,
+    pub num_worker_threads: Option<usize>,
 
     /// Maximum number of blocking threads
     /// Blocking threads are used for blocking operations, this value must be greater than 0.
+    /// Set this at runtime with environment variable DYN_RUNTIME_MAX_BLOCKING_THREADS. Defaults to
+    /// 512.
     #[validate(range(min = 1))]
     #[builder(default = "512")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub max_blocking_threads: usize,
 
     /// HTTP server host for health and metrics endpoints
+    /// Set this at runtime with environment variable DYN_RUNTIME_HTTP_SERVER_HOST
     #[builder(default = "DEFAULT_HTTP_SERVER_HOST.to_string()")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub http_server_host: String,
 
     /// HTTP server port for health and metrics endpoints
     /// If set to 0, the system will assign a random available port
+    /// Set this at runtime with environment variable DYN_RUNTIME_HTTP_SERVER_PORT
     #[builder(default = "DEFAULT_HTTP_SERVER_PORT")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub http_server_port: u16,
 
     /// Health and metrics HTTP server enabled
+    /// Set this at runtime with environment variable DYN_RUNTIME_HTTP_ENABLED
     #[builder(default = "false")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub http_enabled: bool,
+}
+
+impl fmt::Display for RuntimeConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // If None, it defaults to "number of cores", so we indicate that.
+        match self.num_worker_threads {
+            Some(val) => write!(f, "num_worker_threads={val}, ")?,
+            None => write!(f, "num_worker_threads=default (num_cores), ")?,
+        }
+
+        write!(f, "max_blocking_threads={}, ", self.max_blocking_threads)?;
+        write!(f, "http_server_host={}, ", self.http_server_host)?;
+        write!(f, "http_server_port={}, ", self.http_server_port)?;
+        write!(f, "http_enabled={}", self.http_enabled)?;
+
+        Ok(())
+    }
 }
 
 impl RuntimeConfig {
@@ -138,7 +150,7 @@ impl RuntimeConfig {
 
     pub fn single_threaded() -> Self {
         RuntimeConfig {
-            num_worker_threads: 1,
+            num_worker_threads: Some(1),
             max_blocking_threads: 1,
             http_server_host: DEFAULT_HTTP_SERVER_HOST.to_string(),
             http_server_port: DEFAULT_HTTP_SERVER_PORT,
@@ -147,20 +159,24 @@ impl RuntimeConfig {
     }
 
     /// Create a new default runtime configuration
-    pub(crate) fn create_runtime(&self) -> Result<tokio::runtime::Runtime> {
-        Ok(tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(self.num_worker_threads)
+    pub(crate) fn create_runtime(&self) -> std::io::Result<tokio::runtime::Runtime> {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(
+                self.num_worker_threads
+                    .unwrap_or_else(|| std::thread::available_parallelism().unwrap().get()),
+            )
             .max_blocking_threads(self.max_blocking_threads)
             .enable_all()
-            .build()?)
+            .build()
     }
 }
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
+        let num_cores = std::thread::available_parallelism().unwrap().get();
         Self {
-            num_worker_threads: 16,
-            max_blocking_threads: 16,
+            num_worker_threads: Some(num_cores),
+            max_blocking_threads: num_cores,
             http_server_host: DEFAULT_HTTP_SERVER_HOST.to_string(),
             http_server_port: DEFAULT_HTTP_SERVER_PORT,
             http_enabled: false,
@@ -240,7 +256,7 @@ mod tests {
             ],
             || {
                 let config = RuntimeConfig::from_settings()?;
-                assert_eq!(config.num_worker_threads, 24);
+                assert_eq!(config.num_worker_threads, Some(24));
                 assert_eq!(config.max_blocking_threads, 32);
                 Ok(())
             },
