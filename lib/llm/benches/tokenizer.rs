@@ -13,7 +13,7 @@ use dynamo_llm::tokenizers::traits::{Encoder, Tokenizer};
 use dynamo_llm::tokenizers::DecodeStream;
 use dynamo_llm::types::TokenIdType;
 
-const TEST_TOKENIZER: &'static str = concat!(
+const TEST_TOKENIZER: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/tests/data/sample-models/TinyLlama_v1.1/tokenizer.json"
 );
