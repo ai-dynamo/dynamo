@@ -56,10 +56,10 @@ Use this approach when developing or customizing Dynamo as a contributor, or usi
 
 ### Prerequisites
 
-Ensure you have the source code checked out and are in the dynamo directory:
+Ensure you have the source code checked out and are in the `dynamo` directory:
 
 ```bash
-cd dynamo/deploy/cloud/helm/
+cd deploy/cloud/helm/
 ```
 
 ### Set Environment Variables
@@ -145,13 +145,28 @@ Create a Kubernetes secret containing your sensitive values if needed:
 
 ```bash
 export HF_TOKEN=your_hf_token
-kubectl create secret generic dynamo-env-secrets \
-  --from-literal=huggingface.token=${HF_TOKEN} \
-  --from-literal=another_secret.key=value \
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN=${HF_TOKEN} \
   -n ${NAMESPACE}
 ```
 
+
+Pick your deployment destination.
+
+If local
+
 ```bash
-kubectl apply -f examples/llm/deploy/agg.yaml
+export DYNAMO_CLOUD=http://localhost:8080
+```
+
+If kubernetes
+```bash
+export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com
+```
+
+```bash
+# Go to your main dynamo directory.
+cd ../../../
+kubectl apply -f examples/llm/deploy/agg.yaml -n $NAMESPACE
 ```
 
