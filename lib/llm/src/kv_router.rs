@@ -293,21 +293,27 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
 
                     while let Some(item) = response_stream.next().await {
                         // Track tokens if they exist in the response
-                        if let Some(ref output) = item.data {
-                            if !output.token_ids.is_empty() {
-                                // Add tokens to accumulator
-                                accumulated_tokens.extend_from_slice(&output.token_ids);
-                                total_output_length += output.token_ids.len();
-
-                                // Check if we've moved to a new block
-                                let current_block_index = (isl + total_output_length).saturating_sub(1) / block_size;
-                                if current_block_index > last_block_index {
-                                    chooser.push(&request_id, &accumulated_tokens).await;
-                                    accumulated_tokens.clear();
-                                    last_block_index = current_block_index;
-                                }
-                            }
+                        let Some(ref output) = item.data else {
+                            yield item;
+                            continue;
+                        };
+                        if output.token_ids.is_empty() {
+                            yield item;
+                            continue;
                         }
+
+                        // Add tokens to accumulator
+                        accumulated_tokens.extend_from_slice(&output.token_ids);
+                        total_output_length += output.token_ids.len();
+
+                        // Check if we've moved to a new block
+                        let current_block_index = (isl + total_output_length).saturating_sub(1) / block_size;
+                        if current_block_index > last_block_index {
+                            chooser.push(&request_id, &accumulated_tokens).await;
+                            accumulated_tokens.clear();
+                            last_block_index = current_block_index;
+                        }
+
                         yield item;
                     }
 
