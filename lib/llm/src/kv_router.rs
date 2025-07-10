@@ -218,7 +218,7 @@ impl KvRouter {
         tokens: &[u32],
     ) -> anyhow::Result<(i64, u32)> {
         // Acquire mutex to serialize access
-        // TODO: may as well make all the subroutines synchrnous if benchmarking favors this
+        // TODO: may as well make all the subroutines synchronous if benchmarking favors this
         let _guard = self.find_best_match_mutex.lock().await;
 
         let isl_tokens = tokens.len();
