@@ -21,18 +21,22 @@
 backend: pytorch
 tensor_parallel_size: 4
 moe_expert_parallel_size: 1
-# enable_attention_dp: true
 max_batch_size: 256
 # 8448 = 8192 ISL + 256 OSL
 max_num_tokens: 8448
 max_seq_len: 8448
-kv_cache_config:
-  free_gpu_memory_fraction: 0.25
 
-# Enable the MTP(Multi-Token Prediction) in the model engine
+# Enable Speculative Decoding in the model engine
 speculative_config:
   decoding_type: Eagle
-  num_nextn_predict_layers: 1
+  max_draft_len: 1
+  pytorch_weights_path: nvidia/Llama-4-Maverick-17B-128E-Eagle3
+
+kv_cache_config:
+  free_gpu_memory_fraction: 0.5
+  enable_block_reuse: false  
+
+disable_overlap_scheduler: true
 
 use_cuda_graph: true
 cuda_graph_padding_enabled: true
