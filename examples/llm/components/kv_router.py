@@ -187,6 +187,7 @@ class Router:
         """
         # Initialize if worker_id is not present
         if worker_id not in self.active_blocks_dict:
+            logger.warning(f"New Worker added: {worker_id}")
             self.active_blocks_dict[worker_id] = [polled_value, polled_value]
             return polled_value
     
