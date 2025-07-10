@@ -12,17 +12,21 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-tensor_parallel_size: 1
-moe_expert_parallel_size: 1
-enable_attention_dp: false
-max_num_tokens: 8192
-max_batch_size: 16
-trust_remote_code: true
-backend: pytorch
-enable_chunked_prefill: true
-# Overlap scheduler not currently supported in prefill only workers.
-disable_overlap_scheduler: true
-use_cuda_graph: false
 
-kv_cache_config:
-  free_gpu_memory_fraction: 0.40
+from common.base_engine import BaseEngine, BaseEngineConfig
+from common.protocol import TRTLLMWorkerRequest
+
+
+class AggregatedStrategy(BaseEngine):
+    def __init__(
+        self,
+        config: BaseEngineConfig,
+    ):
+        self._config = config
+        if self._config.disaggregation_mode != "prefill_and_decode":
+            raise ValueError("Aggregated engine only supports prefill_and_decode mode")
+        super().__init__(config)
+
+    async def generate(self, request: TRTLLMWorkerRequest):
+        async for res in self.generate_local(request):
+            yield res

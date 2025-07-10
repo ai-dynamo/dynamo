@@ -95,6 +95,7 @@ class SamplingOptions(BaseModel):
 
 class TRTLLMWorkerRequest(BaseModel):
     token_ids: List[TokenIdType]
+    stream: bool = True
     stop_conditions: StopConditions
     sampling_options: SamplingOptions
     eos_token_ids: List[TokenIdType] = Field(default_factory=list)

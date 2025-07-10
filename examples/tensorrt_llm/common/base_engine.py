@@ -18,18 +18,13 @@ from typing import Any, Optional
 
 from common.protocol import DisaggregatedTypeConverter, TRTLLMWorkerRequest
 from tensorrt_llm import SamplingParams
+from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
-from tensorrt_llm.serve.openai_protocol import (
-    DisaggregatedParams as OAIDisaggregatedParams,
-)
+from tensorrt_llm.serve.openai_protocol import DisaggregatedParams
 
 from dynamo.llm import get_tensorrtllm_engine, get_tensorrtllm_publisher
 from dynamo.runtime import DistributedRuntime
-
-logger = logging.getLogger(__name__)
-
-logger.setLevel(logging.DEBUG)
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
@@ -60,7 +55,7 @@ class BaseEngineConfig:
     extra_engine_args: str = ""
     publish_events_and_metrics: bool = False
     disaggregation_mode: str = "prefill_and_decode"
-    remote_prefill_endpoint: Optional[str] = None
+    next_endpoint: Optional[str] = None
     lease_id: int = 0
 
     def __str__(self) -> str:
@@ -74,18 +69,18 @@ class BaseEngineConfig:
             f"extra_engine_args={self.extra_engine_args}, "
             f"publish_events_and_metrics={self.publish_events_and_metrics}, "
             f"disaggregation_mode={self.disaggregation_mode}, "
-            f"remote_prefill_endpoint={self.remote_prefill_endpoint}, "
+            f"next_endpoint={self.next_endpoint}, "
             f"lease_id={self.lease_id})"
         )
 
 
-class BaseTensorrtLLMEngine:
+class BaseEngine:
     def __init__(
         self,
         config: BaseEngineConfig,
     ):
         self._config = config
-        self._prefill_client = None
+        self._next_client = None
         self._llm_engine = None
         self._llm_engine_context = None
         self._llm_publisher = None
@@ -178,7 +173,7 @@ class BaseTensorrtLLMEngine:
 
         if (
             self._config.publish_events_and_metrics
-            and self._config.disaggregation_mode != "prefill"
+            and self._config.next_endpoint is not None
         ):
             kv_listener = runtime.namespace(self._config.namespace).component(
                 self._config.component
@@ -195,20 +190,17 @@ class BaseTensorrtLLMEngine:
             else:
                 raise RuntimeError("Failed to create LLM publisher context")
 
-        # Initialize prefill client if in decode mode
-        if self._config.disaggregation_mode == "decode":
-            if self._config.remote_prefill_endpoint is None:
-                raise ValueError("remote_prefill_endpoint is required for decode mode")
+        if self._config.next_endpoint is not None:
             logging.info(
-                f"Initializing remote prefill client for endpoint: {self._config.remote_prefill_endpoint}"
+                f"Initializing next client for endpoint: {self._config.next_endpoint}"
             )
             (
                 parsed_namespace,
                 parsed_component_name,
                 parsed_endpoint_name,
-            ) = parse_endpoint(self._config.remote_prefill_endpoint)
+            ) = parse_endpoint(self._config.next_endpoint)
             if self._runtime is not None:
-                self._prefill_client = (
+                self._next_client = (
                     await self._runtime.namespace(parsed_namespace)
                     .component(parsed_component_name)
                     .endpoint(parsed_endpoint_name)
@@ -237,102 +229,58 @@ class BaseTensorrtLLMEngine:
                 self._llm_engine = None
                 self._llm_engine_context = None
 
-        self._prefill_client = None
+        self._next_client = None
 
-    async def remote_prefill(self, request: TRTLLMWorkerRequest):
-        """
-        Send a prefill request to the remote prefill worker.
-
-        Args:
-            request: The original request to be sent for prefill
-
-        Returns:
-            The response from the remote prefill worker
-
-        Raises:
-            ValueError: If prefill client is not initialized or multiple responses received
-        """
-        prefill_request = request.model_copy(deep=True)
-        # TRTLLM requires max_tokens to be set for prefill requests.
-        prefill_request.stop_conditions.max_tokens = 1
-        prefill_request.disaggregated_params = OAIDisaggregatedParams(
-            request_type="context_only"
-        )
-
-        if self._prefill_client is None:
-            raise ValueError("Prefill client not initialized")
-        try:
-            # TODO: Use smart KV router to determine which prefill worker to use. This would also require supporting publishing events for prefill workers.
-            remote_prefill_responses = [
-                remote_prefill_response
-                async for remote_prefill_response in await self._prefill_client.round_robin(
-                    prefill_request.model_dump_json()
+    async def remote_generate(
+        self, request, disaggregated_params=None, decode_only=False, prefill_only=False
+    ):
+        if decode_only:
+            if not disaggregated_params:
+                raise ValueError("Disaggregated params are required for decode mode")
+            else:
+                request.disaggregated_params = DisaggregatedParams(
+                    **disaggregated_params
                 )
-            ]
+
+        response_count = 0
+        if self._next_client is None:
+            raise ValueError("Next client not initialized")
+        try:
+            async for remote_response in await self._next_client.round_robin(
+                request.model_dump_json()
+            ):
+                response_count += 1
+                if response_count > 1 and prefill_only:
+                    raise ValueError(
+                        "Multiple responses received from next prefill worker"
+                    )
+                yield remote_response
         except Exception as e:
-            raise ValueError(f"Error in remote prefill: {e}")
+            raise ValueError(f"Error in remote generate: {e}")
 
-        if len(remote_prefill_responses) > 1:
-            raise ValueError(
-                "Prefill worker returned more than one response. This is currently not supported in remote prefill mode."
-            )
-
-        if len(remote_prefill_responses) == 0:
-            raise ValueError("No response received from remote prefill worker")
-
-        remote_prefill_response = remote_prefill_responses[0]
-        return remote_prefill_response
-
-    async def generate(self, request: TRTLLMWorkerRequest):
-        if self._llm_engine is None:
-            raise RuntimeError("Engine not initialized")
-
-        if self._llm_publisher:
-            publishers_error = self._llm_publisher.check_error_queue()
-            if publishers_error:
-                raise publishers_error
-
+    async def generate_helper(
+        self, request, decode_only=False, prefill_only=False, disaggregated_params=None
+    ):
         inputs = request.token_ids
 
-        # Decode the disaggregated params from the request
-        disaggregated_params = DisaggregatedTypeConverter.to_llm_disaggregated_params(
-            request.disaggregated_params
-        )
-        num_output_tokens_so_far = 0
+        if prefill_only:
+            request.stop_conditions.max_tokens = 1
+            disaggregated_params = LlmDisaggregatedParams(request_type="context_only")
 
-        if self._config.disaggregation_mode == "decode":
-            # Run prefill/context phase remotely if disaggregation mode is decode.
-            try:
-                prefill_result = await self.remote_prefill(request)
-            except Exception as e:
-                raise ValueError(f"Error in remote prefill: {e}")
-
-            remote_prefill_response = prefill_result.data()
-            if (
-                remote_prefill_response["finish_reason"] == "stop"
-                or remote_prefill_response["finish_reason"] == "error"
-            ):
-                yield remote_prefill_response
-                return
-            num_output_tokens_so_far = len(remote_prefill_response["token_ids"])
-
-            # Decode the disaggregated params from the remote prefill response
-            # Decode the disaggregated params from the remote prefill response
-            disaggregated_params = (
-                DisaggregatedTypeConverter.to_llm_disaggregated_params(
-                    OAIDisaggregatedParams(
-                        **remote_prefill_response["disaggregated_params"]
+        if decode_only:
+            # Disaggregated params can either be a part of the request or passed in as an argument.
+            # If both are provided, then the disaggregated params from the request are used.
+            if request.disaggregated_params is None and disaggregated_params is None:
+                raise ValueError("Disaggregated params are required for decode mode")
+            if request.disaggregated_params is not None:
+                disaggregated_params = (
+                    DisaggregatedTypeConverter.to_llm_disaggregated_params(
+                        request.disaggregated_params
                     )
                 )
-            )
-
-            # Send the first token response to the client
-            first_token_response = remote_prefill_response
-            first_token_response.pop("disaggregated_params")
-            yield first_token_response
-
-            # Set the disaggregated params to generation_only for the rest of the generation
             disaggregated_params.request_type = "generation_only"
+
+        num_output_tokens_so_far = 0
 
         sampling_params = self.default_sampling_params
         for key, value in request.sampling_options.model_dump().items():
@@ -349,12 +297,14 @@ class BaseTensorrtLLMEngine:
         if ignore_eos:
             sampling_params.ignore_eos = ignore_eos
 
-        # TODO: Disable streaming for context only requests when adding disagg support
+        # Determine streaming mode: disable streaming for prefill to ensure correct behavior
+        streaming = False if prefill_only else request.stream
+
         async for res in self._llm_engine.llm.generate_async(
             inputs=inputs,
             sampling_params=sampling_params,
             disaggregated_params=disaggregated_params,
-            streaming=(self._config.disaggregation_mode != "prefill"),
+            streaming=streaming,
         ):
             # TRTLLM engine needs to start generating tokens first before stats
             # can be retrieved.
@@ -377,7 +327,7 @@ class BaseTensorrtLLMEngine:
                 out["finish_reason"] = output.finish_reason
             if output.stop_reason:
                 out["stop_reason"] = output.stop_reason
-            if self._config.disaggregation_mode == "prefill":
+            if prefill_only:
                 # Return the disaggregated params only when operating in prefill mode.
                 out[
                     "disaggregated_params"
@@ -387,3 +337,31 @@ class BaseTensorrtLLMEngine:
 
             yield out
             num_output_tokens_so_far = next_total_toks
+
+    def check_engine_health(self):
+        if self._llm_engine is None:
+            raise RuntimeError("Engine not initialized")
+
+        if self._llm_publisher:
+            publishers_error = self._llm_publisher.check_error_queue()
+            if publishers_error:
+                raise publishers_error
+
+    async def generate_local(self, request: TRTLLMWorkerRequest):
+        # Generate local is only called by the next worker which will perform all operations locally.
+        self.check_engine_health()
+
+        decode_only = self._config.disaggregation_mode == "decode"
+        prefill_only = self._config.disaggregation_mode == "prefill"
+
+        try:
+            async for res in self.generate_helper(
+                request, decode_only=decode_only, prefill_only=prefill_only
+            ):
+                yield res
+        except Exception as e:
+            logging.error(f"Error in generate_local: {e}")
+            raise e
+
+    def check_for_error(self, result: dict):
+        return result["finish_reason"] == "stop" or result["finish_reason"] == "error"

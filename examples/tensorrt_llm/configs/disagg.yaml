@@ -30,7 +30,7 @@ TensorRTLLMWorker:
   enable-disagg: true
   router: round-robin
 
-TensorRTLLMPrefillWorker:
+TensorRTLLMNextWorker:
   # Path to disk model or HuggingFace model identifier to load
   model-path: TinyLlama/TinyLlama-1.1B-Chat-v1.0
   # Path to a YAML file containing additional keyword arguments to pass to the TRTLLM engine.

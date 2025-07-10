@@ -14,10 +14,13 @@
 # limitations under the License.
 import logging
 
-from common.base_engine import BaseEngineConfig, BaseTensorrtLLMEngine
+from common.aggregated_strategy import AggregatedStrategy
+from common.base_engine import BaseEngineConfig
+from common.decode_first_strategy import DecodeFirstStrategy
 from common.parser import parse_tensorrt_llm_args
+from common.prefill_first_strategy import PrefillFirstStrategy
 from common.protocol import TRTLLMWorkerRequest
-from components.prefill_worker import TensorRTLLMPrefillWorker
+from components.next_worker import TensorRTLLMNextWorker
 
 from dynamo.llm import ModelType, register_llm
 from dynamo.sdk import (
@@ -40,8 +43,8 @@ logger = logging.getLogger(__name__)
     resources={"cpu": "10", "memory": "20Gi"},
     workers=1,
 )
-class TensorRTLLMWorker(BaseTensorrtLLMEngine):
-    prefill_worker = depends(TensorRTLLMPrefillWorker)
+class TensorRTLLMWorker:
+    next_worker = depends(TensorRTLLMNextWorker)
 
     def __init__(self):
         logger.info("Initializing TensorRT-LLM Worker")
@@ -53,10 +56,13 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
         namespace, _ = TensorRTLLMWorker.dynamo_address()  # type: ignore
         endpoint_name = "generate"
         publish_events_and_metrics = args.router == "kv"
-        prefill_class_name = "TensorRTLLMPrefillWorker"
+        next_class_name = "TensorRTLLMNextWorker"
 
         if args.enable_disagg:
-            disaggregation_mode = "decode"
+            if not args.disaggregation_mode:
+                disaggregation_mode = "decode"
+            else:
+                disaggregation_mode = args.disaggregation_mode
         else:
             disaggregation_mode = "prefill_and_decode"
 
@@ -70,46 +76,52 @@ class TensorRTLLMWorker(BaseTensorrtLLMEngine):
             extra_engine_args=args.extra_engine_args,
             publish_events_and_metrics=publish_events_and_metrics,
             disaggregation_mode=disaggregation_mode,
-            remote_prefill_endpoint=f"dyn://{namespace}.{prefill_class_name}.generate",
+            next_endpoint=f"dyn://{namespace}.{next_class_name}.generate",
             lease_id=lease_id,
         )
 
-        super().__init__(config=engine_config)
+        if disaggregation_mode == "prefill_and_decode":
+            self._engine = AggregatedStrategy(engine_config)
+        elif disaggregation_mode == "decode":
+            self._engine = DecodeFirstStrategy(engine_config)
+        elif disaggregation_mode == "prefill":
+            self._engine = PrefillFirstStrategy(engine_config)
+        else:
+            raise ValueError(f"Invalid disaggregation mode: {disaggregation_mode}")
 
     @async_on_start
     async def async_init(self):
         runtime = dynamo_context["runtime"]
-        await self.initialize(runtime)
+        await self._engine.initialize(runtime)
 
-        logger.info("Registering LLM for discovery")
         endpoint = (
-            runtime.namespace(self._config.namespace)
-            .component(self._config.component)
-            .endpoint(self._config.endpoint)
+            runtime.namespace(self._engine._config.namespace)
+            .component(self._engine._config.component)
+            .endpoint(self._engine._config.endpoint)
         )
 
         try:
             await register_llm(
                 ModelType.Backend,
                 endpoint,
-                self._config.model_path,
-                self._config.served_model_name,
-                kv_cache_block_size=self._config.kv_block_size,
+                self._engine._config.model_path,
+                self._engine._config.served_model_name,
+                kv_cache_block_size=self._engine._config.kv_block_size,
             )
             logger.info("Successfully registered LLM for discovery")
         except Exception as e:
             logger.error(f"Failed to register LLM for discovery: {e}")
             raise
 
-        logger.info("TensorRT-LLM Worker initialized")
+        logger.info(
+            f"TensorRT-LLM Worker initialized with {self._engine.__class__.__name__}"
+        )
 
     @on_shutdown
     async def async_cleanup(self):
-        logger.info("Cleaning up TensorRT-LLM Worker")
-        await self.cleanup()
-        logger.info("TensorRT-LLM Worker cleanup completed")
+        await self._engine.cleanup()
 
     @endpoint()
     async def generate(self, request: TRTLLMWorkerRequest):
-        async for response in super().generate(request):
+        async for response in self._engine.generate(request):
             yield response
