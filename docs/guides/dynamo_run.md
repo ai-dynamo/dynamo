@@ -8,8 +8,31 @@ It supports these engines: mistralrs, llamacpp, sglang, vllm, and tensorrt-llm. 
 
 Usage:
 ```
-dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=1.0] [--router-temperature=0.5] [--verbosity (-v|-vv)]
+dynamo-run in=[http|text|dyn://<path>|batch:<jsonl file>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|trtllm|vllm|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=1.0] [--router-temperature=0.5] [--verbosity (-v|-vv)]
 ```
+#### positional argument `in`
+* `in=http`: The component will receive its input via HTTP requests. Serving as the external-facing entry point for your LLM service, allowing clients (e.g., web applications, curl commands) to send requests to your Dynamo-powered backend.
+* `in=text`: The component will receive its input from standard input (stdin). This is generally for development/testing rather than production serving.
+* `in=dyn`: The component will receive its input from Dynamo's internal distributed communication system. This is used when you have a multi-stage pipeline within Dynamo's ecosystem. A previous dynamo run process (or another component within the Dynamo graph) would have sent its output using `out=dyn`. 
+* `in=batch:<jsonl file>`: The component will take a jsonl file full of prompts and evaluate them all. Each line is passed as a prompt to the model. The output is written back to the same folder in output.jsonl.
+
+#### positional argument `out`
+##### Using a Backend/Engine/Destination:
+
+In CLI commands for inference servers or distributed systems, out= typically specifies where the processed output should go or which engine should handle the subsequent steps. Common values might be:
+
+* `out=echo_full`: Unprocessed input prompts are echoed back as responses.
+* `out=echo_core`: Pre-processed input prompts are echoed back as responses.
+* `out=llamacpp`: Outputs are handled by the llama.cpp engine.
+* `out=vllm`:` Outputs are handled by the vLLM inference engine.
+* `out=sglang`: Outputs are handled by the SGLang inference engine.
+* `out=trtllm`: Outputs are handled by TensorRT-LLM engine.
+* `out=mistralrs`: Outputs are handled by the Mistralrs engine.
+* `out=http`: Outputs are sent over HTTP.
+
+#####  Output to Dynamo's Internal Distributed System:
+
+When `out=dyn`is used, it means internal communication. The output of the current component (e.g., an HTTP server handling incoming requests, or a pre-processing stage) is not being sent to an external, self-contained inference engine like vLLM or SGLang, nor is it being sent to a generic HTTP endpoint. Instead, it's being directed back into Dynamo's own distributed system. This is crucial for disaggregated setups or multi-stage pipelines within Dynamo. `out=dyn` tells Dynamo to auto-discover the instances, group them by model, and load balance appropriately (depending on --router-mode flag).
 
 Example: `dynamo run Qwen/Qwen3-0.6B`
 
