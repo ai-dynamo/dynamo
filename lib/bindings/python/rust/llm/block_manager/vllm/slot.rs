@@ -125,7 +125,9 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
                     )
                     .as_ref(),
                 &tokens_to_append,
+                "tokens to apply do not match the sequence tokens"
             );
+
             self.computed_position += tokens_to_append.len();
             tracing::debug!(
                 "applying {} prefill tokens; new computed_position: {}",
@@ -202,21 +204,45 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
         Ok(())
     }
 
-    /// Apply computed/cached blocks to the slot.
+    /// Initialize the slot with the device matched blocks.
     ///
-    /// Note: We should only apply computed blocks once at the beginning.
-    /// Here we clear the list of immutable blocks before applying them because vLLM can try to apply
-    /// this multiple times if the slot was unable acquire blocks for the remainder of the sequence.
-    // TODO: What about something like chunked prefill?
+    /// Note: This should only be called one time before when we first load the initial
+    /// device matches to the sequence. This method will validate the mutable blocks are
+    /// empty and clear the immutable blocks; we clear the immutable blocks because vLLM
+    /// can try to apply this multiple times if the slot was unable acquire blocks for the
+    /// remainder of the sequence.
     #[tracing::instrument(level = "debug")]
-    pub fn apply_computed_blocks(
+    pub fn initialize_with_device_matches(
         &mut self,
         computed_blocks: Vec<ImmutableBlock<S, L, BasicMetadata>>,
     ) -> Result<(), SlotError> {
         assert!(self.mutable.is_empty());
-
-        // clear the immutable blocks
         self.immutable.clear();
+        self.apply_immutable_blocks(computed_blocks)
+    }
+
+    /// Apply immutable blocks to the slot.
+    ///
+    /// Note: The current compute position must match the number of tokens held by the immutable blocks.
+    fn apply_immutable_blocks(
+        &mut self,
+        computed_blocks: Vec<ImmutableBlock<S, L, BasicMetadata>>,
+    ) -> Result<(), SlotError> {
+        debug_assert_eq!(
+            self.computed_position % self.sequence.block_size(),
+            0,
+            "not on a block boundary"
+        );
+
+        debug_assert_eq!(
+            self.computed_position / self.sequence.block_size(),
+            self.immutable.len(),
+            "number of computed blocks does not match the number of immutable blocks in the sequence"
+        );
+
+        // the expected number of immutable blocks after applying the computed blocks
+        let count = computed_blocks.len();
+        let expected_immutable_count = self.immutable.len() + computed_blocks.len();
 
         // create an iterator over the mutable blocks zipped with the token blocks
         let zipped_blocks = self.sequence.blocks().iter().zip(computed_blocks);
@@ -230,6 +256,20 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
             self.computed_position += sequence_block.block_size();
             self.immutable.push(computed_block);
         }
+
+        assert_eq!(
+            self.immutable.len(),
+            expected_immutable_count,
+            "did not apply the expected number of immutable blocks; expected: {}, actual: {}",
+            expected_immutable_count,
+            self.immutable.len()
+        );
+
+        tracing::debug!(
+            "applied {} immutable blocks; computed sequence position: {}",
+            count,
+            self.computed_position
+        );
 
         Ok(())
     }
@@ -357,8 +397,6 @@ impl<L: LocalityProvider> Slot<DeviceStorage, L> {
             ));
         }
 
-        self.computed_position += offloaded_blocks.len() * self.sequence.block_size();
-
         let target_device_blocks = self.mutable.drain(0..offloaded_blocks.len()).collect();
 
         let immutable_device_blocks = bm
@@ -367,7 +405,7 @@ impl<L: LocalityProvider> Slot<DeviceStorage, L> {
             .unwrap()
             .map_err(|e| SlotError::from_str(&format!("failed to onboard blocks: {:?}", e)))?;
 
-        self.immutable.extend(immutable_device_blocks);
+        self.apply_immutable_blocks(immutable_device_blocks)?;
 
         Ok(())
     }
@@ -800,7 +838,7 @@ mod tests {
         println!("Cache hit! Found {} cached blocks", cached_blocks.len());
 
         // Apply the cached blocks (this is the real cache hit path)
-        let result = slot2.apply_computed_blocks(cached_blocks);
+        let result = slot2.initialize_with_device_matches(cached_blocks);
         assert!(result.is_ok(), "Cache hit failed: {:?}", result.err());
 
         // Verify second slot state matches first slot
@@ -939,7 +977,7 @@ mod tests {
         println!("Cache hit! Found {} cached blocks", cached_blocks.len());
 
         // Apply cached blocks (this is the cache hit path)
-        let result = slot2.apply_computed_blocks(cached_blocks);
+        let result = slot2.initialize_with_device_matches(cached_blocks);
         assert!(result.is_ok(), "Cache hit failed: {:?}", result.err());
 
         let slot2_blocks = slot2.get_block_ids();
@@ -1021,7 +1059,7 @@ mod tests {
             .match_sequence_hashes_blocking(&slot1_hashes)
             .expect("Cache lookup failed");
 
-        let result = slot2.apply_computed_blocks(cached_blocks);
+        let result = slot2.initialize_with_device_matches(cached_blocks);
         assert!(result.is_ok());
 
         let cache_hit_duration = start_time.elapsed();
@@ -1108,7 +1146,7 @@ mod tests {
             .pool
             .match_sequence_hashes_blocking(&hashes_a)
             .expect("Cache lookup for sequence A failed");
-        let result = slot_a2.apply_computed_blocks(cached_blocks_a);
+        let result = slot_a2.initialize_with_device_matches(cached_blocks_a);
         assert!(result.is_ok());
 
         let mut slot_b2 = Slot::new(tokens_b.clone().into(), BLOCK_SIZE, salt);
@@ -1116,7 +1154,7 @@ mod tests {
             .pool
             .match_sequence_hashes_blocking(&hashes_b)
             .expect("Cache lookup for sequence B failed");
-        let result = slot_b2.apply_computed_blocks(cached_blocks_b);
+        let result = slot_b2.initialize_with_device_matches(cached_blocks_b);
         assert!(result.is_ok());
 
         let blocks_a2 = slot_a2.get_block_ids();
@@ -1535,7 +1573,7 @@ mod tests {
             .expect("Cache lookup should succeed");
 
         // Test 1: Apply cached blocks (should succeed)
-        let result = slot2.apply_computed_blocks(cached_blocks);
+        let result = slot2.initialize_with_device_matches(cached_blocks);
         assert!(result.is_ok(), "Cache hit should succeed");
 
         // Validate internal state after cache hit
@@ -1770,7 +1808,7 @@ mod tests {
         println!("Attempting to apply to slot with different token sequence...");
 
         // The hash mismatch detection happens in apply_computed_blocks
-        let result = slot2.apply_computed_blocks(cached_blocks);
+        let result = slot2.initialize_with_device_matches(cached_blocks);
 
         if result.is_err() {
             println!("✅ Hash mismatch correctly detected and rejected");

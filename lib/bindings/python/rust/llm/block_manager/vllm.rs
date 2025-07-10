@@ -129,6 +129,11 @@ impl KvbmCacheManager {
         Ok(KvbmBlockList::new(BlockListType::ImmutableDevice(blocks)))
     }
 
+    /// Get the number of matched tokens that can be loaded from the external connector.
+    /// This is used to implement the `get_num_new_matched_tokens` in the vLLM Connector API.
+    ///
+    /// Note: we unpack the id and the num_tokens from the vLLM `Request` so we can hold state
+    /// in the slot manager as well as determine if the matches are on full block boundaries.
     pub fn get_num_new_matched_tokens(
         &self,
         request_id: String,
@@ -145,74 +150,6 @@ impl KvbmCacheManager {
             )
             .map_err(to_pyerr)
     }
-
-    // /// Get the number of offloaded computed blocks for the given sequence hashes.
-    // #[tracing::instrument(level = "debug", skip(self), ret)]
-    // pub fn get_num_offloaded_computed_blocks(
-    //     &self,
-    //     sequence_hashes: Vec<SequenceHash>,
-    //     num_device_blocks: usize,
-    // ) -> PyResult<(Option<KvbmBlockList>, Option<KvbmBlockList>)> {
-    //     if sequence_hashes.is_empty() {
-    //         return Ok((None, None));
-    //     }
-
-    //     if let Some(host) = self.block_manager().host() {
-    //         host.touch_blocks_blocking(&sequence_hashes)
-    //             .map_err(to_pyerr)?;
-    //     }
-
-    //     if let Some(disk) = self.block_manager().disk() {
-    //         disk.touch_blocks_blocking(&sequence_hashes)
-    //             .map_err(to_pyerr)?;
-    //     }
-
-    //     let (host_blocks, num_matched_host) = if let Some(host) = self.block_manager().host() {
-    //         let blocks = host
-    //             .match_sequence_hashes_blocking(&sequence_hashes[num_device_blocks..])
-    //             .map_err(to_pyerr)?;
-    //         if !blocks.is_empty() {
-    //             let num_blocks = blocks.len();
-    //             (Some(blocks), num_blocks)
-    //         } else {
-    //             (None, 0)
-    //         }
-    //     } else {
-    //         (None, 0)
-    //     };
-
-    //     let (disk_blocks, num_matched_disk) = if let Some(disk) = self.block_manager().disk() {
-    //         if num_device_blocks + num_matched_host == sequence_hashes.len() {
-    //             (None, 0)
-    //         } else {
-    //             let blocks = disk
-    //                 .match_sequence_hashes_blocking(
-    //                     &sequence_hashes[num_device_blocks + num_matched_host..],
-    //                 )
-    //                 .map_err(to_pyerr)?;
-
-    //             if !blocks.is_empty() {
-    //                 let num_blocks = blocks.len();
-    //                 (Some(blocks), num_blocks)
-    //             } else {
-    //                 (None, 0)
-    //             }
-    //         }
-    //     } else {
-    //         (None, 0)
-    //     };
-
-    //     tracing::debug!(
-    //         "in get_num_offloaded_computed_blocks, found {} host blocks and {} disk blocks",
-    //         num_matched_host,
-    //         num_matched_disk,
-    //     );
-
-    //     Ok((
-    //         host_blocks.map(|blocks| KvbmBlockList::new(BlockListType::ImmutableHost(blocks))),
-    //         disk_blocks.map(|blocks| KvbmBlockList::new(BlockListType::ImmutableDisk(blocks))),
-    //     ))
-    // }
 
     /// Updates the slot manager with the current request state and allocates new blocks if needed.
     /// Returns the new blocks if they were allocated, otherwise returns None.
@@ -265,25 +202,6 @@ impl KvbmCacheManager {
         let usage: f64 = inuse as f64 / pool.total_blocks() as f64;
         Ok(usage)
     }
-
-    // #[pyo3(signature = (request_id, host_onboard_blocks=None, disk_onboard_blocks=None))]
-    // pub fn onboard_into_slot(
-    //     &self,
-    //     request_id: String,
-    //     host_onboard_blocks: Option<KvbmBlockList>,
-    //     disk_onboard_blocks: Option<KvbmBlockList>,
-    // ) -> PyResult<()> {
-    //     self.slot_manager
-    //         .lock()
-    //         .map_err(to_pyerr)?
-    //         .onboard_into_slot(
-    //             &request_id,
-    //             host_onboard_blocks,
-    //             disk_onboard_blocks,
-    //             self.block_manager(),
-    //         )
-    //         .map_err(to_pyerr)
-    // }
 
     pub fn trigger_onboard(&self, request_id: String) -> PyResult<()> {
         self.slot_manager
@@ -541,35 +459,17 @@ impl<R: RequestKey> SlotManager<R> {
         // these are the blocks that were matched to the sequence hashes
         // this will advance the computed position of the slot
         if let Some(matched_blocks) = new_computed_blocks {
-            let blocks = matched_blocks.take_blocks();
-            match blocks {
+            match matched_blocks.take_blocks() {
                 Some(BlockListType::ImmutableDevice(blocks)) => {
                     tracing::debug!(
                         request_id,
                         "applying {} cache-hit tokens",
                         blocks.len() * self.block_size
                     );
-                    slot.apply_computed_blocks(blocks)?;
+                    slot.initialize_with_device_matches(blocks)?;
                 }
-                Some(BlockListType::MutableDevice(_blocks)) => {
-                    panic!(
-                        "impossibility: mutable blocks were provided instead of immutable blocks"
-                    );
-                }
-                Some(BlockListType::ImmutableHost(_blocks)) => {
-                    panic!("ImmutableHost should not be provided");
-                }
-                Some(BlockListType::MutableHost(_blocks)) => {
-                    panic!("MutableHost should not be provided");
-                }
-                Some(BlockListType::ImmutableDisk(_blocks)) => {
-                    panic!("ImmutableDisk should not be provided");
-                }
-                Some(BlockListType::MutableDisk(_blocks)) => {
-                    panic!("MutableDisk should not be provided");
-                }
-                None => {
-                    panic!("impossibility: block list was none; possible taken previously");
+                _ => {
+                    panic!("logic error: block list was not immutable device");
                 }
             }
         } else {
@@ -607,42 +507,6 @@ impl<R: RequestKey> SlotManager<R> {
             }
         }
     }
-
-    // pub fn onboard_into_slot(
-    //     &mut self,
-    //     request_id: &R,
-    //     host_onboard_blocks: Option<KvbmBlockList>,
-    //     disk_onboard_blocks: Option<KvbmBlockList>,
-    //     bm: &VllmBlockManager,
-    // ) -> Result<(), SlotError> {
-    //     let slot = self.slots.get_mut(request_id).ok_or(SlotError::NotFound)?;
-
-    //     if let Some(host_blocks) = host_onboard_blocks {
-    //         let host_blocks = host_blocks.take_blocks().ok_or(SlotError::Error(
-    //             "host_onboard_blocks should be ImmutableHost".to_string(),
-    //         ))?;
-    //         let BlockListType::ImmutableHost(host_blocks) = host_blocks else {
-    //             return Err(SlotError::Error(
-    //                 "host_onboard_blocks should be ImmutableHost".to_string(),
-    //             ));
-    //         };
-    //         slot.onboard_blocks_to_slot(host_blocks, bm)?;
-    //     }
-
-    //     if let Some(disk_blocks) = disk_onboard_blocks {
-    //         let disk_blocks = disk_blocks.take_blocks().ok_or(SlotError::Error(
-    //             "disk_onboard_blocks should be ImmutableDisk".to_string(),
-    //         ))?;
-    //         let BlockListType::ImmutableDisk(disk_blocks) = disk_blocks else {
-    //             return Err(SlotError::Error(
-    //                 "disk_onboard_blocks should be ImmutableDisk".to_string(),
-    //             ));
-    //         };
-    //         slot.onboard_blocks_to_slot(disk_blocks, bm)?;
-    //     }
-
-    //     Ok(())
-    // }
 
     pub fn get_block_ids(&self, request_id: &R) -> Result<Vec<BlockId>, SlotError> {
         let slot = self.slots.get(request_id).ok_or(SlotError::NotFound)?;
