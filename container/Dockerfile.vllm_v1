@@ -179,6 +179,8 @@ RUN uv pip install /workspace/wheels/nixl/*.whl
 # Install vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
 ARG VLLM_REF="059d4cd"
+ARG MAX_JOBS
+ENV MAX_JOBS=${MAX_JOBS:-16}
 ENV CUDA_HOME=/usr/local/cuda
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
@@ -192,7 +194,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
         uv pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 && \
         python use_existing_torch.py && \
         uv pip install -r requirements/build.txt && \
-        VLLM_USE_PRECOMPILED=1 uv pip install --no-build-isolation -e . && \
+        MAX_JOBS=${MAX_JOBS} uv pip install --no-build-isolation -e . -v && \
         cd tools/ep_kernels && \
         bash install_python_libraries.sh && \
         cd ep_kernels_workspace && \
