@@ -562,11 +562,14 @@ impl<R: RequestKey> SlotManager<R> {
             return Ok((0, false));
         }
 
-        let sequence_hashes = slot.sequence_hashes(SlotPosition::All);
-        assert!(sequence_hashes.len() >= num_computed_tokens);
-
+        // num_computed_tokens represents the number of tokens already on the device
+        // this much be a multiple of the block size
         let num_device_blocks = num_computed_tokens / self.block_size;
-        let search_offset = num_device_blocks;
+        debug_assert_eq!(num_computed_tokens % self.block_size, 0);
+
+        // get the sequence hashes for the device matched tokens
+        let sequence_hashes = slot.sequence_hashes(SlotPosition::All);
+        assert!(sequence_hashes.len() >= num_device_blocks);
 
         if let Some(host) = block_manager.host() {
             host.touch_blocks_blocking(&sequence_hashes)?;
@@ -575,6 +578,9 @@ impl<R: RequestKey> SlotManager<R> {
         if let Some(disk) = block_manager.disk() {
             disk.touch_blocks_blocking(&sequence_hashes)?;
         }
+
+        // we start matching non-device blocks after the device blocks
+        let search_offset = num_device_blocks;
 
         let mut host_blocks = block_manager
             .host()
@@ -596,9 +602,14 @@ impl<R: RequestKey> SlotManager<R> {
 
         let num_matched_disk_blocks = disk_blocks.len();
 
-        tracing::debug!(num_matched_host_blocks, num_matched_disk_blocks,);
-
         let num_matched_blocks = num_matched_host_blocks + num_matched_disk_blocks;
+
+        tracing::debug!(
+            "matched {} host blocks and {} disk blocks; {} total blocks",
+            num_matched_host_blocks,
+            num_matched_disk_blocks,
+            num_matched_blocks
+        );
 
         // early exit if we did not match any blocks
         if num_matched_blocks == 0 {
