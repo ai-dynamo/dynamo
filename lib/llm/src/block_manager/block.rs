@@ -649,14 +649,14 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> std::fmt::Debug for Muta
                     block.sequence_hash().ok()
                 )
             }
-            None => write!(f, "MutableBlock {{ block: None }}"),
+            None => write!(f, "MutableBlock(block: None)"),
         }
     }
 }
 
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Drop for MutableBlock<S, L, M> {
     fn drop(&mut self) {
-        tracing::debug!("MutableBlock::drop: {:?}", self);
+        tracing::debug!("drop: {:?}", self);
         if let Some(block) = self.block.take() {
             if self.return_tx.send(block).is_err() {
                 tracing::warn!("block pool shutdown before block was returned");

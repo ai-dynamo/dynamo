@@ -397,6 +397,7 @@ impl<R: RequestKey> SlotManager<R> {
 
     /// Creates a new slot for the given request ID.
     /// This will populate the slot with the prefill tokens in the block sequence.
+    #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request_id))]
     pub fn create_slot(
         &mut self,
         request_id: &R,
@@ -404,10 +405,14 @@ impl<R: RequestKey> SlotManager<R> {
         tokens: Vec<u32>,
     ) -> Result<Vec<SequenceHash>, SlotError> {
         if !self.slots.contains_key(request_id) {
-            tracing::debug!(request_id, "creating slot");
             self.slots.insert(
                 request_id.clone(),
                 Slot::new(tokens.into(), self.block_size, salt_hash),
+            );
+            tracing::debug!(
+                request_id,
+                "created slot; total slots: {}",
+                self.slots.len()
             );
         }
 
@@ -513,6 +518,7 @@ impl<R: RequestKey> SlotManager<R> {
         Ok(slot.get_block_ids())
     }
 
+    #[tracing::instrument(level = "debug", skip(self), fields(request_id = %request_id))]
     pub fn free_blocks(&mut self, request_id: &R) {
         if let Some(slot) = self.slots.get_mut(request_id) {
             slot.free_blocks();
@@ -526,6 +532,7 @@ impl<R: RequestKey> SlotManager<R> {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip(self), fields(request_id = %request_id))]
     pub fn drop_slot(&mut self, request_id: &R) {
         if self.slots.remove(request_id).is_none() {
             // Request ID may not be found if the client aborts the request.
