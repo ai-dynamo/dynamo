@@ -110,20 +110,23 @@ pub struct Flags {
     #[arg(long, default_value = "round-robin")]
     pub router_mode: RouterMode,
 
+    /// Maximum number of batched tokens for KV routing
+    /// Needed for informing the KV router
+    /// TODO: derive from vllm args
+    /// NOTE: this is not actually used for now
+    #[arg(long, default_value = "8192")]
+    pub max_num_batched_tokens: Option<u32>,
+
     /// KV Router: Weight for overlap score in worker selection.
     /// Higher values prioritize KV cache reuse. Default: 2.0
     #[arg(long)]
     pub kv_overlap_score_weight: Option<f64>,
 
-    /// KV Router: Weight for GPU cache usage in worker selection.
-    /// Higher values avoid workers with nearly full KV caches. Default: 1.0
+    /// KV Router: Temperature for worker sampling via softmax.
+    /// Higher values promote more randomness, and 0 fallbacks to deterministic.
+    /// Default: 0.5
     #[arg(long)]
-    pub kv_gpu_cache_usage_weight: Option<f64>,
-
-    /// KV Router: Weight for waiting requests in worker selection.
-    /// Higher values avoid workers with queued requests. Default: 1.0
-    #[arg(long)]
-    pub kv_waiting_requests_weight: Option<f64>,
+    pub router_temperature: Option<f64>,
 
     /// Max model context length. Reduce this if you don't have enough VRAM for the full model
     /// context length (e.g. Llama 4).
@@ -211,8 +214,8 @@ impl Flags {
             self.router_mode.into(),
             KvRouterConfig::new(
                 self.kv_overlap_score_weight,
-                self.kv_gpu_cache_usage_weight,
-                self.kv_waiting_requests_weight,
+                self.router_temperature,
+                self.max_num_batched_tokens,
             ),
         )
     }

@@ -117,18 +117,10 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
-	// fetch the dynamoGraphConfig
-	dynamoGraphConfig, err := dynamo.GetDynamoGraphConfig(ctx, dynamoDeployment, r.Recorder)
-	if err != nil {
-		logger.Error(err, "failed to get the DynamoGraphConfig")
-		reason = "failed_to_get_the_DynamoGraphConfig"
-		return ctrl.Result{}, err
-	}
-
 	// generate the dynamoComponentsDeployments from the config
-	dynamoComponentsDeployments, err := dynamo.GenerateDynamoComponentsDeployments(ctx, dynamoDeployment, dynamoGraphConfig, r.generateDefaultIngressSpec(dynamoDeployment))
+	dynamoComponentsDeployments, err := dynamo.GenerateDynamoComponentsDeployments(ctx, dynamoDeployment, r.generateDefaultIngressSpec(dynamoDeployment))
 	if err != nil {
-		logger.Error(err, "failed to generate the DynamoComponentsDeployments")
+		logger.Error(err, "failed to generate the DynamoComponentsDeployments and DynamoComponents")
 		reason = "failed_to_generate_the_DynamoComponentsDeployments"
 		return ctrl.Result{}, err
 	}
@@ -138,33 +130,6 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		if deployment.Spec.Ingress.Enabled {
 			dynamoDeployment.SetEndpointStatus(r.isEndpointSecured(), getIngressHost(deployment.Spec.Ingress))
 		}
-	}
-
-	// reconcile the dynamoComponent
-	// for now we use the same component for all the services and we differentiate them by the service name when launching the component
-	dynamoComponent := &nvidiacomv1alpha1.DynamoComponent{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      getK8sName(dynamoDeployment.Spec.DynamoGraph),
-			Namespace: dynamoDeployment.Namespace,
-		},
-		Spec: nvidiacomv1alpha1.DynamoComponentSpec{
-			DynamoComponent: dynamoDeployment.Spec.DynamoGraph,
-		},
-	}
-	_, dynamoComponent, err = commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*nvidiacomv1alpha1.DynamoComponent, bool, error) {
-		return dynamoComponent, false, nil
-	})
-	if err != nil {
-		logger.Error(err, "failed to sync the DynamoComponent")
-		reason = "failed_to_sync_the_DynamoComponent"
-		return ctrl.Result{}, err
-	}
-	if !dynamoComponent.IsReady() {
-		logger.Info("The DynamoComponent is not ready")
-		reason = "dynamoComponent_is_not_ready"
-		message = "The DynamoComponent is not ready"
-		readyStatus = metav1.ConditionFalse
-		return ctrl.Result{}, nil
 	}
 
 	notReadyDeployments := []string{}
@@ -241,13 +206,6 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 		)).
 		Named("dynamographdeployment").
 		Owns(&nvidiacomv1alpha1.DynamoComponentDeployment{}, builder.WithPredicates(predicate.Funcs{
-			// ignore creation cause we don't want to be called again after we create the deployment
-			CreateFunc:  func(ce event.CreateEvent) bool { return false },
-			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
-			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
-			GenericFunc: func(ge event.GenericEvent) bool { return true },
-		})).
-		Owns(&nvidiacomv1alpha1.DynamoComponent{}, builder.WithPredicates(predicate.Funcs{
 			// ignore creation cause we don't want to be called again after we create the deployment
 			CreateFunc:  func(ce event.CreateEvent) bool { return false },
 			DeleteFunc:  func(de event.DeleteEvent) bool { return true },

@@ -60,6 +60,7 @@ pub const DEFAULT_GRACEFUL_SHUTDOWN_TIMEOUT_RELEASE: u64 = 30;
 #[derive(Debug, Clone)]
 pub struct Worker {
     runtime: Runtime,
+    config: RuntimeConfig,
 }
 
 impl Worker {
@@ -84,7 +85,7 @@ impl Worker {
         })?;
 
         let runtime = Runtime::from_handle(rt.handle().clone())?;
-        Ok(Worker { runtime })
+        Ok(Worker { runtime, config })
     }
 
     pub fn tokio_runtime(&self) -> Result<&'static tokio::runtime::Runtime> {
@@ -202,7 +203,8 @@ impl Worker {
             return Err(error!("Worker already initialized"));
         }
         let runtime = Runtime::from_current()?;
-        Ok(Worker { runtime })
+        let config = RuntimeConfig::from_settings()?;
+        Ok(Worker { runtime, config })
     }
 }
 

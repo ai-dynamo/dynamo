@@ -345,6 +345,10 @@ class BaseTensorrtLLMEngine:
         if max_tokens:
             sampling_params.max_tokens = max_tokens
 
+        ignore_eos = request.stop_conditions.ignore_eos
+        if ignore_eos:
+            sampling_params.ignore_eos = ignore_eos
+
         # TODO: Disable streaming for context only requests when adding disagg support
         async for res in self._llm_engine.llm.generate_async(
             inputs=inputs,

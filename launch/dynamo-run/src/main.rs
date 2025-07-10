@@ -62,8 +62,9 @@ fn main() -> anyhow::Result<()> {
 
     // max_worker_threads and max_blocking_threads from env vars or config file.
     let rt_config = dynamo_runtime::RuntimeConfig::from_settings()?;
+    tracing::debug!("Runtime config: {rt_config}");
 
-    // One per process. Wraps a Runtime with holds two tokio runtimes.
+    // One per process. Wraps a Runtime with holds one or two tokio runtimes.
     let worker = dynamo_runtime::Worker::from_config(rt_config)?;
 
     worker.execute(wrapper)

@@ -124,8 +124,19 @@ fn delta_core(tok: u32) -> Annotated<LLMEngineOutput> {
 /// Useful for testing ingress such as service-http.
 struct EchoEngineFull {}
 
+/// Validate Engine that verifies request data
+pub struct ValidateEngine<E> {
+    inner: E,
+}
+
+impl<E> ValidateEngine<E> {
+    pub fn new(inner: E) -> Self {
+        Self { inner }
+    }
+}
+
 /// Engine that dispatches requests to either OpenAICompletions
-//or OpenAIChatCompletions engine
+/// or OpenAIChatCompletions engine
 pub struct EngineDispatcher<E> {
     inner: E,
 }
@@ -134,6 +145,11 @@ impl<E> EngineDispatcher<E> {
     pub fn new(inner: E) -> Self {
         EngineDispatcher { inner }
     }
+}
+
+/// Trait on request types that allows us to validate the data
+pub trait ValidateRequest {
+    fn validate(&self) -> Result<(), anyhow::Error>;
 }
 
 /// Trait that allows handling both completion and chat completions requests
@@ -264,6 +280,30 @@ impl
         _incoming_request: SingleIn<NvCreateEmbeddingRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateEmbeddingResponse>>, Error> {
         unimplemented!()
+    }
+}
+
+#[async_trait]
+impl<E, Req, Resp> AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error> for ValidateEngine<E>
+where
+    E: AsyncEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>, Error> + Send + Sync,
+    Req: ValidateRequest + Send + Sync + 'static,
+    Resp: Send + Sync + 'static,
+{
+    async fn generate(
+        &self,
+        incoming_request: SingleIn<Req>,
+    ) -> Result<ManyOut<Annotated<Resp>>, Error> {
+        let (request, context) = incoming_request.into_parts();
+
+        // Validate the request first
+        if let Err(validation_error) = request.validate() {
+            return Err(anyhow::anyhow!("Validation failed: {}", validation_error));
+        }
+
+        // Forward to inner engine if validation passes
+        let validated_request = SingleIn::rejoin(request, context);
+        self.inner.generate(validated_request).await
     }
 }
 

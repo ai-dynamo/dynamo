@@ -19,7 +19,13 @@ from vllm.config import VllmConfig
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
-from dynamo.llm import WorkerMetricsPublisher
+from dynamo.llm import (
+    ForwardPassMetrics,
+    KvStats,
+    SpecDecodeStats,
+    WorkerMetricsPublisher,
+    WorkerStats,
+)
 from dynamo.runtime import Component
 
 
@@ -69,28 +75,60 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
                 / scheduler_stats.prefix_cache_stats.queries
             )
 
-        self.inner.publish(
+        worker_stats = WorkerStats(
             request_active_slots=scheduler_stats.num_running_reqs,
             request_total_slots=self.request_total_slots,
-            kv_active_blocks=int(self.num_gpu_block * scheduler_stats.kv_cache_usage),
-            kv_total_blocks=self.num_gpu_block,
             num_requests_waiting=scheduler_stats.num_waiting_reqs,
-            gpu_cache_usage_perc=scheduler_stats.kv_cache_usage,
-            gpu_prefix_cache_hit_rate=hit_rate,
             data_parallel_rank=self.dp_rank,
         )
 
+        kv_stats = KvStats(
+            kv_active_blocks=int(self.num_gpu_block * scheduler_stats.kv_cache_usage),
+            kv_total_blocks=self.num_gpu_block,
+            gpu_cache_usage_perc=scheduler_stats.gpu_cache_usage,
+            gpu_prefix_cache_hit_rate=hit_rate,
+        )
+
+        spec_dec_stats = scheduler_stats.spec_decoding_stats
+        if spec_dec_stats:
+            spec_dec_stats = SpecDecodeStats(
+                num_spec_tokens=spec_dec_stats.num_spec_tokens,
+                num_drafts=spec_dec_stats.num_drafts,
+                num_draft_tokens=spec_dec_stats.num_draft_tokens,
+                num_accepted_tokens=spec_dec_stats.num_accepted_tokens,
+                num_accepted_tokens_per_pos=spec_dec_stats.num_accepted_tokens_per_pos,
+            )
+
+        metrics = ForwardPassMetrics(
+            worker_stats=worker_stats,
+            kv_stats=kv_stats,
+            spec_decode_stats=spec_dec_stats,
+        )
+
+        self.inner.publish(metrics)
+
     def init_publish(self):
-        self.inner.publish(
+        worker_stats = WorkerStats(
             request_active_slots=0,
             request_total_slots=self.request_total_slots,
-            kv_active_blocks=0,
-            kv_total_blocks=self.num_gpu_block,
             num_requests_waiting=0,
-            gpu_cache_usage_perc=0,
-            gpu_prefix_cache_hit_rate=0,
             data_parallel_rank=self.dp_rank,
         )
+
+        kv_stats = KvStats(
+            kv_active_blocks=0,
+            kv_total_blocks=self.num_gpu_block,
+            gpu_cache_usage_perc=0,
+            gpu_prefix_cache_hit_rate=0,
+        )
+
+        metrics = ForwardPassMetrics(
+            worker_stats=worker_stats,
+            kv_stats=kv_stats,
+            spec_decode_stats=None,
+        )
+
+        self.inner.publish(metrics)
 
     def log_engine_initialized(self) -> None:
         pass

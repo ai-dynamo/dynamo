@@ -62,30 +62,57 @@ docker compose -f deploy/metrics/docker-compose.yml up -d
 ./container/run.sh -it --framework sglang
 ```
 
+## Run Deployment
+
+This figure shows an overview of the major components to deploy:
+
+
+
+```
+
++------+      +-----------+      +------------------+             +---------------+
+| HTTP |----->| processor |----->|      Worker      |------------>|     Prefill   |
+|      |<-----|           |<-----|                  |<------------|     Worker    |
++------+      +-----------+      +------------------+             +---------------+
+                  |    ^                  |
+       query best |    | return           | publish kv events
+           worker |    | worker_id        v
+                  |    |         +------------------+
+                  |    +---------|     kv-router    |
+                  +------------->|                  |
+                                 +------------------+
+
+```
+
+Note: The above architecture illustrates all the components. The final components
+that get spawned depend upon the chosen graph.
+
 ### Example architectures
+
+> [!IMPORTANT]
+> Below we provide some simple shell scripts that run the components for each configuration. Each shell script is simply running the `dynamo-run` to start up the ingress and using `python3` to start up the workers. You can easily take each commmand and run them in separate terminals.
 
 #### Aggregated
 
 ```bash
-cd /workspace/examples/sglang
-dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml
+cd $DYNAMO_ROOT/examples/sglang
+./launch/agg.sh
 ```
 
-#### Aggregated with router
+#### Aggregated serving with KV Routing
 
 > [!NOTE]
 > The current implementation of `examples/sglang/components/worker.py` publishes _placeholder_ engine metrics to keep the Dynamo KV-router happy. Real-time metrics will be surfaced directly from the SGLang engine once the following pull requests are merged:
-> • Upstream: [sgl-project/sglang #6721](https://github.com/sgl-project/sglang/pull/6721) – _Expose runtime KV-cache & request metrics_.
 > • Dynamo: [ai-dynamo/dynamo #1465](https://github.com/ai-dynamo/dynamo/pull/1465) – _feat: receive kvmetrics from sglang scheduler_.
 >
 > After these are in, the TODOs in `worker.py` will be resolved and the placeholder logic removed.
 
 ```bash
-cd /workspace/examples/sglang
-dynamo serve graphs.agg:Frontend -f ./configs/agg.yaml --Frontend.router=kv
+cd $DYNAMO_ROOT/examples/sglang
+./launch/agg_router.sh
 ```
 
-#### Disaggregated
+#### Disaggregated serving
 
 <details>
 <summary>SGLang Load Balancer vs Dynamo Discovery</summary>
@@ -105,8 +132,8 @@ Because Dynamo has a discovery mechanism, we do not use a load balancer. Instead
 > Disaggregated serving in SGLang currently requires each worker to have the same tensor parallel size [unless you are using an MLA based model](https://github.com/sgl-project/sglang/pull/5922)
 
 ```bash
-cd /workspace/examples/sglang
-dynamo serve graphs.disagg:Frontend -f ./configs/disagg.yaml
+cd $DYNAMO_ROOT/examples/sglang
+./launch/disagg.sh
 ```
 
 ##### Disaggregated with MoE models and DP attention
@@ -115,8 +142,8 @@ SGLang also supports DP attention for MoE models. We provide an example config f
 
 ```bash
 # note this will require 4 GPUs
-cd /workspace/examples/sglang
-dynamo serve graphs.disagg:Frontend -f ./configs/disagg-dp-attention.yaml
+cd $DYNAMO_ROOT/examples/sglang
+./launch/disagg_dp_attn.sh
 ```
 
 In order to scale to the full DeepSeek-R1 model, you can follow the instructions in the [multinode-examples.md](./multinode-examples.md) file.

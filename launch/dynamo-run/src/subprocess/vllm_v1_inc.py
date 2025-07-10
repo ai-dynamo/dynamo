@@ -33,8 +33,12 @@ from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 
 from dynamo.llm import (
+    ForwardPassMetrics,
+    KvStats,
     ModelType,
+    SpecDecodeStats,
     WorkerMetricsPublisher,
+    WorkerStats,
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
     register_llm,
@@ -85,17 +89,36 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
                 / scheduler_stats.prefix_cache_stats.queries
             )
 
-        # TODO Manage DP Ranks in metrics aggregation.
-        self.inner.publish(
+        worker_stats = WorkerStats(
             request_active_slots=scheduler_stats.num_running_reqs,
             request_total_slots=0,  # TODO - remove from metrics
+            num_requests_waiting=scheduler_stats.num_waiting_reqs,
+            data_parallel_rank=None,
+        )
+
+        kv_stats = KvStats(
             kv_active_blocks=0,  # TODO - need to calculate this
             kv_total_blocks=0,  # TODO - remove from metrics
-            num_requests_waiting=scheduler_stats.num_waiting_reqs,  # used in current cost function
             gpu_cache_usage_perc=scheduler_stats.gpu_cache_usage,  # used in current cost function
             gpu_prefix_cache_hit_rate=hit_rate,
-            data_parallel_rank=self.dp_rank,
         )
+
+        spec_dec_stats = scheduler_stats.spec_decoding_stats
+        if spec_dec_stats:
+            spec_dec_stats = SpecDecodeStats(
+                num_spec_tokens=spec_dec_stats.num_spec_tokens,
+                num_drafts=spec_dec_stats.num_drafts,
+                num_draft_tokens=spec_dec_stats.num_draft_tokens,
+                num_accepted_tokens=spec_dec_stats.num_accepted_tokens,
+                num_accepted_tokens_per_pos=spec_dec_stats.num_accepted_tokens_per_pos,
+            )
+
+        metrics = ForwardPassMetrics(
+            worker_stats=worker_stats,
+            kv_stats=kv_stats,
+            spec_decode_stats=spec_dec_stats,
+        )
+        self.inner.publish(metrics)
 
     def log_engine_initialized(self) -> None:
         pass

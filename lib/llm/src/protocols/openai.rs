@@ -13,8 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt::Display;
-
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
@@ -29,42 +27,11 @@ pub mod embeddings;
 pub mod models;
 pub mod nvext;
 pub mod responses;
+pub mod validate;
 
-/// Minimum allowed value for OpenAI's `temperature` sampling option
-pub const MIN_TEMPERATURE: f32 = 0.0;
-
-/// Maximum allowed value for OpenAI's `temperature` sampling option
-pub const MAX_TEMPERATURE: f32 = 2.0;
-
-/// Allowed range of values for OpenAI's `temperature`` sampling option
-pub const TEMPERATURE_RANGE: (f32, f32) = (MIN_TEMPERATURE, MAX_TEMPERATURE);
-
-/// Minimum allowed value for OpenAI's `top_p` sampling option
-pub const MIN_TOP_P: f32 = 0.0;
-
-/// Maximum allowed value for OpenAI's `top_p` sampling option
-pub const MAX_TOP_P: f32 = 1.0;
-
-/// Allowed range of values for OpenAI's `top_p` sampling option
-pub const TOP_P_RANGE: (f32, f32) = (MIN_TOP_P, MAX_TOP_P);
-
-/// Minimum allowed value for OpenAI's `frequency_penalty` sampling option
-pub const MIN_FREQUENCY_PENALTY: f32 = -2.0;
-
-/// Maximum allowed value for OpenAI's `frequency_penalty` sampling option
-pub const MAX_FREQUENCY_PENALTY: f32 = 2.0;
-
-/// Allowed range of values for OpenAI's `frequency_penalty` sampling option
-pub const FREQUENCY_PENALTY_RANGE: (f32, f32) = (MIN_FREQUENCY_PENALTY, MAX_FREQUENCY_PENALTY);
-
-/// Minimum allowed value for OpenAI's `presence_penalty` sampling option
-pub const MIN_PRESENCE_PENALTY: f32 = -2.0;
-
-/// Maximum allowed value for OpenAI's `presence_penalty` sampling option
-pub const MAX_PRESENCE_PENALTY: f32 = 2.0;
-
-/// Allowed range of values for OpenAI's `presence_penalty` sampling option
-pub const PRESENCE_PENALTY_RANGE: (f32, f32) = (MIN_PRESENCE_PENALTY, MAX_PRESENCE_PENALTY);
+use validate::{
+    validate_range, FREQUENCY_PENALTY_RANGE, PRESENCE_PENALTY_RANGE, TEMPERATURE_RANGE, TOP_P_RANGE,
+};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AnnotatedDelta<R> {
@@ -164,21 +131,6 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
             ignore_eos,
         })
     }
-}
-
-// todo - move to common location
-fn validate_range<T>(value: Option<T>, range: &(T, T)) -> Result<Option<T>>
-where
-    T: PartialOrd + Display,
-{
-    if value.is_none() {
-        return Ok(None);
-    }
-    let value = value.unwrap();
-    if value < range.0 || value > range.1 {
-        anyhow::bail!("Value {} is out of range [{}, {}]", value, range.0, range.1);
-    }
-    Ok(Some(value))
 }
 
 pub trait DeltaGeneratorExt<ResponseType: Send + Sync + 'static + std::fmt::Debug>:
