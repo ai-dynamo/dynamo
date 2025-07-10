@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from components.frontend import Frontend
-from components.prefill_worker import TensorRTLLMPrefillWorker
+from components.next_worker import TensorRTLLMNextWorker
 from components.worker import TensorRTLLMWorker
 
-Frontend.link(TensorRTLLMWorker).link(TensorRTLLMPrefillWorker)
+Frontend.link(TensorRTLLMWorker).link(TensorRTLLMNextWorker)

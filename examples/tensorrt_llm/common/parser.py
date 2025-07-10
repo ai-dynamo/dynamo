@@ -44,7 +44,6 @@ def parse_tensorrt_llm_args(
         default="random",
         help="Router type to use for scheduling requests to workers",
     )
-
     parser.add_argument(
         "--kv-block-size",
         type=int,
@@ -56,6 +55,12 @@ def parse_tensorrt_llm_args(
         "--enable-disagg",
         action="store_true",
         help="Enable remote prefill for the worker",
+    )
+    parser.add_argument(
+        "--disaggregation_mode",
+        type=str,
+        default=None,
+        help="Disaggregation mode to use for the worker.",
     )
 
     args = parser.parse_args(config_args)
