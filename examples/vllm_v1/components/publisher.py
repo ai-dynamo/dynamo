@@ -139,7 +139,7 @@ class StatLoggerFactory:
 
     def __init__(self, component: Component, dp_rank: int = 0) -> None:
         self.component = component
-        self.created_logger = None
+        self.created_logger: Optional[DynamoStatLoggerPublisher] = None
         self.dp_rank = dp_rank
 
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
