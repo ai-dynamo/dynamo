@@ -41,9 +41,15 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 Or install vLLM manually:
 
+```bash
+export VLLM_REF=3c545c0c3b98ee642373a308197d750d0e449403
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+git checkout $VLLM_REF
+VLLM_USE_PRECOMPILED=1 uv pip install -e .
 ```
-uv pip install vllm==0.9.1
-```
+
+If you are in the default vllm container remember to uninstall the old vllm using  'uv pip uninstall ai-dynamo-vllm'
 
 2. Start required services:
 ```bash
