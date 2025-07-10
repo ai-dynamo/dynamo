@@ -401,8 +401,10 @@ impl WorkerSelector for DefaultWorkerSelector {
         }
 
         // Normalize by dividing by max value
-        for logit in worker_logits.values_mut() {
-            *logit /= max_logit;
+        if max_logit > 0.0 {
+            for logit in worker_logits.values_mut() {
+                *logit /= max_logit;
+            }
         }
 
         // Use softmax sampling to select worker
