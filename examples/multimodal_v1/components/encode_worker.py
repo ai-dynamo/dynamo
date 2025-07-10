@@ -32,7 +32,7 @@ from utils.args import parse_vllm_args
 from components.worker import VllmPDWorker
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 from utils.logging import check_required_workers
-from transformers import AutoImageProcessor, LlavaForConditionalGeneration
+from transformers import AutoImageProcessor, Llama4ForConditionalGeneration
 
 
 logger = logging.getLogger(__name__)
@@ -73,7 +73,7 @@ class VllmEncodeWorker:
             self.MODEL_ID, trust_remote_code=True
         )
         # self.vision_model = load_vision_model(self.MODEL_ID)
-        self.vision_model = LlavaForConditionalGeneration.from_pretrained(
+        self.vision_model = Llama4ForConditionalGeneration.from_pretrained(
             self.MODEL_ID, device_map="auto", torch_dtype=torch.float16
         ).eval()
 
