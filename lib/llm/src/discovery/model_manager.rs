@@ -217,9 +217,7 @@ impl ModelManager {
             component.clone(),
             kv_cache_block_size,
             Some(selector),
-            kv_router_config
-                .unwrap_or(KvRouterConfig::default())
-                .use_kv_events,
+            kv_router_config.unwrap_or_default().use_kv_events,
         )
         .await?;
         let new_kv_chooser = Arc::new(chooser);
