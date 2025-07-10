@@ -31,6 +31,6 @@ Middle:
 Backend:
   message: "mars"
   ServiceArgs:
-    workers: 2
+    workers: 1
     resources:
       cpu: "1"
