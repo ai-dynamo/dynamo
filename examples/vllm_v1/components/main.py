@@ -16,6 +16,7 @@
 import asyncio
 import logging
 import os
+import signal
 import socket
 from typing import Optional
 
@@ -40,9 +41,33 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
+async def graceful_shutdown(runtime):
+    """
+    By calling `runtime.shutdown()`, the endpoints will immediately be unavailable.
+    However, in-flight requests will still be processed until they are finished.
+    After all in-flight requests are finished, the `serve_endpoint` functions will return
+    and the engine will be shutdown by Python's garbage collector.
+    """
+    logging.info("Received shutdown signal, shutting down DistributedRuntime")
+    runtime.shutdown()
+    logging.info("DistributedRuntime shutdown complete")
+
+
 @dynamo_worker(static=False)
 async def worker(runtime: DistributedRuntime):
     config = parse_args()
+
+    # Set up signal handler for graceful shutdown
+    loop = asyncio.get_running_loop()
+
+    def signal_handler():
+        asyncio.create_task(graceful_shutdown(runtime))
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
+
+    logging.info("Signal handlers set up for graceful shutdown")
+
     if config.is_prefill_worker:
         await init_prefill(runtime, config)
     else:
