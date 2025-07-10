@@ -66,16 +66,18 @@ Deploy vLLM workers across multiple nodes for horizontal scaling:
 dynamo run in=http out=dyn
 
 # Start vLLM worker
-python3 main.py \
-  --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+python3 components/main.py \
+  --model meta-llama/Llama-3.3-70B-Instruct \
+  --tensor-parallel-size 8 \
   --enforce-eager
 ```
 
 **Node 2**: Run additional worker
 ```bash
 # Start vLLM worker
-python3 main.py \
-  --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
+python3 components/main.py \
+  --model meta-llama/Llama-3.3-70B-Instruct \
+  --tensor-parallel-size 8 \
   --enforce-eager
 ```
 
@@ -89,15 +91,20 @@ Deploy prefill and decode workers on separate nodes for optimized resource utili
 dynamo run in=http out=dyn &
 
 # Start prefill worker
-python3 main.py \
-  --model deepseek-ai/DeepSeek-R1
+python3 components/main.py \
+  --model meta-llama/Llama-3.3-70B-Instruct
+  --tensor-parallel-size 8 \
+  --enforce-eager
 ```
 
 **Node 2**: Run decode workers
 ```bash
 # Start decode worker
-python3 main.py \
-  --model deepseek-ai/DeepSeek-R1
+python3 components/main.py \
+  --model meta-llama/Llama-3.3-70B-Instruct
+  --tensor-parallel-size 8 \
+  --enforce-eager \
+  --is-prefill-worker
 ```
 
 

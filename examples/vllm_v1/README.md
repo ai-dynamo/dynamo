@@ -19,27 +19,11 @@ limitations under the License.
 
 This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations using vLLM. For Dynamo integration, we leverage vLLM's native KV cache events, NIXL based transfer mechanisms, and metric reporting to enable KV-aware routing and P/D disaggregation.
 
-## Use the Latest Release
-
-We recommend using the latest stable release of dynamo to avoid breaking changes:
-
-[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
-
-You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
-
-```bash
-git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
-```
-
 ## Deployment Architectures
 
 See [deployment architectures](../llm/README.md#deployment-architectures) to learn about the general idea of the architecture. vLLM supports aggregated, disaggregated, and KV-routed serving patterns.
 
 ## Getting Started
-
-1. Choose a deployment architecture based on your requirements
-2. Configure the components as needed
-3. Deploy using the provided scripts
 
 ### Prerequisites
 
@@ -49,19 +33,17 @@ Start required services (etcd and NATS) using [Docker Compose](../../deploy/metr
 docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
-### Build docker
+### Build and Run docker
 
 ```bash
 ./container/build.sh --framework VLLM_V1
 ```
 
-### Run container
-
 ```bash
 ./container/run.sh -it --framework VLLM_V1
 ```
 
-This includes the specific commit [vllm-project/vllm#19790](https://github.com/vllm-project/vllm/pull/19790) which enables support for DEP (Data Parallel Execution), allowing each DP rank to be its own Dynamo component.
+This includes the specific commit [vllm-project/vllm#19790](https://github.com/vllm-project/vllm/pull/19790) which enables support for external control of the DP ranks. 
 
 ## Run Deployment
 
@@ -131,7 +113,6 @@ bash launch/dep.sh
 ```
 
 
-
 > [!TIP]
 > Run a disaggregated example and try adding another prefill worker once the setup is running! The system will automatically discover and utilize the new worker.
 
@@ -143,7 +124,7 @@ Send a test request to verify your deployment:
 curl localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "Qwen/Qwen3-30B-A3B",
+    "model": "Qwen/Qwen3-0.6B",
     "messages": [
     {
         "role": "user",
