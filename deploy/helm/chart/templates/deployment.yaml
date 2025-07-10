@@ -38,7 +38,7 @@ spec:
       - name: {{ $.Release.Name }}-{{ $serviceName | lower }}
         image: {{ $serviceSpec.extraPodSpec.mainContainer.image }}
         workingDir: {{ $serviceSpec.extraPodSpec.mainContainer.workingDir }}
-        args: 
+        args:
         {{- $serviceSpec.extraPodSpec.mainContainer.args | toYaml | nindent 8 }}
         {{ if $serviceSpec.resources }}
         resources:
@@ -70,7 +70,7 @@ spec:
         {{- end }}
         env:
         - name: DYNAMO_PORT
-          value: "{{ $.Values.dynamoPort | default 8000 }}"  
+          value: "{{ $.Values.dynamoPort | default 8000 }}"
         {{- if $.Values.etcdAddr }}
         - name: ETCD_ENDPOINTS
           value: "{{ $.Values.etcdAddr }}"
