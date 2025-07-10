@@ -50,9 +50,10 @@ VllmPDWorker:
   enable-prefix-caching: true
   enable_disagg: false
   router: random
-  tensor-parallel-size: 1
+  tensor_parallel_size: 8
+  max-model-len: 430000
   ServiceArgs:
     workers: 1
     resources:
-      gpu: '1'
+      gpu: '8'
   common-configs: [model, block-size, max-model-len, image-token-id, num-patches]
