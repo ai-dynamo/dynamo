@@ -129,7 +129,8 @@ pub struct Flags {
     pub router_temperature: Option<f64>,
 
     /// KV Router: Whether to use KV events to maintain the view of cached blocks
-    /// If false, would use ApproxKvRouter for predictions.
+    /// If false, would use ApproxKvRouter for predicting block creation / deletion
+    /// based only on incoming requests at a timer.
     /// Default: true
     #[arg(long)]
     pub use_kv_events: Option<bool>,
