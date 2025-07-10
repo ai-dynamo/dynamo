@@ -85,8 +85,8 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         kv_stats = KvStats(
             kv_active_blocks=int(self.num_gpu_block * scheduler_stats.kv_cache_usage),
             kv_total_blocks=self.num_gpu_block,
-            gpu_cache_usage_perc=scheduler_stats.gpu_cache_usage,
-            gpu_prefix_cache_hit_rate=hit_rate,
+            gpu_cache_usage_perc=scheduler_stats.kv_cache_usage,
+            gpu_prefix_cache_hit_rate=hit_rate,  # TODO: This is a point in time update, not cumulative. Will be problematic on router side if we try to use it.
         )
 
         spec_dec_stats = scheduler_stats.spec_decoding_stats
@@ -141,19 +141,13 @@ class StatLoggerFactory:
         self.component = component
         self.created_logger = None
         self.dp_rank = dp_rank
-        print(
-            f"DEBUG: StatLoggerFactory created for component: {component}"
-        )  # Debug log
 
     def create_stat_logger(self, dp_rank: int) -> StatLoggerBase:
         if self.dp_rank != dp_rank:
             return NullStatLogger()
-        print(f"DEBUG: Creating stat logger for dp_rank: {dp_rank}")  # Debug log
         logger = DynamoStatLoggerPublisher(self.component, dp_rank)
         self.created_logger = logger
-        print(
-            f"DEBUG: Stat logger created successfully for dp_rank: {dp_rank}"
-        )  # Debug log
+
         return logger
 
     def __call__(self, vllm_config: VllmConfig, dp_rank: int) -> StatLoggerBase:

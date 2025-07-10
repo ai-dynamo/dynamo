@@ -72,20 +72,11 @@ echo "  Data parallel size: $DATA_PARALLEL_SIZE"
 echo "  Master address: $MASTER_ADDR"
 echo "  Log directory: $LOG_DIR"
 
-WORKER_PIDS=()
-DYNAMO_PID=
-
-cleanup() {
-    echo "Cleaning up..."
-    kill $DYNAMO_PID "${WORKER_PIDS[@]}" 2>/dev/null || true
-    wait $DYNAMO_PID "${WORKER_PIDS[@]}" 2>/dev/null || true
-}
-trap cleanup EXIT ERR INT TERM
+trap 'echo Cleaning up...; kill 0' EXIT
 
 # run ingress if it's node 0
 if [ $NODE_RANK -eq 0 ]; then
     DYN_LOG=debug dynamo-run in=http out=dyn --router-mode kv 2>&1 | tee $LOG_DIR/dsr1_dep_ingress.log &
-    DYNAMO_PID=$!
 fi
 
 mkdir -p $LOG_DIR
@@ -109,9 +100,7 @@ for ((i=0; i<GPUS_PER_NODE; i++)); do
         --gpu-memory-utilization 0.95 \
         --enforce-eager \
         --kv-events-port 49700 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_rank}.log &
-    WORKER_PIDS+=($!)
 done
 
-# Wait for all background processes to finish
 echo "All workers starting. (press Ctrl+C to stop)..."
-wait $DYNAMO_PID "${WORKER_PIDS[@]}"
+wait

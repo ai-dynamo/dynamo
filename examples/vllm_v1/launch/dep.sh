@@ -1,19 +1,11 @@
 #!/bin/bash
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-
-WORKER_PIDS=()
-
-cleanup() {
-    echo "Cleaning up..."
-    kill $DYNAMO_PID "${WORKER_PIDS[@]}" 2>/dev/null || true
-    wait $DYNAMO_PID "${WORKER_PIDS[@]}" 2>/dev/null || true
-}
-trap cleanup EXIT ERR INT TERM
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
 
 # run ingress
-DYN_LOG=debug $HOME/dynamo/.build/target/debug/dynamo-run in=http out=dyn --router-mode kv &
-DYNAMO_PID=$!
+dynamo run in=http out=dyn --router-mode kv &
 
 # Data Parallel Attention / Expert Parallelism
 # Routing to DP workers managed by Dynamo
@@ -26,9 +18,7 @@ for i in {0..3}; do
     --enable-expert-parallel \
     --enforce-eager \
     --kv-events-port 49500 &
-    WORKER_PIDS+=($!)
 done
 
-# Wait for all background processes to finish
 echo "All workers starting. (press Ctrl+C to stop)..."
-wait $DYNAMO_PID "${WORKER_PIDS[@]}"
+wait
