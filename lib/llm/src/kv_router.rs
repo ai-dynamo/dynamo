@@ -29,7 +29,7 @@ pub mod sequence;
 use crate::{
     kv_router::{
         approx::ApproxKvIndexer,
-        indexer::{KvIndexer, KvIndexerInterface, RouterEvent},
+        indexer::{compute_block_hash_for_seq, KvIndexer, KvIndexerInterface, RouterEvent},
         metrics_aggregator::EndpointCollector,
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
@@ -185,13 +185,7 @@ impl KvRouter {
         let isl_tokens = tokens.len();
         let block_size = self.block_size;
 
-        let (complete_blocks, _partial_block) =
-            TokenBlockSequence::split_tokens(tokens, block_size, 1337_u64);
-
-        let local_block_hashes = complete_blocks
-            .into_iter()
-            .map(|block| LocalBlockHash(block.block_hash()))
-            .collect();
+        let local_block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
         let overlap_scores = match &self.maybe_indexer {
             Some(indexer) => indexer.find_matches(local_block_hashes).await?,
             None => Default::default(), // Returns empty/default instance
