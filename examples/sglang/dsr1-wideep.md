@@ -97,7 +97,7 @@ python3 components/worker.py \
   --enable-two-batch-overlap \
   --deepep-mode normal \
   --mem-fraction-static 0.85 \
-  --deepep-config /configs/deepep.json \
+  --deepep-config configs/deepep.json \
   --ep-num-redundant-experts 32 \
   --ep-dispatch-algorithm dynamic \
   --eplb-algorithm deepseek
