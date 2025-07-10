@@ -1,5 +1,7 @@
 # Quickstart
 
+Before deploying your inference graphs you need to install the Dynamo Inference Platform and the Dynamo Cloud.
+
 ## 1. Installing from Published Artifacts
 
 Use this approach when installing from pre-built helm charts and docker images published to NGC.
@@ -14,7 +16,7 @@ export RELEASE_VERSION=0.3.2
 ### Authenticate with NGC
 
 ```bash
-helm repo add nvidia https://helm.ngc.nvidia.com/nvidia --username='$oauthtoken' --password=<YOUR_NGC_API_KEY>
+helm repo add nvidia https://helm.ngc.nvidia.com/nvidia --username='$oauthtoken' --password=<YOUR_NGC_CLI_API_KEY>
 ```
 
 ### Fetch Helm Charts
@@ -23,7 +25,7 @@ helm repo add nvidia https://helm.ngc.nvidia.com/nvidia --username='$oauthtoken'
 # Fetch the CRDs helm chart
 helm fetch https://helm.ngc.nvidia.com/nvidia/charts/dynamo-crds-v${RELEASE_VERSION}.tgz
 
-# Fetch the platform helm chart  
+# Fetch the platform helm chart
 helm fetch https://helm.ngc.nvidia.com/nvidia/charts/dynamo-platform-v${RELEASE_VERSION}.tgz
 ```
 
@@ -48,7 +50,7 @@ helm install dynamo-platform dynamo-platform-v${RELEASE_VERSION}.tgz --namespace
 
 ## 2. Installing from Source
 
-Use this approach when developing or customizing Dynamo, using local helm charts from the source repository.
+Use this approach when developing or customizing Dynamo as a contributor, or using local helm charts from the source repository.
 
 ### Prerequisites
 
@@ -69,6 +71,26 @@ export IMAGE_TAG=your-image-tag
 ```
 
 ### Install Dynamo Cloud
+
+You could run the `deploy.sh` or use the manual commands under Step 1 and Step 2.
+
+**Installing with a script (alternative to Step 1 and Step 2)**
+
+Install Prerequisites: envsubst, kubectl, helm
+
+```bash
+kubectl create namespace ${NAMESPACE}
+```
+
+```bash
+./deploy.sh --crds
+```
+
+if you want guidance during the process, run the deployment script with the `--interactive` flag:
+
+```bash
+./deploy.sh --crds --interactive
+```
 
 **Step 1: Install Custom Resource Definitions (CRDs)**
 
@@ -100,6 +122,9 @@ helm install dynamo-platform ./platform/ \
   --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
   --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret"
 ```
+
+[More on Deploying to Dynamo Cloud](./dynamo_cloud.md)
+
 
 ## Explore Examples
 
