@@ -190,7 +190,7 @@ class Router:
             logger.warning(f"New Worker added: {worker_id}")
             self.active_blocks_dict[worker_id] = [polled_value, polled_value]
             return polled_value
-    
+
         old_value, predictive_value = self.active_blocks_dict[worker_id]
 
         # Check if polled value is different from old value
