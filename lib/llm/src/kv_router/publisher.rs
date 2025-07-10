@@ -247,10 +247,11 @@ pub async fn start_zmq_listener(
     }
 
     let mut consecutive_errors = 0u32;
+    #[allow(unused_assignments)]
     let mut exit_reason = "unknown";
     let mut messages_processed = 0u64;
 
-    loop {
+    'main: loop {
         tokio::select! {
             biased;
 
@@ -258,7 +259,7 @@ pub async fn start_zmq_listener(
             _ = cancellation_token.cancelled() => {
                 tracing::debug!("ZMQ listener received cancellation signal");
                 exit_reason = "cancellation token cancelled";
-                break;
+                break 'main;
             }
 
             // Receive message
@@ -274,7 +275,7 @@ pub async fn start_zmq_listener(
                             "Too many consecutive ZMQ errors, terminating listener"
                         );
                         exit_reason = "too many consecutive errors";
-                        break;
+                        break 'main;
                     }
 
                     // Simple exponential backoff with max exponent to prevent overflow
@@ -331,7 +332,7 @@ pub async fn start_zmq_listener(
                     if tx.send(event).is_err() {
                         tracing::warn!("Failed to send message to channel - receiver dropped");
                         exit_reason = "channel receiver dropped";
-                        return;
+                        break 'main;
                     }
                     messages_processed += 1;
                 }
