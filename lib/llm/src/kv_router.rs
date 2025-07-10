@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use dynamo_runtime::{
@@ -27,6 +28,7 @@ pub mod sequence;
 
 use crate::{
     kv_router::{
+        approx::ApproxKvIndexer,
         indexer::{KvIndexer, KvIndexerInterface, RouterEvent},
         metrics_aggregator::EndpointCollector,
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
@@ -98,7 +100,7 @@ impl KvRouterConfig {
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
 pub struct KvRouter {
-    indexer: Option<KvIndexer>,
+    maybe_indexer: Option<ApproxKvIndexer>,
     scheduler: KvScheduler,
     block_size: u32,
 }
@@ -118,8 +120,16 @@ impl KvRouter {
         let metrics_aggregator =
             EndpointCollector::new(component.clone(), cancellation_token.clone()).await;
 
-        let maybe_indexer =
-            use_kv_events.then(|| KvIndexer::new(cancellation_token.clone(), block_size));
+        // let maybe_indexer =
+        //     use_kv_events.then(|| KvIndexer::new(cancellation_token.clone(), block_size));
+
+        let maybe_indexer = use_kv_events.then(|| {
+            ApproxKvIndexer::new(
+                cancellation_token.clone(),
+                block_size,
+                Duration::from_secs(120),
+            )
+        });
 
         let scheduler = KvScheduler::start(
             component.namespace().clone(),
@@ -131,34 +141,34 @@ impl KvRouter {
 
         // [gluo TODO] try subscribe_with_type::<RouterEvent>,
         // error checking below will be different.
-        if let Some(ref indexer) = maybe_indexer {
-            let mut kv_events_rx = component.subscribe(KV_EVENT_SUBJECT).await?;
-            let kv_events_tx = indexer.event_sender();
+        // if let Some(ref indexer) = maybe_indexer {
+        //     let mut kv_events_rx = component.subscribe(KV_EVENT_SUBJECT).await?;
+        //     let kv_events_tx = indexer.event_sender();
 
-            tokio::spawn(async move {
-                while let Some(event) = kv_events_rx.next().await {
-                    let event: RouterEvent = match serde_json::from_slice(&event.payload) {
-                        Ok(event) => event,
-                        Err(e) => {
-                            tracing::warn!("Failed to deserialize RouterEvent: {:?}", e);
-                            // Choosing warn and continue to process other events from other workers
-                            // A bad event likely signals a problem with a worker, but potentially other workers are still healthy
-                            continue;
-                        }
-                    };
-                    if let Err(e) = kv_events_tx.send(event).await {
-                        tracing::debug!(
-                            "failed to send kv event to indexer; shutting down: {:?}",
-                            e
-                        );
-                    }
-                }
-            });
-        }
+        //     tokio::spawn(async move {
+        //         while let Some(event) = kv_events_rx.next().await {
+        //             let event: RouterEvent = match serde_json::from_slice(&event.payload) {
+        //                 Ok(event) => event,
+        //                 Err(e) => {
+        //                     tracing::warn!("Failed to deserialize RouterEvent: {:?}", e);
+        //                     // Choosing warn and continue to process other events from other workers
+        //                     // A bad event likely signals a problem with a worker, but potentially other workers are still healthy
+        //                     continue;
+        //                 }
+        //             };
+        //             if let Err(e) = kv_events_tx.send(event).await {
+        //                 tracing::debug!(
+        //                     "failed to send kv event to indexer; shutting down: {:?}",
+        //                     e
+        //                 );
+        //             }
+        //         }
+        //     });
+        // }
 
         tracing::info!("KV Routing initialized");
         Ok(Self {
-            indexer: maybe_indexer,
+            maybe_indexer,
             scheduler,
             block_size,
         })
@@ -182,7 +192,7 @@ impl KvRouter {
             .into_iter()
             .map(|block| LocalBlockHash(block.block_hash()))
             .collect();
-        let overlap_scores = match &self.indexer {
+        let overlap_scores = match &self.maybe_indexer {
             Some(indexer) => indexer.find_matches(local_block_hashes).await?,
             None => Default::default(), // Returns empty/default instance
         };
@@ -197,6 +207,13 @@ impl KvRouter {
                 overlap_scores.clone(),
             )
             .await?;
+
+        if let Some(ref indexer) = self.maybe_indexer {
+            indexer
+                .process_routing_decision_for_request(tokens, best_worker_id)
+                .await
+                .unwrap();
+        };
 
         let overlap_amount = overlap_scores
             .scores
