@@ -182,26 +182,38 @@ ARG VLLM_REF="059d4cd"
 ENV CUDA_HOME=/usr/local/cuda
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
-    uv pip install pip cuda-python && \
-    mkdir /opt/vllm && \
-    cd /opt/vllm && \
-    git clone https://github.com/vllm-project/vllm.git && \
-    cd vllm && \
-    git checkout $VLLM_REF && \
     if [ "$ARCH" = "arm64" ]; then \
+        uv pip install pip cuda-python && \
+        mkdir /opt/vllm && \
+        cd /opt/vllm && \
+        git clone https://github.com/vllm-project/vllm.git && \
+        cd vllm && \
+        git checkout $VLLM_REF && \
         uv pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 && \
         python use_existing_torch.py && \
         uv pip install -r requirements/build.txt && \
         VLLM_USE_PRECOMPILED=1 uv pip install --no-build-isolation -e . && \
+        cd tools/ep_kernels && \
+        bash install_python_libraries.sh && \
+        cd ep_kernels_workspace && \
+        git clone --recursive https://github.com/deepseek-ai/DeepGEMM.git && \
+        cd DeepGEMM && \
+        python setup.py install; \
     else \
+        uv pip install pip cuda-python && \
+        mkdir /opt/vllm && \
+        cd /opt/vllm && \
+        git clone https://github.com/vllm-project/vllm.git && \
+        cd vllm && \
+        git checkout $VLLM_REF && \
         VLLM_USE_PRECOMPILED=1 uv pip install -e . && \
-    fi && \
-    cd tools/ep_kernels && \
-    bash install_python_libraries.sh && \
-    cd ep_kernels_workspace && \
-    git clone --recursive https://github.com/deepseek-ai/DeepGEMM.git && \
-    cd DeepGEMM && \
-    python setup.py install
+        cd tools/ep_kernels && \
+        bash install_python_libraries.sh && \
+        cd ep_kernels_workspace && \
+        git clone --recursive https://github.com/deepseek-ai/DeepGEMM.git && \
+        cd DeepGEMM && \
+        python setup.py install; \
+    fi
 
 
 # Common dependencies
