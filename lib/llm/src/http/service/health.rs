@@ -52,27 +52,12 @@ pub fn live_check_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    let live_path = path.unwrap_or_else(|| "/v1/health/live".to_string());
+    let live_path = path.unwrap_or_else(|| "/live".to_string());
 
     let docs: Vec<RouteDoc> = vec![RouteDoc::new(Method::GET, &live_path)];
 
     let router = Router::new()
         .route(&live_path, get(live_handler))
-        .with_state(state);
-
-    (docs, router)
-}
-
-pub fn ready_check_router(
-    state: Arc<service_v2::State>,
-    path: Option<String>,
-) -> (Vec<RouteDoc>, Router) {
-    let ready_path = path.unwrap_or_else(|| "/v1/health/ready".to_string());
-
-    let docs: Vec<RouteDoc> = vec![RouteDoc::new(Method::GET, &ready_path)];
-
-    let router = Router::new()
-        .route(&ready_path, get(health_handler))
         .with_state(state);
 
     (docs, router)
