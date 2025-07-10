@@ -111,11 +111,9 @@ Once the deployment is complete, you can test it using commands below.
 Do the port forward in another terminal if needed.
 
 ```bash
-# Find your frontend pod
-export FRONTEND_POD=$(kubectl get pods -n ${NAMESPACE} | grep "hello-world-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
-
+export DEPLOYMENT_NAME=hello-world
 # Forward the pod's port to localhost
-kubectl port-forward pod/${FRONTEND_POD} 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/$DEPLOYMENT_NAME-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
 ```bash
