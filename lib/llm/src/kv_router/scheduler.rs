@@ -259,10 +259,10 @@ impl KvScheduler {
         sequences.add_request(request_id, token_sequence, worker_id)
     }
 
-    /// Push a token to a specific request's sequence
-    pub async fn push(&self, request_id: &String, token: u32) {
+    /// Push tokens to a specific request's sequence
+    pub async fn push(&self, request_id: &String, tokens: &[u32]) {
         let mut sequences = self.sequences.lock().await;
-        sequences.push(request_id, token)
+        sequences.push(request_id, tokens)
     }
 
     /// Free all blocks associated with a request
@@ -395,14 +395,17 @@ impl WorkerSelector for DefaultWorkerSelector {
             worker_logits.insert(*worker_id, logit);
 
             tracing::info!(
-                "Formula for {worker_id}: {logit:.3} = {:.1} * {prefill_blocks:.3} + {potential_blocks:.3}",
+                "Formula for {worker_id}: {logit:.3} = {:.1} * {prefill_blocks:.3} + {potential_blocks:.3}  (cached_blocks: {cached_blocks})",
                 self.kv_router_config.overlap_score_weight,
+                cached_blocks = cached_blocks
             );
         }
 
         // Normalize by dividing by max value
-        for logit in worker_logits.values_mut() {
-            *logit /= max_logit;
+        if max_logit > 0.0 {
+            for logit in worker_logits.values_mut() {
+                *logit /= max_logit;
+            }
         }
 
         // Use softmax sampling to select worker

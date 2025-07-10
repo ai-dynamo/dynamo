@@ -428,3 +428,60 @@ You should see a response describing the video's content similar to
   ]
 }
 ```
+
+
+## Deploying Multimodal Examples on Kubernetes
+
+This guide will help you quickly deploy and clean up the multimodal example services in Kubernetes.
+
+### Prerequisites
+
+- **Dynamo Cloud** is already deployed in your target Kubernetes namespace.
+- You have `kubectl` access to your cluster and the correct namespace set in `$NAMESPACE`.
+
+
+### Create a secret with huggingface token
+
+```bash
+export HF_TOKEN="huggingfacehub token with read permission to models"
+kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=$HF_TOKEN -n $KUBE_NS || true
+```
+
+---
+
+Choose the example you want to deploy or delete. The YAML files are located in `examples/multimodal/deploy/k8s/`.
+
+### Deploy the Multimodal Example
+
+```bash
+kubectl apply -f examples/multimodal/deploy/k8s/<Example yaml file> -n $NAMESPACE
+```
+
+### Uninstall the Multimodal Example
+
+
+```bash
+kubectl delete -f examples/multimodal/deploy/k8s/<Example yaml file> -n $NAMESPACE
+```
+
+### Using a different dynamo container
+
+To customize the container image used in your deployment, you will need to update the manifest before applying it.
+
+You can use [`yq`](https://github.com/mikefarah/yq?tab=readme-ov-file#install), a portable command-line YAML processor.
+
+Please follow the [installation instructions](https://github.com/mikefarah/yq?tab=readme-ov-file#install) for your platform if you do not already have `yq` installed. After installing `yq`, you can generate and apply your manifest as follows:
+
+
+```bash
+export DYNAMO_IMAGE=my-registry/my-image:tag
+
+yq '.spec.services.[].extraPodSpec.mainContainer.image = env(DYNAMO_IMAGE)' $EXAMPLE_FILE > my_example_manifest.yaml
+
+# install the dynamo example
+kubectl apply -f my_example_manifest.yaml -n $NAMESPACE
+
+# uninstall the dynamo example
+kubectl delete -f my_example_manifest.yaml -n $NAMESPACE
+
+```

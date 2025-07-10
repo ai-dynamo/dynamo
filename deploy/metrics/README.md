@@ -13,19 +13,17 @@ Default Service Relationship Diagram:
 ```mermaid
 graph TD
     BROWSER[Browser] -->|:3001| GRAFANA[Grafana :3001]
-    BROWSER[Browser] -->|:3001| DCGM_EXPORTER2["external dcgm_exporter 0.0.0.0:9400"]
     subgraph DockerComposeNetwork [Network inside Docker Compose]
         NATS_PROM_EXP[nats-prom-exp :7777 /metrics] -->|:8222/varz| NATS_SERVER[nats-server :4222, :6222, :8222]
         PROMETHEUS[Prometheus server :9090] -->|:2379/metrics| ETCD_SERVER[etcd-server :2379, :2380]
-        PROMETHEUS -->|:9400/metrics| DCGM_EXPORTER[dcgm-exporter :9400]
+        PROMETHEUS -->|:9401/metrics| DCGM_EXPORTER[dcgm-exporter :9401]
         PROMETHEUS -->|:7777/metrics| NATS_PROM_EXP
         PROMETHEUS -->|:8000/metrics| DYNAMOFE[Dynamo HTTP FE :8000]
         GRAFANA -->|:9090/query API| PROMETHEUS
     end
-    BROWSER -->|:9401/metrics| DCGM_EXPORTER
 ```
 
-The dcgm-exporter within the Docker Compose network is configured to bind to port 9400 internally, but it is exposed externally on port 9401. This setup helps prevent conflicts with other dcgm-exporters that might be running concurrently, such as in distributed environments like SLURM.
+The dcgm-exporter service in the Docker Compose network is configured to use port 9401 instead of the default port 9400. This adjustment is made to avoid port conflicts with other dcgm-exporter instances that may be running simultaneously. Such a configuration is typical in distributed systems like SLURM.
 
 As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build containers with `--framework VLLM_V1` or `--framework TENSORRTLLM`.
 

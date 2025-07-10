@@ -466,7 +466,7 @@ impl Decoder {
 
     pub fn process_token_ids(&mut self, token_ids: &[TokenIdType]) -> Result<SeqResult> {
         let mut text: Option<String> = None;
-        let mut tokens = Vec::new();
+        let mut tokens = Vec::with_capacity(token_ids.len());
 
         for token_id in token_ids {
             let StepResult {
@@ -481,7 +481,8 @@ impl Decoder {
 
             if !hide_text {
                 if let Some(token) = &token {
-                    text.get_or_insert_with(String::new).push_str(token);
+                    text.get_or_insert_with(|| String::with_capacity(token_ids.len()))
+                        .push_str(token);
                 }
             }
             tokens.push(token);
