@@ -383,8 +383,8 @@ impl WorkerSelector for DefaultWorkerSelector {
 
             // this is the number of blocks each worker would have if the request were scheduled there
             let potential_blocks = *potential_active_blocks.get(worker_id).unwrap_or_else(||
-                {tracing::warn!("assuming 0 decoding blocks for {worker_id}, as the endpoint does not exist yet");
-                &0
+                {tracing::warn!("assuming {request_blocks} decoding blocks for {worker_id}, as the endpoint does not exist yet");
+                &request_blocks
             }) as f64;
 
             let potential_prefill_blocks = potential_tokens / (block_size as f64);
