@@ -25,7 +25,6 @@ use tokio::sync::Mutex;
 use super::protocols::WorkerSelectionResult;
 use super::WorkerSelector;
 use crate::kv_router::indexer::OverlapScores;
-use crate::kv_router::indexer::WorkerId;
 use crate::kv_router::protocols::LoadMetrics;
 use crate::kv_router::scoring::ProcessedEndpoints;
 use crate::kv_router::sequence::ActiveSequencesMultiWorker;
@@ -37,7 +36,7 @@ use crate::tokens::TokenBlockSequence;
 pub struct KVHitRateEvent {
     pub worker_id: i64,
     pub isl_blocks: usize,
-    pub overlap_blocks: usize,
+    pub overlap_blocks: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -79,6 +78,7 @@ impl Endpoint {
 #[derive(Debug)]
 pub struct SchedulingResponse {
     pub best_worker_id: i64,
+    pub overlap_blocks: u32, // Add this field
     pub endpoints_changed: Option<Vec<i64>>,
 }
 
@@ -174,6 +174,7 @@ impl KvScheduler {
 
                             let response = SchedulingResponse {
                                 best_worker_id: selection.worker_id,
+                                overlap_blocks: selection.overlap_blocks,
                                 endpoints_changed: pending_endpoint_update.take(),
                             };
                             request.respond(response);
@@ -217,7 +218,7 @@ impl KvScheduler {
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
             isl_tokens,
-            overlap,
+            overlap: overlap.clone(),
             potential_blocks,
             resp_tx,
         };
@@ -234,29 +235,14 @@ impl KvScheduler {
         }
 
         let token_sequence = TokenBlockSequence::from_slice(tokens, block_size, None);
-        sequences.add_request(request_id, token_sequence, response.best_worker_id);
+        sequences.add_request(
+            request_id,
+            token_sequence,
+            response.overlap_blocks,
+            response.best_worker_id,
+        );
 
         Ok(response.best_worker_id)
-    }
-
-    /// Find the potential blocks for each worker if the sequence were routed there
-    pub async fn potential_blocks(
-        &self,
-        token_sequence: TokenBlockSequence,
-    ) -> HashMap<i64, usize> {
-        let sequences = self.sequences.lock().await;
-        sequences.potential_blocks(token_sequence)
-    }
-
-    /// Add a new request with its initial tokens to a specific worker
-    pub async fn add_request(
-        &self,
-        request_id: String,
-        token_sequence: TokenBlockSequence,
-        worker_id: WorkerId,
-    ) {
-        let mut sequences = self.sequences.lock().await;
-        sequences.add_request(request_id, token_sequence, worker_id)
     }
 
     /// Push tokens to a specific request's sequence
@@ -417,7 +403,7 @@ impl WorkerSelector for DefaultWorkerSelector {
             .scores
             .get(&best_worker_id)
             .copied()
-            .unwrap_or(0) as usize;
+            .unwrap_or(0);
         let best_logit = worker_logits[&best_worker_id];
 
         tracing::info!(
