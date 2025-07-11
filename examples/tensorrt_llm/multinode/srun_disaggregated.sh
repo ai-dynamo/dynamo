@@ -10,7 +10,7 @@ IMAGE="${IMAGE:-""}"
 # but you may freely customize the mounts based on your cluster. A common practice
 # is to mount paths to NFS storage for common scripts, model weights, etc.
 # NOTE: This can be a comma separated list of multiple mounts as well.
-DEFAULT_MOUNT="${PWD}:/mnt"
+DEFAULT_MOUNT="${PWD}/../:/mnt"
 MOUNTS="${MOUNTS:-${DEFAULT_MOUNT}}"
 
 NUM_GPUS_PER_NODE=${NUM_GPUS_PER_NODE:-4}
@@ -75,7 +75,7 @@ srun \
   --nodes "${NUM_PREFILL_NODES}" \
   --ntasks-per-node "${NUM_GPUS_PER_NODE}" \
   --jobid "${SLURM_JOB_ID}" \
-  /mnt/start_trtllm_worker.sh &
+  /mnt/multinode/start_trtllm_worker.sh &
 
 echo "Launching multi-node decode worker in background."
 DISAGGREGATION_MODE=decode \
@@ -93,4 +93,4 @@ srun \
   --nodes "${NUM_DECODE_NODES}" \
   --ntasks-per-node "${NUM_GPUS_PER_NODE}" \
   --jobid "${SLURM_JOB_ID}" \
-  /mnt/start_trtllm_worker.sh &
+  /mnt/multinode/start_trtllm_worker.sh &
