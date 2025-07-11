@@ -31,7 +31,49 @@ You can find the latest release [here](https://github.com/ai-dynamo/dynamo/relea
 git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 ```
 
-## Deployment Architectures
+## Feature Support Matrix
+
+todo: maybe have 2 tables - 1 for dynamo features and 1 for sglang features that we support
+
+| Feature | SGLang | Status | Docs |
+|---------|--------|--------|------|
+| **Disaggregated Serving** | ✅ | Full support with prefill/decode separation | [doc](https://github.com/sgl-project/sglang/blob/main/docs/disaggregation.md) |
+| **Conditional Disaggregation** | 🚧 | Work in progress ([#7730](https://github.com/sgl-project/sglang/pull/7730)) | [PR](https://github.com/sgl-project/sglang/pull/7730) |
+| **KV-Aware Routing** | ✅ | Full support | [doc](https://github.com/sgl-project/sglang/blob/main/docs/kv_routing.md) |
+| **DP Rank Routing** | 🚧 | Experimental, partial support | - |
+| **WideEP** | ✅ | Full support with large scale P/D for DSR1 | [doc](https://github.com/sgl-project/sglang/blob/main/docs/wideep.md) |
+| **ARM Container** | 🚧 | WIP | - |
+| **Blackwell/Grace Blackwell** | 🚧 | Work in progress ([#7556](https://github.com/sgl-project/sglang/pull/7556)) | [PR](https://github.com/sgl-project/sglang/pull/7556) |
+| **SLA-Based Planner** | ❌ | Not supported | - |
+| **Load Based Planner** | ❌ | Not supported | - |
+| **KVBM** | ❌ | Not supported | - |
+
+## Quick Start 
+
+Below we provide a quick start guide that lets you run all of our the common deployment patterns on a single node. We have a much more comprehensive guide for advanced deployments below.
+
+### Prerequisites
+
+Start required services (etcd and NATS) using [Docker Compose](../../deploy/metrics/docker-compose.yml)
+
+```bash
+docker compose -f deploy/metrics/docker-compose.yml up -d
+```
+
+### Build docker
+
+```bash
+# On an x86 machine - sglang does not support ARM yet
+./container/build.sh --framework sglang
+```
+
+### Run container
+
+```bash
+./container/run.sh -it --framework sglang
+```
+
+### Single Node Deployment Patterns
 
 See [deployment architectures](../llm/README.md#deployment-architectures) to learn about the general idea of the architecture. SGLang currently supports aggregated and disaggregated serving. KV routing support is coming soon!
 
@@ -136,6 +178,12 @@ cd $DYNAMO_ROOT/examples/sglang
 ./launch/disagg.sh
 ```
 
+#### Disaggregated serving with MoE models
+
+SGLang supports many features for MoE models including DP attention, wide expert parallelism, large scale P/D, and more. Dynamo supports all of these features!a
+
+
+
 ##### Disaggregated with MoE models and DP attention
 
 SGLang also supports DP attention for MoE models. We provide an example config for this in `configs/disagg-dp-attention.yaml` which is based on the [DeepSeek-R1-Small-2layers](https://huggingface.co/silence09/DeepSeek-R1-Small-2layers) model. You can use this configuration to test out disaggregated serving on a single node before scaling to the full DeepSeek-R1 model across multiple nodes.
@@ -147,6 +195,10 @@ cd $DYNAMO_ROOT/examples/sglang
 ```
 
 In order to scale to the full DeepSeek-R1 model, you can follow the instructions in the [multinode-examples.md](./multinode-examples.md) file.
+
+###### MoE expert distribution recording
+
+Dynamo supports SGLang's implementation of MoE expert distribution recording for performance optimization. 
 
 ##### Disaggregated with WideEP
 
