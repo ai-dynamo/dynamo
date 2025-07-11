@@ -32,8 +32,8 @@ if [[ -n ${DISAGGREGATION_STRATEGY} ]]; then
 fi
 
 trtllm-llmapi-launch \
-  python3 /workspace/examples/tensorrt_llm/components/worker.py \
+  python3 /mnt/components/worker.py \
     --model-path "${MODEL_PATH}" \
-    --model-name "${SERVED_MODEL_NAME}" \
+    --served-model-name "${SERVED_MODEL_NAME}" \
     --extra-engine-args "${ENGINE_CONFIG}" \
     ${EXTRA_ARGS}
