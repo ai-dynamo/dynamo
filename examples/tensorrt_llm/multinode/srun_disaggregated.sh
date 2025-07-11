@@ -54,7 +54,7 @@ srun \
   --nodelist "${HEAD_NODE}" \
   --nodes 1 \
   --jobid "${SLURM_JOB_ID}" \
-  /mnt/start_frontend_services.sh &
+  /mnt/multinode/start_frontend_services.sh &
 
 # NOTE: Output streamed to stdout for ease of understanding the example, but
 # in practice you would probably set `srun --output ... --error ...` to pipe
