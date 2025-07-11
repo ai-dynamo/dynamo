@@ -74,7 +74,31 @@ RUN apt-get update -y && \
 
 WORKDIR /workspace
 
-### TODO: Bring back UCX EFA setup once we are confident it works with IB devices
+### UCX EFA Setup ###
+RUN rm -rf /opt/hpcx/ucx
+RUN rm -rf /usr/local/ucx
+RUN cd /usr/local/src && \
+    git clone https://github.com/openucx/ucx.git && \
+    cd ucx &&                   \
+    git checkout v1.19.x &&     \
+    ./autogen.sh && ./configure \
+    --prefix=/usr/local/ucx     \
+    --enable-shared             \
+    --disable-static            \
+    --disable-doxygen-doc       \
+    --enable-optimizations      \
+    --enable-cma                \
+    --enable-devel-headers      \
+    --with-cuda=/usr/local/cuda \
+    --with-verbs                \
+    --with-efa                  \
+    --with-dm                   \
+    --with-gdrcopy=/usr/local   \
+    --enable-mt &&              \
+    make -j &&                  \
+    make -j install-strip &&    \
+    ldconfig
+
 ENV CPATH=/usr/include:$CPATH
 ENV PATH=/usr/bin:$PATH
 ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
@@ -403,6 +427,13 @@ RUN apt-get update && \
     uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
+# Install SGLang and related packages (sgl-kernel, einops, sentencepiece) since they are not included in the runtime wheel
+# https://github.com/sgl-project/sglang/blob/v0.4.9.post1/python/pyproject.toml#L18-51
+RUN uv pip install "sglang[runtime_common]>=0.4.9.post1" && \
+    uv pip install einops && \
+    uv pip install sgl-kernel==0.2.4 && \
+    uv pip install sentencepiece
+
 # Install the wheels and symlink executables to /usr/local/bin so dynamo components can use them
 # Dynamo components currently do not have the VIRTUAL_ENV in their PATH, so we need to symlink the executables
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
@@ -411,13 +442,6 @@ RUN uv pip install ai-dynamo --find-links wheelhouse && \
     uv pip install ai-dynamo-runtime --find-links wheelhouse && \
     uv pip install nixl --find-links wheelhouse && \
     ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/
-
-# Install SGLang and related packages (sgl-kernel, einops, sentencepiece) since they are not included in the runtime wheel
-# https://github.com/sgl-project/sglang/blob/v0.4.9.post1/python/pyproject.toml#L18-51
-RUN uv pip install "sglang[runtime_common]>=0.4.9.post1" && \
-    uv pip install einops && \
-    uv pip install sgl-kernel==0.2.4 && \
-    uv pip install sentencepiece
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
