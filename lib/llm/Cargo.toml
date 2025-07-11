@@ -108,6 +108,9 @@ tokenizers = { version = "0.21.1", default-features = false, features = [
 ] }
 sentencepiece = { version = "0.11.2", optional = true }
 
+# metrics
+hdrhistogram = "7.5.4"
+
 # backend
 galil-seiferas = { version = "0.1" }
 toktrie = { version = "0.6.28" }

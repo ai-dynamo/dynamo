@@ -11,10 +11,12 @@ use std::{
 use axum::{
     extract::State,
     http::StatusCode,
+    middleware::Next,
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
+    http::Request,
     routing::{get, post},
     Json, Router,
 };
@@ -92,6 +94,28 @@ impl ErrorResponse {
         )
     }
 
+    /// Rate Limit Exceeded
+    /// Return this error when the request is rejected due to rate limiting.
+    pub fn rate_limit_exceeded(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse {
+                error: msg.to_string(),
+            }),
+        )
+    }
+
+    /// Bad Request
+    /// Return this error when the received request is malformed.
+    pub fn bad_request(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: msg.to_string(),
+            }),
+        )
+    }
+
     /// The OAI endpoints call an [`dynamo.runtime::engine::AsyncEngine`] which are specialized to return
     /// an [`anyhow::Error`]. This method will convert the [`anyhow::Error`] into an [`HttpError`].
     /// If successful, it will return the [`HttpError`] as an [`ErrorResponse::internal_server_error`]
@@ -119,6 +143,35 @@ impl From<HttpError> for ErrorResponse {
     fn from(err: HttpError) -> Self {
         ErrorResponse { error: err.message }
     }
+}
+
+/// Rate Limit Middleware
+///
+/// This middleware will check if the current request should be rejected based on the rate limiter logic.
+/// The rate limiter logic, on the other hand, keeps track of specific model metrics, such as TTFT and ITL.
+/// If these values exceed specific configured thresholds, the request will be rejected. This is so that
+/// we can optimize for goodput, and not necessarily raw throughput, across the service.
+///
+/// If the request should be rejected, it will return a Status Code of 429 Too Many Requests.
+/// Otherwise, it will call the next middleware/route handler.
+pub async fn rate_limit_middleware(
+    State(state): State<service_v2::State>,
+    request: Request<NvCreateChatCompletionRequest>,
+    next: Next,
+) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    let request_body = request.body();
+    let model = request_body.inner.model.clone();
+    let should_reject = state.rate_limiter().should_reject(&model).map_err(|_| {
+        ErrorResponse::internal_server_error("Failed to check rate limit")
+    })?;
+
+    if should_reject {
+        return Err(ErrorResponse::rate_limit_exceeded(&format!(
+            "Rate limit exceeded for current request and model: {model}. Please retry later."
+        )));
+    }
+
+    Ok(next.run(request).await)
 }
 
 /// OpenAI Completions Request Handler

@@ -8,6 +8,8 @@ use super::metrics;
 use super::Metrics;
 use super::RouteDoc;
 use crate::discovery::ModelManager;
+use crate::http::service::rate_limiter::RateLimiter;
+use crate::http::service::rate_limiter::RateLimiterConfig;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
@@ -18,13 +20,15 @@ use tokio_util::sync::CancellationToken;
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
+    rate_limiter: Arc<RateLimiter>,
 }
 
 impl State {
-    pub fn new(manager: Arc<ModelManager>) -> Self {
+    pub fn new(manager: Arc<ModelManager>, rate_limiter: Arc<RateLimiter>) -> Self {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
+            rate_limiter,
         }
     }
 
@@ -39,6 +43,14 @@ impl State {
 
     pub fn manager_clone(&self) -> Arc<ModelManager> {
         self.manager.clone()
+    }
+
+    pub fn rate_limiter(&self) -> &RateLimiter {
+        Arc::as_ref(&self.rate_limiter)
+    }
+
+    pub fn rate_limiter_clone(&self) -> Arc<RateLimiter> {
+        self.rate_limiter.clone()
     }
 
     // TODO
@@ -83,6 +95,9 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
+
+    #[builder(default = "None")]
+    rate_limiter_config: Option<RateLimiterConfig>,
 }
 
 impl HttpService {
@@ -137,7 +152,10 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let state = Arc::new(State::new(model_manager));
+        let rate_limiter = Arc::new(RateLimiter::new(
+            config.rate_limiter_config.unwrap_or_default(),
+        ));
+        let state = Arc::new(State::new(model_manager, rate_limiter));
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
