@@ -20,8 +20,8 @@ use validator::Validate;
 use crate::engines::ValidateRequest;
 
 use super::{
-    nvext::NvExt, nvext::NvExtProvider, validate, OpenAISamplingOptionsProvider,
-    OpenAIStopConditionsProvider,
+    nvext::NvExt, nvext::NvExtProvider, validate, OpenAIOutputOptionsProvider,
+    OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
 };
 
 mod aggregator;
@@ -174,6 +174,36 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     /// Returns a reference to the optional `NvExt` extension, if available.
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
+    }
+}
+
+impl OpenAIOutputOptionsProvider for NvCreateChatCompletionRequest {
+    fn get_logprobs(&self) -> Option<u32> {
+        match self.inner.logprobs {
+            Some(logprobs) => {
+                if logprobs {
+                    match self.inner.top_logprobs {
+                        Some(top_logprobs) => Some(top_logprobs as u32),
+                        None => Some(1_u32),
+                    }
+                } else {
+                    None
+                }
+            }
+            None => None,
+        }
+    }
+
+    fn get_prompt_logprobs(&self) -> Option<u32> {
+        None
+    }
+
+    fn get_skip_special_tokens(&self) -> Option<bool> {
+        None
+    }
+
+    fn get_formatted_prompt(&self) -> Option<bool> {
+        None
     }
 }
 

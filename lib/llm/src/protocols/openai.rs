@@ -16,6 +16,8 @@
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+use crate::protocols::common::OutputOptionsProvider;
+
 use super::{
     common::{self, SamplingOptionsProvider, StopConditionsProvider},
     ContentProvider,
@@ -61,6 +63,16 @@ trait OpenAIStopConditionsProvider {
     fn get_stop(&self) -> Option<Vec<String>>;
 
     fn nvext(&self) -> Option<&nvext::NvExt>;
+}
+
+trait OpenAIOutputOptionsProvider {
+    fn get_logprobs(&self) -> Option<u32>;
+
+    fn get_prompt_logprobs(&self) -> Option<u32>;
+
+    fn get_skip_special_tokens(&self) -> Option<bool>;
+
+    fn get_formatted_prompt(&self) -> Option<bool>;
 }
 
 impl<T: OpenAISamplingOptionsProvider> SamplingOptionsProvider for T {
@@ -129,6 +141,22 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
             stop,
             stop_token_ids_hidden: None,
             ignore_eos,
+        })
+    }
+}
+
+impl<T: OpenAIOutputOptionsProvider> OutputOptionsProvider for T {
+    fn extract_output_options(&self) -> Result<common::OutputOptions> {
+        let logprobs = self.get_logprobs();
+        let prompt_logprobs = self.get_prompt_logprobs();
+        let skip_special_tokens = self.get_skip_special_tokens();
+        let formatted_prompt = self.get_formatted_prompt();
+
+        Ok(common::OutputOptions {
+            logprobs,
+            prompt_logprobs,
+            skip_special_tokens,
+            formatted_prompt,
         })
     }
 }

@@ -269,16 +269,7 @@ class RequestHandler:
             # Set the disaggregated params to generation_only for the rest of the generation
             disaggregated_params.request_type = "generation_only"
 
-        sampling_params = self.default_sampling_params
-        for key, value in request["sampling_options"].items():
-            if not value:
-                continue
-            if hasattr(sampling_params, key):
-                setattr(sampling_params, key, value)
-
-        max_tokens = request["stop_conditions"]["max_tokens"]
-        if max_tokens:
-            sampling_params.max_tokens = max_tokens
+        sampling_params = process_sampling_params(request, self.default_sampling_params)
 
         # TODO: Disable streaming for context only requests when adding disagg support
         async for res in self.engine.llm.generate_async(
@@ -308,6 +299,14 @@ class RequestHandler:
                 out["finish_reason"] = output.finish_reason
             if output.stop_reason:
                 out["stop_reason"] = output.stop_reason
+            if output.logprobs:
+                out["logprobs"] = [
+                    output.logprobs[i][tok_id].logprob
+                    for i, tok_id in enumerate(
+                        out["token_ids"], start=num_output_tokens_so_far
+                    )
+                ]
+                logging.info(f"out['logprobs']={out['logprobs']}")
             if self.disaggregation_mode == "prefill":
                 # Return the disaggregated params only when operating in prefill mode.
                 out["disaggregated_params"] = asdict(
@@ -438,6 +437,113 @@ async def init(runtime: DistributedRuntime, config: Config):
         else:
             handler = RequestHandler(handler_config)
             await endpoint.serve_endpoint(handler.generate)
+
+
+def process_sampling_params(
+    request, default_sampling_params: SamplingParams
+) -> SamplingParams:
+    """
+    Process sampling parameters from request to trtllm.SamplingParams.
+    """
+    sampling_params = request["sampling_options"]
+    output_options = request["output_options"]
+    stop_cond = request["stop_conditions"]
+
+    # Process temperature
+    temperature = sampling_params.get("temperature", None)
+
+    # Process top_k
+    top_k = sampling_params.get("top_k", None)
+    if top_k == -1 or top_k == 0:
+        top_k = None
+
+    # Process top_p
+    top_p = sampling_params.get("top_p", None)
+
+    # Process top_p_min (min_p)
+    top_p_min = sampling_params.get("min_p", None)
+    if top_p_min == 0.0:
+        top_p_min = None
+
+    # Process seed
+    seed = sampling_params.get("seed", None)
+
+    # Process repetition_penalty
+    repetition_penalty = sampling_params.get("repetition_penalty", None)
+    if repetition_penalty is None:
+        repetition_penalty = 1.0
+
+    # Process presence_penalty
+    presence_penalty = sampling_params["presence_penalty"]
+
+    # Process frequency_penalty
+    frequency_penalty = sampling_params["frequency_penalty"]
+
+    # Process length_penalty
+    length_penalty = sampling_params.get("length_penalty", None)
+
+    # Process min_length
+    min_length = stop_cond.get("min_length", None)
+    if min_length is not None and min_length <= 0:
+        min_length = None
+
+    # Process logprobs and prompt_logprobs
+    logprobs = output_options.get("logprobs", None)
+    # None means no logprobs
+    if logprobs is not None and int(logprobs) >= 0:
+        if int(logprobs) > 1:
+            logging.warning(
+                f"Got `top_logprobs={logprobs}`. `top_logprobs > 1` is not supported in trtllm and 1 logprob is returned always."
+            )
+
+    prompt_logprobs = output_options.get("prompt_logprobs", None)
+
+    # TODO guided decoding params
+
+    # TODO make model_max_len configurable
+
+    # TODO handle stop_token_ids
+    # stop_token_ids = []
+    # if sampling_params.stop_token_ids is not None and len(sampling_params.stop_token_ids) > 0:
+    #    stop_token_ids = sampling_params.stop_token_ids
+    # elif hf_config is not None and hf_config.eos_token_id is not None and isinstance(hf_config.eos_token_id, list):
+    #    # Only set if eos_token_id is list, single eos token is well handled by tensorrt_llm
+    #    stop_token_ids = hf_config.eos_token_id
+
+    if prompt_logprobs is not None:
+        logging.warning("prompt_logprobs is not supported by TRT-LLM")
+
+    n_logprobs = logprobs
+    if n_logprobs is not None and n_logprobs > 1:
+        n_logprobs = 1
+
+    n_seq = sampling_params.get("n", 1)
+    if n_seq is None:
+        n_seq = 1
+
+    trtllm_sampling_params = default_sampling_params
+    trtllm_sampling_params.use_beam_search = False  #  changes output if set to True
+    trtllm_sampling_params.top_k = top_k
+    trtllm_sampling_params.top_p = top_p
+    trtllm_sampling_params.seed = seed
+    trtllm_sampling_params.temperature = temperature
+    trtllm_sampling_params.min_tokens = min_length  # SizeType minLength
+    trtllm_sampling_params.max_tokens = sampling_params.get("max_tokens", None)
+    trtllm_sampling_params.repetition_penalty = repetition_penalty
+    trtllm_sampling_params.presence_penalty = presence_penalty
+    trtllm_sampling_params.frequency_penalty = frequency_penalty
+    trtllm_sampling_params.length_penalty = length_penalty
+    trtllm_sampling_params.ignore_eos = sampling_params.get("ignore_eos", False)
+    trtllm_sampling_params.detokenize = False
+    trtllm_sampling_params.n = n_seq
+    trtllm_sampling_params.stop = None  # handled by dynamo
+    trtllm_sampling_params.logprobs = n_logprobs
+    trtllm_sampling_params.prompt_logprobs = False  # not yet supported
+    trtllm_sampling_params.exclude_input_from_output = True
+    # TODO
+    # trtllm_sampling_params.return_generation_logits=(logprobs is not None and logprobs > 1)
+
+    return trtllm_sampling_params
 
 
 def cmd_line_args():
