@@ -12,30 +12,26 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+
+# NOTE: FP4 only supported starting with Blackwell GPUs.
+# https://huggingface.co/nvidia/DeepSeek-R1-FP4
+# You can also specify the full path to locally downloaded weights
+# instead of a HuggingFace ID here.
+
 backend: pytorch
-
-# WideEP related settings
-moe_backend: WideEP
-moe_load_balancer: /mnt/engine_configs/deepseek_r1/wide_ep/eplb.yaml
-
-# TP/EP/PP/DP
-tensor_parallel_size: 16
-moe_expert_parallel_size: 16
-pipeline_parallel_size: 1
+tensor_parallel_size: 4
+moe_expert_parallel_size: 4
 enable_attention_dp: true
-
 max_batch_size: 1
 max_num_tokens: 8192
 max_seq_len: 8192
-
 kv_cache_config:
   free_gpu_memory_fraction: 0.75
-
-# NOTE: pytorch_backend_config section flattened since: https://github.com/NVIDIA/TensorRT-LLM/pull/4603
-# NOTE: overlap_scheduler enabled by default since this commit and changed
-# config field from 'enable_overlap_scheduler' to 'disable_overlap_scheduler':
-# https://github.com/NVIDIA/TensorRT-LLM/commit/b4e5df0ee0024eda3eeb83a6ba822245a30ab428
-disable_overlap_scheduler: true
 print_iter_log: true
-# NOTE: This dtype must match in both prefill/decode configs
 kv_cache_dtype: fp8
+disable_overlap_scheduler: true
+
+# Enable the MTP(Multi-Token Prediction) in the prefill model engine
+speculative_config:
+  decoding_type: MTP
+  num_nextn_predict_layers: 1
