@@ -73,7 +73,7 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | ai-dynamo          | 0.3.2         | >=2.28                               |              |
 | ai-dynamo-runtime  | 0.3.2         | >=2.28 (Python 3.12 has known issues)|              |
 | ai-dynamo-vllm     | 0.8.4.post4¹  | >=2.28 (recommended)                 |              |
-| NIXL               | 0.3.1         | >=2.27                               | >=11.8       |
+| NIXL               | 0.4.0         | >=2.27                               | >=11.8       |
 
 ### Build Dependency
 
@@ -81,8 +81,8 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | :------------------- | :------------------------------------------------------------------------------- |
 | **Base Container**   | [25.03](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/cuda-dl-base/tags) |
 | **ai-dynamo-vllm**   | 0.8.4.post4¹                                                                     |
-| **TensorRT-LLM**     | 1.0.0rc²                                                                        |
-| **NIXL**             | 0.3.1                                                                            |
+| **TensorRT-LLM**     | 1.0.0rc²                                                                         |
+| **NIXL**             | 0.4.0                                                                            |
 
 > [!Important]
 > ¹ ai-dynamo-vllm `v0.8.4.post4` is a customized patch of `v0.8.4` from vLLM.
