@@ -14,7 +14,7 @@
 # limitations under the License.
 
 backend: pytorch
-tensor_parallel_size: 8
+tensor_parallel_size: 4
 moe_expert_parallel_size: 4
 max_batch_size: 256
 # When max_num_tokens set to higher values, can cause OOM issues.

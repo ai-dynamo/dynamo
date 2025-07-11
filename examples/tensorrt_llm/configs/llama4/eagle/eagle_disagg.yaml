@@ -30,7 +30,7 @@ TensorRTLLMWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 8
+      gpu: 4
 
 TensorRTLLMPrefillWorker:
   model-path: "nvidia/Llama-4-Maverick-17B-128E-Instruct-FP8"
@@ -41,4 +41,4 @@ TensorRTLLMPrefillWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 8
+      gpu: 4

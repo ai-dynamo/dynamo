@@ -28,4 +28,4 @@ TensorRTLLMWorker:
   ServiceArgs:
     workers: 1
     resources:
-      gpu: 8
+      gpu: 4
