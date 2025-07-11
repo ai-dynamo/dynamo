@@ -15,14 +15,14 @@
 
 Frontend:
   # This is the client-facing model name, you can set this to anything you'd like.
-  served_model_name: "meta-llama/Llama-4-Maverick-17B-128E"
+  served_model_name: "nvidia/Llama-4-Maverick-17B-128E-Instruct-FP8"
   endpoint: dynamo.TensorRTLLMWorker.generate
   port: 8000
   router: round-robin
 
 TensorRTLLMWorker:
-  served_model_name: "meta-llama/Llama-4-Maverick-17B-128E"
-  model-path: "meta-llama/Llama-4-Maverick-17B-128E"
+  served_model_name: "nvidia/Llama-4-Maverick-17B-128E-Instruct-FP8"
+  model-path: "nvidia/Llama-4-Maverick-17B-128E-Instruct-FP8"
   extra-engine-args: "configs/llama4/eagle/engine_configs/agg_config.yaml"
   router: round-robin
   ServiceArgs:

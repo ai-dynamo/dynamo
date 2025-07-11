@@ -13,11 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# NOTE: FP4 only supported starting with Blackwell GPUs.
-# https://huggingface.co/nvidia/DeepSeek-R1-FP4
-# You can also specify the full path to locally downloaded weights
-# instead of a HuggingFace ID here.
-
 backend: pytorch
 tensor_parallel_size: 4
 moe_expert_parallel_size: 4
@@ -27,6 +22,7 @@ max_seq_len: 8192
 print_iter_log: true
 kv_cache_dtype: fp8
 disable_overlap_scheduler: true
+autotuner_enabled: false
 
 # Enable Speculative Decoding in the model engine
 speculative_config:
@@ -37,4 +33,4 @@ speculative_config:
 
 kv_cache_config:
   free_gpu_memory_fraction: 0.5
-  enable_block_reuse: false  
+  enable_block_reuse: false

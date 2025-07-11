@@ -13,22 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# NOTE: FP4 only supported starting with Blackwell GPUs.
-# https://huggingface.co/nvidia/DeepSeek-R1-FP4
-# You can also specify the full path to locally downloaded weights
-# instead of a HuggingFace ID here.
-
 backend: pytorch
 tensor_parallel_size: 4
 moe_expert_parallel_size: 4
 max_batch_size: 256
-# Note: When MPT is enabled and `cuda_graph_batch_sizes` is specified, `max_num_tokens` must satisfy the following formula:
-# max_num_tokens >= max(cuda_graph_batch_sizes) * (num_nextn_predict_layers + 1)
-# This is a known issue in TensorRT-LLM and will be resolved in the next release.
 max_num_tokens: 512
 # 8704 = 8192 ISL + 512 OSL
 max_seq_len: 8704
 disable_overlap_scheduler: true
+autotuner_enabled: false
 
 # Enable Speculative Decoding in the model engine
 speculative_config:
@@ -39,7 +32,7 @@ speculative_config:
 
 kv_cache_config:
   free_gpu_memory_fraction: 0.5
-  enable_block_reuse: false  
+  enable_block_reuse: false
 
 use_cuda_graph: true
 cuda_graph_padding_enabled: true
