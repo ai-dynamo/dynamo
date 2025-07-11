@@ -357,7 +357,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         // Always push for the first generated token (to mark prefill done)
                         // or when we've moved to a new block
                         let current_block_index = (isl + total_output_length).saturating_sub(1) / block_size;
-                        let should_push = (!first_push_done && total_output_length > 1) ||
+                        let should_push = (!first_push_done && total_output_length >= 1) ||
                                       (first_push_done && current_block_index > last_block_index);
 
                         if should_push {

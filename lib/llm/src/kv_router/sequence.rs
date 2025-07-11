@@ -166,7 +166,7 @@ impl ActiveSequences {
         input_tokens
             .checked_sub((overlap as usize) * self.block_size)
             .unwrap_or_else(|| {
-                panic!("prefill_tokens < 0 with overlap {overlap} and isl {input_tokens}")
+                panic!("prefill_tokens < 0 with overlap {overlap} and ISL {input_tokens}")
             })
     }
 
