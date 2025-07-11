@@ -96,7 +96,9 @@ class PrefillHandler(HandlerBase):
             if response_count > 1:
                 raise ValueError("Prefill response should be generated only once.")
 
-        if self.disaggregation_strategy == "prefill_first" and not self.check_error(prefill_response):
+        if self.disaggregation_strategy == "prefill_first" and not self.check_error(
+            prefill_response
+        ):
             # If operating under prefill_first strategy, the prefill handler needs to trigger
             # the decode handler.
             request["disaggregated_params"] = prefill_response["disaggregated_params"]
@@ -134,8 +136,9 @@ class DecodeHandler(HandlerBase):
             if self.check_error(prefill_response.data()):
                 yield prefill_response.data()
                 return
-            request["disaggregated_params"] = prefill_response.data()["disaggregated_params"]
-
+            request["disaggregated_params"] = prefill_response.data()[
+                "disaggregated_params"
+            ]
 
         async for res in self.generate_locally(request):
             yield res

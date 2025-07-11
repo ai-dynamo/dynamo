@@ -59,7 +59,9 @@ class HandlerBase:
         if self.disaggregation_mode == "prefill":
             return result["finish_reason"] == "error"
         else:
-            return result["finish_reason"] == "stop" or result["finish_reason"] == "error"
+            return (
+                result["finish_reason"] == "stop" or result["finish_reason"] == "error"
+            )
 
     async def generate_locally(self, request: dict):
         """

@@ -2,6 +2,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+# Environment variables with defaults
+export MODEL_PATH=${MODEL_PATH:-"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"}
+export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"deepseek-ai/DeepSeek-R1-Distill-Llama-8B"}
+export AGG_ENGINE_ARGS=${AGG_ENGINE_ARGS:-"engine_configs/agg.yaml"}
+
 # Setup cleanup trap
 cleanup() {
     echo "Cleaning up background processes..."
@@ -20,6 +25,6 @@ DYNAMO_PID=$!
 
 # run worker
 python3 components/worker.py \
-  --model-path deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --served-model-name deepseek-ai/DeepSeek-R1-Distill-Llama-8B \
-  --extra-engine-args configs/agg.yaml
+  --model-path "$MODEL_PATH" \
+  --served-model-name "$SERVED_MODEL_NAME" \
+  --extra-engine-args "$AGG_ENGINE_ARGS"
