@@ -16,10 +16,10 @@ MOUNTS="${MOUNTS:-${DEFAULT_MOUNT}}"
 NUM_GPUS_PER_NODE=${NUM_GPUS_PER_NODE:-4}
 
 NUM_PREFILL_NODES=${NUM_PREFILL_NODES:-4}
-PREFILL_ENGINE_CONFIG="${PREFILL_ENGINE_CONFIG:-/mnt/engine_configs/wide_ep_prefill.yaml}"
+PREFILL_ENGINE_CONFIG="${PREFILL_ENGINE_CONFIG:-/mnt/engine_configs/deepseek_r1/wide_ep/wide_ep_prefill.yaml}"
 
 NUM_DECODE_NODES=${NUM_DECODE_NODES:-4}
-DECODE_ENGINE_CONFIG="${DECODE_ENGINE_CONFIG:-/mnt/engine_configs/wide_ep_decode.yaml}"
+DECODE_ENGINE_CONFIG="${DECODE_ENGINE_CONFIG:-/mnt/engine_configs/deepseek_r1/wide_ep/wide_ep_decode.yaml}"
 
 DISAGGREGATION_STRATEGY=${DISAGGREGATION_STRATEGY:-"decode_first"}
 
