@@ -34,6 +34,7 @@
 //! Each block is identified by a hash of its contents, allowing for deduplication when multiple
 //! requests share common prefixes (e.g., system prompts, few-shot examples).
 
+use crate::kv_router::indexer::OverlapScores;
 use crate::kv_router::indexer::WorkerId;
 use crate::tokens::blocks::UniqueBlock;
 use crate::tokens::TokenBlockSequence;
@@ -144,12 +145,7 @@ impl ActiveSequences {
         token_sequence: TokenBlockSequence,
         overlap: u32,
     ) -> usize {
-        let input_tokens = token_sequence.total_tokens();
-        let prefill_tokens = input_tokens
-            .checked_sub((overlap as usize) * self.block_size)
-            .unwrap_or_else(|| {
-                panic!("prefill_tokens < 0 with overlap {overlap} and isl {input_tokens}")
-            });
+        let prefill_tokens = self.new_tokens(&token_sequence, overlap);
         self.prefill_tokens
             .insert(request_id.clone(), prefill_tokens);
         self.active_tokens += prefill_tokens;
@@ -163,6 +159,25 @@ impl ActiveSequences {
         self.active_seqs.insert(request_id.clone(), token_sequence);
 
         self.active_blocks
+    }
+
+    pub fn new_tokens(&self, token_sequence: &TokenBlockSequence, overlap: u32) -> usize {
+        let input_tokens = token_sequence.total_tokens();
+        input_tokens
+            .checked_sub((overlap as usize) * self.block_size)
+            .unwrap_or_else(|| {
+                panic!("prefill_tokens < 0 with overlap {overlap} and isl {input_tokens}")
+            })
+    }
+
+    pub fn potential_blocks_and_tokens(
+        &self,
+        token_sequence: &TokenBlockSequence,
+        overlap: u32,
+    ) -> (usize, usize) {
+        let potential_blocks = self.new_blocks(token_sequence) + self.active_blocks;
+        let potential_tokens = self.new_tokens(token_sequence, overlap) + self.active_tokens;
+        (potential_blocks, potential_tokens)
     }
 
     /// Match a request against existing blocks and return the number of new blocks that would be added
@@ -290,6 +305,11 @@ enum UpdateSequences {
         token_sequence: Arc<TokenBlockSequence>,
         resp_tx: mpsc::SyncSender<usize>,
     },
+    PotentialBlocksAndTokens {
+        token_sequence: Arc<TokenBlockSequence>,
+        overlap: u32,
+        resp_tx: mpsc::SyncSender<(usize, usize)>,
+    },
     ActiveBlocks {
         resp_tx: mpsc::SyncSender<usize>,
     },
@@ -360,6 +380,15 @@ impl ActiveSequencesMultiWorker {
                     } => {
                         let potential_blocks = active_sequences.potential_blocks(&token_sequence);
                         let _ = resp_tx.send(potential_blocks);
+                    }
+                    UpdateSequences::PotentialBlocksAndTokens {
+                        token_sequence,
+                        overlap,
+                        resp_tx,
+                    } => {
+                        let potential_tokens =
+                            active_sequences.potential_blocks_and_tokens(&token_sequence, overlap);
+                        let _ = resp_tx.send(potential_tokens);
                     }
                     UpdateSequences::ActiveBlocks { resp_tx } => {
                         let active_blocks = active_sequences.active_blocks();
@@ -518,6 +547,43 @@ impl ActiveSequencesMultiWorker {
             },
             None => unreachable!("token_sequence should always be Some for potential_blocks"),
         })
+    }
+
+    /// Query all workers for the potential tokens (new + active) that would be used by a token sequence with overlap
+    pub fn potential_blocks_and_tokens(
+        &self,
+        token_sequence: TokenBlockSequence,
+        overlaps: OverlapScores,
+    ) -> (HashMap<WorkerId, usize>, HashMap<WorkerId, usize>) {
+        let mut potential_blocks = HashMap::new();
+        let mut potential_tokens = HashMap::new();
+        let token_sequence_shared = Arc::new(token_sequence);
+        let mut receivers = Vec::new();
+
+        // Send queries to all workers in parallel
+        for (worker_id, sender) in &self.senders {
+            let (resp_tx, resp_rx) = mpsc::sync_channel(0);
+            receivers.push((worker_id, resp_rx));
+
+            sender
+                .send(UpdateSequences::PotentialBlocksAndTokens {
+                    token_sequence: token_sequence_shared.clone(),
+                    overlap: overlaps.scores.get(worker_id).copied().unwrap_or(0),
+                    resp_tx,
+                })
+                .expect("Failed to send potential_tokens command to worker");
+        }
+
+        // Collect results from all workers
+        for (worker_id, receiver) in receivers {
+            let (blocks, tokens) = receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("Failed to receive response from worker");
+            potential_blocks.insert(*worker_id, blocks);
+            potential_tokens.insert(*worker_id, tokens);
+        }
+
+        (potential_blocks, potential_tokens)
     }
 
     /// Query all workers for their current number of active blocks
