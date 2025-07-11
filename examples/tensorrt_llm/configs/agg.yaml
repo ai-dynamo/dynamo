@@ -12,23 +12,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+tensor_parallel_size: 1
+moe_expert_parallel_size: 1
+enable_attention_dp: false
+max_num_tokens: 8192
+max_batch_size: 16
+trust_remote_code: true
+backend: pytorch
+enable_chunked_prefill: true
 
-Frontend:
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  endpoint: dynamo.TensorRTLLMWorker.generate
-  port: 8000
-  router: round-robin
+kv_cache_config:
+  free_gpu_memory_fraction: 0.95
 
-TensorRTLLMWorker:
-  # Path to disk model or HuggingFace model identifier to load
-  model-path: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  # Name to serve the model under
-  served_model_name: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  # Path to a YAML file containing additional keyword arguments to pass to the TRTLLM engine.
-  # The fields in `extra-engine-args` holds higher priority than the above TRTLLM engine fields.
-  extra-engine-args: "configs/engine_configs/agg_config.yaml"
-  router: round-robin
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: 1
+# NOTE: pytorch_backend_config section flattened since: https://github.com/NVIDIA/TensorRT-LLM/pull/4603
+# NOTE: overlap_scheduler enabled by default since this commit and changed
+# config field from 'enable_overlap_scheduler' to 'disable_overlap_scheduler':
+# https://github.com/NVIDIA/TensorRT-LLM/commit/b4e5df0ee0024eda3eeb83a6ba822245a30ab428
+use_cuda_graph: true

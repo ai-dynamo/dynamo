@@ -1,0 +1,177 @@
+import argparse
+from typing import Optional
+
+# Default endpoint for the next worker.
+DEFAULT_ENDPOINT = "dyn://dynamo.tensorrt_llm.generate"
+DEFAULT_MODEL_PATH = "TinyLlama-1.1B-Instruct"
+DEFAULT_NEXT_ENDPOINT = "dyn://dynamo.tensorrt_llm_next.generate"
+DEFAULT_DISAGGREGATION_STRATEGY = "decode_first"
+DEFAULT_DISAGGREGATION_MODE = "prefill_and_decode"
+
+
+class Config:
+    """Command line parameters or defaults"""
+
+    namespace: str
+    component: str
+    endpoint: str
+    model_path: str
+    served_model_name: Optional[str] = None
+    tensor_parallel_size: int
+    kv_block_size: int
+    extra_engine_args: str
+    publish_events_and_metrics: bool
+    disaggregation_mode: str
+    disaggregation_strategy: str
+    next_endpoint: str
+
+    def __str__(self) -> str:
+        return (
+            f"Config(namespace={self.namespace}, "
+            f"component={self.component}, "
+            f"endpoint={self.endpoint}, "
+            f"model_path={self.model_path}, "
+            f"served_model_name={self.served_model_name}, "
+            f"tensor_parallel_size={self.tensor_parallel_size}, "
+            f"kv_block_size={self.kv_block_size}, "
+            f"extra_engine_args={self.extra_engine_args}, "
+            f"publish_events_and_metrics={self.publish_events_and_metrics}, "
+            f"disaggregation_mode={self.disaggregation_mode}, "
+            f"disaggregation_strategy={self.disaggregation_strategy}, "
+            f"next_endpoint={self.next_endpoint})"
+        )
+
+
+def is_first_worker(config):
+    """
+    Check if the current worker is the first worker in the disaggregation chain.
+    """
+    is_primary_worker = config.disaggregation_mode == "prefill_and_decode"
+    if not is_primary_worker:
+        is_primary_worker = (config.disaggregation_strategy == "prefill_first") and (
+            config.disaggregation_mode == "prefill"
+        )
+
+    if not is_primary_worker:
+        is_primary_worker = (config.disaggregation_strategy == "decode_first") and (
+            config.disaggregation_mode == "decode"
+        )
+
+    return is_primary_worker
+
+
+def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
+    endpoint_str = endpoint.replace("dyn://", "", 1)
+    endpoint_parts = endpoint_str.split(".")
+    if len(endpoint_parts) != 3:
+        raise ValueError(
+            f"Invalid endpoint format: '{endpoint}'. "
+            "Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
+        )
+
+    return tuple(endpoint_parts)
+
+
+def cmd_line_args():
+    parser = argparse.ArgumentParser(
+        description="TensorRT-LLM server integrated with Dynamo LLM."
+    )
+    parser.add_argument(
+        "--endpoint",
+        type=str,
+        default="",
+        help=f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Default: {DEFAULT_ENDPOINT} if first worker, {DEFAULT_NEXT_ENDPOINT} if next worker",
+    )
+    parser.add_argument(
+        "--model-path",
+        type=str,
+        default=DEFAULT_MODEL_PATH,
+        help=f"Path to disk model or HuggingFace model identifier to load. Default: {DEFAULT_MODEL_PATH}",
+    )
+    parser.add_argument(
+        "--served-model-name",
+        type=str,
+        default="",
+        help="Name to serve the model under. Defaults to deriving it from model path.",
+    )
+    parser.add_argument(
+        "--tensor-parallel-size", type=int, default=1, help="Number of GPUs to use."
+    )
+    # IMPORTANT: We should ideally not expose this to users. We should be able to
+    # query the block size from the TRTLLM engine.
+    parser.add_argument(
+        "--kv-block-size", type=int, default=32, help="Size of a KV cache block."
+    )
+
+    parser.add_argument(
+        "--extra-engine-args",
+        type=str,
+        default="",
+        help="Path to a YAML file containing additional keyword arguments to pass to the TRTLLM engine.",
+    )
+    parser.add_argument(
+        "--publish-events-and-metrics",
+        action="store_true",
+        help="Publish events and metrics to the dynamo components. Note: This is not supported when running in prefill disaggregation mode.",
+    )
+    parser.add_argument(
+        "--disaggregation-mode",
+        type=str,
+        default=DEFAULT_DISAGGREGATION_MODE,
+        help=f"Mode to use for disaggregation. Default: {DEFAULT_DISAGGREGATION_MODE}",
+    )
+    parser.add_argument(
+        "--disaggregation-strategy",
+        type=str,
+        default=DEFAULT_DISAGGREGATION_STRATEGY,
+        help=f"Strategy to use for disaggregation. Default: {DEFAULT_DISAGGREGATION_STRATEGY}",
+    )
+    parser.add_argument(
+        "--next-endpoint",
+        type=str,
+        default="",
+        help=f"Endpoint(in 'dyn://namespace.component.endpoint' format) to send requests to when running in disaggregation mode. Default: {DEFAULT_NEXT_ENDPOINT} if first worker, empty if next worker",
+    )
+    args = parser.parse_args()
+
+    # Set the appropriate defaults for the endpoint and next endpoint.
+    if is_first_worker(args):
+        if args.endpoint == "":
+            args.endpoint = DEFAULT_ENDPOINT
+        if (
+            args.next_endpoint == ""
+            and args.disaggregation_mode != "prefill_and_decode"
+        ):
+            args.next_endpoint = DEFAULT_NEXT_ENDPOINT
+    else:
+        if args.endpoint == "":
+            args.endpoint = DEFAULT_NEXT_ENDPOINT
+        if args.next_endpoint != "":
+            raise ValueError("Next endpoint is not allowed for the next worker")
+
+    endpoint = args.endpoint
+
+    config = Config()
+    config.model_path = args.model_path
+    if args.served_model_name:
+        config.served_model_name = args.served_model_name
+    else:
+        # This becomes an `Option` on the Rust side
+        config.served_model_name = None
+
+    parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
+        endpoint
+    )
+
+    config.namespace = parsed_namespace
+    config.component = parsed_component_name
+    config.endpoint = parsed_endpoint_name
+    config.tensor_parallel_size = args.tensor_parallel_size
+    config.kv_block_size = args.kv_block_size
+    config.extra_engine_args = args.extra_engine_args
+    config.publish_events_and_metrics = args.publish_events_and_metrics
+    config.disaggregation_mode = args.disaggregation_mode
+    config.disaggregation_strategy = args.disaggregation_strategy
+    config.next_endpoint = args.next_endpoint
+
+    return config
