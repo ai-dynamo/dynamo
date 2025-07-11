@@ -22,6 +22,7 @@ max_batch_size: 256
 max_num_tokens: 1024
 max_seq_len: 1024
 autotuner_enabled: false
+disable_overlap_scheduler: true
 
 # Enable Speculative Decoding in the model engine
 speculative_config:
