@@ -45,15 +45,11 @@ VllmEncodeWorker:
   common-configs: [model]
 
 VllmPDWorker:
-  enforce-eager: true
-  max-num-batched-tokens: 16384
-  enable-prefix-caching: true
   enable_disagg: false
   router: random
   tensor_parallel_size: 8
-  max-model-len: 430000
   ServiceArgs:
     workers: 1
     resources:
       gpu: '8'
-  common-configs: [model, block-size, max-model-len, image-token-id, num-patches]
+  common-configs: [model, block-size, max-model-len]
