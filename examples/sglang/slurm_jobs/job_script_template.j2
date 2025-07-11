@@ -73,7 +73,7 @@ for i in $(seq 0 $((PREFILL_NODES - 1))); do
     rank=$i
     echo "Launching prefill task on node ${i} (rank ${rank}): $node"
 
-    cmd="srun $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$node --output=${LOG_DIR}/${node}_prefill.out --error=${LOG_DIR}/${node}_prefill.err python /scripts/worker_setup.py --prefill_host_ip ${PREFILL_HOST_IP} --decode_host_ip ${DECODE_HOST_IP} --rank ${rank} --total_nodes ${PREFILL_NODES} --worker_type prefill --gpu_utilization_log /logs/${node}_prefill_gpu_utilization.log ${WORKER_ARGS}"
+    cmd="srun $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$node --export PREFILL_HOST_IP=${PREFILL_HOST_IP} --output=${LOG_DIR}/${node}_prefill.out --error=${LOG_DIR}/${node}_prefill.err python /scripts/worker_setup.py --prefill_host_ip ${PREFILL_HOST_IP} --decode_host_ip ${DECODE_HOST_IP} --rank ${rank} --total_nodes ${PREFILL_NODES} --worker_type prefill --gpu_utilization_log /logs/${node}_prefill_gpu_utilization.log ${WORKER_ARGS}"
     echo "$cmd"
     $cmd &
 done
@@ -84,14 +84,24 @@ for i in $(seq $PREFILL_NODES $((PREFILL_NODES + DECODE_NODES - 1))); do
     rank=$((i - PREFILL_NODES))
     echo "Launching decode task on node ${i} (rank ${rank}): $node"
 
-    cmd="srun $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$node --output=${LOG_DIR}/${node}_decode.out --error=${LOG_DIR}/${node}_decode.err python /scripts/worker_setup.py --decode_host_ip ${DECODE_HOST_IP} --prefill_host_ip ${PREFILL_HOST_IP} --rank ${rank} --total_nodes ${DECODE_NODES} --worker_type decode --gpu_utilization_log /logs/${node}_decode_gpu_utilization.log ${WORKER_ARGS}"
+    cmd="srun $ENROOT_ARGS --nodes=1 --ntasks=1 --nodelist=$node --export PREFILL_HOST_IP=${PREFILL_HOST_IP} --output=${LOG_DIR}/${node}_decode.out --error=${LOG_DIR}/${node}_decode.err python /scripts/worker_setup.py --decode_host_ip ${DECODE_HOST_IP} --prefill_host_ip ${PREFILL_HOST_IP} --rank ${rank} --total_nodes ${DECODE_NODES} --worker_type decode --gpu_utilization_log /logs/${node}_decode_gpu_utilization.log ${WORKER_ARGS}"
     echo "$cmd"
     $cmd &
 done
 
+json_nodes=$(printf '%s\n' "${nodes[@]}" | jq -R . | jq -s .)
+jq -n \
+  --arg PREFILL_HOST_IP "$PREFILL_HOST_IP" \
+  --arg DECODE_HOST_IP "$DECODE_HOST_IP" \
+  --argjson json_nodes "$json_nodes" \
+  --arg SLURM_JOB_ID "$SLURM_JOB_ID" \
+  --arg ENROOT_ARGS "$ENROOT_ARGS" \
+  '{prefill_host_ip: $PREFILL_HOST_IP, decode_host_ip: $DECODE_HOST_IP, nodes: $json_nodes, slurm_job_id: $SLURM_JOB_ID, enroot_args: $ENROOT_ARGS}' > ${LOG_DIR}/job_info.json
+
+
 echo ""
 echo "To connect to the host prefill node:"
-echo "srun $ENROOT_ARGS --jobid $SLURM_JOB_ID -w ${nodes[0]} --overlap --pty bash"
+echo "srun $ENROOT_ARGS --jobid $SLURM_JOB_ID --export PREFILL_HOST_IP=${PREFILL_HOST_IP} -w ${nodes[0]} --overlap --pty bash"
 
 echo ""
 echo "Make sure to cancel the job at the end:"

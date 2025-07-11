@@ -279,11 +279,11 @@ def setup_head_prefill_node(prefill_host_ip: str) -> None:
     )
     if not ingress_process:
         raise RuntimeError("Failed to start ingress")
-    
-    logging.info(f"Starting http server on port 9001for flush_cache endpoint on node {prefill_host_ip}")
-    cache_flush_server_cmd = (
-        f"python3 utils/sgl_http_server.py --ns dynamo"
+
+    logging.info(
+        f"Starting http server on port 9001 for flush_cache endpoint on node {prefill_host_ip}"
     )
+    cache_flush_server_cmd = "python3 utils/sgl_http_server.py --ns dynamo"
     cache_flush_server_process = run_command(cache_flush_server_cmd, background=True)
     if not cache_flush_server_process:
         raise RuntimeError("Failed to start cache flush server")
@@ -385,7 +385,7 @@ def main(input_args: list[str] | None = None):
             args.use_sglang_commands,
             args.gpu_type,
         )
-    else:
+    elif args.worker_type == "decode":
         setup_decode_node(
             args.rank,
             args.decode_host_ip,
@@ -395,6 +395,8 @@ def main(input_args: list[str] | None = None):
             args.use_sglang_commands,
             args.gpu_type,
         )
+    else:
+        raise NotImplementedError(f"Invalid worker type: {args.worker_type}")
 
     logging.info(f"{args.worker_type.capitalize()} node setup complete")
 
