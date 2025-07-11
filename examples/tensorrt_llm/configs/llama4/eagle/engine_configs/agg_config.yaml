@@ -20,7 +20,7 @@ max_batch_size: 256
 # When max_num_tokens set to higher values, can cause OOM issues.
 # Will be investigated in the future with TRTLLM team.
 max_num_tokens: 1024
-max_seq_len: 1024
+max_seq_len: 8448
 autotuner_enabled: false
 disable_overlap_scheduler: true
 
