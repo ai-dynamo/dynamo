@@ -11,12 +11,10 @@ use std::{
 use axum::{
     extract::State,
     http::StatusCode,
-    middleware::Next,
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
     },
-    http::Request,
     routing::{get, post},
     Json, Router,
 };
@@ -145,35 +143,6 @@ impl From<HttpError> for ErrorResponse {
     }
 }
 
-/// Rate Limit Middleware
-///
-/// This middleware will check if the current request should be rejected based on the rate limiter logic.
-/// The rate limiter logic, on the other hand, keeps track of specific model metrics, such as TTFT and ITL.
-/// If these values exceed specific configured thresholds, the request will be rejected. This is so that
-/// we can optimize for goodput, and not necessarily raw throughput, across the service.
-///
-/// If the request should be rejected, it will return a Status Code of 429 Too Many Requests.
-/// Otherwise, it will call the next middleware/route handler.
-pub async fn rate_limit_middleware(
-    State(state): State<service_v2::State>,
-    request: Request<NvCreateChatCompletionRequest>,
-    next: Next,
-) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
-    let request_body = request.body();
-    let model = request_body.inner.model.clone();
-    let should_reject = state.rate_limiter().should_reject(&model).map_err(|_| {
-        ErrorResponse::internal_server_error("Failed to check rate limit")
-    })?;
-
-    if should_reject {
-        return Err(ErrorResponse::rate_limit_exceeded(&format!(
-            "Rate limit exceeded for current request and model: {model}. Please retry later."
-        )));
-    }
-
-    Ok(next.run(request).await)
-}
-
 /// OpenAI Completions Request Handler
 ///
 /// This method will handle the incoming request for the `/v1/completions endpoint`. The endpoint is a "source"
@@ -210,6 +179,17 @@ async fn completions(
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
     let model = &request.inner.model;
+
+    // Rate limit check
+    let should_reject = state
+        .rate_limiter()
+        .should_reject(model)
+        .map_err(|_| ErrorResponse::internal_server_error("Failed to check rate limit"))?;
+    if should_reject {
+        return Err(ErrorResponse::rate_limit_exceeded(&format!(
+            "Rate limit exceeded for current request and model: {model}. Please retry later."
+        )));
+    }
 
     // todo - error handling should be more robust
     let engine = state
@@ -386,6 +366,17 @@ async fn chat_completions(
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
     let model = &request.inner.model;
+
+    // Rate limit check
+    let should_reject = state
+        .rate_limiter()
+        .should_reject(model)
+        .map_err(|_| ErrorResponse::internal_server_error("Failed to check rate limit"))?;
+    if should_reject {
+        return Err(ErrorResponse::rate_limit_exceeded(&format!(
+            "Rate limit exceeded for current request and model: {model}. Please retry later."
+        )));
+    }
 
     // todo - determine the proper error code for when a request model is not present
     tracing::trace!("Getting chat completions engine for model: {}", model);
