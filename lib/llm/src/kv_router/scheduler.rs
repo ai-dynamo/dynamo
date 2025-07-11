@@ -378,7 +378,7 @@ impl WorkerSelector for DefaultWorkerSelector {
                 tracing::warn!(
                     "assuming {isl} tokens for {worker_id}, as the endpoint does not exist yet"
                 );
-                &0
+                &isl
             }) as f64;
 
             // this is the number of blocks each worker would have if the request were scheduled there
