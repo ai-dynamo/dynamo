@@ -115,9 +115,8 @@ def set_side_channel_host_and_port(
         hostname = socket.gethostname()
         # Test if hostname is usable by attempting to bind to it
         try:
-            test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            test_socket.bind((hostname, 0))
-            test_socket.close()
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as test_socket:
+                test_socket.bind((hostname, 0))
         except (socket.error, socket.gaierror):
             # If hostname is not usable, fall back to localhost
             logger.warning(
