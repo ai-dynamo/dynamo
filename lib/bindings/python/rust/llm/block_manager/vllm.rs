@@ -8,6 +8,8 @@ use std::{
 
 use derive_getters::Dissolve;
 use pyo3::{prelude::*, wrap_pymodule};
+use tokio::sync::oneshot::{self, Receiver};
+use tokio_util::sync::CancellationToken;
 
 use dynamo_llm::{
     block_manager::{
@@ -17,7 +19,7 @@ use dynamo_llm::{
             BlockId, ImmutableBlock, MutableBlock,
         },
         pool::{BlockPool, BlockPoolError},
-        BasicMetadata, DeviceStorage, Storage,
+        BasicMetadata, DeviceStorage, DiskStorage, PinnedStorage, Storage,
     },
     tokens::{SaltHash, SequenceHash, TokenBlockSequence, Tokens},
 };
@@ -34,7 +36,7 @@ mod slot;
 
 pub use block_list::{BlockListType, BlockState, BlockStates, KvbmBlockList};
 pub use request::KvbmRequest;
-pub use slot::{Slot, SlotPosition};
+pub use slot::{OnboardBlocks, Slot, SlotPosition};
 
 #[pymodule]
 fn _vllm_integration(m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -162,6 +164,7 @@ impl KvbmCacheManager {
             .map_err(to_pyerr)
     }
 
+    #[tracing::instrument(level = "debug", skip(self), fields(request_id = %request_id))]
     pub fn free(&self, request_id: String) -> PyResult<()> {
         let mut slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
         slot_manager.free_blocks(&request_id);
@@ -177,6 +180,7 @@ impl KvbmCacheManager {
     }
 
     /// Free the entire slot for the given request ID.
+    #[tracing::instrument(level = "debug", skip(self), fields(request_id = %request_id))]
     pub fn free_block_hashes(&self, request_id: String) -> PyResult<()> {
         let mut slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
         slot_manager.drop_slot(&request_id);
@@ -188,7 +192,7 @@ impl KvbmCacheManager {
         Ok(vec![])
     }
 
-    pub fn get_block_ids(&self, request_id: String) -> PyResult<Vec<BlockId>> {
+    pub fn get_block_ids(&mut self, request_id: String) -> PyResult<Vec<BlockId>> {
         self.slot_manager
             .lock()
             .map_err(to_pyerr)?
@@ -203,11 +207,31 @@ impl KvbmCacheManager {
         Ok(usage)
     }
 
-    pub fn trigger_onboard(&self, request_id: String) -> PyResult<()> {
+    pub fn trigger_onboard(
+        &self,
+        request_id: String,
+        async_completion_handler: Py<PyAny>,
+    ) -> PyResult<()> {
+        let request_id_clone = request_id.clone();
+        let handler = move || {
+            // Run our completion handler to notify vLLM of the transfer completion.
+            // TODO(jthomson04): This is called in an async task. Probably not a good idea to block on acquiring the GIL.
+            Python::with_gil(|py| {
+                tracing::debug!(
+                    "Notifying vLLM of onboard completion for request {}",
+                    request_id_clone
+                );
+                async_completion_handler.call0(py).map_err(|e| {
+                    anyhow::anyhow!("failed to notify vLLM of onboard completion: {:?}", e)
+                })?;
+                Ok(())
+            })
+        };
+
         self.slot_manager
             .lock()
             .map_err(to_pyerr)?
-            .trigger_onboard(&request_id, self.block_manager())
+            .trigger_onboard(&request_id, handler, self.block_manager())
             .map_err(to_pyerr)
     }
 
@@ -282,7 +306,7 @@ pub struct GenericSlotUpdate<R> {
     pub num_lookahead_blocks: Option<usize>,
 
     /// Whether to delay caching the blocks.
-    pub delay_cache_blocks: Option<bool>,
+    pub delay_cache_blocks: bool,
 }
 
 impl std::fmt::Debug for GenericSlotUpdate<String> {
@@ -308,7 +332,7 @@ pub struct SlotUpdate(pub GenericSlotUpdate<String>);
 #[pymethods]
 impl SlotUpdate {
     #[new]
-    #[pyo3(signature = (request_id, request_num_tokens, request_num_computed_tokens, tokens_to_append, num_new_tokens, num_new_computed_tokens=None, new_computed_blocks=None, num_lookahead_blocks=None, delay_cache_blocks=None))]
+    #[pyo3(signature = (request_id, request_num_tokens, request_num_computed_tokens, tokens_to_append, num_new_tokens, num_new_computed_tokens=None, new_computed_blocks=None, num_lookahead_blocks=None, delay_cache_blocks=false))]
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         request_id: String,
@@ -319,7 +343,7 @@ impl SlotUpdate {
         num_new_computed_tokens: Option<usize>,
         new_computed_blocks: Option<KvbmBlockList>,
         num_lookahead_blocks: Option<usize>,
-        delay_cache_blocks: Option<bool>,
+        delay_cache_blocks: bool,
     ) -> Self {
         let update = GenericSlotUpdate {
             request_id,
@@ -373,14 +397,27 @@ impl SlotError {
 pub struct SlotManager<R: RequestKey> {
     slots: HashMap<R, Slot<DeviceStorage, Logical<DistributedLeaderWorkerResources>>>,
     block_size: usize,
+
+    /// Runtime used for async transfers.
+    rt: tokio::runtime::Runtime,
+    /// Cancel token used for async transfers.
+    cancel_token: CancellationToken,
 }
 
 impl<R: RequestKey> SlotManager<R> {
     /// Creates a new slot manager.
     pub fn new(block_size: usize) -> Self {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let cancel_token = CancellationToken::new();
+
         Self {
             slots: HashMap::new(),
             block_size,
+            rt,
+            cancel_token,
         }
     }
 
@@ -435,20 +472,13 @@ impl<R: RequestKey> SlotManager<R> {
             num_new_computed_tokens,
             new_computed_blocks,
             num_lookahead_blocks,
-            delay_cache_blocks,
+            _delay_cache_blocks,
         ) = update.dissolve();
 
         // TODO(ryan): add support for lookahead blocks
         if num_lookahead_blocks.is_some() {
             return Err(SlotError::Error(
                 "num_lookahead_blocks is not supported".to_string(),
-            ));
-        }
-
-        // TODO: add support for delay_cache_blocks
-        if delay_cache_blocks.unwrap_or(false) {
-            return Err(SlotError::Error(
-                "delay_cache_blocks is not supported".to_string(),
             ));
         }
 
@@ -501,7 +531,6 @@ impl<R: RequestKey> SlotManager<R> {
         match new_blocks {
             Some(new_blocks) => Ok(Some(new_blocks)),
             None => {
-                // could not allocate new blocks and we reset the slot
                 // note: we could free the blocks here; however, apply_computed_blocks always resets the
                 // immutable block list, avoiding the free_blocks() here allows us to hold the reference count on
                 // the blocks we intend to reuse
@@ -513,9 +542,9 @@ impl<R: RequestKey> SlotManager<R> {
         }
     }
 
-    pub fn get_block_ids(&self, request_id: &R) -> Result<Vec<BlockId>, SlotError> {
-        let slot = self.slots.get(request_id).ok_or(SlotError::NotFound)?;
-        Ok(slot.get_block_ids())
+    pub fn get_block_ids(&mut self, request_id: &R) -> Result<Vec<BlockId>, SlotError> {
+        let slot = self.slots.get_mut(request_id).ok_or(SlotError::NotFound)?;
+        slot.get_block_ids()
     }
 
     #[tracing::instrument(level = "debug", skip(self), fields(request_id = %request_id))]
@@ -611,11 +640,6 @@ impl<R: RequestKey> SlotManager<R> {
             num_matched_blocks
         );
 
-        // early exit if we did not match any blocks
-        if num_matched_blocks == 0 {
-            return Ok((0, false));
-        }
-
         let mut num_new_matched_tokens = num_matched_blocks * self.block_size;
 
         // we are on a block boundary, so we need to throw away the last block
@@ -639,19 +663,42 @@ impl<R: RequestKey> SlotManager<R> {
             num_new_matched_tokens -= self.block_size;
         }
 
-        slot.store_onboard_blocks(host_blocks, disk_blocks)?;
+        // early exit if we did not match any blocks
+        if num_new_matched_tokens == 0 {
+            return Ok((0, false));
+        }
 
-        Ok((num_new_matched_tokens, false))
+        // TODO(jthomson04): We need a much better way to determine whether to do async.
+        // Maybe take a look at what LMCache is doing?
+        let should_onboard_async = true;
+
+        let onboard_blocks = OnboardBlocks::new(host_blocks, disk_blocks, should_onboard_async)?;
+
+        slot.store_onboard_blocks(onboard_blocks)?;
+
+        Ok((num_new_matched_tokens, should_onboard_async))
     }
 
-    #[tracing::instrument(level = "debug", skip(self, block_manager), ret)]
+    #[tracing::instrument(level = "debug", skip(self, completion_handler, block_manager), ret)]
     pub fn trigger_onboard(
         &mut self,
         request_id: &R,
+        completion_handler: impl FnOnce() -> anyhow::Result<()> + Send + Sync + 'static,
         block_manager: &VllmBlockManager,
     ) -> Result<(), SlotError> {
         let slot = self.slots.get_mut(request_id).ok_or(SlotError::NotFound)?;
-        slot.trigger_onboard(block_manager)?;
+        slot.trigger_onboard(
+            block_manager,
+            completion_handler,
+            self.rt.handle(),
+            self.cancel_token.clone(),
+        )?;
         Ok(())
+    }
+}
+
+impl<T: RequestKey> Drop for SlotManager<T> {
+    fn drop(&mut self) {
+        self.cancel_token.cancel();
     }
 }
