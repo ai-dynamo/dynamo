@@ -1045,10 +1045,10 @@ index 000000000..a2f9ce99e
 \ No newline at end of file
 diff --git a/vllm/distributed/device_communicators/nixl.py b/vllm/distributed/device_communicators/nixl.py
 new file mode 100644
-index 000000000..bd4ac984e
+index 000000000..900841ac9
 --- /dev/null
 +++ b/vllm/distributed/device_communicators/nixl.py
-@@ -0,0 +1,445 @@
+@@ -0,0 +1,557 @@
 +# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 +# SPDX-License-Identifier: Apache-2.0
 +#
@@ -1064,14 +1064,17 @@ index 000000000..bd4ac984e
 +# See the License for the specific language governing permissions and
 +# limitations under the License.
 +
-+import torch
-+from typing import List, Tuple
-+from vllm.config import VllmConfig
-+from vllm.logger import init_logger
-+import msgspec
 +import time
 +import uuid
 +from collections import defaultdict
++from typing import List
++
++import msgspec
++import torch
++
++from vllm.config import VllmConfig
++from vllm.logger import init_logger
++
 +from .kv_rearrange import rearrange_tensors
 +
 +logger = init_logger(__name__)
@@ -1084,6 +1087,7 @@ index 000000000..bd4ac984e
 +    logger.warning("NIXL is not available")
 +    NixlWrapper = None
 +
++
 +class NixlMetadata(
 +        msgspec.Struct,
 +        omit_defaults=True,  # type: ignore[call-arg]
@@ -1091,12 +1095,16 @@ index 000000000..bd4ac984e
 +        dict=True):
 +    engine_id: str
 +    agent_metadata: List[bytes]
-+    kv_caches_base_addr: List[List[List[int]]] # base address for each rank for each layer for keys and values
++    kv_caches_base_addr: List[List[List[
++        int]]]  # base address for each rank for each layer for keys and values
 +    num_blocks: int
++    local_ranks: List[int]
 +
 +
 +class DynamoNixlConnector:
-+    def __init__(self, vllm_config: VllmConfig, engine_id: str, rank: int):
++
++    def __init__(self, vllm_config: VllmConfig, engine_id: str, rank: int,
++                 local_rank: int):
 +        self.vllm_config = vllm_config
 +        if NixlWrapper is None:
 +            logger.error("NIXL is not available")
@@ -1118,6 +1126,7 @@ index 000000000..bd4ac984e
 +        self._remote_agents = {}
 +        self.engine_id = engine_id
 +        self.rank = rank
++        self.local_rank = local_rank
 +        self._tp_size = {}
 +        self.src_xfer_side_handles = {}
 +        self.dst_xfer_side_handles = defaultdict(dict)
@@ -1125,10 +1134,10 @@ index 000000000..bd4ac984e
 +
 +        self._transfers = defaultdict(list)
 +
-+
-+        self._tp_size[engine_id] = vllm_config.parallel_config.tensor_parallel_size
-+        self._is_mla = "deepseek" in vllm_config.model_config.architectures[0].lower()
-+        
++        self._tp_size[
++            engine_id] = vllm_config.parallel_config.tensor_parallel_size
++        self._is_mla = "deepseek" in vllm_config.model_config.architectures[
++            0].lower()
 +
 +    @property
 +    def agent_name(self):
@@ -1143,7 +1152,8 @@ index 000000000..bd4ac984e
 +
 +        if self._is_mla:
 +            num_blocks, block_size, head_dim = kv_caches[0].shape
-+            self.block_len = head_dim * block_size * kv_caches[0].element_size()
++            self.block_len = head_dim * block_size * kv_caches[0].element_size(
++            )
 +            logger.debug("Per layer kv cache size: %s", kv_caches[0].shape)
 +            self.num_layers = len(kv_caches)
 +            self.num_blocks = num_blocks
@@ -1156,8 +1166,11 @@ index 000000000..bd4ac984e
 +            for kv_cache in kv_caches:
 +                base_addr = kv_cache.data_ptr()
 +                region_len = self.num_cache_entries * num_blocks * self.block_len
-+                caches_data.append((base_addr, region_len, self.rank, ""))
-+                kv_caches_base_addr.append([base_addr,])
++                caches_data.append(
++                    (base_addr, region_len, self.local_rank, ""))
++                kv_caches_base_addr.append([
++                    base_addr,
++                ])
 +
 +            self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
 +
@@ -1167,7 +1180,8 @@ index 000000000..bd4ac984e
 +            self._registered_descs.append(descs)
 +        else:
 +            _, num_blocks, block_size, num_heads, head_dim = kv_caches[0].shape
-+            self.block_len = block_size * num_heads * head_dim * kv_caches[0].element_size()
++            self.block_len = block_size * num_heads * head_dim * kv_caches[
++                0].element_size()
 +            logger.debug("Per layer kv cache size: %s", kv_caches[0].shape)
 +            self.num_layers = len(kv_caches)
 +            self.num_blocks = num_blocks
@@ -1179,8 +1193,11 @@ index 000000000..bd4ac984e
 +            for key_cache, value_cache in kv_caches:
 +                base_addr = key_cache.data_ptr()
 +                region_len = self.num_cache_entries * num_blocks * self.block_len
-+                caches_data.append((base_addr, region_len, self.rank, ""))
-+                kv_caches_base_addr.append([key_cache.data_ptr(), value_cache.data_ptr()])
++                caches_data.append(
++                    (base_addr, region_len, self.local_rank, ""))
++                kv_caches_base_addr.append(
++                    [key_cache.data_ptr(),
++                     value_cache.data_ptr()])
 +
 +            self.kv_caches_base_addr[self.engine_id] = kv_caches_base_addr
 +
@@ -1191,7 +1208,7 @@ index 000000000..bd4ac984e
 +
 +    def get_agent_metadata(self):
 +        return self.nixl_wrapper.get_agent_metadata()
-+    
++
 +    def shutdown(self):
 +        for descs_list in self._registered_descs:
 +            self.nixl_wrapper.deregister_memory(descs_list)
@@ -1212,13 +1229,19 @@ index 000000000..bd4ac984e
 +        # If the block ids are not contiguous, the function should raise an error
 +        ranges = []
 +        for i in range(len(block_ids)):
-+            if i == 0 or block_ids[i] != block_ids[i-1] + 1:
++            if i == 0 or block_ids[i] != block_ids[i - 1] + 1:
 +                ranges.append([block_ids[i], block_ids[i]])
 +            else:
 +                ranges[-1][1] = block_ids[i]
 +        return ranges
 +
-+    def _get_block_descs_ids(self, engine_id, layer_ids, block_ids, i=None, tp_multiplier=1, staging_ranges=None):
++    def _get_block_descs_ids(self,
++                             engine_id,
++                             layer_ids,
++                             block_ids,
++                             i=None,
++                             tp_multiplier=1,
++                             staging_ranges=None):
 +
 +        if layer_ids == "all":
 +            layer_ids = list(range(self.num_layers))
@@ -1227,7 +1250,6 @@ index 000000000..bd4ac984e
 +
 +        descs_ids = []
 +
-+
 +        if i is not None:
 +            num_blocks = self.num_blocks
 +            for layer_id in layer_ids:
@@ -1235,22 +1257,40 @@ index 000000000..bd4ac984e
 +                    staging_range_idx = 0
 +                    for block_id in block_ids:
 +                        if staging_ranges is not None:
-+                            if block_id > staging_ranges[staging_range_idx][1] or block_id < staging_ranges[staging_range_idx][0]:
++                            if block_id > staging_ranges[staging_range_idx][
++                                    1] or block_id < staging_ranges[
++                                        staging_range_idx][0]:
 +                                staging_range_idx += 1
 +                            start_offset = staging_ranges[staging_range_idx][0]
-+                            i_offset = i * (staging_ranges[staging_range_idx][-1] - start_offset + 1)
-+                            descs_ids.append(layer_id * self.num_cache_entries * num_blocks * tp_multiplier + entry_index * num_blocks * tp_multiplier + start_offset * tp_multiplier + i_offset + (block_id - start_offset))
++                            i_offset = i * (
++                                staging_ranges[staging_range_idx][-1] -
++                                start_offset + 1)
++                            descs_ids.append(
++                                layer_id * self.num_cache_entries *
++                                num_blocks * tp_multiplier +
++                                entry_index * num_blocks * tp_multiplier +
++                                start_offset * tp_multiplier + i_offset +
++                                (block_id - start_offset))
 +                        else:
-+                            descs_ids.append(layer_id * self.num_cache_entries * num_blocks + entry_index * num_blocks + block_id)
++                            descs_ids.append(layer_id *
++                                             self.num_cache_entries *
++                                             num_blocks +
++                                             entry_index * num_blocks +
++                                             block_id)
 +        else:
 +            num_blocks = self.dst_num_blocks[engine_id]
 +            for layer_id in layer_ids:
 +                for entry_index in range(self.num_cache_entries):
 +                    for block_id in block_ids:
-+                        descs_ids.append(layer_id * self.num_cache_entries * num_blocks + entry_index * num_blocks + block_id)
++                        descs_ids.append(layer_id * self.num_cache_entries *
++                                         num_blocks +
++                                         entry_index * num_blocks + block_id)
 +        return descs_ids
 +
-+    def _get_same_length_ranges(self, src_ranges, dst_ranges, return_original_src_ranges=False):
++    def _get_same_length_ranges(self,
++                                src_ranges,
++                                dst_ranges,
++                                return_original_src_ranges=False):
 +        # This function should return a list of ranges for both src and dst so that corresponding ranges are the same length
 +        # For example, if src_ranges is [[0, 2] [4, 8]] and dst_ranges is [[1, 3], [5, 7], [9, 10]]
 +        # The function should return ([[0, 2], [4, 6], [7, 8]], [[1, 3], [5, 7], [9, 10]])
@@ -1258,16 +1298,16 @@ index 000000000..bd4ac984e
 +
 +        original_src_ranges = []
 +        org_src_range = tuple(src_ranges[0])
-+        
++
 +        src_idx, dst_idx = 0, 0
 +        while src_idx < len(src_ranges) and dst_idx < len(dst_ranges):
 +            src_range = src_ranges[src_idx]
 +            dst_range = dst_ranges[dst_idx]
-+            
++
 +            # Calculate the length of each range
 +            src_len = src_range[-1] - src_range[0] + 1
 +            dst_len = dst_range[-1] - dst_range[0] + 1
-+            
++
 +            # If ranges have the same length, add them directly
 +            if src_len == dst_len:
 +                src_overlapping_ranges.append([src_range[0], src_range[-1]])
@@ -1279,7 +1319,8 @@ index 000000000..bd4ac984e
 +                    org_src_range = tuple(src_ranges[src_idx])
 +            # If source range is longer, split it
 +            elif src_len > dst_len:
-+                src_overlapping_ranges.append([src_range[0], src_range[0] + dst_len - 1])
++                src_overlapping_ranges.append(
++                    [src_range[0], src_range[0] + dst_len - 1])
 +                dst_overlapping_ranges.append([dst_range[0], dst_range[-1]])
 +                original_src_ranges.append(org_src_range)
 +                # Update source range for next iteration
@@ -1288,7 +1329,8 @@ index 000000000..bd4ac984e
 +            # If destination range is longer, split it
 +            else:  # src_len < dst_len
 +                src_overlapping_ranges.append([src_range[0], src_range[-1]])
-+                dst_overlapping_ranges.append([dst_range[0], dst_range[0] + src_len - 1])
++                dst_overlapping_ranges.append(
++                    [dst_range[0], dst_range[0] + src_len - 1])
 +                original_src_ranges.append(org_src_range)
 +                # Update destination range for next iteration
 +                dst_ranges[dst_idx] = [dst_range[0] + src_len, dst_range[-1]]
@@ -1299,10 +1341,13 @@ index 000000000..bd4ac984e
 +            return src_overlapping_ranges, dst_overlapping_ranges, original_src_ranges
 +        return src_overlapping_ranges, dst_overlapping_ranges
 +
-+    def read_blocks(self, local_block_ids, staging_block_ids, remote_block_ids, dst_engine_id):
-+        logger.debug("Reading %d blocks from %s to %s", len(local_block_ids), self.agent_name, dst_engine_id)
++    def read_blocks(self, local_block_ids, staging_block_ids, remote_block_ids,
++                    dst_engine_id):
++        logger.debug("Reading %d blocks from %s to %s", len(local_block_ids),
++                     self.agent_name, dst_engine_id)
 +
-+        assert len(local_block_ids) == len(staging_block_ids) == len(remote_block_ids)
++        assert len(local_block_ids) == len(staging_block_ids) == len(
++            remote_block_ids)
 +
 +        if len(local_block_ids) == 0:
 +            logger.debug("No blocks to read")
@@ -1318,54 +1363,80 @@ index 000000000..bd4ac984e
 +            local_ranges = self._get_ranges(local_block_ids)
 +            staging_ranges = self._get_ranges(staging_block_ids)
 +
-+            local_rearranging_ranges, staging_rearranging_ranges = self._get_same_length_ranges(local_ranges, staging_ranges)
++            local_rearranging_ranges, staging_rearranging_ranges = self._get_same_length_ranges(
++                local_ranges, staging_ranges)
 +
-+        tp_multiplier = self._tp_size[dst_engine_id] // self._tp_size[self.engine_id]
-+        remote_block_descs_ids = self._get_block_descs_ids(dst_engine_id, "all", remote_block_ids)
++        tp_multiplier = self._tp_size[dst_engine_id] // self._tp_size[
++            self.engine_id]
++        remote_block_descs_ids = self._get_block_descs_ids(
++            dst_engine_id, "all", remote_block_ids)
 +        local_xfer_side_handle = self.src_xfer_side_handles[tp_multiplier]
 +        handles = []
 +
-+        logger.debug("Time to get block descs ids: %s ms", (time.perf_counter() - start_time) * 1000)
++        logger.debug("Time to get block descs ids: %s ms",
++                     (time.perf_counter() - start_time) * 1000)
 +        create_xfer_start_time = time.perf_counter()
 +
 +        for i in range(tp_multiplier):
-+            staging_block_descs_ids = self._get_block_descs_ids(self.engine_id, "all", staging_block_ids, i=i, tp_multiplier=tp_multiplier, staging_ranges=staging_rearranging_ranges)
++            staging_block_descs_ids = self._get_block_descs_ids(
++                self.engine_id,
++                "all",
++                staging_block_ids,
++                i=i,
++                tp_multiplier=tp_multiplier,
++                staging_ranges=staging_rearranging_ranges)
 +            assert len(staging_block_descs_ids) == len(remote_block_descs_ids)
-+            remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id][i]
-+            handle = self.nixl_wrapper.make_prepped_xfer("READ", local_xfer_side_handle, staging_block_descs_ids, 
-+                                                        remote_xfer_side_handle, remote_block_descs_ids, 
-+                                                        "")
++            remote_xfer_side_handle = self.dst_xfer_side_handles[
++                dst_engine_id][i]
++            handle = self.nixl_wrapper.make_prepped_xfer(
++                "READ", local_xfer_side_handle, staging_block_descs_ids,
++                remote_xfer_side_handle, remote_block_descs_ids, "")
 +            handles.append(handle)
 +            status = self.nixl_wrapper.transfer(handle)
 +
-+        logger.debug("Time to create xfer: %s ms", (time.perf_counter() - create_xfer_start_time) * 1000)
++        logger.debug("Time to create xfer: %s ms",
++                     (time.perf_counter() - create_xfer_start_time) * 1000)
 +
 +        transfer_start_time = time.perf_counter()
 +
 +        for handle in handles:
-+            while (status := self.nixl_wrapper.check_xfer_state(handle)) != "DONE":
++            while (status :=
++                   self.nixl_wrapper.check_xfer_state(handle)) != "DONE":
 +                if status == "PROC":
 +                    time.sleep(0.001)
 +                else:
-+                    raise RuntimeError("Read transfer failed with state %s", status)
++                    raise RuntimeError("Read transfer failed with state %s",
++                                       status)
 +            # self.nixl_wrapper.abort_xfer(handle) # TODO ptarasiewicz: why abort is throwing errors?
 +
-+        logger.debug("Time to transfer: %s ms", (time.perf_counter() - transfer_start_time) * 1000)
++        logger.debug("Time to transfer: %s ms",
++                     (time.perf_counter() - transfer_start_time) * 1000)
 +
 +        rearrange_start_time = time.perf_counter()
 +
 +        if not self._is_mla:
-+            for local_range, staging_range in zip(local_rearranging_ranges, staging_rearranging_ranges):
-+                logger.debug("Rearranging tensors for cache: %s, local_range: %s, staging_range: %s", self.kv_caches[0].shape, local_range, staging_range)
++            for local_range, staging_range in zip(local_rearranging_ranges,
++                                                  staging_rearranging_ranges):
++                logger.debug(
++                    "Rearranging tensors for cache: %s, local_range: %s, staging_range: %s",
++                    self.kv_caches[0].shape, local_range, staging_range)
 +                for kv_cache in self.kv_caches:
 +                    for cache in kv_cache:
-+                        rearrange_tensors(cache[local_range[0]:local_range[1] + 1], cache[staging_range[0]:staging_range[1] + 1], tp_multiplier, "read")
++                        rearrange_tensors(
++                            cache[local_range[0]:local_range[1] + 1],
++                            cache[staging_range[0]:staging_range[1] + 1],
++                            tp_multiplier, "read")
 +
-+        logger.debug("Time to rearrange tensors: %s ms", (time.perf_counter() - rearrange_start_time) * 1000)
-+        logger.debug("Total time for read: %s ms", (time.perf_counter() - start_time) * 1000)
++        logger.debug("Time to rearrange tensors: %s ms",
++                     (time.perf_counter() - rearrange_start_time) * 1000)
++        logger.debug("Total time for read: %s ms",
++                     (time.perf_counter() - start_time) * 1000)
 +
-+    def write_blocks(self, local_block_ids, staging_block_ids, remote_block_ids, dst_engine_id, notify_msg):
-+        logger.debug("Writing %d blocks to %s from %s with notify message %s", len(local_block_ids), dst_engine_id, self.agent_name, notify_msg)
++    def write_blocks(self, local_block_ids, staging_block_ids,
++                     remote_block_ids, dst_engine_id, notify_msg):
++        logger.debug("Writing %d blocks to %s from %s with notify message %s",
++                     len(local_block_ids), dst_engine_id, self.agent_name,
++                     notify_msg)
 +
 +        # hongkuanz: we send isl[:-1] tokens to the prefill where the kv for the last
 +        # isl[-1] token is calculated in the first iteration in decode.
@@ -1374,14 +1445,18 @@ index 000000000..bd4ac984e
 +        remote_block_ids = remote_block_ids[:len(local_block_ids)]
 +
 +        assert len(staging_block_ids) == len(local_block_ids)
-+        tp_multiplier = self._tp_size[dst_engine_id] // self._tp_size[self.engine_id]
++        tp_multiplier = self._tp_size[dst_engine_id] // self._tp_size[
++            self.engine_id]
 +
 +        if len(local_block_ids) == 0:
 +            logger.debug("No blocks to write")
 +            for i in range(tp_multiplier):
-+                self.nixl_wrapper.send_notif(self._remote_agents[dst_engine_id][self.rank * tp_multiplier + i], notify_msg)
++                self.nixl_wrapper.send_notif(
++                    self._remote_agents[dst_engine_id][self.rank *
++                                                       tp_multiplier + i],
++                    notify_msg)
 +            return
-+        
++
 +        start_time = time.perf_counter()
 +
 +        if self._is_mla:
@@ -1392,45 +1467,64 @@ index 000000000..bd4ac984e
 +            local_ranges = self._get_ranges(local_block_ids)
 +            staging_ranges = self._get_ranges(staging_block_ids)
 +
-+            local_rearranging_ranges, staging_rearranging_ranges = self._get_same_length_ranges(local_ranges, staging_ranges)
-+            
-+            for local_range, staging_range in zip(local_rearranging_ranges, staging_rearranging_ranges):
-+                logger.debug("Rearranging tensors for cache: %s, local_range: %s, staging_range: %s", self.kv_caches[0].shape, local_range, staging_range)
++            local_rearranging_ranges, staging_rearranging_ranges = self._get_same_length_ranges(
++                local_ranges, staging_ranges)
++
++            for local_range, staging_range in zip(local_rearranging_ranges,
++                                                  staging_rearranging_ranges):
++                logger.debug(
++                    "Rearranging tensors for cache: %s, local_range: %s, staging_range: %s",
++                    self.kv_caches[0].shape, local_range, staging_range)
 +                for kv_cache in self.kv_caches:
 +                    for cache in kv_cache:
-+                        rearrange_tensors(cache[local_range[0]:local_range[1] + 1], cache[staging_range[0]:staging_range[1] + 1], tp_multiplier, "write")
++                        rearrange_tensors(
++                            cache[local_range[0]:local_range[1] + 1],
++                            cache[staging_range[0]:staging_range[1] + 1],
++                            tp_multiplier, "write")
 +
-+        logger.debug("Time to rearrange tensors: %s ms", (time.perf_counter() - start_time) * 1000)
++        logger.debug("Time to rearrange tensors: %s ms",
++                     (time.perf_counter() - start_time) * 1000)
 +
 +        create_xfer_start_time = time.perf_counter()
 +
 +        # getting block descs ids
-+        remote_block_descs_ids = self._get_block_descs_ids(dst_engine_id, "all", remote_block_ids)
++        remote_block_descs_ids = self._get_block_descs_ids(
++            dst_engine_id, "all", remote_block_ids)
 +        local_xfer_side_handle = self.src_xfer_side_handles[tp_multiplier]
-+        
++
 +        logger.debug("Creating xfer handles")
 +        for i in range(tp_multiplier):
-+            staging_block_descs_ids = self._get_block_descs_ids(self.engine_id, "all", staging_block_ids, i=i, tp_multiplier=tp_multiplier, staging_ranges=staging_rearranging_ranges)
++            staging_block_descs_ids = self._get_block_descs_ids(
++                self.engine_id,
++                "all",
++                staging_block_ids,
++                i=i,
++                tp_multiplier=tp_multiplier,
++                staging_ranges=staging_rearranging_ranges)
 +            assert len(staging_block_descs_ids) == len(remote_block_descs_ids)
-+            remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id][i]
-+            handle = self.nixl_wrapper.make_prepped_xfer("WRITE", local_xfer_side_handle, staging_block_descs_ids,
-+                                                        remote_xfer_side_handle, remote_block_descs_ids, 
-+                                                        notify_msg)
++            remote_xfer_side_handle = self.dst_xfer_side_handles[
++                dst_engine_id][i]
++            handle = self.nixl_wrapper.make_prepped_xfer(
++                "WRITE", local_xfer_side_handle, staging_block_descs_ids,
++                remote_xfer_side_handle, remote_block_descs_ids, notify_msg)
 +            self._transfers[notify_msg].append(handle)
 +            status = self.nixl_wrapper.transfer(handle)
 +
-+        logger.debug("Time to create xfer: %s ms", (time.perf_counter() - create_xfer_start_time) * 1000)
++        logger.debug("Time to create xfer: %s ms",
++                     (time.perf_counter() - create_xfer_start_time) * 1000)
 +
 +        transfer_start_time = time.perf_counter()
-+        logger.debug("Total time for write: %s ms", (time.perf_counter() - start_time) * 1000)
-+                
++        logger.debug("Total time for write: %s ms",
++                     (time.perf_counter() - start_time) * 1000)
++
 +    def get_notifs(self):
 +        return self.nixl_wrapper.update_notifs()
-+    
++
 +    def get_new_notifs(self):
 +        return self.nixl_wrapper.get_new_notifs()
 +
-+    def add_remote_agent(self, engine_id, agent_metadata, agent_tp, kv_caches_base_addr, num_blocks):
++    def add_remote_agent(self, engine_id, agent_metadata, agent_tp,
++                         kv_caches_base_addr, num_blocks, local_ranks):
 +        self._tp_size[engine_id] = agent_tp
 +        agent_names = []
 +        for agent_meta in agent_metadata:
@@ -1439,10 +1533,13 @@ index 000000000..bd4ac984e
 +        self._remote_agents[engine_id] = agent_names
 +        self.kv_caches_base_addr[engine_id] = kv_caches_base_addr
 +
-+        tp_multiplier = self._tp_size[engine_id] // self._tp_size[self.engine_id]
++        tp_multiplier = self._tp_size[engine_id] // self._tp_size[
++            self.engine_id]
 +        assert tp_multiplier > 0, f"Decode TP cannot be smaller than prefill TP, got {self._tp_size[engine_id]} and {self._tp_size[self.engine_id]}"
 +
-+        logger.debug("Creating src xfer side handles for engine %s, tp_multiplier: %s", engine_id, tp_multiplier)
++        logger.debug(
++            "Creating src xfer side handles for engine %s, tp_multiplier: %s",
++            engine_id, tp_multiplier)
 +        if self._is_mla:
 +            dst_block_len = self.block_len
 +        else:
@@ -1451,28 +1548,42 @@ index 000000000..bd4ac984e
 +            # create descs and xfer side handles
 +            blocks_data = []
 +            for layer_id in range(self.num_layers):
-+                for base_addr in self.kv_caches_base_addr[self.engine_id][layer_id]:
++                for base_addr in self.kv_caches_base_addr[
++                        self.engine_id][layer_id]:
 +                    for block_id in range(self.num_blocks):
-+                            block_offset = block_id * self.block_len
-+                            for i in range(1 if self._is_mla else tp_multiplier):
-+                                tp_multiplier_offset = i * dst_block_len
-+                                blocks_data.append((base_addr + block_offset + tp_multiplier_offset, dst_block_len, self.rank))
-+            logger.debug("Created %s blocks for src engine %s and rank %s", len(blocks_data), self.engine_id, self.rank * tp_multiplier + i)
++                        block_offset = block_id * self.block_len
++                        for i in range(1 if self._is_mla else tp_multiplier):
++                            tp_multiplier_offset = i * dst_block_len
++                            blocks_data.append(
++                                (base_addr + block_offset +
++                                 tp_multiplier_offset, dst_block_len,
++                                 self.local_rank))
++            logger.debug("Created %s blocks for src engine %s and rank %s",
++                         len(blocks_data), self.engine_id, self.rank)
 +            descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
-+            self.src_xfer_side_handles[tp_multiplier] = self.nixl_wrapper.prep_xfer_dlist("", descs)
++            self.src_xfer_side_handles[
++                tp_multiplier] = self.nixl_wrapper.prep_xfer_dlist("", descs)
 +
 +        # create dst xfer side handles
 +        self.dst_num_blocks[engine_id] = num_blocks
 +        for i in range(tp_multiplier):
 +            blocks_data = []
 +            for layer_id in range(self.num_layers):
-+                for base_addr in self.kv_caches_base_addr[engine_id][self.rank * tp_multiplier + i][layer_id]:
++                for base_addr in self.kv_caches_base_addr[engine_id][
++                        self.rank * tp_multiplier + i][layer_id]:
 +                    for block_id in range(num_blocks):
 +                        block_offset = block_id * dst_block_len
-+                        blocks_data.append((base_addr + block_offset, dst_block_len, self.rank * tp_multiplier + i))
-+            logger.debug("Created %s blocks for dst engine %s and rank %s", len(blocks_data), engine_id, self.rank * tp_multiplier + i)
++                        blocks_data.append(
++                            (base_addr + block_offset, dst_block_len,
++                             local_ranks[self.rank * tp_multiplier + i]))
++            logger.debug("Created %s blocks for dst engine %s and rank %s",
++                         len(blocks_data), engine_id,
++                         self.rank * tp_multiplier + i)
 +            descs = self.nixl_wrapper.get_xfer_descs(blocks_data, "VRAM")
-+            self.dst_xfer_side_handles[engine_id][i] = self.nixl_wrapper.prep_xfer_dlist(self._remote_agents[engine_id][self.rank * tp_multiplier + i], descs)
++            self.dst_xfer_side_handles[engine_id][
++                i] = self.nixl_wrapper.prep_xfer_dlist(
++                    self._remote_agents[engine_id][self.rank * tp_multiplier +
++                                                   i], descs)
 +
 +        return agent_names
 +
@@ -1488,7 +1599,8 @@ index 000000000..bd4ac984e
 +                if xfer_state == "PROC":
 +                    running_reqs.append(handle)
 +                else:
-+                    raise RuntimeError("Transfer failed with state %s", xfer_state)
++                    raise RuntimeError("Transfer failed with state %s",
++                                       xfer_state)
 +            if len(running_reqs) == 0:
 +                done_req_ids.append(req_id)
 +            else:
@@ -2896,10 +3008,10 @@ index 975afe5ad..2208abea0 100644
              use_v1 = True
  
 diff --git a/vllm/engine/llm_engine.py b/vllm/engine/llm_engine.py
-index 54f7b8fb6..9c1c2635f 100644
+index 54f7b8fb6..501cea7a4 100644
 --- a/vllm/engine/llm_engine.py
 +++ b/vllm/engine/llm_engine.py
-@@ -1,11 +1,28 @@
+@@ -1,9 +1,23 @@
 +# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  # SPDX-License-Identifier: Apache-2.0
 +#
@@ -2917,73 +3029,81 @@ index 54f7b8fb6..9c1c2635f 100644
  
  import copy
  import time
-+import pickle
 +import uuid
  from collections import Counter as collectionsCounter
- from collections import deque
-+from collections import defaultdict
+-from collections import deque
++from collections import defaultdict, deque
  from contextlib import contextmanager
  from dataclasses import dataclass
-+from concurrent.futures import ThreadPoolExecutor
  from functools import partial
- from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
-                     Iterable, List, Literal, Mapping, NamedTuple, Optional)
-@@ -62,6 +79,9 @@ from vllm.utils import (Counter, Device, deprecate_kwargs,
-                         resolve_obj_by_qualname, weak_bind)
- from vllm.version import __version__ as VLLM_VERSION
- from vllm.worker.model_runner_base import InputProcessingError
-+from vllm.remote_prefill import RemotePrefillRequest, RemotePrefillParams, MemoryTransferRequest, MemoryOpType
+@@ -20,6 +34,7 @@ from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
+                          ObservabilityConfig, ParallelConfig, SchedulerConfig,
+                          VllmConfig)
+ from vllm.core.scheduler import ScheduledSequenceGroup, SchedulerOutputs
 +from vllm.distributed.device_communicators.nixl import NixlMetadata
-+
- 
- logger = init_logger(__name__)
- _LOCAL_LOGGING_INTERVAL_SEC = 5
-@@ -93,7 +113,7 @@ class OutputData(NamedTuple):
+ from vllm.engine.arg_utils import EngineArgs
+ from vllm.engine.metrics_types import StatLoggerBase, Stats
+ from vllm.engine.output_processor.interfaces import (
+@@ -45,6 +60,8 @@ from vllm.outputs import (PoolingRequestOutput, RequestOutput,
+                           RequestOutputFactory)
+ from vllm.pooling_params import PoolingParams
+ from vllm.prompt_adapter.request import PromptAdapterRequest
++from vllm.remote_prefill import (MemoryOpType, MemoryTransferRequest,
++                                 RemotePrefillParams, RemotePrefillRequest)
+ from vllm.sampling_params import RequestOutputKind, SamplingParams
+ from vllm.sequence import (ExecuteModelRequest, ParallelSampleSequenceGroup,
+                            PoolingSequenceGroupOutput, Sequence, SequenceGroup,
+@@ -93,6 +110,7 @@ class OutputData(NamedTuple):
      # outputs from multiple steps.
      is_first_step_output: Optional[bool]
      skip: List[int]
--
 +    remote_prefill_requests: Optional[List[RemotePrefillRequest]]
  
- class SchedulerContext:
  
-@@ -107,11 +127,14 @@ class SchedulerContext:
+ class SchedulerContext:
+@@ -107,11 +125,17 @@ class SchedulerContext:
  
          self.multi_step_stream_outputs: bool = multi_step_stream_outputs
  
+-    def append_output(self, outputs: List[SamplerOutput],
 +        self.remote_prefill_requests: List[RemotePrefillRequest] = []
 +
-     def append_output(self, outputs: List[SamplerOutput],
++    def append_output(self,
++                      outputs: List[SamplerOutput],
                        seq_group_metadata_list: List[SequenceGroupMetadata],
-                       scheduler_outputs: SchedulerOutputs, is_async: bool,
+-                      scheduler_outputs: SchedulerOutputs, is_async: bool,
++                      scheduler_outputs: SchedulerOutputs,
++                      is_async: bool,
                        is_last_step: bool,
 -                      is_first_step_output: Optional[bool]):
 +                      is_first_step_output: Optional[bool],
-+                      remote_prefill_requests: Optional[List[RemotePrefillRequest]] = None):
++                      remote_prefill_requests: Optional[
++                          List[RemotePrefillRequest]] = None):
          self.output_queue.append(
              OutputData(outputs=outputs,
                         seq_group_metadata_list=seq_group_metadata_list,
-@@ -119,7 +142,9 @@ class SchedulerContext:
+@@ -119,7 +143,8 @@ class SchedulerContext:
                         is_async=is_async,
                         is_last_step=is_last_step,
                         is_first_step_output=is_first_step_output,
 -                       skip=[]))
 +                       skip=[],
 +                       remote_prefill_requests=remote_prefill_requests))
-+
  
  
  class LLMEngine:
-@@ -362,7 +387,7 @@ class LLMEngine:
+@@ -362,8 +387,8 @@ class LLMEngine:
              Scheduler = self.vllm_config.scheduler_config.scheduler_cls
          self.scheduler = [
              Scheduler(
 -                self.scheduler_config, self.cache_config, self.lora_config,
-+                self.model_config, self.scheduler_config, self.cache_config, self.lora_config,
-                 self.parallel_config.pipeline_parallel_size,
+-                self.parallel_config.pipeline_parallel_size,
++                self.model_config, self.scheduler_config, self.cache_config,
++                self.lora_config, self.parallel_config.pipeline_parallel_size,
                  self.async_callbacks[v_id]
                  if self.model_config.use_async_output_proc else None)
-@@ -422,6 +447,39 @@ class LLMEngine:
+             for v_id in range(self.parallel_config.pipeline_parallel_size)
+@@ -422,6 +447,54 @@ class LLMEngine:
          # Flag to set when an input fails to process and the engine should run
          # the next step without re-scheduling.
          self._skip_scheduling_next_step = False
@@ -2992,8 +3112,10 @@ index 54f7b8fb6..9c1c2635f 100644
 +        if self.vllm_config.kv_transfer_config is not None and self.vllm_config.kv_transfer_config.kv_connector == "DynamoNixlConnector":
 +            self._nixl_agents_names = self._initialize_nixl()
 +
-+        self._request_notif_counter = defaultdict(lambda: -self.parallel_config.tensor_parallel_size)
-+        self._request_done_counter = defaultdict(lambda: -self.parallel_config.tensor_parallel_size)
++        self._request_notif_counter = defaultdict(
++            lambda: -self.parallel_config.tensor_parallel_size)
++        self._request_done_counter = defaultdict(
++            lambda: -self.parallel_config.tensor_parallel_size)
 +        self._finished_prefills = set()
 +        self._finished_transfers = set()
 +
@@ -3004,26 +3126,39 @@ index 54f7b8fb6..9c1c2635f 100644
 +    def get_nixl_metadata(self) -> NixlMetadata:
 +        if not self.is_nixl_initialized:
 +            raise RuntimeError("Nixl is not initialized")
-+        agent_metadata = self.model_executor.collective_rpc("get_nixl_agent_metadata")
-+        kv_caches_base_addr = self.model_executor.collective_rpc("get_nixl_kv_caches_base_addr")
-+        return NixlMetadata(engine_id=self.engine_id, agent_metadata=agent_metadata, kv_caches_base_addr=kv_caches_base_addr, num_blocks=self.cache_config.num_gpu_blocks)
-+    
-+    def add_remote_nixl_metadata(self, nixl_metadata: NixlMetadata) -> List[str]:
++        agent_metadata = self.model_executor.collective_rpc(
++            "get_nixl_agent_metadata")
++        kv_caches_base_addr = self.model_executor.collective_rpc(
++            "get_nixl_kv_caches_base_addr")
++        local_ranks = self.model_executor.collective_rpc("get_local_rank")
++        return NixlMetadata(engine_id=self.engine_id,
++                            agent_metadata=agent_metadata,
++                            kv_caches_base_addr=kv_caches_base_addr,
++                            num_blocks=self.cache_config.num_gpu_blocks,
++                            local_ranks=local_ranks)
++
++    def add_remote_nixl_metadata(self,
++                                 nixl_metadata: NixlMetadata) -> List[str]:
 +        if not self.is_nixl_initialized:
 +            raise RuntimeError("Nixl is not initialized")
 +        engine_id = nixl_metadata.engine_id
 +        agents_metadata = nixl_metadata.agent_metadata
 +        kv_caches_base_addr = nixl_metadata.kv_caches_base_addr
 +        num_blocks = nixl_metadata.num_blocks
-+        return self.model_executor.collective_rpc("add_remote_nixl_metadata", args=(engine_id, agents_metadata, kv_caches_base_addr, num_blocks))
++        local_ranks = nixl_metadata.local_ranks
++        return self.model_executor.collective_rpc(
++            "add_remote_nixl_metadata",
++            args=(engine_id, agents_metadata, kv_caches_base_addr, num_blocks,
++                  local_ranks))
 +
 +    def _initialize_nixl(self) -> List[bytes]:
-+        agents_names = self.model_executor.collective_rpc("initialize_nixl", args=(self.engine_id,))
++        agents_names = self.model_executor.collective_rpc(
++            "initialize_nixl", args=(self.engine_id, ))
 +        return agents_names
  
      def _initialize_kv_caches(self) -> None:
          """Initialize the KV cache in the worker(s).
-@@ -535,6 +593,8 @@ class LLMEngine:
+@@ -535,6 +608,8 @@ class LLMEngine:
          # Shutdown model executor when engine is garbage collected
          # Use getattr since __init__ can fail before the field is set
          if model_executor := getattr(self, "model_executor", None):
@@ -3032,7 +3167,7 @@ index 54f7b8fb6..9c1c2635f 100644
              model_executor.shutdown()
  
      def get_tokenizer_group(
-@@ -587,11 +647,14 @@ class LLMEngine:
+@@ -587,11 +662,16 @@ class LLMEngine:
          prompt_adapter_request: Optional[PromptAdapterRequest],
          trace_headers: Optional[Mapping[str, str]] = None,
          priority: int = 0,
@@ -3043,27 +3178,30 @@ index 54f7b8fb6..9c1c2635f 100644
          """
          if isinstance(params, SamplingParams) and params.n > 1:
 +            if remote_prefill_params is not None:
-+                raise ValueError("Remote prefill params are not supported for multi-step sampling")
++                raise ValueError(
++                    "Remote prefill params are not supported for multi-step sampling"
++                )
              ParallelSampleSequenceGroup.add_request(
                  request_id,
                  self,
-@@ -609,12 +672,14 @@ class LLMEngine:
+@@ -609,12 +689,15 @@ class LLMEngine:
          # Create the sequences.
          block_size = self.cache_config.block_size
          seq_id = next(self.seq_counter)
 +        if remote_prefill_params is not None and remote_prefill_params.is_remote_decode:
-+            next(self.seq_counter) # empty sequence for staging
++            next(self.seq_counter)  # empty sequence for staging
          eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
  
          encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
  
          seq = Sequence(seq_id, decoder_inputs, block_size, eos_token_id,
 -                       lora_request, prompt_adapter_request)
-+                       lora_request, prompt_adapter_request, remote_prefill_params)
++                       lora_request, prompt_adapter_request,
++                       remote_prefill_params)
  
          encoder_seq = (None if encoder_inputs is None else Sequence(
              seq_id, encoder_inputs, block_size, eos_token_id, lora_request,
-@@ -631,8 +696,12 @@ class LLMEngine:
+@@ -631,8 +714,13 @@ class LLMEngine:
                  trace_headers=trace_headers,
                  prompt_adapter_request=prompt_adapter_request,
                  encoder_seq=encoder_seq,
@@ -3073,11 +3211,12 @@ index 54f7b8fb6..9c1c2635f 100644
 +            )
          elif isinstance(params, PoolingParams):
 +            if remote_prefill_params is not None:
-+                raise ValueError("Remote prefill params are not supported for pooling")
++                raise ValueError(
++                    "Remote prefill params are not supported for pooling")
              seq_group = self._create_sequence_group_with_pooling(
                  request_id,
                  seq,
-@@ -703,6 +772,7 @@ class LLMEngine:
+@@ -703,6 +791,7 @@ class LLMEngine:
              trace_headers: Optional[Mapping[str, str]] = None,
              prompt_adapter_request: Optional[PromptAdapterRequest] = None,
              priority: int = 0,
@@ -3085,7 +3224,7 @@ index 54f7b8fb6..9c1c2635f 100644
              *,
              inputs: Optional[PromptType] = None,  # DEPRECATED
      ) -> None:
-@@ -794,6 +864,7 @@ class LLMEngine:
+@@ -794,6 +883,7 @@ class LLMEngine:
              prompt_adapter_request=prompt_adapter_request,
              trace_headers=trace_headers,
              priority=priority,
@@ -3093,7 +3232,7 @@ index 54f7b8fb6..9c1c2635f 100644
          )
  
      def _validate_token_prompt(self, prompt: PromptType,
-@@ -828,6 +899,7 @@ class LLMEngine:
+@@ -828,6 +918,7 @@ class LLMEngine:
          prompt_adapter_request: Optional[PromptAdapterRequest] = None,
          encoder_seq: Optional[Sequence] = None,
          priority: int = 0,
@@ -3101,7 +3240,7 @@ index 54f7b8fb6..9c1c2635f 100644
      ) -> SequenceGroup:
          """Creates a SequenceGroup with SamplingParams."""
          max_logprobs = self.get_model_config().max_logprobs
-@@ -863,7 +935,9 @@ class LLMEngine:
+@@ -863,7 +954,9 @@ class LLMEngine:
              prompt_adapter_request=prompt_adapter_request,
              encoder_seq=encoder_seq,
              priority=priority,
@@ -3112,117 +3251,139 @@ index 54f7b8fb6..9c1c2635f 100644
  
          return seq_group
  
-@@ -1030,11 +1104,11 @@ class LLMEngine:
+@@ -1030,11 +1123,12 @@ class LLMEngine:
              # When we process only one request, no pop is required
              # (since later we will process all of the rest)
              (outputs, seq_group_metadata_list, scheduler_outputs, is_async,
 -             is_last_step, is_first_step_output, skip) = ctx.output_queue[0]
-+             is_last_step, is_first_step_output, skip, remote_prefill_requests) = ctx.output_queue[0]
++             is_last_step, is_first_step_output, skip,
++             remote_prefill_requests) = ctx.output_queue[0]
          else:
              (outputs, seq_group_metadata_list, scheduler_outputs, is_async,
-              is_last_step, is_first_step_output,
+-             is_last_step, is_first_step_output,
 -             skip) = ctx.output_queue.popleft()
-+             skip, remote_prefill_requests) = ctx.output_queue.popleft()
++             is_last_step, is_first_step_output, skip,
++             remote_prefill_requests) = ctx.output_queue.popleft()
  
          # Sanity check
          assert len(seq_group_metadata_list) == len(
-@@ -1360,6 +1434,12 @@ class LLMEngine:
+@@ -1360,6 +1454,13 @@ class LLMEngine:
  
          # Clear outputs for each new scheduler iteration
          ctx.request_outputs.clear()
 +        ctx.remote_prefill_requests.clear()
 +
-+        remote_prefill_seq_group_metadata_list: List[SequenceGroupMetadata] = []
++        remote_prefill_seq_group_metadata_list: List[
++            SequenceGroupMetadata] = []
 +        running_seq_group_metadata_list: List[SequenceGroupMetadata] = []
 +        remote_prefill_scheduled_seq_groups: List[ScheduledSequenceGroup] = []
 +        running_scheduled_seq_groups: List[ScheduledSequenceGroup] = []
  
          # Skip the scheduler if there are any remaining steps in the seq groups.
          # This ensures that the scheduler is only called again when the current
-@@ -1372,7 +1452,43 @@ class LLMEngine:
+@@ -1372,7 +1473,54 @@ class LLMEngine:
              # Schedule iteration
              (seq_group_metadata_list, scheduler_outputs,
               allow_async_output_proc
 -             ) = self.scheduler[virtual_engine].schedule()
-+             ) = self.scheduler[virtual_engine].schedule(self._finished_prefills, self._finished_transfers)
-+            
++             ) = self.scheduler[virtual_engine].schedule(
++                 self._finished_prefills, self._finished_transfers)
 +
 +            # Separate remote prefill and running seq groups
-+            for seq_group_metadata, scheduled_seq_group in zip(seq_group_metadata_list, scheduler_outputs.scheduled_seq_groups):
++            for seq_group_metadata, scheduled_seq_group in zip(
++                    seq_group_metadata_list,
++                    scheduler_outputs.scheduled_seq_groups):
 +                if seq_group_metadata.do_remote_prefill:
-+                    remote_prefill_seq_group_metadata_list.append(seq_group_metadata)
-+                    remote_prefill_scheduled_seq_groups.append(scheduled_seq_group)
++                    remote_prefill_seq_group_metadata_list.append(
++                        seq_group_metadata)
++                    remote_prefill_scheduled_seq_groups.append(
++                        scheduled_seq_group)
 +                else:
 +                    running_seq_group_metadata_list.append(seq_group_metadata)
 +                    running_scheduled_seq_groups.append(scheduled_seq_group)
 +
 +            seq_group_metadata_list = running_seq_group_metadata_list
 +            scheduler_outputs.scheduled_seq_groups = running_scheduled_seq_groups
-+            
++
 +            # Send remote prefill requests before model execution
-+            for seq_group_metadata, scheduled_seq_group in zip(remote_prefill_seq_group_metadata_list, remote_prefill_scheduled_seq_groups):
++            for seq_group_metadata, scheduled_seq_group in zip(
++                    remote_prefill_seq_group_metadata_list,
++                    remote_prefill_scheduled_seq_groups):
 +                assert len(scheduled_seq_group.seq_group.seqs) == 1
 +                assert self._nixl_agents_names
 +                seq_id = scheduled_seq_group.seq_group.seqs[0].seq_id
 +                block_table = seq_group_metadata.block_tables[seq_id]
-+                if len(block_table) == len(seq_group_metadata.computed_block_nums):
++                if len(block_table) == len(
++                        seq_group_metadata.computed_block_nums):
 +                    logger.debug("No blocks to prefill")
 +                    self._finished_prefills.add(seq_group_metadata.request_id)
 +                    continue
-+                
++
 +                remote_prefill_request = RemotePrefillRequest(
 +                    request_id=seq_group_metadata.request_id,
 +                    # prompt_token_ids=scheduled_seq_group.seq_group.seqs[0].inputs.prompt_token_ids[:-1], # last one will be decoded on decode for sampling anyway
-+                    prompt_token_ids=scheduled_seq_group.seq_group.seqs[0].inputs.prompt_token_ids, # TODO ptarasiewicz do not send the last token when NIXL fixes send notif (needed for writing 0 blocks)
-+                    sampling_params=scheduled_seq_group.seq_group.sampling_params,
++                    prompt_token_ids=scheduled_seq_group.seq_group.seqs[0].
++                    inputs.
++                    prompt_token_ids,  # TODO ptarasiewicz do not send the last token when NIXL fixes send notif (needed for writing 0 blocks)
++                    sampling_params=scheduled_seq_group.seq_group.
++                    sampling_params,
 +                    block_ids=block_table,
 +                    engine_id=self.engine_id,
 +                    computed_block_ids=seq_group_metadata.computed_block_nums,
-+                    multimodal_data_source=scheduled_seq_group.seq_group.remote_prefill_params.multimodal_data_source
-+                )
-+                scheduled_seq_group.seq_group.remote_prefill_params.remote_prefill_request_callback(remote_prefill_request)
++                    multimodal_data_source=scheduled_seq_group.seq_group.
++                    remote_prefill_params.multimodal_data_source)
++                scheduled_seq_group.seq_group.remote_prefill_params.remote_prefill_request_callback(
++                    remote_prefill_request)
  
              ctx.seq_group_metadata_list = seq_group_metadata_list
              ctx.scheduler_outputs = scheduler_outputs
-@@ -1427,8 +1543,46 @@ class LLMEngine:
+@@ -1427,8 +1575,54 @@ class LLMEngine:
                  execute_model_req.async_callback = self.async_callbacks[
                      virtual_engine]
  
 +            # After model execution, we need to transfer the memory from the prefill to the decode
 +            memory_transfer_reqs = []
-+            for scheduled_seq_group, seq_group_metadata in zip(scheduler_outputs.scheduled_seq_groups, seq_group_metadata_list):
++            for scheduled_seq_group, seq_group_metadata in zip(
++                    scheduler_outputs.scheduled_seq_groups,
++                    seq_group_metadata_list):
 +                remote_prefill_params = scheduled_seq_group.seq_group.remote_prefill_params
 +                if remote_prefill_params is not None and remote_prefill_params.is_remote_decode:
 +                    assert len(scheduled_seq_group.seq_group.seqs) == 1
 +                    req_id = scheduled_seq_group.seq_group.request_id
 +                    seq_id = scheduled_seq_group.seq_group.seqs[0].seq_id
 +                    block_table = seq_group_metadata.block_tables[seq_id]
-+                    staging_block_ids = seq_group_metadata.block_tables[seq_id + 1]
++                    staging_block_ids = seq_group_metadata.block_tables[seq_id
++                                                                        + 1]
 +
-+                    num_computed_blocks = len(seq_group_metadata.computed_block_nums)
-+                    computed_decode_block_ids = remote_prefill_params.decode_block_ids[:num_computed_blocks]
++                    num_computed_blocks = len(
++                        seq_group_metadata.computed_block_nums)
++                    computed_decode_block_ids = remote_prefill_params.decode_block_ids[:
++                                                                                       num_computed_blocks]
 +
 +                    if computed_decode_block_ids:
 +                        kv_recv_req = MemoryTransferRequest(
 +                            request_id=req_id,
 +                            local_block_ids=block_table[:num_computed_blocks],
-+                            staging_block_ids=staging_block_ids[:num_computed_blocks],
++                            staging_block_ids=
++                            staging_block_ids[:num_computed_blocks],
 +                            remote_block_ids=computed_decode_block_ids,
-+                            remote_engine_id=remote_prefill_params.decode_engine_id,
++                            remote_engine_id=remote_prefill_params.
++                            decode_engine_id,
 +                            notify_msg=req_id,
-+                            op_type=MemoryOpType.READ
-+                        )
++                            op_type=MemoryOpType.READ)
 +                        memory_transfer_reqs.append(kv_recv_req)
 +
 +                    kv_send_req = MemoryTransferRequest(
 +                        request_id=req_id,
 +                        local_block_ids=block_table[num_computed_blocks:],
-+                        staging_block_ids=staging_block_ids[num_computed_blocks:],
-+                        remote_block_ids=remote_prefill_params.decode_block_ids[num_computed_blocks:],
-+                        remote_engine_id=remote_prefill_params.decode_engine_id,
++                        staging_block_ids=staging_block_ids[
++                            num_computed_blocks:],
++                        remote_block_ids=remote_prefill_params.
++                        decode_block_ids[num_computed_blocks:],
++                        remote_engine_id=remote_prefill_params.
++                        decode_engine_id,
 +                        notify_msg=req_id,
-+                        op_type=MemoryOpType.WRITE
-+                    )
++                        op_type=MemoryOpType.WRITE)
 +                    memory_transfer_reqs.append(kv_send_req)
 +            execute_model_req.memory_transfer_requests = memory_transfer_reqs
 +
@@ -3232,7 +3393,7 @@ index 54f7b8fb6..9c1c2635f 100644
                      execute_model_req=execute_model_req)
                  self._skip_scheduling_next_step = False
              except InputProcessingError as e:
-@@ -1444,7 +1598,6 @@ class LLMEngine:
+@@ -1444,7 +1638,6 @@ class LLMEngine:
                      allow_async_output_proc=allow_async_output_proc)
                  # Raise so the caller is notified that this request failed
                  raise
@@ -3240,20 +3401,19 @@ index 54f7b8fb6..9c1c2635f 100644
              # We need to do this here so that last step's sampled_token_ids can
              # be passed to the next iteration for PP.
              if self.scheduler_config.is_multi_step:
-@@ -1455,7 +1608,26 @@ class LLMEngine:
+@@ -1455,7 +1648,25 @@ class LLMEngine:
              if len(ctx.output_queue) > 0:
                  self._process_model_outputs(ctx=ctx)
              # No outputs in this case
 -            outputs = []
-+            execute_model_req = ExecuteModelRequest(
-+                seq_group_metadata_list=[],
-+                blocks_to_swap_in=[],
-+                blocks_to_swap_out=[],
-+                blocks_to_copy=[])
++            execute_model_req = ExecuteModelRequest(seq_group_metadata_list=[],
++                                                    blocks_to_swap_in=[],
++                                                    blocks_to_swap_out=[],
++                                                    blocks_to_copy=[])
 +
 +            outputs, request_notif_counter, request_done_counter = self.model_executor.execute_model(
 +                execute_model_req=execute_model_req)
-+            
++
 +        for req_id, notif_count in request_notif_counter.items():
 +            self._request_notif_counter[req_id] += notif_count
 +            if self._request_notif_counter[req_id] > -1:
@@ -3268,15 +3428,6 @@ index 54f7b8fb6..9c1c2635f 100644
  
          # Finish the current step for all the sequence groups.
          if self.scheduler_config.is_multi_step:
-@@ -1515,7 +1687,7 @@ class LLMEngine:
-             # queued control plane messages, such as add/remove lora adapters.
-             logger.debug("Stopping remote worker execution loop.")
-             self.model_executor.stop_remote_worker_execution_loop()
--
-+            
-         return ctx.request_outputs
- 
-     def _abort_and_cache_schedule(
 diff --git a/vllm/engine/multiprocessing/__init__.py b/vllm/engine/multiprocessing/__init__.py
 index cafd8150b..6a5e45b4e 100644
 --- a/vllm/engine/multiprocessing/__init__.py
@@ -3393,7 +3544,7 @@ index cafd8150b..6a5e45b4e 100644
 +    gpu_cache_usage_perc: float
 +    gpu_prefix_cache_hit_rate: float
 diff --git a/vllm/engine/multiprocessing/client.py b/vllm/engine/multiprocessing/client.py
-index f058b1329..fd5610a3c 100644
+index f058b1329..2fdb5b8bf 100644
 --- a/vllm/engine/multiprocessing/client.py
 +++ b/vllm/engine/multiprocessing/client.py
 @@ -1,4 +1,17 @@
@@ -3454,25 +3605,16 @@ index f058b1329..fd5610a3c 100644
  from vllm.engine.protocol import EngineClient
  # yapf: enable
  from vllm.envs import VLLM_RPC_TIMEOUT
-@@ -48,6 +66,17 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
+@@ -48,6 +66,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
  from vllm.sampling_params import SamplingParams
  from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
  from vllm.utils import Device, deprecate_kwargs
 +from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest, RemotePrefillRequestCallback
 +from vllm.distributed.device_communicators.nixl import NixlMetadata
-+
-+# Import ForwardPassMetrics and related classes from dynamo
-+try:
-+    from dynamo.llm import ForwardPassMetrics, WorkerStats, KvStats
-+except ImportError:
-+    # Fallback if dynamo imports are not available
-+    ForwardPassMetrics = None
-+    WorkerStats = None
-+    KvStats = None
  
  logger = init_logger(__name__)
  
-@@ -93,6 +122,7 @@ class MQLLMEngineClient(EngineClient):
+@@ -93,6 +113,7 @@ class MQLLMEngineClient(EngineClient):
          self._errored_with: Optional[BaseException] = None
  
          # Get the configs.
@@ -3480,7 +3622,7 @@ index f058b1329..fd5610a3c 100644
          self.model_config = engine_config.model_config
          self.decoding_config = engine_config.decoding_config
  
-@@ -117,6 +147,10 @@ class MQLLMEngineClient(EngineClient):
+@@ -117,6 +138,10 @@ class MQLLMEngineClient(EngineClient):
          self.heartbeat_socket: Socket = self.context.socket(zmq.constants.PULL)
          self.heartbeat_socket.connect(f"{ipc_path}{IPC_HEALTH_EXT}")
  
@@ -3491,7 +3633,7 @@ index f058b1329..fd5610a3c 100644
          # IPC path for the data socket.
          self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
  
-@@ -131,8 +165,27 @@ class MQLLMEngineClient(EngineClient):
+@@ -131,8 +156,27 @@ class MQLLMEngineClient(EngineClient):
          # Loop to check health of the LLMEngine periodically.
          # Started after the MQLLMEngine is ready.
          self.health_loop: Optional[asyncio.Task] = None
@@ -3519,7 +3661,7 @@ index f058b1329..fd5610a3c 100644
      @staticmethod
      def is_unsupported_config(vllm_config: VllmConfig):
          # Pipeline parallel not yet supported
-@@ -182,6 +235,76 @@ class MQLLMEngineClient(EngineClient):
+@@ -182,6 +226,61 @@ class MQLLMEngineClient(EngineClient):
          except Exception as e:
              self._set_errored(e)
  
@@ -3556,28 +3698,13 @@ index f058b1329..fd5610a3c 100644
 +                    if self.metrics_publisher is not None and isinstance(
 +                        metrics, KvMetrics
 +                    ):
-+                        # Construct structured metrics objects
-+                        worker_stats = WorkerStats(
-+                            request_active_slots=metrics.request_active_slots,
-+                            request_total_slots=metrics.request_total_slots,
-+                            num_requests_waiting=metrics.num_requests_waiting,
-+                            data_parallel_rank=None
-+                        )
-+                        
-+                        kv_stats = KvStats(
-+                            kv_active_blocks=metrics.kv_active_blocks,
-+                            kv_total_blocks=metrics.kv_total_blocks,
-+                            gpu_cache_usage_perc=metrics.gpu_cache_usage_perc,
-+                            gpu_prefix_cache_hit_rate=metrics.gpu_prefix_cache_hit_rate
-+                        )
-+                        
-+                        forward_pass_metrics = ForwardPassMetrics(
-+                            worker_stats=worker_stats,
-+                            kv_stats=kv_stats,
-+                            spec_decode_stats=None
-+                        )
-+                        
-+                        self.metrics_publisher.publish(forward_pass_metrics)
++                        self.metrics_publisher.publish(metrics.request_active_slots,
++                                                    metrics.request_total_slots,
++                                                    metrics.kv_active_blocks,
++                                                    metrics.kv_total_blocks,
++                                                    metrics.num_requests_waiting, 
++                                                    metrics.gpu_cache_usage_perc, 
++                                                    metrics.gpu_prefix_cache_hit_rate)
 +                        logger.debug("Metrics successful.")
 +
 +                    # TODO: Investigate sending whole stats object
@@ -3596,7 +3723,7 @@ index f058b1329..fd5610a3c 100644
      async def run_output_handler_loop(self):
          """Get RequestOutputs from Engine and stream to Request Queues"""
  
-@@ -250,7 +373,7 @@ class MQLLMEngineClient(EngineClient):
+@@ -250,7 +349,7 @@ class MQLLMEngineClient(EngineClient):
                  # Put each output into the appropriate queue.
                  elif isinstance(
                          request_outputs,
@@ -3605,7 +3732,7 @@ index f058b1329..fd5610a3c 100644
                      self._add_output(request_outputs)
                  else:
                      for request_output in request_outputs:
-@@ -261,7 +384,7 @@ class MQLLMEngineClient(EngineClient):
+@@ -261,7 +360,7 @@ class MQLLMEngineClient(EngineClient):
  
      def _add_output(self, request_output: Union[RequestOutput,
                                                  RPCAdapterLoadedResponse,
@@ -3614,7 +3741,7 @@ index f058b1329..fd5610a3c 100644
          queue = self.output_queues.get(request_output.request_id)
          if queue is not None:
              queue.put_nowait(request_output)
-@@ -283,12 +406,25 @@ class MQLLMEngineClient(EngineClient):
+@@ -283,12 +382,25 @@ class MQLLMEngineClient(EngineClient):
              # Wait until server is ready.
              response = await self._wait_for_server_rpc(socket)
  
@@ -3640,7 +3767,7 @@ index f058b1329..fd5610a3c 100644
  
      def close(self):
          """Destroy the ZeroMQ Context."""
-@@ -298,6 +434,8 @@ class MQLLMEngineClient(EngineClient):
+@@ -298,6 +410,8 @@ class MQLLMEngineClient(EngineClient):
          # Cancel background tasks.
          if self.health_loop is not None:
              self.health_loop.cancel()
@@ -3649,7 +3776,7 @@ index f058b1329..fd5610a3c 100644
          if self.output_loop is not None:
              self.output_loop.cancel()
  
-@@ -420,6 +558,9 @@ class MQLLMEngineClient(EngineClient):
+@@ -420,6 +534,9 @@ class MQLLMEngineClient(EngineClient):
          """
          if self._errored_with is not None:
              raise self._errored_with
@@ -3659,7 +3786,7 @@ index f058b1329..fd5610a3c 100644
  
      @property
      def is_running(self) -> bool:
-@@ -478,6 +619,7 @@ class MQLLMEngineClient(EngineClient):
+@@ -478,6 +595,7 @@ class MQLLMEngineClient(EngineClient):
          trace_headers: Optional[Mapping[str, str]] = None,
          prompt_adapter_request: Optional[PromptAdapterRequest] = None,
          priority: int = 0,
@@ -3667,7 +3794,7 @@ index f058b1329..fd5610a3c 100644
          *,
          inputs: Optional[PromptType] = None  # DEPRECATED
      ) -> AsyncGenerator[RequestOutput, None]:
-@@ -507,7 +649,8 @@ class MQLLMEngineClient(EngineClient):
+@@ -507,7 +625,8 @@ class MQLLMEngineClient(EngineClient):
  
          return self._process_request(prompt, sampling_params, request_id,
                                       lora_request, trace_headers,
@@ -3677,7 +3804,7 @@ index f058b1329..fd5610a3c 100644
  
      @overload
      def encode(
-@@ -591,6 +734,7 @@ class MQLLMEngineClient(EngineClient):
+@@ -591,6 +710,7 @@ class MQLLMEngineClient(EngineClient):
          trace_headers: Optional[Mapping[str, str]] = None,
          prompt_adapter_request: Optional[PromptAdapterRequest] = None,
          priority: int = 0,
@@ -3685,7 +3812,7 @@ index f058b1329..fd5610a3c 100644
      ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
              PoolingRequestOutput, None]]:
          """Send an RPCGenerateRequest to the RPCServer and stream responses."""
-@@ -636,6 +780,12 @@ class MQLLMEngineClient(EngineClient):
+@@ -636,6 +756,12 @@ class MQLLMEngineClient(EngineClient):
              else:
                  lp_bytes = None
  
@@ -3698,7 +3825,7 @@ index f058b1329..fd5610a3c 100644
              request_bytes = pickle.dumps(
                  RPCProcessRequest(
                      prompt=prompt,
-@@ -645,11 +795,11 @@ class MQLLMEngineClient(EngineClient):
+@@ -645,11 +771,11 @@ class MQLLMEngineClient(EngineClient):
                      trace_headers=trace_headers,
                      prompt_adapter_request=prompt_adapter_request,
                      priority=priority,
@@ -3712,7 +3839,7 @@ index f058b1329..fd5610a3c 100644
              await self.input_socket.send_multipart(parts, copy=False)
  
              # 4) Stream the RequestOutputs from the output queue. Note
-@@ -740,3 +890,22 @@ class MQLLMEngineClient(EngineClient):
+@@ -740,3 +866,22 @@ class MQLLMEngineClient(EngineClient):
          # Raise on error, otherwise happily return None
          if isinstance(request_output, BaseException):
              raise request_output
@@ -4492,10 +4619,10 @@ index 9524a69f6..c314fbe8f 100644
          prefill_meta = model_input.attn_metadata.prefill_metadata
  
 diff --git a/vllm/worker/worker.py b/vllm/worker/worker.py
-index d59f20f49..4c78301a9 100644
+index d59f20f49..b81e10a47 100644
 --- a/vllm/worker/worker.py
 +++ b/vllm/worker/worker.py
-@@ -1,8 +1,22 @@
+@@ -1,4 +1,17 @@
 +# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  # SPDX-License-Identifier: Apache-2.0
 +#
@@ -4510,26 +4637,26 @@ index d59f20f49..4c78301a9 100644
 +# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 +# See the License for the specific language governing permissions and
 +# limitations under the License.
-+
  """A GPU worker class."""
  import gc
  import os
--from typing import Dict, List, Optional, Set, Tuple, Type, Union
-+from typing import Dict, List, Optional, Set, Tuple, Type, Union, TYPE_CHECKING, Any
- 
- import torch
- import torch.distributed
-@@ -31,6 +45,9 @@ from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
- from vllm.worker.pooling_model_runner import PoolingModelRunner
- from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
-                                      WorkerInput)
+@@ -14,6 +27,7 @@ from vllm.distributed import (ensure_kv_transfer_initialized,
+                               ensure_model_parallel_initialized,
+                               init_distributed_environment,
+                               set_custom_all_reduce)
 +from vllm.distributed.device_communicators.nixl import DynamoNixlConnector
+ from vllm.logger import init_logger
+ from vllm.lora.request import LoRARequest
+ from vllm.model_executor import set_random_seed
+@@ -21,6 +35,7 @@ from vllm.model_executor.layers.sampler import SamplerOutput
+ from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
+ from vllm.platforms import current_platform
+ from vllm.prompt_adapter.request import PromptAdapterRequest
 +from vllm.remote_prefill import MemoryOpType
-+
- 
- logger = init_logger(__name__)
- 
-@@ -307,6 +324,46 @@ class Worker(LocalOrDistributedWorkerBase):
+ from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
+                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
+ from vllm.utils import (GiB_bytes, MemorySnapshot, bind_kv_cache,
+@@ -307,6 +322,69 @@ class Worker(LocalOrDistributedWorkerBase):
              self._init_cache_engine()
          self._warm_up_model()
  
@@ -4538,36 +4665,59 @@ index d59f20f49..4c78301a9 100644
 +        # TODO ptarasiewicz nixl can also support DRAM
 +        assert self.device_config.device_type == "cuda", "Currently only CUDA is supported for Nixl connector"
 +
-+        self.nixl_connector = DynamoNixlConnector(self.vllm_config, engine_id, self.local_rank) # TODO ptarasiewicz: rank or local_rank?
-+        assert len(self.cache_engine) == 1, "Only one cache engine is supported for now"
++        self.nixl_connector = DynamoNixlConnector(self.vllm_config, engine_id,
++                                                  self.rank, self.local_rank)
++        assert len(self.cache_engine
++                   ) == 1, "Only one cache engine is supported for now"
 +        self.nixl_connector.register_kv_caches(self.cache_engine[0].gpu_cache)
 +        return self.nixl_connector.agent_name
-+    
++
 +    def get_nixl_agent_metadata(self) -> bytes:
 +        assert self.nixl_connector is not None, "Nixl connector is not initialized"
 +        return self.nixl_connector.get_agent_metadata()
 +
-+    def add_remote_nixl_metadata(self, engine_id: str, agents_metadata: List[bytes], kv_caches_base_addr: List[List[Tuple[int, int]]], num_blocks: int) -> str:
++    def get_local_rank(self) -> List[int]:
++        return self.local_rank
++
++    def add_remote_nixl_metadata(self, engine_id: str,
++                                 agents_metadata: List[bytes],
++                                 kv_caches_base_addr: List[List[Tuple[int,
++                                                                      int]]],
++                                 num_blocks: int,
++                                 local_ranks: List[int]) -> str:
 +        assert self.nixl_connector is not None, "Nixl connector is not initialized"
-+        agent_name = self.nixl_connector.add_remote_agent(engine_id, agents_metadata, len(agents_metadata), kv_caches_base_addr, num_blocks) # TODO ptarasiewicz: rank or local_rank?
++        agent_name = self.nixl_connector.add_remote_agent(
++            engine_id, agents_metadata, len(agents_metadata),
++            kv_caches_base_addr, num_blocks, local_ranks)
 +        return agent_name
-+    
++
 +    def get_nixl_kv_caches_base_addr(self) -> List[bytes]:
 +        assert self.nixl_connector is not None, "Nixl connector is not initialized"
-+        return self.nixl_connector.kv_caches_base_addr[self.nixl_connector.engine_id]
-+        
++        return self.nixl_connector.kv_caches_base_addr[
++            self.nixl_connector.engine_id]
++
 +    def _read_blocks(self, worker_input: WorkerInput) -> None:
 +        for i, op_type in enumerate(worker_input.op_type):
 +            if op_type == MemoryOpType.READ:
-+                self.nixl_connector.read_blocks(worker_input.local_block_ids[i], worker_input.staging_block_ids[i], worker_input.remote_block_ids[i], worker_input.remote_engine_id[i])
++                self.nixl_connector.read_blocks(
++                    worker_input.local_block_ids[i],
++                    worker_input.staging_block_ids[i],
++                    worker_input.remote_block_ids[i],
++                    worker_input.remote_engine_id[i])
 +
 +    def _write_blocks(self, worker_input: WorkerInput) -> None:
 +        if not self.is_driver_worker:
-+            torch.cuda.synchronize() # to make sure that the blocks are ready, on driver worker we transfer after sampling, so there's no need to synchronize
++            torch.cuda.synchronize(
++            )  # to make sure that the blocks are ready, on driver worker we transfer after sampling, so there's no need to synchronize
 +
 +        for i, op_type in enumerate(worker_input.op_type):
 +            if op_type == MemoryOpType.WRITE:
-+                self.nixl_connector.write_blocks(worker_input.local_block_ids[i], worker_input.staging_block_ids[i], worker_input.remote_block_ids[i], worker_input.remote_engine_id[i], worker_input.notify_msg[i])
++                self.nixl_connector.write_blocks(
++                    worker_input.local_block_ids[i],
++                    worker_input.staging_block_ids[i],
++                    worker_input.remote_block_ids[i],
++                    worker_input.remote_engine_id[i],
++                    worker_input.notify_msg[i])
 +
 +    def shutdown_nixl(self) -> None:
 +        assert self.nixl_connector is not None, "Nixl connector is not initialized"
@@ -4576,16 +4726,16 @@ index d59f20f49..4c78301a9 100644
      def _init_cache_engine(self):
          assert self.cache_config.num_gpu_blocks is not None
          self.cache_engine = [
-@@ -368,6 +425,8 @@ class Worker(LocalOrDistributedWorkerBase):
-         blocks_to_copy = torch.tensor(execute_model_req.blocks_to_copy,
+@@ -369,6 +447,8 @@ class Worker(LocalOrDistributedWorkerBase):
                                        device=self.device,
                                        dtype=torch.int64).view(-1, 2)
-+        
-+        mem_transfer_reqs = execute_model_req.memory_transfer_requests or []
  
++        mem_transfer_reqs = execute_model_req.memory_transfer_requests or []
++
          return WorkerInput(
              num_seq_groups=num_seq_groups,
-@@ -376,6 +435,12 @@ class Worker(LocalOrDistributedWorkerBase):
+             blocks_to_swap_in=blocks_to_swap_in,
+@@ -376,6 +456,12 @@ class Worker(LocalOrDistributedWorkerBase):
              blocks_to_copy=blocks_to_copy,
              virtual_engine=virtual_engine,
              num_steps=num_steps,
