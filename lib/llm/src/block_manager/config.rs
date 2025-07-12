@@ -202,6 +202,10 @@ pub struct KvBlockManagerConfig {
     /// Event manager to handle block related events
     #[builder(default)]
     pub event_manager: Option<Arc<dyn EventManager>>,
+
+    /// Channel to reset the block manager to a specific cache level
+    #[builder(default)]
+    pub block_reset_channel: Option<BlockResetChannel>,
 }
 
 impl KvBlockManagerConfig {

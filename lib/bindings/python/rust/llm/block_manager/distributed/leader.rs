@@ -7,12 +7,22 @@ use utils::get_barrier_id;
 use derive_getters::Dissolve;
 use llm_rs::block_manager::distributed::{KvbmLeader as KvbmLeaderImpl, KvbmLeaderConfig};
 
-fn compute_num_blocks(env_var: &str, bytes_per_block: usize) -> usize {
-    let cache_size_gb = std::env::var(env_var)
-        .unwrap_or_default()
-        .parse::<usize>()
-        .unwrap_or(0);
-    (cache_size_gb * 1_000_000_000) / bytes_per_block
+const CPU_CACHE: &str = "DYNAMO_KVBM_CPU_CACHE_GB";
+const CPU_CACHE_OVERRIDE: &str = "DYNAMO_KVBM_CPU_CACHE_OVERRIDE_NUM_BLOCKS";
+
+const DISK_CACHE: &str = "DYNAMO_KVBM_DISK_CACHE_GB";
+const DISK_CACHE_OVERRIDE: &str = "DYNAMO_KVBM_DISK_CACHE_OVERRIDE_NUM_BLOCKS";
+
+fn compute_num_blocks(cache_size_key: &str, override_key: &str, bytes_per_block: usize) -> usize {
+    if let Ok(override_num_blocks) = std::env::var(override_key) {
+        override_num_blocks.parse::<usize>().unwrap_or(0)
+    } else {
+        let cache_size_gb = std::env::var(cache_size_key)
+            .unwrap_or_default()
+            .parse::<f64>()
+            .unwrap_or(0.0);
+        ((cache_size_gb * 1_000_000_000.0) / bytes_per_block as f64) as usize
+    }
 }
 
 #[pyclass]
@@ -27,8 +37,8 @@ impl KvbmLeader {
     #[new]
     #[pyo3(signature = (bytes_per_block, world_size))]
     fn new(bytes_per_block: usize, world_size: usize) -> PyResult<Self> {
-        let num_host_blocks = compute_num_blocks("DYNAMO_KVBM_CPU_CACHE", bytes_per_block);
-        let num_disk_blocks = compute_num_blocks("DYNAMO_KVBM_DISK_CACHE", bytes_per_block);
+        let num_host_blocks = compute_num_blocks(CPU_CACHE, CPU_CACHE_OVERRIDE, bytes_per_block);
+        let num_disk_blocks = compute_num_blocks(DISK_CACHE, DISK_CACHE_OVERRIDE, bytes_per_block);
 
         let barrier_id = get_barrier_id();
 

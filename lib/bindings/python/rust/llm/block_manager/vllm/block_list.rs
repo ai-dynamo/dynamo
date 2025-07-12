@@ -86,7 +86,7 @@ pub enum BlockListType {
 }
 
 #[pyclass]
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct KvbmBlockList {
     blocks: Arc<std::sync::Mutex<Option<BlockListType>>>,
     count: usize,
@@ -185,6 +185,76 @@ impl KvbmBlockList {
     pub fn block_count(&self) -> usize {
         self.count
     }
+
+    pub fn get_block_ids(&self) -> Vec<usize> {
+        let blocks = self.blocks.lock().unwrap();
+        match &*blocks {
+            Some(BlockListType::ImmutableDevice(blocks)) => {
+                blocks.iter().map(|b| b.block_id()).collect()
+            }
+            Some(BlockListType::MutableDevice(blocks)) => {
+                blocks.iter().map(|b| b.block_id()).collect()
+            }
+            Some(BlockListType::ImmutableHost(blocks)) => {
+                blocks.iter().map(|b| b.block_id()).collect()
+            }
+            Some(BlockListType::MutableHost(blocks)) => {
+                blocks.iter().map(|b| b.block_id()).collect()
+            }
+            Some(BlockListType::ImmutableDisk(blocks)) => {
+                blocks.iter().map(|b| b.block_id()).collect()
+            }
+            Some(BlockListType::MutableDisk(blocks)) => {
+                blocks.iter().map(|b| b.block_id()).collect()
+            }
+            None => Vec::new(),
+        }
+    }
+
+    pub fn get_block_hashes(&self) -> Vec<u64> {
+        let blocks = self.blocks.lock().unwrap();
+        match &*blocks {
+            Some(BlockListType::ImmutableDevice(blocks)) => {
+                blocks.iter().map(|b| b.sequence_hash()).collect()
+            }
+
+            Some(BlockListType::ImmutableHost(blocks)) => {
+                blocks.iter().map(|b| b.sequence_hash()).collect()
+            }
+
+            Some(BlockListType::ImmutableDisk(blocks)) => {
+                blocks.iter().map(|b| b.sequence_hash()).collect()
+            }
+
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn get_block_types(&self) -> Vec<String> {
+        let blocks = self.blocks.lock().unwrap();
+        match &*blocks {
+            Some(BlockListType::ImmutableDevice(_)) => vec!["ImmutableDevice".to_string()],
+            Some(BlockListType::MutableDevice(_)) => vec!["MutableDevice".to_string()],
+            Some(BlockListType::ImmutableHost(_)) => vec!["ImmutableHost".to_string()],
+            Some(BlockListType::MutableHost(_)) => vec!["MutableHost".to_string()],
+            Some(BlockListType::ImmutableDisk(_)) => vec!["ImmutableDisk".to_string()],
+            Some(BlockListType::MutableDisk(_)) => vec!["MutableDisk".to_string()],
+            None => Vec::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for KvbmBlockList {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "KvbmBlockList(count: {}; block_types: {:?}; block_ids: {:?}; block_hashes: {:?})",
+            self.count,
+            self.get_block_types(),
+            self.get_block_ids(),
+            self.get_block_hashes()
+        )
+    }
 }
 
 /// vLLM has a KVCacheBlock object which holds the block ID and sequence hash information.
@@ -215,9 +285,16 @@ impl BlockState {
 }
 
 #[pyclass]
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct BlockStates {
     pub states: Vec<BlockState>,
+}
+
+impl std::fmt::Debug for BlockStates {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let block_ids = self.states.iter().map(|s| s.block_id).collect::<Vec<_>>();
+        write!(f, "BlockStates(block_ids: {:?})", block_ids)
+    }
 }
 
 #[pymethods]

@@ -31,6 +31,9 @@ pub mod offload;
 pub mod pool;
 pub mod storage;
 
+// dynamo rt integration
+pub mod component;
+
 pub use crate::common::dtype::DType;
 pub use block::{
     locality::{self, LocalityProvider, LogicalResources},
@@ -38,6 +41,7 @@ pub use block::{
     BasicMetadata, BlockMetadata, Blocks, ImmutableBlock, MutableBlock,
 };
 pub use config::*;
+
 pub use layout::{nixl::NixlLayout, LayoutConfig, LayoutConfigBuilder, LayoutError, LayoutType};
 pub use offload::request::BlockResult;
 pub use pool::BlockPool;
@@ -51,6 +55,7 @@ use anyhow::{Context, Result};
 use block::nixl::{BlockMutability, NixlBlockSet, RemoteBlocks, SerializedNixlBlockSet};
 use derive_builder::Builder;
 use nixl_sys::Agent as NixlAgent;
+use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
@@ -64,7 +69,7 @@ pub type WorkerID = u64;
 pub type ReferenceBlockManager = KvBlockManager<locality::Local, BasicMetadata>;
 
 /// Represents the different cache levels for KV blocks
-#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum CacheLevel {
     /// Represents KV blocks in GPU memory
     G1,
@@ -78,6 +83,9 @@ pub enum CacheLevel {
     /// Represents KV blocks in Remote NVMe storage
     G4,
 }
+
+/// Type of channel used to reset the block manager to a specific cache level
+pub type BlockResetChannel = tokio::sync::broadcast::Receiver<CacheLevel>;
 
 struct CancelOnLastDrop {
     cancellation_token: CancellationToken,
@@ -96,11 +104,22 @@ impl Drop for CancelOnLastDrop {
 // 4. construct a Blocks object for each layout providing a unique block_set_idx
 //    for each layout type.
 // 5. initialize the pools for each set of blocks
-#[derive(Clone)]
 pub struct KvBlockManager<Locality: LocalityProvider, Metadata: BlockMetadata> {
     state: Arc<state::KvBlockManagerState<Locality, Metadata>>,
     _cancellation_token: Arc<CancelOnLastDrop>,
     block_size: usize,
+}
+
+impl<Locality: LocalityProvider, Metadata: BlockMetadata> Clone
+    for KvBlockManager<Locality, Metadata>
+{
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+            _cancellation_token: self._cancellation_token.clone(),
+            block_size: self.block_size,
+        }
+    }
 }
 
 impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManager<Locality, Metadata> {
@@ -223,6 +242,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata> KvBlockManager<locality::Logi
 
 #[cfg(all(test, feature = "testing-full"))]
 mod tests {
+
     use super::*;
 
     use crate::tokens::Tokens;
@@ -231,7 +251,7 @@ mod tests {
     // Atomic Counter for Worker ID
     static WORKER_ID: AtomicU64 = AtomicU64::new(1337);
 
-    fn create_reference_block_manager_config() -> KvBlockManagerConfig {
+    pub fn create_reference_block_manager_config() -> KvBlockManagerConfig {
         let worker_id = WORKER_ID.fetch_add(1, Ordering::SeqCst);
 
         // Check if we're already in a Tokio runtime context
@@ -285,7 +305,7 @@ mod tests {
             .unwrap()
     }
 
-    async fn create_reference_block_manager() -> ReferenceBlockManager {
+    pub async fn create_reference_block_manager() -> ReferenceBlockManager {
         ReferenceBlockManager::new(create_reference_block_manager_config())
             .await
             .unwrap()

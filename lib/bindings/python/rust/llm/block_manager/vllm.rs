@@ -11,10 +11,12 @@ use pyo3::{prelude::*, wrap_pymodule};
 
 use dynamo_llm::{
     block_manager::{
-        block::data::logical::distributed_leader_worker::DistributedLeaderWorkerResources,
-        block::locality::{LocalityProvider, Logical},
-        block::{BlockId, ImmutableBlock, MutableBlock},
-        pool::BlockPool,
+        block::{
+            data::logical::distributed_leader_worker::DistributedLeaderWorkerResources,
+            locality::{LocalityProvider, Logical},
+            BlockId, ImmutableBlock, MutableBlock,
+        },
+        pool::{BlockPool, BlockPoolError},
         BasicMetadata, DeviceStorage, Storage,
     },
     tokens::{SaltHash, SequenceHash, TokenBlockSequence, Tokens},
@@ -99,6 +101,7 @@ impl KvbmCacheManager {
     }
 
     /// Returns the number of tokens that have been computed for the given request.
+    #[tracing::instrument(level = "debug", skip(self))]
     pub fn num_computed_tokens(&self, request_id: String) -> PyResult<usize> {
         let slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
         slot_manager
@@ -108,10 +111,14 @@ impl KvbmCacheManager {
 
     /// Get the computed blocks for the given sequence hashes.
     /// This is used to get the blocks for the request.
+    #[tracing::instrument(level = "debug", skip(self), ret)]
     pub fn get_computed_blocks(
         &self,
         sequence_hashes: Vec<SequenceHash>,
     ) -> PyResult<KvbmBlockList> {
+        // Unfortunately, we cannot associate the sequence hashes with the request ID due to the calling
+        // structure of the vLLM scheduler.
+
         let blocks = self
             .block_manager()
             .device()
@@ -122,43 +129,31 @@ impl KvbmCacheManager {
         Ok(KvbmBlockList::new(BlockListType::ImmutableDevice(blocks)))
     }
 
-    /// Get the number of offloaded computed blocks for the given sequence hashes.
-    pub fn get_num_offloaded_computed_blocks(
+    /// Get the number of matched tokens that can be loaded from the external connector.
+    /// This is used to implement the `get_num_new_matched_tokens` in the vLLM Connector API.
+    ///
+    /// Note: we unpack the id and the num_tokens from the vLLM `Request` so we can hold state
+    /// in the slot manager as well as determine if the matches are on full block boundaries.
+    pub fn get_num_new_matched_tokens(
         &self,
-        sequence_hashes: Vec<SequenceHash>,
-    ) -> PyResult<(Option<KvbmBlockList>, Option<KvbmBlockList>)> {
-        let host_blocks = if let Some(host) = self.block_manager().host() {
-            Some(
-                host.match_sequence_hashes_blocking(&sequence_hashes)
-                    .map_err(to_pyerr)?,
+        request_id: String,
+        request_num_tokens: usize,
+        num_computed_tokens: usize,
+    ) -> PyResult<(usize, bool)> {
+        let mut slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
+        slot_manager
+            .get_num_new_matched_tokens(
+                &request_id,
+                request_num_tokens,
+                num_computed_tokens,
+                self.block_manager(),
             )
-        } else {
-            None
-        };
-
-        let disk_blocks = if let Some(disk) = self.block_manager().disk() {
-            Some(
-                disk.match_sequence_hashes_blocking(&sequence_hashes)
-                    .map_err(to_pyerr)?,
-            )
-        } else {
-            None
-        };
-
-        tracing::debug!(
-            "in get_num_offloaded_computed_blocks, found {} host blocks and {} disk blocks",
-            host_blocks.as_ref().map(|blocks| blocks.len()).unwrap_or(0),
-            disk_blocks.as_ref().map(|blocks| blocks.len()).unwrap_or(0),
-        );
-
-        Ok((
-            host_blocks.map(|blocks| KvbmBlockList::new(BlockListType::ImmutableHost(blocks))),
-            disk_blocks.map(|blocks| KvbmBlockList::new(BlockListType::ImmutableDisk(blocks))),
-        ))
+            .map_err(to_pyerr)
     }
 
     /// Updates the slot manager with the current request state and allocates new blocks if needed.
     /// Returns the new blocks if they were allocated, otherwise returns None.
+    #[tracing::instrument(level = "debug", skip(self), fields(update = ?update), ret)]
     pub fn allocate_slots(&self, update: SlotUpdate) -> PyResult<Option<BlockStates>> {
         self.slot_manager
             .lock()
@@ -171,10 +166,6 @@ impl KvbmCacheManager {
         let mut slot_manager = self.slot_manager.lock().map_err(to_pyerr)?;
         slot_manager.free_blocks(&request_id);
         Ok(())
-    }
-
-    pub fn reset_prefix_cache(&self) -> PyResult<()> {
-        Err(to_pyerr("reset_prefix_cache is not implemented"))
     }
 
     pub fn get_num_common_prefix_blocks(
@@ -212,29 +203,50 @@ impl KvbmCacheManager {
         Ok(usage)
     }
 
-    #[pyo3(signature = (request_id, request_num_computed_tokens, host_onboard_blocks=None, disk_onboard_blocks=None))]
-    pub fn onboard_into_slot(
-        &self,
-        request_id: String,
-        request_num_computed_tokens: usize,
-        host_onboard_blocks: Option<KvbmBlockList>,
-        disk_onboard_blocks: Option<KvbmBlockList>,
-    ) -> PyResult<()> {
+    pub fn trigger_onboard(&self, request_id: String) -> PyResult<()> {
         self.slot_manager
             .lock()
             .map_err(to_pyerr)?
-            .onboard_into_slot(
-                &request_id,
-                request_num_computed_tokens,
-                host_onboard_blocks,
-                disk_onboard_blocks,
-                self.block_manager(),
-            )
+            .trigger_onboard(&request_id, self.block_manager())
             .map_err(to_pyerr)
+    }
+
+    pub fn reset_prefix_cache(&self) -> bool {
+        match self._reset_prefix_cache() {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::error!("failed to reset prefix cache: {:?}", e);
+                false
+            }
+        }
     }
 }
 
-#[derive(Debug, Clone, Dissolve)]
+impl KvbmCacheManager {
+    #[tracing::instrument(level = "debug", skip(self), ret)]
+    fn _reset_prefix_cache(&self) -> Result<(), SlotError> {
+        let manager = self.block_manager();
+
+        if let Some(disk) = manager.disk() {
+            disk.reset_blocking()?;
+            tracing::debug!("reset disk prefix cache");
+        }
+
+        if let Some(host) = manager.host() {
+            host.reset_blocking()?;
+            tracing::debug!("reset host prefix cache");
+        }
+
+        if let Some(device) = manager.device() {
+            device.reset_blocking()?;
+            tracing::debug!("reset device prefix cache");
+        }
+
+        Ok(())
+    }
+}
+
+#[derive(Clone, Dissolve)]
 pub struct GenericSlotUpdate<R> {
     /// The request ID.
     pub request_id: R,
@@ -271,6 +283,22 @@ pub struct GenericSlotUpdate<R> {
 
     /// Whether to delay caching the blocks.
     pub delay_cache_blocks: Option<bool>,
+}
+
+impl std::fmt::Debug for GenericSlotUpdate<String> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let tokens_display = if self.tokens_to_append.len() > 8 {
+            format!(
+                "[{:?}...{:?}]",
+                &self.tokens_to_append[..3],
+                &self.tokens_to_append[self.tokens_to_append.len() - 3..]
+            )
+        } else {
+            format!("{:?}", self.tokens_to_append)
+        };
+
+        write!(f, "GenericSlotUpdate(request_id: {}, request_num_tokens: {}, request_num_computed_tokens: {}, tokens_to_append: {}, num_new_tokens: {}, num_new_computed_tokens: {:?}, new_computed_blocks: {:?}, num_lookahead_blocks: {:?}, delay_cache_blocks: {:?})", self.request_id, self.request_num_tokens, self.request_num_computed_tokens, tokens_display, self.num_new_tokens, self.num_new_computed_tokens, self.new_computed_blocks, self.num_lookahead_blocks, self.delay_cache_blocks)
+    }
 }
 
 #[pyclass]
@@ -331,6 +359,9 @@ pub enum SlotError {
 
     #[error("slot error: {0}")]
     Error(String),
+
+    #[error(transparent)]
+    BlockPoolError(#[from] BlockPoolError),
 }
 
 impl SlotError {
@@ -366,18 +397,22 @@ impl<R: RequestKey> SlotManager<R> {
 
     /// Creates a new slot for the given request ID.
     /// This will populate the slot with the prefill tokens in the block sequence.
+    #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request_id))]
     pub fn create_slot(
         &mut self,
         request_id: &R,
         salt_hash: SaltHash,
         tokens: Vec<u32>,
     ) -> Result<Vec<SequenceHash>, SlotError> {
-        tracing::debug!(request_id, "creating slot");
-
         if !self.slots.contains_key(request_id) {
             self.slots.insert(
                 request_id.clone(),
                 Slot::new(tokens.into(), self.block_size, salt_hash),
+            );
+            tracing::debug!(
+                request_id,
+                "created slot; total slots: {}",
+                self.slots.len()
             );
         }
 
@@ -385,6 +420,7 @@ impl<R: RequestKey> SlotManager<R> {
         Ok(slot.sequence_hashes(SlotPosition::All))
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(request_id = %update.request_id))]
     pub fn update_slot(
         &mut self,
         update: GenericSlotUpdate<R>,
@@ -428,35 +464,17 @@ impl<R: RequestKey> SlotManager<R> {
         // these are the blocks that were matched to the sequence hashes
         // this will advance the computed position of the slot
         if let Some(matched_blocks) = new_computed_blocks {
-            let blocks = matched_blocks.take_blocks();
-            match blocks {
+            match matched_blocks.take_blocks() {
                 Some(BlockListType::ImmutableDevice(blocks)) => {
                     tracing::debug!(
                         request_id,
                         "applying {} cache-hit tokens",
                         blocks.len() * self.block_size
                     );
-                    slot.apply_computed_blocks(blocks)?;
+                    slot.initialize_with_device_matches(blocks)?;
                 }
-                Some(BlockListType::MutableDevice(_blocks)) => {
-                    panic!(
-                        "impossibility: mutable blocks were provided instead of immutable blocks"
-                    );
-                }
-                Some(BlockListType::ImmutableHost(_blocks)) => {
-                    panic!("ImmutableHost should not be provided");
-                }
-                Some(BlockListType::MutableHost(_blocks)) => {
-                    panic!("MutableHost should not be provided");
-                }
-                Some(BlockListType::ImmutableDisk(_blocks)) => {
-                    panic!("ImmutableDisk should not be provided");
-                }
-                Some(BlockListType::MutableDisk(_blocks)) => {
-                    panic!("MutableDisk should not be provided");
-                }
-                None => {
-                    panic!("impossibility: block list was none; possible taken previously");
+                _ => {
+                    panic!("logic error: block list was not immutable device");
                 }
             }
         } else {
@@ -495,69 +513,12 @@ impl<R: RequestKey> SlotManager<R> {
         }
     }
 
-    pub fn onboard_into_slot(
-        &mut self,
-        request_id: &R,
-        request_num_computed_tokens: usize,
-        host_onboard_blocks: Option<KvbmBlockList>,
-        disk_onboard_blocks: Option<KvbmBlockList>,
-        bm: &VllmBlockManager,
-    ) -> Result<(), SlotError> {
-        let slot = self.slots.get_mut(request_id).ok_or(SlotError::NotFound)?;
-
-        if host_onboard_blocks.is_some() || disk_onboard_blocks.is_some() {
-            let num_device_blocks = request_num_computed_tokens / self.block_size;
-
-            let host_blocks = if let Some(host_blocks) = host_onboard_blocks {
-                let host_blocks = host_blocks.take_blocks().ok_or(SlotError::Error(
-                    "host_onboard_blocks should be ImmutableHost".to_string(),
-                ))?;
-                let BlockListType::ImmutableHost(host_blocks) = host_blocks else {
-                    return Err(SlotError::Error(
-                        "host_onboard_blocks should be ImmutableHost".to_string(),
-                    ));
-                };
-                Some(host_blocks)
-            } else {
-                None
-            };
-
-            let disk_blocks = if let Some(disk_blocks) = disk_onboard_blocks {
-                let disk_blocks = disk_blocks.take_blocks().ok_or(SlotError::Error(
-                    "disk_onboard_blocks should be ImmutableDisk".to_string(),
-                ))?;
-                let BlockListType::ImmutableDisk(disk_blocks) = disk_blocks else {
-                    return Err(SlotError::Error(
-                        "disk_onboard_blocks should be ImmutableDisk".to_string(),
-                    ));
-                };
-                Some(disk_blocks)
-            } else {
-                None
-            };
-
-            let mut onboard_idx_start = num_device_blocks;
-
-            if let Some(host_blocks) = host_blocks.as_ref() {
-                if onboard_idx_start < host_blocks.len() {
-                    slot.onboard_blocks_to_slot(host_blocks[onboard_idx_start..].to_vec(), bm)?;
-                    onboard_idx_start += host_blocks.len() - onboard_idx_start;
-                }
-            }
-
-            if let Some(disk_blocks) = disk_blocks.as_ref() {
-                slot.onboard_blocks_to_slot(disk_blocks[onboard_idx_start..].to_vec(), bm)?;
-            }
-        }
-
-        Ok(())
-    }
-
     pub fn get_block_ids(&self, request_id: &R) -> Result<Vec<BlockId>, SlotError> {
         let slot = self.slots.get(request_id).ok_or(SlotError::NotFound)?;
         Ok(slot.get_block_ids())
     }
 
+    #[tracing::instrument(level = "debug", skip(self), fields(request_id = %request_id))]
     pub fn free_blocks(&mut self, request_id: &R) {
         if let Some(slot) = self.slots.get_mut(request_id) {
             slot.free_blocks();
@@ -571,6 +532,7 @@ impl<R: RequestKey> SlotManager<R> {
         }
     }
 
+    #[tracing::instrument(level = "debug", skip(self), fields(request_id = %request_id))]
     pub fn drop_slot(&mut self, request_id: &R) {
         if self.slots.remove(request_id).is_none() {
             // Request ID may not be found if the client aborts the request.
@@ -580,5 +542,116 @@ impl<R: RequestKey> SlotManager<R> {
                 request_id
             );
         }
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, block_manager), ret)]
+    pub fn get_num_new_matched_tokens(
+        &mut self,
+        request_id: &R,
+        request_num_tokens: usize,
+        num_computed_tokens: usize,
+        block_manager: &VllmBlockManager,
+    ) -> Result<(usize, bool), SlotError> {
+        let slot = self.slots.get_mut(request_id).ok_or(SlotError::NotFound)?;
+
+        // the number of device matched tokens should be less than or equal to the number of tokens in the request
+        assert!(num_computed_tokens <= request_num_tokens);
+
+        // early exit if we cannot match full block
+        if (request_num_tokens - num_computed_tokens) < self.block_size {
+            return Ok((0, false));
+        }
+
+        // num_computed_tokens represents the number of tokens already on the device
+        // this much be a multiple of the block size
+        let num_device_blocks = num_computed_tokens / self.block_size;
+        debug_assert_eq!(num_computed_tokens % self.block_size, 0);
+
+        // get the sequence hashes for the device matched tokens
+        let sequence_hashes = slot.sequence_hashes(SlotPosition::All);
+        assert!(sequence_hashes.len() >= num_device_blocks);
+
+        if let Some(host) = block_manager.host() {
+            host.touch_blocks_blocking(&sequence_hashes)?;
+        }
+
+        if let Some(disk) = block_manager.disk() {
+            disk.touch_blocks_blocking(&sequence_hashes)?;
+        }
+
+        // we start matching non-device blocks after the device blocks
+        let search_offset = num_device_blocks;
+
+        let mut host_blocks = block_manager
+            .host()
+            .map(|host| host.match_sequence_hashes_blocking(&sequence_hashes[search_offset..]))
+            .transpose()?
+            .unwrap_or_default();
+
+        let num_matched_host_blocks = host_blocks.len();
+
+        // advance the search offset by the number of matched host blocks
+        let search_offset = search_offset + num_matched_host_blocks;
+
+        // start at host offset
+        let mut disk_blocks = block_manager
+            .disk()
+            .map(|disk| disk.match_sequence_hashes_blocking(&sequence_hashes[search_offset..]))
+            .transpose()?
+            .unwrap_or_default();
+
+        let num_matched_disk_blocks = disk_blocks.len();
+
+        let num_matched_blocks = num_matched_host_blocks + num_matched_disk_blocks;
+
+        tracing::debug!(
+            "matched {} host blocks and {} disk blocks; {} total blocks",
+            num_matched_host_blocks,
+            num_matched_disk_blocks,
+            num_matched_blocks
+        );
+
+        // early exit if we did not match any blocks
+        if num_matched_blocks == 0 {
+            return Ok((0, false));
+        }
+
+        let mut num_new_matched_tokens = num_matched_blocks * self.block_size;
+
+        // we are on a block boundary, so we need to throw away the last block
+        if num_computed_tokens + num_new_matched_tokens == request_num_tokens {
+            tracing::debug!(
+                request_id,
+                "on a block boundary, throwing away the last block"
+            );
+
+            // we should have matched at least one block
+            assert!(!host_blocks.is_empty() || !disk_blocks.is_empty());
+
+            // pop from disk, or if there are none, then from host
+            if disk_blocks.is_empty() {
+                host_blocks.pop();
+            } else {
+                disk_blocks.pop();
+            }
+
+            // decrement the number of new matched tokens by the block size
+            num_new_matched_tokens -= self.block_size;
+        }
+
+        slot.store_onboard_blocks(host_blocks, disk_blocks)?;
+
+        Ok((num_new_matched_tokens, false))
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, block_manager), ret)]
+    pub fn trigger_onboard(
+        &mut self,
+        request_id: &R,
+        block_manager: &VllmBlockManager,
+    ) -> Result<(), SlotError> {
+        let slot = self.slots.get_mut(request_id).ok_or(SlotError::NotFound)?;
+        slot.trigger_onboard(block_manager)?;
+        Ok(())
     }
 }

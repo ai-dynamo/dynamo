@@ -407,7 +407,9 @@ impl CudaContextProivder for DeviceStorage {
 impl Drop for DeviceStorage {
     fn drop(&mut self) {
         self.handles.release();
-        unsafe { cudarc::driver::result::free_sync(self.ptr as _) }.unwrap();
+        if let DeviceStorageType::Owned = self._storage_type {
+            unsafe { cudarc::driver::result::free_sync(self.ptr as _) }.unwrap();
+        }
     }
 }
 

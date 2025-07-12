@@ -1,6 +1,8 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use dynamo_llm::block_manager::{DiskStorage, PinnedStorage};
+
 use super::*;
 
 #[allow(dead_code)]
@@ -34,6 +36,30 @@ pub struct Slot<S: Storage, L: LocalityProvider> {
 
     /// The mutable blocks
     mutable: VecDeque<MutableBlock<S, L, BasicMetadata>>,
+
+    /// Blocks to be onboarded from the host
+    /// We must hold these blocks in the slot state until the scheduler trigger the onboarding.
+    onboard_from_host: Option<Vec<ImmutableBlock<PinnedStorage, L, BasicMetadata>>>,
+
+    /// Blocks to be onboarded from the disk
+    /// We must hold these blocks in the slot state until the scheduler trigger the onboarding.
+    onboard_from_disk: Option<Vec<ImmutableBlock<DiskStorage, L, BasicMetadata>>>,
+}
+
+impl<S: Storage, L: LocalityProvider> std::fmt::Debug for Slot<S, L> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let immutable_block_ids = self
+            .immutable
+            .iter()
+            .map(|b| b.block_id())
+            .collect::<Vec<_>>();
+        let mutable_block_ids = self
+            .mutable
+            .iter()
+            .map(|b| b.block_id())
+            .collect::<Vec<_>>();
+        write!(f, "Slot(computed_position: {}, prefill_position: {}, immutable_block_ids: {:?}, mutable_block_ids: {:?})", self.computed_position, self.prefill_position, immutable_block_ids, mutable_block_ids)
+    }
 }
 
 impl<S: Storage, L: LocalityProvider> Slot<S, L> {
@@ -48,6 +74,8 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
             sequence,
             immutable: Vec::new(),
             mutable: VecDeque::new(),
+            onboard_from_host: None,
+            onboard_from_disk: None,
         }
     }
 
@@ -57,9 +85,10 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
 
     /// Updates the sequence with the given tokens.
     /// These tokens will advance the computed sequence position.
+    #[tracing::instrument(level = "debug", skip(block_pool))]
     pub fn apply_computed_tokens(
         &mut self,
-        tokens_to_append: Vec<u32>,
+        mut tokens_to_append: Vec<u32>,
         block_pool: &BlockPool<S, L, BasicMetadata>,
     ) -> Result<(), SlotError> {
         if tokens_to_append.is_empty() {
@@ -79,7 +108,16 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
 
         // if we are still prefilling, we don't extend the sequence, but verify the tokens match what is already present.
         if self.computed_position < self.prefill_position {
-            tracing::debug!("applying {} prefill tokens", tokens_to_append.len());
+            // In chunked prefill, vLLM may combine the final prefill chunk with some decode tokens.
+            // We need to split off the decode tokens and apply them below.
+            let remaining_decode_tokens = if self.computed_position + tokens_to_append.len()
+                > self.sequence.total_tokens()
+            {
+                tokens_to_append.split_off(self.sequence.total_tokens() - self.computed_position)
+            } else {
+                vec![]
+            };
+
             debug_assert_eq!(
                 self.sequence
                     .tokens_at(
@@ -87,10 +125,19 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
                     )
                     .as_ref(),
                 &tokens_to_append,
+                "tokens to apply do not match the sequence tokens"
             );
+
             self.computed_position += tokens_to_append.len();
-        } else {
-            tracing::debug!("applying {} tokens", tokens_to_append.len());
+            tracing::debug!(
+                "applying {} prefill tokens; new computed_position: {}",
+                tokens_to_append.len(),
+                self.computed_position
+            );
+            tokens_to_append = remaining_decode_tokens;
+        }
+
+        if !tokens_to_append.is_empty() {
             // if we are not prefilling, we extend the sequence and advance the sequence position.
             // first advance the sequence, then the position -- this covers the case where the extend fails.
             let count = tokens_to_append.len();
@@ -98,6 +145,12 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
                 .extend(tokens_to_append.into())
                 .map_err(|e| SlotError::from_str(&format!("failed to extend sequence: {:?}", e)))?;
             self.computed_position += count;
+
+            tracing::debug!(
+                "applied {} tokens; new computed_position: {}",
+                count,
+                self.computed_position
+            );
         }
 
         // determine if we need to register any blocks
@@ -108,12 +161,13 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
         debug_assert!(num_blocks_to_register <= self.mutable.len());
 
         if num_blocks_to_register == 0 {
-            tracing::debug!("no blocks to register");
+            tracing::trace!("no blocks to register");
             return Ok(());
         }
 
         let mut blocks_to_register = Vec::new();
-        tracing::debug!("registering {} blocks", num_blocks_to_register);
+        tracing::trace!("registering {} blocks", num_blocks_to_register);
+        assert!(self.mutable.len() >= num_blocks_to_register);
 
         // create an iterator over the mutable blocks zipped with the token blocks
         let zipped_blocks = self
@@ -133,33 +187,70 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
             blocks_to_register.push(mutable_block);
         }
 
+        assert_eq!(blocks_to_register.len(), num_blocks_to_register);
+
         // register the mutable blocks and extend the slot's immutable blocks
         let immutable_blocks = block_pool
             .register_blocks_blocking(blocks_to_register)
             .map_err(|e| SlotError::from_str(&format!("failed to register blocks: {:?}", e)))?;
+
+        assert_eq!(immutable_blocks.len(), num_blocks_to_register);
+
+        tracing::debug!("registered {:?}", immutable_blocks);
+        tracing::debug!("new computed_position: {}", self.computed_position);
 
         self.immutable.extend(immutable_blocks);
 
         Ok(())
     }
 
-    /// Apply computed/cached blocks to the slot.
+    /// Initialize the slot with the device matched blocks.
     ///
-    /// Note: We should only apply computed blocks once at the beginning.
-    /// Here we clear the list of immutable blocks before applying them because vLLM can try to apply
-    /// this multiple times if the slot was unable acquire blocks for the remainder of the sequence.
-    // TODO: What about something like chunked prefill?
-    pub fn apply_computed_blocks(
+    /// Note: This should only be called one time before when we first load the initial
+    /// device matches to the sequence. This method will validate the mutable blocks are
+    /// empty and clear the immutable blocks; we clear the immutable blocks because vLLM
+    /// can try to apply this multiple times if the slot was unable acquire blocks for the
+    /// remainder of the sequence.
+    #[tracing::instrument(level = "debug")]
+    pub fn initialize_with_device_matches(
         &mut self,
         computed_blocks: Vec<ImmutableBlock<S, L, BasicMetadata>>,
     ) -> Result<(), SlotError> {
         assert!(self.mutable.is_empty());
-
-        // clear the immutable blocks
         self.immutable.clear();
+        self.apply_immutable_blocks(computed_blocks)
+    }
+
+    /// Apply immutable blocks to the slot.
+    ///
+    /// Note: The current compute position must match the number of tokens held by the immutable blocks.
+    fn apply_immutable_blocks(
+        &mut self,
+        computed_blocks: Vec<ImmutableBlock<S, L, BasicMetadata>>,
+    ) -> Result<(), SlotError> {
+        debug_assert_eq!(
+            self.computed_position % self.sequence.block_size(),
+            0,
+            "not on a block boundary"
+        );
+
+        debug_assert_eq!(
+            self.computed_position / self.sequence.block_size(),
+            self.immutable.len(),
+            "number of computed blocks does not match the number of immutable blocks in the sequence"
+        );
+
+        // the expected number of immutable blocks after applying the computed blocks
+        let count = computed_blocks.len();
+        let expected_immutable_count = self.immutable.len() + computed_blocks.len();
 
         // create an iterator over the mutable blocks zipped with the token blocks
-        let zipped_blocks = self.sequence.blocks().iter().zip(computed_blocks);
+        let zipped_blocks = self
+            .sequence
+            .blocks()
+            .iter()
+            .skip(self.immutable.len())
+            .zip(computed_blocks);
 
         // validate the sequence hashes of the incoming immutable computed blocks
         // against the sequence hashes of blocks in the sequence.
@@ -171,6 +262,20 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
             self.immutable.push(computed_block);
         }
 
+        assert_eq!(
+            self.immutable.len(),
+            expected_immutable_count,
+            "did not apply the expected number of immutable blocks; expected: {}, actual: {}",
+            expected_immutable_count,
+            self.immutable.len()
+        );
+
+        tracing::debug!(
+            "applied {} immutable blocks; computed sequence position: {}",
+            count,
+            self.computed_position
+        );
+
         Ok(())
     }
 
@@ -180,6 +285,7 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
     /// otherwise returns the block ids of the new blocks.
     ///
     /// An empty vector is returned if no new blocks are required.
+    #[tracing::instrument(level = "debug", skip(block_pool), ret)]
     pub fn allocate_blocks(
         &mut self,
         num_new_tokens: usize,
@@ -208,6 +314,7 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
 
     /// Frees the blocks in the slot.
     /// This will return the blocks in reverse order so that the tail blocks are evicted first.
+    #[tracing::instrument(level = "debug")]
     pub fn free_blocks(&mut self) {
         self.mutable.clear();
         let mut immutable_blocks = std::mem::take(&mut self.immutable);
@@ -261,6 +368,29 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
 }
 
 impl<L: LocalityProvider> Slot<DeviceStorage, L> {
+    #[tracing::instrument(level = "debug", skip(self, block_manager), ret)]
+    pub fn trigger_onboard(
+        &mut self,
+        block_manager: &dynamo_llm::block_manager::KvBlockManager<L, BasicMetadata>,
+    ) -> Result<(), SlotError> {
+        if self.onboard_from_host.is_none() && self.onboard_from_disk.is_none() {
+            return Err(SlotError::from_str("no onboard blocks to trigger"));
+        }
+
+        if let Some(host_blocks) = self.onboard_from_host.take() {
+            self.onboard_blocks_to_slot(host_blocks, block_manager)?;
+        }
+
+        if let Some(disk_blocks) = self.onboard_from_disk.take() {
+            self.onboard_blocks_to_slot(disk_blocks, block_manager)?;
+        }
+
+        tracing::debug!("onboarded blocks to slot {:?}", self);
+
+        Ok(())
+    }
+
+    #[tracing::instrument(level = "debug", skip(self, bm), ret)]
     pub fn onboard_blocks_to_slot<T: Storage>(
         &mut self,
         offloaded_blocks: Vec<ImmutableBlock<T, L, BasicMetadata>>,
@@ -272,8 +402,6 @@ impl<L: LocalityProvider> Slot<DeviceStorage, L> {
             ));
         }
 
-        self.computed_position += offloaded_blocks.len() * self.sequence.block_size();
-
         let target_device_blocks = self.mutable.drain(0..offloaded_blocks.len()).collect();
 
         let immutable_device_blocks = bm
@@ -282,7 +410,22 @@ impl<L: LocalityProvider> Slot<DeviceStorage, L> {
             .unwrap()
             .map_err(|e| SlotError::from_str(&format!("failed to onboard blocks: {:?}", e)))?;
 
-        self.immutable.extend(immutable_device_blocks);
+        self.apply_immutable_blocks(immutable_device_blocks)?;
+
+        Ok(())
+    }
+
+    pub fn store_onboard_blocks(
+        &mut self,
+        host_blocks: Vec<ImmutableBlock<PinnedStorage, L, BasicMetadata>>,
+        disk_blocks: Vec<ImmutableBlock<DiskStorage, L, BasicMetadata>>,
+    ) -> Result<(), SlotError> {
+        if self.onboard_from_host.is_some() || self.onboard_from_disk.is_some() {
+            return Err(SlotError::from_str("onboard blocks already stored"));
+        }
+
+        self.onboard_from_host = Some(host_blocks);
+        self.onboard_from_disk = Some(disk_blocks);
 
         Ok(())
     }
@@ -322,7 +465,7 @@ mod tests {
                 num_blocks: 10,
                 num_layers: 2,
                 outer_dim: 1,
-                page_size: 64,
+                page_size: BLOCK_SIZE,
                 inner_dim: 128,
                 alignment: 1,
                 dtype_width_bytes: 2,
@@ -513,8 +656,12 @@ mod tests {
         assert_eq!(slot.num_tokens(SlotPosition::Prefill), 4);
         assert_eq!(slot.num_tokens(SlotPosition::All), 4);
 
+        assert_eq!(slot.mutable.len(), 0);
+        assert_eq!(slot.immutable.len(), 1);
+
         // Now we're in decode mode - add new tokens one at a time
-        for i in 0..3 {
+        for i in 0..5 {
+            println!("=== Decode Pass {} ===", i);
             let decode_token = 100 + i as u32; // Use distinct tokens for decode
 
             // Allocate space for the new token
@@ -524,6 +671,8 @@ mod tests {
                 "Failed to allocate block for decode token {}",
                 i
             );
+
+            assert_eq!(slot.mutable.len(), 1);
 
             // Apply the decode token
             let result = slot.apply_computed_tokens(vec![decode_token], &fixture.pool);
@@ -540,12 +689,23 @@ mod tests {
             assert_eq!(slot.num_tokens(SlotPosition::All), expected_total);
             // Prefill count should remain unchanged
             assert_eq!(slot.num_tokens(SlotPosition::Prefill), 4);
+
+            if expected_total % BLOCK_SIZE == 0 {
+                assert_eq!(slot.mutable.len(), 0);
+                assert_eq!(slot.immutable.len(), expected_total / BLOCK_SIZE);
+            } else {
+                assert_eq!(slot.mutable.len(), 1);
+                assert_eq!(slot.immutable.len(), expected_total / BLOCK_SIZE);
+            }
         }
 
         // Final verification
-        assert_eq!(slot.num_tokens(SlotPosition::Computed), 7);
-        assert_eq!(slot.num_tokens(SlotPosition::All), 7);
+        assert_eq!(slot.num_tokens(SlotPosition::Computed), 9);
+        assert_eq!(slot.num_tokens(SlotPosition::All), 9);
         assert_eq!(slot.num_tokens(SlotPosition::Prefill), 4);
+
+        assert_eq!(slot.mutable.len(), 1);
+        assert_eq!(slot.immutable.len(), 2);
     }
 
     // Debug Assertion Bug Analysis - demonstrates the issue
@@ -683,7 +843,7 @@ mod tests {
         println!("Cache hit! Found {} cached blocks", cached_blocks.len());
 
         // Apply the cached blocks (this is the real cache hit path)
-        let result = slot2.apply_computed_blocks(cached_blocks);
+        let result = slot2.initialize_with_device_matches(cached_blocks);
         assert!(result.is_ok(), "Cache hit failed: {:?}", result.err());
 
         // Verify second slot state matches first slot
@@ -822,7 +982,7 @@ mod tests {
         println!("Cache hit! Found {} cached blocks", cached_blocks.len());
 
         // Apply cached blocks (this is the cache hit path)
-        let result = slot2.apply_computed_blocks(cached_blocks);
+        let result = slot2.initialize_with_device_matches(cached_blocks);
         assert!(result.is_ok(), "Cache hit failed: {:?}", result.err());
 
         let slot2_blocks = slot2.get_block_ids();
@@ -904,7 +1064,7 @@ mod tests {
             .match_sequence_hashes_blocking(&slot1_hashes)
             .expect("Cache lookup failed");
 
-        let result = slot2.apply_computed_blocks(cached_blocks);
+        let result = slot2.initialize_with_device_matches(cached_blocks);
         assert!(result.is_ok());
 
         let cache_hit_duration = start_time.elapsed();
@@ -991,7 +1151,7 @@ mod tests {
             .pool
             .match_sequence_hashes_blocking(&hashes_a)
             .expect("Cache lookup for sequence A failed");
-        let result = slot_a2.apply_computed_blocks(cached_blocks_a);
+        let result = slot_a2.initialize_with_device_matches(cached_blocks_a);
         assert!(result.is_ok());
 
         let mut slot_b2 = Slot::new(tokens_b.clone().into(), BLOCK_SIZE, salt);
@@ -999,7 +1159,7 @@ mod tests {
             .pool
             .match_sequence_hashes_blocking(&hashes_b)
             .expect("Cache lookup for sequence B failed");
-        let result = slot_b2.apply_computed_blocks(cached_blocks_b);
+        let result = slot_b2.initialize_with_device_matches(cached_blocks_b);
         assert!(result.is_ok());
 
         let blocks_a2 = slot_a2.get_block_ids();
@@ -1418,7 +1578,7 @@ mod tests {
             .expect("Cache lookup should succeed");
 
         // Test 1: Apply cached blocks (should succeed)
-        let result = slot2.apply_computed_blocks(cached_blocks);
+        let result = slot2.initialize_with_device_matches(cached_blocks);
         assert!(result.is_ok(), "Cache hit should succeed");
 
         // Validate internal state after cache hit
@@ -1653,7 +1813,7 @@ mod tests {
         println!("Attempting to apply to slot with different token sequence...");
 
         // The hash mismatch detection happens in apply_computed_blocks
-        let result = slot2.apply_computed_blocks(cached_blocks);
+        let result = slot2.initialize_with_device_matches(cached_blocks);
 
         if result.is_err() {
             println!("✅ Hash mismatch correctly detected and rejected");
@@ -1662,5 +1822,32 @@ mod tests {
         }
 
         println!("✅ Sequence hash mismatch test completed");
+    }
+
+    #[test]
+    fn test_blocks_chunked_prefill_with_decode_tokens() {
+        let fixture = TestFixture::new();
+
+        let tokens = vec![0; BLOCK_SIZE * 2];
+
+        let mut slot = Slot::new(tokens.clone().into(), BLOCK_SIZE, SALT_HASH);
+
+        let allocated_blocks = slot.allocate_blocks(tokens.len() + 2, &fixture.pool);
+        assert_eq!(allocated_blocks.unwrap().len(), 3);
+
+        slot.apply_computed_tokens(tokens[..BLOCK_SIZE].to_vec(), &fixture.pool)
+            .unwrap();
+
+        assert_eq!(slot.immutable.len(), 1);
+        assert_eq!(slot.mutable.len(), 2);
+
+        // Add the remaining prefill tokens along with some simulated decode tokens.
+        let remaining_prefill_with_decode_tokens = vec![0; BLOCK_SIZE + 1];
+
+        slot.apply_computed_tokens(remaining_prefill_with_decode_tokens, &fixture.pool)
+            .unwrap();
+
+        assert_eq!(slot.immutable.len(), 2);
+        assert_eq!(slot.mutable.len(), 1);
     }
 }
