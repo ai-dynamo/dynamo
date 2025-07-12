@@ -357,7 +357,7 @@ export TRTLLM_USE_UCX_KVCACHE=1
 * The current example has been tested out on a GB200x4 node.
 * To run Eagle Speculative Decoding with Llama 4, ensure the container meets the following criteria:
   * Built with a version of TensorRT-LLM based on the 0.21 release [Link](https://github.com/NVIDIA/TensorRT-LLM/tree/release/0.21)
-  * It includes the changes from this PR [Link](https://github.com/NVIDIA/TensorRT-LLM/pull/5975)
+  * The TensorRT-LLM build includes the changes from this PR [Link](https://github.com/NVIDIA/TensorRT-LLM/pull/5975)
 
 ##### Aggregated Serving
 ```bash
