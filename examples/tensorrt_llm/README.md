@@ -27,11 +27,11 @@ This directory contains examples and reference implementations for deploying Lar
   - [Build docker](#build-docker)
   - [Run container](#run-container)
   - [Run deployment](#run-deployment)
-    - [Single Node deployment](#single-node-example-architectures)
+    - [Single Node deployment](#single-node-deployments)
     - [Multinode deployment](#multinode-deployment)
   - [Client](#client)
   - [Benchmarking](#benchmarking)
-  - [Close Deployment](#close-deployment)
+- [Disaggregation Strategy](#disaggregation-strategy)
 - [KV Cache Transfer](#kv-cache-transfer-in-disaggregated-serving)
 
 # Quick Start
@@ -50,7 +50,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ## Deployment Architectures
 
-See [deployment architectures](../llm/README.md#deployment-architectures) to learn about the general idea of the architecture. 
+See [deployment architectures](../llm/README.md#deployment-architectures) to learn about the general idea of the architecture.
 
 Note: TensorRT-LLM disaggregation does not support conditional disaggregation yet. You can configure the deployment to always use either aggregate or disaggregated serving.
 
@@ -99,8 +99,8 @@ This figure shows an overview of the major components to deploy:
 ```
 
 +------+      +-----------+      +------------------+             +---------------+
-| HTTP |----->| processor |----->|      Worker      |------------>|     Prefill   |
-|      |<-----|           |<-----|                  |<------------|     Worker    |
+| HTTP |----->| processor |----->|      Worker1     |------------>|    Worker2    |
+|      |<-----|           |<-----|                  |<------------|               |
 +------+      +-----------+      +------------------+             +---------------+
                   |    ^                  |
        query best |    | return           | publish kv events
@@ -112,10 +112,9 @@ This figure shows an overview of the major components to deploy:
 
 ```
 
-Note: The above architecture illustrates all the components. The final components
-that get spawned depend upon the chosen graph.
+**Note:** The diagram above shows all possible components in a deployment. Depending on the chosen disaggregation strategy, you can configure whether Worker1 handles prefill and Worker2 handles decode, or vice versa. For more information on how to select and configure these strategies, see the [Disaggregation Strategy](#disaggregation-strategy) section below.
 
-### Single-Node example architectures
+### Single-Node Deployments
 
 > [!IMPORTANT]
 > Below we provide some simple shell scripts that run the components for each configuration. Each shell script is simply running the `dynamo-run` to start up the ingress and using `python3` to start up the workers. You can easily take each commmand and run them in separate terminals.
@@ -152,10 +151,28 @@ cd $DYNAMO_ROOT/examples/tensorrt_llm
 ./launch/disagg_router.sh
 ```
 
+#### Aggregated with Multi-Token Prediction (MTP) and DeepSeek R1
+```bash
+cd $DYNAMO_ROOT/examples/tensorrt_llm
+
+export AGG_ENGINE_ARGS=./engine_configs/deepseek_r1/mtp/mtp_agg.yaml
+export SERVED_MODEL_NAME="nvidia/DeepSeek-R1-FP4"
+# nvidia/DeepSeek-R1-FP4 is a large model
+export MODEL_PATH="nvidia/DeepSeek-R1-FP4"
+./launch/agg.sh
+```
+
+Notes:
+- MTP is only available within the container built with the experimental TensorRT-LLM commit. Please add --use-default-experimental-tensorrtllm-commit to the arguments of the build.sh script.
+
+  Example: `./container/build.sh --framework tensorrtllm --use-default-experimental-tensorrtllm-commit`
+
+- There is a noticeable latency for the first two inference requests. Please send warm-up requests before starting the benchmark.
+- MTP performance may vary depending on the acceptance rate of predicted tokens, which is dependent on the dataset or queries used while benchmarking. Additionally, `ignore_eos` should generally be omitted or set to `false` when using MTP to avoid speculating garbage outputs and getting unrealistic acceptance rates.
+
 ### Multinode Deployment
 
-For details and instructions on multinode serving, please refer to the [multinode-examples.md](./multinode-examples.md) document. This guide provides step-by-step examples and configuration tips for deploying Dynamo with TensorRT-LLM across multiple nodes.
-
+For details and instructions on multinode serving, please refer to the [multinode-examples.md](./multinode/multinode-examples.md) document. This guide provides step-by-step examples and configuration tips for deploying Dynamo with TensorRT-LLM across multiple nodes.
 
 ### Client
 
@@ -168,10 +185,20 @@ NOTE: To send a request to a multi-node deployment, target the node which is run
 To benchmark your deployment with GenAI-Perf, see this utility script, configuring the
 `model` name and `host` based on your deployment: [perf.sh](../../benchmarks/llm/perf.sh)
 
-### Close deployment
 
-See [close deployment](../../docs/guides/dynamo_serve.md#close-deployment) section to learn about how to close the deployment.
+## Disaggregation Strategy
 
-### KV Cache Transfer in Disaggregated Serving
+The disaggregation strategy controls how requests are distributed between the prefill and decode workers in a disaggregated deployment.
+
+By default, Dynamo uses a `decode first` strategy: incoming requests are initially routed to the decode worker, which then forwards them to the prefill worker in round-robin fashion. The prefill worker processes the request and returns results to the decode worker for any remaining decode operations.
+
+When using KV routing, however, Dynamo switches to a `prefill first` strategy. In this mode, requests are routed directly to the prefill worker, which can help maximize KV cache reuse and improve overall efficiency for certain workloads. Choosing the appropriate strategy can have a significant impact on performance, depending on your use case.
+
+The disaggregation strategy can be set using the `DISAGGREGATION_STRATEGY` environment variable. You can set the strategy before launching your deployment, for example:
+```bash
+DISAGGREGATION_STRATEGY="prefill_first" ./launch/disagg.sh
+```
+
+## KV Cache Transfer in Disaggregated Serving
 
 Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV cache transfer guide](./kv-cache-tranfer.md).
