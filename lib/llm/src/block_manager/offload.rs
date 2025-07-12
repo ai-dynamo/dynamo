@@ -778,9 +778,11 @@ mod tests {
 
     fn populate_block<S: Storage + NixlDescriptor>(
         block: &impl BlockDataProvider<StorageType = S>,
-        value: u8,
+        start_value: u8,
     ) -> Result<()> {
         let block_data = block.block_data();
+
+        let mut value = start_value;
 
         for layer_idx in 0..block_data.num_layers() {
             for outer_idx in 0..block_data.num_outer_dims() {
@@ -811,6 +813,8 @@ mod tests {
                     _ => panic!(),
                 }
             }
+
+            value += 1;
         }
 
         Ok(())
@@ -818,10 +822,10 @@ mod tests {
 
     fn get_block_contents<S: Storage + NixlDescriptor>(
         block: &impl BlockDataProvider<StorageType = S>,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<Vec<Vec<u8>>> {
         let block_data = block.block_data();
 
-        let mut contents: Vec<u8> = Vec::new();
+        let mut contents: Vec<Vec<u8>> = Vec::new();
 
         for layer_idx in 0..block_data.num_layers() {
             for outer_idx in 0..block_data.num_outer_dims() {
@@ -838,10 +842,10 @@ mod tests {
                         )
                         .result()?;
 
-                        contents.extend(buffer);
+                        contents.push(buffer);
                     },
                     StorageType::Pinned => unsafe {
-                        contents.extend(
+                        contents.push(
                             std::slice::from_raw_parts(layer_view.as_ptr(), layer_view.size())
                                 .to_vec(),
                         );
@@ -857,30 +861,35 @@ mod tests {
                             file.seek(SeekFrom::Start(nixl_desc.as_ptr() as u64))?;
                         }
                         file.read_exact(&mut aligned)?;
-                        contents.extend(aligned.to_vec());
+                        contents.push(aligned.to_vec());
                     }
                     _ => anyhow::bail!("Unsupported storage type."),
                 }
             }
         }
 
-        Ok(contents.to_vec())
+        Ok(contents)
     }
 
     fn check_block_contents(
         block1: &impl BlockDataProvider<StorageType = impl Storage + NixlDescriptor>,
         block2: &impl BlockDataProvider<StorageType = impl Storage + NixlDescriptor>,
-        value: u8,
+        start_value: u8,
     ) -> Result<()> {
         let contents1 = get_block_contents(block1)?;
         let contents2 = get_block_contents(block2)?;
 
         assert_eq!(contents1.len(), contents2.len());
 
-        for (c1_value, c2_value) in contents1.iter().zip(contents2.iter()) {
-            if *c1_value != *c2_value || *c1_value != value {
-                panic!("{} != {} != {}", c1_value, c2_value, value);
+        let mut value = start_value;
+
+        for (layer1_vec, layer2_vec) in contents1.iter().zip(contents2.iter()) {
+            for (c1_value, c2_value) in layer1_vec.iter().zip(layer2_vec.iter()) {
+                if c1_value != c2_value || c1_value != &value {
+                    panic!("{} != {} != {}", c1_value, c2_value, value);
+                }
             }
+            value += 1;
         }
         Ok(())
     }
