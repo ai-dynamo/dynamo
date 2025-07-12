@@ -358,14 +358,14 @@ export TRTLLM_USE_UCX_KVCACHE=1
 * To run Eagle Speculative Decoding with Llama 4, ensure the container meets the following criteria:
   * Built with a version of TensorRT-LLM based on the 0.21 release [Link](https://github.com/NVIDIA/TensorRT-LLM/tree/release/0.21)
   * The TensorRT-LLM build includes the changes from this PR [Link](https://github.com/NVIDIA/TensorRT-LLM/pull/5975)
+* If you need to download model weights off huggingface, make sure you run the command `huggingface-cli login` and have access to the necessary gated models.
 
 ##### Aggregated Serving
 ```bash
 cd /workspace/examples/tensorrt_llm
 dynamo serve graphs.disagg:Frontend -f configs/llama4/eagle/eagle_agg.yaml
 ```
-* Known Issue: In Aggregated Serving, when the `max_num_tokens` was set to higher values, in our case 8448, we experienced Out of Memory (OOM) errors. This is being investigated by the TRTLLM team.
-
+* Known Issue: In Aggregated Serving, setting `max_num_tokens` to higher values (e.g. `max_num_tokens: 8448`) can lead to Out of Memory (OOM) errors. This is being investigated by the TRTLLM team.
 
 ##### Disaggregated Serving
 ```bash
