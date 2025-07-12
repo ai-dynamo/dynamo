@@ -25,7 +25,6 @@ use tokio::sync::Mutex;
 use super::protocols::WorkerSelectionResult;
 use super::WorkerSelector;
 use crate::kv_router::indexer::OverlapScores;
-use crate::kv_router::indexer::WorkerId;
 use crate::kv_router::protocols::LoadMetrics;
 use crate::kv_router::scoring::ProcessedEndpoints;
 use crate::kv_router::sequence::ActiveSequencesMultiWorker;
@@ -37,7 +36,7 @@ use crate::tokens::TokenBlockSequence;
 pub struct KVHitRateEvent {
     pub worker_id: i64,
     pub isl_blocks: usize,
-    pub overlap_blocks: usize,
+    pub overlap_blocks: u32,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -79,13 +78,15 @@ impl Endpoint {
 #[derive(Debug)]
 pub struct SchedulingResponse {
     pub best_worker_id: i64,
+    pub overlap_blocks: u32, // Add this field
     pub endpoints_changed: Option<Vec<i64>>,
 }
 
 pub struct SchedulingRequest {
     pub isl_tokens: usize,
-    pub overlap: OverlapScores,
+    pub overlaps: OverlapScores,
     pub potential_blocks: HashMap<i64, usize>,
+    pub potential_tokens: HashMap<i64, usize>,
     resp_tx: tokio::sync::oneshot::Sender<SchedulingResponse>,
 }
 
@@ -174,6 +175,7 @@ impl KvScheduler {
 
                             let response = SchedulingResponse {
                                 best_worker_id: selection.worker_id,
+                                overlap_blocks: selection.overlap_blocks,
                                 endpoints_changed: pending_endpoint_update.take(),
                             };
                             request.respond(response);
@@ -207,18 +209,20 @@ impl KvScheduler {
         isl_tokens: usize,
         block_size: u32,
         tokens: &[u32],
-        overlap: OverlapScores,
+        overlaps: OverlapScores,
     ) -> Result<i64, KvSchedulerError> {
         let mut sequences = self.sequences.lock().await;
 
         let token_sequence = TokenBlockSequence::from_slice(tokens, block_size, None);
-        let potential_blocks = sequences.potential_blocks(token_sequence);
+        let (potential_blocks, potential_tokens) =
+            sequences.potential_blocks_and_tokens(token_sequence, overlaps.clone());
 
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
             isl_tokens,
-            overlap,
+            overlaps,
             potential_blocks,
+            potential_tokens,
             resp_tx,
         };
         self.request_tx
@@ -234,29 +238,14 @@ impl KvScheduler {
         }
 
         let token_sequence = TokenBlockSequence::from_slice(tokens, block_size, None);
-        sequences.add_request(request_id, token_sequence, response.best_worker_id);
+        sequences.add_request(
+            request_id,
+            token_sequence,
+            response.overlap_blocks,
+            response.best_worker_id,
+        );
 
         Ok(response.best_worker_id)
-    }
-
-    /// Find the potential blocks for each worker if the sequence were routed there
-    pub async fn potential_blocks(
-        &self,
-        token_sequence: TokenBlockSequence,
-    ) -> HashMap<i64, usize> {
-        let sequences = self.sequences.lock().await;
-        sequences.potential_blocks(token_sequence)
-    }
-
-    /// Add a new request with its initial tokens to a specific worker
-    pub async fn add_request(
-        &self,
-        request_id: String,
-        token_sequence: TokenBlockSequence,
-        worker_id: WorkerId,
-    ) {
-        let mut sequences = self.sequences.lock().await;
-        sequences.add_request(request_id, token_sequence, worker_id)
     }
 
     /// Push tokens to a specific request's sequence
@@ -370,34 +359,47 @@ impl WorkerSelector for DefaultWorkerSelector {
             return Err(KvSchedulerError::NoEndpoints);
         }
 
-        let request_blocks = request.isl_tokens.div_ceil(block_size as usize);
+        let isl = request.isl_tokens;
+        let request_blocks = isl.div_ceil(block_size as usize);
+        let overlaps = &request.overlaps.scores;
+
+        // active blocks for decoding
         let potential_active_blocks = &request.potential_blocks;
+        // active tokens in the batch (processed by the linear layers), mostly prefill tokens
+        let potential_active_tokens = &request.potential_tokens;
 
         let mut worker_logits = HashMap::new();
         let mut max_logit = f64::NEG_INFINITY;
 
         // Calculate logits for each worker
         for (worker_id, _) in workers.endpoints.iter() {
-            let cached_blocks = request.overlap.scores.get(worker_id).copied().unwrap_or(0) as f64;
-            let prefill_blocks = request_blocks as f64 - cached_blocks;
+            // this is the number of tokens each worker would have if the request were scheduled there
+            let potential_tokens = *potential_active_tokens.get(worker_id).unwrap_or_else(|| {
+                tracing::warn!(
+                    "assuming {isl} tokens for {worker_id}, as the endpoint does not exist yet"
+                );
+                &isl
+            }) as f64;
 
             // this is the number of blocks each worker would have if the request were scheduled there
             let potential_blocks = *potential_active_blocks.get(worker_id).unwrap_or_else(||
-                {tracing::warn!("assuming 0 decoding blocks for {worker_id}, as the load metrics endpoint does not exist yet");
-                &0
+                {tracing::warn!("assuming {request_blocks} decoding blocks for {worker_id}, as the endpoint does not exist yet");
+                &request_blocks
             }) as f64;
 
+            let potential_prefill_blocks = potential_tokens / (block_size as f64);
+
             // Calculate logit (lower is better)
-            let logit =
-                self.kv_router_config.overlap_score_weight * prefill_blocks + potential_blocks;
+            let logit = self.kv_router_config.overlap_score_weight * potential_prefill_blocks
+                + potential_blocks;
             max_logit = max_logit.max(logit);
 
             worker_logits.insert(*worker_id, logit);
 
             tracing::info!(
-                "Formula for {worker_id}: {logit:.3} = {:.1} * {prefill_blocks:.3} + {potential_blocks:.3}  (cached_blocks: {cached_blocks})",
+                "Formula for {worker_id}: {logit:.3} = {:.1} * {potential_prefill_blocks:.3} + {potential_blocks:.3}  (cached_blocks: {})",
                 self.kv_router_config.overlap_score_weight,
-                cached_blocks = cached_blocks
+                overlaps.get(worker_id).unwrap_or(&0),
             );
         }
 
@@ -412,12 +414,7 @@ impl WorkerSelector for DefaultWorkerSelector {
         let temperature = self.kv_router_config.router_temperature;
         let best_worker_id = softmax_sample(&worker_logits, temperature);
 
-        let overlap_blocks = request
-            .overlap
-            .scores
-            .get(&best_worker_id)
-            .copied()
-            .unwrap_or(0) as usize;
+        let overlap_blocks = overlaps.get(&best_worker_id).copied().unwrap_or(0);
         let best_logit = worker_logits[&best_worker_id];
 
         tracing::info!(

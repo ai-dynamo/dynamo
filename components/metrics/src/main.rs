@@ -199,7 +199,7 @@ async fn app(runtime: Runtime) -> Result<()> {
                                 &config_clone,
                                 event.worker_id,
                                 event.isl_blocks,
-                                event.overlap_blocks,
+                                event.overlap_blocks as usize,
                             );
                         }
                         Err(e) => {
