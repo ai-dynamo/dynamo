@@ -28,4 +28,5 @@ class CustomBuildHook(BuildHookInterface):
                 f"{bin_path}/http": "dynamo/sdk/cli/bin/http",
                 f"{bin_path}/metrics": "dynamo/sdk/cli/bin/metrics",
                 f"{bin_path}/mock_worker": "dynamo/sdk/cli/bin/mock_worker",
+                f"{bin_path}/libdynamo_llm_capi.so": "dynamo/sdk/cli/bin/libdynamo_llm_capi.so",
             }

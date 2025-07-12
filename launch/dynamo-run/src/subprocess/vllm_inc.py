@@ -36,6 +36,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sdk.lib.utils import get_capi_library_path
 
 # Only used if you run it manually from the command line
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
@@ -208,7 +209,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     _check_and_set_env_value("VLLM_WORKER_ID", str(endpoint.lease_id()))
     _check_and_set_env_value(
-        "VLLM_KV_CAPI_PATH", "libdynamo_llm_capi.so", allow_override=True
+        "VLLM_KV_CAPI_PATH", get_capi_library_path(), allow_override=True
     )
     _check_and_set_env_value("VLLM_KV_NAMESPACE", config.namespace)
     _check_and_set_env_value("VLLM_KV_COMPONENT", config.component)
