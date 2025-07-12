@@ -350,3 +350,25 @@ unset TRTLLM_USE_NIXL_KVCACHE
 export TRTLLM_USE_UCX_KVCACHE=1
 ```
 
+
+### Example architectures for Llama 4 Maverick Instruct + Eagle Speculative Decoding
+
+#### Notes
+* The current example has been tested out on a GB200x4 node.
+* To run Eagle Speculative Decoding with Llama 4, ensure the container meets the following criteria:
+  * Built with a version of TensorRT-LLM based on the 0.21 release [Link](https://github.com/NVIDIA/TensorRT-LLM/tree/release/0.21)
+  * It includes the changes from this PR [Link](https://github.com/NVIDIA/TensorRT-LLM/pull/5975)
+
+##### Aggregated Serving
+```bash
+cd /workspace/examples/tensorrt_llm
+dynamo serve graphs.disagg:Frontend -f configs/llama4/eagle/eagle_agg.yaml
+```
+* Known Issue: In Aggregated Serving, when the `max_num_tokens` was set to higher values, in our case 8448, we experienced Out of Memory (OOM) errors. This is being investigated by the TRTLLM team.
+
+
+##### Disaggregated Serving
+```bash
+cd /workspace/examples/tensorrt_llm
+dynamo serve graphs.disagg:Frontend -f configs/llama4/eagle/eagle_disagg.yaml
+```
