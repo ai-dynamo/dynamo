@@ -42,7 +42,7 @@ spec:
       dynamoNamespace: vllm-v1-disagg
       envFromSecret: hf-token-secret
       componentType: worker
-      replicas: 1
+      replicas: 2
       resources:
         requests:
           cpu: "10"
