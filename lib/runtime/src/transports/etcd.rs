@@ -132,6 +132,13 @@ impl Client {
         })
     }
 
+    /// Get the lease TTL for a given lease ID
+    pub async fn get_lease_ttl(&self, lease_id: i64) -> Result<u64> {
+        let mut lease_client = self.client.lease_client();
+        let response = lease_client.time_to_live(lease_id, None).await?;
+        Ok(response.ttl() as u64)
+    }
+
     /// Get a reference to the underlying [`etcd_client::Client`] instance.
     pub(crate) fn etcd_client(&self) -> &etcd_client::Client {
         &self.client

@@ -67,8 +67,6 @@ pub enum InstanceSource {
     Dynamic(tokio::sync::watch::Receiver<Vec<Instance>>),
 }
 
-// TODO: Avoid returning a full clone of `Vec<Instance>` everytime from Client
-//       See instances() and instances_avail() methods
 impl Client {
     // Client will only talk to a single static endpoint
     pub(crate) async fn new_static(endpoint: Endpoint) -> Result<Self> {
@@ -105,6 +103,20 @@ impl Client {
         self.endpoint.etcd_root()
     }
 
+    /// Borrow the instances slice and apply a function to it without cloning the vec upfront.
+    pub fn with_instances<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce(&[Instance]) -> R,
+    {
+        match self.instance_source.as_ref() {
+            InstanceSource::Static => f(&[]),
+            InstanceSource::Dynamic(watch_rx) => {
+                let instances = watch_rx.borrow();
+                f(&instances)
+            }
+        }
+    }
+
     /// Instances available from watching etcd
     pub fn instances(&self) -> Vec<Instance> {
         match self.instance_source.as_ref() {
@@ -114,7 +126,7 @@ impl Client {
     }
 
     pub fn instance_ids(&self) -> Vec<i64> {
-        self.instances().into_iter().map(|ep| ep.id()).collect()
+        self.with_instances(|instances| instances.iter().map(|ep| ep.id()).collect())
     }
 
     /// Wait for at least one Instance to be available for this Endpoint
@@ -134,38 +146,54 @@ impl Client {
         Ok(instances)
     }
 
+    /// Get the lease TTL for the primary lease, or the default if not available
+    async fn get_lease_ttl_or_default(&self) -> u64 {
+        const DEFAULT_LEASE_TTL: u64 = 10; // seconds
+
+        let drt = self.endpoint.drt();
+        match (drt.primary_lease(), drt.etcd_client.as_ref()) {
+            (Some(lease), Some(client)) => client
+                .get_lease_ttl(lease.id())
+                .await
+                .unwrap_or(DEFAULT_LEASE_TTL),
+            _ => DEFAULT_LEASE_TTL,
+        }
+    }
+
     /// Instances available from watching etcd minus those reported as down
     pub async fn instances_avail(&self) -> Vec<Instance> {
-        // TODO: Can we get the remaining TTL from the lease for the instance?
-        const ETCD_LEASE_TTL: u64 = 10; // seconds
         let now = std::time::Instant::now();
 
-        let instances = self.instances();
         let mut inhibited = self.instance_inhibited.lock().await;
+        let lease_ttl = self.get_lease_ttl_or_default().await;
 
         // 1. Remove inhibited instances that are no longer in `self.instances()`
         // 2. Remove inhibited instances that have expired
         // 3. Only return instances that are not inhibited after removals
+        // NOTE: Update the `inhibited` map in place, and return the filtered instances.
+        //       This avoids cloning the instances vector upfront.
         let mut new_inhibited = HashMap::<i64, std::time::Instant>::new();
-        let filtered = instances
-            .into_iter()
-            .filter_map(|instance| {
-                let id = instance.id();
-                if let Some(&timestamp) = inhibited.get(&id) {
-                    if now.duration_since(timestamp).as_secs() > ETCD_LEASE_TTL {
-                        tracing::debug!("instance {id} stale inhibition");
-                        Some(instance)
+        let filtered = self.with_instances(|instances| {
+            instances
+                .iter()
+                .filter_map(|instance| {
+                    let id = instance.id();
+                    if let Some(&timestamp) = inhibited.get(&id) {
+                        if now.duration_since(timestamp).as_secs() > lease_ttl {
+                            tracing::debug!("instance {id} stale inhibition");
+                            Some(instance.clone())
+                        } else {
+                            tracing::debug!("instance {id} is inhibited");
+                            new_inhibited.insert(id, timestamp);
+                            None
+                        }
                     } else {
-                        tracing::debug!("instance {id} is inhibited");
-                        new_inhibited.insert(id, timestamp);
-                        None
+                        tracing::debug!("instance {id} not inhibited");
+                        Some(instance.clone())
                     }
-                } else {
-                    tracing::debug!("instance {id} not inhibited");
-                    Some(instance)
-                }
-            })
-            .collect();
+                })
+                .collect()
+        });
 
         *inhibited = new_inhibited;
         filtered
