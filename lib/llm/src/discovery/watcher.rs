@@ -19,6 +19,7 @@ use dynamo_runtime::{
 use crate::{
     backend::Backend,
     kv_router::{KvPushRouter, KvRouterConfig},
+    migration::Migration,
     model_type::ModelType,
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, PreprocessedRequest},
     protocols::common::llm_backend::{EmbeddingsEngineOutput, LLMEngineOutput},
@@ -197,12 +198,14 @@ impl ModelWatcher {
                 // function. Needs checking carefully, possibly we need to store it in state.
                 let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
 
+                // Chat Completions
                 let frontend = SegmentSource::<
                     SingleIn<NvCreateChatCompletionRequest>,
                     ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
                 >::new();
                 let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
                 let backend = Backend::from_mdc(card.clone()).await?.into_operator();
+                let migration = Migration::from_mdc(card.clone()).await?.into_operator();
                 let router =
                     PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
                         client.clone(),
@@ -231,13 +234,16 @@ impl ModelWatcher {
                 let chat_engine = frontend
                     .link(preprocessor.forward_edge())?
                     .link(backend.forward_edge())?
+                    .link(migration.forward_edge())?
                     .link(service_backend)?
+                    .link(migration.backward_edge())?
                     .link(backend.backward_edge())?
                     .link(preprocessor.backward_edge())?
                     .link(frontend)?;
                 self.manager
                     .add_chat_completions_model(&model_entry.name, chat_engine)?;
 
+                // Completions
                 let frontend = SegmentSource::<
                     SingleIn<NvCreateCompletionRequest>,
                     ManyOut<Annotated<NvCreateCompletionResponse>>,
