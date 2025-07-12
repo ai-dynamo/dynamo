@@ -530,6 +530,18 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
 
         Ok(())
     }
+
+    /// Returns the [`PoolStatus`] of the pool.
+    pub fn status(&self) -> (Vec<SequenceHash>, usize) {
+        let inactive_blocks = self
+            .priority_set
+            .iter()
+            .map(|key| key.sequence_hash())
+            .collect();
+        let empty_blocks = self.uninitialized_set.len();
+
+        (inactive_blocks, empty_blocks)
+    }
 }
 
 #[cfg(test)]

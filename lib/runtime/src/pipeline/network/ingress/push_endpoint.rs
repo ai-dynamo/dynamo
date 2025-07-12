@@ -83,10 +83,6 @@ impl PushEndpoint {
                             tracing::trace!(worker_id, "request handled successfully");
                         }
                         Err(e) => {
-                            #[cfg(debug_assertions)]
-                            tracing::warn!("Failed to handle request: {:?}", e);
-
-                            #[cfg(not(debug_assertions))]
                             tracing::warn!("Failed to handle request: {}", e.to_string());
                         }
                     }

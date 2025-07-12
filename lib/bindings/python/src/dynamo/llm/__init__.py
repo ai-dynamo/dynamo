@@ -19,6 +19,7 @@ from dynamo._core import AggregatedMetrics as AggregatedMetrics
 
 try:
     from dynamo._core import BlockManager as BlockManager
+    from dynamo._core import BlockManagerClient as BlockManagerClient
     from dynamo._core import KvbmLeader as KvbmLeader
     from dynamo._core import KvbmWorker as KvbmWorker
 except ImportError:

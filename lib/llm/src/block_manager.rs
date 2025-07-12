@@ -32,7 +32,7 @@ pub mod pool;
 pub mod storage;
 
 // dynamo rt integration
-pub mod component;
+pub mod controller;
 
 pub use crate::common::dtype::DType;
 pub use block::{
@@ -280,13 +280,13 @@ mod tests {
                     .build()
                     .unwrap(),
             )
-            .disk_layout(
-                KvManagerLayoutConfig::builder()
-                    .num_blocks(16)
-                    .allocator(storage::DiskAllocator)
-                    .build()
-                    .unwrap(),
-            )
+            // .disk_layout(
+            //     KvManagerLayoutConfig::builder()
+            //         .num_blocks(16)
+            //         .allocator(storage::DiskAllocator)
+            //         .build()
+            //         .unwrap(),
+            // )
             .host_layout(
                 KvManagerLayoutConfig::builder()
                     .num_blocks(16)
@@ -402,7 +402,7 @@ mod tests {
         let device = block_manager.device().unwrap();
 
         let tokens = Tokens::from(vec![1, 2, 3, 4]);
-        let token_sequence = tokens.into_sequence(4, Some(0));
+        let token_sequence = tokens.into_sequence(block_manager.block_size() as u32, Some(0));
         let token_block = token_sequence.blocks().first().unwrap();
 
         let mut device_block = device.allocate_blocks(1).await?.into_iter().next().unwrap();
