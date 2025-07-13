@@ -78,7 +78,7 @@ impl Default for KvRouterConfig {
     fn default() -> Self {
         Self {
             overlap_score_weight: 1.0,
-            router_temperature: 0.5,
+            router_temperature: 0.0,
             use_kv_events: true,
             max_num_batched_tokens: 8192,
         }
