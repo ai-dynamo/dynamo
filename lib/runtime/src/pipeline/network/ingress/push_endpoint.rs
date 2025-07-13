@@ -21,11 +21,13 @@ use async_nats::service::endpoint::Endpoint;
 use derive_builder::Builder;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+use crate::protocols::LeaseId;
 
 #[derive(Builder)]
 pub struct PushEndpoint {
     pub service_handler: Arc<dyn PushWorkHandler>,
     pub cancellation_token: CancellationToken,
+    pub instance_id: LeaseId
 }
 
 /// version of crate
@@ -68,7 +70,6 @@ impl PushEndpoint {
                 }
 
                 let ingress = self.service_handler.clone();
-                let worker_id = "".to_string();
 
                 // increment the inflight counter
                 inflight.fetch_add(1, Ordering::SeqCst);
@@ -76,11 +77,11 @@ impl PushEndpoint {
                 let notify_clone = notify.clone();
 
                 tokio::spawn(async move {
-                    tracing::trace!(worker_id, "handling new request");
+                    tracing::trace!(self.instance_id, "handling new request");
                     let result = ingress.handle_payload(req.message.payload).await;
                     match result {
                         Ok(_) => {
-                            tracing::trace!(worker_id, "request handled successfully");
+                            tracing::trace!(self.instance_id, "request handled successfully");
                         }
                         Err(e) => {
                             tracing::warn!("Failed to handle request: {:?}", e);

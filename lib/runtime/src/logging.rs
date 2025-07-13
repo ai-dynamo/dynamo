@@ -40,11 +40,13 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Once;
-
+use opentelemetry::trace::TraceContextExt;
 use figment::{
     providers::{Format, Serialized, Toml},
     Figment,
 };
+// use opentelemetry::global;
+//use opentelemetry::trace::{Tracer };
 use serde::{Deserialize, Serialize};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::fmt::time::FormatTime;
@@ -58,7 +60,22 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::{filter::Directive, fmt};
 use tracing_subscriber::fmt::format::FmtSpan;
+//use tracing_opentelemetry::OpenTelemetryLayer;
+//use opentelemetry::{global, KeyValue};
+use opentelemetry::trace::TracerProvider;
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use opentelemetry::trace::{SpanContext};
+use tracing::Span;
 
+//use opentelemetry_sdk::{
+//    trace::{Config, SdkTracerProvider},
+//    Resource,
+//};
+
+//use opentelemetry_sdk::trace::SdkTracerProvider;
+
+use tracing_opentelemetry::OpenTelemetrySpanExt;
+use opentelemetry_sdk::trace::Sampler;
 /// ENV used to set the log level
 const FILTER_ENV: &str = "DYN_LOG";
 
@@ -102,6 +119,9 @@ pub fn init() {
     INIT.call_once(|| {
         let config = load_config();
 
+	// Initialize OpenTelemetry
+//        let (tracer, _) = tracing_opentelemetry::new_tracer("Dynamo", TokioCurrentThread::new());
+
         // Examples to remove noise
         // .add_directive("rustls=warn".parse()?)
         // .add_directive("tokio_util::codec=warn".parse()?)
@@ -121,23 +141,33 @@ pub fn init() {
                 }
             }
         }
+	// Create a new OpenTelemetry trace pipeline that prints to stdout
+	let provider = SdkTracerProvider::builder()
+	    .with_sampler(Sampler::AlwaysOn)
+            .build();
+	let tracer = provider.tracer("readme_example");
+
+	// Create a tracing layer with the configured tracer
+	let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
 
         if crate::config::jsonl_logging_enabled() {
             let l = fmt::layer()
                 .with_ansi(false) // ansi terminal escapes and colors always disabled
-		.with_span_events(FmtSpan::CLOSE) // Enable span timing
+		.with_span_events(FmtSpan::NEW | FmtSpan::CLOSE) // Enable span timing
+		.json()
+		.with_span_list(true)
                 .event_format(CustomJsonFormatter::new())
                 .with_writer(std::io::stderr)
                 .with_filter(filter_layer);
-            tracing_subscriber::registry().with(l).init();
+            tracing_subscriber::registry().with(telemetry).with(l).init();
         } else {
             let l = fmt::layer()
                 .with_ansi(!crate::config::disable_ansi_logging())
-		.with_span_events(FmtSpan::CLOSE) // Enable span timing
+		.with_span_events(FmtSpan::FULL) // Enable span timing
                 .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
                 .with_writer(std::io::stderr)
                 .with_filter(filter_layer);
-            tracing_subscriber::registry().with(l).init();
+            tracing_subscriber::registry().with(telemetry).with(l).init();
         };
     });
 }
@@ -254,7 +284,23 @@ where
             .or_else(|| ctx.lookup_current());
 
         if let Some(span) = current_span {
+
+
+
+//	    println!("{}",span.trace_id());
             let ext = span.extensions();
+	    let otel_ctx = Span::current().context();
+	    let span_ref = otel_ctx.span();
+	    let span_context = span_ref.span_context();
+	    visitor.fields.insert(
+		"neelay_trace_id".to_string(),
+		serde_json::Value::String(span_context.trace_id().to_string()),
+	    );
+	    visitor.fields.insert(
+		"neelay_span_id".to_string(),
+		serde_json::Value::String(span_context.span_id().to_string()),
+	    );
+
             let data = ext.get::<FormattedFields<N>>().unwrap();
             let span_fields: Vec<(&str, &str)> = data
                 .fields
@@ -267,26 +313,35 @@ where
                     serde_json::Value::String(value.trim_matches('"').to_string()),
                 );
             }
+	    if let Some(parent) = span.parent() {
+                visitor.fields.insert("parent_id".to_string(), serde_json::Value::Number(parent.id().into_u64().into())); // Add the parent ID to the span's fields
+            }
             visitor.fields.insert(
                 "span_name".to_string(),
                 serde_json::Value::String(span.name().to_string()),
             );
+
+	    visitor.fields.insert(
+                "span_id".to_string(),
+		serde_json::Value::Number(span.id().into_u64().into())
+            );
+
         }
 
         let metadata = event.metadata();
         let log = JsonLog {
             level: metadata.level().to_string(),
             time: self.time_formatter.format_now(),
-            file_path: if cfg!(debug_assertions) {
-                metadata.file()
-            } else {
-                None
-            },
-            line_number: if cfg!(debug_assertions) {
-                metadata.line()
-            } else {
-                None
-            },
+            file_path: //if cfg!(debug_assertions) {
+                metadata.file(),
+//            } else {
+  //              None
+    //        },
+            line_number: //if cfg!(debug_assertions) {
+                metadata.line(),
+//            } else {
+  //              None
+    //        },
             message,
             fields: visitor.fields,
         };

@@ -72,6 +72,10 @@ nuid = { version = "0.5" }
 once_cell = { version = "1" }
 regex = { version = "1" }
 socket2 = { version = "0.5.8" }
+tracing-opentelemetry = "0.31"
+opentelemetry = { version = "0.30" }
+opentelemetry_sdk = { version = "0.30" }
+opentelemetry-stdout = { version = "0.30" }
 
 [dev-dependencies]
 assert_matches = { version = "1.5.0" }
