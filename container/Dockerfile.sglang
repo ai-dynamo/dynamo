@@ -25,7 +25,7 @@ ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 # without adding if statements everywhere, so just define both as ARGs for now.
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
-# This version references the 0.4.9.post1 release which includes a NIXL fix that was released after the 0.4.8.post1 release https://github.com/sgl-project/sglang/pull/7330
+
 ARG SGLANG_VERSION="0.4.9.post1"
 ARG SGL_KERNEL_VERSION="0.2.4"
 
