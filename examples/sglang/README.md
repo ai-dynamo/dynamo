@@ -49,8 +49,8 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | [**Disaggregated Serving**](../../docs/architecture/disagg_serving.md) | ✅ |  |
 | [**Conditional Disaggregation**](../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
 | [**KV-Aware Routing**](../../docs/architecture/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../docs/architecture/sla_based_planner.md) | ❌ | Not supported |
-| [**Load Based Planner**](../../docs/architecture/load_based_planner.md) | ❌ | Not supported |
+| [**SLA-Based Planner**](../../docs/architecture/sla_planner.md) | ❌ | Not supported |
+| [**Load Based Planner**](../../docs/architecture/load_planner.md) | ❌ | Not supported |
 | [**KVBM**](../../docs/architecture/kvbm_architecture.md) | ❌ | Not supported |
 
 ### Large Scale P/D and WideEP Features
