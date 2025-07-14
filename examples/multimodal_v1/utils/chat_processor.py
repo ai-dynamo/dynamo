@@ -188,6 +188,7 @@ class ChatProcessor:
                 conversation,
                 self.tokenizer,
                 request_metadata,
+                enable_force_include_usage=False,
             ):
                 if raw_response.startswith("data: [DONE]"):
                     yield raw_response
@@ -221,6 +222,7 @@ class ChatProcessor:
                 conversation,
                 self.tokenizer,
                 request_metadata,
+                enable_force_include_usage=False,
             ):
                 if raw_response.startswith("data: [DONE]"):
                     break

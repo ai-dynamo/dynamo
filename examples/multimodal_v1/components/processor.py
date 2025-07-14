@@ -119,6 +119,8 @@ class Processor(ProcessMixIn):
             sampling_params,
         ) = await self._parse_raw_request(raw_request)
 
+        logger.info(f"Parsed request: {request}, conversation: {conversation}, prompt: {prompt}, engine_prompt: {engine_prompt}, sampling_params: {sampling_params}")
+
         worker_request = vLLMMultimodalRequest(
             engine_prompt=engine_prompt,
             sampling_params=sampling_params,

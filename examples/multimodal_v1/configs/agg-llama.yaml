@@ -32,7 +32,7 @@ Frontend:
 
 Processor:
   router: round-robin
-  prompt-template: "USER: <image>\n<prompt> ASSISTANT:"
+  prompt-template: "<|image|>\n<prompt>"
   common-configs: [model, block-size, max-model-len]
 
 VllmEncodeWorker:
