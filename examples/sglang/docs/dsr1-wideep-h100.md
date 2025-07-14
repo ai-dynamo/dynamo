@@ -26,10 +26,10 @@ Dynamo supports SGLang's implementation of wide expert parallelism and large sca
 ```bash
 git clone -b v0.4.8.post1 https://github.com/sgl-project/sglang.git
 cd sglang/docker
-docker build -f Dockerfile -t deepep .
+docker build -f Dockerfile -t sgl-widepep .
 ```
 
-You will now have a `deepep:latest` image
+You will now have a `sgl-widepep:latest` image
 
 2. Build the Dynamo container
 
