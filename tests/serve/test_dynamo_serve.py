@@ -265,8 +265,6 @@ class DynamoServeProcess(ManagedProcess):
         if graph.config:
             command.extend(["-f", os.path.join(graph.directory, graph.config)])
 
-        command.extend(["--Frontend.port", str(port)])
-
         if args:
             for k, v in args.items():
                 command.extend([f"{k}", f"{v}"])
