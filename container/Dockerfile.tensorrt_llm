@@ -496,8 +496,7 @@ COPY examples /workspace/examples
 RUN uv pip install /workspace/benchmarks
 
 # Copy files for legal compliance
-COPY ATTRIBUTION* /workspace/
-COPY LICENSE /workspace/
+COPY ATTRIBUTION* LICENSE /workspace/
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
