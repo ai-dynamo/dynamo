@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use clap::ValueEnum;
@@ -229,6 +230,20 @@ impl Flags {
                 self.max_num_batched_tokens,
             ),
         )
+    }
+
+    /// Load extra engine arguments from a JSON file
+    /// Returns a HashMap of parameter names to values
+    pub fn load_extra_engine_args(
+        &self,
+    ) -> anyhow::Result<Option<HashMap<String, serde_json::Value>>> {
+        if let Some(path) = &self.extra_engine_args {
+            let file_content = std::fs::read_to_string(path)?;
+            let args: HashMap<String, serde_json::Value> = serde_json::from_str(&file_content)?;
+            Ok(Some(args))
+        } else {
+            Ok(None)
+        }
     }
 
     pub fn mocker_config(&self) -> MockEngineArgs {
