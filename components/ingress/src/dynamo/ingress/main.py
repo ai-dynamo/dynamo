@@ -31,9 +31,7 @@ def parse_args():
     )
     flags = parser.parse_args()
 
-    kwargs = {}
-    if flags.http_port is not None:
-        kwargs["http_port"] = flags.http_port
+    kwargs = {"http_port": flags.http_port}
     if flags.kv_cache_block_size is not None:
         kwargs["kv_cache_block_size"] = flags.kv_cache_block_size
 
