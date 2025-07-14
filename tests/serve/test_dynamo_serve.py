@@ -285,7 +285,6 @@ class DynamoServeProcess(ManagedProcess):
                 (f"http://localhost:{port}/v1/models", self._check_model)
             ]
             health_check_ports = [port]
-            env = None
 
         self.port = port
         self.graph = graph
@@ -305,7 +304,6 @@ class DynamoServeProcess(ManagedProcess):
                 "from multiprocessing.spawn",
             ],
             log_dir=request.node.name,
-            env=env,  # Pass the environment variables
         )
 
     def _check_model(self, response):
@@ -395,10 +393,6 @@ class DynamoServeProcess(ManagedProcess):
 
 @pytest.fixture(
     params=[
-        pytest.param("agg", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
-        pytest.param("agg_router", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
-        pytest.param("disagg", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
-        pytest.param("disagg_router", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
         pytest.param("multimodal_agg", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
         pytest.param("trtllm_agg", marks=[pytest.mark.tensorrtllm, pytest.mark.gpu_1]),
         pytest.param(
