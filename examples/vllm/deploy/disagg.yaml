@@ -15,13 +15,31 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: disagg
+  name: vllm-v1-disagg
 spec:
   services:
     Frontend:
       dynamoNamespace: vllm-v1-disagg
       componentType: main
       replicas: 1
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
       resources:
         requests:
           cpu: "1"
@@ -31,18 +49,39 @@ spec:
           memory: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.2
+          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.3
           workingDir: /workspace/examples/vllm_v1
           args:
             - dynamo
             - run
             - in=http
             - out=dyn
+            - --http-port
+            - "8000"
     VllmDecodeWorker:
       dynamoNamespace: vllm-v1-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - 'grep "VllmWorker.*has been initialized" /tmp/vllm.log'
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
       resources:
         requests:
           cpu: "10"
@@ -54,19 +93,34 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.2
+          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.3
           workingDir: /workspace/examples/vllm_v1
           args:
-            - python3
-            - components/main.py
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --enforce-eager
+            - "python3 components/main.py --model Qwen/Qwen3-0.6B --enforce-eager 2>&1 | tee /tmp/vllm.log"
     VllmPrefillWorker:
       dynamoNamespace: vllm-v1-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - 'grep "VllmWorker.*has been initialized" /tmp/vllm.log'
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
       resources:
         requests:
           cpu: "10"
@@ -78,12 +132,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.2
+          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.3
           workingDir: /workspace/examples/vllm_v1
           args:
-            - python3
-            - components/main.py
-            - --model
-            - Qwen/Qwen3-0.6B
-            - --enforce-eager
-            - --is-prefill-worker
+            - "python3 components/main.py --model Qwen/Qwen3-0.6B --enforce-eager --is-prefill-worker 2>&1 | tee /tmp/vllm.log"
