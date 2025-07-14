@@ -26,6 +26,9 @@ ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
+ARG SGLANG_VERSION="0.4.9.post1"
+ARG SGL_KERNEL_VERSION="0.2.4"
+
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS nixl_base
 
 # Redeclare ARCH and ARCH_ALT so they're available in this stage
@@ -159,14 +162,13 @@ RUN cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl
 RUN uv pip install /workspace/wheels/nixl/*.whl
 
 # Install sglang
-# This commit references a NIXL fix that was released after the 0.4.8.post1 release https://github.com/sgl-project/sglang/pull/7330
 #TODO: Built wheel should become an artifact which can be cached and reused in subsequent builds
-ARG SGLANG_COMMIT="bb9b608c86ebad7d9d01e29fe058bc184dc7285f"
+ARG SGLANG_VERSION
 RUN --mount=type=cache,target=/root/.cache/uv \
     cd /opt && \
     git clone https://github.com/sgl-project/sglang.git && \
     cd sglang && \
-    git checkout ${SGLANG_COMMIT} && \
+    git checkout v${SGLANG_VERSION} && \
     # Install in editable mode for development
     uv pip install -e "python[all]"
 
@@ -419,6 +421,7 @@ ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins
 ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:$LD_LIBRARY_PATH
 
 # Setup the python environment
+# libnuma-dev is a required dependency for sglang integration with NIXL
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential python3-dev libnuma-dev && \
@@ -428,19 +431,16 @@ RUN apt-get update && \
 
 # Install SGLang and related packages (sgl-kernel, einops, sentencepiece) since they are not included in the runtime wheel
 # https://github.com/sgl-project/sglang/blob/v0.4.9.post1/python/pyproject.toml#L18-51
-RUN uv pip install "sglang[runtime_common]>=0.4.9.post1" && \
-    uv pip install einops && \
-    uv pip install sgl-kernel==0.2.4 && \
-    uv pip install sentencepiece
+ARG SGLANG_VERSION
+ARG SGL_KERNEL_VERSION
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install sglang[runtime_common]==${SGLANG_VERSION} einops sgl-kernel==${SGL_KERNEL_VERSION} sentencepiece
 
 # Install the wheels and symlink executables to /usr/local/bin so dynamo components can use them
 # Dynamo components currently do not have the VIRTUAL_ENV in their PATH, so we need to symlink the executables
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 COPY --from=base /workspace/wheels/nixl/*.whl wheelhouse/
-RUN uv pip install ai-dynamo --find-links wheelhouse && \
-    uv pip install ai-dynamo-runtime --find-links wheelhouse && \
-    uv pip install nixl --find-links wheelhouse && \
-    ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/
+RUN uv pip install ai-dynamo nixl --find-links wheelhouse
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
@@ -450,8 +450,16 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
-# Copy examples and set up Python path
-COPY . /workspace
+# Copy benchmarks, examples, and tests for CI
+# TODO: Remove this once we have a functional CI image built on top of the runtime image
+COPY tests /workspace/tests
+COPY benchmarks /workspace/benchmarks
+COPY examples /workspace/examples
+RUN uv pip install /workspace/benchmarks
+
+# Copy attribution files
+COPY ATTRIBUTION* LICENSE /workspace/
+
 ENV PYTHONPATH=/workspace/examples/sglang/utils:$PYTHONPATH
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]

@@ -265,19 +265,18 @@ class DynamoServeProcess(ManagedProcess):
         if graph.config:
             command.extend(["-f", os.path.join(graph.directory, graph.config)])
 
-        command.extend(["--Frontend.port", str(port)])
-
         if args:
             for k, v in args.items():
                 command.extend([f"{k}", f"{v}"])
 
         health_check_urls = []
         health_check_ports = []
+        env = None
 
         # Handle multimodal deployments differently
         if "multimodal" in graph.directory:
-            # port is currently required to be 8000
-            assert port == 8000
+            env = os.environ.copy()
+            env["DYNAMO_PORT"] = str(port)
         else:
             # Regular LLM deployments
             command.extend(["--Frontend.port", str(port)])
@@ -304,6 +303,7 @@ class DynamoServeProcess(ManagedProcess):
                 "from multiprocessing.spawn",
             ],
             log_dir=request.node.name,
+            env=env,
         )
 
     def _check_model(self, response):
