@@ -65,6 +65,8 @@ class RequestHandler:
         gen = self.engine_client.create_chat_completion(
             request["messages"], stream=True
         )
+        # TODO this is a synchronous generator in an async method.
+        # Move it to a thread so it doesn't block the event loop.
         for res in gen:
             logging.debug(f"res: {res}")
             yield res
