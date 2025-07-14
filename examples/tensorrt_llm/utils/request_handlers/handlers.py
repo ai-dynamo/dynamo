@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
-from dataclasses import dataclass
 
 from utils.request_handlers.handler_base import (
     DisaggregationMode,
@@ -130,17 +129,13 @@ class DecodeHandler(HandlerBase):
                 response_count += 1
                 if response_count > 1:
                     raise ValueError("Prefill response should be generated only once.")
-                
+
             response_data = prefill_response.data()
-            if prefill_response is not None and self.check_error(
-                response_data
-            ):
+            if prefill_response is not None and self.check_error(response_data):
                 yield response_data
                 return
             if prefill_response is not None:
-                request["disaggregated_params"] = response_data[
-                    "disaggregated_params"
-                ]
+                request["disaggregated_params"] = response_data["disaggregated_params"]
 
         async for res in self.generate_locally(request):
             yield res

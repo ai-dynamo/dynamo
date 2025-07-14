@@ -7,17 +7,10 @@ import os
 import signal
 import sys
 
-# Add the parent directory to the Python path so we can import utils
-parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-if parent_dir not in sys.path:
-    sys.path.insert(0, parent_dir)
-
 import uvloop
 from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
-from utils.request_handlers.handlers import RequestHandlerConfig, RequestHandlerFactory
-from utils.trtllm_utils import Config, cmd_line_args, is_first_worker, parse_endpoint
 
 from dynamo.llm import (
     ModelType,
@@ -27,6 +20,45 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+
+
+def _setup_path_and_imports():
+    """Setup path and import utils modules"""
+    # Add the parent directory to the Python path so we can import utils
+    parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    if parent_dir not in sys.path:
+        sys.path.insert(0, parent_dir)
+
+    from utils.request_handlers.handlers import (
+        RequestHandlerConfig,
+        RequestHandlerFactory,
+    )
+    from utils.trtllm_utils import (
+        Config,
+        cmd_line_args,
+        is_first_worker,
+        parse_endpoint,
+    )
+
+    return (
+        RequestHandlerConfig,
+        RequestHandlerFactory,
+        Config,
+        cmd_line_args,
+        is_first_worker,
+        parse_endpoint,
+    )
+
+
+# Import utils modules
+(
+    RequestHandlerConfig,
+    RequestHandlerFactory,
+    Config,
+    cmd_line_args,
+    is_first_worker,
+    parse_endpoint,
+) = _setup_path_and_imports()
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
