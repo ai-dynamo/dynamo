@@ -93,7 +93,7 @@ async fn mock_event_publisher(namespace: Namespace) {
         let event = KVHitRateEvent {
             worker_id,
             isl_blocks,
-            overlap_blocks,
+            overlap_blocks: overlap_blocks as u32,
         };
 
         if let Err(e) = namespace.publish(KV_HIT_RATE_SUBJECT, &event).await {

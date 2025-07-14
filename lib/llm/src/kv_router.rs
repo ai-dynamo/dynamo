@@ -78,7 +78,7 @@ impl Default for KvRouterConfig {
     fn default() -> Self {
         Self {
             overlap_score_weight: 1.0,
-            router_temperature: 0.5,
+            router_temperature: 0.0,
             use_kv_events: true,
             max_num_batched_tokens: 8192,
         }
@@ -337,6 +337,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     let mut accumulated_tokens = Vec::new();
                     let mut total_output_length = 0usize;
                     let mut last_block_index = (isl.saturating_sub(1)) / block_size;
+                    let mut first_push_done = false;
 
                     while let Some(item) = response_stream.next().await {
                         // Track tokens if they exist in the response
@@ -353,12 +354,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                         accumulated_tokens.extend_from_slice(&output.token_ids);
                         total_output_length += output.token_ids.len();
 
-                        // Check if we've moved to a new block
+                        // Always push for the first generated token (to mark prefill done)
+                        // or when we've moved to a new block
                         let current_block_index = (isl + total_output_length).saturating_sub(1) / block_size;
-                        if current_block_index > last_block_index {
+                        let should_push = (!first_push_done && total_output_length >= 1) ||
+                                      (first_push_done && current_block_index > last_block_index);
+
+                        if should_push {
                             chooser.push(&request_id, &accumulated_tokens).await;
                             accumulated_tokens.clear();
                             last_block_index = current_block_index;
+                            if !first_push_done {
+                                first_push_done = true;
+                            }
                         }
 
                         yield item;
