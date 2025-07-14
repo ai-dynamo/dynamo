@@ -303,7 +303,7 @@ class DynamoServeProcess(ManagedProcess):
                 "from multiprocessing.spawn",
             ],
             log_dir=request.node.name,
-            env=env
+            env=env,
         )
 
     def _check_model(self, response):
