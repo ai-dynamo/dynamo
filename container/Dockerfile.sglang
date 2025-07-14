@@ -25,6 +25,8 @@ ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 # without adding if statements everywhere, so just define both as ARGs for now.
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
+# This version references the 0.4.9.post1 release which includes a NIXL fix that was released after the 0.4.8.post1 release https://github.com/sgl-project/sglang/pull/7330
+ARG SGLANG_VERSION="0.4.9.post1"
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS nixl_base
 
@@ -159,14 +161,13 @@ RUN cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl
 RUN uv pip install /workspace/wheels/nixl/*.whl
 
 # Install sglang
-# This commit references the 0.4.9.post1 release which includes a NIXL fix that was released after the 0.4.8.post1 release https://github.com/sgl-project/sglang/pull/7330
 #TODO: Built wheel should become an artifact which can be cached and reused in subsequent builds
-ARG SGLANG_COMMIT="066f4ec91f7becd1d490745c856c4a57ede9d1ca"
+ARG SGLANG_VERSION
 RUN --mount=type=cache,target=/root/.cache/uv \
     cd /opt && \
     git clone https://github.com/sgl-project/sglang.git && \
     cd sglang && \
-    git checkout ${SGLANG_COMMIT} && \
+    git checkout v${SGLANG_VERSION} && \
     # Install in editable mode for development
     uv pip install -e "python[all]"
 
@@ -431,10 +432,9 @@ RUN apt-get update && \
 
 # Install SGLang and related packages (sgl-kernel, einops, sentencepiece) since they are not included in the runtime wheel
 # https://github.com/sgl-project/sglang/blob/v0.4.9.post1/python/pyproject.toml#L18-51
-# This commit references the 0.4.9.post1 release which includes a NIXL fix that was released after the 0.4.8.post1 release https://github.com/sgl-project/sglang/pull/7330
-ARG SGLANG_COMMIT="066f4ec91f7becd1d490745c856c4a57ede9d1ca"
+ARG SGLANG_VERSION
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install "sglang[runtime_common]==0.4.9.post1" einops sgl-kernel==0.2.4 sentencepiece
+    uv pip install sglang[runtime_common]==${SGLANG_VERSION} einops sgl-kernel==0.2.4 sentencepiece
 
 # Install the wheels and symlink executables to /usr/local/bin so dynamo components can use them
 # Dynamo components currently do not have the VIRTUAL_ENV in their PATH, so we need to symlink the executables
@@ -458,10 +458,7 @@ COPY examples /workspace/examples
 RUN uv pip install /workspace/benchmarks
 
 # Copy attribution files
-COPY ATTRIBUTIONS.md /workspace/ATTRIBUTIONS.md
-COPY ATTRIBUTIONS-Python.md /workspace/ATTRIBUTIONS-Python.md
-COPY ATTRIBUTIONS-Rust.md /workspace/ATTRIBUTIONS-Rust.md
-COPY ATTRIBUTIONS-Go.md /workspace/ATTRIBUTIONS-Go.md
+COPY ATTRIBUTION* LICENSE /workspace/
 
 ENV PYTHONPATH=/workspace/examples/sglang/utils:$PYTHONPATH
 
