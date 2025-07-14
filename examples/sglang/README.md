@@ -31,6 +31,15 @@ You can find the latest release [here](https://github.com/ai-dynamo/dynamo/relea
 git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 ```
 
+---
+
+## Table of Contents
+- [Feature Support Matrix](#feature-support-matrix)
+- [Prerequisites](#prerequisites)
+- [Run Single Node Examples](#run-single-node-examples)
+- [Multi-Node and Advanced Examples](#advanced-examples)
+- [Deploy on SLURM or Kubernetes](#deployment)
+
 ## Feature Support Matrix
 
 ### Core Dynamo Features
@@ -53,11 +62,9 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | **GB200 Support**  | 🚧     | WIP [PR](https://github.com/sgl-project/sglang/pull/7556) |
 
 
-## Quick Start 
+## Prerequisites
 
-Below we provide a quick start guide that lets you run all of our the common deployment patterns on a single node. We have a much more comprehensive guide for advanced deployments below. See our different [architectures](../llm/README.md#deployment-architectures) for a high level overview of each pattern and the architecture diagram for each.
-
-### Start NATS and ETCD in the background
+### 1. Start NATS and ETCD in the background
 
 Start using [Docker Compose](../../deploy/metrics/docker-compose.yml)
 
@@ -65,7 +72,7 @@ Start using [Docker Compose](../../deploy/metrics/docker-compose.yml)
 docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
-### Build container
+### 2. Build container
 
 ```bash
 # pull our pre-build sglang runtime container
@@ -74,7 +81,7 @@ docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.3.2
 ./container/build.sh --framework sglang
 ```
 
-### Run container
+### 3. Run container
 
 ```bash
 ./container/run.sh -it --framework sglang
@@ -86,6 +93,8 @@ docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.3.2
 > Each example corresponds to a simple bash script that runs the OpenAI compatible server, processor, and optional router (written in Rust) and LLM engine (written in Python) in a single terminal. You can easily take each command and run them in separate terminals.
 >
 > Additionally - because we use sglang's argument parser, you can pass in any argument that sglang supports to the worker!
+
+Below we provide a quick start guide that lets you run all of our the common deployment patterns on a single node. We have a much more comprehensive guide for advanced deployments below. See our different [architectures](../llm/README.md#deployment-architectures) for a high level overview of each pattern and the architecture diagram for each.
 
 ### Aggregated Serving
 
@@ -158,5 +167,10 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 ### SGLang Utilities and Tools
 - **[HTTP Server to flush cache and record MoE expert distribution data](docs/sgl-http-server.md)**
 
+## Deployment
+
 ## Kubernetes
 - **[Deploying Dynamo with SGLang on Kubernetes - coming soon!](.)**
+
+## SLURM
+- **[Deploying Dynamo with SGLang on SLURM](slurm_jobs/README.md)**
