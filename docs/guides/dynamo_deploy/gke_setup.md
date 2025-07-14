@@ -136,14 +136,7 @@ dynamo-operator:
         iam.gke.io/gcp-service-account: your-sa@your-gcp-project.iam.gserviceaccount.com
   ...
   dynamo:
-    dockerRegistry:
-      useKubernetesSecret: false
-      server: us-central1-docker.pkg.dev/your-project/your-registry
     components:
-      serviceAccount:
-        annotations:
-          iam.gke.io/gcp-service-account: your-sa@your-gcp-project.iam.gserviceaccount.com
-    imageBuilder:
       serviceAccount:
         annotations:
           iam.gke.io/gcp-service-account: your-sa@your-gcp-project.iam.gserviceaccount.com
@@ -152,7 +145,7 @@ dynamo-operator:
 ....
 ```
 
-You can use it during helm installation (last step of deploy.sh)
+You can use it during helm installation (last step of /deploy/cloud/helm/deploy.sh)
 
 ```bash
 helm upgrade --install ${RELEASE} platform/ -f values.yaml --namespace ${NAMESPACE}

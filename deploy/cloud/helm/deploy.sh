@@ -16,6 +16,17 @@
 # limitations under the License.
 
 set -euo pipefail
+trap 'echo "Error at line $LINENO. Exiting."' ERR
+
+required_tools=(envsubst kubectl helm)
+
+for tool in "${required_tools[@]}"; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    echo "Error: Required tool '$tool' is not installed or not in PATH."
+    exit 1
+  fi
+done
+
 
 # Use system helm
 HELM_CMD=$(which helm)
@@ -42,6 +53,7 @@ export ENABLE_LWS="${ENABLE_LWS:=false}"
 # Add command line options
 INTERACTIVE=false
 INSTALL_CRDS=false
+YAML_ONLY=false
 # Parse command line arguments
 while [[ $# -gt 0 ]]; do
   key="$1"
@@ -54,10 +66,15 @@ while [[ $# -gt 0 ]]; do
       INSTALL_CRDS=true
       shift
       ;;
+    --yaml-only)
+      YAML_ONLY=true
+      shift
+      ;;
     --help)
       echo "Usage: $0 [options]"
       echo "Options:"
       echo "  --interactive       Run in interactive mode"
+      echo "  --yaml-only         Only generate generated-values.yaml and exit"
       echo "  --help              Show this help message"
       echo "  --crds              Also install the CRDs"
       exit 0
@@ -122,8 +139,6 @@ retry_command() {
 
 # Update the helm repo and build the dependencies
 retry_command "$HELM_CMD repo add nats https://nats-io.github.io/k8s/helm/charts/" 5 5 && \
-retry_command "$HELM_CMD repo add bitnami https://charts.bitnami.com/bitnami" 5 5 && \
-retry_command "$HELM_CMD repo add minio https://charts.min.io/" 5 5 && \
 retry_command "$HELM_CMD repo update" 5 5
 
 
@@ -153,6 +168,10 @@ cat generated-values.yaml
 
 echo ""
 echo "Generated values file saved as generated-values.yaml"
+if [ "$YAML_ONLY" = true ]; then
+  echo "--yaml-only flag detected; skipping Helm deployment steps."
+  exit 0
+fi
 
 # Build dependencies before installation
 echo "Building helm dependencies..."
@@ -166,11 +185,16 @@ if [ "$INSTALL_CRDS" = true ]; then
   $HELM_CMD upgrade --install dynamo-crds crds/ --namespace default --wait --atomic
 fi
 
-# Install/upgrade the helm chart
-echo "Installing/upgrading helm chart..."
-$HELM_CMD upgrade --install $RELEASE_NAME platform/ \
-  -f generated-values.yaml \
-  --create-namespace \
-  --namespace ${NAMESPACE}
+# Build Platform
+echo "Building platform..."
+$HELM_CMD dep build ./platform/
 
+# Install platform
+echo "Installing platform..."
+helm install dynamo-platform ./platform/ \
+  --namespace ${NAMESPACE} \
+  --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
+  --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
+  --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret" \
+  --set controller.env.DYNAMO_CLOUD=${DYNAMO_CLOUD}
 echo "Helm chart deployment complete"

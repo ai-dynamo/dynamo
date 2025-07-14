@@ -26,7 +26,7 @@ This example demonstrates the basic concepts of Dynamo by creating a simple mult
 3. Set up a simple HTTP API endpoint
 4. Deploy and interact with a Dynamo service graph
 
-Pipeline Architecture:
+Graph Architecture:
 
 ```
 Users/Clients (HTTP)
@@ -66,6 +66,12 @@ Users/Clients (HTTP)
 
 ## Running the Example Locally
 
+Make sure you are running etcd and nats
+```bash
+sudo systemctl start etcd
+sudo systemctl start nats-server
+```
+
 1. Launch all three services using a single command:
 
 ```bash
@@ -87,65 +93,37 @@ curl -X 'POST' \
 }'
 ```
 
-## Deploying to and Running the Example in Kubernetes
-
-This example can be deployed to a Kubernetes cluster using [Dynamo Cloud](../../docs/guides/dynamo_deploy/dynamo_cloud.md) and the Dynamo CLI.
-
-### Prerequisites
-
-You must have first followed the instructions in [deploy/cloud/helm/README.md](https://github.com/ai-dynamo/dynamo/blob/main/deploy/cloud/helm/README.md) to create your Dynamo cloud deployment.
-
-### Deployment Steps For your Hello World graph.
-
-For detailed deployment instructions, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md). The following are the specific commands for the hello world example:
-
-```bash
-Make sure your dynamo cloud deploy.sh script from the prior step finished successfully and setup port forwaring in another window
-per its suggestion.
-
-kubectl port-forward svc/...-dynamo-api-store <local-port>:80 -n $NAMESPACE
-
-
-# Set your dynamo root directory
-cd <root dynamo folder>
-export PROJECT_ROOT=$(pwd)
-
-# Configure environment variables (see operator_deployment.md for details)
-export KUBE_NS=hello-world
-export DYNAMO_CLOUD=http://localhost:8080  # If using port-forward
-# OR
-# export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com  # If using Ingress/VirtualService
-
-# Build the Dynamo base image (see operator_deployment.md for details)
-export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
-
-# Build the service
-cd $PROJECT_ROOT/examples/hello_world
-DYNAMO_TAG=$(dynamo build hello_world:Frontend | grep "Successfully built" | awk '{ print $3 }' | sed 's/\.$//')
-
 # Deploy to Kubernetes
-# TODO: Deploy your service using a DynamoGraphDeployment CR.
-```
 
-### Testing the Deployment
+You should first deploy the Dynamo Cloud Platform.
+If you are a **👤 Dynamo User** first follow the [Quickstart Guide](../guides/dynamo_deploy/quickstart.md).
+If you are a **🧑‍💻 Dynamo Contributor** and you have changed the platform code you would have to rebuild the dynamo platform. To do so please look at the [Cloud Guide](../guides/dynamo_deploy/dynamo_cloud.md).
 
-Once the deployment is complete, you can test it using:
+## Deploy your service using a DynamoGraphDeployment CR.
 
 ```bash
-# Find your frontend pod
-export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
-
-# Forward the pod's port to localhost
-kubectl port-forward pod/$FRONTEND_POD 8000:8000 -n ${KUBE_NS}
-
-# Test the API endpoint
-curl -X 'POST' 'http://localhost:8000/generate' \
-    -H 'accept: text/event-stream' \
-    -H 'Content-Type: application/json' \
-    -d '{"text": "test"}'
+kubectl apply -f examples/hello_world/deploy/hello_world.yaml -n ${NAMESPACE}
 ```
 
-For more details on managing deployments, testing, and troubleshooting, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md).
+## Testing the Deployment
+
+Once the deployment is complete, you can test it using commands below.
+Do the port forward in another terminal if needed.
+
+```bash
+export DEPLOYMENT_NAME=hello-world
+# Forward the pod's port to localhost
+kubectl port-forward svc/$DEPLOYMENT_NAME-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+```bash
+# Test the API endpoint
+curl -N -X POST http://localhost:8000/generate \
+  -H "accept: text/event-stream" \
+  -H "Content-Type: application/json" \
+  -d '{"text": "test"}'
+```
+
 
 ## Expected Output
 

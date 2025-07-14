@@ -92,10 +92,6 @@ class ResponseType(BaseModel):
     # Add other fields as needed
 ```
 
-For example, if you deploy your worker directly behind an OpenAI HTTP (`http`) service
-using `llmctl`, you can define the request and response types to correspond to
-Chat Completions objects, such as the ones specified in the OpenAI API. For example:
-
 ```python
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest
 

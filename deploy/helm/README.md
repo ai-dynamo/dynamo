@@ -17,10 +17,41 @@ limitations under the License.
 
 # Manual Helm Deployment
 
-This directory contains Helm charts for manually deploying Dynamo inference graphs to Kubernetes. These charts are used when you need full control over your deployment configuration.
+This directory contains Helm charts for manually deploying Dynamo inference graphs to Kubernetes.
+This approach allows you to install Dynamo directly using a DynamoGraphDeploymentCRD values file, which is useful for quick deployments or testing specific configurations.
 
-For detailed documentation on manual deployment using Helm charts, please refer to:
-- [Manual Helm Deployment Guide](../../docs/guides/dynamo_deploy/manual_helm_deployment.md)
-- [Minikube Setup Guide](../../docs/guides/dynamo_deploy/minikube.md)
+### Prerequisites
 
-For a quick start example, see [examples/hello_world/README.md#deploying-to-kubernetes-using-helm](../../examples/hello_world/README.md#deploying-to-kubernetes-using-helm)
+- Helm 3.0+
+- Kubernetes 1.16+
+- ETCD v3.5+ (without auth)
+- NATS v2.10+ (with jetstream enabled)
+
+### Basic Installation
+
+```bash
+helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud -f ./examples/vllm_v1/deploy/agg.yaml
+```
+
+### Customizable Properties
+
+You can override the default configuration by setting the following properties:
+
+```bash
+helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud \
+  -f ./examples/vllm_v1/deploy/agg.yaml \
+  --set "imagePullSecrets[0].name=docker-secret-1" \
+  --set etcdAddr="my-etcd-service:2379" \
+  --set natsAddr="nats://my-nats-service:4222"
+```
+
+#### Available Properties
+
+| Property | Description | Example |
+|----------|-------------|---------|
+| `imagePullSecrets` | Array of image pull secrets for accessing private registries | `imagePullSecrets[0].name=docker-secret-1` |
+| `etcdAddr` | Address of the etcd service | `dynamo-platform-etcd:2379` |
+| `natsAddr` | Address of the NATS messaging service | `nats://dynamo-platform-nats:4222` |
+
+
+

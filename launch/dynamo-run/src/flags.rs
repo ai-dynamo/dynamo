@@ -118,15 +118,22 @@ pub struct Flags {
     pub max_num_batched_tokens: Option<u32>,
 
     /// KV Router: Weight for overlap score in worker selection.
-    /// Higher values prioritize KV cache reuse. Default: 2.0
+    /// Higher values prioritize KV cache reuse. Default: 1.0
     #[arg(long)]
     pub kv_overlap_score_weight: Option<f64>,
 
     /// KV Router: Temperature for worker sampling via softmax.
     /// Higher values promote more randomness, and 0 fallbacks to deterministic.
-    /// Default: 0.5
+    /// Default: 0.0
     #[arg(long)]
     pub router_temperature: Option<f64>,
+
+    /// KV Router: Whether to use KV events to maintain the view of cached blocks
+    /// If false, would use ApproxKvRouter for predicting block creation / deletion
+    /// based only on incoming requests at a timer.
+    /// Default: true
+    #[arg(long)]
+    pub use_kv_events: Option<bool>,
 
     /// Max model context length. Reduce this if you don't have enough VRAM for the full model
     /// context length (e.g. Llama 4).
@@ -215,6 +222,7 @@ impl Flags {
             KvRouterConfig::new(
                 self.kv_overlap_score_weight,
                 self.router_temperature,
+                self.use_kv_events,
                 self.max_num_batched_tokens,
             ),
         )

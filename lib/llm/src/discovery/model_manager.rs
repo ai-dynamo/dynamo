@@ -212,18 +212,12 @@ impl ModelManager {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
     ) -> anyhow::Result<Arc<KvRouter>> {
-        // Determine if we should use KV events based on overlap score weight
-        let use_kv_events = kv_router_config
-            .as_ref()
-            .map(|config| config.overlap_score_weight > 0.0)
-            .unwrap_or(false);
-
-        let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
+        let selector = Box::new(DefaultWorkerSelector::new(kv_router_config.clone()));
         let chooser = KvRouter::new(
             component.clone(),
             kv_cache_block_size,
             Some(selector),
-            use_kv_events,
+            kv_router_config.unwrap_or_default().use_kv_events,
         )
         .await?;
         let new_kv_chooser = Arc::new(chooser);
