@@ -72,6 +72,8 @@ In each container, you should be in the `/sgl-workspace/dynamo/examples/sglang` 
 ```bash
 # run ingress
 dynamo run in=http out=dyn &
+# optionally run the http server that allows you to flush the kv cache for all workers (see benchmarking section below)
+python3 utils/sgl_http_server.py --ns dynamo &
 # run prefill worker
 python3 components/worker.py \
   --model-path /model/ \
@@ -170,6 +172,8 @@ Example usage:
 ```bash
 # warmup
 ./utils/bench.sh HEAD_PREFILL_NODE_IP --type warmup
+# if you ran the http server on the head prefill node, you can optionally flush the kv cache for all workers (similar to SGLangs benchmarking script)
+curl -X POST http://${HEAD_PREFILL_NODE_IP}:9001/flush_cache
 # run benchmark
 ./utils/bench.sh HEAD_PREFILL_NODE_IP --type e2e
 ```
@@ -181,6 +185,8 @@ Example usage:
 ```bash
 # generate data
 python3 utils/generate_bench_data.py --output data.jsonl --num-prompts 8192 --input-len 4096 --output-len 5 --model deepseek-ai/DeepSeek-R1
+# if you ran the http server on the head prefill node, you can optionally flush the kv cache for all workers (similar to SGLangs benchmarking script)
+curl -X POST http://${HEAD_PREFILL_NODE_IP}:9001/flush_cache
 # run benchmark
 ./utils/bench.sh HEAD_PREFILL_NODE_IP --type custom_completions
 ```

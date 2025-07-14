@@ -20,7 +20,7 @@ use std::collections::HashMap;
 
 use crate::kv_router::scheduler::Endpoint;
 
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ProcessedEndpoints {
     pub endpoints: HashMap<i64, Endpoint>,
     pub load_avg: f64,
@@ -32,7 +32,7 @@ impl ProcessedEndpoints {
         // compute some basic statistics
         let load_values: Vec<f64> = endpoints
             .iter()
-            .map(|x| x.data.kv_stats.kv_active_blocks as f64)
+            .map(|endpoint| endpoint.data.kv_active_blocks() as f64)
             .collect();
         let load_avg = load_values.iter().copied().sum::<f64>() / load_values.len() as f64;
         let variance = load_values
@@ -49,5 +49,16 @@ impl ProcessedEndpoints {
             load_avg,
             load_std,
         }
+    }
+
+    pub fn worker_ids(&self) -> Vec<i64> {
+        self.endpoints.keys().copied().collect()
+    }
+
+    pub fn active_blocks(&self) -> HashMap<i64, usize> {
+        self.endpoints
+            .iter()
+            .map(|(&worker_id, endpoint)| (worker_id, endpoint.data.kv_active_blocks() as usize))
+            .collect()
     }
 }

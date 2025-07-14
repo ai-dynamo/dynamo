@@ -3392,14 +3392,8 @@ index cafd8150b..6a5e45b4e 100644
 +    num_requests_waiting: int
 +    gpu_cache_usage_perc: float
 +    gpu_prefix_cache_hit_rate: float
-+    spec_decode_draft_acceptance_rate: Optional[float] = None
-+    spec_decode_system_efficiency: Optional[float] = None
-+    spec_decode_draft_tokens: Optional[int] = None
-+    spec_decode_emitted_tokens: Optional[int] = None
-+    spec_decode_accepted_tokens: Optional[int] = None
-+    spec_decode_num_spec_tokens: Optional[int] = None
 diff --git a/vllm/engine/multiprocessing/client.py b/vllm/engine/multiprocessing/client.py
-index f058b1329..2fdb5b8bf 100644
+index f058b1329..fd5610a3c 100644
 --- a/vllm/engine/multiprocessing/client.py
 +++ b/vllm/engine/multiprocessing/client.py
 @@ -1,4 +1,17 @@
@@ -3460,16 +3454,25 @@ index f058b1329..2fdb5b8bf 100644
  from vllm.engine.protocol import EngineClient
  # yapf: enable
  from vllm.envs import VLLM_RPC_TIMEOUT
-@@ -48,6 +66,8 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
+@@ -48,6 +66,17 @@ from vllm.prompt_adapter.request import PromptAdapterRequest
  from vllm.sampling_params import SamplingParams
  from vllm.transformers_utils.tokenizer_group import init_tokenizer_from_configs
  from vllm.utils import Device, deprecate_kwargs
 +from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest, RemotePrefillRequestCallback
 +from vllm.distributed.device_communicators.nixl import NixlMetadata
++
++# Import ForwardPassMetrics and related classes from dynamo
++try:
++    from dynamo.llm import ForwardPassMetrics, WorkerStats, KvStats
++except ImportError:
++    # Fallback if dynamo imports are not available
++    ForwardPassMetrics = None
++    WorkerStats = None
++    KvStats = None
  
  logger = init_logger(__name__)
  
-@@ -93,6 +113,7 @@ class MQLLMEngineClient(EngineClient):
+@@ -93,6 +122,7 @@ class MQLLMEngineClient(EngineClient):
          self._errored_with: Optional[BaseException] = None
  
          # Get the configs.
@@ -3477,7 +3480,7 @@ index f058b1329..2fdb5b8bf 100644
          self.model_config = engine_config.model_config
          self.decoding_config = engine_config.decoding_config
  
-@@ -117,6 +138,10 @@ class MQLLMEngineClient(EngineClient):
+@@ -117,6 +147,10 @@ class MQLLMEngineClient(EngineClient):
          self.heartbeat_socket: Socket = self.context.socket(zmq.constants.PULL)
          self.heartbeat_socket.connect(f"{ipc_path}{IPC_HEALTH_EXT}")
  
@@ -3488,7 +3491,7 @@ index f058b1329..2fdb5b8bf 100644
          # IPC path for the data socket.
          self.data_ipc_path = f"{ipc_path}{IPC_DATA_EXT}"
  
-@@ -131,8 +156,27 @@ class MQLLMEngineClient(EngineClient):
+@@ -131,8 +165,27 @@ class MQLLMEngineClient(EngineClient):
          # Loop to check health of the LLMEngine periodically.
          # Started after the MQLLMEngine is ready.
          self.health_loop: Optional[asyncio.Task] = None
@@ -3516,7 +3519,7 @@ index f058b1329..2fdb5b8bf 100644
      @staticmethod
      def is_unsupported_config(vllm_config: VllmConfig):
          # Pipeline parallel not yet supported
-@@ -182,6 +226,61 @@ class MQLLMEngineClient(EngineClient):
+@@ -182,6 +235,76 @@ class MQLLMEngineClient(EngineClient):
          except Exception as e:
              self._set_errored(e)
  
@@ -3553,13 +3556,28 @@ index f058b1329..2fdb5b8bf 100644
 +                    if self.metrics_publisher is not None and isinstance(
 +                        metrics, KvMetrics
 +                    ):
-+                        self.metrics_publisher.publish(metrics.request_active_slots,
-+                                                    metrics.request_total_slots,
-+                                                    metrics.kv_active_blocks,
-+                                                    metrics.kv_total_blocks,
-+                                                    metrics.num_requests_waiting, 
-+                                                    metrics.gpu_cache_usage_perc, 
-+                                                    metrics.gpu_prefix_cache_hit_rate)
++                        # Construct structured metrics objects
++                        worker_stats = WorkerStats(
++                            request_active_slots=metrics.request_active_slots,
++                            request_total_slots=metrics.request_total_slots,
++                            num_requests_waiting=metrics.num_requests_waiting,
++                            data_parallel_rank=None
++                        )
++                        
++                        kv_stats = KvStats(
++                            kv_active_blocks=metrics.kv_active_blocks,
++                            kv_total_blocks=metrics.kv_total_blocks,
++                            gpu_cache_usage_perc=metrics.gpu_cache_usage_perc,
++                            gpu_prefix_cache_hit_rate=metrics.gpu_prefix_cache_hit_rate
++                        )
++                        
++                        forward_pass_metrics = ForwardPassMetrics(
++                            worker_stats=worker_stats,
++                            kv_stats=kv_stats,
++                            spec_decode_stats=None
++                        )
++                        
++                        self.metrics_publisher.publish(forward_pass_metrics)
 +                        logger.debug("Metrics successful.")
 +
 +                    # TODO: Investigate sending whole stats object
@@ -3578,7 +3596,7 @@ index f058b1329..2fdb5b8bf 100644
      async def run_output_handler_loop(self):
          """Get RequestOutputs from Engine and stream to Request Queues"""
  
-@@ -250,7 +349,7 @@ class MQLLMEngineClient(EngineClient):
+@@ -250,7 +373,7 @@ class MQLLMEngineClient(EngineClient):
                  # Put each output into the appropriate queue.
                  elif isinstance(
                          request_outputs,
@@ -3587,7 +3605,7 @@ index f058b1329..2fdb5b8bf 100644
                      self._add_output(request_outputs)
                  else:
                      for request_output in request_outputs:
-@@ -261,7 +360,7 @@ class MQLLMEngineClient(EngineClient):
+@@ -261,7 +384,7 @@ class MQLLMEngineClient(EngineClient):
  
      def _add_output(self, request_output: Union[RequestOutput,
                                                  RPCAdapterLoadedResponse,
@@ -3596,7 +3614,7 @@ index f058b1329..2fdb5b8bf 100644
          queue = self.output_queues.get(request_output.request_id)
          if queue is not None:
              queue.put_nowait(request_output)
-@@ -283,12 +382,25 @@ class MQLLMEngineClient(EngineClient):
+@@ -283,12 +406,25 @@ class MQLLMEngineClient(EngineClient):
              # Wait until server is ready.
              response = await self._wait_for_server_rpc(socket)
  
@@ -3622,7 +3640,7 @@ index f058b1329..2fdb5b8bf 100644
  
      def close(self):
          """Destroy the ZeroMQ Context."""
-@@ -298,6 +410,8 @@ class MQLLMEngineClient(EngineClient):
+@@ -298,6 +434,8 @@ class MQLLMEngineClient(EngineClient):
          # Cancel background tasks.
          if self.health_loop is not None:
              self.health_loop.cancel()
@@ -3631,7 +3649,7 @@ index f058b1329..2fdb5b8bf 100644
          if self.output_loop is not None:
              self.output_loop.cancel()
  
-@@ -420,6 +534,9 @@ class MQLLMEngineClient(EngineClient):
+@@ -420,6 +558,9 @@ class MQLLMEngineClient(EngineClient):
          """
          if self._errored_with is not None:
              raise self._errored_with
@@ -3641,7 +3659,7 @@ index f058b1329..2fdb5b8bf 100644
  
      @property
      def is_running(self) -> bool:
-@@ -478,6 +595,7 @@ class MQLLMEngineClient(EngineClient):
+@@ -478,6 +619,7 @@ class MQLLMEngineClient(EngineClient):
          trace_headers: Optional[Mapping[str, str]] = None,
          prompt_adapter_request: Optional[PromptAdapterRequest] = None,
          priority: int = 0,
@@ -3649,7 +3667,7 @@ index f058b1329..2fdb5b8bf 100644
          *,
          inputs: Optional[PromptType] = None  # DEPRECATED
      ) -> AsyncGenerator[RequestOutput, None]:
-@@ -507,7 +625,8 @@ class MQLLMEngineClient(EngineClient):
+@@ -507,7 +649,8 @@ class MQLLMEngineClient(EngineClient):
  
          return self._process_request(prompt, sampling_params, request_id,
                                       lora_request, trace_headers,
@@ -3659,7 +3677,7 @@ index f058b1329..2fdb5b8bf 100644
  
      @overload
      def encode(
-@@ -591,6 +710,7 @@ class MQLLMEngineClient(EngineClient):
+@@ -591,6 +734,7 @@ class MQLLMEngineClient(EngineClient):
          trace_headers: Optional[Mapping[str, str]] = None,
          prompt_adapter_request: Optional[PromptAdapterRequest] = None,
          priority: int = 0,
@@ -3667,7 +3685,7 @@ index f058b1329..2fdb5b8bf 100644
      ) -> Union[AsyncGenerator[RequestOutput, None], AsyncGenerator[
              PoolingRequestOutput, None]]:
          """Send an RPCGenerateRequest to the RPCServer and stream responses."""
-@@ -636,6 +756,12 @@ class MQLLMEngineClient(EngineClient):
+@@ -636,6 +780,12 @@ class MQLLMEngineClient(EngineClient):
              else:
                  lp_bytes = None
  
@@ -3680,7 +3698,7 @@ index f058b1329..2fdb5b8bf 100644
              request_bytes = pickle.dumps(
                  RPCProcessRequest(
                      prompt=prompt,
-@@ -645,11 +771,11 @@ class MQLLMEngineClient(EngineClient):
+@@ -645,11 +795,11 @@ class MQLLMEngineClient(EngineClient):
                      trace_headers=trace_headers,
                      prompt_adapter_request=prompt_adapter_request,
                      priority=priority,
@@ -3694,7 +3712,7 @@ index f058b1329..2fdb5b8bf 100644
              await self.input_socket.send_multipart(parts, copy=False)
  
              # 4) Stream the RequestOutputs from the output queue. Note
-@@ -740,3 +866,22 @@ class MQLLMEngineClient(EngineClient):
+@@ -740,3 +890,22 @@ class MQLLMEngineClient(EngineClient):
          # Raise on error, otherwise happily return None
          if isinstance(request_output, BaseException):
              raise request_output

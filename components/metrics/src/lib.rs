@@ -83,7 +83,7 @@ use serde::{Deserialize, Serialize};
 use std::net::SocketAddr;
 use std::time::Duration as StdDuration;
 
-use dynamo_llm::kv_router::protocols::ForwardPassMetrics;
+use dynamo_llm::kv_router::protocols::{ForwardPassMetrics, LoadMetrics};
 use dynamo_llm::kv_router::scheduler::Endpoint;
 use dynamo_llm::kv_router::scoring::ProcessedEndpoints;
 
@@ -449,7 +449,10 @@ impl PrometheusMetrics {
         // Update per-worker metrics
         for (worker_id, endpoint) in processed.endpoints.iter() {
             let worker_id = worker_id.to_string();
-            let metrics = endpoint.data.clone();
+            let load_metrics = endpoint.data.clone();
+            let LoadMetrics::EngineLoadMetrics(metrics) = load_metrics else {
+                panic!("Can only update with ForwardPassMetrics");
+            };
 
             self.set_worker_gauge(
                 &self.kv_blocks_active,
@@ -602,7 +605,7 @@ pub fn postprocess_metrics(
             e.id().ok().map(|id| Endpoint {
                 name: format!("worker-{id}"),
                 subject: e.subject.clone(),
-                data: m.clone(),
+                data: LoadMetrics::EngineLoadMetrics(m.clone()),
             })
         })
         .collect();

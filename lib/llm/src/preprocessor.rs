@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! The Preprocessor consists of the following modules
 //!
@@ -205,9 +193,7 @@ impl OpenAIPreprocessor {
                                 self.formatter.render(request)?
                             };
 
-                            let encoding = tokio::task::block_in_place(|| {
-                                self.tokenizer.encode(&formatted_prompt)
-                            })?;
+                            let encoding = self.tokenizer.encode(&formatted_prompt)?;
 
                             if request.has_annotation(ANNOTATION_FORMATTED_PROMPT) {
                                 annotations.insert(
@@ -219,22 +205,21 @@ impl OpenAIPreprocessor {
                             if request.has_annotation(ANNOTATION_TOKEN_IDS) {
                                 annotations.insert(
                                     ANNOTATION_TOKEN_IDS.to_string(),
-                                    serde_json::to_string(&encoding.token_ids)?,
+                                    serde_json::to_string(encoding.token_ids())?,
                                 );
                             }
 
-                            builder.token_ids(encoding.token_ids);
+                            builder.token_ids(encoding.token_ids().to_vec());
                         }
                         TextInput::Batch(texts) => {
-                            let token_batches: Result<Vec<Vec<u32>>, _> = texts
+                            let token_batches: Vec<Vec<u32>> = texts
                                 .par_iter()
                                 .map(|text| {
-                                    tokio::task::block_in_place(|| self.tokenizer.encode(text))
-                                        .map(|encoding| encoding.token_ids)
+                                    self.tokenizer
+                                        .encode(text)
+                                        .map(|encoded| encoded.token_ids().to_vec())
                                 })
-                                .collect();
-
-                            let token_batches = token_batches?;
+                                .collect::<Result<Vec<_>>>()?;
                             builder.batch_token_ids(Some(token_batches));
                             builder.token_ids(vec![]);
                         }
@@ -285,8 +270,8 @@ impl OpenAIPreprocessor {
 
         let all_token_ids = match &request.inner.input {
             async_openai::types::EmbeddingInput::String(s) => {
-                let encoding = tokio::task::block_in_place(|| self.tokenizer.encode(s))?;
-                vec![encoding.token_ids]
+                let encoding = self.tokenizer.encode(s)?;
+                vec![encoding.token_ids().to_vec()]
             }
             async_openai::types::EmbeddingInput::StringArray(arr) => {
                 let input_strs: Vec<String> = arr.to_vec();
@@ -300,7 +285,7 @@ impl OpenAIPreprocessor {
                 .await??;
                 let token_arrays: Vec<Vec<u32>> = encodings
                     .into_iter()
-                    .map(|encoding| encoding.token_ids)
+                    .map(|encoding| encoding.token_ids().to_vec())
                     .collect();
                 token_arrays
             }

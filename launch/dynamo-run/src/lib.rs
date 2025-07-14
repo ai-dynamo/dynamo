@@ -11,6 +11,7 @@ use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_runtime::CancellationToken;
 
 mod flags;
+use either::Either;
 pub use flags::Flags;
 mod opt;
 pub use dynamo_llm::request_template::RequestTemplate;
@@ -41,14 +42,19 @@ pub async fn run(
         .kv_cache_block_size(flags.kv_cache_block_size)
         // Only set if user provides. Usually loaded from tokenizer_config.json
         .context_length(flags.context_length)
-        .http_port(flags.http_port)
+        .http_port(Some(flags.http_port))
         .router_config(flags.router_config())
         .request_template(flags.request_template.clone());
 
     // If `in=dyn` we want the trtllm/sglang/vllm subprocess to listen on that endpoint.
     // If not, then the endpoint isn't exposed so we let LocalModel invent one.
+    let mut rt = Either::Left(runtime.clone());
     if let Input::Endpoint(path) = &in_opt {
-        builder.endpoint_id(path.parse().with_context(|| path.clone())?);
+        builder.endpoint_id(Some(path.parse().with_context(|| path.clone())?));
+
+        let distributed_runtime =
+            dynamo_runtime::DistributedRuntime::from_settings(runtime.clone()).await?;
+        rt = Either::Right(distributed_runtime);
     };
 
     let local_model = builder.build().await?;
@@ -70,8 +76,7 @@ pub async fn run(
     //
     // Run in from an input
     //
-
-    dynamo_llm::entrypoint::input::run_input(in_opt, runtime, engine_config).await?;
+    dynamo_llm::entrypoint::input::run_input(rt, in_opt, engine_config).await?;
 
     // Allow engines to ask main thread to wait on an extra future.
     // We use this to stop the vllm and sglang sub-process

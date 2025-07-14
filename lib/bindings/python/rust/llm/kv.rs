@@ -29,51 +29,6 @@ use tracing;
 use llm_rs::kv_router::protocols::*;
 use llm_rs::kv_router::publisher::{create_stored_blocks, KvEventSourceConfig};
 
-#[pyclass]
-pub(crate) struct KvRouter {
-    inner: Arc<llm_rs::kv_router::KvRouter>,
-}
-
-#[pymethods]
-impl KvRouter {
-    #[new]
-    fn new(component: Component, kv_block_size: usize) -> PyResult<Self> {
-        if kv_block_size == 0 {
-            return Err(to_pyerr(anyhow::anyhow!("kv_block_size cannot be 0")));
-        };
-
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        runtime.block_on(async {
-            let inner = llm_rs::kv_router::KvRouter::new(
-                component.inner.clone(),
-                kv_block_size as u32,
-                None,
-            )
-            .await
-            .map_err(to_pyerr)?;
-            Ok(Self {
-                inner: Arc::new(inner),
-            })
-        })
-    }
-
-    fn schedule<'p>(
-        &self,
-        py: Python<'p>,
-        token_ids: Vec<u32>,
-        lora_id: u64,
-    ) -> PyResult<Bound<'p, PyAny>> {
-        let router = self.inner.clone();
-        pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            let worker_id = router
-                .schedule(&token_ids, lora_id)
-                .await
-                .map_err(to_pyerr)?;
-            Ok(worker_id)
-        })
-    }
-}
-
 #[pyfunction]
 pub fn compute_block_hash_for_seq_py(tokens: Vec<u32>, kv_block_size: usize) -> PyResult<Vec<u64>> {
     if kv_block_size == 0 {
@@ -617,25 +572,34 @@ impl KvMetricsAggregator {
     fn get_metrics<'p>(&self, py: Python<'p>) -> PyResult<Bound<'p, PyAny>> {
         // TODO: update EndpointKvMetrics to match the new ForwardPassMetrics struct
         let endpoints = self.inner.get_endpoints();
+        let load_avg = endpoints.load_avg;
+        let load_std = endpoints.load_std;
+
         let endpoint_kv_metrics = endpoints
             .endpoints
-            .iter()
-            .map(|(worker_id, endpoint)| EndpointKvMetrics {
-                worker_id: *worker_id,
-                request_active_slots: endpoint.data.worker_stats.request_active_slots,
-                request_total_slots: endpoint.data.worker_stats.request_total_slots,
-                kv_active_blocks: endpoint.data.kv_stats.kv_active_blocks,
-                kv_total_blocks: endpoint.data.kv_stats.kv_total_blocks,
-                num_requests_waiting: endpoint.data.worker_stats.num_requests_waiting,
-                gpu_cache_usage_perc: endpoint.data.kv_stats.gpu_cache_usage_perc,
-                gpu_prefix_cache_hit_rate: endpoint.data.kv_stats.gpu_prefix_cache_hit_rate,
+            .into_iter()
+            .map(|(worker_id, endpoint)| {
+                let metrics = endpoint.data;
+                let LoadMetrics::EngineLoadMetrics(fwd_pass_metrics) = metrics else {
+                    panic!("Endpoints do not contain forward pass metrics.");
+                };
+                EndpointKvMetrics {
+                    worker_id,
+                    request_active_slots: fwd_pass_metrics.worker_stats.request_active_slots,
+                    request_total_slots: fwd_pass_metrics.worker_stats.request_total_slots,
+                    kv_active_blocks: fwd_pass_metrics.kv_stats.kv_active_blocks,
+                    kv_total_blocks: fwd_pass_metrics.kv_stats.kv_total_blocks,
+                    num_requests_waiting: fwd_pass_metrics.worker_stats.num_requests_waiting,
+                    gpu_cache_usage_perc: fwd_pass_metrics.kv_stats.gpu_cache_usage_perc,
+                    gpu_prefix_cache_hit_rate: fwd_pass_metrics.kv_stats.gpu_prefix_cache_hit_rate,
+                }
             })
             .collect();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             Ok(AggregatedMetrics {
                 endpoints: endpoint_kv_metrics,
-                load_avg: endpoints.load_avg,
-                load_std: endpoints.load_std,
+                load_avg,
+                load_std,
             })
         })
     }

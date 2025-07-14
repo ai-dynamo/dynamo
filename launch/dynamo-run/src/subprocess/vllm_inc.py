@@ -26,9 +26,17 @@ from vllm.entrypoints.openai.api_server import (
 )
 from vllm.inputs import TokensPrompt
 
-from dynamo.llm import ModelType, WorkerMetricsPublisher, register_llm
+from dynamo.llm import (
+    ForwardPassMetrics,
+    KvStats,
+    ModelType,
+    WorkerMetricsPublisher,
+    WorkerStats,
+    register_llm,
+)
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sdk.lib.utils import get_capi_library_path
 
 # Only used if you run it manually from the command line
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
@@ -70,15 +78,29 @@ class RequestHandler:
         self.engine_client.set_metrics_publisher(self.metrics_publisher)
         # Initially send dummy metrics to kick start,
         # vLLM will not update stat until forward pass is triggered
-        self.metrics_publisher.publish(
-            0,  # request_active_slots
-            1024,  # request_total_slots
-            0,  # kv_active_blocks
-            1024,  # kv_total_blocks
-            0,  # num_requests_waiting
-            0.0,  # gpu_cache_usage_perc
-            0.0,  # gpu_prefix_cache_hit_rate
+
+        # Create the structured metrics objects
+        worker_stats = WorkerStats(
+            request_active_slots=0,
+            request_total_slots=1024,
+            num_requests_waiting=0,
+            data_parallel_rank=None,
         )
+
+        kv_stats = KvStats(
+            kv_active_blocks=0,
+            kv_total_blocks=1024,
+            gpu_cache_usage_perc=0.0,
+            gpu_prefix_cache_hit_rate=0.0,
+        )
+
+        metrics = ForwardPassMetrics(
+            worker_stats=worker_stats, kv_stats=kv_stats, spec_decode_stats=None
+        )
+
+        # Publish the metrics as a single object
+        self.metrics_publisher.publish(metrics)
+
         task = asyncio.create_task(self.create_metrics_publisher_endpoint())
         task.add_done_callback(
             lambda _: logging.debug("metrics publisher endpoint created")
@@ -187,7 +209,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     _check_and_set_env_value("VLLM_WORKER_ID", str(endpoint.lease_id()))
     _check_and_set_env_value(
-        "VLLM_KV_CAPI_PATH", "libdynamo_llm_capi.so", allow_override=True
+        "VLLM_KV_CAPI_PATH", get_capi_library_path(), allow_override=True
     )
     _check_and_set_env_value("VLLM_KV_NAMESPACE", config.namespace)
     _check_and_set_env_value("VLLM_KV_COMPONENT", config.component)

@@ -39,14 +39,14 @@ pub struct WorkerSelectionResult {
     pub overlap_blocks: usize,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct ForwardPassMetrics {
     pub worker_stats: WorkerStats,
     pub kv_stats: KvStats,
     pub spec_decode_stats: Option<SpecDecodeStats>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct WorkerStats {
     // https://lmsys.org/blog/2024-12-04-sglang-v0-4/#data-parallelism-attention-for-deepseek-models
     pub data_parallel_rank: Option<u32>,
@@ -55,7 +55,7 @@ pub struct WorkerStats {
     pub num_requests_waiting: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct KvStats {
     pub kv_active_blocks: u64,
     pub kv_total_blocks: u64,
@@ -65,7 +65,34 @@ pub struct KvStats {
     pub gpu_prefix_cache_hit_rate: f32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
+pub struct PredictiveLoadMetrics {
+    pub kv_active_blocks: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LoadMetrics {
+    EngineLoadMetrics(ForwardPassMetrics),
+    PredictiveLoadMetrics(PredictiveLoadMetrics),
+}
+
+impl LoadMetrics {
+    pub fn kv_active_blocks(&self) -> u64 {
+        match self {
+            LoadMetrics::EngineLoadMetrics(metrics) => metrics.kv_stats.kv_active_blocks,
+            LoadMetrics::PredictiveLoadMetrics(metrics) => metrics.kv_active_blocks,
+        }
+    }
+}
+
+impl Default for LoadMetrics {
+    fn default() -> Self {
+        LoadMetrics::PredictiveLoadMetrics(PredictiveLoadMetrics::default())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct SpecDecodeStats {
     pub num_spec_tokens: Option<u32>,
     pub num_drafts: Option<u32>,

@@ -243,7 +243,7 @@ DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk
 
 # Deploy to Kubernetes
 export DEPLOYMENT_NAME=llm-agg
-dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
+# TODO: Deploy your service using a DynamoGraphDeployment CR.
 ```
 
 **Note**: Optionally add `--Planner.no-operation=false` at the end of the deployment command to enable the planner component to take scaling actions on your deployment.
@@ -253,11 +253,8 @@ dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
 Once the deployment is complete, you can test it using:
 
 ```bash
-# Find your frontend pod
-export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
-
-# Forward the pod's port to localhost
-kubectl port-forward pod/$FRONTEND_POD 8000:8000 -n ${KUBE_NS}
+# Forward the port to localhost
+kubectl port-forward svc/$DEPLOYMENT_NAME-frontend 8000:8000 -n ${KUBE_NS}
 
 # Test the API endpoint
 curl localhost:8000/v1/chat/completions \
@@ -274,5 +271,3 @@ curl localhost:8000/v1/chat/completions \
     "max_tokens": 30
   }'
 ```
-
-For more details on managing deployments, testing, and troubleshooting, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md).

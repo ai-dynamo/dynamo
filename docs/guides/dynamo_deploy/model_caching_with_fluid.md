@@ -178,7 +178,6 @@ kind: DynamoGraphDeployment
 metadata:
   name: model-caching
 spec:
-  dynamoGraph: "frontend:3x6rl5b3gcnf5skh"
   envs:
     - name: HF_HOME
       value: /model
@@ -275,7 +274,6 @@ kind: DynamoGraphDeployment
 metadata:
   name: my-hello-world
 spec:
-  dynamoGraph: frontend:214c1690
   envs:
   - name: DYN_LOG
     value: "debug"
