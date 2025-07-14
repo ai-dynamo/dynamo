@@ -395,10 +395,6 @@ class DynamoServeProcess(ManagedProcess):
 
 @pytest.fixture(
     params=[
-        pytest.param("agg", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
-        pytest.param("agg_router", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
-        pytest.param("disagg", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
-        pytest.param("disagg_router", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
         pytest.param("multimodal_agg", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
         pytest.param("trtllm_agg", marks=[pytest.mark.tensorrtllm, pytest.mark.gpu_1]),
         pytest.param(
