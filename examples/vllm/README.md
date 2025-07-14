@@ -127,6 +127,8 @@ For Kubernetes deployment, YAML manifests are provided in the `deploy/` director
 
 #### Prerequisites
 
+- **Dynamo Cloud**: Follow the [Quickstart Guide](../../docs/guides/dynamo_deploy/quickstart.md) to deploy Dynamo Cloud first.
+
 - **Container Images**: The deployment files currently require access to `nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime`. If you don't have access, build and push your own image:
   ```bash
   ./container/build.sh --framework VLLM_V1
