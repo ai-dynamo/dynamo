@@ -168,7 +168,7 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 ### Structured Output and Tool Calling
 - **[Tool calling with Dynamo - coming soon!](.)**
 
-### SGLang Utilities and Tools
+### Supporting SGLang's native endpoints via Dynamo
 - **[HTTP Server for native SGLang endpoints](docs/sgl-http-server.md)**
 
 ## Deployment
