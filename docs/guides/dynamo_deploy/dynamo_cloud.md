@@ -27,7 +27,7 @@ The Dynamo cloud platform consists of several key components:
 - **Custom Resources**: Kubernetes custom resources for defining and managing Dynamo services
 
 
-## Prerequisites
+## Deployment Prerequisites
 
 Before getting started with the Dynamo cloud platform, ensure you have:
 
