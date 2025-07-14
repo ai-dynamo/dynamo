@@ -39,21 +39,21 @@ pub type CriticalTaskHandler<Fut> = dyn FnOnce(CancellationToken) -> Fut + Send 
 ///
 /// This is useful for ensuring that critical detached tasks either complete successfully
 /// or trigger appropriate shutdown procedures when they fail.
-pub struct CriticalTaskExecutionHandle {
+pub struct CriticalTaskExecutionHandle<T> {
     monitor_task: JoinHandle<()>,
     graceful_shutdown_token: CancellationToken,
-    result_receiver: Option<oneshot::Receiver<Result<()>>>,
+    result_receiver: Option<oneshot::Receiver<Result<T>>>,
     detached: bool,
 }
 
-impl CriticalTaskExecutionHandle {
+impl<T: Send + Sync + 'static> CriticalTaskExecutionHandle<T> {
     pub fn new<Fut>(
         task_fn: impl FnOnce(CancellationToken) -> Fut + Send + 'static,
         parent_token: CancellationToken,
         description: &str,
     ) -> Result<Self>
     where
-        Fut: Future<Output = Result<()>> + Send + 'static,
+        Fut: Future<Output = Result<T>> + Send + 'static,
     {
         Self::new_with_runtime(task_fn, parent_token, description, &Handle::try_current()?)
     }
@@ -72,7 +72,7 @@ impl CriticalTaskExecutionHandle {
         runtime: &Handle,
     ) -> Result<Self>
     where
-        Fut: Future<Output = Result<()>> + Send + 'static,
+        Fut: Future<Output = Result<T>> + Send + 'static,
     {
         let graceful_shutdown_token = parent_token.child_token();
         let description = description.to_string();
@@ -87,12 +87,12 @@ impl CriticalTaskExecutionHandle {
             let future = task_fn(graceful_shutdown_token_clone);
 
             match future.await {
-                Ok(()) => {
+                Ok(value) => {
                     tracing::debug!(
                         "Critical task '{}' completed successfully",
                         description_clone
                     );
-                    Ok(())
+                    Ok(value)
                 }
                 Err(e) => {
                     tracing::error!("Critical task '{}' failed: {:#}", description_clone, e);
@@ -195,16 +195,26 @@ impl CriticalTaskExecutionHandle {
     /// - `Err(...)` if the task failed or panicked, preserving the original error
     ///
     /// Note: Both errors and panics trigger parent cancellation immediately via the monitor task.
-    pub async fn join(mut self) -> Result<()> {
+    pub async fn join(mut self) -> Result<T> {
         self.detached = true;
-        let result = match self.result_receiver.take().unwrap().await {
+        match self.result_receiver.take().unwrap().await {
             Ok(task_result) => task_result,
             Err(_) => {
                 // This should rarely happen - means monitor task was dropped/cancelled
                 Err(anyhow::anyhow!("Critical task monitor was cancelled"))
             }
-        };
-        result
+        }
+    }
+
+    pub fn blocking_join(mut self) -> Result<T> {
+        self.detached = true;
+        match self.result_receiver.take().unwrap().blocking_recv() {
+            Ok(result) => result,
+            Err(_) => {
+                // This should rarely happen - means monitor task was dropped/cancelled
+                Err(anyhow::anyhow!("Critical task monitor was cancelled"))
+            }
+        }
     }
 
     /// Detach the task. This allows the task to continue running after the handle is dropped.
@@ -213,7 +223,7 @@ impl CriticalTaskExecutionHandle {
     }
 }
 
-impl Drop for CriticalTaskExecutionHandle {
+impl<T> Drop for CriticalTaskExecutionHandle<T> {
     fn drop(&mut self) {
         if !self.detached {
             panic!("Critical task was not detached prior to drop!");
@@ -268,7 +278,7 @@ mod tests {
         // - Demonstrates the "critical" aspect - failures affect the entire system
         let parent_token = CancellationToken::new();
 
-        let handle = CriticalTaskExecutionHandle::new(
+        let handle = CriticalTaskExecutionHandle::<()>::new(
             |_cancel_token| async move {
                 anyhow::bail!("Critical task failed!");
             },
@@ -306,7 +316,7 @@ mod tests {
         // - Demonstrates panic safety of the critical task system
         let parent_token = CancellationToken::new();
 
-        let handle = CriticalTaskExecutionHandle::new(
+        let handle = CriticalTaskExecutionHandle::<()>::new(
             |_cancel_token| async move {
                 panic!("Something went terribly wrong!");
             },
@@ -342,7 +352,7 @@ mod tests {
         let work_done = Arc::new(AtomicU32::new(0));
         let work_done_clone = work_done.clone();
 
-        let handle = CriticalTaskExecutionHandle::new(
+        let handle = CriticalTaskExecutionHandle::<()>::new(
             |cancel_token| async move {
                 for i in 0..100 {
                     if cancel_token.is_cancelled() {
@@ -394,7 +404,7 @@ mod tests {
         let task2_completed_clone = task2_completed.clone();
 
         // Start two critical tasks
-        let handle1 = CriticalTaskExecutionHandle::new(
+        let handle1 = CriticalTaskExecutionHandle::<()>::new(
             |cancel_token| async move {
                 for _ in 0..50 {
                     if cancel_token.is_cancelled() {
@@ -410,7 +420,7 @@ mod tests {
         )
         .unwrap();
 
-        let handle2 = CriticalTaskExecutionHandle::new(
+        let handle2 = CriticalTaskExecutionHandle::<()>::new(
             |_cancel_token| async move {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 task2_completed_clone.store(true, Ordering::SeqCst);
@@ -554,7 +564,7 @@ mod tests {
         // - Demonstrates true "critical task" behavior with immediate failure propagation
         let parent_token = CancellationToken::new();
 
-        let handle = CriticalTaskExecutionHandle::new(
+        let handle = CriticalTaskExecutionHandle::<()>::new(
             |_cancel_token| async move {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 panic!("Critical failure!");
@@ -585,7 +595,7 @@ mod tests {
         // - Demonstrates consistent critical failure behavior
         let parent_token = CancellationToken::new();
 
-        let handle = CriticalTaskExecutionHandle::new(
+        let handle = CriticalTaskExecutionHandle::<()>::new(
             |_cancel_token| async move {
                 tokio::time::sleep(Duration::from_millis(50)).await;
                 anyhow::bail!("Critical error!");
@@ -619,5 +629,23 @@ mod tests {
         .unwrap();
 
         // Dropping without detaching should panic
+    }
+
+    #[test]
+    fn test_blocking_join() -> Result<()> {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()?;
+
+        let parent_token = CancellationToken::new();
+        let handle = CriticalTaskExecutionHandle::new_with_runtime(
+            |_cancel_token| async move { Ok(()) },
+            parent_token,
+            "test-blocking-join-task",
+            rt.handle(),
+        )
+        .unwrap();
+
+        handle.blocking_join()
     }
 }

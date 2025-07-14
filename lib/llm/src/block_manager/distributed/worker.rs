@@ -118,7 +118,7 @@ fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
 }
 
 pub struct KvbmWorker {
-    task: Option<CriticalTaskExecutionHandle>,
+    task: Option<CriticalTaskExecutionHandle<()>>,
 }
 
 impl KvbmWorker {

@@ -24,12 +24,26 @@ if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
+    from vllm.v1.core.sched.scheduler import Scheduler
     from vllm.v1.request import Request
 
 from dynamo.llm.vllm_integration.kv_cache_utils import KvbmCacheBlocks
 from dynamo.llm.vllm_integration.rust import BlockManager
 from dynamo.llm.vllm_integration.rust import KvbmCacheManager as RustKvbmCacheManager
 from dynamo.llm.vllm_integration.rust import KvbmRequest, SlotUpdate
+
+
+class MockSingleTypeManager:
+    def cache_blocks(self, *args, **kwargs):
+        pass
+
+
+class MockReqToBlockHashes:
+    def __init__(self):
+        self.req_to_block_hashes = {}
+
+    def __getitem__(self, request_id: str):
+        pass
 
 
 class KvbmCacheManager(KVConnectorBase_V1):
@@ -44,6 +58,7 @@ class KvbmCacheManager(KVConnectorBase_V1):
     def __init__(
         self,
         block_manager: BlockManager,
+        scheduler: "Scheduler",
         log_stats: bool = False,
     ) -> None:
         """
@@ -55,11 +70,16 @@ class KvbmCacheManager(KVConnectorBase_V1):
         # pass the python bound KVBM to the Rust KVBM cache manager
         # the rust cache manager will take ownership of the kvbm
         self.cache_manager = RustKvbmCacheManager(block_manager)
+        self.scheduler = scheduler
         self.block_size = block_manager.block_size()
         self.log_stats = log_stats
         # FIXME: make prefix cache stats conditional on log_stats
         self.prefix_cache_stats = PrefixCacheStats() if log_stats else None
-        self.pending_onboard_blocks = {}
+
+        # Some stub implementations needed for the Async KV transfer.
+        # These are all no-ops.
+        self.single_type_manager = MockSingleTypeManager()
+        self.req_to_block_hashes = MockReqToBlockHashes()
 
     @property
     def usage(self) -> float:
@@ -333,7 +353,12 @@ class KvbmCacheManager(KVConnectorBase_V1):
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
-        self.cache_manager.trigger_onboard(request.request_id)
+        def async_completion_handler():
+            self.scheduler.finished_recving_kv_req_ids.add(request.request_id)
+
+        self.cache_manager.trigger_onboard(request.request_id, async_completion_handler)
+
+    # Unused KV connector methods
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
@@ -347,12 +372,7 @@ class KvbmCacheManager(KVConnectorBase_V1):
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
-
-        self.pending_onboard_blocks.clear()
-
-        return KVConnectorMetadata()
-
-    # Unused KV connector methods
+        pass
 
     def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """
