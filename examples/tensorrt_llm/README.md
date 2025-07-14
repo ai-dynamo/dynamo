@@ -350,3 +350,51 @@ unset TRTLLM_USE_NIXL_KVCACHE
 export TRTLLM_USE_UCX_KVCACHE=1
 ```
 
+
+### Example architectures for Llama 4 Maverick Instruct + Eagle Speculative Decoding
+
+#### Notes
+* Testing for the current example used:
+  * One GB200x4 node for aggregate serving
+  * Two GB200x4 nodes for disaggregate serving
+* To run Eagle Speculative Decoding with Llama 4, ensure the container meets the following criteria:
+  * Built with a version of TensorRT-LLM based on the 0.21 release [Link](https://github.com/NVIDIA/TensorRT-LLM/tree/release/0.21)
+  * The TensorRT-LLM build includes the changes from this PR [Link](https://github.com/NVIDIA/TensorRT-LLM/pull/5975)
+* If you need to download model weights off huggingface, make sure you run the command `huggingface-cli login` and have access to the necessary gated models.
+
+##### Aggregated Serving
+```bash
+cd /workspace/examples/tensorrt_llm
+dynamo serve graphs.disagg:Frontend -f configs/llama4/eagle/eagle_agg.yaml
+```
+* Known Issue: In Aggregated Serving, setting `max_num_tokens` to higher values (e.g. `max_num_tokens: 8448`) can lead to Out of Memory (OOM) errors. This is being investigated by the TRTLLM team.
+
+##### Disaggregated Serving
+
+###### Head Node
+Start nats/etcd
+``` bash
+nats-server -js &
+etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd &
+```
+
+Launch graph of Frontend and TensorRTLLMWorker (decode) on head node:
+
+```bash
+cd /workspace/examples/tensorrt_llm
+dynamo serve graphs.agg:Frontend -f configs/llama4/eagle/eagle_disagg.yaml  &
+```
+
+###### Worker Node(s)
+Set environment variables pointing at the etcd/nats endpoints on the head node.
+```bash
+export HEAD_NODE_IP="<head-node-ip>"
+export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
+export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
+```
+
+Deploy a Prefill worker:
+```bash
+cd /workspace/examples/tensorrt_llm
+dynamo serve components.prefill_worker:TensorRTLLMPrefillWorker -f configs/llama4/eagle/eagle_disagg.yaml --service-name TensorRTLLMPrefillWorker &
+```

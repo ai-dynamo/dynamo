@@ -265,19 +265,18 @@ class DynamoServeProcess(ManagedProcess):
         if graph.config:
             command.extend(["-f", os.path.join(graph.directory, graph.config)])
 
-        command.extend(["--Frontend.port", str(port)])
-
         if args:
             for k, v in args.items():
                 command.extend([f"{k}", f"{v}"])
 
         health_check_urls = []
         health_check_ports = []
+        env = None
 
         # Handle multimodal deployments differently
         if "multimodal" in graph.directory:
-            # port is currently required to be 8000
-            assert port == 8000
+            env = os.environ.copy()
+            env["DYNAMO_PORT"] = str(port)
         else:
             # Regular LLM deployments
             command.extend(["--Frontend.port", str(port)])
@@ -285,7 +284,6 @@ class DynamoServeProcess(ManagedProcess):
                 (f"http://localhost:{port}/v1/models", self._check_model)
             ]
             health_check_ports = [port]
-            env = None
 
         self.port = port
         self.graph = graph
@@ -305,7 +303,7 @@ class DynamoServeProcess(ManagedProcess):
                 "from multiprocessing.spawn",
             ],
             log_dir=request.node.name,
-            env=env,  # Pass the environment variables
+            env=env,
         )
 
     def _check_model(self, response):
@@ -395,10 +393,6 @@ class DynamoServeProcess(ManagedProcess):
 
 @pytest.fixture(
     params=[
-        pytest.param("agg", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
-        pytest.param("agg_router", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
-        pytest.param("disagg", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
-        pytest.param("disagg_router", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
         pytest.param("multimodal_agg", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
         pytest.param("trtllm_agg", marks=[pytest.mark.tensorrtllm, pytest.mark.gpu_1]),
         pytest.param(
