@@ -120,7 +120,7 @@ cd $DYNAMO_ROOT/examples/sglang
 ### Disaggregated serving
 
 <details>
-<summary>SGLang Load Balancer vs Dynamo Discovery</summary>
+<summary>Under the hood: SGLang Load Balancer vs Dynamo Discovery</summary>
 
 SGLang uses a mini load balancer to route requests to handle disaggregated serving. The load balancer functions as follows:
 
