@@ -21,107 +21,41 @@ limitations under the License.
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/dynamo)
 
-<p align="center">
-  <a href="https://github.com/ai-dynamo/dynamo/issues/762"><b>Roadmap</b></a> &nbsp;|&nbsp;
-  <a href="https://docs.nvidia.com/dynamo/latest/index.html"><b>Documentation</b></a> &nbsp;|&nbsp;
-  <a href="https://github.com/ai-dynamo/examples"><b>Examples</b></a> &nbsp;|&nbsp;
-  <a href="https://github.com/ai-dynamo/enhancements"><b>Design Proposals</b></a>
-</p>
+| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[Documentation](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Examples](https://github.com/ai-dynamo/examples)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** |
 
-## NVIDIA Dynamo
+### The Era of Multi-Node, Multi-GPU
 
-**High-throughput, low-latency inference framework for serving generative AI and reasoning models in multi-node distributed environments.**
+![GPU Evolution](./docs/images/frontpage-gpu-evolution.png)
+
 
 Large language models are quickly outgrowing the memory and compute budget of any single GPU. Tensor-parallelism solves the capacity problem by spreading each layer across many GPUs—and sometimes many servers—but it creates a new one: how do you coordinate those shards, route requests, and share KV cache fast enough to feel like one accelerator? This orchestration gap is exactly what NVIDIA Dynamo is built to close.
 
-<p align="center">
-  <img src="./docs/images/frontpage-architecture.png" alt="Dynamo architecture" width="600"/>
-</p>
+![Multi Node Multi-GPU topology](./docs/images/frontpage-gpu-vertical.png)
 
-NVIDIA Dynamo is designed to be inference engine agnostic and captures LLM-specific capabilities such as:
 
-- **Disaggregated prefill & decode inference** – Maximizes GPU throughput and facilitates trade-off between throughput and latency
+
+### Introducing NVIDIA Dynamo
+
+NVIDIA Dynamo is a high-throughput low-latency inference framework designed for serving generative AI and reasoning models in multi-node distributed environments. Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLang or others) and captures LLM-specific capabilities such as:
+
+![Dynamo architecture](./docs/images/frontpage-architecture.png)
+
+- **Disaggregated prefill & decode inference** – Maximizes GPU throughput and facilitates trade off between throughput and latency.
 - **Dynamic GPU scheduling** – Optimizes performance based on fluctuating demand
 - **LLM-aware request routing** – Eliminates unnecessary KV cache re-computation
-- **Accelerated data transfer** – Reduces inference response time using NIXL
+- **Accelerated data transfer** – Reduces inference response time using NIXL.
 - **KV cache offloading** – Leverages multiple memory hierarchies for higher system throughput
 
 Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach.
 
-## Framework Support Matrix
-
-| Feature | vLLM | SGLang | TensorRT-LLM |
-|---------|----------------------|----------------------------|----------------------------------------|
-| **Disaggregated Serving** | ✅ | ✅ | ✅ |
-| **Conditional Disaggregation** | ✅ | 🚧 | 🚧 |
-| **KV-Aware Routing** | ✅ | ✅ | ✅ |
-| **SLA-Based Planner** | ✅ | ❌ | ❌ |
-| **Load Based Planner** | ✅ | ❌ | ❌ |
-| **KVBM** | 🚧 | ❌ | ❌ |
-| **Kubernetes Deployment** | ✅ | 🚧 | 🚧 |
 
 
-To learn more about each framework and their capabilities, check out each framework's README!
+### Installation
 
-- **[vLLM](examples/llm/README.md)**
-- **[SGLang](examples/sglang/README.md)**
-- **[TensorRT-LLM](examples/tensorrt_llm/README.md)**
-
-## Deployment Architectures
-
-### Aggregated Serving
-Single-instance deployment where both prefill and decode are handled by the same worker.
+The following examples require a few system level packages.
+Recommended to use Ubuntu 24.04 with a x86_64 CPU. See [docs/support_matrix.md](docs/support_matrix.md)
 
 ```
-+------+      +-----------+      +------------------+
-| HTTP |----->| processor |----->|      Worker      |
-|      |<-----|           |<-----|   (Prefill +     |
-+------+      +-----------+      |     Decode)      |
-                                 +------------------+
-```
-
-**Best for:** Small to medium workloads, simple deployment
-
-### Disaggregated Serving
-Distributed deployment where prefill and decode are handled by separate, independently scalable workers.
-
-```
-+------+      +-----------+      +------------------+     +---------------+
-| HTTP |----->| processor |----->| Decode Worker    |<--->| Prefill       |
-|      |<-----|           |<-----|                  |     | Worker        |
-+------+      +-----------+      +------------------+     +---------------+
-                                          |
-                                          v
-                                 +------------------+
-                                 |   Prefill Queue  |
-                                 +------------------+
-```
-
-**Best for:** High throughput, independent scaling, optimized hardware utilization
-
-### KV-Aware Routing
-Intelligent request routing based on KV cache hit rates across workers.
-
-```
-+------+      +-----------+      +------------------+     +------------------+
-| HTTP |----->| processor |----->|    KV Router     |---->|     Worker 1     |
-|      |<-----|           |<-----|                  |---->|     Worker 2     |
-+------+      +-----------+      +------------------+     |        ...       |
-                                          |               +------------------+
-                                          v
-                                 +------------------+
-                                 |   KV Indexer    |
-                                 +------------------+
-```
-
-**Best for:** High cache hit rates, shared context workloads
-
-## Installation
-
-### Using pip
-Using `pip` is our recommended way to install Dynamo.
-
-```bash
 apt-get update
 DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0
 python3 -m venv venv
@@ -129,38 +63,113 @@ source venv/bin/activate
 
 pip install "ai-dynamo[all]"
 ```
+> [!NOTE]
+> To ensure compatibility, please refer to the examples in the release branch or tag that matches the version you installed.
 
-### Using conda
+### Building the Dynamo Base Image
+
+Although not needed for local development, deploying your Dynamo pipelines to Kubernetes will require you to build and push a Dynamo base image to your container registry. You can use any container registry of your choice, such as:
+- Docker Hub (docker.io)
+- NVIDIA NGC Container Registry (nvcr.io)
+- Any private registry
+
+Here's how to build it:
+
 ```bash
-git clone https://github.com/ai-dynamo/dynamo.git
-conda activate <ENV_NAME>
-pip install nixl # Or install https://github.com/ai-dynamo/nixl from source
-
-# To install ai-dynamo-runtime from source# To install ai-dynamo-runtime from source
-cargo build --release
-cd lib/bindings/python
-pip install .
-cd ../../../
-pip install ".[all]"
-
-# To test
-docker compose -f deploy/metrics/docker-compose.yml up -d
-cd examples/sglang
-./launch/agg.sh
+./container/build.sh
+docker tag dynamo:latest-vllm <your-registry>/dynamo-base:latest-vllm
+docker login <your-registry>
+docker push <your-registry>/dynamo-base:latest-vllm
 ```
 
-## Local Development
+Notes about builds for specific frameworks:
+- For specific details on the `--framework vllm` build, see [here](examples/llm/README.md).
+- For specific details on the `--framework tensorrtllm` build, see [here](examples/tensorrt_llm/README.md).
+
+Note about AWS environments:
+- If deploying Dynamo in AWS, make sure to build the container with EFA support using the `--make-efa` flag.
+
+After building, you can use this image by setting the `DYNAMO_IMAGE` environment variable to point to your built image:
+```bash
+export DYNAMO_IMAGE=<your-registry>/dynamo-base:latest-vllm
+```
 
 > [!NOTE]
-> If you use vscode or cursor, check out our [.devcontainer setup](.devcontainer/README.md). Otherwise, to develop locally, we recommend working inside of the container.
+> We are working on leaner base images that can be built using the targets in the top-level Earthfile.
+
+### Running and Interacting with an LLM Locally
+
+To run a model and interact with it locally you can call `dynamo
+run` with a hugging face model. `dynamo run` supports several backends
+including: `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
+
+#### Example Command
+
+```
+dynamo run out=vllm deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+```
+
+```
+? User › Hello, how are you?
+✔ User · Hello, how are you?
+Okay, so I'm trying to figure out how to respond to the user's greeting. They said, "Hello, how are you?" and then followed it with "Hello! I'm just a program, but thanks for asking." Hmm, I need to come up with a suitable reply. ...
+```
+
+### LLM Serving
+
+Dynamo provides a simple way to spin up a local set of inference
+components including:
+
+- **OpenAI Compatible Frontend** – High performance OpenAI compatible http api server written in Rust.
+- **Basic and Kv Aware Router** – Route and load balance traffic to a set of workers.
+- **Workers** – Set of pre-configured LLM serving engines.
+
+To run a minimal configuration you can use a pre-configured
+example.
+
+#### Start Dynamo Distributed Runtime Services
+
+First start the Dynamo Distributed Runtime services:
 
 ```bash
-# This builds the vllm container by default. You can change the framework by passing the --framework flag.
+docker compose -f deploy/metrics/docker-compose.yml up -d
+```
+#### Start Dynamo LLM Serving Components
+
+Next serve a minimal configuration with an http server, basic
+round-robin router, and a single worker.
+
+```bash
+cd examples/llm
+dynamo serve graphs.agg:Frontend -f configs/agg.yaml
+```
+
+#### Send a Request
+
+```bash
+curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "messages": [
+    {
+        "role": "user",
+        "content": "Hello, how are you?"
+    }
+    ],
+    "stream":false,
+    "max_tokens": 300
+  }' | jq
+```
+
+### Local Development
+
+If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions see the [ReadMe](.devcontainer/README.md) for more details.
+
+Otherwise, to develop locally, we recommend working inside of the container
+
+```bash
 ./container/build.sh
-# This will mount your current working dynamo directory inside of the container
 ./container/run.sh -it --mount-workspace
 
-# Setup dynamo
 cargo build --release
 mkdir -p /workspace/deploy/sdk/src/dynamo/sdk/cli/bin
 cp /workspace/target/release/http /workspace/deploy/sdk/src/dynamo/sdk/cli/bin
@@ -169,4 +178,29 @@ cp /workspace/target/release/dynamo-run /workspace/deploy/sdk/src/dynamo/sdk/cli
 
 uv pip install -e .
 export PYTHONPATH=$PYTHONPATH:/workspace/deploy/sdk/src:/workspace/components/planner/src
+```
+
+
+#### Conda Environment
+
+Alternately, you can use a conda environment
+
+```bash
+conda activate <ENV_NAME>
+
+pip install nixl # Or install https://github.com/ai-dynamo/nixl from source
+
+cargo build --release
+
+# To install ai-dynamo-runtime from source
+cd lib/bindings/python
+pip install .
+
+cd ../../../
+pip install ".[all]"
+
+# To test
+docker compose -f deploy/metrics/docker-compose.yml up -d
+cd examples/llm
+dynamo serve graphs.agg:Frontend -f configs/agg.yaml
 ```
