@@ -17,60 +17,12 @@ limitations under the License.
 
 # Dynamo Deployment Guide
 
-This directory contains all the necessary files and instructions for deploying Dynamo in various environments. Choose the deployment method that best suits your needs:
+This directory contains all the necessary files and instructions for deploying Dynamo in various environments.
 
-## Directory Structure
+Please follow [Dynamo Cloud Guide](../docs/guides/dynamo_deploy/dynamo_cloud.md)
 
-```
-deploy/
-├── cloud/                    # Cloud deployment configurations and tools
-├── helm/                     # Helm charts for manual Kubernetes deployment
-├── metrics/                  # Monitoring and metrics configuration
-├── sdk/                      # Dynamo SDK and related tools
-└── README.md                 # This file
-```
 
-## Deployment Options
 
-### 1. 🚀 Dynamo Cloud Platform [PREFERRED]
 
-The Dynamo Cloud Platform provides a managed deployment experience with:
-- Automated infrastructure management
-- Built-in monitoring and metrics
-- Production-ready configurations
-- Managed NATS and etcd dependencies
 
-For detailed instructions, see:
-- [Dynamo Cloud Platform Guide](../docs/guides/dynamo_deploy/dynamo_cloud.md)
-
-### 2. Manual Deployment with Helm Charts
-
-For users who need more control over their deployments:
-- Full control over deployment parameters
-- Manual management of infrastructure
-- Customizable monitoring setup
-- Flexible configuration options
-- Manual management of NATS and etcd dependencies
-
-Documentation:
-- [Manual Helm Deployment Guide](../docs/guides/dynamo_deploy/manual_helm_deployment.md)
-- [Minikube Setup Guide](../docs/guides/dynamo_deploy/minikube.md)
-
-## Choosing the Right Deployment Method
-
-- **Dynamo Cloud Platform**: Best for most users, provides managed deployment with built-in monitoring
-  - See [Dynamo Cloud Platform Guide](../docs/guides/dynamo_deploy/dynamo_cloud.md)
-  - Recommended for production deployments
-  - Simplifies dependency management
-  - Provides infrastructure for user management
-
-- **Manual Helm Deployment**: For users who need full control over their deployment
-  - See [Manual Helm Deployment Guide](../docs/guides/dynamo_deploy/manual_helm_deployment.md)
-  - Suitable for custom deployments
-  - Requires manual management of dependencies
-  - Provides maximum flexibility for users
-
-## Example Deployments
-
-To help you get started, we provide several example deployments:
 
