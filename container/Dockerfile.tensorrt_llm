@@ -317,8 +317,6 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
     cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
     cp -r lib/bindings/c/include /opt/dynamo/bindings/.  && \
     cp target/release/dynamo-run /usr/local/bin && \
-    cp target/release/http /usr/local/bin && \
-    cp target/release/llmctl /usr/local/bin && \
     cp target/release/metrics /usr/local/bin && \
     cp target/release/mock_worker /usr/local/bin
 
