@@ -272,7 +272,7 @@ class DynamoServeProcess(ManagedProcess):
         health_check_urls = []
         health_check_ports = []
         env = None
-        
+
         # Handle multimodal deployments differently
         if "multimodal" in graph.directory:
             env = os.environ.copy()
