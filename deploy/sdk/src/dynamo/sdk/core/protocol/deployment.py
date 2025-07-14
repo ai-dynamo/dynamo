@@ -14,11 +14,7 @@
 # limitations under the License.
 
 import typing as t
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from enum import Enum
-
-import typer
 
 
 @dataclass
@@ -75,36 +71,6 @@ class Resources:
                 )
 
 
-class DeploymentStatus(str, Enum):
-    """Status of a dynamo deployment."""
-
-    PENDING = "pending"
-    IN_PROGRESS = "in progress"
-    RUNNING = "running"
-    FAILED = "failed"
-    TERMINATED = "terminate"
-    SCALED_TO_ZERO = "scaled to zero"
-
-    @property
-    def color(self) -> str:
-        return {
-            DeploymentStatus.RUNNING: "green",
-            DeploymentStatus.IN_PROGRESS: "yellow",
-            DeploymentStatus.PENDING: "yellow",
-            DeploymentStatus.FAILED: "red",
-            DeploymentStatus.TERMINATED: "red",
-            DeploymentStatus.SCALED_TO_ZERO: "yellow",
-        }.get(self, "white")
-
-
-@dataclass
-class ScalingPolicy:
-    """Scaling policy."""
-
-    policy: str
-    parameters: t.Dict[str, t.Union[int, float, str]] = field(default_factory=dict)
-
-
 @dataclass
 class Env:
     """Environment variable."""
@@ -126,149 +92,5 @@ class Service:
     resources: Resources | None = None
     envs: t.List[Env] = field(default_factory=list)
     secrets: t.List[str] = field(default_factory=list)
-    scaling: ScalingPolicy = field(default_factory=lambda: ScalingPolicy(policy="none"))
     apis: dict = field(default_factory=dict)
     size_bytes: int = 0
-
-
-@dataclass
-class Deployment:
-    """Graph deployment."""
-
-    name: str
-    namespace: str
-    graph: t.Optional[str] = None
-    entry_service: t.Optional[Service] = None
-    envs: t.Optional[t.List[t.Dict[str, t.Any]]] = None
-
-
-# Type alias for deployment responses (e.g., from backend APIs)
-DeploymentResponse = t.Dict[str, t.Any]
-
-
-@dataclass
-class DeploymentConfig:
-    """Configuration object for deployment operations.
-
-    Consolidates all deployment parameters including graph configuration,
-    environment variables, and deployment settings.
-    """
-
-    # Core deployment settings
-    graph: str
-    endpoint: str
-    name: t.Optional[str] = None
-    target: str = "kubernetes"
-    dev: bool = False
-
-    # Configuration and timing
-    config_file: t.Optional[typer.FileText] = None
-    wait: bool = True
-    timeout: int = 3600
-
-    # Environment variables
-    envs: t.Optional[t.List[str]] = None
-    envs_from_secret: t.Optional[t.List[str]] = None
-    env_secrets_name: t.Optional[str] = "dynamo-env-secrets"
-
-
-class DeploymentManager(ABC):
-    """Interface for managing dynamo graph deployments."""
-
-    @abstractmethod
-    def create_deployment(self, deployment: Deployment, **kwargs) -> DeploymentResponse:
-        """Create new deployment.
-
-        Args:
-            deployment: Deployment configuration
-            **kwargs: Additional backend-specific arguments
-
-        Returns:
-            The created deployment
-        """
-        pass
-
-    @abstractmethod
-    def update_deployment(self, deployment_id: str, deployment: Deployment) -> None:
-        """Update an existing deployment.
-
-        Args:
-            deployment_id: The ID of the deployment to update
-            deployment: New deployment configuration
-        """
-        pass
-
-    @abstractmethod
-    def get_deployment(self, deployment_id: str) -> DeploymentResponse:
-        """Get deployment details.
-
-        Args:
-            deployment_id: The ID of the deployment
-
-        Returns:
-            Dictionary containing deployment details
-        """
-        pass
-
-    @abstractmethod
-    def list_deployments(self) -> t.List[DeploymentResponse]:
-        """List all deployments.
-
-        Returns:
-            List of dictionaries containing deployment id and details
-        """
-        pass
-
-    @abstractmethod
-    def delete_deployment(self, deployment_id: str) -> None:
-        """Delete a deployment.
-
-        Args:
-            deployment_id: The ID of the deployment to delete
-        """
-        pass
-
-    @abstractmethod
-    def get_status(
-        self,
-        deployment_id: str,
-    ) -> DeploymentStatus:
-        """Get the current status of a deployment.
-
-        Args (one of):
-            deployment_id: The ID of the deployment
-
-        Returns:
-            The current status of the deployment
-        """
-        pass
-
-    @abstractmethod
-    def wait_until_ready(
-        self, deployment_id: str, timeout: int = 3600
-    ) -> t.Tuple[DeploymentResponse, bool]:
-        """Wait until a deployment is ready.
-
-        Args:
-            deployment_id: The ID of the deployment
-            timeout: Maximum time to wait in seconds
-
-        Returns:
-            Tuple of deployment response and a boolean indicating if the deployment became ready
-        """
-        pass
-
-    @abstractmethod
-    def get_endpoint_urls(
-        self,
-        deployment_id: str,
-    ) -> t.List[str]:
-        """Get the list of endpoint urls attached to a deployment.
-
-        Args (one of):
-            deployment_id: The ID of the deployment
-
-        Returns:
-            List of deployment's endpoint urls
-        """
-        pass

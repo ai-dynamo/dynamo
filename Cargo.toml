@@ -28,7 +28,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "Dynamo Inference Framework"
 authors = ["NVIDIA Inc. <sw-dl-dynamo@nvidia.com>"]
@@ -39,9 +39,9 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 
 [workspace.dependencies]
 # Local crates
-dynamo-runtime = { path = "lib/runtime", version = "0.3.1" }
-dynamo-llm = { path = "lib/llm", version = "0.3.1" }
-dynamo-tokens = { path = "lib/tokens", version = "0.3.1" }
+dynamo-runtime = { path = "lib/runtime", version = "0.3.2" }
+dynamo-llm = { path = "lib/llm", version = "0.3.2" }
+dynamo-tokens = { path = "lib/tokens", version = "0.3.2" }
 
 # External dependencies
 anyhow = { version = "1" }
@@ -73,6 +73,7 @@ thiserror = { version = "2.0.11" }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["codec", "net"] }
+axum = { version = "0.8" }
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
 validator = { version = "0.20.0", features = ["derive"] }

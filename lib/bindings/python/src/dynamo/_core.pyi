@@ -46,7 +46,7 @@ class DistributedRuntime:
 
     ...
 
-    def namespace(self, name: str, path: str) -> Namespace:
+    def namespace(self, name: str) -> Namespace:
         """
         Create a `Namespace` object
         """
@@ -272,25 +272,6 @@ class Client:
         """
         ...
 
-class KvRouter:
-    """
-    A router will determine which worker should handle a given request.
-    """
-
-    ...
-
-    def __init__(self, drt: DistributedRuntime, component: Component) -> None:
-        """
-        Create a `KvRouter` object that is associated with the `component`
-        """
-
-    def schedule(self, token_ids: List[int], lora_id: int) -> int:
-        """
-        Return the worker id that should handle the given token ids,
-        exception will be raised if there is no worker available.
-        """
-        ...
-
 class DisaggregatedRouter:
     """
     A router that determines whether to perform prefill locally or remotely based on
@@ -355,7 +336,85 @@ def compute_block_hash_for_seq_py(tokens: List[int], kv_block_size: int) -> List
     Returns:
         List of block hashes as integers
     """
+
     ...
+
+class WorkerStats:
+    """
+    Worker stats.
+    """
+
+    ...
+
+    def __init__(
+        self,
+        request_active_slots: int,
+        request_total_slots: int,
+        num_requests_waiting: int,
+        data_parallel_rank: Optional[int] = None,
+    ) -> None:
+        """
+        Create a `WorkerStats` object.
+        """
+        ...
+
+class KvStats:
+    """
+    KV stats.
+    """
+
+    ...
+
+    def __init__(
+        self,
+        kv_active_blocks: int,
+        kv_total_blocks: int,
+        gpu_cache_usage_perc: float,
+        gpu_prefix_cache_hit_rate: float,
+    ) -> None:
+        """
+        Create a `KvStats` object.
+        """
+        ...
+
+class SpecDecodeStats:
+    """
+    Speculative decoding stats.
+    """
+
+    ...
+
+    def __init__(
+        self,
+        num_spec_tokens: int,
+        num_drafts: int,
+        num_draft_tokens: int,
+        num_accepted_tokens: int,
+        num_accepted_tokens_per_pos: List[int],
+    ) -> None:
+        """
+        Create a `SpecDecodeStats` object when running with speculative decoding.
+        """
+        ...
+
+class ForwardPassMetrics:
+    """
+    A collection of metrics for a forward pass.
+    Includes worker stats, KV stats, and speculative decoding stats.
+    """
+
+    ...
+
+    def __init__(
+        self,
+        worker_stats: WorkerStats,
+        kv_stats: KvStats,
+        spec_decode_stats: Optional[SpecDecodeStats] = None,
+    ) -> None:
+        """
+        Create a `ForwardPassMetrics` object
+        """
+        ...
 
 class WorkerMetricsPublisher:
     """
@@ -369,7 +428,7 @@ class WorkerMetricsPublisher:
         Create a `WorkerMetricsPublisher` object
         """
 
-    def create_service(self, component: Component) -> None:
+    def create_endpoint(self, component: Component) -> None:
         """
         Similar to Component.create_service, but only service created through
         this method will interact with KV router of the same component.
@@ -377,17 +436,10 @@ class WorkerMetricsPublisher:
 
     def publish(
         self,
-        request_active_slots: int,
-        request_total_slots: int,
-        kv_active_blocks: int,
-        kv_total_blocks: int,
-        num_requests_waiting: int,
-        gpu_cache_usage_perc: float,
-        gpu_prefix_cache_hit_rate: float,
-        data_parallel_rank: int = 0,
+        metrics: ForwardPassMetrics
     ) -> None:
         """
-        Update the KV metrics being reported.
+        Update the metrics being reported.
         """
         ...
 
@@ -787,6 +839,18 @@ async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: st
     """Attach the model at path to the given endpoint, and advertise it as model_type"""
     ...
 
+class EngineConfig:
+    """Holds internal configuration for a Dynamo engine."""
+    ...
+
+async def make_engine(args: EntrypointArgs) -> EngineConfig:
+    """Make an engine matching the args"""
+    ...
+
+async def run_input(runtime: DistributedRuntime, input: str, engine_config: EngineConfig) -> None:
+    """Start an engine, connect it to an input, and run until stopped."""
+    ...
+
 class NatsQueue:
     """
     A queue implementation using NATS JetStream for task distribution
@@ -1092,3 +1156,11 @@ class ZmqKvEventListener:
             ValueError: If events cannot be serialized to JSON
         """
         ...
+
+class EntrypointArgs:
+    """
+    Settings to connect an input to a worker and run them.
+    Use by `dynamo run`.
+    """
+
+    ...

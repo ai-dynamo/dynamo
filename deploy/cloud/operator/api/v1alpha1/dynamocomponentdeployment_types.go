@@ -38,9 +38,9 @@ const (
 
 // DynamoComponentDeploymentSpec defines the desired state of DynamoComponentDeployment
 type DynamoComponentDeploymentSpec struct {
-	DynamoComponent string `json:"dynamoComponent"`
+	DynamoComponent string `json:"dynamoComponent,omitempty"`
 	// contains the tag of the DynamoComponent: for example, "my_package:MyService"
-	DynamoTag string `json:"dynamoTag"`
+	DynamoTag string `json:"dynamoTag,omitempty"`
 
 	DynamoComponentDeploymentSharedSpec `json:",inline"`
 }
@@ -58,6 +58,8 @@ type DynamoComponentDeploymentSharedSpec struct {
 
 	// contains the name of the service
 	ServiceName string `json:"serviceName,omitempty"`
+
+	ComponentType string `json:"componentType,omitempty"`
 
 	// dynamo namespace of the service (allows to override the dynamo namespace of the service defined in annotations inside the dynamo archive)
 	DynamoNamespace *string `json:"dynamoNamespace,omitempty"`
@@ -165,7 +167,7 @@ func (s *DynamoComponentDeployment) SetSpec(spec any) {
 }
 
 func (s *DynamoComponentDeployment) IsMainComponent() bool {
-	return strings.HasSuffix(s.Spec.DynamoTag, s.Spec.ServiceName)
+	return strings.HasSuffix(s.Spec.DynamoTag, s.Spec.ServiceName) || s.Spec.ComponentType == commonconsts.ComponentTypeMain
 }
 
 func (s *DynamoComponentDeployment) GetDynamoDeploymentConfig() []byte {
@@ -188,4 +190,12 @@ func (s *DynamoComponentDeployment) SetDynamoDeploymentConfig(config []byte) {
 		Name:  commonconsts.DynamoDeploymentConfigEnvVar,
 		Value: string(config),
 	})
+}
+
+// GetImage returns the docker image of the DynamoComponent
+func (s *DynamoComponentDeployment) GetImage() string {
+	if s.Spec.ExtraPodSpec != nil && s.Spec.ExtraPodSpec.MainContainer != nil {
+		return s.Spec.ExtraPodSpec.MainContainer.Image
+	}
+	return ""
 }

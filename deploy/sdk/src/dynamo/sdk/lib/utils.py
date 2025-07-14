@@ -132,3 +132,28 @@ def upload_graph(
     )
     if resp.status_code not in (200, 201, 204):
         raise RuntimeError(f"Failed to upload graph artifact: {resp.text}")
+
+
+def get_capi_library_path() -> str:
+    """
+    Get the path to the libdynamo_llm_capi.so library.
+
+    First checks the VLLM_KV_CAPI_PATH environment variable.
+    If not set, returns the path where the library is installed by the wheel.
+
+    Returns:
+        The path to the library.
+    """
+    # First check environment variable
+    env_path = os.environ.get("VLLM_KV_CAPI_PATH")
+    if env_path:
+        return env_path
+
+    # Fall back to the installed location
+    # The library is installed at dynamo/sdk/cli/bin/libdynamo_llm_capi.so
+    import dynamo.sdk
+
+    sdk_path = os.path.dirname(dynamo.sdk.__file__)
+    lib_path = os.path.join(sdk_path, "cli", "bin", "libdynamo_llm_capi.so")
+
+    return lib_path

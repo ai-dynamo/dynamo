@@ -46,8 +46,9 @@
 //! implementation of the main block manager.
 
 use crate::mocker::evictor::LRUEvictor;
-use crate::mocker::protocols::{MoveBlock, MoveBlockResponse, PrefillCost, UniqueBlock};
+use crate::mocker::protocols::{MoveBlock, MoveBlockResponse, PrefillCost};
 use crate::mocker::sequence::ActiveSequence;
+use crate::tokens::blocks::UniqueBlock;
 use derive_getters::Getters;
 use std::collections::{HashMap, HashSet};
 use tokio::sync::mpsc;

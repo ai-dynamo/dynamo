@@ -323,3 +323,54 @@ impl<Req: PipelineIO, Resp: PipelineIO> Ingress<Req, Resp> {
 pub trait PushWorkHandler: Send + Sync {
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError>;
 }
+
+/*
+/// `NetworkStreamWrapper` is a simple wrapper used to detect proper stream termination
+/// in network communication between ingress and egress components.
+///
+/// **Purpose**: This wrapper solves the problem of detecting whether a stream ended
+/// gracefully or was cut off prematurely (e.g., due to network issues).
+///
+/// **Design Rationale**:
+/// - Cannot use `Annotated` directly because the generic type `U` varies:
+///   - Sometimes `U = Annotated<...>`
+///   - Sometimes `U = LLMEngineOutput<...>`
+/// - Using `Annotated` would require double-wrapping like `Annotated<Annotated<...>>`
+/// - A simple wrapper is cleaner and more straightforward
+///
+/// **Stream Flow**:
+/// ```
+/// At AsyncEngine:
+///   response 1 -> response 2 -> response 3 -> <end>
+///
+/// Between ingress/egress:
+///   response 1 <end=false> -> response 2 <end=false> -> response 3 <end=false> -> (null) <end=true>
+///
+/// At client:
+///   response 1 -> response 2 -> response 3 -> <end>
+/// ```
+///
+/// **Error Handling**:
+/// If the stream is cut off before proper termination, the egress is responsible for
+/// injecting an error response to communicate the incomplete stream to the client:
+/// ```
+/// At AsyncEngine:
+///   response 1 -> ... <without end flag>
+///
+/// At egress:
+///   response 1 <end=false> -> <stream ended without end flag -> convert to error>
+///
+/// At client:
+///   response 1 -> error response
+/// ```
+///
+/// The detection must be done at egress level because premature stream termination
+/// can be due to network issues that only the egress component can detect.
+*/
+/// TODO: Detect end-of-stream using Server-Sent Events (SSE). This will be removed.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct NetworkStreamWrapper<U> {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<U>,
+    pub complete_final: bool,
+}

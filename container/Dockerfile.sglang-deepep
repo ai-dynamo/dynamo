@@ -24,7 +24,8 @@ RUN apt-get update -y && \
     meson \
     ninja-build \
     pybind11-dev \
-    patchelf
+    patchelf \
+    net-tools
 
 # Install Python build dependencies
 RUN pip install --break-system-packages meson-python wheel build
@@ -88,9 +89,9 @@ RUN pip install --break-system-packages "sglang==0.4.8.post1"
 ENV SGL_FORCE_SHUTDOWN=1
 
 WORKDIR /sgl-workspace
-# support batch completions for SGL benchmarking
-# https://github.com/ai-dynamo/dynamo/pull/1721
-ARG DYNAMO_COMMIT="9cbf803172f8ed4b3342c9d5237b49cb07d4d95c"
+# include flush cache endpoint and server support
+# https://github.com/ai-dynamo/dynamo/pull/1769
+ARG DYNAMO_COMMIT="bd91dca6141e05bcfbe9bd4dea54cc58b9e37d75"
 RUN git clone https://github.com/ai-dynamo/dynamo.git && cd dynamo && git checkout ${DYNAMO_COMMIT}
 
 # install dynamo in editable mode
@@ -140,10 +141,10 @@ RUN pip install --break-system-packages -e .
 
 ENV PYTHONPATH=/sgl-workspace/dynamo/components/planner/src:/sgl-workspace/dynamo/examples/sglang:$PYTHONPATH
 
-RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-${ARCH}.deb && \
-    dpkg -i nats-server-v2.10.24-${ARCH}.deb && rm nats-server-v2.10.24-${ARCH}.deb
+RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-${ARCH}.deb && \
+    dpkg -i nats-server-v2.10.28-${ARCH}.deb && rm nats-server-v2.10.28-${ARCH}.deb
 
-ENV ETCD_VERSION="v3.5.18"
+ENV ETCD_VERSION="v3.5.21"
 RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
     mkdir -p /usr/local/bin/etcd && \
     tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
