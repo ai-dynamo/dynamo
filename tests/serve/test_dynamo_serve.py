@@ -285,7 +285,6 @@ class DynamoServeProcess(ManagedProcess):
                 (f"http://localhost:{port}/v1/models", self._check_model)
             ]
             health_check_ports = [port]
-            env = None
 
         self.port = port
         self.graph = graph
@@ -305,7 +304,6 @@ class DynamoServeProcess(ManagedProcess):
                 "from multiprocessing.spawn",
             ],
             log_dir=request.node.name,
-            env=env,  # Pass the environment variables
         )
 
     def _check_model(self, response):
