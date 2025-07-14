@@ -35,22 +35,22 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ### Core Dynamo Features
 
-| Feature | SGLang | Notes | Docs |
-|---------|--------|--------|------|
-| **Disaggregated Serving** | ✅ | Full support with prefill/decode separation | [doc](https://github.com/sgl-project/sglang/blob/main/docs/disaggregation.md) |
-| **Conditional Disaggregation** | 🚧 | Work in progress ([#7730](https://github.com/sgl-project/sglang/pull/7730)) | [PR](https://github.com/sgl-project/sglang/pull/7730) |
-| **KV-Aware Routing** | ✅ | Full support | [doc](https://github.com/sgl-project/sglang/blob/main/docs/kv_routing.md) |
-| **SLA-Based Planner** | ❌ | Not supported | - |
-| **Load Based Planner** | ❌ | Not supported | - |
-| **KVBM** | ❌ | Not supported | - |
+| Feature | SGLang | Notes |
+|---------|--------|-------|
+| [**Disaggregated Serving**](../../docs/architecture/disagg_serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
+| [**KV-Aware Routing**](../../docs/architecture/kv_cache_routing.md) | ✅ |  |
+| [**SLA-Based Planner**](../../docs/architecture/sla_based_planner.md) | ❌ | Not supported |
+| [**Load Based Planner**](../../docs/architecture/load_based_planner.md) | ❌ | Not supported |
+| [**KVBM**](../../docs/architecture/kvbm_architecture.md) | ❌ | Not supported |
 
 ### Large Scale P/D and WideEP Features
 
-| Feature | SGLang | Notes | Docs |
-|---------|--------|------|
-| **WideEP** | ✅ | Full Support on H100s and GB200s | [doc](https://github.com/sgl-project/sglang/blob/main/docs/wideep.md) |
-| **DP Rank Routing** | 🚧 | Direct routing supported. Process per DP rank is not supported | - |
-| **GB200 Support** | 🚧 | Work in progress ([#7556](https://github.com/sgl-project/sglang/pull/7556)) | [PR](https://github.com/sgl-project/sglang/pull/7556) |
+| Feature            | SGLang | Notes                                                                 |
+|--------------------|--------|-----------------------------------------------------------------------|
+| **WideEP**         | ✅     | Full support on H100s and GB200s                                      |
+| **DP Rank Routing**| 🚧     | Direct routing supported. Process per DP rank is not supported        |
+| **GB200 Support**  | 🚧     | WIP [PR](https://github.com/sgl-project/sglang/pull/7556) |
 
 
 ## Quick Start 
@@ -59,7 +59,7 @@ Below we provide a quick start guide that lets you run all of our the common dep
 
 ### Start NATS and ETCD in the background
 
-Start required services (etcd and NATS) using [Docker Compose](../../deploy/metrics/docker-compose.yml)
+Start using [Docker Compose](../../deploy/metrics/docker-compose.yml)
 
 ```bash
 docker compose -f deploy/metrics/docker-compose.yml up -d
@@ -68,7 +68,9 @@ docker compose -f deploy/metrics/docker-compose.yml up -d
 ### Build container
 
 ```bash
-# On an x86 machine TODO: sglang public image?
+# pull our pre-build sglang runtime container
+docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.3.2
+# or build from source
 ./container/build.sh --framework sglang
 ```
 
