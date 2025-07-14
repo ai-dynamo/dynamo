@@ -36,7 +36,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 ## Table of Contents
 - [Feature Support Matrix](#feature-support-matrix)
 - [Quick Start](#quick-start)
-- [Run Single Node Examples](#run-single-node-examples)
+- [Single Node Examples](#run-single-node-examples)
 - [Multi-Node and Advanced Examples](#advanced-examples)
 - [Deploy on SLURM or Kubernetes](#deployment)
 
@@ -57,9 +57,9 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature            | SGLang | Notes                                                                 |
 |--------------------|--------|-----------------------------------------------------------------------|
-| **WideEP**         | ✅     | Full support on H100s and GB200s                                      |
-| **DP Rank Routing**| 🚧     | Direct routing supported. Process per DP rank is not supported        |
-| **GB200 Support**  | 🚧     | WIP [PR](https://github.com/sgl-project/sglang/pull/7556) |
+| **WideEP**         | ✅/🚧 | Full support on H100s/GB200 WIP [PR](https://github.com/sgl-project/sglang/pull/7556)                                     |
+| **DP Rank Routing**| 🚧    | Direct routing supported. Process per DP rank is not supported        |
+| **GB200 Support**  | 🚧    | WIP [PR](https://github.com/sgl-project/sglang/pull/7556) |
 
 
 ## Quick Start
@@ -165,10 +165,15 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 ### Speculative Decoding
 - **[Deploying DeepSeek-R1 with MTP - coming soon!](.)**
 
+### Structured Output and Tool Calling
+- **[Tool calling with Dynamo - coming soon!](.)**
+
 ### SGLang Utilities and Tools
-- **[HTTP Server to flush cache and record MoE expert distribution data](docs/sgl-http-server.md)**
+- **[HTTP Server for native SGLang endpoints](docs/sgl-http-server.md)**
 
 ## Deployment
+
+We currently provide deployment examples for Kubernetes (coming soon!) and SLURM
 
 ## Kubernetes
 - **[Deploying Dynamo with SGLang on Kubernetes - coming soon!](.)**
