@@ -128,6 +128,13 @@ pub struct Flags {
     #[arg(long)]
     pub router_temperature: Option<f64>,
 
+    /// KV Router: Whether to use KV events to maintain the view of cached blocks
+    /// If false, would use ApproxKvRouter for predicting block creation / deletion
+    /// based only on incoming requests at a timer.
+    /// Default: true
+    #[arg(long)]
+    pub use_kv_events: Option<bool>,
+
     /// Max model context length. Reduce this if you don't have enough VRAM for the full model
     /// context length (e.g. Llama 4).
     /// Defaults to the model's max, which is usually model_max_length in tokenizer_config.json.
@@ -215,6 +222,7 @@ impl Flags {
             KvRouterConfig::new(
                 self.kv_overlap_score_weight,
                 self.router_temperature,
+                self.use_kv_events,
                 self.max_num_batched_tokens,
             ),
         )

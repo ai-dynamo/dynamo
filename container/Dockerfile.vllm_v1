@@ -174,9 +174,9 @@ RUN if [ "$ARCH" = "arm64" ]; then \
 # TODO: Move NIXL wheel install to the wheel_builder stage
 RUN uv pip install /workspace/wheels/nixl/*.whl
 
-# Install patched vllm - keep this early in Dockerfile to avoid
+# Install vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
-ARG VLLM_REF="3c545c0c3b98ee642373a308197d750d0e449403"
+ARG VLLM_REF="059d4cd"
 ENV CUDA_HOME=/usr/local/cuda
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
@@ -308,8 +308,6 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.comman
 
 RUN mkdir -p /home/$USERNAME/.cache/
 
-ENV VLLM_KV_CAPI_PATH=$HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so
-
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
 ##################################
@@ -429,8 +427,6 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
-# Tell vllm to use the Dynamo LLM C API for KV Cache Routing
-ENV VLLM_KV_CAPI_PATH=/opt/dynamo/bindings/lib/libdynamo_llm_capi.so
 ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/
 
 ########################################
@@ -494,9 +490,6 @@ RUN uv pip install ai-dynamo --find-links wheelhouse && \
     uv pip install nixl --find-links wheelhouse && \
     ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
     rm -r wheelhouse
-
-# Tell vllm to use the Dynamo LLM C API for KV Cache Routing
-ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \

@@ -46,11 +46,27 @@ pub enum TokenizerType {
 pub type Offsets = (usize, usize);
 
 /// Contains the results of tokenizing text: token IDs, string tokens, and their spans
-#[derive(Debug, Hash)]
-pub struct Encoding {
-    pub token_ids: Vec<TokenIdType>,
-    pub tokens: Vec<String>,
-    pub spans: Vec<Offsets>,
+#[derive(Debug, Clone)]
+pub enum Encoding {
+    /// Hugging Face
+    Hf(Box<tokenizers::tokenizer::Encoding>),
+    /// Sentence Piece
+    Sp(Vec<TokenIdType>),
+}
+
+impl Encoding {
+    pub fn token_ids(&self) -> &[u32] {
+        match self {
+            Encoding::Hf(inner) => inner.get_ids(),
+            Encoding::Sp(inner) => inner,
+        }
+    }
+}
+
+impl Hash for Encoding {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.token_ids().hash(state);
+    }
 }
 
 pub mod traits {
@@ -194,8 +210,8 @@ impl DecodeStream {
         Self {
             tokenizer,
             skip_special_tokens,
-            ids: Vec::new(),
-            prefix: "".to_string(),
+            ids: Vec::with_capacity(64),
+            prefix: String::with_capacity(64),
             prefix_index: 0,
             read_index: 0,
         }
@@ -211,25 +227,23 @@ impl DecodeStream {
     /// a valid chunk.
     pub fn step(&mut self, id: u32) -> Result<Option<String>> {
         self.ids.push(id);
-        let string = self
-            .tokenizer
-            .decode(self.ids.as_slice(), self.skip_special_tokens)?;
+        let decoded = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
 
-        if string.len() > self.prefix.len() && !string.ends_with('�') {
-            if !(string.starts_with(&self.prefix)) {
-                anyhow::bail!("Detokenizer failure: invalid prefix");
-            }
-            let new_text = &string[self.prefix.len()..].to_string();
-            let new_prefix_index = self.ids.len() - self.prefix_index;
-            self.prefix = self
-                .tokenizer
-                .decode(self.ids.as_slice(), self.skip_special_tokens)?;
-            self.read_index = self.prefix_index;
-            self.prefix_index = new_prefix_index;
-            Ok(Some(new_text.to_string()))
-        } else {
-            Ok(None)
+        if decoded.len() <= self.prefix.len() || decoded.ends_with('�') {
+            return Ok(None);
         }
+        if !decoded.starts_with(&self.prefix) {
+            anyhow::bail!("Detokenizer failure: invalid prefix");
+        }
+        let new_text = decoded[self.prefix.len()..].to_string();
+
+        self.prefix = decoded;
+        self.read_index = self.prefix_index;
+
+        let new_prefix_index = self.ids.len() - self.prefix_index;
+        self.prefix_index = new_prefix_index;
+
+        Ok(Some(new_text))
     }
 }
 
@@ -255,11 +269,12 @@ impl std::fmt::Debug for Sequence {
             .field(
                 "token_ids",
                 &format_args!("{}", {
-                    if self.token_ids.len() <= 20 {
-                        format!("{:?}", self.token_ids)
+                    let token_ids = self.token_ids();
+                    if token_ids.len() <= 20 {
+                        format!("{:?}", token_ids)
                     } else {
-                        let first_ten = &self.token_ids[..10];
-                        let last_ten = &self.token_ids[self.token_ids.len() - 10..];
+                        let first_ten = &token_ids[..10];
+                        let last_ten = &token_ids[token_ids.len() - 10..];
                         format!("{:?} ... {:?}", first_ten, last_ten)
                     }
                 }),
@@ -301,7 +316,7 @@ impl Sequence {
         // })?;
 
         let encoding = self.tokenizer.encode(input)?;
-        self.token_ids.extend(encoding.token_ids);
+        self.token_ids.extend(encoding.token_ids());
         Ok(())
     }
 

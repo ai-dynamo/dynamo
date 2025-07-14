@@ -253,11 +253,8 @@ export DEPLOYMENT_NAME=llm-agg
 Once the deployment is complete, you can test it using:
 
 ```bash
-# Find your frontend pod
-export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
-
-# Forward the pod's port to localhost
-kubectl port-forward pod/$FRONTEND_POD 8000:8000 -n ${KUBE_NS}
+# Forward the port to localhost
+kubectl port-forward svc/$DEPLOYMENT_NAME-frontend 8000:8000 -n ${KUBE_NS}
 
 # Test the API endpoint
 curl localhost:8000/v1/chat/completions \
@@ -274,5 +271,3 @@ curl localhost:8000/v1/chat/completions \
     "max_tokens": 30
   }'
 ```
-
-For more details on managing deployments, testing, and troubleshooting, please refer to the [Operator Deployment Guide](../../docs/guides/dynamo_deploy/operator_deployment.md).

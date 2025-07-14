@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use dynamo_runtime::{
@@ -14,6 +15,7 @@ use dynamo_runtime::{
     protocols::annotated::Annotated,
 };
 use futures::stream::{self, StreamExt};
+use tokio::sync::Mutex;
 
 pub mod approx;
 pub mod indexer;
@@ -27,7 +29,11 @@ pub mod sequence;
 
 use crate::{
     kv_router::{
-        indexer::{KvIndexer, KvIndexerInterface, RouterEvent},
+        approx::ApproxKvIndexer,
+        indexer::{
+            compute_block_hash_for_seq, KvIndexer, KvIndexerInterface, KvRouterError,
+            OverlapScores, RouterEvent,
+        },
         metrics_aggregator::EndpointCollector,
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
@@ -35,7 +41,6 @@ use crate::{
     },
     preprocessor::PreprocessedRequest,
     protocols::common::llm_backend::LLMEngineOutput,
-    tokens::TokenBlockSequence,
 };
 
 use dynamo_runtime::traits::events::EventSubscriber;
@@ -63,6 +68,8 @@ pub struct KvRouterConfig {
 
     pub router_temperature: f64,
 
+    pub use_kv_events: bool,
+
     // note: this is not actually used for now
     pub max_num_batched_tokens: u32,
 }
@@ -72,6 +79,7 @@ impl Default for KvRouterConfig {
         Self {
             overlap_score_weight: 1.0,
             router_temperature: 0.5,
+            use_kv_events: true,
             max_num_batched_tokens: 8192,
         }
     }
@@ -83,14 +91,35 @@ impl KvRouterConfig {
     pub fn new(
         overlap_score_weight: Option<f64>,
         temperature: Option<f64>,
+        use_kv_events: Option<bool>,
         max_num_batched_tokens: Option<u32>,
     ) -> Self {
         let default = Self::default();
         Self {
             overlap_score_weight: overlap_score_weight.unwrap_or(default.overlap_score_weight),
             router_temperature: temperature.unwrap_or(default.router_temperature),
+            use_kv_events: use_kv_events.unwrap_or(default.use_kv_events),
             max_num_batched_tokens: max_num_batched_tokens
                 .unwrap_or(default.max_num_batched_tokens),
+        }
+    }
+}
+
+// TODO: is there a way (macro) to auto-derive the KvIndexerInterface trait for this
+// since both variants implement it
+pub enum Indexer {
+    KvIndexer(KvIndexer),
+    ApproxKvIndexer(ApproxKvIndexer),
+}
+
+impl Indexer {
+    async fn find_matches(
+        &self,
+        sequence: Vec<LocalBlockHash>,
+    ) -> Result<OverlapScores, KvRouterError> {
+        match self {
+            Indexer::KvIndexer(indexer) => indexer.find_matches(sequence).await,
+            Indexer::ApproxKvIndexer(indexer) => indexer.find_matches(sequence).await,
         }
     }
 }
@@ -98,9 +127,16 @@ impl KvRouterConfig {
 /// A KvRouter only decides which worker you should use. It doesn't send you there.
 /// TODO: Rename this to indicate it only selects a worker, it does not route.
 pub struct KvRouter {
-    indexer: Option<KvIndexer>,
+    indexer: Indexer,
+
+    // How about a Box<dyn KvIndexerInterface>
     scheduler: KvScheduler,
+
     block_size: u32,
+
+    // To ensure blocking reads / writes
+    // TODO: benchmark tradeoffs
+    find_best_match_mutex: Mutex<()>,
 }
 
 impl KvRouter {
@@ -118,8 +154,16 @@ impl KvRouter {
         let metrics_aggregator =
             EndpointCollector::new(component.clone(), cancellation_token.clone()).await;
 
-        let maybe_indexer =
-            use_kv_events.then(|| KvIndexer::new(cancellation_token.clone(), block_size));
+        let indexer = if use_kv_events {
+            Indexer::KvIndexer(KvIndexer::new(cancellation_token.clone(), block_size))
+        } else {
+            // hard code 120 seconds for now
+            Indexer::ApproxKvIndexer(ApproxKvIndexer::new(
+                cancellation_token.clone(),
+                block_size,
+                Duration::from_secs(120),
+            ))
+        };
 
         let scheduler = KvScheduler::start(
             component.namespace().clone(),
@@ -131,9 +175,9 @@ impl KvRouter {
 
         // [gluo TODO] try subscribe_with_type::<RouterEvent>,
         // error checking below will be different.
-        if let Some(ref indexer) = maybe_indexer {
+        if let Indexer::KvIndexer(ref kv_indexer) = indexer {
             let mut kv_events_rx = component.subscribe(KV_EVENT_SUBJECT).await?;
-            let kv_events_tx = indexer.event_sender();
+            let kv_events_tx = kv_indexer.event_sender();
 
             tokio::spawn(async move {
                 while let Some(event) = kv_events_rx.next().await {
@@ -158,9 +202,10 @@ impl KvRouter {
 
         tracing::info!("KV Routing initialized");
         Ok(Self {
-            indexer: maybe_indexer,
+            indexer,
             scheduler,
             block_size,
+            find_best_match_mutex: Mutex::new(()), // Add this
         })
     }
 
@@ -172,20 +217,15 @@ impl KvRouter {
         context_id: &str,
         tokens: &[u32],
     ) -> anyhow::Result<(i64, u32)> {
+        // Acquire mutex to serialize access
+        // TODO: may as well make all the subroutines synchronous if benchmarking favors this
+        let _guard = self.find_best_match_mutex.lock().await;
+
         let isl_tokens = tokens.len();
         let block_size = self.block_size;
 
-        let (complete_blocks, _partial_block) =
-            TokenBlockSequence::split_tokens(tokens, block_size, 1337_u64);
-
-        let local_block_hashes = complete_blocks
-            .into_iter()
-            .map(|block| LocalBlockHash(block.block_hash()))
-            .collect();
-        let overlap_scores = match &self.indexer {
-            Some(indexer) => indexer.find_matches(local_block_hashes).await?,
-            None => Default::default(), // Returns empty/default instance
-        };
+        let local_block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+        let overlap_scores = self.indexer.find_matches(local_block_hashes).await?;
 
         let best_worker_id = self
             .scheduler
@@ -197,6 +237,13 @@ impl KvRouter {
                 overlap_scores.clone(),
             )
             .await?;
+
+        if let Indexer::ApproxKvIndexer(ref indexer) = self.indexer {
+            indexer
+                .process_routing_decision_for_request(tokens, best_worker_id)
+                .await
+                .unwrap();
+        };
 
         let overlap_amount = overlap_scores
             .scores

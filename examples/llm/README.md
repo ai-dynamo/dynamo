@@ -245,7 +245,7 @@ in `dynamo deployment get ${DEPLOYMENT_NAME}` and skip the steps to find and for
 export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
 
 # Forward the pod's port to localhost
-kubectl port-forward pod/$FRONTEND_POD 3000:3000 -n ${KUBE_NS}
+dynamo-operator-deployment.yaml/$FRONTEND_POD 3000:3000 -n ${KUBE_NS}
 
 # Test the API endpoint
 curl localhost:3000/v1/chat/completions \

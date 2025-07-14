@@ -15,174 +15,136 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# vLLM Deployment Examples
+# LLM Deployment Examples using vLLM
 
-This directory contains examples for deploying vLLM models in both aggregated and disaggregated configurations.
+This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations using vLLM. For Dynamo integration, we leverage vLLM's native KV cache events, NIXL based transfer mechanisms, and metric reporting to enable KV-aware routing and P/D disaggregation.
 
-## Use the Latest Release
+## Deployment Architectures
 
-We recommend using the latest stable release of dynamo to avoid breaking changes:
+See [deployment architectures](../llm/README.md#deployment-architectures) to learn about the general idea of the architecture. vLLM supports aggregated, disaggregated, and KV-routed serving patterns.
 
-[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
+## Getting Started
 
-You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
+### Prerequisites
 
-```bash
-git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
-```
+Start required services (etcd and NATS) using [Docker Compose](../../deploy/metrics/docker-compose.yml):
 
-## Prerequisites
-
-1. Run Dynamo vLLM V1 docker:
-```bash
-./container/build.sh --framework VLLM_V1 --target dev
-./container/run.sh --framework VLLM_V1 --target dev -it
-```
-
-Or install vLLM manually:
-
-```bash
-export VLLM_REF=3c545c0c3b98ee642373a308197d750d0e449403
-git clone https://github.com/vllm-project/vllm.git
-cd vllm
-git checkout $VLLM_REF
-VLLM_USE_PRECOMPILED=1 uv pip install -e .
-```
-
-If you are in the default vllm container remember to uninstall the old vllm using  'uv pip uninstall ai-dynamo-vllm'
-
-2. Start required services:
 ```bash
 docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
-## Running the Server
+### Build and Run docker
 
-### Aggregated Deployment
 ```bash
-cd examples/vllm_v1
-dynamo serve graphs.agg:Frontend -f configs/agg.yaml
+./container/build.sh --framework VLLM_V1
 ```
 
-### Disaggregated Deployment
 ```bash
-cd examples/vllm_v1
-dynamo serve graphs.disagg:Frontend -f configs/disagg.yaml
+./container/run.sh -it --framework VLLM_V1
 ```
 
-## Testing the API
+This includes the specific commit [vllm-project/vllm#19790](https://github.com/vllm-project/vllm/pull/19790) which enables support for external control of the DP ranks.
 
-Send a test request using curl:
+## Run Deployment
+
+This figure shows an overview of the major components to deploy:
+
+```
++------+      +-----------+      +------------------+             +---------------+
+| HTTP |----->| dynamo    |----->|   vLLM Worker    |------------>|  vLLM Prefill |
+|      |<-----| ingress   |<-----|                  |<------------|    Worker     |
++------+      +-----------+      +------------------+             +---------------+
+                  |    ^                  |
+       query best |    | return           | publish kv events
+           worker |    | worker_id        v
+                  |    |         +------------------+
+                  |    +---------|     kv-router    |
+                  +------------->|                  |
+                                 +------------------+
+```
+
+Note: The above architecture illustrates all the components. The final components that get spawned depend upon the chosen deployment pattern.
+
+### Example Architectures
+
+> [!IMPORTANT]
+> Below we provide simple shell scripts that run the components for each configuration. Each shell script runs `dynamo run` to start the ingress and uses `python3 main.py` to start the vLLM workers. You can run each command in separate terminals for better log visibility.
+
+#### Aggregated Serving
+
 ```bash
-curl localhost:8000/v1/completions \
+# requires one gpu
+cd examples/vllm_v1
+bash launch/agg.sh
+```
+
+#### Aggregated Serving with KV Routing
+
+```bash
+# requires two gpus
+cd examples/vllm_v1
+bash launch/agg_router.sh
+```
+
+#### Disaggregated Serving
+
+```bash
+# requires two gpus
+cd examples/vllm_v1
+bash launch/disagg.sh
+```
+
+#### Disaggregated Serving with KV Routing
+
+```bash
+# requires three gpus
+cd examples/vllm_v1
+bash launch/disagg_router.sh
+```
+
+#### Single Node Data Parallel Attention / Expert Parallelism
+
+This example is not meant to be performant but showcases dynamo routing to data parallel workers
+
+```bash
+# requires four gpus
+cd examples/vllm_v1
+bash launch/dep.sh
+```
+
+
+> [!TIP]
+> Run a disaggregated example and try adding another prefill worker once the setup is running! The system will automatically discover and utilize the new worker.
+
+### Testing the Deployment
+
+Send a test request to verify your deployment:
+
+```bash
+curl localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    "prompt": "In the heart of Eldoria...",
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [
+    {
+        "role": "user",
+        "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
+    }
+    ],
     "stream": false,
     "max_tokens": 30
   }'
 ```
 
-For more detailed explenations, refer to the main [LLM examples README](../llm/README.md).
+## Configuration
 
+vLLM workers are configured through command-line arguments. Key parameters include:
 
+- `--endpoint`: Dynamo endpoint in format `dyn://namespace.component.endpoint`
+- `--model`: Model to serve (e.g., `Qwen/Qwen3-0.6B`)
+- `--is-prefill-worker`: Enable prefill-only mode for disaggregated serving
+- `--metrics-endpoint-port`: Port for publishing KV metrics to Dynamo
 
-## Deepseek R1
+See `args.py` for the full list of configuration options and their defaults.
 
-To run DSR1 model please first follow the Ray setup from the [multinode documentation](../../docs/examples/multinode.md).
-
-### Aggregated Deployment
-
-```bash
-cd examples/vllm_v1
-dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/agg.yaml
-```
-
-
-### Disaggregated Deployment
-
-To create frontend with a single decode worker:
-```bash
-cd examples/vllm_v1
-dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/disagg.yaml
-```
-
-To create a single decode worker:
-```bash
-cd examples/vllm_v1
-dynamo serve components.worker:VllmDecodeWorker -f configs/deepseek_r1/disagg.yaml
-```
-
-To create a single prefill worker:
-```bash
-cd examples/vllm_v1
-dynamo serve components.worker:VllmPrefillWorker -f configs/deepseek_r1/disagg.yaml
-```
-
-### Data Parallelism Deployment
-
-Additional configuration steps will be required for enabling DP for DSR1 model,
-as it typically requires setting up the DP groups across nodes.
-`configs/deepseek_r1/agg_dp.yaml` and `configs/deepseek_r1/disagg_dp.yaml` will be
-the replacement for aggregated deployment and disaggregated deployment.
-The below demonstration will use deployment of a single worker as an example,
-the reader should apply the same to any `dynamo serve` command that will create
-a worker.
-
-To create a single decode worker, take note of the IP address, referred as <head-ip> below, of the node, and:
-```bash
-cd examples/vllm_v1
-dynamo serve components.worker:VllmDecodeWorker -f configs/deepseek_r1/disagg_dp.yaml --VllmDecodeWorker.data_parallel_address=<head-ip>
-```
-
-The above command will create 1 of the 2 DP groups and the worker will be consdiered
-the head of the DP groups. Next we need to create a `VllmDpWorker` to create the rest of the DP groups, one for each group.
-
-```bash
-cd examples/vllm_v1
-# 'data_parallel_start_rank' == `dp_group_index * data_parallel_size_local`
-dynamo serve components.worker:VllmDpWorker -f configs/deepseek_r1/disagg_dp.yaml --VllmDpWorker.data_parallel_address=<head-ip> --VllmDpWorker.data_parallel_start_rank=8
-
-# repeat above until all DP groups are created
-```
-
-
-### Wide EP
-
-If running oustide of Dynamo vLLM V1 container please follow [vLLM guide](https://github.com/vllm-project/vllm/tree/main/tools/ep_kernels) to install EP kernels and install [DeepGEMM](https://github.com/deepseek-ai/DeepGEMM).
-
-To run DSR1 with DEP16 (EP16 MoE and DP16 for other layers) with [DeepEP kernels](https://github.com/deepseek-ai/DeepEP) run on head node:
-
-```
-export VLLM_ALL2ALL_BACKEND="deepep_low_latency" # or "deepep_high_throughput"
-export VLLM_USE_DEEP_GEMM=1
-export GLOO_SOCKET_IFNAME=eth3 # or another non IB interface that you can find with `ifconfig -a`
-cd examples/vllm_v1
-dynamo serve components.worker:VllmDecodeWorker -f configs/deepseek_r1/disagg_dp.yaml --VllmDecodeWorker.data_parallel_address=<head-ip> --VllmDecodeWorker.enable_expert_parallel=true
-```
-
-on 2nd node:
-
-```
-export VLLM_ALL2ALL_BACKEND="deepep_low_latency" # or "deepep_high_throughput"
-export VLLM_USE_DEEP_GEMM=1
-export GLOO_SOCKET_IFNAME=eth3 # or another non IB interface that you can find with `ifconfig -a`
-cd examples/vllm_v1
-# 'data_parallel_start_rank' == `dp_group_index * data_parallel_size_local`
-dynamo serve components.worker:VllmDpWorker -f configs/deepseek_r1/disagg_dp.yaml --VllmDpWorker.data_parallel_address=<head-ip> --VllmDpWorker.data_parallel_start_rank=8 --VllmDpWorker.enable_expert_parallel=true
-```
-
-## Testing
-
-Send a test request using curl:
-```bash
-curl localhost:8000/v1/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "deepseek-ai/DeepSeek-R1",
-    "prompt": "In the heart of Eldoria...",
-    "stream": false,
-    "max_tokens": 30
-  }'
-```
+The [documentation](https://docs.vllm.ai/en/v0.9.2/configuration/serve_args.html?h=serve+arg) for the vLLM CLI args points to running 'vllm serve --help' to see what CLI args can be added. We use the same argument parser as vLLM.

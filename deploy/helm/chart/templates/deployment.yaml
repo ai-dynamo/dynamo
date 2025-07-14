@@ -79,4 +79,35 @@ spec:
         - name: NATS_SERVER
           value: "{{ $.Values.natsAddr }}"
         {{- end }}
+        ports:
+        - name: health
+          containerPort: {{ $.Values.healthPort | default 5000 }}
+        livenessProbe:
+          {{- if $serviceSpec.extraPodSpec.mainContainer.livenessProbe }}
+          {{ $serviceSpec.extraPodSpec.mainContainer.livenessProbe | toYaml | nindent 10 }}
+          {{- else }}
+          initialDelaySeconds: 60
+          periodSeconds: 60
+          timeoutSeconds: 5
+          failureThreshold: 10
+          successThreshold: 1
+          httpGet:
+            path: /healthz
+            port: health
+            scheme: HTTP
+          {{- end }}
+        readinessProbe:
+          {{- if $serviceSpec.extraPodSpec.mainContainer.readinessProbe }}
+          {{ $serviceSpec.extraPodSpec.mainContainer.readinessProbe | toYaml | nindent 10 }}
+          {{- else }}
+          initialDelaySeconds: 60
+          periodSeconds: 60
+          timeoutSeconds: 5
+          failureThreshold: 10
+          successThreshold: 1
+          httpGet:
+            path: /readyz
+            port: health
+            scheme: HTTP
+          {{- end }}
 {{- end }}

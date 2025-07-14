@@ -36,6 +36,10 @@ testing-nixl  = ["dep:nixl-sys"]
 block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
 sentencepiece = ["dep:sentencepiece"]
 
+[[bench]]
+name = "tokenizer"
+harness = false
+
 [dependencies]
 # repo
 dynamo-runtime = { workspace = true }
@@ -126,6 +130,7 @@ rmp-serde = "1.3"
 
 [dev-dependencies]
 assert_matches = "1.5"
+criterion = { version = "0.3", features = ["html_reports"] }
 hf-hub = { workspace = true }
 proptest = "1.5.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
