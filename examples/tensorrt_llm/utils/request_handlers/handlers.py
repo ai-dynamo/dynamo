@@ -35,13 +35,10 @@ class RequestHandlerFactory:
         }
 
     def _validate_config(self, config: RequestHandlerConfig):
-        mode_value = (
-            config.disaggregation_mode.value
-            if hasattr(config.disaggregation_mode, "value")
-            else str(config.disaggregation_mode)
-        )
-        if mode_value not in self.handlers:
-            raise ValueError(f"Invalid disaggregation_mode '{mode_value}'")
+        if config.disaggregation_mode.value not in self.handlers:
+            raise ValueError(
+                f"Invalid disaggregation_mode '{config.disaggregation_mode.value}'"
+            )
 
         if not config.next_client:
             if (

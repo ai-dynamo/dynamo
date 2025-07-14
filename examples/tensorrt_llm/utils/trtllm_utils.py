@@ -126,12 +126,14 @@ def cmd_line_args():
         "--disaggregation-mode",
         type=str,
         default=DEFAULT_DISAGGREGATION_MODE,
+        choices=[mode.value for mode in DisaggregationMode],
         help=f"Mode to use for disaggregation. Default: {DEFAULT_DISAGGREGATION_MODE}",
     )
     parser.add_argument(
         "--disaggregation-strategy",
         type=str,
         default=DEFAULT_DISAGGREGATION_STRATEGY,
+        choices=[strategy.value for strategy in DisaggregationStrategy],
         help=f"Strategy to use for disaggregation. Default: {DEFAULT_DISAGGREGATION_STRATEGY}",
     )
     parser.add_argument(
@@ -142,8 +144,23 @@ def cmd_line_args():
     )
     args = parser.parse_args()
 
+    config = Config()
+    # Set the model path and served model name.
+    config.model_path = args.model_path
+    if args.served_model_name:
+        config.served_model_name = args.served_model_name
+    else:
+        # This becomes an `Option` on the Rust side
+        config.served_model_name = None
+
+    # Set the disaggregation mode and strategy.
+    config.disaggregation_mode = DisaggregationMode(args.disaggregation_mode)
+    config.disaggregation_strategy = DisaggregationStrategy(
+        args.disaggregation_strategy
+    )
+
     # Set the appropriate defaults for the endpoint and next endpoint.
-    if is_first_worker(args):
+    if is_first_worker(config):
         if args.endpoint == "":
             args.endpoint = DEFAULT_ENDPOINT
         if (
@@ -156,17 +173,7 @@ def cmd_line_args():
             args.endpoint = DEFAULT_NEXT_ENDPOINT
         if args.next_endpoint != "":
             raise ValueError("Next endpoint is not allowed for the next worker")
-
     endpoint = args.endpoint
-
-    config = Config()
-    config.model_path = args.model_path
-    if args.served_model_name:
-        config.served_model_name = args.served_model_name
-    else:
-        # This becomes an `Option` on the Rust side
-        config.served_model_name = None
-
     parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
         endpoint
     )
@@ -174,12 +181,11 @@ def cmd_line_args():
     config.namespace = parsed_namespace
     config.component = parsed_component_name
     config.endpoint = parsed_endpoint_name
+    config.next_endpoint = args.next_endpoint
+
     config.tensor_parallel_size = args.tensor_parallel_size
     config.kv_block_size = args.kv_block_size
     config.extra_engine_args = args.extra_engine_args
     config.publish_events_and_metrics = args.publish_events_and_metrics
-    config.disaggregation_mode = args.disaggregation_mode
-    config.disaggregation_strategy = args.disaggregation_strategy
-    config.next_endpoint = args.next_endpoint
 
     return config
