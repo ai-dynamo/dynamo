@@ -172,7 +172,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
     prefill_worker_client = (
-        await runtime.namespace("dynamo")
+        await runtime.namespace(config.namespace)
         .component("prefill")  # TODO don't hardcode
         .endpoint("generate")
         .client()
