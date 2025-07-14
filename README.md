@@ -50,7 +50,7 @@ Built in Rust for performance and in Python for extensibility, Dynamo is fully o
 
 ## Framework Support Matrix
 
-| Feature | [vLLM] | [SGLang] | [TensorRT-LLM] |
+| Feature | vLLM | SGLang | TensorRT-LLM |
 |---------|----------------------|----------------------------|----------------------------------------|
 | **Disaggregated Serving** | ✅ | ✅ | ✅ |
 | **Conditional Disaggregation** | ✅ | 🚧 | 🚧 |

@@ -141,18 +141,20 @@ cd $DYNAMO_ROOT/examples/sglang
 
 ## Advanced Examples
 
-Below we provide a selected list of advanced deployment examples. Please open up an issue if you'd like to see a specific example!
+Below we provide a selected list of advanced examples. Please open up an issue if you'd like to see a specific example!
 
-### Deploying multi-node models
-- **[Deploy a multi-node model](docs/multinode-examples.md)**
+### Run on multi-node
+- **[Run a multi-node model](docs/multinode-examples.md)**
 
 ### Large scale P/D disaggregation with WideEP
-- **[Deploying DeepSeek-R1 on 104+ H100s](docs/dsr1-wideep-h100.md)**
-- **[Deploying DeepSeek-R1 on GB200s](docs/dsr1-wideep-gb200.md)**
+- **[Run DeepSeek-R1 on 104+ H100s](docs/dsr1-wideep-h100.md)**
+- **[Run DeepSeek-R1 on GB200s](docs/dsr1-wideep-gb200.md)**
 
 ### Speculative Decoding
 - **[Deploying DeepSeek-R1 with MTP - coming soon!](.)**
 
-## SGLang Utilities and Tools
-
+### SGLang Utilities and Tools
 - **[HTTP Server to flush cache and record MoE expert distribution data](docs/sgl-http-server.md)**
+
+## Kubernetes
+- **[Deploying Dynamo with SGLang on Kubernetes - coming soon!](.)**
