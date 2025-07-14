@@ -80,14 +80,14 @@ class RequestHandler:
         """Publish initial set of warmup metrics"""
         worker_stats = WorkerStats(
             request_active_slots=0,
-            request_total_slots=self.request_total_slots,
+            request_total_slots=1024,
             num_requests_waiting=0,
-            data_parallel_rank=self.dp_rank,
+            data_parallel_rank=0,
         )
 
         kv_stats = KvStats(
             kv_active_blocks=0,
-            kv_total_blocks=self.num_gpu_block,
+            kv_total_blocks=1024,
             gpu_cache_usage_perc=0,
             gpu_prefix_cache_hit_rate=0,
         )
