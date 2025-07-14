@@ -80,10 +80,7 @@ pub async fn run(
             (Box::pin(fut), Some(model.card().clone()))
         }
         EngineConfig::Dynamic(_) => {
-            // We can only get here for in=dyn out=vllm|sglang`, because vllm and sglang are a
-            // subprocess that we talk to like a remote endpoint.
-            // That means the vllm/sglang subprocess is doing all the work, we are idle.
-            (never_ready(), None)
+            unreachable!("An endpoint input will never have a Dynamic engine");
         }
     };
 
@@ -106,8 +103,4 @@ pub async fn run(
     }
 
     Ok(())
-}
-
-fn never_ready() -> Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'static>> {
-    Box::pin(std::future::pending::<anyhow::Result<()>>())
 }

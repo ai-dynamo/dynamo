@@ -21,16 +21,6 @@ pub enum Output {
     #[cfg(feature = "llamacpp")]
     /// Run inference using llama.cpp
     LlamaCpp,
-
-    /// Run inference using sglang
-    SgLang,
-
-    /// Run inference using trtllm
-    Trtllm,
-
-    // Start vllm in a sub-process connecting via nats
-    // Sugar for `python vllm_inc.py --endpoint <thing> --model <thing>`
-    Vllm,
 }
 
 impl TryFrom<&str> for Output {
@@ -43,10 +33,6 @@ impl TryFrom<&str> for Output {
 
             #[cfg(feature = "llamacpp")]
             "llamacpp" | "llama_cpp" => Ok(Output::LlamaCpp),
-
-            "sglang" => Ok(Output::SgLang),
-            "trtllm" => Ok(Output::Trtllm),
-            "vllm" => Ok(Output::Vllm),
 
             "echo_full" => Ok(Output::EchoFull),
             "echo_core" => Ok(Output::EchoCore),
@@ -76,10 +62,6 @@ impl fmt::Display for Output {
             #[cfg(feature = "llamacpp")]
             Output::LlamaCpp => "llamacpp",
 
-            Output::SgLang => "sglang",
-            Output::Trtllm => "trtllm",
-            Output::Vllm => "vllm",
-
             Output::EchoFull => "echo_full",
             Output::EchoCore => "echo_core",
 
@@ -102,10 +84,6 @@ impl Output {
         {
             out.push(Output::LlamaCpp.to_string());
         }
-
-        out.push(Output::SgLang.to_string());
-        out.push(Output::Trtllm.to_string());
-        out.push(Output::Vllm.to_string());
 
         out
     }
