@@ -63,6 +63,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
+    m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
+    m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
 
     m.add_class::<DistributedRuntime>()?;
     m.add_class::<CancellationToken>()?;
@@ -72,8 +74,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Client>()?;
     m.add_class::<EtcdClient>()?;
     m.add_class::<AsyncResponseStream>()?;
-    m.add_class::<llm::kv::KvRouter>()?;
     m.add_class::<llm::disagg_router::DisaggregatedRouter>()?;
+    m.add_class::<llm::entrypoint::EntrypointArgs>()?;
+    m.add_class::<llm::entrypoint::EngineConfig>()?;
+    m.add_class::<llm::entrypoint::EngineType>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?;
     m.add_class::<llm::preprocessor::OAIChatPreprocessor>()?;
@@ -96,6 +100,10 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<http::HttpAsyncEngine>()?;
     m.add_class::<EtcdKvCache>()?;
     m.add_class::<ModelType>()?;
+    m.add_class::<llm::kv::ForwardPassMetrics>()?;
+    m.add_class::<llm::kv::WorkerStats>()?;
+    m.add_class::<llm::kv::KvStats>()?;
+    m.add_class::<llm::kv::SpecDecodeStats>()?;
     m.add_class::<RouterMode>()?;
 
     engine::add_to_module(m)?;
@@ -214,7 +222,7 @@ struct Endpoint {
 #[pyclass]
 #[derive(Clone)]
 struct Client {
-    router: rs::pipeline::PushRouter<serde_json::Value, serde_json::Value>,
+    router: rs::pipeline::PushRouter<serde_json::Value, RsAnnotated<serde_json::Value>>,
 }
 
 #[pyclass(eq, eq_int)]
@@ -485,13 +493,12 @@ impl Endpoint {
         let inner = self.inner.clone();
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
             let client = inner.client().await.map_err(to_pyerr)?;
-            let push_router =
-                rs::pipeline::PushRouter::<serde_json::Value, serde_json::Value>::from_client(
-                    client,
-                    Default::default(),
-                )
-                .await
-                .map_err(to_pyerr)?;
+            let push_router = rs::pipeline::PushRouter::<
+                serde_json::Value,
+                RsAnnotated<serde_json::Value>,
+            >::from_client(client, Default::default())
+            .await
+            .map_err(to_pyerr)?;
             Ok(Client {
                 router: push_router,
             })
@@ -757,23 +764,13 @@ impl Client {
 }
 
 async fn process_stream(
-    stream: EngineStream<serde_json::Value>,
+    stream: EngineStream<RsAnnotated<serde_json::Value>>,
     tx: tokio::sync::mpsc::Sender<RsAnnotated<PyObject>>,
 ) {
     let mut stream = stream;
     while let Some(response) = stream.next().await {
         // Convert the response to a PyObject using Python's GIL
-        // TODO: Remove the clone, but still log the full JSON string on error. But how?
-        let annotated: RsAnnotated<serde_json::Value> = match serde_json::from_value(
-            response.clone(),
-        ) {
-            Ok(a) => a,
-            Err(err) => {
-                tracing::error!(%err, %response, "process_stream: Failed de-serializing JSON into RsAnnotated");
-                break;
-            }
-        };
-
+        let annotated: RsAnnotated<serde_json::Value> = response;
         let annotated: RsAnnotated<PyObject> = annotated.map_data(|data| {
             let result = Python::with_gil(|py| match pythonize::pythonize(py, &data) {
                 Ok(pyobj) => Ok(pyobj.into()),

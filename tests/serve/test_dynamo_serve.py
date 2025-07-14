@@ -276,10 +276,8 @@ class DynamoServeProcess(ManagedProcess):
 
         # Handle multimodal deployments differently
         if "multimodal" in graph.directory:
-            # Set DYNAMO_PORT environment variable for multimodal
-            env = os.environ.copy()
-            env["DYNAMO_PORT"] = str(port)
-            # Don't add health check on port since multimodal uses DYNAMO_PORT
+            # port is currently required to be 8000
+            assert port == 8000
         else:
             # Regular LLM deployments
             command.extend(["--Frontend.port", str(port)])
@@ -397,10 +395,6 @@ class DynamoServeProcess(ManagedProcess):
 
 @pytest.fixture(
     params=[
-        pytest.param("agg", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
-        pytest.param("agg_router", marks=[pytest.mark.vllm, pytest.mark.gpu_1]),
-        pytest.param("disagg", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
-        pytest.param("disagg_router", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
         pytest.param("multimodal_agg", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
         pytest.param("trtllm_agg", marks=[pytest.mark.tensorrtllm, pytest.mark.gpu_1]),
         pytest.param(

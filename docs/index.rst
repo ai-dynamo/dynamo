@@ -30,8 +30,15 @@ The NVIDIA Dynamo Platform is a high-performance, low-latency inference framewor
    - `Dynamo examples repo <https://github.com/ai-dynamo/examples>`_
 
 
+Quick Start
+-----------------
+Follow the :doc:`Quick Guide to install Dynamo Platform <guides/dynamo_deploy/quickstart>`.
+
+
 Dive in: Examples
 -----------------
+
+The examples below assume you build the latest image yourself from source. If using a prebuilt image follow the examples from the corresponding branch.
 
 .. grid:: 1 2 2 2
     :gutter: 3
@@ -79,7 +86,8 @@ Dive in: Examples
    Disaggregated Serving <architecture/disagg_serving.md>
    KV Block Manager <architecture/kvbm_intro.rst>
    KV Cache Routing <architecture/kv_cache_routing.md>
-   Planner <architecture/planner.md>
+   Planner <architecture/planner_intro.rst>
+   Dynamo Architecture Flow <architecture/dynamo_flow.md>
 
 .. toctree::
    :hidden:
@@ -104,6 +112,7 @@ Dive in: Examples
    :hidden:
    :caption: Deployment Guides
 
+   Dynamo Deploy Quickstart <guides/dynamo_deploy/quickstart.md>
    Dynamo Cloud Kubernetes Platform <guides/dynamo_deploy/dynamo_cloud.md>
    Deploying Dynamo Inference Graphs to Kubernetes using the Dynamo Cloud Platform <guides/dynamo_deploy/operator_deployment.md>
    Manual Helm Deployment <guides/dynamo_deploy/manual_helm_deployment.md>
@@ -135,5 +144,11 @@ Dive in: Examples
    Multinode Examples <examples/multinode.md>
    LLM Deployment Examples using TensorRT-LLM <examples/trtllm.md>
 
+.. toctree::
+   :hidden:
+   :caption: Reference
+
+   Glossary <dynamo_glossary.md>
+   KVBM Reading <architecture/kvbm_reading.md>
 
 

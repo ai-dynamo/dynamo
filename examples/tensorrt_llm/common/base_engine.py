@@ -314,7 +314,6 @@ class BaseTensorrtLLMEngine:
             ):
                 yield remote_prefill_response
                 return
-            num_output_tokens_so_far = len(remote_prefill_response["token_ids"])
 
             # Decode the disaggregated params from the remote prefill response
             # Decode the disaggregated params from the remote prefill response
@@ -325,11 +324,6 @@ class BaseTensorrtLLMEngine:
                     )
                 )
             )
-
-            # Send the first token response to the client
-            first_token_response = remote_prefill_response
-            first_token_response.pop("disaggregated_params")
-            yield first_token_response
 
             # Set the disaggregated params to generation_only for the rest of the generation
             disaggregated_params.request_type = "generation_only"

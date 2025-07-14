@@ -91,24 +91,4 @@ cd examples/hello_world
 dynamo build hello_world:Frontend
 ```
 
-### `deploy`
-
-Use `deploy` to create a pipeline on Dynamo Cloud using either interactive prompts or a YAML configuration file. For more details, see [Deploying Inference Graphs to Kubernetes](dynamo_deploy/README.md).
-
-#### Usage
-```bash
-dynamo deploy [PIPELINE]
-```
-
-#### Arguments
-* `PIPELINE`: The pipeline to deploy; defaults to *None*; required
-
-#### Flags
-* `--name`/`-n`: Set the deployment name. Defaults to *None*; required
-* `--config-file`/`-f`: Specify the configuration file path. Defaults to *None*; required
-* `--wait`/`--no-wait`: Choose whether to wait for deployment readiness. Defaults to wait
-* `--timeout`: Set maximum deployment time in seconds. Defaults to 3600
-* `--endpoint`/`-e`: Specify the Dynamo Cloud deployment endpoint. Defaults to *None*; required
-* `--help`/`-h`: Display command help
-
 For a detailed deployment example, see [Operator Deployment](dynamo_deploy/operator_deployment.md).

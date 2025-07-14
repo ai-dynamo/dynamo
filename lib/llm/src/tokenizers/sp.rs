@@ -57,21 +57,8 @@ impl Encoder for SentencePieceTokenizer {
             .encode(input)
             .map_err(|err| Error::msg(format!("Error encoding input: {}", err)))?;
 
-        let mut token_ids = Vec::new();
-        let mut tokens = Vec::new();
-        let mut spans = Vec::new();
-
-        for piece in encoding {
-            token_ids.push(piece.id);
-            tokens.push(piece.piece);
-            spans.push((piece.span.0 as usize, piece.span.1 as usize));
-        }
-
-        Ok(Encoding {
-            token_ids,
-            tokens,
-            spans,
-        })
+        let token_ids = encoding.into_iter().map(|piece| piece.id).collect();
+        Ok(Encoding::Sp(token_ids))
     }
 
     /// Encodes multiple string inputs into tokens using the SentencePiece model.

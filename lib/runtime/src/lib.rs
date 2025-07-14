@@ -36,6 +36,7 @@ pub use config::RuntimeConfig;
 pub mod component;
 pub mod discovery;
 pub mod engine;
+pub mod http_server;
 pub mod logging;
 pub mod pipeline;
 pub mod prelude;
@@ -97,4 +98,7 @@ pub struct DistributedRuntime {
     is_static: bool,
 
     instance_sources: Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
+
+    // Start time for tracking uptime
+    start_time: std::time::Instant,
 }
