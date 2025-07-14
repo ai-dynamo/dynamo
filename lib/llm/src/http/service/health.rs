@@ -64,10 +64,8 @@ pub fn live_check_router(
 }
 
 async fn live_handler(
-    axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
+    axum::extract::State(_state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
-    // This will panic if we can get the list of models
-    let _ = state.manager().get_model_entries();
     (
         StatusCode::OK,
         Json(json!({
