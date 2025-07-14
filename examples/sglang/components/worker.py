@@ -68,12 +68,37 @@ class RequestHandler:
             self.zmq_context, zmq.PULL, self.engine.port_args.metrics_ipc_name, True
         )
 
+        self.init_publish()
         asyncio.create_task(self._receive_and_publish_metrics_loop())
 
         task = asyncio.create_task(self.create_metrics_publisher_endpoint())
         task.add_done_callback(
             lambda _: logging.debug("metrics publisher endpoint created")
         )
+
+    def init_publish(self):
+        """Publish initial set of warmup metrics"""
+        worker_stats = WorkerStats(
+            request_active_slots=0,
+            request_total_slots=self.request_total_slots,
+            num_requests_waiting=0,
+            data_parallel_rank=self.dp_rank,
+        )
+
+        kv_stats = KvStats(
+            kv_active_blocks=0,
+            kv_total_blocks=self.num_gpu_block,
+            gpu_cache_usage_perc=0,
+            gpu_prefix_cache_hit_rate=0,
+        )
+
+        metrics = ForwardPassMetrics(
+            worker_stats=worker_stats,
+            kv_stats=kv_stats,
+            spec_decode_stats=None,
+        )
+
+        self.metrics_publisher.publish(metrics)
 
     async def create_metrics_publisher_endpoint(self):
         logging.debug("Creating metrics publisher endpoint")
