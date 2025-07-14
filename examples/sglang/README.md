@@ -35,7 +35,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ## Table of Contents
 - [Feature Support Matrix](#feature-support-matrix)
-- [Prerequisites](#prerequisites)
+- [Quick Start](#quick-start)
 - [Run Single Node Examples](#run-single-node-examples)
 - [Multi-Node and Advanced Examples](#advanced-examples)
 - [Deploy on SLURM or Kubernetes](#deployment)
@@ -62,9 +62,11 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | **GB200 Support**  | 🚧     | WIP [PR](https://github.com/sgl-project/sglang/pull/7556) |
 
 
-## Prerequisites
+## Quick Start
 
-### 1. Start NATS and ETCD in the background
+Below we provide a guide that lets you run all of our the common deployment patterns on a single node. See our different [architectures](../llm/README.md#deployment-architectures) for a high level overview of each pattern and the architecture diagram for each.
+
+### Start NATS and ETCD in the background
 
 Start using [Docker Compose](../../deploy/metrics/docker-compose.yml)
 
@@ -72,7 +74,7 @@ Start using [Docker Compose](../../deploy/metrics/docker-compose.yml)
 docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
-### 2. Build container
+### Build container
 
 ```bash
 # pull our pre-build sglang runtime container
@@ -81,7 +83,7 @@ docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.3.2
 ./container/build.sh --framework sglang
 ```
 
-### 3. Run container
+### Run container
 
 ```bash
 ./container/run.sh -it --framework sglang
@@ -94,7 +96,6 @@ docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.3.2
 >
 > Additionally - because we use sglang's argument parser, you can pass in any argument that sglang supports to the worker!
 
-Below we provide a quick start guide that lets you run all of our the common deployment patterns on a single node. We have a much more comprehensive guide for advanced deployments below. See our different [architectures](../llm/README.md#deployment-architectures) for a high level overview of each pattern and the architecture diagram for each.
 
 ### Aggregated Serving
 

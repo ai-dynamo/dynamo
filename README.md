@@ -41,7 +41,7 @@ Large language models are quickly outgrowing the memory and compute budget of an
 NVIDIA Dynamo is designed to be inference engine agnostic and captures LLM-specific capabilities such as:
 
 - **Disaggregated prefill & decode inference** – Maximizes GPU throughput and facilitates trade-off between throughput and latency
-- **Dynamic GPU scheduling** – Optimizes performance based on fluctuating demand  
+- **Dynamic GPU scheduling** – Optimizes performance based on fluctuating demand
 - **LLM-aware request routing** – Eliminates unnecessary KV cache re-computation
 - **Accelerated data transfer** – Reduces inference response time using NIXL
 - **KV cache offloading** – Leverages multiple memory hierarchies for higher system throughput
@@ -63,9 +63,9 @@ Built in Rust for performance and in Python for extensibility, Dynamo is fully o
 
 To learn more about each framework and their capabilities, check out each framework's README!
 
-- **[vLLM](examples/llm/README.md)** 
-- **[SGLang](examples/sglang/README.md)** 
-- **[TensorRT-LLM](examples/tensorrt_llm/README.md)** 
+- **[vLLM](examples/llm/README.md)**
+- **[SGLang](examples/sglang/README.md)**
+- **[TensorRT-LLM](examples/tensorrt_llm/README.md)**
 
 ## Deployment Architectures
 
