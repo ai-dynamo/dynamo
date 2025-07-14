@@ -1,6 +1,7 @@
 # Quickstart
 
 Before deploying your inference graphs you need to install the Dynamo Inference Platform and the Dynamo Cloud.
+You could install from [Published Artifacts](#1-installing-from-published-artifacts) or [Source](#2-installing-from-source)
 
 ## 1. Installing from Published Artifacts
 
@@ -135,22 +136,6 @@ helm install dynamo-platform ./platform/ \
 
 ## Explore Examples
 
-### Hello World
-
-For a basic example that doesn't require a GPU, see the [Hello World](../../examples/hello_world.md)
-
-### LLM
-
-Create a Kubernetes secret containing your sensitive values if needed:
-
-```bash
-export HF_TOKEN=your_hf_token
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN=${HF_TOKEN} \
-  -n ${NAMESPACE}
-```
-
-
 Pick your deployment destination.
 
 If local
@@ -164,9 +149,23 @@ If kubernetes
 export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com
 ```
 
+If deploying to Kubernetes, create a Kubernetes secret containing your sensitive values if needed:
+
 ```bash
-# Go to your main dynamo directory.
-cd ../../../
-kubectl apply -f examples/llm/deploy/agg.yaml -n $NAMESPACE
+export HF_TOKEN=your_hf_token
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN=${HF_TOKEN} \
+  -n ${NAMESPACE}
 ```
+
+Example are stored in the [Examples Folder](../../examples/README.md)
+
+Follow the most basic ones in the dedicated guides below:
+
+[Hello World](../../examples/hello_world.md)
+
+[LLM](../../examples/llm_deployment.md)
+
+
+
 

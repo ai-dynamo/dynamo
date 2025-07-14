@@ -37,13 +37,11 @@ deploy/
 The Dynamo Cloud Platform provides a managed deployment experience with:
 - Automated infrastructure management
 - Built-in monitoring and metrics
-- Simplified deployment process via `dynamo deploy` CLI commands
 - Production-ready configurations
 - Managed NATS and etcd dependencies
 
 For detailed instructions, see:
 - [Dynamo Cloud Platform Guide](../docs/guides/dynamo_deploy/dynamo_cloud.md)
-- [Operator Deployment Guide](../docs/guides/dynamo_deploy/operator_deployment.md)
 
 ### 2. Manual Deployment with Helm Charts
 
@@ -76,14 +74,3 @@ Documentation:
 
 To help you get started, we provide several example deployments:
 
-### Hello World Example
-A basic example to learn Dynamo deployment: [Hello World Example](../examples/hello_world/README.md#deploying-to-and-running-the-example-in-kubernetes)
-- Shows how to deploy a simple three-service pipeline that processes text
-- Provides step-by-step instructions for building your service and testing with port forwarding
-- Includes sample output showing the text flow between services
-
-### LLM Examples
-Example for deploying LLM services: [LLM Example](../examples/llm/README.md#deploy-to-kubernetes)
-- Demonstrates deploying and making inference requests against LLM models
-- Includes examples for both aggregated and disaggregated serving
-- Provides detailed deployment steps and testing instructions
