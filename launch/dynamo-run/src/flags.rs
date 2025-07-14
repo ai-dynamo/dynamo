@@ -13,13 +13,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 use clap::ValueEnum;
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_llm::local_model::LocalModel;
+use dynamo_llm::mocker::protocols::MockEngineArgs;
 use dynamo_runtime::pipeline::RouterMode as RuntimeRouterMode;
 
 use crate::Output;
@@ -212,6 +212,9 @@ impl Flags {
                     anyhow::bail!("--model-path should refer to a GGUF file. llama_cpp does not support safetensors.");
                 }
             }
+            Output::Mocker => {
+                // nothing to check here
+            }
         }
         Ok(())
     }
@@ -228,18 +231,13 @@ impl Flags {
         )
     }
 
-    /// Load extra engine arguments from a JSON file
-    /// Returns a HashMap of parameter names to values
-    pub fn load_extra_engine_args(
-        &self,
-    ) -> anyhow::Result<Option<HashMap<String, serde_json::Value>>> {
-        if let Some(path) = &self.extra_engine_args {
-            let file_content = std::fs::read_to_string(path)?;
-            let args: HashMap<String, serde_json::Value> = serde_json::from_str(&file_content)?;
-            Ok(Some(args))
-        } else {
-            Ok(None)
-        }
+    pub fn mocker_config(&self) -> MockEngineArgs {
+        let Some(path) = &self.extra_engine_args else {
+            tracing::warn!("Did not specify extra engine args. Using default mocker args.");
+            return MockEngineArgs::default();
+        };
+        MockEngineArgs::from_json_file(path)
+            .unwrap_or_else(|e| panic!("Failed to build mocker engine args from {path:?}: {e}"))
     }
 }
 
