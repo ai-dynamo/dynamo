@@ -1,12 +1,20 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 import argparse
 from typing import Optional
+
+from utils.request_handlers.handler_base import (
+    DisaggregationMode,
+    DisaggregationStrategy,
+)
 
 # Default endpoint for the next worker.
 DEFAULT_ENDPOINT = "dyn://dynamo.tensorrt_llm.generate"
 DEFAULT_MODEL_PATH = "TinyLlama-1.1B-Instruct"
 DEFAULT_NEXT_ENDPOINT = "dyn://dynamo.tensorrt_llm_next.generate"
-DEFAULT_DISAGGREGATION_STRATEGY = "decode_first"
-DEFAULT_DISAGGREGATION_MODE = "prefill_and_decode"
+DEFAULT_DISAGGREGATION_STRATEGY = DisaggregationStrategy.DECODE_FIRST
+DEFAULT_DISAGGREGATION_MODE = DisaggregationMode.AGGREGATED
 
 
 class Config:
@@ -21,8 +29,8 @@ class Config:
     kv_block_size: int
     extra_engine_args: str
     publish_events_and_metrics: bool
-    disaggregation_mode: str
-    disaggregation_strategy: str
+    disaggregation_mode: DisaggregationMode
+    disaggregation_strategy: DisaggregationStrategy
     next_endpoint: str
 
     def __str__(self) -> str:
@@ -46,16 +54,16 @@ def is_first_worker(config):
     """
     Check if the current worker is the first worker in the disaggregation chain.
     """
-    is_primary_worker = config.disaggregation_mode == "prefill_and_decode"
+    is_primary_worker = config.disaggregation_mode == DisaggregationMode.AGGREGATED
     if not is_primary_worker:
-        is_primary_worker = (config.disaggregation_strategy == "prefill_first") and (
-            config.disaggregation_mode == "prefill"
-        )
+        is_primary_worker = (
+            config.disaggregation_strategy == DisaggregationStrategy.PREFILL_FIRST
+        ) and (config.disaggregation_mode == DisaggregationMode.PREFILL)
 
     if not is_primary_worker:
-        is_primary_worker = (config.disaggregation_strategy == "decode_first") and (
-            config.disaggregation_mode == "decode"
-        )
+        is_primary_worker = (
+            config.disaggregation_strategy == DisaggregationStrategy.DECODE_FIRST
+        ) and (config.disaggregation_mode == DisaggregationMode.DECODE)
 
     return is_primary_worker
 
@@ -68,8 +76,8 @@ def parse_endpoint(endpoint: str) -> tuple[str, str, str]:
             f"Invalid endpoint format: '{endpoint}'. "
             "Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
         )
-
-    return tuple(endpoint_parts)
+    namespace, component, endpoint_name = endpoint_parts
+    return namespace, component, endpoint_name
 
 
 def cmd_line_args():

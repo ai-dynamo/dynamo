@@ -1,7 +1,14 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
 from dataclasses import dataclass
 
-from utils.request_handlers.handler_base import HandlerBase
+from utils.request_handlers.handler_base import (
+    DisaggregationMode,
+    DisaggregationStrategy,
+    HandlerBase,
+)
 
 
 @dataclass
@@ -14,8 +21,8 @@ class RequestHandlerConfig:
     engine: object
     default_sampling_params: object
     publisher: object
-    disaggregation_mode: str
-    disaggregation_strategy: str
+    disaggregation_mode: DisaggregationMode
+    disaggregation_strategy: DisaggregationStrategy
     next_client: object
 
 
@@ -28,23 +35,27 @@ class RequestHandlerFactory:
         }
 
     def _validate_config(self, config: RequestHandlerConfig):
-        if config.disaggregation_mode not in self.handlers:
-            raise ValueError(
-                f"Invalid disaggregation_mode '{config.disaggregation_mode}'. "
-                f"Supported modes: {list(self.handlers.keys())}"
-            )
+        mode_value = (
+            config.disaggregation_mode.value
+            if hasattr(config.disaggregation_mode, "value")
+            else str(config.disaggregation_mode)
+        )
+        if mode_value not in self.handlers:
+            raise ValueError(f"Invalid disaggregation_mode '{mode_value}'")
 
         if not config.next_client:
             if (
-                config.disaggregation_mode == "prefill"
-                and config.disaggregation_strategy == "prefill_first"
+                config.disaggregation_mode == DisaggregationMode.PREFILL
+                and config.disaggregation_strategy
+                == DisaggregationStrategy.PREFILL_FIRST
             ):
                 raise ValueError(
                     "Next client is required for the main worker when disaggregation_mode='prefill' and disaggregation_strategy='prefill_first'."
                 )
             if (
-                config.disaggregation_mode == "decode"
-                and config.disaggregation_strategy == "decode_first"
+                config.disaggregation_mode == DisaggregationMode.DECODE
+                and config.disaggregation_strategy
+                == DisaggregationStrategy.DECODE_FIRST
             ):
                 raise ValueError(
                     "Next client is required for the decode worker when disaggregation_mode='decode' and disaggregation_strategy='decode_first'."
@@ -52,7 +63,7 @@ class RequestHandlerFactory:
 
     def get_request_handler(self, config: RequestHandlerConfig) -> HandlerBase:
         self._validate_config(config)
-        return self.handlers[config.disaggregation_mode](config)
+        return self.handlers[config.disaggregation_mode.value](config)
 
 
 def get_request_handler(config: RequestHandlerConfig) -> HandlerBase:
@@ -96,12 +107,16 @@ class PrefillHandler(HandlerBase):
             if response_count > 1:
                 raise ValueError("Prefill response should be generated only once.")
 
-        if self.disaggregation_strategy == "prefill_first" and not self.check_error(
-            prefill_response
+        if (
+            self.disaggregation_strategy == DisaggregationStrategy.PREFILL_FIRST
+            and not self.check_error(prefill_response)
         ):
             # If operating under prefill_first strategy, the prefill handler needs to trigger
             # the decode handler.
-            request["disaggregated_params"] = prefill_response["disaggregated_params"]
+            if prefill_response is not None:
+                request["disaggregated_params"] = prefill_response[
+                    "disaggregated_params"
+                ]
             async for res in self.remote_decode(request):
                 yield res
         else:
@@ -122,7 +137,7 @@ class DecodeHandler(HandlerBase):
             yield res
 
     async def generate(self, request: dict):
-        if self.disaggregation_strategy == "decode_first":
+        if self.disaggregation_strategy == DisaggregationStrategy.DECODE_FIRST:
             prefill_response = None
             # If operating under decode_first strategy, the decode handler needs to trigger
             # the prefill handler.
@@ -133,12 +148,15 @@ class DecodeHandler(HandlerBase):
                 if response_count > 1:
                     raise ValueError("Prefill response should be generated only once.")
 
-            if self.check_error(prefill_response.data()):
+            if prefill_response is not None and self.check_error(
+                prefill_response.data()
+            ):
                 yield prefill_response.data()
                 return
-            request["disaggregated_params"] = prefill_response.data()[
-                "disaggregated_params"
-            ]
+            if prefill_response is not None:
+                request["disaggregated_params"] = prefill_response.data()[
+                    "disaggregated_params"
+                ]
 
         async for res in self.generate_locally(request):
             yield res

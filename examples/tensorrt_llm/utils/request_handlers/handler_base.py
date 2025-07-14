@@ -15,13 +15,28 @@
 
 import logging
 from dataclasses import asdict, dataclass
+from enum import Enum
 
+from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
 from utils.disagg_utils import DisaggregatedParams, DisaggregatedParamsCodec
 
+from dynamo.llm.tensorrtllm.engine import TensorRTLLMEngine
+from dynamo.llm.tensorrtllm.publisher import Publisher
 from dynamo.runtime.logging import configure_dynamo_logging
 
 configure_dynamo_logging()
+
+
+class DisaggregationMode(Enum):
+    AGGREGATED = "prefill_and_decode"
+    PREFILL = "prefill"
+    DECODE = "decode"
+
+
+class DisaggregationStrategy(Enum):
+    PREFILL_FIRST = "prefill_first"
+    DECODE_FIRST = "decode_first"
 
 
 @dataclass
@@ -31,10 +46,12 @@ class RequestHandlerConfig:
     """
 
     component: object
-    engine: object
-    default_sampling_params: object
-    publisher: object
-    disaggregation_mode: str
+    engine: TensorRTLLMEngine
+    default_sampling_params: SamplingParams
+    publisher: Publisher
+    disaggregation_mode: DisaggregationMode
+    disaggregation_strategy: DisaggregationStrategy
+    next_client: object
 
 
 class HandlerBase:
@@ -56,7 +73,7 @@ class HandlerBase:
         """
         Check if there is an error in the result.
         """
-        if self.disaggregation_mode == "prefill":
+        if self.disaggregation_mode == DisaggregationMode.PREFILL:
             return result["finish_reason"] == "error"
         else:
             return (
@@ -81,7 +98,7 @@ class HandlerBase:
 
         # Decode the disaggregated params from the request
         disaggregated_params = None
-        if self.disaggregation_mode == "prefill":
+        if self.disaggregation_mode == DisaggregationMode.PREFILL:
             request["stop_conditions"]["max_tokens"] = 1
             disaggregated_params = LlmDisaggregatedParams(request_type="context_only")
 
@@ -91,7 +108,10 @@ class HandlerBase:
             )
             disaggregated_params.request_type = "generation_only"
 
-        if self.disaggregation_mode == "decode" and disaggregated_params is None:
+        if (
+            self.disaggregation_mode == DisaggregationMode.DECODE
+            and disaggregated_params is None
+        ):
             raise ValueError("Disaggregated params are required for decode mode")
 
         num_output_tokens_so_far = 0
@@ -109,7 +129,9 @@ class HandlerBase:
 
         # TODO: Instead of True, we should use streaming from the request.
         # However, currently dynamo run does not send streaming in the request.
-        streaming = False if self.disaggregation_mode == "prefill" else True
+        streaming = (
+            False if self.disaggregation_mode == DisaggregationMode.PREFILL else True
+        )
 
         async for res in self.engine.llm.generate_async(
             inputs=inputs,
@@ -123,7 +145,7 @@ class HandlerBase:
                 self.publisher.start()
                 self.first_generation = False
 
-            if res.finished and self.disaggregation_mode != "prefill":
+            if res.finished and self.disaggregation_mode != DisaggregationMode.PREFILL:
                 yield {"finish_reason": "stop", "token_ids": []}
                 break
 
@@ -138,7 +160,7 @@ class HandlerBase:
                 out["finish_reason"] = output.finish_reason
             if output.stop_reason:
                 out["stop_reason"] = output.stop_reason
-            if self.disaggregation_mode == "prefill":
+            if self.disaggregation_mode == DisaggregationMode.PREFILL:
                 # Return the disaggregated params only when operating in prefill mode.
                 out["disaggregated_params"] = asdict(
                     DisaggregatedParamsCodec.encode(output.disaggregated_params)
