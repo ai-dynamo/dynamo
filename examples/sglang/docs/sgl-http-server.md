@@ -73,9 +73,6 @@ Stops the expert distribution recording process.
 #### GET /dump_expert_distribution_record
 Retrieves the collected expert distribution data.
 
-#### GET /health
-Returns health status of discovered SGLang components.
-
 ## Configuration
 
 The server accepts the following command-line arguments:
