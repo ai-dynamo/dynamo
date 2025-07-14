@@ -165,7 +165,7 @@ def cmd_line_args():
             args.endpoint = DEFAULT_ENDPOINT
         if (
             args.next_endpoint == ""
-            and args.disaggregation_mode != "prefill_and_decode"
+            and config.disaggregation_mode != DisaggregationMode.AGGREGATED
         ):
             args.next_endpoint = DEFAULT_NEXT_ENDPOINT
     else:

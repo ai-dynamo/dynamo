@@ -117,7 +117,7 @@ This figure shows an overview of the major components to deploy:
 ### Single-Node Deployments
 
 > [!IMPORTANT]
-> Below we provide some simple shell scripts that run the components for each configuration. Each shell script is simply running the `dynamo-run` to start up the ingress and using `python3` to start up the workers. You can easily take each commmand and run them in separate terminals.
+> Below we provide some simple shell scripts that run the components for each configuration. Each shell script is simply running the `dynamo-run` to start up the ingress and using `python3` to start up the workers. You can easily take each command and run them in separate terminals.
 
 #### Aggregated
 ```bash

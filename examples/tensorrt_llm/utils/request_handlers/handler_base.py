@@ -103,6 +103,8 @@ class HandlerBase:
             disaggregated_params = LlmDisaggregatedParams(request_type="context_only")
 
         if "disaggregated_params" in request:
+            if self.disaggregation_mode == DisaggregationMode.PREFILL:
+                raise ValueError("Cannot provide disaggregated_params in prefill mode")
             disaggregated_params = DisaggregatedParamsCodec.decode(
                 DisaggregatedParams(**request["disaggregated_params"])
             )

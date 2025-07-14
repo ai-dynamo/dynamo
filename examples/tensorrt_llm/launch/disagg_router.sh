@@ -44,7 +44,7 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 components/worker.py 
   --extra-engine-args  "$PREFILL_ENGINE_ARGS" \
   --disaggregation-mode prefill \
   --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
-  $EXTRA_PREFILL_ARGS &
+  "$EXTRA_PREFILL_ARGS" &
 PREFILL_PID=$!
 
 # run decode worker
@@ -54,4 +54,4 @@ CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 components/worker.py \
   --extra-engine-args  "$DECODE_ENGINE_ARGS" \
   --disaggregation-mode decode \
   --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
-  $EXTRA_DECODE_ARGS
+  "$EXTRA_DECODE_ARGS"

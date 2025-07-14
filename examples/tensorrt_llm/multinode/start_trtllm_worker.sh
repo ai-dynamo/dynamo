@@ -31,11 +31,11 @@ fi
 
 EXTRA_ARGS=""
 if [[ -n ${DISAGGREGATION_MODE} ]]; then
-  EXTRA_ARGS+="--disaggregation-mode ${DISAGGREGATION_MODE}"
+  EXTRA_ARGS+="--disaggregation-mode ${DISAGGREGATION_MODE} "
 fi
 
 if [[ -n ${DISAGGREGATION_STRATEGY} ]]; then
-  EXTRA_ARGS+="--disaggregation-strategy ${DISAGGREGATION_STRATEGY}"
+  EXTRA_ARGS+="--disaggregation-strategy ${DISAGGREGATION_STRATEGY} "
 fi
 
 trtllm-llmapi-launch \

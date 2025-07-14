@@ -8,22 +8,8 @@ from utils.request_handlers.handler_base import (
     DisaggregationMode,
     DisaggregationStrategy,
     HandlerBase,
+    RequestHandlerConfig,
 )
-
-
-@dataclass
-class RequestHandlerConfig:
-    """
-    Configuration for the request handler
-    """
-
-    component: object
-    engine: object
-    default_sampling_params: object
-    publisher: object
-    disaggregation_mode: DisaggregationMode
-    disaggregation_strategy: DisaggregationStrategy
-    next_client: object
 
 
 class RequestHandlerFactory:
@@ -144,14 +130,15 @@ class DecodeHandler(HandlerBase):
                 response_count += 1
                 if response_count > 1:
                     raise ValueError("Prefill response should be generated only once.")
-
+                
+            response_data = prefill_response.data()
             if prefill_response is not None and self.check_error(
-                prefill_response.data()
+                response_data
             ):
-                yield prefill_response.data()
+                yield response_data
                 return
             if prefill_response is not None:
-                request["disaggregated_params"] = prefill_response.data()[
+                request["disaggregated_params"] = response_data[
                     "disaggregated_params"
                 ]
 
