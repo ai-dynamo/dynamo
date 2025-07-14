@@ -27,6 +27,7 @@ ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 # This version references the 0.4.9.post1 release which includes a NIXL fix that was released after the 0.4.8.post1 release https://github.com/sgl-project/sglang/pull/7330
 ARG SGLANG_VERSION="0.4.9.post1"
+ARG SGL_KERNEL_VERSION="0.2.4"
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS nixl_base
 
@@ -433,14 +434,15 @@ RUN apt-get update && \
 # Install SGLang and related packages (sgl-kernel, einops, sentencepiece) since they are not included in the runtime wheel
 # https://github.com/sgl-project/sglang/blob/v0.4.9.post1/python/pyproject.toml#L18-51
 ARG SGLANG_VERSION
+ARG SGL_KERNEL_VERSION
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install sglang[runtime_common]==${SGLANG_VERSION} einops sgl-kernel==0.2.4 sentencepiece
+    uv pip install sglang[runtime_common]==${SGLANG_VERSION} einops sgl-kernel==${SGL_KERNEL_VERSION} sentencepiece
 
 # Install the wheels and symlink executables to /usr/local/bin so dynamo components can use them
 # Dynamo components currently do not have the VIRTUAL_ENV in their PATH, so we need to symlink the executables
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 COPY --from=base /workspace/wheels/nixl/*.whl wheelhouse/
-RUN uv pip install ai-dynamo ai-dynamo-runtime nixl --find-links wheelhouse
+RUN uv pip install ai-dynamo nixl --find-links wheelhouse
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
