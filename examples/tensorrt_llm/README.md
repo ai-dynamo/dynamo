@@ -33,6 +33,8 @@ This directory contains examples and reference implementations for deploying Lar
   - [Benchmarking](#benchmarking)
 - [Disaggregation Strategy](#disaggregation-strategy)
 - [KV Cache Transfer](#kv-cache-transfer-in-disaggregated-serving)
+- [More Example Architectures](#more-example-architectures)
+  - [Llama 4 Maverick Instruct + Eagle Speculative Decoding](./llama4_plus_eagle.md)
 
 # Quick Start
 
@@ -172,7 +174,7 @@ Notes:
 
 ### Multinode Deployment
 
-For details and instructions on multinode serving, please refer to the [multinode-examples.md](./multinode/multinode-examples.md) document. This guide provides step-by-step examples and configuration tips for deploying Dynamo with TensorRT-LLM across multiple nodes.
+For comprehensive instructions on multinode serving, see the [multinode-examples.md](./multinode/multinode-examples.md) guide. It provides step-by-step deployment examples and configuration tips for running Dynamo with TensorRT-LLM across multiple nodes. While the walkthrough uses DeepSeek-R1 as the model, you can easily adapt the process for any supported model by updating the relevant configuration files. You can see [Llama4+eagle](./llama4_plus_eagle.md) guide to see how to use these scripts when a single worker fits on the single node.
 
 ### Client
 
@@ -203,50 +205,6 @@ DISAGGREGATION_STRATEGY="prefill_first" ./launch/disagg.sh
 
 Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV cache transfer guide](./kv-cache-tranfer.md).
 
-### Example architectures for Llama 4 Maverick Instruct + Eagle Speculative Decoding
+## More Example Architectures
 
-#### Notes
-* Testing for the current example used:
-  * One GB200x4 node for aggregate serving
-  * Two GB200x4 nodes for disaggregate serving
-* To run Eagle Speculative Decoding with Llama 4, ensure the container meets the following criteria:
-  * Built with a version of TensorRT-LLM based on the 0.21 release [Link](https://github.com/NVIDIA/TensorRT-LLM/tree/release/0.21)
-  * The TensorRT-LLM build includes the changes from this PR [Link](https://github.com/NVIDIA/TensorRT-LLM/pull/5975)
-* If you need to download model weights off huggingface, make sure you run the command `huggingface-cli login` and have access to the necessary gated models.
-
-##### Aggregated Serving
-```bash
-cd /workspace/examples/tensorrt_llm
-dynamo serve graphs.disagg:Frontend -f configs/llama4/eagle/eagle_agg.yaml
-```
-* Known Issue: In Aggregated Serving, setting `max_num_tokens` to higher values (e.g. `max_num_tokens: 8448`) can lead to Out of Memory (OOM) errors. This is being investigated by the TRTLLM team.
-
-##### Disaggregated Serving
-
-###### Head Node
-Start nats/etcd
-``` bash
-nats-server -js &
-etcd --listen-client-urls http://0.0.0.0:2379 --advertise-client-urls http://0.0.0.0:2379 --data-dir /tmp/etcd &
-```
-
-Launch graph of Frontend and TensorRTLLMWorker (decode) on head node:
-
-```bash
-cd /workspace/examples/tensorrt_llm
-dynamo serve graphs.agg:Frontend -f configs/llama4/eagle/eagle_disagg.yaml  &
-```
-
-###### Worker Node(s)
-Set environment variables pointing at the etcd/nats endpoints on the head node.
-```bash
-export HEAD_NODE_IP="<head-node-ip>"
-export NATS_SERVER="nats://${HEAD_NODE_IP}:4222"
-export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
-```
-
-Deploy a Prefill worker:
-```bash
-cd /workspace/examples/tensorrt_llm
-dynamo serve components.prefill_worker:TensorRTLLMPrefillWorker -f configs/llama4/eagle/eagle_disagg.yaml --service-name TensorRTLLMPrefillWorker &
-```
+- [Llama 4 Maverick Instruct + Eagle Speculative Decoding](./llama4_plus_eagle.md)
