@@ -98,9 +98,7 @@ impl DistributedRuntime {
                 }
             }
         } else {
-            tracing::debug!(
-                "Health and metrics HTTP server is disabled via DYN_SYSTEM_ENABLED"
-            );
+            tracing::debug!("Health and metrics HTTP server is disabled via DYN_SYSTEM_ENABLED");
         }
 
         Ok(distributed_runtime)

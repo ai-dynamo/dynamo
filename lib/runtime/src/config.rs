@@ -138,7 +138,7 @@ impl RuntimeConfig {
                             _ => k.as_str(),
                         };
                         Some(mapped_key.into())
-                    },
+                    }
                     _ => None,
                 }
             }))

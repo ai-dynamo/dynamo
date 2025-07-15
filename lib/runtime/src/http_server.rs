@@ -76,7 +76,11 @@ pub async fn spawn_http_server(
     cancel_token: CancellationToken,
     drt: Arc<crate::DistributedRuntime>,
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
-    tracing::info!("[spawn_http_server] called with host={}, port={}", host, port);
+    tracing::info!(
+        "[spawn_http_server] called with host={}, port={}",
+        host,
+        port
+    );
     // Create HTTP server state with pre-created metrics
     let server_state = Arc::new(HttpServerState::new(drt)?);
 
@@ -114,7 +118,10 @@ pub async fn spawn_http_server(
         Ok(listener) => {
             // get the actual address and port, print in debug level
             let actual_address = listener.local_addr()?;
-            tracing::info!("[spawn_http_server] HTTP server bound to: {}", actual_address);
+            tracing::info!(
+                "[spawn_http_server] HTTP server bound to: {}",
+                actual_address
+            );
             (listener, actual_address)
         }
         Err(e) => {
@@ -265,9 +272,15 @@ mod tests {
         // use tokio::io::{AsyncReadExt, AsyncWriteExt};
         // use reqwest for HTTP requests
         let runtime = crate::Runtime::from_settings().unwrap();
-        let drt = Arc::new(crate::DistributedRuntime::from_settings_without_discovery(runtime).await.unwrap());
+        let drt = Arc::new(
+            crate::DistributedRuntime::from_settings_without_discovery(runtime)
+                .await
+                .unwrap(),
+        );
         let cancel_token = CancellationToken::new();
-        let (addr, server_handle) = spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt).await.unwrap();
+        let (addr, server_handle) = spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt)
+            .await
+            .unwrap();
         println!("[test] Waiting for server to start...");
         sleep(std::time::Duration::from_millis(1000)).await;
         println!("[test] Server should be up, starting requests...");
@@ -282,13 +295,21 @@ mod tests {
             let response = client.get(&url).send().await.unwrap();
             let status = response.status();
             let body = response.text().await.unwrap();
-            println!("[test] Response for {}: status={}, body={:?}", path, status, body);
+            println!(
+                "[test] Response for {}: status={}, body={:?}",
+                path, status, body
+            );
             if expect_200 {
                 assert_eq!(status, 200, "Response: status={}, body={:?}", status, body);
             } else {
                 assert_eq!(status, 404, "Response: status={}, body={:?}", status, body);
             }
-            assert!(body.contains(expect_body), "Response: status={}, body={:?}", status, body);
+            assert!(
+                body.contains(expect_body),
+                "Response: status={}, body={:?}",
+                status,
+                body
+            );
         }
         cancel_token.cancel();
         match server_handle.await {
