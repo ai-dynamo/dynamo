@@ -48,21 +48,21 @@ impl RuntimeMetrics {
 
 /// HTTP server state containing pre-created metrics
 pub struct HttpServerState {
-    drt: Arc<crate::DistributedRuntime>,
+    uptime_fn: Arc<dyn Fn() -> std::time::Duration + Send + Sync>,
     registry: Arc<Registry>,
     runtime_metrics: Arc<RuntimeMetrics>,
 }
 
 impl HttpServerState {
     /// Create new HTTP server state with pre-created metrics
-    pub fn new(drt: Arc<crate::DistributedRuntime>) -> anyhow::Result<Self> {
+    pub fn new(uptime_fn: Arc<dyn Fn() -> std::time::Duration + Send + Sync>) -> anyhow::Result<Self> {
         let registry = Arc::new(Registry::new());
 
         // Create runtime metrics
         let runtime_metrics = RuntimeMetrics::new(&registry)?;
 
         Ok(Self {
-            drt,
+            uptime_fn,
             registry,
             runtime_metrics,
         })
@@ -74,7 +74,7 @@ pub async fn spawn_http_server(
     host: &str,
     port: u16,
     cancel_token: CancellationToken,
-    drt: Arc<crate::DistributedRuntime>,
+    uptime_fn: Arc<dyn Fn() -> std::time::Duration + Send + Sync>,
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
     tracing::info!(
         "[spawn_http_server] called with host={}, port={}",
@@ -82,7 +82,7 @@ pub async fn spawn_http_server(
         port
     );
     // Create HTTP server state with pre-created metrics
-    let server_state = Arc::new(HttpServerState::new(drt)?);
+    let server_state = Arc::new(HttpServerState::new(uptime_fn)?);
 
     let app = Router::new()
         .route(
@@ -147,15 +147,15 @@ pub async fn spawn_http_server(
 /// Health handler
 async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
     tracing::info!("[health_handler] called");
-    let uptime = state.drt.uptime();
+    let uptime = (state.uptime_fn)();
     let response = format!("OK\nUptime: {} seconds\n", uptime.as_secs());
     (StatusCode::OK, response)
 }
 
-/// Metrics handler with DistributedRuntime uptime
+/// Metrics handler with uptime
 async fn metrics_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
     // Update the uptime gauge with current value
-    let uptime_seconds = state.drt.uptime().as_secs_f64();
+    let uptime_seconds = (state.uptime_fn)().as_secs_f64();
     state.runtime_metrics.update_uptime(uptime_seconds);
 
     // Gather metrics from the registry
@@ -281,12 +281,12 @@ mod tests {
         );
 
         let cancel_token = CancellationToken::new();
+        let runtime_uptime = drt.clone();
+        let uptime_fn = Arc::new(move || runtime_uptime.uptime());
         let (addr, server_handle) =
-            spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt.clone())
+            spawn_http_server("127.0.0.1", 0, cancel_token.clone(), uptime_fn)
                 .await
                 .unwrap();
-        println!("[test] Waiting for server to start...");
-        sleep(std::time::Duration::from_millis(1000)).await;
         println!("[test] Server should be up, starting requests...");
         let client = reqwest::Client::new();
         for (path, expect_200, expect_body) in [
@@ -329,7 +329,7 @@ mod tests {
             }
         }
 
-        // Explicitly drop the distributed runtime in a blocking context to avoid async drop issues
+        // Explicitly drop the distributed runtime in a blocking context to prevent async drop issues
         tokio::task::spawn_blocking(move || {
             drop(drt);
         })
