@@ -172,8 +172,6 @@ Otherwise, to develop locally, we recommend working inside of the container
 
 cargo build --release
 mkdir -p /workspace/deploy/sdk/src/dynamo/sdk/cli/bin
-cp /workspace/target/release/http /workspace/deploy/sdk/src/dynamo/sdk/cli/bin
-cp /workspace/target/release/llmctl /workspace/deploy/sdk/src/dynamo/sdk/cli/bin
 cp /workspace/target/release/dynamo-run /workspace/deploy/sdk/src/dynamo/sdk/cli/bin
 
 uv pip install -e .
