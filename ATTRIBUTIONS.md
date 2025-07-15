@@ -131,9 +131,7 @@ The GCC Runtime Library Exception can be found at: https://www.gnu.org/licenses/
 **License:** Apache License Version 2.0
 **Copyright:** Copyright © 2025 Broadcom. The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
 
-Bitnami Helm Chart for Etcd - provides a helm chart to deploy Dynamo via helm charts
-
-```
+Bitnami Helm chart for Etcd – provides a chart to deploy Etcd via Helm
 Copyright &copy; 2025 Broadcom. The term "Broadcom" refers to Broadcom Inc. and/or its subsidiaries.
 SPDX-License-Identifier: APACHE-2.0
 
