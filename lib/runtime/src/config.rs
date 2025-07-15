@@ -19,7 +19,7 @@ const DEFAULT_SYSTEM_PORT: u16 = 9090;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerConfig {
-    /// Grace shutdown period for the system-service.
+    /// Grace shutdown period for the system server.
     pub graceful_shutdown_timeout: u64,
 }
 
