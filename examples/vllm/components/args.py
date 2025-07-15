@@ -14,7 +14,6 @@
 # limitations under the License.
 
 import logging
-import socket
 import sys
 from typing import Optional
 
@@ -28,13 +27,27 @@ logger = logging.getLogger(__name__)
 # Only used if you run it manually from the command line
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
+DEFAULT_BASE_PORT = 20000
+SIDE_CHANNEL_PORT_OFFSET = 1000
+
+# Port allocation strategy:
+# - KV Events: base_port + dp_rank (deterministic per rank)
+# - Side Channel: base_port + SIDE_CHANNEL_PORT_OFFSET + dp_rank (deterministic per rank)
+# This ensures no overlap between services
+# To change base port use --base-port
 
 
-def find_free_port() -> int:
-    """Find a free port by binding to port 0."""
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        port = s.getsockname()[1]
+def get_kv_events_port(base_port: int, dp_rank: int) -> int:
+    """Get deterministic port for KV events based on data parallel rank."""
+    port = base_port + dp_rank
+    logger.debug(f"Allocated KV events ZMQ port {port} for dp_rank {dp_rank}")
+    return port
+
+
+def get_side_channel_port(base_port: int, dp_rank: int) -> int:
+    """Get deterministic port for NIXL side channel based on data parallel rank."""
+    port = base_port + SIDE_CHANNEL_PORT_OFFSET + dp_rank
+    logger.debug(f"Allocated NIXL side channel port {port} for dp_rank {dp_rank}")
     return port
 
 
@@ -45,8 +58,8 @@ class Config:
     namespace: str
     component: str
     endpoint: str
-    kv_events_port: int
     is_prefill_worker: bool
+    base_port: int
 
     # mirror vLLM
     model: str
@@ -57,6 +70,10 @@ class Config:
 
 
 def overwrite_args(config):
+    dp_rank = config.engine_args.data_parallel_rank or 0
+
+    kv_port = get_kv_events_port(config.base_port, dp_rank)
+
     defaults = {
         "task": "generate",
         "skip_tokenizer_init": True,
@@ -68,7 +85,7 @@ def overwrite_args(config):
         "kv_events_config": KVEventsConfig(
             enable_kv_cache_events=True,
             publisher="zmq",
-            endpoint=f"tcp://*:{config.kv_events_port}",
+            endpoint=f"tcp://*:{kv_port - dp_rank}",  # vLLM will iterate dp_rank for us, so we need to subtract it out TODO: fix in vLLM
         ),
         # Always setting up kv transfer for disagg
         "kv_transfer_config": KVTransferConfig(
@@ -104,10 +121,10 @@ def parse_args() -> Config:
         help="Enable prefill functionality for this worker. Currently overwrites the --endpoint to be a specially chosen dyn://dynamo.prefill.generate",
     )
     parser.add_argument(
-        "--kv-events-port",
+        "--base-port",
         type=int,
-        default=find_free_port(),
-        help="Endpoint where vLLM publishes metrics for dynamo. For DP, we handle the port iteration.",
+        default=DEFAULT_BASE_PORT,
+        help=f"Base port for allocating service ports. KV events will use base_port+dp_rank, side channels will use base_port+SIDE_CHANNEL_PORT_OFFSET onwards. Default: {DEFAULT_BASE_PORT}",
     )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -143,7 +160,7 @@ def parse_args() -> Config:
     config.endpoint = parsed_endpoint_name
     config.engine_args = engine_args
     config.is_prefill_worker = args.is_prefill_worker
-    config.kv_events_port = args.kv_events_port
+    config.base_port = args.base_port
 
     if config.engine_args.block_size is None:
         config.engine_args.block_size = 16

@@ -21,7 +21,7 @@ import socket
 from typing import Optional
 
 import uvloop
-from args import Config, find_free_port, parse_args
+from args import Config, get_side_channel_port, parse_args
 from handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from publisher import StatLoggerFactory
 from vllm.distributed.kv_events import ZmqEventPublisher
@@ -78,7 +78,7 @@ def setup_vllm_engine(config, stat_logger=None):
     os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-    set_side_channel_host_and_port()
+    set_side_channel_host_and_port(config)
 
     engine_args = config.engine_args
     # Load default sampling params from `generation_config.json`
@@ -105,11 +105,9 @@ def setup_vllm_engine(config, stat_logger=None):
     return engine_client, vllm_config, default_sampling_params
 
 
-def set_side_channel_host_and_port(
-    hostname: Optional[str] = None, port: Optional[int] = None
-):
+def set_side_channel_host_and_port(config: Config, hostname: Optional[str] = None):
     """vLLM V1 NixlConnector creates a side channel to exchange metadata with other NIXL connectors.
-    This sets the port number for the side channel.
+    This sets the port number for the side channel using deterministic port allocation.
     """
     if hostname is None:
         hostname = socket.gethostname()
@@ -123,8 +121,11 @@ def set_side_channel_host_and_port(
                 f"Hostname '{hostname}' is not usable, falling back to '127.0.0.1'"
             )
             hostname = "127.0.0.1"
-    if port is None:
-        port = find_free_port()
+
+    # Use deterministic port allocation based on data parallel rank
+    dp_rank = config.engine_args.data_parallel_rank or 0
+    port = get_side_channel_port(config.base_port, dp_rank)
+
     logger.debug("Setting VLLM_NIXL_SIDE_CHANNEL_HOST to %s", hostname)
     os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = hostname
     logger.debug("Setting VLLM_NIXL_SIDE_CHANNEL_PORT to %s", port)
