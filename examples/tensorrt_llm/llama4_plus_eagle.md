@@ -43,6 +43,8 @@ inside an interactive shell on one of the allocated nodes, set the
 following environment variables based:
 
 ```bash
+cd $DYNAMO_ROOT/examples/tensorrt_llm
+
 export IMAGE="<dynamo_trtllm_image>"
 export MOUNTS="${PWD}/:/mnt"
 export MODEL_PATH="nvidia/Llama-4-Maverick-17B-128E-Instruct-FP8"
@@ -52,7 +54,6 @@ export SERVED_MODEL_NAME="nvidia/Llama-4-Maverick-17B-128E-Instruct-FP8"
 
 ## Aggregated Serving
 ```bash
-cd $DYNAMO_ROOT/examples/tensorrt_llm
 export NUM_NODES=1
 export ENGINE_CONFIG="/mnt/engine_configs/llama4/eagle/eagle_agg.yaml"
 ./multinode/srun_aggregated.sh
@@ -70,3 +71,8 @@ export DECODE_ENGINE_CONFIG="/mnt/engine_configs/llama4/eagle/eagle_decode.yaml"
 ./multinode/srun_disaggregated.sh
 ```
 * Known Issue: In Aggregated Serving, setting `max_num_tokens` to higher values (e.g. `max_num_tokens: 8448`) can lead to Out of Memory (OOM) errors. This is being investigated by the TRTLLM team.
+
+
+## Example Request
+
+See [here](./multinode/multinode-examples.md#example-request) to learn how to send a request to the deployment.
