@@ -15,7 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Running DeepSeek-R1 Disaggregated with WideEP
+# Running DeepSeek-R1 Disaggregated with WideEP on H100s
 
 Dynamo supports SGLang's implementation of wide expert parallelism and large scale P/D for DeepSeek-R1! You can read their blog post [here](https://www.nvidia.com/en-us/technologies/ai/deepseek-r1-large-scale-p-d-with-wide-expert-parallelism/) for more details. We provide a Dockerfile for this in `container/Dockerfile.sglang-deepep` and configurations to deploy this at scale. In this example, we will run 1 prefill worker on 4 H100 nodes and 1 decode worker on 9 H100 nodes (104 total GPUs).
 
@@ -26,16 +26,16 @@ Dynamo supports SGLang's implementation of wide expert parallelism and large sca
 ```bash
 git clone -b v0.4.8.post1 https://github.com/sgl-project/sglang.git
 cd sglang/docker
-docker build -f Dockerfile -t deepep .
+docker build -f Dockerfile -t sgl-widepep .
 ```
 
-You will now have a `deepep:latest` image
+You will now have a `sgl-widepep:latest` image
 
 2. Build the Dynamo container
 
 ```bash
 cd $DYNAMO_ROOT
-docker build -f container/Dockerfile.sglang-deepep . -t dynamo-deepep --no-cache
+docker build -f container/Dockerfile.sglang-wideep . -t dynamo-wideep --no-cache
 ```
 
 3. You can run this container on each 8xH100 node using the following command.
@@ -56,7 +56,7 @@ docker run \
     --ulimit nofile=65536:65536 \
     --cap-add CAP_SYS_PTRACE \
     --ipc host \
-    dynamo-deepep:latest
+    dynamo-wideep:latest
 ```
 
 In each container, you should be in the `/sgl-workspace/dynamo/examples/sglang` directory.

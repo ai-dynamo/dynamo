@@ -116,6 +116,40 @@ bash launch/dep.sh
 > [!TIP]
 > Run a disaggregated example and try adding another prefill worker once the setup is running! The system will automatically discover and utilize the new worker.
 
+### Kubernetes Deployment
+
+For Kubernetes deployment, YAML manifests are provided in the `deploy/` directory. These define DynamoGraphDeployment resources for various configurations:
+
+- `agg.yaml` - Aggregated serving
+- `agg_router.yaml` - Aggregated serving with KV routing
+- `disagg.yaml` - Disaggregated serving
+- `disagg_router.yaml` - Disaggregated serving with KV routing
+
+#### Prerequisites
+
+- **Dynamo Cloud**: Follow the [Quickstart Guide](../../docs/guides/dynamo_deploy/quickstart.md) to deploy Dynamo Cloud first.
+
+- **Container Images**: The deployment files currently require access to `nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime`. If you don't have access, build and push your own image:
+  ```bash
+  ./container/build.sh --framework VLLM_V1
+  # Tag and push to your container registry
+  # Update the image references in the YAML files
+  ```
+
+- **Port Forwarding**: After deployment, forward the frontend service to access the API:
+  ```bash
+  kubectl port-forward deployment/vllm-v1-disagg-frontend-<pod-uuid-info> 8080:8000
+  ```
+
+#### Deploy to Kubernetes
+
+Example with disagg:
+
+```bash
+cd ~/dynamo/examples/vllm/deploy
+kubectl apply -f disagg.yaml
+```
+
 ### Testing the Deployment
 
 Send a test request to verify your deployment:

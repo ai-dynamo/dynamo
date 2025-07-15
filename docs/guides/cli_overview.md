@@ -69,26 +69,4 @@ dynamo serve hello_world:Frontend
 dynamo serve --service-name Middle hello_world:Frontend
 ```
 
-### `build`
-
-Use `build` to package your inference graph and its dependencies into an archive. Combine this with the `--containerize` flag to create a single Docker container for your inference graph. As with `serve`, you point toward the first service in your dependency graph. For more details, see [Serving Inference Graphs](dynamo_serve.md).
-
-#### Usage
-```bash
-dynamo build [SERVICE]
-```
-
-#### Arguments
-* `SERVICE`: Specify the service to build using file:Class syntax
-
-#### Flags
-* `--working-dir`: Specify the directory for finding the Service instance
-* `--containerize`: Choose whether to create a container from the dynamo artifact after building
-
-#### Example
-```bash
-cd examples/hello_world
-dynamo build hello_world:Frontend
-```
-
 For a detailed deployment example, see [Operator Deployment](dynamo_deploy/operator_deployment.md).

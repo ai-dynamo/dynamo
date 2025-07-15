@@ -15,11 +15,11 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-v1-disagg-planner
+  name: vllm-v1-disagg-router
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-v1-disagg-planner
+      dynamoNamespace: vllm-v1-disagg-router
       componentType: main
       replicas: 1
       livenessProbe:
@@ -59,10 +59,10 @@ spec:
             - --http-port
             - "8000"
     VllmDecodeWorker:
-      dynamoNamespace: vllm-v1-disagg-planner
+      dynamoNamespace: vllm-v1-disagg-router
       envFromSecret: hf-token-secret
       componentType: worker
-      replicas: 1
+      replicas: 2
       livenessProbe:
         exec:
           command:
@@ -98,7 +98,7 @@ spec:
           args:
             - "python3 components/main.py --model Qwen/Qwen3-0.6B --enforce-eager 2>&1 | tee /tmp/vllm.log"
     VllmPrefillWorker:
-      dynamoNamespace: vllm-v1-disagg-planner
+      dynamoNamespace: vllm-v1-disagg-router
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1

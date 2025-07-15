@@ -15,13 +15,10 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-v1-disagg-planner
+  name: vllm-v1-agg
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-v1-disagg-planner
-      componentType: main
-      replicas: 1
       livenessProbe:
         httpGet:
           path: /health
@@ -40,6 +37,9 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
+      dynamoNamespace: vllm-v1-agg
+      componentType: main
+      replicas: 1
       resources:
         requests:
           cpu: "1"
@@ -59,10 +59,7 @@ spec:
             - --http-port
             - "8000"
     VllmDecodeWorker:
-      dynamoNamespace: vllm-v1-disagg-planner
       envFromSecret: hf-token-secret
-      componentType: worker
-      replicas: 1
       livenessProbe:
         exec:
           command:
@@ -82,6 +79,9 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
+      dynamoNamespace: vllm-v1-agg
+      componentType: worker
+      replicas: 2
       resources:
         requests:
           cpu: "10"
@@ -97,42 +97,3 @@ spec:
           workingDir: /workspace/examples/vllm
           args:
             - "python3 components/main.py --model Qwen/Qwen3-0.6B --enforce-eager 2>&1 | tee /tmp/vllm.log"
-    VllmPrefillWorker:
-      dynamoNamespace: vllm-v1-disagg-planner
-      envFromSecret: hf-token-secret
-      componentType: worker
-      replicas: 1
-      livenessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - 'grep "VllmWorker.*has been initialized" /tmp/vllm.log'
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      resources:
-        requests:
-          cpu: "10"
-          memory: "20Gi"
-          gpu: "1"
-        limits:
-          cpu: "10"
-          memory: "20Gi"
-          gpu: "1"
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.4
-          workingDir: /workspace/examples/vllm
-          args:
-            - "python3 components/main.py --model Qwen/Qwen3-0.6B --enforce-eager --is-prefill-worker 2>&1 | tee /tmp/vllm.log"
