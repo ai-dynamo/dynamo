@@ -6,6 +6,7 @@ import logging
 import os
 import signal
 import sys
+from typing import TYPE_CHECKING
 
 import uvloop
 from tensorrt_llm import SamplingParams
@@ -20,6 +21,9 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+
+if TYPE_CHECKING:
+    from utils.trtllm_utils import Config
 
 
 def _setup_path_and_imports():

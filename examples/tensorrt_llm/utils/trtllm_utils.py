@@ -20,18 +20,21 @@ DEFAULT_DISAGGREGATION_MODE = DisaggregationMode.AGGREGATED
 class Config:
     """Command line parameters or defaults"""
 
-    namespace: str
-    component: str
-    endpoint: str
-    model_path: str
-    served_model_name: Optional[str] = None
-    tensor_parallel_size: int
-    kv_block_size: int
-    extra_engine_args: str
-    publish_events_and_metrics: bool
-    disaggregation_mode: DisaggregationMode
-    disaggregation_strategy: DisaggregationStrategy
-    next_endpoint: str
+    def __init__(self) -> None:
+        self.namespace: str = ""
+        self.component: str = ""
+        self.endpoint: str = ""
+        self.model_path: str = ""
+        self.served_model_name: Optional[str] = None
+        self.tensor_parallel_size: int = 1
+        self.kv_block_size: int = 32
+        self.extra_engine_args: str = ""
+        self.publish_events_and_metrics: bool = False
+        self.disaggregation_mode: DisaggregationMode = DEFAULT_DISAGGREGATION_MODE
+        self.disaggregation_strategy: DisaggregationStrategy = (
+            DEFAULT_DISAGGREGATION_STRATEGY
+        )
+        self.next_endpoint: str = ""
 
     def __str__(self) -> str:
         return (

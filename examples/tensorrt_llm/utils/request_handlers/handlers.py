@@ -130,11 +130,13 @@ class DecodeHandler(HandlerBase):
                 if response_count > 1:
                     raise ValueError("Prefill response should be generated only once.")
 
-            response_data = prefill_response.data()
+            response_data = (
+                prefill_response.data() if prefill_response is not None else None
+            )
             if prefill_response is not None and self.check_error(response_data):
                 yield response_data
                 return
-            if prefill_response is not None:
+            if prefill_response is not None and response_data is not None:
                 request["disaggregated_params"] = response_data["disaggregated_params"]
 
         async for res in self.generate_locally(request):
