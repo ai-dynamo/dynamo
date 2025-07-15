@@ -148,6 +148,12 @@ impl HttpService {
 }
 
 impl HttpServiceConfigBuilder {
+    /// Set the rate limiter config for the HTTP service.
+    pub fn with_rate_limiter(mut self, config: RateLimiterConfig) -> Self {
+        self.rate_limiter_config = Some(Some(config));
+        self
+    }
+
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
 

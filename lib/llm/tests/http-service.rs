@@ -154,6 +154,7 @@ fn compute_index(endpoint: &Endpoint, request_type: &RequestType, status: &Statu
     let status = match status {
         Status::Success => 0,
         Status::Error => 1,
+        Status::Rejected => 2,
     };
 
     endpoint * 4 + request_type * 2 + status

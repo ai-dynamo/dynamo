@@ -96,7 +96,7 @@ fn bench_time_constants(c: &mut Criterion) {
 fn bench_rate_limiter_decisions(c: &mut Criterion) {
     let mut group = c.benchmark_group("rate_limiter_decisions");
 
-    let config = RateLimiterConfig::new(100.0, 10.0, 10.0, false);
+    let config = RateLimiterConfig::new(100.0, 10.0, 10.0, false).unwrap();
 
     group.bench_function("should_reject_with_data", |b| {
         let rate_limiter = RateLimiter::new(Some(config.clone()));
@@ -147,7 +147,7 @@ fn bench_concurrent_access(c: &mut Criterion) {
             &thread_count,
             |b, &num_threads| {
                 b.iter(|| {
-                    let config = RateLimiterConfig::new(1000.0, 10.0, 30.0, false);
+                    let config = RateLimiterConfig::new(1000.0, 10.0, 30.0, false).unwrap();
                     let rate_limiter = Arc::new(RateLimiter::new(Some(config)));
 
                     let handles: Vec<_> = (0..num_threads)
@@ -203,7 +203,7 @@ fn bench_memory_patterns(c: &mut Criterion) {
     });
 
     group.bench_function("per_model_isolation", |b| {
-        let config = RateLimiterConfig::new(1000.0, 10.0, 30.0, true);
+        let config = RateLimiterConfig::new(1000.0, 10.0, 30.0, true).unwrap();
 
         b.iter(|| {
             let rate_limiter = RateLimiter::new(Some(config.clone()));
@@ -287,15 +287,15 @@ fn bench_configuration_comparison(c: &mut Criterion) {
     let configs = vec![
         (
             "aggressive",
-            RateLimiterConfig::new(1000.0, 10.0, 1.0, false),
+            RateLimiterConfig::new(1000.0, 10.0, 1.0, false).unwrap(),
         ),
         (
             "balanced",
-            RateLimiterConfig::new(1000.0, 10.0, 10.0, false),
+            RateLimiterConfig::new(1000.0, 10.0, 10.0, false).unwrap(),
         ),
         (
             "conservative",
-            RateLimiterConfig::new(1000.0, 10.0, 60.0, false),
+            RateLimiterConfig::new(1000.0, 10.0, 60.0, false).unwrap(),
         ),
     ];
 

@@ -38,6 +38,7 @@
 
 use std::time::Instant;
 
+use anyhow::Result;
 use dashmap::DashMap;
 use validator::Validate;
 
@@ -46,10 +47,10 @@ use validator::Validate;
 pub struct RateLimiterConfig {
     /// Threshold for the time to first token metric
     #[validate(range(min = 0.0))]
-    ttft_threshold_ms: f64,
+    ttft_threshold_secs: f64,
     /// Threshold for the inter-token latency metric
     #[validate(range(min = 0.0))]
-    itl_threshold_ms: f64,
+    itl_threshold_secs: f64,
     /// Time constant for the time-weighted EMA
     #[validate(range(min = 0.001))]
     time_constant_secs: f64,
@@ -59,23 +60,29 @@ pub struct RateLimiterConfig {
 
 impl RateLimiterConfig {
     pub fn new(
-        ttft_threshold_ms: f64,
-        itl_threshold_ms: f64,
+        ttft_threshold_secs: f64,
+        itl_threshold_secs: f64,
         time_constant_secs: f64,
         per_model_limits: bool,
-    ) -> Self {
-        Self {
-            ttft_threshold_ms,
-            itl_threshold_ms,
+    ) -> Result<Self> {
+        let config: RateLimiterConfig = Self {
+            ttft_threshold_secs,
+            itl_threshold_secs,
             time_constant_secs,
             per_model_limits,
-        }
+        };
+
+        config
+            .validate()
+            .map_err(|e| anyhow::anyhow!("Invalid rate limiter config: {}", e))?;
+
+        Ok(config)
     }
 
     pub fn empty() -> Self {
         Self {
-            ttft_threshold_ms: 0.0,
-            itl_threshold_ms: 0.0,
+            ttft_threshold_secs: 0.0,
+            itl_threshold_secs: 0.0,
             time_constant_secs: 0.001,
             per_model_limits: false,
         }
@@ -85,9 +92,9 @@ impl RateLimiterConfig {
 impl Default for RateLimiterConfig {
     fn default() -> Self {
         Self {
-            ttft_threshold_ms: 1000.0, // 1s
-            itl_threshold_ms: 10.0,    // 10ms
-            time_constant_secs: 30.0,  // 30s
+            ttft_threshold_secs: 1.0, // 1s
+            itl_threshold_secs: 0.1,  // 100ms
+            time_constant_secs: 30.0, // 30s
             per_model_limits: false,
         }
     }
@@ -292,12 +299,16 @@ impl RateLimiter {
     /// Check if the request should be rejected based on the cached metrics
     ///
     /// Returns true if the request should be rejected, false otherwise
-    pub fn should_reject(&self, model: &str) -> bool {
+    pub fn should_reject(&self, model: &str) -> ShouldRejectResult {
         let model_key = self.get_model_key(model);
         let model_metrics = self.model_metrics.get(&model_key);
 
         let Some(model_metrics) = model_metrics else {
-            return false;
+            return ShouldRejectResult {
+                should_reject: false,
+                decayed_ttft_ema: 0.0,
+                decayed_itl_ema: 0.0,
+            };
         };
 
         // Get decayed time-weighted EMA values
@@ -310,16 +321,31 @@ impl RateLimiter {
 
         drop(model_metrics);
 
-        let ttft_exceeded = self.config.ttft_threshold_ms < decayed_ttft_ema;
-        let itl_exceeded = self.config.itl_threshold_ms < decayed_itl_ema;
+        let ttft_exceeded = self.config.ttft_threshold_secs < decayed_ttft_ema;
+        let itl_exceeded = self.config.itl_threshold_secs < decayed_itl_ema;
 
         if ttft_exceeded || itl_exceeded {
             let rate_limiter_metrics = self.get_metrics(&model_key);
-            self.log_metrics(model, rate_limiter_metrics);
-            return true;
+            self.log_metrics(model, rate_limiter_metrics, true);
+            return ShouldRejectResult {
+                should_reject: true,
+                decayed_ttft_ema,
+                decayed_itl_ema,
+            };
         }
 
-        false
+        if decayed_ttft_ema > self.config.ttft_threshold_secs * 0.9
+            || decayed_itl_ema > self.config.itl_threshold_secs * 0.9
+        {
+            let rate_limiter_metrics = self.get_metrics(&model_key);
+            self.log_metrics(model, rate_limiter_metrics, false);
+        }
+
+        ShouldRejectResult {
+            should_reject: false,
+            decayed_ttft_ema,
+            decayed_itl_ema,
+        }
     }
 
     /// Get current metrics and diagnostics for current model
@@ -353,15 +379,31 @@ impl RateLimiter {
         }
     }
 
-    fn log_metrics(&self, model: &str, metrics: RateLimiterMetrics) {
-        tracing::warn!(
-            model = model,
-            ttft_threshold_ms = self.config.ttft_threshold_ms,
-            itl_threshold_ms = self.config.itl_threshold_ms,
-            "Rate limit exceeded for model {model}: {metrics}",
-            metrics = metrics,
-        );
+    fn log_metrics(&self, model: &str, metrics: RateLimiterMetrics, has_exceeded: bool) {
+        if has_exceeded {
+            tracing::warn!(
+                model = model,
+                ttft_threshold_secs = self.config.ttft_threshold_secs,
+                itl_threshold_secs = self.config.itl_threshold_secs,
+                "Rate limit exceeded for model {model}: {metrics}",
+                metrics = metrics,
+            );
+        } else {
+            tracing::info!(
+                model = model,
+                ttft_threshold_secs = self.config.ttft_threshold_secs,
+                itl_threshold_secs = self.config.itl_threshold_secs,
+                "Approaching rate limit thresholds. Current rate limit metrics for model {model}: {metrics}",
+                metrics = metrics,
+            );
+        }
     }
+}
+
+pub struct ShouldRejectResult {
+    pub should_reject: bool,
+    pub decayed_ttft_ema: f64,
+    pub decayed_itl_ema: f64,
 }
 
 #[cfg(test)]
@@ -659,8 +701,8 @@ mod tests {
         const SLEEP_DURATION_MS: u64 = 1;
 
         let config = RateLimiterConfig {
-            ttft_threshold_ms: 1000.0,
-            itl_threshold_ms: 100.0,
+            ttft_threshold_secs: 1.0,
+            itl_threshold_secs: 0.1,
             time_constant_secs: 30.0,
             per_model_limits: false,
         };
@@ -675,10 +717,10 @@ mod tests {
 
             handles.push(thread::spawn(move || {
                 for j in 0..NUM_RECORDS {
-                    limiter_clone.record_ttft("model", (i * NUM_RECORDS + j) as f64);
-                    limiter_clone.record_itl("model", (i + j) as f64);
+                    limiter_clone.record_ttft("model", (i * NUM_RECORDS + j) as f64 / 10_000.0);
+                    limiter_clone.record_itl("model", (i + j) as f64 / 1_000.0);
 
-                    if limiter_clone.should_reject("model") {
+                    if limiter_clone.should_reject("model").should_reject {
                         error_count_clone.fetch_add(1, Ordering::Relaxed);
                     }
 
@@ -707,8 +749,8 @@ mod tests {
         const SLEEP_DURATION_MS: u64 = 1;
 
         let config = RateLimiterConfig {
-            ttft_threshold_ms: 1000.0,
-            itl_threshold_ms: 10.0,
+            ttft_threshold_secs: 1.0,
+            itl_threshold_secs: 0.1,
             time_constant_secs: 30.0,
             per_model_limits: false,
         };
@@ -723,10 +765,10 @@ mod tests {
 
             handles.push(thread::spawn(move || {
                 for j in 0..NUM_RECORDS {
-                    limiter_clone.record_ttft("model", (i * NUM_RECORDS + j) as f64);
-                    limiter_clone.record_itl("model", (i + j) as f64);
+                    limiter_clone.record_ttft("model", (i * NUM_RECORDS + j) as f64 / 1_000.0);
+                    limiter_clone.record_itl("model", (i + j) as f64 / 100.0);
 
-                    if limiter_clone.should_reject("model") {
+                    if limiter_clone.should_reject("model").should_reject {
                         error_count_clone.fetch_add(1, Ordering::Relaxed);
                     }
 
@@ -810,8 +852,8 @@ mod tests {
     #[test]
     fn test_rate_limiter_integration() {
         let config = RateLimiterConfig {
-            ttft_threshold_ms: 100.0, // 100ms
-            itl_threshold_ms: 5.0,    // 5ms
+            ttft_threshold_secs: 100., // 100ms
+            itl_threshold_secs: 1.,    // 5ms
             time_constant_secs: 1.0,
             ..Default::default()
         };
@@ -826,7 +868,7 @@ mod tests {
         thread::sleep(Duration::from_millis(150)); // Wait for warmup
 
         assert!(
-            !limiter.should_reject("test"),
+            !limiter.should_reject("test").should_reject,
             "Should not reject with low values"
         );
 
@@ -835,7 +877,7 @@ mod tests {
         limiter.record_ttft("test", 300.0);
 
         assert!(
-            limiter.should_reject("test"),
+            limiter.should_reject("test").should_reject,
             "Should reject with high values"
         );
     }
@@ -845,8 +887,8 @@ mod tests {
         const NUM_SAMPLES: usize = 100;
 
         let config = RateLimiterConfig {
-            ttft_threshold_ms: 100.0, // 100ms
-            itl_threshold_ms: 5.0,    // 5ms
+            ttft_threshold_secs: 70.,
+            itl_threshold_secs: 0.005,
             time_constant_secs: 1.0,
             ..Default::default()
         };
@@ -861,7 +903,7 @@ mod tests {
         thread::sleep(Duration::from_millis(150)); // Wait for warmup
 
         assert!(
-            !limiter.should_reject("test"),
+            !limiter.should_reject("test").should_reject,
             "Should not reject with low values"
         );
 
@@ -871,7 +913,7 @@ mod tests {
         }
 
         assert!(
-            limiter.should_reject("test"),
+            limiter.should_reject("test").should_reject,
             "Should reject with high values"
         );
     }
@@ -904,14 +946,14 @@ mod tests {
         thread::sleep(Duration::from_millis(20));
 
         // Both should reject model A
-        assert!(global_limiter.should_reject(MODEL_A));
-        assert!(per_model_limiter.should_reject(MODEL_A));
+        assert!(global_limiter.should_reject(MODEL_A).should_reject);
+        assert!(per_model_limiter.should_reject(MODEL_A).should_reject);
 
         // Global limiter should also reject model B (uses same "global" key)
-        assert!(global_limiter.should_reject(MODEL_B));
+        assert!(global_limiter.should_reject(MODEL_B).should_reject);
 
         // Per-model limiter should NOT reject model B (separate tracking)
-        assert!(!per_model_limiter.should_reject(MODEL_B));
+        assert!(!per_model_limiter.should_reject(MODEL_B).should_reject);
     }
 
     #[test]
