@@ -264,24 +264,27 @@ mod tests {
         assert!(response.contains("Total uptime of the DistributedRuntime in seconds"));
     }
 
-    /*
     #[tokio::test]
     async fn test_spawn_http_server_endpoints() {
         use std::sync::Arc;
         use tokio::time::sleep;
         use tokio_util::sync::CancellationToken;
-        // use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        // use reqwest for HTTP requests
-        let runtime = crate::Runtime::from_settings().unwrap();
+
+        // Create runtime and distributed runtime in a blocking context to avoid async drop issues
+        let runtime = tokio::task::spawn_blocking(|| crate::Runtime::from_settings().unwrap())
+            .await
+            .unwrap();
         let drt = Arc::new(
             crate::DistributedRuntime::from_settings_without_discovery(runtime)
                 .await
                 .unwrap(),
         );
+
         let cancel_token = CancellationToken::new();
-        let (addr, server_handle) = spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt)
-            .await
-            .unwrap();
+        let (addr, server_handle) =
+            spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt.clone())
+                .await
+                .unwrap();
         println!("[test] Waiting for server to start...");
         sleep(std::time::Duration::from_millis(1000)).await;
         println!("[test] Server should be up, starting requests...");
@@ -312,6 +315,8 @@ mod tests {
                 body
             );
         }
+
+        // Cancel the server and wait for it to shut down gracefully
         cancel_token.cancel();
         match server_handle.await {
             Ok(_) => println!("[test] Server shut down normally"),
@@ -323,6 +328,12 @@ mod tests {
                 }
             }
         }
+
+        // Explicitly drop the distributed runtime in a blocking context to avoid async drop issues
+        tokio::task::spawn_blocking(move || {
+            drop(drt);
+        })
+        .await
+        .unwrap();
     }
-    */
 }
