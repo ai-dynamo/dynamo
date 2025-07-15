@@ -19,10 +19,10 @@ limitations under the License.
 
 This guide demonstrates how to deploy Llama 4 Maverick Instruct with Eagle Speculative Decoding on GB200x4 nodes. We will be following the [multi-node deployment instructions](./multinode/multinode-examples.md) to set up the environment for the following scenarios:
 
-- **Aggregated Serving:**  
+- **Aggregated Serving:**
   Deploy the entire Llama 4 model on a single GB200x4 node for end-to-end serving.
 
-- **Disaggregated Serving:**  
+- **Disaggregated Serving:**
   Distribute the workload across two GB200x4 nodes:
     - One node runs the decode worker.
     - The other node runs the prefill worker.
@@ -46,10 +46,13 @@ following environment variables based:
 cd $DYNAMO_ROOT/examples/tensorrt_llm
 
 export IMAGE="<dynamo_trtllm_image>"
+# export MOUNTS="${PWD}/:/mnt,/lustre:/lustre"
 export MOUNTS="${PWD}/:/mnt"
 export MODEL_PATH="nvidia/Llama-4-Maverick-17B-128E-Instruct-FP8"
 export SERVED_MODEL_NAME="nvidia/Llama-4-Maverick-17B-128E-Instruct-FP8"
 ```
+
+See [this](./multinode/multinode-examples.md#setup) section from multinode guide to learn more about the above options.
 
 
 ## Aggregated Serving
@@ -63,7 +66,6 @@ export ENGINE_CONFIG="/mnt/engine_configs/llama4/eagle/eagle_agg.yaml"
 ## Disaggregated Serving
 
 ```bash
-cd $DYNAMO_ROOT/examples/tensorrt_llm
 export NUM_PREFILL_NODES=1
 export PREFILL_ENGINE_CONFIG="/mnt/engine_configs/llama4/eagle/eagle_prefill.yaml"
 export NUM_DECODE_NODES=1
