@@ -123,11 +123,11 @@ RUN if [ "$ARCH" = "arm64" ]; then \
 ENV NIXL_PREFIX=/usr/local/nixl
 
 # nats
-RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-${ARCH}.deb && \
-    dpkg -i nats-server-v2.10.24-${ARCH}.deb && rm nats-server-v2.10.24-${ARCH}.deb
+RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-${ARCH}.deb && \
+    dpkg -i nats-server-v2.10.28-${ARCH}.deb && rm nats-server-v2.10.28-${ARCH}.deb
 
 # etcd
-ENV ETCD_VERSION="v3.5.18"
+ENV ETCD_VERSION="v3.5.21"
 RUN wget https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
     mkdir -p /usr/local/bin/etcd && \
     tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
@@ -317,8 +317,6 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
     cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
     cp -r lib/bindings/c/include /opt/dynamo/bindings/.  && \
     cp target/release/dynamo-run /usr/local/bin && \
-    cp target/release/http /usr/local/bin && \
-    cp target/release/llmctl /usr/local/bin && \
     cp target/release/metrics /usr/local/bin && \
     cp target/release/mock_worker /usr/local/bin
 
@@ -371,6 +369,8 @@ CMD []
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
+ARG ARCH_ALT
+
 WORKDIR /workspace
 ENV DYNAMO_HOME=/workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
@@ -408,7 +408,7 @@ RUN uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 # Common dependencies
-# ToDo: Remove extra install and use pyproject.toml to define all dependencies
+# TODO: Remove extra install and use pyproject.toml to define all dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     uv pip install --requirement /tmp/requirements.txt
 
@@ -462,7 +462,6 @@ COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATT
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-*-linux-gnu.so /usr/local/lib/python3.12/dist-packages/
 
 # Setup environment variables
-ARG ARCH_ALT
 ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins
 ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:/opt/hpcx/ompi/lib:$LD_LIBRARY_PATH
 ENV PATH=/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
@@ -480,20 +479,22 @@ COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 RUN uv pip install --index-url "${TENSORRTLLM_INDEX_URL}" \
     --extra-index-url https://pypi.org/simple \
     "${TENSORRTLLM_PIP_WHEEL}" && \
-    uv pip install ai-dynamo --find-links wheelhouse && \
-    uv pip install nixl --find-links wheelhouse
+    uv pip install ai-dynamo nixl --find-links wheelhouse
 
 # Setup TRTLLM environment variables, same as in dev image
 ENV TRTLLM_USE_UCX_KVCACHE=1
 COPY --from=dev /usr/local/bin/set_trtllm_env.sh /usr/local/bin/set_trtllm_env.sh
 RUN echo 'source /usr/local/bin/set_trtllm_env.sh' >> /root/.bashrc
 
-# Copy benchmarks, exmaples and tests for CI
+# Copy benchmarks, examples and tests for CI
 # TODO: Remove this once we have a functional CI image built on top of the runtime image
 COPY tests /workspace/tests
 COPY benchmarks /workspace/benchmarks
 COPY examples /workspace/examples
 RUN uv pip install /workspace/benchmarks
+
+# Copy files for legal compliance
+COPY ATTRIBUTION* LICENSE /workspace/
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \

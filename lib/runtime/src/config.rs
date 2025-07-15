@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use super::Result;
 use derive_builder::Builder;
@@ -20,11 +8,18 @@ use figment::{
     Figment,
 };
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use validator::Validate;
+
+/// Default system host for health and metrics endpoints
+const DEFAULT_SYSTEM_HOST: &str = "0.0.0.0";
+
+/// Default system port for health and metrics endpoints
+const DEFAULT_SYSTEM_PORT: u16 = 9090;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerConfig {
-    /// Grace shutdown period for http-service.
+    /// Grace shutdown period for the system server.
     pub graceful_shutdown_timeout: u64,
 }
 
@@ -60,17 +55,56 @@ impl Default for WorkerConfig {
 pub struct RuntimeConfig {
     /// Number of async worker threads
     /// If set to 1, the runtime will run in single-threaded mode
+    /// Set this at runtime with environment variable DYN_RUNTIME_NUM_WORKER_THREADS. Defaults to
+    /// number of cores.
     #[validate(range(min = 1))]
-    #[builder(default = "16")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
-    pub num_worker_threads: usize,
+    pub num_worker_threads: Option<usize>,
 
     /// Maximum number of blocking threads
     /// Blocking threads are used for blocking operations, this value must be greater than 0.
+    /// Set this at runtime with environment variable DYN_RUNTIME_MAX_BLOCKING_THREADS. Defaults to
+    /// 512.
     #[validate(range(min = 1))]
     #[builder(default = "512")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub max_blocking_threads: usize,
+
+    /// System server host for health and metrics endpoints
+    /// Set this at runtime with environment variable DYN_SYSTEM_HOST
+    #[builder(default = "DEFAULT_SYSTEM_HOST.to_string()")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub system_host: String,
+
+    /// System server port for health and metrics endpoints
+    /// If set to 0, the system will assign a random available port
+    /// Set this at runtime with environment variable DYN_SYSTEM_PORT
+    #[builder(default = "DEFAULT_SYSTEM_PORT")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub system_port: u16,
+
+    /// Health and metrics System server enabled
+    /// Set this at runtime with environment variable DYN_SYSTEM_ENABLED
+    #[builder(default = "false")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub system_enabled: bool,
+}
+
+impl fmt::Display for RuntimeConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // If None, it defaults to "number of cores", so we indicate that.
+        match self.num_worker_threads {
+            Some(val) => write!(f, "num_worker_threads={val}, ")?,
+            None => write!(f, "num_worker_threads=default (num_cores), ")?,
+        }
+
+        write!(f, "max_blocking_threads={}, ", self.max_blocking_threads)?;
+        write!(f, "system_host={}, ", self.system_host)?;
+        write!(f, "system_port={}, ", self.system_port)?;
+        write!(f, "system_enabled={}", self.system_enabled)?;
+
+        Ok(())
+    }
 }
 
 impl RuntimeConfig {
@@ -91,6 +125,23 @@ impl RuntimeConfig {
                     _ => None,
                 }
             }))
+            .merge(Env::prefixed("DYN_SYSTEM_").filter_map(|k| {
+                let full_key = format!("DYN_SYSTEM_{}", k.as_str());
+                // filters out empty environment variables
+                match std::env::var(&full_key) {
+                    Ok(v) if !v.is_empty() => {
+                        // Map DYN_SYSTEM_* to the correct field names
+                        let mapped_key = match k.as_str() {
+                            "HOST" => "system_host",
+                            "PORT" => "system_port",
+                            "ENABLED" => "system_enabled",
+                            _ => k.as_str(),
+                        };
+                        Some(mapped_key.into())
+                    }
+                    _ => None,
+                }
+            }))
     }
 
     /// Load the runtime configuration from the environment and configuration files
@@ -107,28 +158,44 @@ impl RuntimeConfig {
         Ok(config)
     }
 
+    /// Check if System server should be enabled
+    /// System server is disabled by default, but can be enabled by setting DYN_SYSTEM_ENABLED to true
+    pub fn system_server_enabled(&self) -> bool {
+        self.system_enabled
+    }
+
     pub fn single_threaded() -> Self {
         RuntimeConfig {
-            num_worker_threads: 1,
+            num_worker_threads: Some(1),
             max_blocking_threads: 1,
+            system_host: DEFAULT_SYSTEM_HOST.to_string(),
+            system_port: DEFAULT_SYSTEM_PORT,
+            system_enabled: false,
         }
     }
 
     /// Create a new default runtime configuration
-    pub(crate) fn create_runtime(&self) -> Result<tokio::runtime::Runtime> {
-        Ok(tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(self.num_worker_threads)
+    pub(crate) fn create_runtime(&self) -> std::io::Result<tokio::runtime::Runtime> {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(
+                self.num_worker_threads
+                    .unwrap_or_else(|| std::thread::available_parallelism().unwrap().get()),
+            )
             .max_blocking_threads(self.max_blocking_threads)
             .enable_all()
-            .build()?)
+            .build()
     }
 }
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
+        let num_cores = std::thread::available_parallelism().unwrap().get();
         Self {
-            num_worker_threads: 16,
-            max_blocking_threads: 16,
+            num_worker_threads: Some(num_cores),
+            max_blocking_threads: num_cores,
+            system_host: DEFAULT_SYSTEM_HOST.to_string(),
+            system_port: DEFAULT_SYSTEM_PORT,
+            system_enabled: false,
         }
     }
 }
@@ -142,6 +209,22 @@ impl RuntimeConfigBuilder {
     }
 }
 
+/// Check if a string is truthy
+/// This will be used to evaluate environment variables or any other subjective
+/// configuration parameters that can be set by the user that should be evaluated
+/// as a boolean value.
+pub fn is_truthy(val: &str) -> bool {
+    matches!(val.to_lowercase().as_str(), "1" | "true" | "on" | "yes")
+}
+
+/// Check if a string is falsey
+/// This will be used to evaluate environment variables or any other subjective
+/// configuration parameters that can be set by the user that should be evaluated
+/// as a boolean value (opposite of is_truthy).
+pub fn is_falsey(val: &str) -> bool {
+    matches!(val.to_lowercase().as_str(), "0" | "false" | "off" | "no")
+}
+
 /// Check if an environment variable is truthy
 pub fn env_is_truthy(env: &str) -> bool {
     match std::env::var(env) {
@@ -150,12 +233,12 @@ pub fn env_is_truthy(env: &str) -> bool {
     }
 }
 
-/// Check if a string is truthy
-/// This will be used to evaluate environment variables or any other subjective
-/// configuration parameters that can be set by the user that should be evaluated
-/// as a boolean value.
-pub fn is_truthy(val: &str) -> bool {
-    matches!(val.to_lowercase().as_str(), "1" | "true" | "on" | "yes")
+/// Check if an environment variable is falsey
+pub fn env_is_falsey(env: &str) -> bool {
+    match std::env::var(env) {
+        Ok(val) => is_falsey(val.as_str()),
+        Err(_) => false,
+    }
 }
 
 /// Check whether JSONL logging enabled
@@ -189,7 +272,7 @@ mod tests {
             ],
             || {
                 let config = RuntimeConfig::from_settings()?;
-                assert_eq!(config.num_worker_threads, 24);
+                assert_eq!(config.num_worker_threads, Some(24));
                 assert_eq!(config.max_blocking_threads, 32);
                 Ok(())
             },
@@ -238,5 +321,92 @@ mod tests {
                 Ok(())
             },
         )
+    }
+
+    #[test]
+    fn test_runtime_config_system_server_env_vars() -> Result<()> {
+        temp_env::with_vars(
+            vec![
+                ("DYN_SYSTEM_HOST", Some("127.0.0.1")),
+                ("DYN_SYSTEM_PORT", Some("9090")),
+            ],
+            || {
+                let config = RuntimeConfig::from_settings()?;
+                assert_eq!(config.system_host, "127.0.0.1");
+                assert_eq!(config.system_port, 9090);
+                Ok(())
+            },
+        )
+    }
+
+    #[test]
+    fn test_system_server_enabled_by_default() {
+        temp_env::with_vars(vec![("DYN_SYSTEM_ENABLED", None::<&str>)], || {
+            let config = RuntimeConfig::from_settings().unwrap();
+            assert!(!config.system_server_enabled());
+        });
+    }
+
+    #[test]
+    fn test_system_server_disabled_explicitly() {
+        temp_env::with_vars(vec![("DYN_SYSTEM_ENABLED", Some("false"))], || {
+            let config = RuntimeConfig::from_settings().unwrap();
+            assert!(!config.system_server_enabled());
+        });
+    }
+
+    #[test]
+    fn test_system_server_enabled_explicitly() {
+        temp_env::with_vars(vec![("DYN_SYSTEM_ENABLED", Some("true"))], || {
+            let config = RuntimeConfig::from_settings().unwrap();
+            assert!(config.system_server_enabled());
+        });
+    }
+
+    #[test]
+    fn test_system_server_enabled_by_port() {
+        temp_env::with_vars(vec![("DYN_SYSTEM_PORT", Some("8080"))], || {
+            let config = RuntimeConfig::from_settings().unwrap();
+            assert!(!config.system_server_enabled());
+            assert_eq!(config.system_port, 8080);
+        });
+    }
+
+    #[test]
+    fn test_is_truthy_and_falsey() {
+        // Test truthy values
+        assert!(is_truthy("1"));
+        assert!(is_truthy("true"));
+        assert!(is_truthy("TRUE"));
+        assert!(is_truthy("on"));
+        assert!(is_truthy("yes"));
+
+        // Test falsey values
+        assert!(is_falsey("0"));
+        assert!(is_falsey("false"));
+        assert!(is_falsey("FALSE"));
+        assert!(is_falsey("off"));
+        assert!(is_falsey("no"));
+
+        // Test opposite behavior
+        assert!(!is_truthy("0"));
+        assert!(!is_falsey("1"));
+
+        // Test env functions
+        temp_env::with_vars(vec![("TEST_TRUTHY", Some("true"))], || {
+            assert!(env_is_truthy("TEST_TRUTHY"));
+            assert!(!env_is_falsey("TEST_TRUTHY"));
+        });
+
+        temp_env::with_vars(vec![("TEST_FALSEY", Some("false"))], || {
+            assert!(!env_is_truthy("TEST_FALSEY"));
+            assert!(env_is_falsey("TEST_FALSEY"));
+        });
+
+        // Test missing env vars
+        temp_env::with_vars(vec![("TEST_MISSING", None::<&str>)], || {
+            assert!(!env_is_truthy("TEST_MISSING"));
+            assert!(!env_is_falsey("TEST_MISSING"));
+        });
     }
 }

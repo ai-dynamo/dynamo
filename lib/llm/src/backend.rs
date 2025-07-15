@@ -164,7 +164,9 @@ impl
 
                     let result = state.decoder.process_token_ids(&data.token_ids).unwrap();
 
-                    // todo - propagate finish reason details - possibly an annotation
+                    // NOTE: the `finish_reason` is computed from the generated `token_ids` alone.
+                    // The `data` field can have a `finish_reason` set, coming from the underlying
+                    // LLM inference `Engine`, and empty `token_ids`. See comment below for more details.
                     let finish_reason = match &result.stop_trigger {
                         Some(StopTrigger::MaxTokensLimit) => Some(FinishReason::Length),
                         Some(StopTrigger::HiddenStopTokenDetected(_)) => Some(FinishReason::Stop),
@@ -203,7 +205,15 @@ impl
                     let mut output = output;
                     let mut data = output.data.take().unwrap();
 
-                    data.finish_reason = finish_reason;
+                    // NOTE: If `finish_reason.is_some()`, then one of the stop conditions was triggered
+                    // by the token generation. We should update the `data.finish_reason` in that case.
+                    // However, if `finish_reason.is_none()`, it is possible that we are in the case where
+                    // `data.token_ids` is empty, and `data.finish_reason` is already correctly set.
+                    // In that case, `process_token_ids` above will rewrite `finish_reason` to `None`,
+                    // which we don't want to propagate to `data.finish_reason`.
+                    if finish_reason.is_some() {
+                        data.finish_reason = finish_reason;
+                    }
                     data.text = text;
                     data.tokens = Some(tokens);
 
@@ -466,7 +476,7 @@ impl Decoder {
 
     pub fn process_token_ids(&mut self, token_ids: &[TokenIdType]) -> Result<SeqResult> {
         let mut text: Option<String> = None;
-        let mut tokens = Vec::new();
+        let mut tokens = Vec::with_capacity(token_ids.len());
 
         for token_id in token_ids {
             let StepResult {
@@ -481,7 +491,8 @@ impl Decoder {
 
             if !hide_text {
                 if let Some(token) = &token {
-                    text.get_or_insert_with(String::new).push_str(token);
+                    text.get_or_insert_with(|| String::with_capacity(token_ids.len()))
+                        .push_str(token);
                 }
             }
             tokens.push(token);

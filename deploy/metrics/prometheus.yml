@@ -31,7 +31,7 @@ scrape_configs:
   - job_name: 'dcgm-exporter'
     scrape_interval: 5s
     static_configs:
-      - targets: ['dcgm-exporter:9400']  # on the "monitoring" network
+      - targets: ['dcgm-exporter:9401']  # on the "monitoring" network
 
   # This is a demo service that needs to be launched manually. See components/metrics/README.md
   # Note that you may need to disable the firewall on your host. On Ubuntu: sudo ufw allow 8000/tcp

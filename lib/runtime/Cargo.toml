@@ -37,6 +37,7 @@ async-nats = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
 async_zmq = { workspace = true }
+axum = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
@@ -80,5 +81,13 @@ opentelemetry-stdout = { version = "0.30" }
 [dev-dependencies]
 assert_matches = { version = "1.5.0" }
 env_logger = { version = "0.11" }
+reqwest = { version = "0.12.22", features = ["json"] }
 rstest = { version = "0.23.0" }
 temp-env = { version = "0.3.6" }
+
+# These patches are to address issues in reqwest, which is used in the HTTP server test (but not on servers).
+# These are transitive dependencies to use secure versions and mitigate known vulnerabilities.
+[patch.crates-io]
+tokio  = { version = "1.18.4" }   # addresses RUSTSEC-2023-0001
+h2     = { version = "0.4.4"   }   # addresses RUSTSEC-2024-0332
+rustls = { version = "0.23.18" }   # addresses RUSTSEC-2024-0399

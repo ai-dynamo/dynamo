@@ -4,55 +4,28 @@ This directory contains configuration for visualizing metrics from the metrics a
 
 ## Components
 
-- **Prometheus**: Collects and stores metrics from the service
-- **Grafana**: Provides visualization dashboards for the metrics
+- **Prometheus Server**: Collects and stores metrics from Dynamo services and other components.
+- **Grafana**: Provides dashboards by querying the Prometheus Server.
 
 ## Topology
 
 Default Service Relationship Diagram:
-```text
-     ┌─────────────┐    ┌─────────────┐    ┌─────────────┐
-     │ nats-server │    │ etcd-server │    │dcgm-exporter│
-     │   :4222     │    │   :2379     │    │   :9400     │
-     │   :6222     │    │   :2380     │    │             │
-     │   :8222     │    │             │    │             │
-     └──────┬──────┘    └──────┬──────┘    └──────┬──────┘
-            │                  │                  │
-            │ :8222/varz       │ :2379/metrics    │ :9400/metrics
-            │                  │                  │
-            ▼                  │                  │
-     ┌─────────────┐           │                  │
-     │nats-prom-exp│           │                  │
-     │   :7777     │           │                  │
-     │             │           │                  │
-     │  /metrics   │           │                  │
-     └──────┬──────┘           │                  │
-            │                  │                  │
-            │ :7777/metrics    │                  │
-            │                  │                  │
-            ▼                  ▼                  ▼
-     ┌─────────────────────────────────────────────────┐
-     │                prometheus                       │
-     │                  :9090                          │
-     │                                                 │
-     │  scrapes: nats-prom-exp:7777/metrics            │
-     │           etcd-server:2379/metrics              │
-     │           dcgm-exporter:9400/metrics            │
-     └──────────────────┬──────────────────────────────┘
-                        │
-                        │ :9090/query API
-                        │
-                        ▼
-                ┌─────────────┐
-                │   grafana   │
-                │    :3001    │
-                │             │
-                └─────────────┘
+```mermaid
+graph TD
+    BROWSER[Browser] -->|:3001| GRAFANA[Grafana :3001]
+    subgraph DockerComposeNetwork [Network inside Docker Compose]
+        NATS_PROM_EXP[nats-prom-exp :7777 /metrics] -->|:8222/varz| NATS_SERVER[nats-server :4222, :6222, :8222]
+        PROMETHEUS[Prometheus server :9090] -->|:2379/metrics| ETCD_SERVER[etcd-server :2379, :2380]
+        PROMETHEUS -->|:9401/metrics| DCGM_EXPORTER[dcgm-exporter :9401]
+        PROMETHEUS -->|:7777/metrics| NATS_PROM_EXP
+        PROMETHEUS -->|:8000/metrics| DYNAMOFE[Dynamo HTTP FE :8000]
+        GRAFANA -->|:9090/query API| PROMETHEUS
+    end
 ```
 
-Networks:
-- monitoring: nats-prom-exp, etcd-server, dcgm-exporter, prometheus, grafana
-- default: nats-server (accessible via host network)
+The dcgm-exporter service in the Docker Compose network is configured to use port 9401 instead of the default port 9400. This adjustment is made to avoid port conflicts with other dcgm-exporter instances that may be running simultaneously. Such a configuration is typical in distributed systems like SLURM.
+
+As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build containers with `--framework VLLM_V1` or `--framework TENSORRTLLM`.
 
 ## Getting Started
 
@@ -66,7 +39,7 @@ Networks:
    docker compose -f deploy/metrics/docker-compose.yml --profile metrics up -d  # In addition to the above, start Prometheus & Grafana
    ```
 
-   If you have particular GPU(s) to use, set the variable below before docker compose:
+   To target specific GPU(s), export the variable below before running Docker Compose:
    ```bash
    export CUDA_VISIBLE_DEVICES=0,2
    ```
