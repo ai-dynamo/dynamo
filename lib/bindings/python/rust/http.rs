@@ -37,8 +37,16 @@ pub struct HttpService {
 impl HttpService {
     #[new]
     #[pyo3(signature = (port=None))]
-    pub fn new(port: Option<u16>) -> PyResult<Self> {
-        let builder = service_v2::HttpService::builder().port(port.unwrap_or(8080));
+    pub fn new(
+        port: Option<u16>,
+        rate_limiter_config: Option<RateLimiterConfig>,
+    ) -> PyResult<Self> {
+        let mut builder = service_v2::HttpService::builder().port(port.unwrap_or(8080));
+
+        if let Some(rate_limiter_config) = rate_limiter_config {
+            builder = builder.with_rate_limiter(rate_limiter_config.inner);
+        }
+
         let inner = builder.build().map_err(to_pyerr)?;
         Ok(Self { inner })
     }
@@ -182,5 +190,32 @@ where
                 }
             }
         }
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub struct RateLimiterConfig {
+    inner: dynamo_llm::http::service::rate_limiter::RateLimiterConfig,
+}
+
+#[pymethods]
+impl RateLimiterConfig {
+    #[new]
+    pub fn new(
+        ttft_threshold_secs: f64,
+        itl_threshold_secs: f64,
+        time_constant_secs: f64,
+        per_model_rate_limiting: bool,
+    ) -> PyResult<Self> {
+        let inner = dynamo_llm::http::service::rate_limiter::RateLimiterConfig::new(
+            ttft_threshold_secs,
+            itl_threshold_secs,
+            time_constant_secs,
+            per_model_rate_limiting,
+        )
+        .map_err(to_pyerr)?;
+
+        Ok(Self { inner })
     }
 }

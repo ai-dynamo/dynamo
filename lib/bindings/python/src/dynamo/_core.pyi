@@ -807,7 +807,7 @@ class HttpService:
     It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
     """
 
-    ...
+    ... 
 
 class HttpError:
     """
@@ -815,6 +815,19 @@ class HttpError:
     """
 
     ...
+
+class RateLimiterConfig:
+    """
+    A configuration for the HTTP service rate limiter logic
+    """
+
+    def __init__(
+        self, 
+        ttft_threshold_secs: float, 
+        itl_threshold_secs: float, 
+        time_constant_secs: float, 
+        per_model_limits: bool = False
+    ) -> None: ...
 
 class HttpAsyncEngine:
     """
