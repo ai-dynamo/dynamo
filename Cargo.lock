@@ -1897,6 +1897,7 @@ dependencies = [
  "prometheus",
  "rand 0.9.1",
  "regex",
+ "reqwest",
  "rstest 0.23.0",
  "serde",
  "serde_json",
