@@ -66,6 +66,24 @@ use opentelemetry::trace::TracerProvider;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use opentelemetry::trace::{SpanContext};
 use tracing::Span;
+use tracing_subscriber::layer::Context;
+use tracing::Id;
+use tracing::span;
+use tracing_subscriber::Layer;
+use uuid::Uuid;
+
+/// Generate a 32-character, lowercase hex trace ID (W3C-compliant)
+fn generate_trace_id() -> String {
+    Uuid::new_v4().simple().to_string()
+}
+
+/// Generate a 16-character, lowercase hex span ID (W3C-compliant)
+fn generate_span_id() -> String {
+    // Use the first 8 bytes (16 hex chars) of a UUID v4
+    let uuid = Uuid::new_v4();
+    let bytes = uuid.as_bytes();
+    bytes[..8].iter().map(|b| format!("{:02x}", b)).collect()
+}
 
 //use opentelemetry_sdk::{
 //    trace::{Config, SdkTracerProvider},
@@ -87,6 +105,28 @@ const CONFIG_PATH_ENV: &str = "DYN_LOGGING_CONFIG_PATH";
 
 /// Once instance to ensure the logger is only initialized once
 static INIT: Once = Once::new();
+
+pub struct DistributedTraceIdLayer;
+
+struct DistributedTracingContext {
+    trace_id: String,
+    span_id: String
+}
+
+impl<S> Layer<S> for DistributedTraceIdLayer
+where
+    S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(&self, _attrs: &span::Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        if let Some(span) = ctx.span(id) {
+	    let trace_id = generate_trace_id();
+	    let span_id = generate_span_id();
+	    let mut extensions = span.extensions_mut();
+	    extensions.insert(DistributedTracingContext {trace_id:trace_id,
+							 span_id:span_id});
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct LoggingConfig {
@@ -142,13 +182,14 @@ pub fn init() {
             }
         }
 	// Create a new OpenTelemetry trace pipeline that prints to stdout
-	let provider = SdkTracerProvider::builder()
-	    .with_sampler(Sampler::AlwaysOn)
-            .build();
-	let tracer = provider.tracer("readme_example");
+//	let provider = SdkTracerProvider::builder()
+//	    .with_sampler(Sampler::AlwaysOn)
+//	    .with_simple_exporter(opentelemetry_stdout::SpanExporter::default())
+  //          .build();
+//	let tracer = provider.tracer("readme_example");
 
 	// Create a tracing layer with the configured tracer
-	let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
+//	let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
 
         if crate::config::jsonl_logging_enabled() {
             let l = fmt::layer()
@@ -159,7 +200,7 @@ pub fn init() {
                 .event_format(CustomJsonFormatter::new())
                 .with_writer(std::io::stderr)
                 .with_filter(filter_layer);
-            tracing_subscriber::registry().with(telemetry).with(l).init();
+            tracing_subscriber::registry().with(DistributedTraceIdLayer).with(l).init();
         } else {
             let l = fmt::layer()
                 .with_ansi(!crate::config::disable_ansi_logging())
@@ -167,7 +208,7 @@ pub fn init() {
                 .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
                 .with_writer(std::io::stderr)
                 .with_filter(filter_layer);
-            tracing_subscriber::registry().with(telemetry).with(l).init();
+            tracing_subscriber::registry().with(l).init();
         };
     });
 }
@@ -271,6 +312,7 @@ where
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> std::fmt::Result {
+
         let mut visitor = JsonVisitor::default();
         event.record(&mut visitor);
         let message = visitor
@@ -286,19 +328,23 @@ where
         if let Some(span) = current_span {
 
 
-
 //	    println!("{}",span.trace_id());
             let ext = span.extensions();
+	    let tracing_context = ext.get::<DistributedTracingContext>().unwrap();
 	    let otel_ctx = Span::current().context();
 	    let span_ref = otel_ctx.span();
 	    let span_context = span_ref.span_context();
+
+	    visitor.fields.insert("neelay_trace_id".to_string(),
+				  serde_json::Value::String(tracing_context.span_id.clone()));
+
+//	    visitor.fields.insert(
+//		"neelay_trace_id".to_string(),
+//		serde_json::Value::String(span_context.trace_id().to_string()),
+//	    );
 	    visitor.fields.insert(
-		"neelay_trace_id".to_string(),
-		serde_json::Value::String(span_context.trace_id().to_string()),
-	    );
-	    visitor.fields.insert(
-		"neelay_span_id".to_string(),
-		serde_json::Value::String(span_context.span_id().to_string()),
+		"trace_span_id".to_string(),
+		serde_json::Value::String(tracing_context.trace_id.clone()),
 	    );
 
             let data = ext.get::<FormattedFields<N>>().unwrap();
@@ -399,5 +445,32 @@ impl tracing::field::Visit for JsonVisitor {
             // It's unlikely that we would log an inf or nan value.
             serde_json::Value::Number(Number::from_f64(value).unwrap_or(0.into())),
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tracing::instrument(skip_all)]
+    async fn foo() {
+	tracing::trace!(
+	    message="received two parts",
+	    header=5,
+	    data="foo"
+        );
+
+    }
+
+    #[tokio::test]
+    #[tracing::instrument(skip_all)]
+    async fn test_span() {
+	init();
+	tracing::trace!(
+	    message="received two parts",
+	    header=5,
+	    data="foo"
+        );
+	foo().await;
     }
 }
