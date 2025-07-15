@@ -34,7 +34,7 @@ limitations under the License.
 
 The container will be built and give certain file permissions to your local uid and gid.
 
-> Note: Currently local-dev is only implemented for --framework VLLM
+> Note: Currently local-dev is only implemented for --framework VLLM_V1
 
 2. Open Dynamo folder in VS Code
 - Press Ctrl + Shift + P

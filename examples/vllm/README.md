@@ -74,7 +74,7 @@ Note: The above architecture illustrates all the components. The final component
 
 ```bash
 # requires one gpu
-cd examples/vllm_v1
+cd examples/vllm
 bash launch/agg.sh
 ```
 
@@ -82,7 +82,7 @@ bash launch/agg.sh
 
 ```bash
 # requires two gpus
-cd examples/vllm_v1
+cd examples/vllm
 bash launch/agg_router.sh
 ```
 
@@ -90,7 +90,7 @@ bash launch/agg_router.sh
 
 ```bash
 # requires two gpus
-cd examples/vllm_v1
+cd examples/vllm
 bash launch/disagg.sh
 ```
 
@@ -98,7 +98,7 @@ bash launch/disagg.sh
 
 ```bash
 # requires three gpus
-cd examples/vllm_v1
+cd examples/vllm
 bash launch/disagg_router.sh
 ```
 
@@ -108,7 +108,7 @@ This example is not meant to be performant but showcases dynamo routing to data 
 
 ```bash
 # requires four gpus
-cd examples/vllm_v1
+cd examples/vllm
 bash launch/dep.sh
 ```
 
