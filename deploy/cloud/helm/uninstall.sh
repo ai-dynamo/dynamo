@@ -33,11 +33,16 @@ fi
 
 # Step 2: Delete all custom resource instances for each CRD
 for CRD in ${DYNAMO_CRDS}; do
-  # Delete all instances across all namespaces
+  SCOPE=$(kubectl get crd "${CRD}" -o jsonpath='{.spec.scope}')
 
-  echo "Deleting all instances of ${CRD}..."
-  kubectl get "${CRD}" --all-namespaces -o name | xargs -r kubectl delete --wait=false
+  if [ "$SCOPE" == "Namespaced" ]; then
+    echo "Deleting all namespaced instances of ${CRD}..."
+    kubectl get "${CRD}" --all-namespaces -o name | xargs -r kubectl delete --wait=false
+  else
+    echo "Skipping cluster-scoped CRD: ${CRD}"
+  fi
 done
+
 
 # Step 3: Wait for the Operator to handle finalizer removal
 echo "Waiting for Dynamo Operator to handle the finalizer removal (30 seconds)..."
