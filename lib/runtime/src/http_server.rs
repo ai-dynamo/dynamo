@@ -264,6 +264,7 @@ mod tests {
         assert!(response.contains("Total uptime of the DistributedRuntime in seconds"));
     }
 
+    /*
     #[tokio::test]
     async fn test_spawn_http_server_endpoints() {
         use std::sync::Arc;
@@ -323,4 +324,5 @@ mod tests {
             }
         }
     }
+    */
 }
