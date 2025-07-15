@@ -159,8 +159,7 @@ impl RuntimeConfig {
     }
 
     /// Check if System server should be enabled
-    /// System server is enabled by default, but can be disabled by setting DYN_SYSTEM_ENABLED to false
-    /// If a port is explicitly provided, System server will be enabled regardless
+    /// System server is disabled by default, but can be enabled by setting DYN_SYSTEM_ENABLED to true
     pub fn system_server_enabled(&self) -> bool {
         self.system_enabled
     }
