@@ -152,9 +152,7 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let rate_limiter = Arc::new(RateLimiter::new(
-            config.rate_limiter_config.unwrap_or_default(),
-        ));
+        let rate_limiter = Arc::new(RateLimiter::new(config.rate_limiter_config));
         let state = Arc::new(State::new(model_manager, rate_limiter));
 
         // enable prometheus metrics

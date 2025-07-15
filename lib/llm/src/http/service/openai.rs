@@ -103,17 +103,6 @@ impl ErrorResponse {
         )
     }
 
-    /// Bad Request
-    /// Return this error when the received request is malformed.
-    pub fn bad_request(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: msg.to_string(),
-            }),
-        )
-    }
-
     /// The OAI endpoints call an [`dynamo.runtime::engine::AsyncEngine`] which are specialized to return
     /// an [`anyhow::Error`]. This method will convert the [`anyhow::Error`] into an [`HttpError`].
     /// If successful, it will return the [`HttpError`] as an [`ErrorResponse::internal_server_error`]
@@ -159,6 +148,9 @@ async fn completions(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
+    // Rate limit check
+    should_reject_request(&state, &request.inner.model)?;
+
     // todo - extract distributed tracing id and context id from headers
     let request_id = uuid::Uuid::new_v4().to_string();
 
@@ -180,17 +172,6 @@ async fn completions(
     // todo - when optional, if none, apply a default
     let model = &request.inner.model;
 
-    // Rate limit check
-    let should_reject = state
-        .rate_limiter()
-        .should_reject(model)
-        .map_err(|_| ErrorResponse::internal_server_error("Failed to check rate limit"))?;
-    if should_reject {
-        return Err(ErrorResponse::rate_limit_exceeded(&format!(
-            "Rate limit exceeded for current request and model: {model}. Please retry later."
-        )));
-    }
-
     // todo - error handling should be more robust
     let engine = state
         .manager()
@@ -202,7 +183,9 @@ async fn completions(
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::Completions, streaming);
 
-    let mut response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(model, state.rate_limiter_clone());
 
     // setup context
     // todo - inherit request_id from distributed trace details
@@ -324,6 +307,9 @@ async fn chat_completions(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
+    // Rate limit check
+    should_reject_request(&state, &request.inner.model)?;
+
     // Handle unsupported fields - if Some(resp) is returned by
     // validate_chat_completion_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
@@ -367,17 +353,6 @@ async fn chat_completions(
     // todo - when optional, if none, apply a default
     let model = &request.inner.model;
 
-    // Rate limit check
-    let should_reject = state
-        .rate_limiter()
-        .should_reject(model)
-        .map_err(|_| ErrorResponse::internal_server_error("Failed to check rate limit"))?;
-    if should_reject {
-        return Err(ErrorResponse::rate_limit_exceeded(&format!(
-            "Rate limit exceeded for current request and model: {model}. Please retry later."
-        )));
-    }
-
     // todo - determine the proper error code for when a request model is not present
     tracing::trace!("Getting chat completions engine for model: {}", model);
 
@@ -391,7 +366,9 @@ async fn chat_completions(
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::ChatCompletions, streaming);
 
-    let mut response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(model, state.rate_limiter_clone());
 
     // setup context
     // todo - inherit request_id from distributed trace details
@@ -549,7 +526,9 @@ async fn responses(
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::Responses, false);
 
-    let _response_collector = state.metrics_clone().create_response_collector(model);
+    let _response_collector = state
+        .metrics_clone()
+        .create_response_collector(model, state.rate_limiter_clone());
 
     let request = Context::with_id(request, request_id.clone());
 
@@ -589,6 +568,25 @@ async fn responses(
     inflight_guard.mark_ok();
 
     Ok(Json(response).into_response())
+}
+
+pub fn should_reject_request(
+    state: &Arc<service_v2::State>,
+    model: &str,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if !state.rate_limiter().is_enabled() {
+        return Ok(());
+    }
+
+    let should_reject = state.rate_limiter().should_reject(model);
+
+    if should_reject {
+        return Err(ErrorResponse::rate_limit_exceeded(&format!(
+            "Rate limit exceeded for current request and model: {model}. Please retry later."
+        )));
+    }
+
+    Ok(())
 }
 
 pub fn validate_response_input_is_text_only(
