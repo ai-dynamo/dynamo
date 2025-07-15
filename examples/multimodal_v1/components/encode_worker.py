@@ -213,14 +213,17 @@ class VllmEncodeWorker:
             #     ).model_dump_json()
     
             with torch.no_grad():
-                logger.debug(f"Vision model device: {self.vision_model.device}")
-                vision_outputs = self.vision_model.vision_tower(
-                    image_embeds["pixel_values"].to(self.vision_model.device)
-                )
-                logger.debug("Vision model completed.")
-
-                embeddings = vision_outputs.last_hidden_state
+                embeddings = self.vision_model.vision_model(
+                                image_embeds["pixel_values"].to(dtype=torch.float16).cuda()).last_hidden_state
                 embeddings = self.vision_model.multi_modal_projector(embeddings)
+                # logger.debug(f"Vision model device: {self.vision_model.device}")
+                # vision_outputs = self.vision_model.vision_tower(
+                #     image_embeds["pixel_values"].to(self.vision_model.device)
+                # )
+                # logger.debug("Vision model completed.")
+
+                # embeddings = vision_outputs.last_hidden_state
+                # embeddings = self.vision_model.multi_modal_projector(embeddings)
 
 
             descriptor = connect.Descriptor(embeddings)

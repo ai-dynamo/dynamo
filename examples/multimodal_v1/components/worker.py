@@ -171,7 +171,7 @@ class VllmPDWorker(VllmBaseWorker):
         # embeddings_shape, self.embeddings_dtype = get_vision_embeddings_info(
         #     self.engine_args.model, self.engine_args.num_patches
         # )
-        embeddings_shape = (1, 577, 4096)
+        embeddings_shape = (1, 5, 144, 5120)
         logger.debug(f"Embeddings shape: {embeddings_shape}")
         self.embedding_size = embeddings_shape[1]
 

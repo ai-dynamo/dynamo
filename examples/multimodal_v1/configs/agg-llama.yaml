@@ -47,7 +47,6 @@ VllmEncodeWorker:
 VllmDecodeWorker:
   router: random
   tensor_parallel_size: 8
-  gpu_memory_utilization: 0.8
   ServiceArgs:
     workers: 1
     resources:
@@ -58,7 +57,6 @@ VllmPDWorker:
   enable_disagg: false
   router: random
   tensor_parallel_size: 8
-  gpu_memory_utilization: 0.8
   ServiceArgs:
     workers: 1
     resources:
