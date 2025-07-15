@@ -2,8 +2,39 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Example cli using the Python bindings, similar to `dynamo-run`.
+#
 # Usage: `python cli.py in=text out=mistralrs <your-model>`.
+# `in` can be:
+# - "http": OpenAI compliant HTTP server
+# - "text": Interactive text chat
+# - "batch:<file.jsonl>": Run all the prompts in the JSONL file, write out to a jsonl in current dir.
+# - "stdin": Allows you to pipe something in: `echo prompt | python cli.py in=stdin out=...`
+# - "dyn://name": Connect to nats/etcd and listen for requests from frontend.
+#
+# `out` can be:
+# - "dyn": Run as the frontend node. Auto-discover workers and route traffic to them.
+# - "mistralrs", "llamacpp", "sglang", "vllm", "trtllm", "echo": An LLM worker.
+#
 # Must be in a virtualenv with the Dynamo bindings (or wheel) installed.
+#
+# To use mistralrs or llamacpp you must build the library with those features:
+# ```
+# maturin develop --features mistralrs,llamacpp --release
+# ```
+#
+# `--release` is optional. It builds slower but the resulting library is significantly faster.
+#
+# They will both be built for CUDA by default. If you see a runtime error `CUDA_ERROR_STUB_LIBRARY` this is because
+# the stub `libcuda.so` is earlier on the library search path than the real libcuda. Try removing
+# the `rpath` from the library:
+#
+# ```
+# patchelf --set-rpath '' _core.cpython-312-x86_64-linux-gnu.so
+# ```
+#
+# If you include the `llamacpp` feature flag, `libllama.so` and `libggml.so` (and family) will need to be
+# available at runtime.
+#
 
 import argparse
 import asyncio
@@ -47,7 +78,8 @@ def parse_args():
 
     # --- Step 2: Argparse for flags and the model path ---
     parser = argparse.ArgumentParser(
-        description="Dynamo CLI: Connect inputs to an engine",
+        description="Dynamo example CLI: Connect inputs to an engine",
+        usage="python cli.py in=text out=mistralrs <your-model>",
         formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
     )
 
