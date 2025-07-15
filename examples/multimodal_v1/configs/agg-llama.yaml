@@ -14,7 +14,7 @@
 # limitations under the License.
 Common:
   model: meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8
-  max-model-len: 430000
+  max-model-len: 208960
   image-token-id: 32000
   num-patches: 576
 
@@ -44,10 +44,21 @@ VllmEncodeWorker:
       gpu: '1'
   common-configs: [model]
 
+VllmDecodeWorker:
+  router: random
+  tensor_parallel_size: 8
+  gpu_memory_utilization: 0.8
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: '8'
+  common-configs: [model, block-size, max-model-len]
+
 VllmPDWorker:
   enable_disagg: false
   router: random
   tensor_parallel_size: 8
+  gpu_memory_utilization: 0.8
   ServiceArgs:
     workers: 1
     resources:

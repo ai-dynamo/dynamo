@@ -155,21 +155,6 @@ class VllmEncodeWorker:
             raise ValueError(f"Failed to load image: {e}")
     
 
-    async def send_request_to_decode(
-        self,
-        request: vLLMMultimodalRequest,
-    ) -> AsyncIterator[MyRequestOutput]:
-        logger.debug("Sending request to decode")
-
-        decode_request = copy.deepcopy(request)
-
-        logger.debug("Decode request: %s", decode_request.model_dump_json())
-
-        async for decode_response in await self.pd_worker_client.round_robin(
-            decode_request.model_dump_json()
-        ):
-            yield MyRequestOutput.model_validate_json(decode_response.data())
-
     @endpoint()
     async def encode(self, request: vLLMMultimodalRequest) -> AsyncIterator[MyRequestOutput]:
         logger.debug(f"Received encode request: {{ id: {request.request_id} }}.")

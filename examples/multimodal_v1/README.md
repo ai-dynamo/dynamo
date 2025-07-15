@@ -111,3 +111,11 @@ curl localhost:8000/v1/completions \
     "max_tokens": 30
   }'
 ```
+
+```
+dynamo serve components.frontend:Frontend -f configs/agg-llama.yaml
+dynamo serve components.processor:Processor -f configs/agg-llama.yaml
+dynamo serve components.encode_worker:VllmEncoderWorker -f configs/agg-llama.yaml
+dynamo serve components.worker:VllmPDWorker -f configs/agg-llama.yaml
+dynamo serve components.worker:VllmDecodeWorker -f configs/agg-llama.yaml
+```
