@@ -40,7 +40,7 @@ docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
 ```bash
-./container/run.sh -it --framework VLLM_V1 --mount-workspace
+./container/run.sh -it --framework VLLM_V1 [--mount-workspace]
 ```
 
 This includes the specific commit [vllm-project/vllm#19790](https://github.com/vllm-project/vllm/pull/19790) which enables support for external control of the DP ranks.
