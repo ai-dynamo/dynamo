@@ -128,6 +128,9 @@ impl Metrics {
     /// - `{prefix}_http_service_output_sequence_tokens` - HistogramVec for output sequence length in tokens
     /// - `{prefix}_http_service_time_to_first_token_seconds` - HistogramVec for time to first token in seconds
     /// - `{prefix}_http_service_inter_token_latency_seconds` - HistogramVec for inter-token latency in seconds
+    /// - `{prefix}_http_service_rate_limit_requests_total` - IntCounterVec for the total number of requests rejected by the rate limiter
+    /// - `{prefix}_http_service_rate_limit_ema_ttft_seconds` - HistogramVec for time to first token in seconds
+    /// - `{prefix}_http_service_rate_limit_ema_itl_seconds` - HistogramVec for inter-token latency in seconds
     pub fn new(prefix: &str) -> Self {
         let rate_limit_requests_counter = IntCounterVec::new(
             Opts::new(

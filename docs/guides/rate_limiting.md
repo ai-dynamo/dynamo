@@ -115,3 +115,51 @@ TTFT: TimeWeightedDiagnostics { decayed_time_weighted_average: 2.450, time_const
 ITL: TimeWeightedDiagnostics { decayed_time_weighted_average: 0.025, time_constant_secs: 30.0, last_weighted_sum: 1.245, duration_since_last_update: 0.125 }
 }
 ```
+
+
+## Tuning Guidelines
+
+### Time Constant
+- **Shorter (10-30s)**: Faster reaction to load changes, more sensitive
+- **Longer (60-120s)**: Smoother operation, less reactive to spikes
+
+### TTFT Threshold
+- **Conservative (500-1000ms)**: Maintains very responsive feel
+- **Moderate (1000-2000ms)**: Balances throughput with responsiveness
+- **Aggressive (2000ms+)**: Prioritizes throughput over latency
+
+### ITL Threshold  
+- **Conservative (5-10ms)**: Ensures smooth streaming experience
+- **Moderate (10-20ms)**: Allows some latency for higher throughput
+- **Aggressive (20ms+)**: Accepts choppier streaming for max throughput
+
+### Per-Model vs Global
+- **Per-Model**: Better for multi-tenant scenarios with different SLAs
+- **Global**: Simpler for single-tenant or uniform SLA scenarios
+
+## Best Practices
+
+1. **Start Conservative**: Begin with lower thresholds and increase based on user feedback
+2. **Monitor Closely**: Watch both rate limit counters and user-facing metrics
+3. **Load Test**: Validate behavior under realistic load patterns
+4. **Document SLAs**: Clearly communicate expected performance to users
+5. **Alert on Rejections**: Set up alerts when rejection rates exceed acceptable levels
+
+## Troubleshooting
+
+### High Rejection Rates
+- Check if system is genuinely overloaded
+- Consider increasing thresholds temporarily
+- Scale backend resources
+- Investigate specific models causing issues
+
+### No Rejections During Overload
+- Verify rate limiter is enabled
+- Check threshold configuration
+- Ensure metrics are being recorded properly
+- Review time constant settings
+
+### Inconsistent Behavior
+- Check if per-model limits are configured correctly
+- Review metric collection for gaps
+- Validate system clock stability

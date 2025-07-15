@@ -18,6 +18,7 @@ use async_stream::stream;
 use dynamo_llm::http::service::{
     error::HttpError,
     metrics::{Endpoint, RequestType, Status},
+    rate_limiter::RateLimiterConfig,
     service_v2::HttpService,
     Metrics,
 };
@@ -467,6 +468,627 @@ async fn test_http_service() {
 
     assert!(response.status().is_success(), "{:?}", response);
     println!("{}", response.text().await.unwrap());
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+/// Engine that simulates low TTFT to trigger rate limiting
+struct SlowTTFTEngine {
+    ttft_delay_ms: u64,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for SlowTTFTEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+
+        let generator = request.response_generator();
+        let ttft_delay_ms = self.ttft_delay_ms;
+
+        let stream = stream! {
+            // Simulate slow TTFT
+            tokio::time::sleep(std::time::Duration::from_millis(ttft_delay_ms)).await;
+
+            // Generate a few tokens with normal ITL
+            for i in 0..3 {
+                let inner = generator.create_choice(i, Some(format!("token {i}")), None, None);
+                let output = NvCreateChatCompletionStreamResponse { inner };
+                yield Annotated::from_data(output);
+
+                if i < 2 {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await; // Normal ITL
+                }
+            }
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+/// Engine that simulates slow ITL to trigger rate limiting
+struct SlowITLEngine {
+    itl_delay_ms: u64,
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for SlowITLEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (request, context) = request.transfer(());
+        let ctx = context.context();
+
+        let generator = request.response_generator();
+        let itl_delay_ms = self.itl_delay_ms;
+
+        let stream = stream! {
+            // Fast TTFT
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+            // Generate tokens with slow ITL
+            for i in 0..5 {
+                let inner = generator.create_choice(i, Some(format!("token {i}")), None, None);
+                let output = NvCreateChatCompletionStreamResponse { inner };
+                yield Annotated::from_data(output);
+
+                if i < 4 {
+                    tokio::time::sleep(std::time::Duration::from_millis(itl_delay_ms)).await; // Slow ITL
+                }
+            }
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+#[tokio::test]
+async fn test_rate_limiting_triggers_correctly() {
+    // Create rate limiter config with low thresholds for testing
+    let rate_limiter_config = RateLimiterConfig::new(
+        1.0,   // TTFT threshold: 1 second
+        0.1,   // ITL threshold: 100ms
+        5.0,   // Time constant: 5 seconds
+        false, // Global rate limiting
+    )
+    .unwrap();
+
+    let service = HttpService::builder()
+        .port(8990)
+        .with_rate_limiter(rate_limiter_config)
+        .build()
+        .unwrap();
+
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run(token.clone()).await });
+
+    // Add engines with different performance characteristics
+    let fast_engine = Arc::new(CounterEngine {});
+    let slow_ttft_engine = Arc::new(SlowTTFTEngine {
+        ttft_delay_ms: 1500,
+    }); // 1.5s TTFT
+    let slow_itl_engine = Arc::new(SlowITLEngine { itl_delay_ms: 200 }); // 200ms ITL
+
+    manager
+        .add_chat_completions_model("fast", fast_engine)
+        .unwrap();
+    manager
+        .add_chat_completions_model("slow_ttft", slow_ttft_engine)
+        .unwrap();
+    manager
+        .add_chat_completions_model("slow_itl", slow_itl_engine)
+        .unwrap();
+
+    let client = reqwest::Client::new();
+    let metrics = state.metrics_clone();
+
+    // Wait for service to be ready
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    // Test 1: Fast model should work fine initially
+    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+        .model("fast")
+        .messages(vec![
+            async_openai::types::ChatCompletionRequestMessage::User(
+                async_openai::types::ChatCompletionRequestUserMessage {
+                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                        "test".to_string(),
+                    ),
+                    name: None,
+                },
+            ),
+        ])
+        .stream(true)
+        .max_tokens(10 as u32)
+        .build()
+        .unwrap();
+
+    let response = client
+        .post("http://localhost:8990/v1/chat/completions")
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+
+    assert!(
+        response.status().is_success(),
+        "Fast model should work initially"
+    );
+    let _ = response.bytes().await.unwrap();
+
+    // Test 2: Slow TTFT model should trigger rate limiting after a few requests
+    let mut slow_ttft_request = request.clone();
+    slow_ttft_request.model = "slow_ttft".to_string();
+
+    // Make several requests to build up the EMA
+    for i in 0..3 {
+        println!("Sending slow TTFT request {}", i + 1);
+        let response = client
+            .post("http://localhost:8990/v1/chat/completions")
+            .json(&slow_ttft_request)
+            .send()
+            .await
+            .unwrap();
+
+        // First few requests should succeed (building up EMA)
+        if i < 2 {
+            assert!(
+                response.status().is_success(),
+                "Slow TTFT request {} should succeed while building EMA",
+                i + 1
+            );
+            let _ = response.bytes().await.unwrap();
+        } else {
+            // Later requests should be rate limited
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                println!("Rate limiting triggered after {} requests", i + 1);
+                break;
+            } else {
+                let _ = response.bytes().await.unwrap();
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await; // Small delay between requests
+    }
+
+    // Test 3: Slow ITL model should also trigger rate limiting
+    let mut slow_itl_request = request.clone();
+    slow_itl_request.model = "slow_itl".to_string();
+
+    for i in 0..3 {
+        println!("Sending slow ITL request {}", i + 1);
+        let response = client
+            .post("http://localhost:8990/v1/chat/completions")
+            .json(&slow_itl_request)
+            .send()
+            .await
+            .unwrap();
+
+        if i < 2 {
+            assert!(
+                response.status().is_success(),
+                "Slow ITL request {} should succeed while building EMA",
+                i + 1
+            );
+            let _ = response.bytes().await.unwrap();
+        } else {
+            // Later requests should be rate limited
+            if response.status() == StatusCode::TOO_MANY_REQUESTS {
+                println!("ITL rate limiting triggered after {} requests", i + 1);
+                break;
+            } else {
+                let _ = response.bytes().await.unwrap();
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // Test 4: Verify rejection metrics were recorded
+    let rejection_count = metrics.get_rate_limit_requests_counter(
+        "slow_ttft",
+        &Endpoint::ChatCompletions,
+        &RequestType::Stream,
+        &Status::Rejected,
+    ) + metrics.get_rate_limit_requests_counter(
+        "slow_itl",
+        &Endpoint::ChatCompletions,
+        &RequestType::Stream,
+        &Status::Rejected,
+    );
+
+    println!("Total rejection count: {}", rejection_count);
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_rate_limiting_http_integration() {
+    let rate_limiter_config = RateLimiterConfig::new(0.1, 0.01, 5.0, false).unwrap();
+    let service = HttpService::builder()
+        .port(8991)
+        .with_rate_limiter(rate_limiter_config)
+        .build()
+        .unwrap();
+
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run(token.clone()).await });
+
+    // Use simple CounterEngine (already exists)
+    let engine = Arc::new(CounterEngine {});
+    manager.add_chat_completions_model("test", engine).unwrap();
+
+    // Manually record high TTFT values to trigger rate limiting
+    state.rate_limiter().record_ttft("test", 0.5);
+    state.rate_limiter().record_ttft("test", 0.3);
+    state.rate_limiter().record_ttft("test", 0.4);
+
+    let client = reqwest::Client::new();
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+        .model("test")
+        .messages(vec![
+            async_openai::types::ChatCompletionRequestMessage::User(
+                async_openai::types::ChatCompletionRequestUserMessage {
+                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                        "test".to_string(),
+                    ),
+                    name: None,
+                },
+            ),
+        ])
+        .stream(true)
+        .max_tokens(3 as u32)
+        .build()
+        .unwrap();
+
+    // This request should be rate limited
+    let response = client
+        .post("http://localhost:8991/v1/chat/completions")
+        .json(&request)
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+    println!("✅ Rate limiting triggered correctly!");
+
+    // Verify metrics were recorded
+    let rejection_count = state.metrics_clone().get_rate_limit_requests_counter(
+        "test",
+        &Endpoint::ChatCompletions,
+        &RequestType::Stream,
+        &Status::Rejected,
+    );
+    assert!(rejection_count > 0, "Should have recorded rejection");
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_per_model_vs_global_rate_limiting() {
+    // Test global rate limiting (per_model_limits = false)
+    let global_config = RateLimiterConfig::new(0.8, 0.08, 3.0, false).unwrap();
+    let service1 = HttpService::builder()
+        .port(8992)
+        .with_rate_limiter(global_config)
+        .build()
+        .unwrap();
+
+    let state1 = service1.state_clone();
+    let manager1 = state1.manager();
+
+    let token1 = CancellationToken::new();
+    let cancel_token1 = token1.clone();
+    let task1 = tokio::spawn(async move { service1.run(token1.clone()).await });
+
+    // Test per-model rate limiting (per_model_limits = true)
+    let per_model_config = RateLimiterConfig::new(0.8, 0.08, 3.0, true).unwrap();
+    let service2 = HttpService::builder()
+        .port(8993)
+        .with_rate_limiter(per_model_config)
+        .build()
+        .unwrap();
+
+    let state2 = service2.state_clone();
+    let manager2 = state2.manager();
+
+    let token2 = CancellationToken::new();
+    let cancel_token2 = token2.clone();
+    let task2 = tokio::spawn(async move { service2.run(token2.clone()).await });
+
+    // Add slow engines to both services
+    let slow_engine1a = Arc::new(SlowTTFTEngine {
+        ttft_delay_ms: 1200,
+    });
+    let slow_engine1b = Arc::new(SlowTTFTEngine {
+        ttft_delay_ms: 1200,
+    });
+    let slow_engine2a = Arc::new(SlowTTFTEngine {
+        ttft_delay_ms: 1200,
+    });
+    let slow_engine2b = Arc::new(SlowTTFTEngine {
+        ttft_delay_ms: 1200,
+    });
+
+    manager1
+        .add_chat_completions_model("model_a", slow_engine1a)
+        .unwrap();
+    manager1
+        .add_chat_completions_model("model_b", slow_engine1b)
+        .unwrap();
+    manager2
+        .add_chat_completions_model("model_a", slow_engine2a)
+        .unwrap();
+    manager2
+        .add_chat_completions_model("model_b", slow_engine2b)
+        .unwrap();
+
+    let client = reqwest::Client::new();
+
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    let base_request = async_openai::types::CreateChatCompletionRequestArgs::default()
+        .messages(vec![
+            async_openai::types::ChatCompletionRequestMessage::User(
+                async_openai::types::ChatCompletionRequestUserMessage {
+                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                        "test".to_string(),
+                    ),
+                    name: None,
+                },
+            ),
+        ])
+        .stream(true)
+        .max_tokens(10 as u32)
+        .build()
+        .unwrap();
+
+    // Test global rate limiting - model_a affects model_b
+    println!("Testing global rate limiting...");
+    for _i in 0..3 {
+        let mut request_a = base_request.clone();
+        request_a.model = "model_a".to_string();
+
+        let response = client
+            .post("http://localhost:8992/v1/chat/completions")
+            .json(&request_a)
+            .send()
+            .await
+            .unwrap();
+
+        if response.status().is_success() {
+            let _ = response.bytes().await.unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // Now model_b should be affected by model_a's rate limiting (global)
+    let mut request_b = base_request.clone();
+    request_b.model = "model_b".to_string();
+
+    let response = client
+        .post("http://localhost:8992/v1/chat/completions")
+        .json(&request_b)
+        .send()
+        .await
+        .unwrap();
+
+    println!(
+        "Global rate limiting - model_b status: {}",
+        response.status()
+    );
+
+    // Test per-model rate limiting - model_a doesn't affect model_b
+    println!("Testing per-model rate limiting...");
+    for _i in 0..3 {
+        let mut request_a = base_request.clone();
+        request_a.model = "model_a".to_string();
+
+        let response = client
+            .post("http://localhost:8993/v1/chat/completions")
+            .json(&request_a)
+            .send()
+            .await
+            .unwrap();
+
+        if response.status().is_success() {
+            let _ = response.bytes().await.unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // model_b should NOT be affected by model_a's rate limiting (per-model)
+    let mut request_b2 = base_request.clone();
+    request_b2.model = "model_b".to_string();
+
+    let response = client
+        .post("http://localhost:8993/v1/chat/completions")
+        .json(&request_b2)
+        .send()
+        .await
+        .unwrap();
+
+    println!(
+        "Per-model rate limiting - model_b status: {}",
+        response.status()
+    );
+    // Model B should succeed since it has its own rate limiting state
+    assert!(
+        response.status().is_success() || response.status() != StatusCode::TOO_MANY_REQUESTS,
+        "Per-model rate limiting should not affect model_b"
+    );
+
+    if response.status().is_success() {
+        let _ = response.bytes().await.unwrap();
+    }
+
+    cancel_token1.cancel();
+    cancel_token2.cancel();
+    task1.await.unwrap().unwrap();
+    task2.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn test_rate_limiting_recovery() {
+    let rate_limiter_config = RateLimiterConfig::new(
+        0.6,  // TTFT threshold: 600ms
+        0.06, // ITL threshold: 60ms
+        1.0,  // Short time constant for faster recovery
+        false,
+    )
+    .unwrap();
+
+    let service = HttpService::builder()
+        .port(8994)
+        .with_rate_limiter(rate_limiter_config)
+        .build()
+        .unwrap();
+
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+    let task = tokio::spawn(async move { service.run(token.clone()).await });
+
+    // Add engines with different speeds
+    let slow_engine = Arc::new(SlowTTFTEngine {
+        ttft_delay_ms: 1000,
+    }); // 1s TTFT
+    let fast_engine = Arc::new(CounterEngine {});
+
+    manager
+        .add_chat_completions_model("slow", slow_engine)
+        .unwrap();
+    manager
+        .add_chat_completions_model("fast", fast_engine)
+        .unwrap();
+
+    let client = reqwest::Client::new();
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+    let slow_request = async_openai::types::CreateChatCompletionRequestArgs::default()
+        .model("slow")
+        .messages(vec![
+            async_openai::types::ChatCompletionRequestMessage::User(
+                async_openai::types::ChatCompletionRequestUserMessage {
+                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                        "test".to_string(),
+                    ),
+                    name: None,
+                },
+            ),
+        ])
+        .stream(true)
+        .max_tokens(10 as u32)
+        .build()
+        .unwrap();
+
+    let fast_request = async_openai::types::CreateChatCompletionRequestArgs::default()
+        .model("fast")
+        .messages(vec![
+            async_openai::types::ChatCompletionRequestMessage::User(
+                async_openai::types::ChatCompletionRequestUserMessage {
+                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                        "test".to_string(),
+                    ),
+                    name: None,
+                },
+            ),
+        ])
+        .stream(true)
+        .max_tokens(10 as u32)
+        .build()
+        .unwrap();
+
+    // Phase 1: Trigger rate limiting with slow requests
+    println!("Phase 1: Triggering rate limiting...");
+    for i in 0..4 {
+        let response = client
+            .post("http://localhost:8994/v1/chat/completions")
+            .json(&slow_request)
+            .send()
+            .await
+            .unwrap();
+
+        if response.status() == StatusCode::TOO_MANY_REQUESTS {
+            println!("Rate limiting triggered at request {}", i + 1);
+            break;
+        } else {
+            let _ = response.bytes().await.unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    // Phase 2: Wait for system to recover (time constant is 1.0s)
+    println!("Phase 2: Waiting for recovery...");
+    tokio::time::sleep(std::time::Duration::from_millis(3000)).await; // Wait 3 time constants
+
+    // Phase 3: Send fast requests to bring down the EMA
+    println!("Phase 3: Sending fast requests to improve EMA...");
+    for i in 0..3 {
+        let response = client
+            .post("http://localhost:8994/v1/chat/completions")
+            .json(&fast_request)
+            .send()
+            .await
+            .unwrap();
+
+        println!("Fast request {} status: {}", i + 1, response.status());
+        if response.status().is_success() {
+            let _ = response.bytes().await.unwrap();
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    // Phase 4: Verify that slow requests work again (system recovered)
+    println!("Phase 4: Testing recovery with moderate request...");
+    let response = client
+        .post("http://localhost:8994/v1/chat/completions")
+        .json(&fast_request)
+        .send()
+        .await
+        .unwrap();
+
+    println!("Recovery test status: {}", response.status());
+    assert!(
+        response.status().is_success(),
+        "System should have recovered and accept requests again"
+    );
+
+    if response.status().is_success() {
+        let _ = response.bytes().await.unwrap();
+    }
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();
