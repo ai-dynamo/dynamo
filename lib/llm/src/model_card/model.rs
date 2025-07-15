@@ -102,7 +102,7 @@ pub struct ModelDeploymentCard {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_formatter: Option<PromptFormatterArtifact>,
 
-    /// Prompt Formatter configuration
+    /// chat template may be stored as a separate file instead of in `prompt_formatter`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template_file: Option<PromptFormatterArtifact>,
 
