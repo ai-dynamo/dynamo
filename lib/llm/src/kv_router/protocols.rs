@@ -36,7 +36,7 @@ pub struct WorkerSelectionResult {
 
     /// The number of blocks that the selected worker may already have cached.
     /// This is not a guarantee, but an estimate.
-    pub overlap_blocks: usize,
+    pub overlap_blocks: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]

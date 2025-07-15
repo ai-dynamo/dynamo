@@ -20,6 +20,7 @@ import pytest
 
 # List of models used in the serve tests
 SERVE_TEST_MODELS = [
+    "Qwen/Qwen3-0.6B",
     "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "llava-hf/llava-1.5-7b-hf",
 ]

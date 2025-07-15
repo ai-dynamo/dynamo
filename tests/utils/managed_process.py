@@ -166,6 +166,7 @@ class ManagedProcess:
                 stdin=stdin,
                 stdout=stdout,
                 stderr=stderr,
+                start_new_session=True,  # Isolate process group to prevent kill 0 from affecting parent
             )
             self._sed_proc = subprocess.Popen(
                 ["sed", "-u", f"s/^/[{self._command_name.upper()}] /"],
@@ -186,6 +187,7 @@ class ManagedProcess:
                     stdin=stdin,
                     stdout=stdout,
                     stderr=stderr,
+                    start_new_session=True,  # Isolate process group to prevent kill 0 from affecting parent
                 )
 
                 self._sed_proc = subprocess.Popen(
