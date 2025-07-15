@@ -319,6 +319,8 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     .find_best_match(&context_id, &request.token_ids)
                     .await?;
                 let has_worker_id_annotation = request.has_annotation("query_instance_id");
+                // Extract context information before moving the request
+                let stream_context = request.context().clone();
                 // Update the request with the estimated prefix hit blocks
                 let (mut backend_input, context) = request.into_parts();
                 let isl = backend_input.token_ids.len();
@@ -332,7 +334,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     let response =
                         Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
                     let stream = stream::iter(vec![response]);
-                    Ok(ResponseStream::new(Box::pin(stream), context.context()))
+                    Ok(ResponseStream::new(Box::pin(stream), stream_context))
                 } else {
                     // Get the response stream from the worker
                     let mut response_stream =
