@@ -327,23 +327,14 @@ where
 
         if let Some(span) = current_span {
 
-
-//	    println!("{}",span.trace_id());
             let ext = span.extensions();
 	    let tracing_context = ext.get::<DistributedTracingContext>().unwrap();
-	    let otel_ctx = Span::current().context();
-	    let span_ref = otel_ctx.span();
-	    let span_context = span_ref.span_context();
 
-	    visitor.fields.insert("neelay_trace_id".to_string(),
+	    visitor.fields.insert("trace_id".to_string(),
 				  serde_json::Value::String(tracing_context.span_id.clone()));
 
-//	    visitor.fields.insert(
-//		"neelay_trace_id".to_string(),
-//		serde_json::Value::String(span_context.trace_id().to_string()),
-//	    );
 	    visitor.fields.insert(
-		"trace_span_id".to_string(),
+		"span_id".to_string(),
 		serde_json::Value::String(tracing_context.trace_id.clone()),
 	    );
 
@@ -354,22 +345,21 @@ where
                 .filter_map(|entry| entry.split_once('='))
                 .collect();
             for (name, value) in span_fields {
+
                 visitor.fields.insert(
                     name.to_string(),
                     serde_json::Value::String(value.trim_matches('"').to_string()),
                 );
             }
 	    if let Some(parent) = span.parent() {
-                visitor.fields.insert("parent_id".to_string(), serde_json::Value::Number(parent.id().into_u64().into())); // Add the parent ID to the span's fields
+		let parent_ext = parent.extensions();
+
+		let parent_tracing_context = parent_ext.get::<DistributedTracingContext>().unwrap();
+                visitor.fields.insert("parent_id".to_string(), serde_json::Value::String(parent_tracing_context.trace_id.clone())); // Add the parent ID to the span's fields
             }
             visitor.fields.insert(
                 "span_name".to_string(),
                 serde_json::Value::String(span.name().to_string()),
-            );
-
-	    visitor.fields.insert(
-                "span_id".to_string(),
-		serde_json::Value::Number(span.id().into_u64().into())
             );
 
         }
@@ -454,6 +444,17 @@ mod tests {
 
     #[tracing::instrument(skip_all)]
     async fn foo() {
+	tracing::trace!(
+	    message="received two parts",
+	    header=5,
+	    data="foo"
+        );
+
+	foo_2().await;
+    }
+
+    #[tracing::instrument(skip_all)]
+    async fn foo_2() {
 	tracing::trace!(
 	    message="received two parts",
 	    header=5,
