@@ -206,13 +206,13 @@ impl RateLimiterConfig {
         ttft_threshold_secs: f64,
         itl_threshold_secs: f64,
         time_constant_secs: f64,
-        per_model_rate_limiting: bool,
+        per_model_limits: bool,
     ) -> PyResult<Self> {
         let inner = dynamo_llm::http::service::rate_limiter::RateLimiterConfig::new(
             ttft_threshold_secs,
             itl_threshold_secs,
             time_constant_secs,
-            per_model_rate_limiting,
+            per_model_limits,
         )
         .map_err(to_pyerr)?;
 

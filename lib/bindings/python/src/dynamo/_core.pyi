@@ -807,7 +807,11 @@ class HttpService:
     It is a OpenAI compatible http ingress into the Dynamo Distributed Runtime.
     """
 
-    ... 
+    def __init__(
+        self, 
+        port: Optional[int] = None, 
+        rate_limiter_config: Optional[RateLimiterConfig] = None
+    ) -> None: ...
 
 class HttpError:
     """
