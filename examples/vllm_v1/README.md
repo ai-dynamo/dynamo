@@ -90,7 +90,58 @@ For more detailed explenations, refer to the main [LLM examples README](../llm/R
 
 ## Deepseek R1
 
-To run DSR1 model please first follow the Ray setup from the [multinode documentation](../../docs/examples/multinode.md).
+<details>
+<summary>Ray Setup for DSR1 Model</summary>
+
+**Note:** This section is only needed if a single model instance is spawning across multiple nodes without data parallelism (e.g., with tensor parallelism 16).
+
+Each vLLM instance requires a separate Ray cluster. This means if you want to run prefill workers on some nodes and decode workers on other nodes, you need to create separate Ray clusters for each group.
+
+**Example Setup:**
+- **Prefill workers:** nodes 1 & 2
+- **Decode workers:** nodes 3 & 4
+
+**Step 1: Create Ray cluster for prefill workers (nodes 1 & 2)**
+
+On node 1 (head node for prefill cluster):
+```bash
+ray start --head --port=6379
+```
+
+On node 2 (worker node for prefill cluster):
+```bash
+ray start --address=<node-1-ip>:6379
+```
+
+**Step 2: Create Ray cluster for decode workers (nodes 3 & 4)**
+
+On node 3 (head node for decode cluster):
+```bash
+ray start --head --port=6379
+```
+
+On node 4 (worker node for decode cluster):
+```bash
+ray start --address=<node-3-ip>:6379
+```
+
+**Step 3: Set environment variables**
+
+On each node, set the appropriate environment variable:
+```bash
+export VLLM_HOST_IP=<current-node-ip>
+```
+
+**Step 4: Verify clusters**
+
+On each head node, verify the cluster status:
+```bash
+ray status
+```
+
+You should see the expected number of nodes and GPUs for each cluster.
+
+</details>
 
 ### Aggregated Deployment
 
