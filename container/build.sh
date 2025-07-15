@@ -424,12 +424,14 @@ else
     fi
 fi
 
-cd "$NIXL_DIR" || exit
+pushd "$NIXL_DIR" || exit
 if ! git checkout ${NIXL_COMMIT}; then
     echo "ERROR: Failed to checkout NIXL commit ${NIXL_COMMIT}. The cached directory may be out of date."
     echo "Please delete $NIXL_DIR and re-run the build script."
     exit 1
 fi
+
+popd
 
 BUILD_CONTEXT_ARG+=" --build-context nixl=$NIXL_DIR"
 
