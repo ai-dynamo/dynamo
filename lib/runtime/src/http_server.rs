@@ -55,7 +55,9 @@ pub struct HttpServerState {
 
 impl HttpServerState {
     /// Create new HTTP server state with pre-created metrics
-    pub fn new(uptime_fn: Arc<dyn Fn() -> std::time::Duration + Send + Sync>) -> anyhow::Result<Self> {
+    pub fn new(
+        uptime_fn: Arc<dyn Fn() -> std::time::Duration + Send + Sync>,
+    ) -> anyhow::Result<Self> {
         let registry = Arc::new(Registry::new());
 
         // Create runtime metrics

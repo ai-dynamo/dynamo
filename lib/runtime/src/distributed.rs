@@ -82,7 +82,8 @@ impl DistributedRuntime {
             let drt_arc = Arc::new(distributed_runtime.clone());
             let runtime_clone = distributed_runtime.runtime.clone();
             // spawn_http_server spawns its own background task:
-            let uptime_fn = Arc::new(move || drt_arc.uptime()) as Arc<dyn Fn() -> std::time::Duration + Send + Sync>;
+            let uptime_fn = Arc::new(move || drt_arc.uptime())
+                as Arc<dyn Fn() -> std::time::Duration + Send + Sync>;
             match crate::http_server::spawn_http_server(
                 &config.system_host,
                 config.system_port,
