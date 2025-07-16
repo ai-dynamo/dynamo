@@ -44,7 +44,7 @@ pub struct KvbmLeaderConfig {
 
     /// The leader-worker init connection timeout seconds.
     #[builder(default = "120")]
-    leader_timeout_secs: u64,
+    leader_init_timeout_secs: u64,
 }
 
 impl KvbmLeaderConfig {
@@ -91,7 +91,7 @@ impl KvbmLeader {
         let leader_barrier: LeaderBarrier<KvbmLeaderData, ()> = LeaderBarrier::new(
             config.barrier_id.clone(),
             config.world_size,
-            Some(Duration::from_secs(config.leader_timeout_secs)),
+            Some(Duration::from_secs(config.leader_init_timeout_secs)),
         );
 
         let worker_data = leader_barrier
@@ -108,7 +108,7 @@ impl KvbmLeader {
         let zmq_leader = ZmqActiveMessageLeader::new(
             leader_sockets,
             config.world_size,
-            Duration::from_secs(config.leader_timeout_secs),
+            Duration::from_secs(config.leader_init_timeout_secs),
             cancel_token.clone(),
         )
         .await?;

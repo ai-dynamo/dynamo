@@ -58,7 +58,7 @@ impl KvbmLeader {
             .num_host_blocks(num_host_blocks)
             .num_disk_blocks(num_disk_blocks)
             .world_size(world_size)
-            .leader_init_timeout_sec(leader_init_timeout_sec)
+            .leader_init_timeout_secs(leader_init_timeout_sec)
             .build()
             .map_err(to_pyerr)?;
 
