@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
-const INIT_TIMEOUT_SECS: u64 = 120;
+const DEFAULT_INIT_TIMEOUT_SECS: u64 = 120;
 
 /// Data that is sent to workers over ETCD to establish a ZMQ connection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,11 +84,16 @@ impl KvbmLeader {
             num_disk_blocks: config.num_disk_blocks,
         });
 
+        let leader_init_timeout_sec: u64 = std::env::var("DYNAMO_KVBM_LEADER_WORKER_INIT_TIMEOUT_SECS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(DEFAULT_INIT_TIMEOUT_SECS);
+
         // Build our leader barrier and publish the data.
         let leader_barrier: LeaderBarrier<KvbmLeaderData, ()> = LeaderBarrier::new(
             config.barrier_id.clone(),
             config.world_size,
-            Some(Duration::from_secs(INIT_TIMEOUT_SECS)),
+            Some(Duration::from_secs(leader_init_timeout_sec)),
         );
 
         let worker_data = leader_barrier
@@ -105,7 +110,7 @@ impl KvbmLeader {
         let zmq_leader = ZmqActiveMessageLeader::new(
             leader_sockets,
             config.world_size,
-            Duration::from_secs(INIT_TIMEOUT_SECS),
+            Duration::from_secs(leader_init_timeout_sec),
             cancel_token.clone(),
         )
         .await?;
