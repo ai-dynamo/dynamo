@@ -153,6 +153,8 @@ dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/agg.yaml
 
 ### Disaggregated Deployment
 
+**Note:** Disaggregated deployment does not work with multi-node tensor parallelism in vLLM until [vLLM PR #19080](https://github.com/vllm-project/vllm/pull/19080) gets merged.
+
 To create frontend with a single decode worker:
 ```bash
 cd examples/vllm_v1
