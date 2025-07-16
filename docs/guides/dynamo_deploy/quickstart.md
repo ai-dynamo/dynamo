@@ -1,9 +1,12 @@
 # Quickstart
 
-Before deploying your inference graphs you need to install the Dynamo Inference Platform and the Dynamo Cloud.
-You could install from [Published Artifacts](#1-installing-from-published-artifacts) or [Source](#2-installing-from-source)
+Your onboarding includes 2 steps.
+1. Before deploying your inference graphs you need to install the Dynamo Inference Platform and the Dynamo Cloud.
+Dynamo Cloud acts as an orchestration layer between the end user and Kubernetes, handling the complexity of deploying your graphs for you.
+You could install from [Published Artifacts](#1-installing-dynamo-cloud-from-published-artifacts) or [Source](#2-installing-dynamo-cloud-from-source)
+2. Once you install the Dynamo Cloud, proceed to the [Examples](../../examples/README.md) to deploy an inference graph.
 
-## 1. Installing from Published Artifacts
+## 1. Installing Dynamo Cloud from Published Artifacts
 
 Use this approach when installing from pre-built helm charts and docker images published to NGC.
 
@@ -51,7 +54,7 @@ kubectl create namespace ${NAMESPACE}
 helm install dynamo-platform dynamo-platform-v${RELEASE_VERSION}.tgz --namespace ${NAMESPACE}
 ```
 
-## 2. Installing from Source
+## 2. Installing Dynamo Cloud from Source
 
 Use this approach when developing or customizing Dynamo as a contributor, or using local helm charts from the source repository.
 
@@ -135,6 +138,7 @@ helm install dynamo-platform ./platform/ \
 
 [More on Deploying to Dynamo Cloud](./dynamo_cloud.md)
 
+We have provided the `deploy/cloud/helm/uninstall.sh` script for you which would remove Dynamo Cloud installation if you need a clean slate.
 
 ## Explore Examples
 

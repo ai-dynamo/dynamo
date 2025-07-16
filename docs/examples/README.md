@@ -2,7 +2,7 @@
 
 ## Serving examples locally
 
-Follow individual examples to serve models locally.
+TODO: Follow individual examples to serve models locally.
 
 
 ## Deploying Examples to Kubernetes
@@ -35,14 +35,28 @@ export PROJECT_ROOT=$(pwd)
 export NAMESPACE=<your-namespace> # the namespace you used to deploy Dynamo cloud to.
 ```
 
-Pick your deployment destination.
+Deploying an example consists of the simple `kubectl apply -f ... -n ${NAMESPACE}` command. For example:
 
-
-If kubernetes
 ```bash
-export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com
+kubectl apply -f  examples/vllm/deploy/agg.yaml -n ${NAMESPACE}
 ```
 
+You can use `kubectl get dynamoGraphDeployment -n ${NAMESPACE}` to view your deployment.
+You can use `kubectl delete dynamoGraphDeployment <your-dep-name> -n ${NAMESPACE}` to delete the deployment.
+
+
+**Note 1** Example Image
+
+The examples use a prebuilt image from the `nvcr.io/nvidian/nim-llm-dev registry`.
+You can change the image location in your CR file prior to applying
+
+```bash
+extraPodSpec:
+        mainContainer:
+          image: <image-in-your-$DYNAMO_IMAGE>
+```
+
+**Note 2**
 Setup port forward if needed when deploying to Kubernetes.
 
 List the services in your namespace:
@@ -57,19 +71,6 @@ SERVICE_NAME=$(kubectl get svc -n ${NAMESPACE} -o name | grep frontend | sed 's|
 kubectl port-forward svc/${SERVICE_NAME}-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
-Deploying an example consists of the simple `kubectl apply -f ... -n ${NAMESPACE}` command. For example:
-
-```bash
-kubectl apply -f  examples/vllm/deploy/agg.yaml -n ${NAMESPACE}
-```
-
-**Note** You can change the image location in your CR file prior to applying
-
-```bash
-extraPodSpec:
-        mainContainer:
-          image: <image-in-your-$DYNAMO_IMAGE>
-```
-
+Consult the [Port Forward Documentation](https://kubernetes.io/docs/tasks/access-application-cluster/port-forward-access-application-cluster/)
 
 More on [LLM examples](llm_deployment.md)
