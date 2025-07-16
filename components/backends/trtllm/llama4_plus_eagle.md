@@ -43,7 +43,7 @@ inside an interactive shell on one of the allocated nodes, set the
 following environment variables based:
 
 ```bash
-cd $DYNAMO_ROOT/examples/tensorrt_llm
+cd $DYNAMO_HOME/components/backends/trtllm
 
 export IMAGE="<dynamo_trtllm_image>"
 # export MOUNTS="${PWD}/:/mnt,/lustre:/lustre"
