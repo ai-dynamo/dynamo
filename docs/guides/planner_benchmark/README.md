@@ -19,6 +19,9 @@ limitations under the License.
 
 This guide shows an example of benchmarking `LocalPlanner` performance with synthetic data. In this example, we focus on 8x H100 SXM GPU and `deepseek-ai/DeepSeek-R1-Distill-Llama-8B` model with TP1 prefill and decode engine.
 
+> [!WARNING]
+> Bare metal deployment with local connector is deprecated. The only option to deploy planner is via k8s. We will update the examples in this document soon.
+
 ## Synthetic Data Generation
 
 We first generate synthetic data with varying request rate from 0.75 to 3 using the provided `generate_synthetic_data.py` script.
