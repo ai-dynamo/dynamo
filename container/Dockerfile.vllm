@@ -459,6 +459,7 @@ COPY --from=ci_minimum /opt/dynamo/bindings /opt/dynamo/bindings
 # Copy nats and etcd from base image
 COPY --from=base /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+ENV PATH=/usr/local/bin/etcd/:$PATH
 
 # Copy UCX from base image as plugin for NIXL
 # Copy NIXL source from base image (required for NIXL plugins)
