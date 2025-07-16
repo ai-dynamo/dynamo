@@ -158,13 +158,8 @@ kubectl create secret generic hf-token-secret \
   -n ${NAMESPACE}
 ```
 
-Example are stored in the [Examples Folder](../../examples/README.md)
+Follow the [Examples](../../examples/README.md)
 
-Follow the most basic ones in the dedicated guides below:
-
-[Hello World](../../examples/hello_world.md)
-
-[LLM](../../examples/llm_deployment.md)
 
 
 

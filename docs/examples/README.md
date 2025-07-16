@@ -26,7 +26,7 @@ export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
 ```
 
 
-### Post Install Instructions
+### Deploying a particular example
 
 ```bash
 # Set your dynamo root directory
@@ -37,26 +37,33 @@ export NAMESPACE=<your-namespace> # the namespace you used to deploy Dynamo clou
 
 Pick your deployment destination.
 
-If local
-
-```bash
-export DYNAMO_CLOUD=http://localhost:8080
-```
 
 If kubernetes
 ```bash
 export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com
 ```
 
-Setup port forward if needed
+Setup port forward if needed when deploying to Kubernetes.
+
 ```bash
-export DEPLOYMENT_NAME=<your-depl-name>
+export DEPLOYMENT_NAME=vllm-v1-agg # example
 # Forward the pod's port to localhost
 kubectl port-forward svc/$DEPLOYMENT_NAME-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
-Deploying examples consists of the simple `kubectl apply -f example` command. For example:
+Deploying an example consists of the simple `kubectl apply -f ... -n ${NAMESPACE}` command. For example:
 
 ```bash
-kubectl apply -  examples/vllm/deploy/agg.yaml
+kubectl apply -f  examples/vllm/deploy/agg.yaml -n ${NAMESPACE}
 ```
+
+**Note** You can change the image location in your CR file prior to applying
+
+```bash
+extraPodSpec:
+        mainContainer:
+          image: <image-in-your-$DYNAMO_IMAGE>
+```
+
+
+More on [LLM examples](llm_deployment.md)
