@@ -6,11 +6,12 @@ metadata:
 spec:
   template:
     spec:
+      serviceAccountName: profile-sla-sa
       imagePullSecrets:
-        - name: nvcrimagepullsecret
+        - name: nvcr-imagepullsecret
       containers:
       - name: profile-sla
-        image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-233.0
+        image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-233.1
         resources:
           requests:
             nvidia.com/gpu: 8
@@ -26,8 +27,6 @@ spec:
             value: nats://${NAMESPACE}-nats:4222
           - name: ETCD_ENDPOINTS
             value: ${NAMESPACE}-etcd:2379
-          - name: KUBECONFIG
-            value: /root/.kube/config
         command: ["python", "/workspace/benchmarks/profiler/profile_sla.py"]
         args:
           - --config
@@ -39,16 +38,9 @@ spec:
         volumeMounts:
           - name: output-volume
             mountPath: /workspace/profiling_results
-          - name: kube-config
-            mountPath: /root/.kube
-            readOnly: true
       restartPolicy: Never
       volumes:
         - name: output-volume
           persistentVolumeClaim:
             claimName: profiling-pvc
-        - name: kube-config
-          hostPath:
-            path: ${HOME}/.kube
-            type: Directory
   backoffLimit: 1

@@ -6,18 +6,6 @@
 - **`disagg.yaml`** - Disaggregated deployment
 - **`disagg_planner.yaml`** - Disaggregated deployment with SLA-based autoscaling planner
 
-## Prerequisites
-
-**For profiling jobs:** Ensure your `~/.kube/config` is available at `/home/ubuntu/.kube/config` on the node where the profiling job will run. The profiling job uses hostPath mounting to access your Kubernetes configuration.
-
-If your kube config is in a different location, update the hostPath in `profile_sla_job.yaml`:
-```yaml
-- name: kube-config
-  hostPath:
-    path: /path/to/your/.kube  # Update this path
-    type: Directory
-```
-
 ## Quick Start
 
 Set your environment variables:
@@ -35,6 +23,8 @@ kubectl apply -f agg.yaml
 **Step 1: Run profiling (required)**
 ```bash
 envsubst < profiling_pvc.yaml | kubectl apply -f -
+envsubst < profile_sla_rbac.yaml | kubectl apply -f -
+envsubst < profile_sla_binding.yaml | kubectl apply -f -
 envsubst < profile_sla_job.yaml | kubectl apply -f -
 ```
 
