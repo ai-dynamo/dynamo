@@ -15,11 +15,12 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: agg
+  name: agg-llava
 spec:
+  envs:
   services:
     Frontend:
-      dynamoNamespace: vllm-v0-agg
+      dynamoNamespace: agg-llava
       componentType: main
       replicas: 1
       resources:
@@ -32,7 +33,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
-          workingDir: /workspace/examples/vllm_v0
+          workingDir: /workspace/examples/multimodal
           args:
             - dynamo
             - serve
@@ -44,10 +45,37 @@ spec:
             - --service-name
             - Frontend
             - -f
-            - ./configs/agg.yaml
-    VllmWorker:
+            - ./configs/agg-llava.yaml
+    Processor:
+      dynamoNamespace: agg-llava
+      componentType: worker
+      replicas: 1
+      resources:
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+        limits:
+          cpu: "1"
+          memory: "2Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
+          workingDir: /workspace/examples/multimodal
+          args:
+            - dynamo
+            - serve
+            - graphs.agg:Processor
+            - --system-app-port
+            - "5000"
+            - --enable-system-app
+            - --use-default-health-checks
+            - --service-name
+            - Processor
+            - -f
+            - ./configs/agg-llava.yaml
+    VllmDecodeWorker:
       envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-v0-agg
+      dynamoNamespace: agg-llava
       replicas: 1
       resources:
         requests:
@@ -61,16 +89,45 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
-          workingDir: /workspace/examples/vllm_v0
+          workingDir: /workspace/examples/multimodal
           args:
             - dynamo
             - serve
-            - graphs.agg:VllmWorker
+            - graphs.agg:VllmDecodeWorker
             - --system-app-port
             - "5000"
             - --enable-system-app
             - --use-default-health-checks
             - --service-name
-            - VllmWorker
+            - VllmDecodeWorker
             - -f
-            - ./configs/agg.yaml
+            - ./configs/agg-llava.yaml
+    VllmEncodeWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: agg-llava
+      replicas: 1
+      resources:
+        requests:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+        limits:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
+          workingDir: /workspace/examples/multimodal
+          args:
+            - dynamo
+            - serve
+            - graphs.agg:VllmEncodeWorker
+            - --system-app-port
+            - "5000"
+            - --enable-system-app
+            - --use-default-health-checks
+            - --service-name
+            - VllmEncodeWorker
+            - -f
+            - ./configs/agg-llava.yaml

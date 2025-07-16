@@ -265,21 +265,18 @@ class DynamoServeProcess(ManagedProcess):
         if graph.config:
             command.extend(["-f", os.path.join(graph.directory, graph.config)])
 
-        command.extend(["--Frontend.port", str(port)])
-
         if args:
             for k, v in args.items():
                 command.extend([f"{k}", f"{v}"])
 
         health_check_urls = []
         health_check_ports = []
+        env = None
 
         # Handle multimodal deployments differently
         if "multimodal" in graph.directory:
-            # Set DYNAMO_PORT environment variable for multimodal
             env = os.environ.copy()
             env["DYNAMO_PORT"] = str(port)
-            # Don't add health check on port since multimodal uses DYNAMO_PORT
         else:
             # Regular LLM deployments
             command.extend(["--Frontend.port", str(port)])
@@ -287,7 +284,6 @@ class DynamoServeProcess(ManagedProcess):
                 (f"http://localhost:{port}/v1/models", self._check_model)
             ]
             health_check_ports = [port]
-            env = None
 
         self.port = port
         self.graph = graph
@@ -307,7 +303,7 @@ class DynamoServeProcess(ManagedProcess):
                 "from multiprocessing.spawn",
             ],
             log_dir=request.node.name,
-            env=env,  # Pass the environment variables
+            env=env,
         )
 
     def _check_model(self, response):

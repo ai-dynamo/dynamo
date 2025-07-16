@@ -17,9 +17,6 @@ kind: DynamoGraphDeployment
 metadata:
   name: disagg
 spec:
-  envs:
-    - name: DYN_DEPLOYMENT_CONFIG
-      value: '{"Common":{"model":"deepseek-ai/DeepSeek-R1-Distill-Llama-8B","block-size":64,"max-model-len":16384,"kv-transfer-config":"{\"kv_connector\":\"DynamoNixlConnector\"}"},"Frontend":{"served_model_name":"deepseek-ai/DeepSeek-R1-Distill-Llama-8B","endpoint":"dynamo.VllmWorker.generate","port":8000,"router":"round-robin","common-configs":["block-size"]},"VllmWorker":{"remote-prefill":true,"conditional-disagg":true,"max-local-prefill-length":10,"max-prefill-queue-size":2,"enable-prefix-caching":true,"common-configs":["model","block-size","max-model-len","kv-transfer-config"]},"PrefillWorker":{"max-num-batched-tokens":16384,"common-configs":["model","block-size","max-model-len","kv-transfer-config"]}}'
   services:
     Frontend:
       dynamoNamespace: vllm-v1-disagg
@@ -34,7 +31,7 @@ spec:
           memory: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
           workingDir: /workspace/examples/vllm_v1
           args:
             - dynamo
@@ -46,6 +43,8 @@ spec:
             - --use-default-health-checks
             - --service-name
             - Frontend
+            - -f
+            - ./configs/disagg.yaml
     SimpleLoadBalancer:
       envFromSecret: hf-token-secret
       dynamoNamespace: vllm-v1-disagg
@@ -59,7 +58,7 @@ spec:
           memory: "20Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
           workingDir: /workspace/examples/vllm_v1
           args:
             - dynamo
@@ -71,6 +70,8 @@ spec:
             - --use-default-health-checks
             - --service-name
             - SimpleLoadBalancer
+            - -f
+            - ./configs/disagg.yaml
     VllmDecodeWorker:
       dynamoNamespace: vllm-v1-disagg
       envFromSecret: hf-token-secret
@@ -79,14 +80,14 @@ spec:
         requests:
           cpu: "10"
           memory: "20Gi"
-          nvidia.com/gpu: "1"
+          gpu: "1"
         limits:
           cpu: "10"
           memory: "20Gi"
-          nvidia.com/gpu: "1"
+          gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
           workingDir: /workspace/examples/vllm_v1
           args:
             - dynamo
@@ -98,6 +99,8 @@ spec:
             - --use-default-health-checks
             - --service-name
             - VllmDecodeWorker
+            - -f
+            - ./configs/disagg.yaml
     VllmPrefillWorker:
       dynamoNamespace: vllm-v1-disagg
       envFromSecret: hf-token-secret
@@ -106,14 +109,14 @@ spec:
         requests:
           cpu: "10"
           memory: "20Gi"
-          nvidia.com/gpu: "1"
+          gpu: "1"
         limits:
           cpu: "10"
           memory: "20Gi"
-          nvidia.com/gpu: "1"
+          gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:latest
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
           workingDir: /workspace/examples/vllm_v1
           args:
             - dynamo
@@ -125,3 +128,5 @@ spec:
             - --use-default-health-checks
             - --service-name
             - VllmPrefillWorker
+            - -f
+            - ./configs/disagg.yaml

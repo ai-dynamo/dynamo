@@ -41,9 +41,15 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 Or install vLLM manually:
 
+```bash
+export VLLM_REF=3c545c0c3b98ee642373a308197d750d0e449403
+git clone https://github.com/vllm-project/vllm.git
+cd vllm
+git checkout $VLLM_REF
+VLLM_USE_PRECOMPILED=1 uv pip install -e .
 ```
-uv pip install vllm==0.9.1
-```
+
+If you are in the default vllm container remember to uninstall the old vllm using  'uv pip uninstall ai-dynamo-vllm'
 
 2. Start required services:
 ```bash
@@ -84,7 +90,58 @@ For more detailed explenations, refer to the main [LLM examples README](../llm/R
 
 ## Deepseek R1
 
-To run DSR1 model please first follow the Ray setup from the [multinode documentation](../../docs/examples/multinode.md).
+<details>
+<summary>Ray Setup for DSR1 Model</summary>
+
+**Note:** This section is only needed if a single model instance is spawning across multiple nodes without data parallelism (e.g., with tensor parallelism 16).
+
+Each vLLM instance requires a separate Ray cluster. This means if you want to run prefill workers on some nodes and decode workers on other nodes, you need to create separate Ray clusters for each group.
+
+**Example Setup:**
+- **Prefill workers:** nodes 1 & 2
+- **Decode workers:** nodes 3 & 4
+
+**Step 1: Create Ray cluster for prefill workers (nodes 1 & 2)**
+
+On node 1 (head node for prefill cluster):
+```bash
+ray start --head --port=6379
+```
+
+On node 2 (worker node for prefill cluster):
+```bash
+ray start --address=<node-1-ip>:6379
+```
+
+**Step 2: Create Ray cluster for decode workers (nodes 3 & 4)**
+
+On node 3 (head node for decode cluster):
+```bash
+ray start --head --port=6379
+```
+
+On node 4 (worker node for decode cluster):
+```bash
+ray start --address=<node-3-ip>:6379
+```
+
+**Step 3: Set environment variables**
+
+On each node, set the appropriate environment variable:
+```bash
+export VLLM_HOST_IP=<current-node-ip>
+```
+
+**Step 4: Verify clusters**
+
+On each head node, verify the cluster status:
+```bash
+ray status
+```
+
+You should see the expected number of nodes and GPUs for each cluster.
+
+</details>
 
 ### Aggregated Deployment
 
@@ -95,6 +152,8 @@ dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/agg.yaml
 
 
 ### Disaggregated Deployment
+
+**Note:** Disaggregated deployment does not work with multi-node tensor parallelism in vLLM until [vLLM PR #19080](https://github.com/vllm-project/vllm/pull/19080) gets merged.
 
 To create frontend with a single decode worker:
 ```bash
@@ -127,6 +186,7 @@ a worker.
 To create a single decode worker, take note of the IP address, referred as <head-ip> below, of the node, and:
 ```bash
 cd examples/vllm_v1
+export GLOO_SOCKET_IFNAME=eth3 # or another non IB interface that you can find with `ifconfig -a`
 dynamo serve components.worker:VllmDecodeWorker -f configs/deepseek_r1/disagg_dp.yaml --VllmDecodeWorker.data_parallel_address=<head-ip>
 ```
 
@@ -135,6 +195,7 @@ the head of the DP groups. Next we need to create a `VllmDpWorker` to create the
 
 ```bash
 cd examples/vllm_v1
+export GLOO_SOCKET_IFNAME=eth3 # or another non IB interface that you can find with `ifconfig -a`
 # 'data_parallel_start_rank' == `dp_group_index * data_parallel_size_local`
 dynamo serve components.worker:VllmDpWorker -f configs/deepseek_r1/disagg_dp.yaml --VllmDpWorker.data_parallel_address=<head-ip> --VllmDpWorker.data_parallel_start_rank=8
 

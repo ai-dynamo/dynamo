@@ -15,11 +15,11 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: agg
+  name: hello-world
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-v0-agg
+      dynamoNamespace: hello-world
       componentType: main
       replicas: 1
       resources:
@@ -32,11 +32,11 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
-          workingDir: /workspace/examples/vllm_v0
+          workingDir: /workspace/examples/hello_world
           args:
             - dynamo
             - serve
-            - graphs.agg:Frontend
+            - hello_world:Frontend
             - --system-app-port
             - "5000"
             - --enable-system-app
@@ -44,33 +44,56 @@ spec:
             - --service-name
             - Frontend
             - -f
-            - ./configs/agg.yaml
-    VllmWorker:
-      envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-v0-agg
+            - ./config.yaml
+    Middle:
+      dynamoNamespace: hello-world
       replicas: 1
       resources:
         requests:
-          cpu: "10"
-          memory: "20Gi"
-          gpu: "1"
+          cpu: "1"
+          memory: "2Gi"
         limits:
-          cpu: "10"
-          memory: "20Gi"
-          gpu: "1"
+          cpu: "1"
+          memory: "2Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
-          workingDir: /workspace/examples/vllm_v0
+          workingDir: /workspace/examples/hello_world
           args:
             - dynamo
             - serve
-            - graphs.agg:VllmWorker
+            - hello_world:Middle
             - --system-app-port
             - "5000"
             - --enable-system-app
             - --use-default-health-checks
             - --service-name
-            - VllmWorker
+            - Middle
             - -f
-            - ./configs/agg.yaml
+            - ./config.yaml
+    Backend:
+      dynamoNamespace: hello-world
+      replicas: 1
+      resources:
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+        limits:
+          cpu: "1"
+          memory: "2Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
+          workingDir: /workspace/examples/hello_world
+          args:
+            - dynamo
+            - serve
+            - hello_world:Backend
+            - --system-app-port
+            - "5000"
+            - --enable-system-app
+            - --use-default-health-checks
+            - --service-name
+            - Backend
+            - -f
+            - ./config.yaml

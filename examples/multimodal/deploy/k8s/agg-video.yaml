@@ -15,11 +15,12 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: disagg
+  name: agg-video
 spec:
+  envs:
   services:
     Frontend:
-      dynamoNamespace: vllm-v0-disagg
+      dynamoNamespace: agg-video
       componentType: main
       replicas: 1
       resources:
@@ -32,11 +33,11 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
-          workingDir: /workspace/examples/vllm_v0
+          workingDir: /workspace/examples/multimodal
           args:
             - dynamo
             - serve
-            - graphs.disagg:Frontend
+            - graphs.agg_video:Frontend
             - --system-app-port
             - "5000"
             - --enable-system-app
@@ -44,10 +45,37 @@ spec:
             - --service-name
             - Frontend
             - -f
-            - ./configs/disagg.yaml
-    VllmWorker:
-      dynamoNamespace: vllm-v0-disagg
+            - ./configs/agg_video.yaml
+    Processor:
+      dynamoNamespace: agg-video
+      componentType: worker
+      replicas: 1
+      resources:
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+        limits:
+          cpu: "1"
+          memory: "2Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
+          workingDir: /workspace/examples/multimodal
+          args:
+            - dynamo
+            - serve
+            - graphs.agg_video:Processor
+            - --system-app-port
+            - "5000"
+            - --enable-system-app
+            - --use-default-health-checks
+            - --service-name
+            - Processor
+            - -f
+            - ./configs/agg_video.yaml
+    VllmDecodeWorker:
       envFromSecret: hf-token-secret
+      dynamoNamespace: agg-video
       replicas: 1
       resources:
         requests:
@@ -61,22 +89,22 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
-          workingDir: /workspace/examples/vllm_v0
+          workingDir: /workspace/examples/multimodal
           args:
             - dynamo
             - serve
-            - graphs.disagg:VllmWorker
+            - graphs.agg_video:VllmDecodeWorker
             - --system-app-port
             - "5000"
             - --enable-system-app
             - --use-default-health-checks
             - --service-name
-            - VllmWorker
+            - VllmDecodeWorker
             - -f
-            - ./configs/disagg.yaml
-    PrefillWorker:
-      dynamoNamespace: vllm-v0-disagg
+            - ./configs/agg_video.yaml
+    VllmEncodeWorker:
       envFromSecret: hf-token-secret
+      dynamoNamespace: agg-video
       replicas: 1
       resources:
         requests:
@@ -90,16 +118,16 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
-          workingDir: /workspace/examples/vllm_v0
+          workingDir: /workspace/examples/multimodal
           args:
             - dynamo
             - serve
-            - graphs.disagg:PrefillWorker
+            - graphs.agg_video:VllmEncodeWorker
             - --system-app-port
             - "5000"
             - --enable-system-app
             - --use-default-health-checks
             - --service-name
-            - PrefillWorker
+            - VllmEncodeWorker
             - -f
-            - ./configs/disagg.yaml
+            - ./configs/agg_video.yaml

@@ -34,7 +34,14 @@ from vllm.inputs import TokensPrompt
 from vllm.remote_prefill import RemotePrefillParams, RemotePrefillRequest
 from vllm.sampling_params import RequestOutputKind
 
-from dynamo.llm import ModelType, WorkerMetricsPublisher, register_llm
+from dynamo.llm import (
+    ForwardPassMetrics,
+    KvStats,
+    ModelType,
+    WorkerMetricsPublisher,
+    WorkerStats,
+    register_llm,
+)
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
@@ -122,15 +129,25 @@ class VllmWorker:
         self.engine_client.set_metrics_publisher(self.metrics_publisher)
         # Initially send dummy metrics to kick start,
         # vLLM will not update stat until forward pass is triggered
-        self.metrics_publisher.publish(
-            0,  # request_active_slots
-            1024,  # request_total_slots
-            0,  # kv_active_blocks
-            1024,  # kv_total_blocks
-            0,  # num_requests_waiting
-            0.0,  # gpu_cache_usage_perc
-            0.0,  # gpu_prefix_cache_hit_rate
+        worker_stats = WorkerStats(
+            request_active_slots=0,
+            request_total_slots=1024,
+            num_requests_waiting=0,
+            data_parallel_rank=None,
         )
+        kv_stats = KvStats(
+            kv_active_blocks=0,
+            kv_total_blocks=1024,
+            gpu_cache_usage_perc=0.0,
+            gpu_prefix_cache_hit_rate=0.0,
+        )
+        spec_dec_stats = None
+        metrics = ForwardPassMetrics(
+            worker_stats=worker_stats,
+            kv_stats=kv_stats,
+            spec_decode_stats=spec_dec_stats,
+        )
+        self.metrics_publisher.publish(metrics)
         task = asyncio.create_task(self.create_metrics_publisher_endpoint())
         task.add_done_callback(
             lambda _: logger.info("metrics publisher endpoint created")

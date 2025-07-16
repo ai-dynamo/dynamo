@@ -15,11 +15,12 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: disagg
+  name: disagg-llava
 spec:
+  envs:
   services:
     Frontend:
-      dynamoNamespace: vllm-v0-disagg
+      dynamoNamespace: disagg-llava
       componentType: main
       replicas: 1
       resources:
@@ -32,7 +33,7 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
-          workingDir: /workspace/examples/vllm_v0
+          workingDir: /workspace/examples/multimodal
           args:
             - dynamo
             - serve
@@ -45,38 +46,36 @@ spec:
             - Frontend
             - -f
             - ./configs/disagg.yaml
-    VllmWorker:
-      dynamoNamespace: vllm-v0-disagg
-      envFromSecret: hf-token-secret
+    Processor:
+      dynamoNamespace: disagg-llava
+      componentType: worker
       replicas: 1
       resources:
         requests:
-          cpu: "10"
-          memory: "20Gi"
-          gpu: "1"
+          cpu: "1"
+          memory: "2Gi"
         limits:
-          cpu: "10"
-          memory: "20Gi"
-          gpu: "1"
+          cpu: "1"
+          memory: "2Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
-          workingDir: /workspace/examples/vllm_v0
+          workingDir: /workspace/examples/multimodal
           args:
             - dynamo
             - serve
-            - graphs.disagg:VllmWorker
+            - graphs.disagg:Processor
             - --system-app-port
             - "5000"
             - --enable-system-app
             - --use-default-health-checks
             - --service-name
-            - VllmWorker
+            - Processor
             - -f
             - ./configs/disagg.yaml
-    PrefillWorker:
-      dynamoNamespace: vllm-v0-disagg
+    VllmDecodeWorker:
       envFromSecret: hf-token-secret
+      dynamoNamespace: disagg-llava
       replicas: 1
       resources:
         requests:
@@ -90,16 +89,74 @@ spec:
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
-          workingDir: /workspace/examples/vllm_v0
+          workingDir: /workspace/examples/multimodal
           args:
             - dynamo
             - serve
-            - graphs.disagg:PrefillWorker
+            - graphs.disagg:VllmDecodeWorker
             - --system-app-port
             - "5000"
             - --enable-system-app
             - --use-default-health-checks
             - --service-name
-            - PrefillWorker
+            - VllmDecodeWorker
+            - -f
+            - ./configs/disagg.yaml
+    VllmEncodeWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: disagg-llava
+      replicas: 1
+      resources:
+        requests:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+        limits:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
+          workingDir: /workspace/examples/multimodal
+          args:
+            - dynamo
+            - serve
+            - graphs.disagg:VllmEncodeWorker
+            - --system-app-port
+            - "5000"
+            - --enable-system-app
+            - --use-default-health-checks
+            - --service-name
+            - VllmEncodeWorker
+            - -f
+            - ./configs/disagg.yaml
+    VllmPrefillWorker:
+      envFromSecret: hf-token-secret
+      dynamoNamespace: disagg-llava
+      replicas: 1
+      resources:
+        requests:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+        limits:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
+          workingDir: /workspace/examples/multimodal
+          args:
+            - dynamo
+            - serve
+            - graphs.disagg:VllmPrefillWorker
+            - --system-app-port
+            - "5000"
+            - --enable-system-app
+            - --use-default-health-checks
+            - --service-name
+            - VllmPrefillWorker
             - -f
             - ./configs/disagg.yaml
