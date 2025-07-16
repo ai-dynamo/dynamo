@@ -100,7 +100,9 @@ if you want guidance during the process, run the deployment script with the `--i
 ./deploy.sh --crds --interactive
 ```
 
-**Step 1: Install Custom Resource Definitions (CRDs)**
+**Installing CRDs manually  (alternative to the script deploy.sh)**
+
+***Step 1: Install Custom Resource Definitions (CRDs)**
 
 ```bash
 helm install dynamo-crds ./crds/ \
@@ -109,7 +111,7 @@ helm install dynamo-crds ./crds/ \
   --atomic
 ```
 
-**Step 2: Build Dependencies and Install Platform**
+***Step 2: Build Dependencies and Install Platform**
 
 ```bash
 helm dep build ./platform/

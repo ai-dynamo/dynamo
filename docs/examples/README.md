@@ -45,10 +45,16 @@ export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com
 
 Setup port forward if needed when deploying to Kubernetes.
 
+List the services in your namespace:
+
 ```bash
-export DEPLOYMENT_NAME=vllm-v1-agg # example
-# Forward the pod's port to localhost
-kubectl port-forward svc/$DEPLOYMENT_NAME-frontend 8000:8000 -n ${NAMESPACE}
+kubectl get svc -n ${NAMESPACE}
+```
+Look for one that ends in `-frontend` and use it for port forward.
+
+```bash
+SERVICE_NAME=$(kubectl get svc -n ${NAMESPACE} -o name | grep frontend | sed 's|.*/||' | sed 's|-frontend||' | head -n1)
+kubectl port-forward svc/${SERVICE_NAME}-frontend 8000:8000 -n ${NAMESPACE}
 ```
 
 Deploying an example consists of the simple `kubectl apply -f ... -n ${NAMESPACE}` command. For example:
