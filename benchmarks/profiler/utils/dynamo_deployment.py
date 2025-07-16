@@ -64,9 +64,15 @@ class DynamoDeploymentClient:
         self.deployment_spec = None  # Will store the full deployment spec
         self.base_log_dir = Path(base_log_dir) if base_log_dir else Path("logs")
 
-    async def _init_kubernetes(self):
+    def _init_kubernetes(self):
         """Initialize kubernetes client"""
-        await config.load_kube_config()
+        try:
+            # Try in-cluster config first (for pods with service accounts)
+            config.load_incluster_config()
+        except Exception:
+            # Fallback to kube config file (for local development)
+            config.load_kube_config()
+
         self.k8s_client = client.ApiClient()
         self.custom_api = client.CustomObjectsApi(self.k8s_client)
         self.core_api = client.CoreV1Api(self.k8s_client)
@@ -78,7 +84,7 @@ class DynamoDeploymentClient:
         Args:
             deployment: Either a dict containing the deployment spec or a path to a yaml file
         """
-        await self._init_kubernetes()
+        self._init_kubernetes()
 
         if isinstance(deployment, str):
             # Load from yaml file
@@ -193,7 +199,7 @@ class DynamoDeploymentClient:
         """
         EXAMPLE_CHAT_REQUEST["model"] = self.model_name
         with self.port_forward() as port:
-            url = f"http://localhost:{port}/v1/chat/completions"            
+            url = f"http://localhost:{port}/v1/chat/completions"
             async with httpx.AsyncClient() as client:
                 response = await client.post(url, json=EXAMPLE_CHAT_REQUEST)
                 response.raise_for_status()
