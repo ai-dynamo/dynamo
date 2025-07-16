@@ -76,6 +76,8 @@ export DOCKER_SERVER=your-docker-registry.com
 export IMAGE_TAG=your-image-tag
 ```
 
+The operator image will be pulled from `$DOCKER_SERVER/dynamo-operator:$IMAGE_TAG`.
+
 ### Install Dynamo Cloud
 
 You could run the `deploy.sh` or use the manual commands under Step 1 and Step 2.
