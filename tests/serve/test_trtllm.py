@@ -186,7 +186,7 @@ class TRTLLMProcess(ManagedProcess):
 trtllm_configs = {
     "aggregated": TRTLLMConfig(
         name="aggregated",
-        directory="/workspace/examples/tensorrt_llm",
+        directory="/workspace/components/backends/trtllm",
         script_name="agg.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.tensorrtllm],
         endpoints=["v1/chat/completions", "v1/completions"],
@@ -199,7 +199,7 @@ trtllm_configs = {
     ),
     "disaggregated": TRTLLMConfig(
         name="disaggregated",
-        directory="/workspace/examples/tensorrt_llm",
+        directory="/workspace/components/backends/trtllm",
         script_name="disagg.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.tensorrtllm],
         endpoints=["v1/chat/completions", "v1/completions"],
