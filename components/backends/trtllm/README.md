@@ -123,13 +123,13 @@ This figure shows an overview of the major components to deploy:
 
 #### Aggregated
 ```bash
-cd $DYNAMO_ROOT/examples/tensorrt_llm
+cd $DYNAMO_HOME/components/backends/trtllm
 ./launch/agg.sh
 ```
 
 #### Aggregated with KV Routing
 ```bash
-cd $DYNAMO_ROOT/examples/tensorrt_llm
+cd $DYNAMO_HOME/components/backends/trtllm
 ./launch/agg_router.sh
 ```
 
@@ -139,7 +139,7 @@ cd $DYNAMO_ROOT/examples/tensorrt_llm
 > Disaggregated serving supports two strategies for request flow: `"prefill_first"` and `"decode_first"`. By default, the script below uses the `"decode_first"` strategy, which can reduce response latency by minimizing extra hops in the return path. You can switch strategies by setting the `DISAGGREGATION_STRATEGY` environment variable.
 
 ```bash
-cd $DYNAMO_ROOT/examples/tensorrt_llm
+cd $DYNAMO_HOME/components/backends/trtllm
 ./launch/disagg.sh
 ```
 
@@ -149,13 +149,13 @@ cd $DYNAMO_ROOT/examples/tensorrt_llm
 > Disaggregated serving with KV routing uses a "prefill first" workflow by default. Currently, Dynamo supports KV routing to only one endpoint per model. In disaggregated workflow, it is generally more effective to route requests to the prefill worker. If you wish to use a "decode first" workflow instead, you can simply set the `DISAGGREGATION_STRATEGY` environment variable accordingly.
 
 ```bash
-cd $DYNAMO_ROOT/examples/tensorrt_llm
+cd $DYNAMO_HOME/components/backends/trtllm
 ./launch/disagg_router.sh
 ```
 
 #### Aggregated with Multi-Token Prediction (MTP) and DeepSeek R1
 ```bash
-cd $DYNAMO_ROOT/examples/tensorrt_llm
+cd $DYNAMO_HOME/components/backends/trtllm
 
 export AGG_ENGINE_ARGS=./engine_configs/deepseek_r1/mtp/mtp_agg.yaml
 export SERVED_MODEL_NAME="nvidia/DeepSeek-R1-FP4"
