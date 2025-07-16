@@ -189,11 +189,22 @@ impl KvbmCacheManager {
     }
 
     pub fn get_block_ids(&self, request_id: String) -> PyResult<Vec<BlockId>> {
-        self.slot_manager
+        Ok(self
+            .slot_manager
             .lock()
             .map_err(to_pyerr)?
             .get_block_ids(&request_id)
-            .map_err(to_pyerr)
+            .inspect_err(|e| {
+                match e {
+                    SlotError::NotFound => {
+                        tracing::warn!(request_id, "slot was never allocated for this request");
+                    }
+                    _ => {
+                        tracing::error!(request_id, "failed to get block ids: {:?}", e);
+                    }
+                }
+            })
+            .unwrap_or_default())
     }
 
     pub fn usage(&self) -> PyResult<f64> {
