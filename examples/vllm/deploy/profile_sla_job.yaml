@@ -13,9 +13,9 @@ spec:
         image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-233.0
         resources:
           requests:
-            nvidia.com/gpu: 2
+            nvidia.com/gpu: 8
           limits:
-            nvidia.com/gpu: 2
+            nvidia.com/gpu: 8
         env:
           - name: HUGGING_FACE_HUB_TOKEN
             valueFrom:
@@ -26,28 +26,29 @@ spec:
             value: nats://${NAMESPACE}-nats:4222
           - name: ETCD_ENDPOINTS
             value: ${NAMESPACE}-etcd:2379
+          - name: KUBECONFIG
+            value: /root/.kube/config
         command: ["python", "/workspace/benchmarks/profiler/profile_sla.py"]
         args:
-          - --backend
-          - vllm_v1
           - --config
           - /workspace/examples/vllm/deploy/disagg.yaml
           - --output-dir
           - /workspace/profiling_results
-          - --isl
-          - "512"
-          - --osl
-          - "32"
-          - --ttft
-          - "500"
-          - --itl
-          - "50"
+          - --namespace
+          - ${NAMESPACE}
         volumeMounts:
           - name: output-volume
             mountPath: /workspace/profiling_results
+          - name: kube-config
+            mountPath: /root/.kube
+            readOnly: true
       restartPolicy: Never
       volumes:
         - name: output-volume
           persistentVolumeClaim:
             claimName: profiling-pvc
+        - name: kube-config
+          hostPath:
+            path: ${HOME}/.kube
+            type: Directory
   backoffLimit: 1
