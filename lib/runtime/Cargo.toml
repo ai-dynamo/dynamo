@@ -62,6 +62,7 @@ url = { workspace = true }
 validator = { workspace = true }
 xxhash-rust = { workspace = true }
 
+arc-swap = { version = "1" }
 async-once-cell = { version = "0.5.4" }
 educe = { version = "0.6.0" }
 figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
