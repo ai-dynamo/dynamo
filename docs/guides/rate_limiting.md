@@ -21,7 +21,7 @@ weight = exp(-age / time_constant_secs)
 
 This means:
 - Recent samples have higher influence on the average
-- Old samples decay exponentially over time  
+- Old samples decay exponentially over time
 - System "recovers" during idle periods
 
 ### Decision Logic
@@ -71,7 +71,7 @@ use dynamo_llm::http::service::rate_limiter::RateLimiterConfig;
 
 let config = RateLimiterConfig::new(
     1500.0,  // TTFT threshold (ms)
-    15.0,    // ITL threshold (ms) 
+    15.0,    // ITL threshold (ms)
     60.0,    // Time constant (s)
     true,    // Per-model limits
 );
@@ -128,7 +128,7 @@ ITL: TimeWeightedDiagnostics { decayed_time_weighted_average: 0.025, time_consta
 - **Moderate (1000-2000ms)**: Balances throughput with responsiveness
 - **Aggressive (2000ms+)**: Prioritizes throughput over latency
 
-### ITL Threshold  
+### ITL Threshold
 - **Conservative (5-10ms)**: Ensures smooth streaming experience
 - **Moderate (10-20ms)**: Allows some latency for higher throughput
 - **Aggressive (20ms+)**: Accepts choppier streaming for max throughput

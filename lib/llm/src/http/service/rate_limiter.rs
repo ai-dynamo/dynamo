@@ -40,22 +40,44 @@ use std::time::Instant;
 
 use anyhow::Result;
 use dashmap::DashMap;
+use derive_builder::Builder;
 use validator::Validate;
 
 /// Configuration for the rate limiter
-#[derive(Debug, Clone, Validate)]
+#[derive(Debug, Clone, Builder, Validate)]
+#[builder(pattern = "owned")]
 pub struct RateLimiterConfig {
-    /// Threshold for the time to first token metric
-    #[validate(range(min = 0.0))]
+    /// Threshold for the time to first token metric,
+    /// which defines the maximum allowed time to first token
+    /// in seconds. Any recorded time to first token above this threshold
+    /// will likely trigger a rate limit rejection for the next incoming request.
+    #[builder(default = "1.0")]
+    #[validate(range(min = 1e-2))]
     ttft_threshold_secs: f64,
-    /// Threshold for the inter-token latency metric
-    #[validate(range(min = 0.0))]
+
+    /// Threshold for the inter-token latency metric,
+    /// which defines the maximum allowed inter-token latency
+    /// in seconds. Any recorded inter-token latency above this threshold
+    /// will likely trigger a rate limit rejection for the next incoming request.
+    #[builder(default = "0.1")]
+    #[validate(range(min = 1e-4))]
     itl_threshold_secs: f64,
-    /// Time constant for the time-weighted EMA
-    #[validate(range(min = 0.001))]
+
+    /// Time constant for the time-weighted EMA,
+    /// that is, the time constant for the exponential moving average
+    /// of the time-weighted average.
+    #[builder(default = "15.0")]
+    #[validate(range(min = 1e-2))]
     time_constant_secs: f64,
-    /// Whether to use per-model limits
+
+    /// Whether to use per-model limits, that is,
+    /// to track rate limit metrics for each model separately
+    #[builder(default = "true")]
     per_model_limits: bool,
+
+    /// Whether the rate limiter is enabled
+    #[builder(default = "false")]
+    is_enabled: bool,
 }
 
 impl RateLimiterConfig {
@@ -70,6 +92,7 @@ impl RateLimiterConfig {
             itl_threshold_secs,
             time_constant_secs,
             per_model_limits,
+            is_enabled: true,
         };
 
         config
@@ -85,7 +108,16 @@ impl RateLimiterConfig {
             itl_threshold_secs: 0.0,
             time_constant_secs: 0.001,
             per_model_limits: false,
+            is_enabled: false,
         }
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.is_enabled
+    }
+
+    pub fn builder() -> RateLimiterConfigBuilder {
+        RateLimiterConfigBuilder::default()
     }
 }
 
@@ -96,6 +128,7 @@ impl Default for RateLimiterConfig {
             itl_threshold_secs: 0.1,  // 100ms
             time_constant_secs: 30.0, // 30s
             per_model_limits: false,
+            is_enabled: true,
         }
     }
 }
@@ -136,13 +169,9 @@ impl Default for RateLimiterConfig {
 /// ```
 #[derive(Debug)]
 pub struct TimeWeightedAverageTracker {
-    /// Last computed time-weighted average
-    last_weighted_average: f64,
-    /// Last total weight sum
-    last_total_weight: f64,
-    /// Last observed time
-    last_time: Instant,
-    /// Time constant for the time-weighted average
+    previous_weighted_average: f64,
+    previous_total_weight: f64,
+    previous_observed_time: Instant,
     time_constant_secs: f64,
 }
 
@@ -150,9 +179,9 @@ impl TimeWeightedAverageTracker {
     pub fn new(time_constant_secs: f64) -> Self {
         let now = Instant::now();
         Self {
-            last_weighted_average: 0.,
-            last_total_weight: 0.,
-            last_time: now,
+            previous_weighted_average: 0.,
+            previous_total_weight: 0.,
+            previous_observed_time: now,
             time_constant_secs,
         }
     }
@@ -160,29 +189,34 @@ impl TimeWeightedAverageTracker {
     /// Record a new value to the tracker.
     pub fn record_value(&mut self, value: f64) {
         let now = Instant::now();
-        if self.last_weighted_average == 0. && self.last_total_weight == 0. {
+        if self.previous_weighted_average == 0. && self.previous_total_weight == 0. {
             // First sample
-            self.last_weighted_average = value;
-            self.last_total_weight = 1.;
+            self.previous_weighted_average = value;
+            self.previous_total_weight = 1.;
         } else {
-            let time_elapsed = now.duration_since(self.last_time).as_secs_f64();
+            let time_elapsed = now
+                .duration_since(self.previous_observed_time)
+                .as_secs_f64();
             let decay_factor = (-time_elapsed / self.time_constant_secs).exp();
 
             // Update the weighted average, using recursive EMA formula
-            self.last_total_weight = 1. + self.last_total_weight * decay_factor;
-            let alpha = 1. / self.last_total_weight;
-            self.last_weighted_average = alpha * value + (1. - alpha) * self.last_weighted_average;
+            self.previous_total_weight = 1. + self.previous_total_weight * decay_factor;
+            let alpha = 1. / self.previous_total_weight;
+            self.previous_weighted_average =
+                alpha * value + (1. - alpha) * self.previous_weighted_average;
         }
 
-        self.last_time = now;
+        self.previous_observed_time = now;
     }
 
     /// Get the current time-weighted average, decayed to account for the time elapsed since the last update.
     pub fn get_decayed_time_weighted_average(&self) -> f64 {
         let now = Instant::now();
-        let time_elapsed = now.duration_since(self.last_time).as_secs_f64();
+        let time_elapsed = now
+            .duration_since(self.previous_observed_time)
+            .as_secs_f64();
         let decay_factor = (-time_elapsed / self.time_constant_secs).exp();
-        self.last_weighted_average * decay_factor
+        self.previous_weighted_average * decay_factor
     }
 }
 
@@ -224,8 +258,8 @@ impl std::fmt::Display for RateLimiterMetrics {
 pub struct TimeWeightedDiagnostics {
     pub decayed_time_weighted_average: f64,
     pub time_constant_secs: f64,
-    pub last_weighted_sum: f64,
-    pub last_time: Instant,
+    pub previous_weighted_sum: f64,
+    pub previous_observed_time: Instant,
 }
 
 impl std::fmt::Display for TimeWeightedDiagnostics {
@@ -235,13 +269,13 @@ impl std::fmt::Display for TimeWeightedDiagnostics {
             "TimeWeightedDiagnostics {{ \
                 decayed_time_weighted_average: {:.3}, \
                 time_constant_secs: {:.1}, \
-                last_weighted_sum: {:.3}, \
+                previous_weighted_sum: {:.3}, \
                 duration_since_last_update: {:?} \
             }}",
             self.decayed_time_weighted_average,
             self.time_constant_secs,
-            self.last_weighted_sum,
-            self.last_time.elapsed().as_secs_f64()
+            self.previous_weighted_sum,
+            self.previous_observed_time.elapsed().as_secs_f64()
         )
     }
 }
@@ -249,20 +283,18 @@ impl std::fmt::Display for TimeWeightedDiagnostics {
 pub struct RateLimiter {
     config: RateLimiterConfig,
     model_metrics: DashMap<String, ModelMetrics>,
-    is_enabled: bool,
 }
 
 impl RateLimiter {
-    pub fn new(config: Option<RateLimiterConfig>) -> Self {
+    pub fn new(config: RateLimiterConfig) -> Self {
         Self {
-            is_enabled: config.is_some(),
-            config: config.unwrap_or_else(|| RateLimiterConfig::empty()),
+            config,
             model_metrics: DashMap::new(),
         }
     }
 
     pub fn is_enabled(&self) -> bool {
-        self.is_enabled
+        self.config.is_enabled
     }
 
     #[inline]
@@ -358,23 +390,23 @@ impl RateLimiter {
         let decayed_itl_ema = model_metrics
             .itl_tracker
             .get_decayed_time_weighted_average();
-        let ttft_last_weighted_sum = model_metrics.ttft_tracker.last_total_weight;
-        let itl_last_weighted_sum = model_metrics.itl_tracker.last_total_weight;
-        let ttft_last_time = model_metrics.ttft_tracker.last_time;
-        let itl_last_time = model_metrics.itl_tracker.last_time;
+        let ttft_previous_weighted_sum = model_metrics.ttft_tracker.previous_total_weight;
+        let itl_previous_weighted_sum = model_metrics.itl_tracker.previous_total_weight;
+        let ttft_previous_observed_time = model_metrics.ttft_tracker.previous_observed_time;
+        let itl_previous_observed_time = model_metrics.itl_tracker.previous_observed_time;
 
         RateLimiterMetrics {
             ttft_diagnostics: TimeWeightedDiagnostics {
                 decayed_time_weighted_average: decayed_ttft_ema,
                 time_constant_secs: self.config.time_constant_secs,
-                last_weighted_sum: ttft_last_weighted_sum,
-                last_time: ttft_last_time,
+                previous_weighted_sum: ttft_previous_weighted_sum,
+                previous_observed_time: ttft_previous_observed_time,
             },
             itl_diagnostics: TimeWeightedDiagnostics {
                 decayed_time_weighted_average: decayed_itl_ema,
                 time_constant_secs: self.config.time_constant_secs,
-                last_weighted_sum: itl_last_weighted_sum,
-                last_time: itl_last_time,
+                previous_weighted_sum: itl_previous_weighted_sum,
+                previous_observed_time: itl_previous_observed_time,
             },
         }
     }
@@ -705,8 +737,9 @@ mod tests {
             itl_threshold_secs: 0.1,
             time_constant_secs: 30.0,
             per_model_limits: false,
+            is_enabled: true,
         };
-        let limiter = Arc::new(RateLimiter::new(Some(config)));
+        let limiter = Arc::new(RateLimiter::new(config));
         let error_count = Arc::new(AtomicUsize::new(0));
 
         let mut handles = Vec::new();
@@ -753,8 +786,9 @@ mod tests {
             itl_threshold_secs: 0.1,
             time_constant_secs: 30.0,
             per_model_limits: false,
+            is_enabled: true,
         };
-        let limiter = Arc::new(RateLimiter::new(Some(config)));
+        let limiter = Arc::new(RateLimiter::new(config));
         let error_count = Arc::new(AtomicUsize::new(0));
 
         let mut handles = Vec::new();
@@ -858,7 +892,7 @@ mod tests {
             ..Default::default()
         };
 
-        let limiter = Arc::new(RateLimiter::new(Some(config)));
+        let limiter = Arc::new(RateLimiter::new(config));
 
         // Record low values - should not trigger
         limiter.record_ttft("test", 50.0);
@@ -893,7 +927,7 @@ mod tests {
             ..Default::default()
         };
 
-        let limiter = Arc::new(RateLimiter::new(Some(config)));
+        let limiter = Arc::new(RateLimiter::new(config));
 
         // Record low values - should not trigger
         limiter.record_ttft("test", 50.0);
@@ -933,8 +967,8 @@ mod tests {
             ..Default::default()
         };
 
-        let global_limiter = RateLimiter::new(Some(global_config));
-        let per_model_limiter = RateLimiter::new(Some(per_model_config));
+        let global_limiter = RateLimiter::new(global_config);
+        let per_model_limiter = RateLimiter::new(per_model_config);
 
         // Record high values for model A
         global_limiter.record_ttft(MODEL_A, 2000.0);

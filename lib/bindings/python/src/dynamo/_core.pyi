@@ -808,8 +808,8 @@ class HttpService:
     """
 
     def __init__(
-        self, 
-        port: Optional[int] = None, 
+        self,
+        port: Optional[int] = None,
         rate_limiter_config: Optional[RateLimiterConfig] = None
     ) -> None: ...
 
@@ -826,11 +826,11 @@ class RateLimiterConfig:
     """
 
     def __init__(
-        self, 
-        ttft_threshold_secs: float, 
-        itl_threshold_secs: float, 
-        time_constant_secs: float, 
-        per_model_limits: bool = False
+        self,
+        ttft_threshold_secs: Optional[float] = None,
+        itl_threshold_secs: Optional[float] = None,
+        time_constant_secs: Optional[float] = None,
+        per_model_limits: Optional[bool] = None
     ) -> None: ...
 
 class HttpAsyncEngine:

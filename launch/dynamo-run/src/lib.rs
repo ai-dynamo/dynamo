@@ -44,7 +44,8 @@ pub async fn run(
         .context_length(flags.context_length)
         .http_port(Some(flags.http_port))
         .router_config(flags.router_config())
-        .request_template(flags.request_template.clone());
+        .request_template(flags.request_template.clone())
+        .rate_limiter_config(flags.rate_limiter_config());
 
     // If `in=dyn` we want the trtllm/sglang/vllm subprocess to listen on that endpoint.
     // If not, then the endpoint isn't exposed so we let LocalModel invent one.

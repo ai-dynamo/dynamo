@@ -16,6 +16,7 @@ use dynamo_runtime::{
 
 use crate::discovery::ModelEntry;
 use crate::entrypoint::RouterConfig;
+use crate::http::service::rate_limiter::RateLimiterConfig;
 use crate::model_card::{self, ModelDeploymentCard};
 use crate::model_type::ModelType;
 use crate::request_template::RequestTemplate;
@@ -46,6 +47,7 @@ pub struct LocalModelBuilder {
     router_config: Option<RouterConfig>,
     kv_cache_block_size: u32,
     http_port: u16,
+    rate_limiter_config: Option<RateLimiterConfig>,
 }
 
 impl Default for LocalModelBuilder {
@@ -60,6 +62,7 @@ impl Default for LocalModelBuilder {
             context_length: Default::default(),
             template_file: Default::default(),
             router_config: Default::default(),
+            rate_limiter_config: Default::default(),
         }
     }
 }
@@ -112,6 +115,11 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn rate_limiter_config(&mut self, rate_limiter_config: RateLimiterConfig) -> &mut Self {
+        self.rate_limiter_config = Some(rate_limiter_config);
+        self
+    }
+
     /// Make an LLM ready for use:
     /// - Download it from Hugging Face (and NGC in future) if necessary
     /// - Resolve the path
@@ -146,6 +154,7 @@ impl LocalModelBuilder {
                 template,
                 http_port: self.http_port,
                 router_config: self.router_config.take().unwrap_or_default(),
+                rate_limiter_config: self.rate_limiter_config.take().unwrap_or_default(),
             });
         }
 
@@ -201,6 +210,7 @@ impl LocalModelBuilder {
             template,
             http_port: self.http_port,
             router_config: self.router_config.take().unwrap_or_default(),
+            rate_limiter_config: self.rate_limiter_config.take().unwrap_or_default(),
         })
     }
 }
@@ -213,6 +223,7 @@ pub struct LocalModel {
     template: Option<RequestTemplate>,
     http_port: u16, // Only used if input is HTTP server
     router_config: RouterConfig,
+    rate_limiter_config: RateLimiterConfig, // Only used if input is HTTP server
 }
 
 impl LocalModel {
@@ -242,6 +253,10 @@ impl LocalModel {
 
     pub fn router_config(&self) -> &RouterConfig {
         &self.router_config
+    }
+
+    pub fn rate_limiter_config(&self) -> RateLimiterConfig {
+        self.rate_limiter_config.clone()
     }
 
     pub fn is_gguf(&self) -> bool {

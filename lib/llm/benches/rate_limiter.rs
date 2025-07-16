@@ -1,10 +1,12 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use dynamo_llm::http::service::rate_limiter::{
     RateLimiter, RateLimiterConfig, TimeWeightedAverageTracker,
 };
 use std::sync::Arc;
 use std::thread;
-use std::time::Duration;
 
 // Benchmark configurations
 const SAMPLE_SIZES: &[usize] = &[10, 100, 1000, 10000];
@@ -49,10 +51,6 @@ fn bench_time_weighted_average(c: &mut Criterion) {
                 let mut tracker = TimeWeightedAverageTracker::new(10.0);
                 for i in 0..size {
                     tracker.record_value(i as f64);
-                    if i % 100 == 0 {
-                        // Add some time variance
-                        thread::sleep(Duration::from_nanos(1));
-                    }
                 }
 
                 b.iter(|| {
@@ -99,7 +97,7 @@ fn bench_rate_limiter_decisions(c: &mut Criterion) {
     let config = RateLimiterConfig::new(100.0, 10.0, 10.0, false).unwrap();
 
     group.bench_function("should_reject_with_data", |b| {
-        let rate_limiter = RateLimiter::new(Some(config.clone()));
+        let rate_limiter = RateLimiter::new(config.clone());
 
         // Pre-populate with samples
         for i in 0..100 {
@@ -113,7 +111,7 @@ fn bench_rate_limiter_decisions(c: &mut Criterion) {
     });
 
     group.bench_function("record_ttft", |b| {
-        let rate_limiter = RateLimiter::new(Some(config.clone()));
+        let rate_limiter = RateLimiter::new(config.clone());
         let mut counter = 0;
 
         b.iter(|| {
@@ -123,7 +121,7 @@ fn bench_rate_limiter_decisions(c: &mut Criterion) {
     });
 
     group.bench_function("record_itl", |b| {
-        let rate_limiter = RateLimiter::new(Some(config.clone()));
+        let rate_limiter = RateLimiter::new(config.clone());
         let mut counter = 0;
 
         b.iter(|| {
@@ -148,7 +146,7 @@ fn bench_concurrent_access(c: &mut Criterion) {
             |b, &num_threads| {
                 b.iter(|| {
                     let config = RateLimiterConfig::new(1000.0, 10.0, 30.0, false).unwrap();
-                    let rate_limiter = Arc::new(RateLimiter::new(Some(config)));
+                    let rate_limiter = Arc::new(RateLimiter::new(config));
 
                     let handles: Vec<_> = (0..num_threads)
                         .map(|thread_id| {
@@ -206,7 +204,7 @@ fn bench_memory_patterns(c: &mut Criterion) {
         let config = RateLimiterConfig::new(1000.0, 10.0, 30.0, true).unwrap();
 
         b.iter(|| {
-            let rate_limiter = RateLimiter::new(Some(config.clone()));
+            let rate_limiter = RateLimiter::new(config.clone());
 
             // Simulate multiple models
             for model_id in 0..10 {
@@ -258,15 +256,12 @@ fn bench_edge_cases(c: &mut Criterion) {
 
     group.bench_function("very_old_samples", |b| {
         b.iter(|| {
-            let mut tracker = TimeWeightedAverageTracker::new(0.1); // Very short time constant
+            let mut tracker = TimeWeightedAverageTracker::new(0.0001); // Very short time constant
 
             // Add some samples
             for i in 0..100 {
                 tracker.record_value(black_box(i as f64));
             }
-
-            // Sleep to make them very old
-            thread::sleep(Duration::from_millis(100));
 
             // Add fresh samples
             for i in 100..200 {
@@ -305,7 +300,7 @@ fn bench_configuration_comparison(c: &mut Criterion) {
             &config,
             |b, config| {
                 b.iter(|| {
-                    let rate_limiter = RateLimiter::new(Some(config.clone()));
+                    let rate_limiter = RateLimiter::new(config.clone());
 
                     // Simulate realistic usage pattern
                     for i in 0..200 {

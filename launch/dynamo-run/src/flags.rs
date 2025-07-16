@@ -18,6 +18,7 @@ use std::path::PathBuf;
 
 use clap::ValueEnum;
 use dynamo_llm::entrypoint::RouterConfig;
+use dynamo_llm::http::service::rate_limiter::RateLimiterConfig;
 use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_llm::local_model::LocalModel;
 use dynamo_runtime::pipeline::RouterMode as RuntimeRouterMode;
@@ -165,6 +166,26 @@ pub struct Flags {
     /// These are the command line arguments to the python engine when using `pystr` or `pytok`.
     #[arg(index = 2, last = true, hide = true, allow_hyphen_values = true)]
     pub last: Vec<String>,
+
+    /// Enables rate limiter config.
+    #[arg(long)]
+    pub enable_rate_limiter: Option<bool>,
+
+    /// Time to first token threshold in seconds, for the OpenAI HTTP service rate limiter.
+    #[arg(long)]
+    pub rate_limiter_ttft_threshold_secs: Option<f64>,
+
+    /// Inter-token latency threshold in seconds, for the OpenAI HTTP service rate limiter.
+    #[arg(long)]
+    pub rate_limiter_itl_threshold_secs: Option<f64>,
+
+    /// Time constant for the time-weighted EMA, for the OpenAI HTTP service rate limiter.
+    #[arg(long)]
+    pub rate_limiter_time_constant_secs: Option<f64>,
+
+    /// Whether to use per-model limits, for the OpenAI HTTP service rate limiter.
+    #[arg(long)]
+    pub rate_limiter_per_model_limits: Option<bool>,
 }
 
 impl Flags {
@@ -226,6 +247,28 @@ impl Flags {
                 self.max_num_batched_tokens,
             ),
         )
+    }
+
+    pub fn rate_limiter_config(&self) -> RateLimiterConfig {
+        if self.enable_rate_limiter.is_none() {
+            return RateLimiterConfig::empty();
+        }
+
+        let mut builder = RateLimiterConfig::builder();
+        if let Some(ttft_threshold_secs) = self.rate_limiter_ttft_threshold_secs {
+            builder = builder.ttft_threshold_secs(ttft_threshold_secs);
+        }
+        if let Some(itl_threshold_secs) = self.rate_limiter_itl_threshold_secs {
+            builder = builder.itl_threshold_secs(itl_threshold_secs);
+        }
+        if let Some(time_constant_secs) = self.rate_limiter_time_constant_secs {
+            builder = builder.time_constant_secs(time_constant_secs);
+        }
+        if let Some(per_model_limits) = self.rate_limiter_per_model_limits {
+            builder = builder.per_model_limits(per_model_limits);
+        }
+
+        builder.build().unwrap_or_default()
     }
 
     /// Load extra engine arguments from a JSON file

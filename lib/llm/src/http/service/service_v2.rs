@@ -97,8 +97,8 @@ pub struct HttpServiceConfig {
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
 
-    #[builder(default = "None")]
-    rate_limiter_config: Option<RateLimiterConfig>,
+    #[builder(default = "RateLimiterConfig::empty()")]
+    rate_limiter_config: RateLimiterConfig,
 }
 
 impl HttpService {
@@ -166,12 +166,6 @@ static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
 static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
 
 impl HttpServiceConfigBuilder {
-    /// Set the rate limiter config for the HTTP service.
-    pub fn with_rate_limiter(mut self, config: RateLimiterConfig) -> Self {
-        self.rate_limiter_config = Some(Some(config));
-        self
-    }
-
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
 

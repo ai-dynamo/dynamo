@@ -27,6 +27,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
         .enable_embeddings_endpoints(true)
+        .rate_limiter_config(engine_config.local_model().rate_limiter_config())
         .with_request_template(engine_config.local_model().request_template())
         .build()?;
     match engine_config {
