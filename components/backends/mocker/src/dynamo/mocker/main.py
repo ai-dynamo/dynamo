@@ -24,9 +24,9 @@ async def worker(runtime: DistributedRuntime):
     # Create engine configuration
     entrypoint_args = EntrypointArgs(
         engine_type=EngineType.Mocker,
+        model_path=args.model_path,
         model_name=args.model_name,
         endpoint_id=args.endpoint,
-        http_port=args.http_port,
         extra_engine_args=args.extra_engine_args,
     )
 
@@ -42,10 +42,9 @@ def cmd_line_args():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--extra-engine-args",
-        type=Path,
-        help="Path to JSON file with mocker configuration "
-        "(num_gpu_blocks, speedup_ratio, etc.)",
+        "--model-path",
+        type=str,
+        help="Path to model directory or HuggingFace model ID for tokenizer",
     )
     parser.add_argument(
         "--endpoint",
@@ -56,13 +55,14 @@ def cmd_line_args():
     parser.add_argument(
         "--model-name",
         type=str,
-        default="mocker-engine",
+        default=None,
         help="Model name for API responses (default: mocker-engine)",
     )
     parser.add_argument(
-        "--http-port",
-        type=int,
-        help="Run as HTTP server on this port (e.g., 8080)",
+        "--extra-engine-args",
+        type=Path,
+        help="Path to JSON file with mocker configuration "
+        "(num_gpu_blocks, speedup_ratio, etc.)",
     )
 
     return parser.parse_args()
