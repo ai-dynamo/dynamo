@@ -46,10 +46,29 @@ use prometheus::{proto::MetricType, Registry};
 use reqwest::StatusCode;
 use rstest::*;
 use std::sync::Arc;
+use tokio::time::timeout;
 
 struct CounterEngine {}
 
-#[allow(deprecated)]
+// Add a new long-running test engine
+struct LongRunningEngine {
+    delay_ms: u64,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl LongRunningEngine {
+    fn new(delay_ms: u64) -> Self {
+        Self {
+            delay_ms,
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    fn was_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
 #[async_trait]
 impl
     AsyncEngine<
@@ -82,6 +101,47 @@ impl
 
                 yield Annotated::from_data(output);
             }
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for LongRunningEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+
+        tracing::info!(
+            "LongRunningEngine: Starting generation with {}ms delay",
+            self.delay_ms
+        );
+
+        let cancelled_flag = self.cancelled.clone();
+        let delay_ms = self.delay_ms;
+
+        let stream = async_stream::stream! {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {
+                    // timeout completed - yield result
+                }
+                _ = ctx.stopped() => {
+                    cancelled_flag.store(true, std::sync::atomic::Ordering::Release);
+                    return;
+                }
+            }
+
+            yield Annotated::<NvCreateChatCompletionStreamResponse>::from_annotation("event.dynamo.test.sentinel", &"DONE".to_string()).expect("Failed to create annotated response");
         };
 
         Ok(ResponseStream::new(Box::pin(stream), ctx))
@@ -876,6 +936,180 @@ async fn test_generic_byot_client(
 
     let (_stream, context) = result.unwrap().dissolve();
     assert_eq!(context.id(), ctx.id(), "Context ID should match");
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_client_disconnect_cancellation_unary() {
+    let service = HttpService::builder().port(8993).build().unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+
+    // Start the service
+    let task = tokio::spawn(async move { service.run(token).await });
+
+    // Wait for service to be ready
+    wait_for_service_ready(8993).await;
+
+    // Create a long-running engine (10 seconds)
+    let long_running_engine = Arc::new(LongRunningEngine::new(10_000));
+    manager
+        .add_chat_completions_model("slow-model", long_running_engine.clone())
+        .unwrap();
+
+    let client = reqwest::Client::new();
+
+    let message = async_openai::types::ChatCompletionRequestMessage::User(
+        async_openai::types::ChatCompletionRequestUserMessage {
+            content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                "This will take a long time".to_string(),
+            ),
+            name: None,
+        },
+    );
+
+    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+        .model("slow-model")
+        .messages(vec![message])
+        .stream(false) // Test unary response
+        .build()
+        .expect("Failed to build request");
+
+    // Start the request and cancel it after 1 second
+    let start_time = std::time::Instant::now();
+
+    let request_future = async {
+        client
+            .post("http://localhost:8993/v1/chat/completions")
+            .json(&request)
+            .send()
+            .await
+    };
+
+    // Use timeout to simulate client disconnect after 1 second
+    let result = timeout(std::time::Duration::from_millis(1000), request_future).await;
+
+    let elapsed = start_time.elapsed();
+
+    // The request should timeout (simulating client disconnect)
+    assert!(result.is_err(), "Request should have timed out");
+
+    // Give the service a moment to detect the disconnect and propagate cancellation
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Verify the engine was cancelled
+    assert!(
+        long_running_engine.was_cancelled(),
+        "Engine should have been cancelled due to client disconnect"
+    );
+
+    // Verify cancellation happened quickly (within 2 seconds, not the full 10 seconds)
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "Cancellation should have propagated quickly, took {:?}",
+        elapsed
+    );
+
+    tracing::info!(
+        "✅ Client disconnect test passed! Request cancelled in {:?}, engine detected cancellation",
+        elapsed
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_client_disconnect_cancellation_streaming() {
+    let service = HttpService::builder().port(8994).build().unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+
+    // Start the service
+    let task = tokio::spawn(async move { service.run(token).await });
+
+    // Wait for service to be ready
+    wait_for_service_ready(8994).await;
+
+    // Create a long-running engine (10 seconds)
+    let long_running_engine = Arc::new(LongRunningEngine::new(10_000));
+    manager
+        .add_chat_completions_model("slow-stream-model", long_running_engine.clone())
+        .unwrap();
+
+    let client = reqwest::Client::new();
+
+    let message = async_openai::types::ChatCompletionRequestMessage::User(
+        async_openai::types::ChatCompletionRequestUserMessage {
+            content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                "This will stream for a long time".to_string(),
+            ),
+            name: None,
+        },
+    );
+
+    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+        .model("slow-stream-model")
+        .messages(vec![message])
+        .stream(true) // Test streaming response
+        .build()
+        .expect("Failed to build request");
+
+    // Start the request and cancel it after 1 second
+    let start_time = std::time::Instant::now();
+
+    let request_future = async {
+        let response = client
+            .post("http://localhost:8994/v1/chat/completions")
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+
+        // Start reading the stream, then drop it to simulate client disconnect
+        let mut stream = response.bytes_stream();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // Read one chunk then drop the stream (simulating client disconnect)
+        let _ = StreamExt::next(&mut stream).await;
+        // Stream gets dropped here when function exits
+    };
+
+    // Use timeout to simulate the streaming request timing out
+    let result = timeout(std::time::Duration::from_millis(1500), request_future).await;
+
+    let elapsed = start_time.elapsed();
+
+    // Give the service time to detect the disconnect
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+    // Verify the engine was cancelled
+    assert!(
+        long_running_engine.was_cancelled(),
+        "Engine should have been cancelled due to streaming client disconnect"
+    );
+
+    // Verify cancellation happened reasonably quickly
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "Stream cancellation should have propagated reasonably quickly, took {:?}",
+        elapsed
+    );
+
+    tracing::info!(
+        "✅ Streaming client disconnect test passed! Stream cancelled in {:?}, engine detected cancellation",
+        elapsed
+    );
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();

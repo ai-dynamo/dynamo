@@ -30,7 +30,7 @@ pub mod openai;
 
 /// The token ID type
 pub type TokenIdType = u32;
-pub type DataStream<T> = Pin<Box<dyn Stream<Item = T> + Send + Sync>>;
+pub use dynamo_runtime::engine::DataStream;
 
 // TODO: This is an awkward dependency that we need to address
 // Originally, all the Annotated/SSE Codec bits where in the LLM protocol module; however, [Annotated]
