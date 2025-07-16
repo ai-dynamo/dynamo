@@ -184,6 +184,7 @@ a worker.
 To create a single decode worker, take note of the IP address, referred as <head-ip> below, of the node, and:
 ```bash
 cd examples/vllm_v1
+export GLOO_SOCKET_IFNAME=eth3 # or another non IB interface that you can find with `ifconfig -a`
 dynamo serve components.worker:VllmDecodeWorker -f configs/deepseek_r1/disagg_dp.yaml --VllmDecodeWorker.data_parallel_address=<head-ip>
 ```
 
@@ -192,6 +193,7 @@ the head of the DP groups. Next we need to create a `VllmDpWorker` to create the
 
 ```bash
 cd examples/vllm_v1
+export GLOO_SOCKET_IFNAME=eth3 # or another non IB interface that you can find with `ifconfig -a`
 # 'data_parallel_start_rank' == `dp_group_index * data_parallel_size_local`
 dynamo serve components.worker:VllmDpWorker -f configs/deepseek_r1/disagg_dp.yaml --VllmDpWorker.data_parallel_address=<head-ip> --VllmDpWorker.data_parallel_start_rank=8
 
