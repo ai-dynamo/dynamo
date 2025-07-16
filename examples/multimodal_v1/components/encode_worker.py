@@ -29,6 +29,7 @@ from PIL import Image
 from utils.model import load_vision_model
 from utils.protocol import EncodeRequest, EncodeResponse, vLLMMultimodalRequest, MyRequestOutput
 from utils.args import parse_vllm_args
+from utils.image_loader import ImageLoader
 from components.worker import VllmPDWorker
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 from utils.logging import check_required_workers
@@ -52,7 +53,6 @@ except ImportError as e:
 
 CACHE_SIZE_MAXIMUM = 8
 
-
 @service(
     dynamo={
         "enabled": True,
@@ -69,6 +69,7 @@ class VllmEncodeWorker:
         self.engine_args = parse_vllm_args(class_name, "")
         self.MODEL_ID = self.engine_args.model
 
+        self.image_loader = ImageLoader(cache_size=CACHE_SIZE_MAXIMUM)
         self.image_processor = AutoImageProcessor.from_pretrained(
             self.MODEL_ID, trust_remote_code=True
         )
@@ -77,83 +78,7 @@ class VllmEncodeWorker:
             self.MODEL_ID, device_map="auto", torch_dtype=torch.float16
         ).eval()
 
-        self._image_cache: dict[str, Image.Image] = {}
-        self._cache_queue: Queue[str] = Queue(maxsize=CACHE_SIZE_MAXIMUM)
-        self._current_readable = None
-
-        self._http_client: Optional[httpx.AsyncClient] = None
-        self._http_timeout = 30.0
         self.min_workers = 1
-
-    async def load_image(self, image_url: str) -> Image.Image:
-        parsed_url = urlparse(image_url)
-
-        # For HTTP(S) URLs, check cache first
-        if parsed_url.scheme in ("http", "https"):
-            image_url_lower = image_url.lower()
-            if image_url_lower in self._image_cache:
-                logger.debug(f"Image found in cache for URL: {image_url}")
-                return self._image_cache[image_url_lower]
-
-        try:
-            if parsed_url.scheme == "data":
-                # Parse data URL format: data:[<media type>][;base64],<data>
-                if not parsed_url.path.startswith("image/"):
-                    raise ValueError("Data URL must be an image type")
-
-                # Split the path into media type and data
-                media_type, data = parsed_url.path.split(",", 1)
-                if ";base64" not in media_type:
-                    raise ValueError("Data URL must be base64 encoded")
-
-                try:
-                    image_bytes = base64.b64decode(data)
-                    image_data = BytesIO(image_bytes)
-                except binascii.Error as e:
-                    raise ValueError(f"Invalid base64 encoding: {e}")
-            elif parsed_url.scheme in ("http", "https"):
-                if not self._http_client:
-                    raise RuntimeError("HTTP client not initialized")
-
-                response = await self._http_client.get(image_url)
-                response.raise_for_status()
-
-                if not response.content:
-                    raise ValueError("Empty response content from image URL")
-
-                image_data = BytesIO(response.content)
-            else:
-                raise ValueError(f"Invalid image source scheme: {parsed_url.scheme}")
-
-            # PIL is sync, so offload to a thread to avoid blocking the event loop
-            image = await asyncio.to_thread(Image.open, image_data)
-
-            # Validate image format and convert to RGB
-            if image.format not in ("JPEG", "PNG", "WEBP"):
-                raise ValueError(f"Unsupported image format: {image.format}")
-
-            image_converted = image.convert("RGB")
-
-            # Cache HTTP(S) URLs
-            if parsed_url.scheme in ("http", "https"):
-                image_url_lower = image_url.lower()
-                # Cache the image for future use, and evict the oldest image if the cache is full
-                if self._cache_queue.full():
-                    oldest_image_url = self._cache_queue.get()
-                    del self._image_cache[oldest_image_url]
-
-                self._image_cache[image_url_lower] = image_converted
-                self._cache_queue.put(image_url_lower)
-
-            return image
-
-        except httpx.HTTPError as e:
-            logger.error(f"HTTP error loading image: {e}")
-            raise
-        except Exception as e:
-            logger.error(f"Error loading image: {e}")
-            raise ValueError(f"Failed to load image: {e}")
-    
 
     @endpoint()
     async def encode(self, request: vLLMMultimodalRequest) -> AsyncIterator[MyRequestOutput]:
@@ -172,7 +97,7 @@ class VllmEncodeWorker:
         # 8. Yield the encode response.
 
         try:
-            image = await self.load_image(request.image_url)
+            image = await self.image_loader.load_image(request.image_url)
 
             logger.debug(f"Processing image for request: {{ id: {request_id} }}")
             image_embeds = self.image_processor(images=image, return_tensors="pt")
@@ -257,8 +182,6 @@ class VllmEncodeWorker:
     @async_on_start
     async def async_init(self):
         logger.info("Startup started.")
-        # Initialize HTTP client with default limits
-        self._http_client = httpx.AsyncClient(timeout=self._http_timeout)
         runtime = dynamo_context["runtime"]
         comp_ns, comp_name = VllmPDWorker.dynamo_address()  # type: ignore
         self.pd_worker_client = (

@@ -22,6 +22,7 @@ import socket
 from typing import Optional, AsyncGenerator
 import connect
 import torch
+from utils.image_loader import ImageLoader
 from utils.model import get_vision_embeddings_info
 from utils.args import parse_vllm_args
 from utils.protocol import MyRequestOutput, vLLMGenerateRequest, vLLMMultimodalRequest
@@ -32,7 +33,7 @@ from vllm.entrypoints.openai.api_server import (
 from vllm.inputs.data import TokensPrompt
 
 from dynamo.sdk import async_on_start, endpoint, service, depends, dynamo_context
-
+from transformers import AutoImageProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -185,24 +186,34 @@ class VllmPDWorker(VllmBaseWorker):
         # descriptor.register_memory(self._connector)
         self._embeddings_descriptor = (embeddings, descriptor)
 
+        self.image_loader = ImageLoader()
+        self.image_processor = AutoImageProcessor.from_pretrained(
+            self.engine_args.model, trust_remote_code=True
+        )
+
         logger.info("VllmPDWorker has been initialized")
 
     @endpoint()
     async def generate(self, request: vLLMMultimodalRequest):
         logger.debug(f"Received generate request in PDWorker: {{ id: {request.request_id} }}.")
 
-        # Process embeddings using the connector
-        embeddings, descriptor = self._embeddings_descriptor
+        if request.image_url is None:
+            # Process embeddings using the connector
+            embeddings, descriptor = self._embeddings_descriptor
 
-        if descriptor is None:
-            logger.error(f"in PD worker, descriptor is None")
+            if descriptor is None:
+                logger.error(f"in PD worker, descriptor is None")
 
-        read_op = await self._connector.begin_read(
-            request.serialized_request,
-            descriptor
-        )
-        await read_op.wait_for_completion()
-        logger.debug(f"in PD worker, image features: {embeddings}")
+            read_op = await self._connector.begin_read(
+                request.serialized_request,
+                descriptor
+            )
+            await read_op.wait_for_completion()
+            logger.debug(f"in PD worker, image features: {embeddings}")
+            multi_modal_data=embeddings
+        else:
+            image = await self.image_loader.load_image(request.image_url)
+            multi_modal_data = self.image_processor(images=image, return_tensors="pt")
 
         # Remove the image features from the request as they are not required
         request.image_url = None
@@ -224,7 +235,7 @@ class VllmPDWorker(VllmBaseWorker):
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
                 prompt_token_ids=pd_request.engine_prompt["prompt_token_ids"],
-                multi_modal_data={"image": embeddings}
+                multi_modal_data={"image": multi_modal_data}
             ),
             sampling_params=pd_request.sampling_params,
             request_id=pd_request.request_id,
