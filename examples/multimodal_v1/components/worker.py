@@ -212,11 +212,12 @@ class VllmPDWorker(VllmBaseWorker):
             logger.debug(f"in PD worker, image features: {embeddings}")
             multi_modal_data=embeddings
         else:
-            image = await self.image_loader.load_image(request.image_url)
-            multi_modal_data = self.image_processor(images=image, return_tensors="pt")["pixel_values"].to(dtype=torch.float16)
-            # image input is expected to be (batch_size, image_num, channel, height, width)
-            multi_modal_data = [multi_modal_data.unsqueeze(0)]
-            logger.info(f"Image features shape: {multi_modal_data.shape}")
+            # Use PIL image instead of image embeddings
+            multi_modal_data = await self.image_loader.load_image(request.image_url)
+            # multi_modal_data = self.image_processor(images=image, return_tensors="pt")["pixel_values"].to(dtype=torch.float16)
+            # image input is expected to be (image_num, channel, height, width)
+            # logger.info(f"Image features shape: {multi_modal_data.shape}")
+            # multi_modal_data = multi_modal_data.unsqueeze(0)
 
         # Remove the image features from the request as they are not required
         request.image_url = None
@@ -248,6 +249,9 @@ class VllmPDWorker(VllmBaseWorker):
         if self.enable_disagg:
             decode_request = copy.deepcopy(request)
             async for prefill_response in gen:
+                # Update the prompt token id in the decode request to the one
+                # in response, which has image templated filled in.
+                decode_request.engine_prompt["prompt_token_ids"] = prefill_response.prompt_token_ids
                 # logger.debug(f"Prefill response: {prefill_response}")
                 # request_output = MyRequestOutput.model_validate_json(prefill_response.model_dump_json())
                 logger.debug(f"Prefill response kv_transfer_params: {prefill_response.kv_transfer_params}")
