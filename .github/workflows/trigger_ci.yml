@@ -61,6 +61,7 @@ jobs:
           sdk:
             - 'deploy/**'
           sglang:
+            - 'container/Dockerfile.sglang'
             - 'container/Dockerfile.sglang-deepep'
             - 'examples/sglang/**'
             - 'container/build.sh'
