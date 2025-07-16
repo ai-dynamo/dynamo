@@ -31,6 +31,8 @@ pub enum Output {
     // Start vllm in a sub-process connecting via nats
     // Sugar for `python vllm_inc.py --endpoint <thing> --model <thing>`
     Vllm,
+
+    Mocker,
 }
 
 impl TryFrom<&str> for Output {
@@ -47,6 +49,7 @@ impl TryFrom<&str> for Output {
             "sglang" => Ok(Output::SgLang),
             "trtllm" => Ok(Output::Trtllm),
             "vllm" => Ok(Output::Vllm),
+            "mocker" => Ok(Output::Mocker),
 
             "echo_full" => Ok(Output::EchoFull),
             "echo_core" => Ok(Output::EchoCore),
@@ -79,6 +82,7 @@ impl fmt::Display for Output {
             Output::SgLang => "sglang",
             Output::Trtllm => "trtllm",
             Output::Vllm => "vllm",
+            Output::Mocker => "mocker",
 
             Output::EchoFull => "echo_full",
             Output::EchoCore => "echo_core",
@@ -106,6 +110,7 @@ impl Output {
         out.push(Output::SgLang.to_string());
         out.push(Output::Trtllm.to_string());
         out.push(Output::Vllm.to_string());
+        out.push(Output::Mocker.to_string());
 
         out
     }
