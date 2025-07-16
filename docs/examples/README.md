@@ -16,7 +16,6 @@ If you are a **👤 Dynamo User** first follow the [Quickstart Guide](../guides/
 ### Instructions for Dynamo Contributor
 If you are a **🧑‍💻 Dynamo Contributor** first follow the instructions in [deploy/cloud/helm/README.md](../../deploy/cloud/helm/README.md) to create your Dynamo Cloud deployment.
 
-Make sure your dynamo cloud the `deploy.sh --crds --interactive` script finished successfully.
 
 You would have to rebuild the dynamo platform images as the code evolves. For more details please look at the [Cloud Guide](../guides/dynamo_deploy/dynamo_cloud.md)
 
@@ -49,4 +48,15 @@ If kubernetes
 export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com
 ```
 
-Deploying examples consists of the simple `kubectl apply -f` command.
+Setup port forward if needed
+```bash
+export DEPLOYMENT_NAME=<your-depl-name>
+# Forward the pod's port to localhost
+kubectl port-forward svc/$DEPLOYMENT_NAME-frontend 8000:8000 -n ${NAMESPACE}
+```
+
+Deploying examples consists of the simple `kubectl apply -f example` command. For example:
+
+```bash
+kubectl apply -  examples/vllm/deploy/agg.yaml
+```
