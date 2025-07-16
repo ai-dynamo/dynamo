@@ -7,6 +7,9 @@ The SLA (Service Level Agreement)-based planner is an intelligent autoscaling sy
 > [!NOTE]
 > Currently, SLA-based planner only supports disaggregated setup.
 
+> [!WARNING]
+> Bare metal deployment with local connector is deprecated. The only option to deploy SLA-based planner is via k8s. We will update the examples in this document soon.
+
 ## Features
 
 * **SLA-driven scaling**: Automatically scales prefill/decode workers to meet TTFT and ITL targets
