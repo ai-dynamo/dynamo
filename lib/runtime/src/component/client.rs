@@ -1,29 +1,20 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use crate::pipeline::{
     AddressedPushRouter, AddressedRequest, AsyncEngine, Data, ManyOut, PushRouter, RouterMode,
     SingleIn,
 };
+use arc_swap::ArcSwap;
 use rand::Rng;
 use std::collections::HashMap;
+use std::sync::RwLock;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
-    Arc,
+    Arc, Mutex,
 };
-use tokio::{net::unix::pipe::Receiver, sync::Mutex};
+use std::time::Instant;
+use tokio::net::unix::pipe::Receiver;
 
 use crate::{
     pipeline::async_trait,
@@ -58,7 +49,9 @@ pub struct Client {
     // These are the remotes I know about from watching etcd
     pub instance_source: Arc<InstanceSource>,
     // These are the instances that are reported as down from sending rpc
-    instance_inhibited: Arc<Mutex<HashMap<i64, std::time::Instant>>>,
+    instance_inhibited: Arc<Mutex<HashMap<i64, Instant>>>,
+    // The current active IDs
+    instance_cache: Arc<ArcSwap<Vec<i64>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -76,11 +69,14 @@ impl Client {
             endpoint,
             instance_source: Arc::new(InstanceSource::Static),
             instance_inhibited: Arc::new(Mutex::new(HashMap::new())),
+            instance_cache: Arc::new(ArcSwap::from(Arc::new(vec![]))),
         })
     }
 
     // Client with auto-discover instances using etcd
     pub(crate) async fn new_dynamic(endpoint: Endpoint) -> Result<Self> {
+        const INSTANCE_REFRESH_PERIOD: Duration = Duration::from_secs(1);
+
         // create live endpoint watcher
         let Some(etcd_client) = &endpoint.component.drt.etcd_client else {
             anyhow::bail!("Attempt to create a dynamic client on a static endpoint");
@@ -89,11 +85,27 @@ impl Client {
         let instance_source =
             Self::get_or_create_dynamic_instance_source(etcd_client, &endpoint).await?;
 
-        Ok(Client {
+        let cancel_token = endpoint.drt().primary_token();
+        let client = Client {
             endpoint,
             instance_source,
             instance_inhibited: Arc::new(Mutex::new(HashMap::new())),
-        })
+            instance_cache: Arc::new(ArcSwap::from(Arc::new(vec![]))),
+        };
+
+        let instance_source_c = client.instance_source.clone();
+        let instance_inhibited_c = Arc::clone(&client.instance_inhibited);
+        let instance_cache_c = Arc::clone(&client.instance_cache);
+        tokio::task::spawn(async move {
+            while !cancel_token.is_cancelled() {
+                refresh_instances(&instance_source_c, &instance_inhibited_c, &instance_cache_c);
+                tokio::select! {
+                    _ = cancel_token.cancelled() => {}
+                    _ = tokio::time::sleep(INSTANCE_REFRESH_PERIOD) => {}
+                }
+            }
+        });
+        Ok(client)
     }
 
     pub fn path(&self) -> String {
@@ -107,10 +119,7 @@ impl Client {
 
     /// Instances available from watching etcd
     pub fn instances(&self) -> Vec<Instance> {
-        match self.instance_source.as_ref() {
-            InstanceSource::Static => vec![],
-            InstanceSource::Dynamic(watch_rx) => watch_rx.borrow().clone(),
-        }
+        instances_inner(self.instance_source.as_ref())
     }
 
     pub fn instance_ids(&self) -> Vec<i64> {
@@ -135,48 +144,16 @@ impl Client {
     }
 
     /// Instances available from watching etcd minus those reported as down
-    pub async fn instances_avail(&self) -> Vec<Instance> {
-        // TODO: Can we get the remaining TTL from the lease for the instance?
-        const ETCD_LEASE_TTL: u64 = 10; // seconds
-        let now = std::time::Instant::now();
-
-        let instances = self.instances();
-        let mut inhibited = self.instance_inhibited.lock().await;
-
-        // 1. Remove inhibited instances that are no longer in `self.instances()`
-        // 2. Remove inhibited instances that have expired
-        // 3. Only return instances that are not inhibited after removals
-        let mut new_inhibited = HashMap::<i64, std::time::Instant>::new();
-        let filtered = instances
-            .into_iter()
-            .filter_map(|instance| {
-                let id = instance.id();
-                if let Some(&timestamp) = inhibited.get(&id) {
-                    if now.duration_since(timestamp).as_secs() > ETCD_LEASE_TTL {
-                        tracing::debug!("instance {id} stale inhibition");
-                        Some(instance)
-                    } else {
-                        tracing::debug!("instance {id} is inhibited");
-                        new_inhibited.insert(id, timestamp);
-                        None
-                    }
-                } else {
-                    tracing::debug!("instance {id} not inhibited");
-                    Some(instance)
-                }
-            })
-            .collect();
-
-        *inhibited = new_inhibited;
-        filtered
+    pub fn instance_ids_avail(&self) -> arc_swap::Guard<Arc<Vec<i64>>> {
+        self.instance_cache.load()
     }
 
     /// Mark an instance as down/unavailable
-    pub async fn report_instance_down(&self, instance_id: i64) {
-        let now = std::time::Instant::now();
-
-        let mut inhibited = self.instance_inhibited.lock().await;
-        inhibited.insert(instance_id, now);
+    pub fn report_instance_down(&self, instance_id: i64) {
+        self.instance_inhibited
+            .lock()
+            .unwrap()
+            .insert(instance_id, Instant::now());
 
         tracing::debug!("inhibiting instance {instance_id}");
     }
@@ -274,5 +251,51 @@ impl Client {
         let instance_source = Arc::new(InstanceSource::Dynamic(watch_rx));
         instance_sources.insert(endpoint.clone(), Arc::downgrade(&instance_source));
         Ok(instance_source)
+    }
+}
+
+/// Update the instance id cache
+fn refresh_instances(
+    instance_source: &InstanceSource,
+    instance_inhibited: &Arc<Mutex<HashMap<i64, Instant>>>,
+    instance_cache: &Arc<ArcSwap<Vec<i64>>>,
+) {
+    const ETCD_LEASE_TTL: u64 = 10; // seconds
+
+    // TODO: Can we get the remaining TTL from the lease for the instance?
+    let now = Instant::now();
+
+    let instances = instances_inner(instance_source);
+    let mut inhibited = instance_inhibited.lock().unwrap();
+
+    // 1. Remove inhibited instances that are no longer in `self.instances()`
+    // 2. Remove inhibited instances that have expired
+    // 3. Only return instances that are not inhibited after removals
+    let mut new_inhibited = HashMap::<i64, Instant>::new();
+    let filtered: Vec<i64> = instances
+        .into_iter()
+        .filter_map(|instance| {
+            let id = instance.id();
+            if let Some(&timestamp) = inhibited.get(&id) {
+                if now.duration_since(timestamp).as_secs() > ETCD_LEASE_TTL {
+                    Some(id)
+                } else {
+                    new_inhibited.insert(id, timestamp);
+                    None
+                }
+            } else {
+                Some(id)
+            }
+        })
+        .collect();
+
+    *inhibited = new_inhibited;
+    instance_cache.store(Arc::new(filtered));
+}
+
+fn instances_inner(instance_source: &InstanceSource) -> Vec<Instance> {
+    match instance_source {
+        InstanceSource::Static => vec![],
+        InstanceSource::Dynamic(watch_rx) => watch_rx.borrow().clone(),
     }
 }
