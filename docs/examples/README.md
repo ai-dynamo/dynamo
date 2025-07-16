@@ -48,7 +48,8 @@ You can use `kubectl delete dynamoGraphDeployment <your-dep-name> -n ${NAMESPACE
 **Note 1** Example Image
 
 The examples use a prebuilt image from the `nvcr.io/nvidian/nim-llm-dev registry`.
-You can change the image location in your CR file prior to applying
+You can build your own image and update the image location in your CR file prior to applying.
+See [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image)
 
 ```bash
 extraPodSpec:
