@@ -17,10 +17,8 @@ use dynamo_runtime::protocols::Endpoint as EndpointId;
 #[repr(i32)]
 pub enum EngineType {
     Echo = 1,
-    MistralRs = 2,
-    LlamaCpp = 3,
-    Dynamic = 4,
-    Mocker = 5,
+    Dynamic = 2,
+    Mocker = 3,
 }
 
 #[pyclass]
@@ -155,40 +153,6 @@ async fn select_engine(
             RsEngineConfig::StaticCore {
                 engine,
                 model: Box::new(local_model),
-            }
-        }
-        EngineType::MistralRs => {
-            #[cfg(feature = "mistralrs")]
-            {
-                RsEngineConfig::StaticFull {
-                    engine: dynamo_engine_mistralrs::make_engine(&local_model).await?,
-                    model: Box::new(local_model),
-                }
-            }
-            #[cfg(not(feature = "mistralrs"))]
-            {
-                anyhow::bail!(
-                    "mistralrs engine is not enabled. Rebuild bindings with `--features mistralrs`"
-                );
-            }
-        }
-        EngineType::LlamaCpp => {
-            #[cfg(feature = "llamacpp")]
-            {
-                RsEngineConfig::StaticCore {
-                    engine: dynamo_engine_llamacpp::make_engine(
-                        distributed_runtime.inner.primary_token(),
-                        &local_model,
-                    )
-                    .await?,
-                    model: Box::new(local_model),
-                }
-            }
-            #[cfg(not(feature = "llamacpp"))]
-            {
-                anyhow::bail!(
-                    "llamacpp engine is not enabled. Rebuild bindings with `--features llamacpp`"
-                );
             }
         }
     };
