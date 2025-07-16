@@ -80,8 +80,8 @@ export DOCKER_PASSWORD=YOUR_NGC_CLI_API_KEY  # your-password if not using nvcr.i
 ```
 
 ```bash
+export IMAGE_TAG=RELEASE_VERSION # i.e. 0.3.2 - the release you are using or your-image-tag of you have built your own Dynamo image.
 # The  Nvidia Cloud Operator image will be pulled from the `$DOCKER_SERVER/dynamo-operator:$IMAGE_TAG`.
-export IMAGE_TAG=0.3.2 # The release you are using or your-image-tag of you have built your own Dynamo image.
 ```
 
 ### Install Dynamo Cloud
