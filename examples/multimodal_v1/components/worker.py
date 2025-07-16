@@ -213,7 +213,10 @@ class VllmPDWorker(VllmBaseWorker):
             multi_modal_data=embeddings
         else:
             image = await self.image_loader.load_image(request.image_url)
-            multi_modal_data = self.image_processor(images=image, return_tensors="pt")
+            multi_modal_data = self.image_processor(images=image, return_tensors="pt")["pixel_values"].to(dtype=torch.float16)
+            # image input is expected to be (batch_size, image_num, channel, height, width)
+            multi_modal_data = [multi_modal_data.unsqueeze(0)]
+            logger.info(f"Image features shape: {multi_modal_data.shape}")
 
         # Remove the image features from the request as they are not required
         request.image_url = None
