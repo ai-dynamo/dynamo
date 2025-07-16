@@ -40,13 +40,11 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Once;
-use opentelemetry::trace::TraceContextExt;
+
 use figment::{
     providers::{Format, Serialized, Toml},
     Figment,
 };
-// use opentelemetry::global;
-//use opentelemetry::trace::{Tracer };
 use serde::{Deserialize, Serialize};
 use tracing::{Event, Subscriber};
 use tracing_subscriber::fmt::time::FormatTime;
@@ -59,41 +57,19 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::{filter::Directive, fmt};
-use tracing_subscriber::fmt::format::FmtSpan;
-//use tracing_opentelemetry::OpenTelemetryLayer;
-//use opentelemetry::{global, KeyValue};
-use opentelemetry::trace::TracerProvider;
-use opentelemetry_sdk::trace::SdkTracerProvider;
-use opentelemetry::trace::{SpanContext};
 use tracing::Span;
 use tracing_subscriber::layer::Context;
 use tracing::Id;
 use tracing::span;
 use tracing_subscriber::Layer;
+use tracing_subscriber::fmt::format::FmtSpan;
 use uuid::Uuid;
+use tracing::field::Field;
+use tracing::span::Record;
+use tracing_subscriber::field::Visit;
+use tracing_subscriber::Registry;
+use tracing_subscriber::registry::SpanData;
 
-/// Generate a 32-character, lowercase hex trace ID (W3C-compliant)
-fn generate_trace_id() -> String {
-    Uuid::new_v4().simple().to_string()
-}
-
-/// Generate a 16-character, lowercase hex span ID (W3C-compliant)
-fn generate_span_id() -> String {
-    // Use the first 8 bytes (16 hex chars) of a UUID v4
-    let uuid = Uuid::new_v4();
-    let bytes = uuid.as_bytes();
-    bytes[..8].iter().map(|b| format!("{:02x}", b)).collect()
-}
-
-//use opentelemetry_sdk::{
-//    trace::{Config, SdkTracerProvider},
-//    Resource,
-//};
-
-//use opentelemetry_sdk::trace::SdkTracerProvider;
-
-use tracing_opentelemetry::OpenTelemetrySpanExt;
-use opentelemetry_sdk::trace::Sampler;
 /// ENV used to set the log level
 const FILTER_ENV: &str = "DYN_LOG";
 
@@ -105,28 +81,6 @@ const CONFIG_PATH_ENV: &str = "DYN_LOGGING_CONFIG_PATH";
 
 /// Once instance to ensure the logger is only initialized once
 static INIT: Once = Once::new();
-
-pub struct DistributedTraceIdLayer;
-
-struct DistributedTracingContext {
-    trace_id: String,
-    span_id: String
-}
-
-impl<S> Layer<S> for DistributedTraceIdLayer
-where
-    S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
-{
-    fn on_new_span(&self, _attrs: &span::Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
-        if let Some(span) = ctx.span(id) {
-	    let trace_id = generate_trace_id();
-	    let span_id = generate_span_id();
-	    let mut extensions = span.extensions_mut();
-	    extensions.insert(DistributedTracingContext {trace_id:trace_id,
-							 span_id:span_id});
-        }
-    }
-}
 
 #[derive(Serialize, Deserialize, Debug)]
 struct LoggingConfig {
@@ -154,13 +108,132 @@ impl Default for LoggingConfig {
     }
 }
 
+/// Generate a 32-character, lowercase hex trace ID (W3C-compliant)
+fn generate_trace_id() -> String {
+    Uuid::new_v4().simple().to_string()
+}
+
+/// Generate a 16-character, lowercase hex span ID (W3C-compliant)
+fn generate_span_id() -> String {
+    // Use the first 8 bytes (16 hex chars) of a UUID v4
+    let uuid = Uuid::new_v4();
+    let bytes = uuid.as_bytes();
+    bytes[..8].iter().map(|b| format!("{:02x}", b)).collect()
+}
+
+pub struct DistributedTraceIdLayer;
+
+#[derive(Clone)]
+pub struct DistributedTracingContext {
+    trace_id: String,
+    span_id: String,
+    parent_id: Option<String>
+}
+
+impl<S> Layer<S> for DistributedTraceIdLayer
+where
+    S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
+{
+    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+        if let Some(span) = ctx.span(id) {
+	    let mut trace_id = None;
+	    let mut parent_id = None;
+
+	    if let Some(parent_span_id) = ctx.current_span().id() {
+
+		if let Some(parent_span) = ctx.span(parent_span_id) {
+                    // Access parent span data (e.g., name)
+                    let parent_ext = parent_span.extensions();
+		    if let Some(parent_tracing_context) = parent_ext.get::<DistributedTracingContext>() {
+			trace_id = Some(parent_tracing_context.trace_id.clone());
+			parent_id = Some(parent_tracing_context.span_id.clone());
+		    }
+
+		}
+            }
+
+	    if trace_id == None {
+		trace_id = Some(generate_trace_id());
+	    }
+
+	    let span_id = generate_span_id();
+	    let mut extensions = span.extensions_mut();
+	    extensions.insert(DistributedTracingContext {trace_id:trace_id.expect("Trace ID must be set"),
+							 span_id:span_id,
+							 parent_id:parent_id});
+        }
+    }
+
+    fn on_record(&self, id: &Id, record: &Record<'_>, ctx: Context<'_, S>) {
+	println!("on record");
+        if let Some(span) = ctx.span(id) {
+            // Visitor struct for extracting updated trace_id/parent_id/span_id
+            #[derive(Default)]
+            struct UpdateVisitor {
+                trace_id: Option<String>,
+                span_id: Option<String>,
+                parent_id: Option<String>,
+            }
+            impl Visit for UpdateVisitor {
+                fn record_str(&mut self, field: &Field, value: &str) {
+		    println!("filed name{}",field.name());
+                    match field.name() {
+                        "trace_id" => self.trace_id = Some(value.to_string()),
+                        "span_id" => self.span_id = Some(value.to_string()),
+                        "parent_id" => self.parent_id = Some(value.to_string()),
+                        _ => {}
+                    }
+                }
+                fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                    // Fallback in case they're recorded as Debug, not str:
+                    let s = format!("{value:?}");
+                    match field.name() {
+                        "trace_id" => self.trace_id = Some(s),
+                        "span_id" => self.span_id = Some(s),
+                        "parent_id" => self.parent_id = Some(s),
+                        _ => {}
+                    }
+                }
+            }
+            // Extract updated fields
+            let mut visitor = UpdateVisitor::default();
+            record.record(&mut visitor);
+            let mut exts = span.extensions_mut();
+
+            // Only update fields that changed
+            if let Some(context) = exts.get_mut::<DistributedTracingContext>() {
+                if let Some(new_trace_id) = visitor.trace_id {
+                    context.trace_id = new_trace_id;
+                }
+                if let Some(new_span_id) = visitor.span_id {
+                    context.span_id = new_span_id;
+                }
+                if let Some(new_parent_id) = visitor.parent_id {
+                    context.parent_id = Some(new_parent_id);
+                }
+            }
+        }
+    }
+}
+
+
+pub fn get_distributed_tracing_context() -> Option<DistributedTracingContext> {
+    Span::current().with_subscriber(|(id, subscriber)| {
+        subscriber
+            .downcast_ref::<Registry>()
+            .and_then(|registry| registry.span_data(&id))
+            .and_then(|span_data| {
+                let extensions = span_data.extensions();
+                extensions.get::<DistributedTracingContext>().cloned()
+            })
+    }).flatten()
+}
+
 /// Initialize the logger
+
 pub fn init() {
     INIT.call_once(|| {
         let config = load_config();
-
-	// Initialize OpenTelemetry
-//        let (tracer, _) = tracing_opentelemetry::new_tracer("Dynamo", TokioCurrentThread::new());
 
         // Examples to remove noise
         // .add_directive("rustls=warn".parse()?)
@@ -181,22 +254,11 @@ pub fn init() {
                 }
             }
         }
-	// Create a new OpenTelemetry trace pipeline that prints to stdout
-//	let provider = SdkTracerProvider::builder()
-//	    .with_sampler(Sampler::AlwaysOn)
-//	    .with_simple_exporter(opentelemetry_stdout::SpanExporter::default())
-  //          .build();
-//	let tracer = provider.tracer("readme_example");
-
-	// Create a tracing layer with the configured tracer
-//	let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
 
         if crate::config::jsonl_logging_enabled() {
             let l = fmt::layer()
                 .with_ansi(false) // ansi terminal escapes and colors always disabled
-		.with_span_events(FmtSpan::NEW | FmtSpan::CLOSE) // Enable span timing
-		.json()
-		.with_span_list(true)
+		.with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
                 .event_format(CustomJsonFormatter::new())
                 .with_writer(std::io::stderr)
                 .with_filter(filter_layer);
@@ -204,7 +266,6 @@ pub fn init() {
         } else {
             let l = fmt::layer()
                 .with_ansi(!crate::config::disable_ansi_logging())
-		.with_span_events(FmtSpan::FULL) // Enable span timing
                 .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
                 .with_writer(std::io::stderr)
                 .with_filter(filter_layer);
@@ -312,7 +373,6 @@ where
         mut writer: Writer<'_>,
         event: &Event<'_>,
     ) -> std::fmt::Result {
-
         let mut visitor = JsonVisitor::default();
         event.record(&mut visitor);
         let message = visitor
@@ -324,20 +384,8 @@ where
             .parent()
             .and_then(|id| ctx.span(id))
             .or_else(|| ctx.lookup_current());
-
         if let Some(span) = current_span {
-
             let ext = span.extensions();
-	    let tracing_context = ext.get::<DistributedTracingContext>().unwrap();
-
-	    visitor.fields.insert("trace_id".to_string(),
-				  serde_json::Value::String(tracing_context.span_id.clone()));
-
-	    visitor.fields.insert(
-		"span_id".to_string(),
-		serde_json::Value::String(tracing_context.trace_id.clone()),
-	    );
-
             let data = ext.get::<FormattedFields<N>>().unwrap();
             let span_fields: Vec<(&str, &str)> = data
                 .fields
@@ -345,18 +393,61 @@ where
                 .filter_map(|entry| entry.split_once('='))
                 .collect();
             for (name, value) in span_fields {
-
                 visitor.fields.insert(
                     name.to_string(),
                     serde_json::Value::String(value.trim_matches('"').to_string()),
                 );
             }
-	    if let Some(parent) = span.parent() {
-		let parent_ext = parent.extensions();
+            visitor.fields.insert(
+                "span_name".to_string(),
+                serde_json::Value::String(span.name().to_string()),
+            );
 
-		let parent_tracing_context = parent_ext.get::<DistributedTracingContext>().unwrap();
-                visitor.fields.insert("parent_id".to_string(), serde_json::Value::String(parent_tracing_context.trace_id.clone())); // Add the parent ID to the span's fields
-            }
+
+	    if let Some(tracing_context) = ext.get::<DistributedTracingContext>() {
+		visitor.fields.insert("span_id".to_string(),serde_json::Value::String(tracing_context.span_id.clone()));
+		visitor.fields.insert("trace_id".to_string(),serde_json::Value::String(tracing_context.trace_id.clone()));
+		if let Some(parent_id) = tracing_context.parent_id.clone() {
+		    visitor.fields.insert("parent_id".to_string(),serde_json::Value::String(parent_id));
+		}
+	    }
+	    else {
+		visitor.fields.insert("span_id".to_string(),serde_json::Value::String(span.id().into_u64().to_string()));
+		if let Some(parent) = span.parent() {
+		    visitor.fields.insert("parent_id".to_string(),serde_json::Value::String(parent.id().into_u64().to_string()));
+		}
+
+	    }
+
+	    /*
+	    if let Some(span_id) = visitor.fields.get("span_id") {
+	    } else {
+
+	    if let Some(tracing_context) = ext.get::<DistributedTracingContext>() {
+		visitor.fields.insert("trace_id".to_string(),
+				      serde_json::Value::String(tracing_context.trace_id.clone()));
+		visitor.fields.insert(
+		    "span_id".to_string(),
+		    serde_json::Value::String(tracing_context.span_id.clone()),
+		);
+		if let Some(parent_id) = tracing_context.parent_id.clone() {
+		    visitor.fields.insert("parent_id".to_string(), serde_json::Value::String(parent_id));
+		}
+	    } else {
+		if let Some(span_id) = visitor.fields.get("span_id") {
+		} else {
+		    visitor.fields.insert("span_id".to_string(),
+					  serde_json::Value::String(span.id().into_u64().to_string()));
+		}
+		if let Some(parent_id)  = visitor.fields.get("parent_id") {
+		} else {
+		    if let Some(parent) = span.parent() {
+			visitor.fields.insert("parent_id".to_string(),serde_json::Value::String(parent.id().into_u64().to_string()));
+		    }
+		}
+	    }
+
+	    */
             visitor.fields.insert(
                 "span_name".to_string(),
                 serde_json::Value::String(span.name().to_string()),
@@ -368,16 +459,16 @@ where
         let log = JsonLog {
             level: metadata.level().to_string(),
             time: self.time_formatter.format_now(),
-            file_path: //if cfg!(debug_assertions) {
-                metadata.file(),
-//            } else {
-  //              None
-    //        },
-            line_number: //if cfg!(debug_assertions) {
-                metadata.line(),
-//            } else {
-  //              None
-    //        },
+            file_path: if cfg!(debug_assertions) {
+                metadata.file()
+            } else {
+                None
+            },
+            line_number: if cfg!(debug_assertions) {
+                metadata.line()
+            } else {
+                None
+            },
             message,
             fields: visitor.fields,
         };
@@ -442,6 +533,26 @@ impl tracing::field::Visit for JsonVisitor {
 mod tests {
     use super::*;
 
+    #[tracing::instrument(skip_all,fields(trace_id, span_id))]
+    async fn foo_3() {
+
+	println!("recording");
+	tracing::Span::current().record("trace_id","goo");
+	tracing::Span::current().record("span_id","goo");
+
+	if let Some (my_ctx) = get_distributed_tracing_context() {
+	    println!("my context {}", my_ctx.trace_id);
+	}
+
+	tracing::trace!(
+	    message="received two parts",
+	    header=5,
+	    data="foo"
+        );
+
+	foo_2().await;
+    }
+
     #[tracing::instrument(skip_all)]
     async fn foo() {
 	tracing::trace!(
@@ -467,11 +578,7 @@ mod tests {
     #[tracing::instrument(skip_all)]
     async fn test_span() {
 	init();
-	tracing::trace!(
-	    message="received two parts",
-	    header=5,
-	    data="foo"
-        );
-	foo().await;
+//	foo().await;
+	foo_3().await;
     }
 }
