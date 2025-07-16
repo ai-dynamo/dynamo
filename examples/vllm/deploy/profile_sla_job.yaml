@@ -9,7 +9,7 @@ spec:
       serviceAccountName: profile-sla-sa
       containers:
       - name: profile-sla
-        image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-233.1
+        image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-233.2
         resources:
           requests:
             nvidia.com/gpu: 8

@@ -20,6 +20,16 @@ kubectl apply -f agg.yaml
 
 ### SLA Planner Deployment
 
+**Optional Step 0: add a kubernetes secret**
+
+```bash
+kubectl create secret docker-registry nvcr-imagepullsecret \
+  --docker-server=nvcr.io \
+  --docker-username='$oauthtoken' \
+  --docker-password=<nvapi key> \
+  -n $NAMESPACE
+```
+
 **Step 1: Run profiling (required)**
 ```bash
 envsubst < profiling_pvc.yaml | kubectl apply -f -
