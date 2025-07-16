@@ -479,6 +479,15 @@ RUN uv venv $VIRTUAL_ENV --python 3.12 && \
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     uv pip install --requirement /tmp/requirements.txt
 
+# Install test dependencies
+#TODO: Remove this once we have a functional ci_minimum image built on top of the runtime image
+RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
+
+#TODO: Remove this once we have a functional ci_minimum image built on top of the runtime image
+COPY . /workspace
+RUN uv pip install /workspace/benchmarks
+
 # Install the wheels and symlink executables to /usr/local/bin so dynamo components can use them
 # Dynamo components currently do not have the VIRTUAL_ENV in their PATH, so we need to symlink the executables
 #Copy NIXL and Dynamo wheels into wheelhouse
@@ -497,5 +506,5 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
 # Copy examples
 COPY ./examples examples/
 
-ENTRYPOINT [ "/usr/bin/bash" ]
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []
