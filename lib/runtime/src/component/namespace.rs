@@ -78,6 +78,16 @@ impl EventSubscriber for Namespace {
     }
 }
 
+impl MetricsRegistry for Namespace {
+    fn metrics_prefix(&self) -> String {
+        format!("ns_{}", self.name)
+    }
+
+    fn metrics_hierarchy(&self) -> Vec<String> {
+        vec![self.drt().metrics_prefix(), self.metrics_prefix()]
+    }
+}
+
 #[cfg(feature = "integration")]
 #[cfg(test)]
 mod tests {

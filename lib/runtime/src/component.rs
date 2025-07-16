@@ -30,10 +30,7 @@
 //! TODO: Top-level Overview of Endpoints/Functions
 
 use crate::{
-    discovery::Lease,
-    profiling::{MetricsRegistry, PrometheusRegistry},
-    service::ServiceSet,
-    transports::etcd::EtcdPath,
+    discovery::Lease, profiling::MetricsRegistry, service::ServiceSet, transports::etcd::EtcdPath,
 };
 
 use super::{
@@ -44,7 +41,6 @@ use super::{
     utils::Duration,
     DistributedRuntime, Result, Runtime,
 };
-
 
 use crate::pipeline::network::{ingress::push_endpoint::PushEndpoint, PushWorkHandler};
 use crate::protocols::Endpoint as EndpointId;

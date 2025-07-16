@@ -17,7 +17,7 @@ pub use crate::component::Component;
 use crate::{
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
     discovery::DiscoveryClient,
-    profiling,
+    profiling::{self, MetricsRegistry},
     service::ServiceClient,
     transports::{etcd, nats, tcp},
     ErrorContext,
@@ -74,6 +74,7 @@ impl DistributedRuntime {
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
+            metrics_registries_by_prefix: std::sync::Mutex::new(HashMap::new()),
         };
 
         Ok(distributed_runtime)
@@ -194,5 +195,15 @@ impl DistributedConfig {
         config.etcd_config.attach_lease = false;
 
         config
+    }
+}
+
+impl MetricsRegistry for DistributedRuntime {
+    fn metrics_prefix(&self) -> String {
+        "".to_string()
+    }
+
+    fn metrics_hierarchy(&self) -> Vec<String> {
+        vec![self.metrics_prefix()]
     }
 }
