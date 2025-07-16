@@ -20,7 +20,7 @@ pub enum EngineType {
     MistralRs = 2,
     LlamaCpp = 3,
     Dynamic = 4,
-    Mocker = 5, // Add new engine type
+    Mocker = 5,
 }
 
 #[pyclass]

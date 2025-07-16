@@ -513,7 +513,7 @@ pub async fn make_mocker_engine(
     args: MockEngineArgs,
 ) -> Result<crate::backend::ExecutionContext, Error> {
     // Create the mocker engine
-    tracing::info!("Creating mocker engine with config: \n {args:?}");
+    tracing::info!("Creating mocker engine with config: {args:?}");
     let annotated_engine =
         AnnotatedMockEngine::new(MockVllmEngine::new(args), distributed_runtime, endpoint);
 
