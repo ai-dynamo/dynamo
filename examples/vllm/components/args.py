@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import json
 import logging
 import os
@@ -116,34 +117,58 @@ async def allocate_and_reserve_port(
     etcd_client,
     worker_id: str,
     reason: str,
+    max_attempts: int = 100,
 ) -> int:
-    """Get an OS-assigned port and atomically reserve it in ETCD."""
+    """
+    Get an OS-assigned port and atomically reserve it in ETCD.
+    Retries until successful or max_attempts reached.
+
+    Args:
+        max_attempts: Maximum number of ports to try (default: 100)
+
+    Raises:
+        RuntimeError: If unable to reserve a port within max_attempts
+        OSError: If unable to create sockets (system resource issues)
+    """
 
     node_name = socket.gethostname()
 
-    # Hold socket open just long enough to reserve in ETCD
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(("", 0))
-        port = sock.getsockname()[1]
+    for attempt in range(1, max_attempts + 1):
+        # Hold socket open just long enough to reserve in ETCD
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("", 0))
+            port = sock.getsockname()[1]
 
-        # Reserve in ETCD while holding the socket
-        key = f"dyn://{namespace}/ports/{node_name}/{port}"
-        value = {
-            "worker_id": worker_id,
-            "reason": reason,
-            "reserved_at": time.time(),
-            "pid": os.getpid(),
-        }
+            # Reserve in ETCD while holding the socket
+            key = f"dyn://{namespace}/ports/{node_name}/{port}"
+            value = {
+                "worker_id": worker_id,
+                "reason": reason,
+                "reserved_at": time.time(),
+                "pid": os.getpid(),
+            }
 
-        await etcd_client.kv_create(
-            key=key,
-            value=json.dumps(value).encode(),
-            lease_id=etcd_client.primary_lease_id(),  # Auto-cleanup
-        )
-        logger.debug(f"Reserved OS-assigned port {port} for {worker_id}")
+            try:
+                await etcd_client.kv_create(
+                    key=key,
+                    value=json.dumps(value).encode(),
+                    lease_id=etcd_client.primary_lease_id(),
+                )
+                logger.debug(f"Reserved OS-assigned port {port} for {worker_id}")
+                return port
 
-    return port
+            except Exception as e:
+                logger.debug(
+                    f"Port {port} on {node_name} was already reserved (attempt {attempt}): {e}"
+                )
+
+        if attempt < max_attempts:
+            await asyncio.sleep(0.01)
+
+    raise RuntimeError(
+        f"Failed to allocate and reserve a port after {max_attempts} attempts"
+    )
 
 
 async def configure_ports_with_etcd(config: Config, etcd_client):
