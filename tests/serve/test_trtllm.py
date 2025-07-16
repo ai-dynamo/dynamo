@@ -22,8 +22,8 @@ logger = logging.getLogger(__name__)
 text_prompt = "Tell me a short joke about AI."
 
 
-def create_payload_for_config(config: "VLLMConfig") -> Payload:
-    """Create a payload using the model from the vLLM config"""
+def create_payload_for_config(config: "TRTLLMConfig") -> Payload:
+    """Create a payload using the model from the trtllm config"""
     return Payload(
         payload_chat={
             "model": config.model,
@@ -49,8 +49,8 @@ def create_payload_for_config(config: "VLLMConfig") -> Payload:
 
 
 @dataclass
-class VLLMConfig:
-    """Configuration for vLLM test scenarios"""
+class TRTLLMConfig:
+    """Configuration for trtllm test scenarios"""
 
     name: str
     directory: str
@@ -63,17 +63,17 @@ class VLLMConfig:
     delayed_start: int = 0
 
 
-class VLLMProcess(ManagedProcess):
-    """Simple process manager for vllm shell scripts"""
+class TRTLLMProcess(ManagedProcess):
+    """Simple process manager for trtllm shell scripts"""
 
-    def __init__(self, config: VLLMConfig, request):
+    def __init__(self, config: TRTLLMConfig, request):
         self.port = 8080
         self.config = config
         self.dir = config.directory
         script_path = os.path.join(self.dir, "launch", config.script_name)
 
         if not os.path.exists(script_path):
-            raise FileNotFoundError(f"vLLM script not found: {script_path}")
+            raise FileNotFoundError(f"trtllm script not found: {script_path}")
 
         command = ["bash", script_path]
 
@@ -182,13 +182,13 @@ class VLLMProcess(ManagedProcess):
         logger.info("Deployment Ready")
 
 
-# vLLM test configurations
-vllm_configs = {
-    "aggregated": VLLMConfig(
+# trtllm test configurations
+trtllm_configs = {
+    "aggregated": TRTLLMConfig(
         name="aggregated",
-        directory="/workspace/examples/llm",
+        directory="/workspace/examples/tensorrt_llm",
         script_name="agg.sh",
-        marks=[pytest.mark.gpu_1, pytest.mark.vllm],
+        marks=[pytest.mark.gpu_1, pytest.mark.tensorrtllm],
         endpoints=["v1/chat/completions", "v1/completions"],
         response_handlers=[
             chat_completions_response_handler,
@@ -197,11 +197,11 @@ vllm_configs = {
         model="Qwen/Qwen3-0.6B",
         delayed_start=45,
     ),
-    "disaggregated": VLLMConfig(
+    "disaggregated": TRTLLMConfig(
         name="disaggregated",
-        directory="/workspace/examples/llm",
+        directory="/workspace/examples/tensorrt_llm",
         script_name="disagg.sh",
-        marks=[pytest.mark.gpu_2, pytest.mark.vllm],
+        marks=[pytest.mark.gpu_2, pytest.mark.tensorrtllm],
         endpoints=["v1/chat/completions", "v1/completions"],
         response_handlers=[
             chat_completions_response_handler,
@@ -216,17 +216,17 @@ vllm_configs = {
 @pytest.fixture(
     params=[
         pytest.param(config_name, marks=config.marks)
-        for config_name, config in vllm_configs.items()
+        for config_name, config in trtllm_configs.items()
     ]
 )
-def vllm_config_test(request):
-    """Fixture that provides different vLLM test configurations"""
-    return vllm_configs[request.param]
+def trtllm_config_test(request):
+    """Fixture that provides different trtllm test configurations"""
+    return trtllm_configs[request.param]
 
 
 @pytest.mark.e2e
 @pytest.mark.slow
-def test_deployment(vllm_config_test, request, runtime_services):
+def test_deployment(trtllm_config_test, request, runtime_services):
     """
     Test dynamo deployments with different configurations.
     """
@@ -236,13 +236,13 @@ def test_deployment(vllm_config_test, request, runtime_services):
     logger = logging.getLogger(request.node.name)
     logger.info("Starting test_deployment")
 
-    config = vllm_config_test
+    config = trtllm_config_test
     payload = create_payload_for_config(config)
 
     logger.info("Using model: %s", config.model)
     logger.info("Script: %s", config.script_name)
 
-    with VLLMProcess(config, request) as server_process:
+    with TRTLLMProcess(config, request) as server_process:
         server_process.wait_for_ready(payload, logger)
 
         for endpoint, response_handler in zip(
