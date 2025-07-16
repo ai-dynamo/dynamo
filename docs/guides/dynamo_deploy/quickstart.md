@@ -21,6 +21,8 @@ Install `envsubst`, `kubectl`, `helm`
 
 ### Authenticate with NGC
 
+Go to  https://ngc.nvidia.com/org to get your NGC_CLI_API_KEY.
+
 ```bash
 helm repo add nvidia https://helm.ngc.nvidia.com/nvidia --username='$oauthtoken' --password=<YOUR_NGC_CLI_API_KEY>
 ```
@@ -68,15 +70,19 @@ cd deploy/cloud/helm/
 
 ### Set Environment Variables
 
+Our examples use the `nvcr.io` but you can setup your own values if you use another docker registry.
+
 ```bash
-export NAMESPACE=dynamo-cloud
-export DOCKER_USERNAME=your-username
-export DOCKER_PASSWORD=your-password
-export DOCKER_SERVER=your-docker-registry.com
-export IMAGE_TAG=your-image-tag
+export NAMESPACE=dynamo-cloud # or whatever you prefer.
+export DOCKER_SERVER=nvcr.io/nvidia/ai-dynamo/  # your-docker-registry.com
+export DOCKER_USERNAME='$oauthtoken'  # your-username if not using nvcr.io
+export DOCKER_PASSWORD=YOUR_NGC_CLI_API_KEY  # your-password if not using nvcr.io
 ```
 
-The operator image will be pulled from `$DOCKER_SERVER/dynamo-operator:$IMAGE_TAG`.
+```bash
+# The  Nvidia Cloud Operator image will be pulled from the `$DOCKER_SERVER/dynamo-operator:$IMAGE_TAG`.
+export IMAGE_TAG=0.3.2 # The release you are using or your-image-tag of you have built your own Dynamo image.
+```
 
 ### Install Dynamo Cloud
 
@@ -140,7 +146,7 @@ helm install dynamo-platform ./platform/ \
 
 [More on Deploying to Dynamo Cloud](./dynamo_cloud.md)
 
-We have provided the `deploy/cloud/helm/uninstall.sh` script for you which would remove Dynamo Cloud installation if you need a clean slate.
+**Note** We have provided the `deploy/cloud/helm/uninstall.sh` script for you which would remove Dynamo Cloud installation if you need a clean slate.
 
 ## Explore Examples
 
