@@ -116,11 +116,11 @@ class TRTLLMProcess(ManagedProcess):
     ):
         assert response.status_code == 200, "Response Error"
         content = response_handler(response)
-        logger.info("Received Content: %s", content)
+        logger.info(f"Received Content: {content}")
         # Check for expected responses
         assert content, "Empty response content"
         for expected in payload.expected_response:
-            assert expected in content, "Expected '%s' not found in response" % expected
+            assert expected in content, f"Expected '{expected}' not found in response"
 
     def wait_for_ready(self, payload, logger=logging.getLogger()):
         url = f"http://localhost:{self.port}/{self.config.endpoints[0]}"
@@ -134,8 +134,7 @@ class TRTLLMProcess(ManagedProcess):
             else payload.payload_completions
         )
 
-        while time.time() - start_time < self.config.timeout:
-            elapsed = time.time() - start_time
+        while (elapsed := time.time() - start_time) < self.config.timeout:
             try:
                 response = requests.post(
                     url,
@@ -143,43 +142,36 @@ class TRTLLMProcess(ManagedProcess):
                     timeout=self.config.timeout - elapsed,
                 )
             except (requests.RequestException, requests.Timeout) as e:
-                logger.warning("Retrying due to Request failed: %s", e)
+                logger.warning(f"Retrying due to Request failed: {e}")
                 time.sleep(retry_delay)
                 continue
-            logger.info("Response%r", response)
+            logger.info(f"Response: {response}")
             if response.status_code == 500:
                 error = response.json().get("error", "")
                 if "no instances" in error:
-                    logger.warning("Retrying due to no instances available")
+                    logger.warning(
+                        f"Retrying due to no instances available for model '{self.config.model}'"
+                    )
                     time.sleep(retry_delay)
                     continue
             if response.status_code == 404:
                 error = response.json().get("error", "")
                 if "Model not found" in error:
-                    logger.warning("Retrying due to model not found")
+                    logger.warning(
+                        f"Retrying due to model not found for model '{self.config.model}'"
+                    )
                     time.sleep(retry_delay)
                     continue
             # Process the response
             if response.status_code != 200:
-                logger.error(
-                    "Service returned status code %s: %s",
-                    response.status_code,
-                    response.text,
-                )
                 pytest.fail(
-                    "Service returned status code %s: %s"
-                    % (response.status_code, response.text)
+                    f"Service returned status code {response.status_code}: {response.text}"
                 )
             else:
                 break
         else:
-            logger.error(
-                "Service did not return a successful response within %s s",
-                self.config.timeout,
-            )
             pytest.fail(
-                "Service did not return a successful response within %s s"
-                % self.config.timeout
+                f"Service did not return a successful response within {self.config.timeout} s"
             )
 
         self.check_response(payload, response, self.config.response_handlers[0], logger)
@@ -244,12 +236,13 @@ def test_deployment(trtllm_config_test, request, runtime_services):
     config = trtllm_config_test
     payload = create_payload_for_config(config)
 
-    logger.info("Using model: %s", config.model)
-    logger.info("Script: %s", config.script_name)
+    logger.info(f"Using model: {config.model}")
+    logger.info(f"Script: {config.script_name}")
 
     with TRTLLMProcess(config, request) as server_process:
         server_process.wait_for_ready(payload, logger)
 
+        assert len(config.endpoints) == len(config.response_handlers)
         for endpoint, response_handler in zip(
             config.endpoints, config.response_handlers
         ):
