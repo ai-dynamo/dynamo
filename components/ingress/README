@@ -1,9 +1,0 @@
-# Dynamo ingress / frontend node.
-
-Usage: `python -m dynamo.ingress [--http-port <port>]`. Port defaults to 8080.
-
-This runs an OpenAI compliant HTTP server, a pre-processor, and a router in a single process. Engines / workers are auto-discovered when they call `register_llm`.
-
-Requires `etcd` and `nats-server -js`.
-
-This is the same as `dynamo-run in=http out=dyn`.

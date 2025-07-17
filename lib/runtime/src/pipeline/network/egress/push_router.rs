@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 use super::{AsyncEngineContextProvider, ResponseStream};
 use crate::{
@@ -111,19 +99,18 @@ where
 
     /// Issue a request to the next available instance in a round-robin fashion
     pub async fn round_robin(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
-        let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
+        let counter = self.round_robin_counter.fetch_add(1, Ordering::Relaxed) as usize;
 
         let instance_id = {
-            let instances = self.client.instances_avail().await;
-            let count = instances.len();
+            let instance_ids = self.client.instance_ids_avail();
+            let count = instance_ids.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
                     "no instances found for endpoint {:?}",
                     self.client.endpoint.etcd_root()
                 ));
             }
-            let offset = counter % count as u64;
-            instances[offset as usize].id()
+            instance_ids[counter % count]
         };
         tracing::trace!("round robin router selected {instance_id}");
 
@@ -134,17 +121,16 @@ where
     /// Issue a request to a random endpoint
     pub async fn random(&self, request: SingleIn<T>) -> anyhow::Result<ManyOut<U>> {
         let instance_id = {
-            let instances = self.client.instances_avail().await;
-            let count = instances.len();
+            let instance_ids = self.client.instance_ids_avail();
+            let count = instance_ids.len();
             if count == 0 {
                 return Err(anyhow::anyhow!(
                     "no instances found for endpoint {:?}",
                     self.client.endpoint.etcd_root()
                 ));
             }
-            let counter = rand::rng().random::<u64>();
-            let offset = counter % count as u64;
-            instances[offset as usize].id()
+            let counter = rand::rng().random::<u64>() as usize;
+            instance_ids[counter % count]
         };
         tracing::trace!("random router selected {instance_id}");
 
@@ -158,10 +144,7 @@ where
         request: SingleIn<T>,
         instance_id: i64,
     ) -> anyhow::Result<ManyOut<U>> {
-        let found = {
-            let instances = self.client.instances_avail().await;
-            instances.iter().any(|ep| ep.id() == instance_id)
-        };
+        let found = self.client.instance_ids_avail().contains(&instance_id);
 
         if !found {
             return Err(anyhow::anyhow!(
@@ -205,7 +188,7 @@ where
                     }
                     async move {
                         if let Some((client, instance_id)) = report_instance_down {
-                            client.report_instance_down(instance_id).await;
+                            client.report_instance_down(instance_id);
                         }
                         res
                     }
@@ -215,7 +198,7 @@ where
             Err(err) => {
                 if let Some(req_err) = err.downcast_ref::<NatsRequestError>() {
                     if matches!(req_err.kind(), NatsNoResponders) {
-                        self.client.report_instance_down(instance_id).await;
+                        self.client.report_instance_down(instance_id);
                     }
                 }
                 Err(err)

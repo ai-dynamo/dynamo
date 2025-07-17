@@ -19,24 +19,35 @@ Follow the instructions in [deploy/cloud/README.md](../../deploy/cloud/README.md
 
 Deploy 2 Dynamo aggregated graphs following the instructions in [examples/llm/README.md](../../examples/llm/README.md):
 
-### Build Dynamo Graph
-```bash
-export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
-
-# Build the service
-cd $PROJECT_ROOT/examples/llm
-export DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk '{ print $NF }' | sed 's/\.$//')
-```
-
 ### Deploy Dynamo Graphs
+
+Follow the commands to deploy 2 dynamo graphs -
+
 ```bash
+# Set pre-built vLLM dynamo base container image
+export VLLM_RUNTIME_IMAGE=<dynamo-vllm-base-image>
+# for example:
+# export VLLM_RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
+
+# run the following commands from dynamo repo's root folder
+
 # Deploy first graph
 export DEPLOYMENT_NAME=llm-agg1
-# TODO: Deploy your service using a DynamoGraphDeployment CR.
+yq eval '
+  .metadata.name = env(DEPLOYMENT_NAME) |
+  .spec.services[].extraPodSpec.mainContainer.image = env(VLLM_RUNTIME_IMAGE)
+' examples/vllm_v0/deploy/agg.yaml > examples/vllm_v0/deploy/agg1.yaml
+
+kubectl apply -f examples/vllm_v0/deploy/agg1.yaml
 
 # Deploy second graph
 export DEPLOYMENT_NAME=llm-agg2
-# TODO: Deploy your service using a DynamoGraphDeployment CR.
+yq eval '
+  .metadata.name = env(DEPLOYMENT_NAME) |
+  .spec.services[].extraPodSpec.mainContainer.image = env(VLLM_RUNTIME_IMAGE)
+' examples/vllm_v0/deploy/agg.yaml > examples/vllm_v0/deploy/agg2.yaml
+
+kubectl apply -f examples/vllm_v0/deploy/agg2.yaml
 ```
 
 3. **Deploy Inference Gateway**

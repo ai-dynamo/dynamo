@@ -17,11 +17,9 @@ import asyncio
 import logging
 import os
 import signal
-import socket
-from typing import Optional
 
 import uvloop
-from args import Config, find_free_port, parse_args
+from args import Config, configure_ports_with_etcd, overwrite_args, parse_args
 from handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from publisher import StatLoggerFactory
 from vllm.distributed.kv_events import ZmqEventPublisher
@@ -57,6 +55,10 @@ async def graceful_shutdown(runtime):
 async def worker(runtime: DistributedRuntime):
     config = parse_args()
 
+    etcd_client = runtime.etcd_client()
+    await configure_ports_with_etcd(config, etcd_client)
+    overwrite_args(config)
+
     # Set up signal handler for graceful shutdown
     loop = asyncio.get_running_loop()
 
@@ -77,8 +79,6 @@ async def worker(runtime: DistributedRuntime):
 def setup_vllm_engine(config, stat_logger=None):
     os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-
-    set_side_channel_host_and_port()
 
     engine_args = config.engine_args
     # Load default sampling params from `generation_config.json`
@@ -103,32 +103,6 @@ def setup_vllm_engine(config, stat_logger=None):
     )
     logger.info(f"VllmWorker for {config.model} has been initialized")
     return engine_client, vllm_config, default_sampling_params
-
-
-def set_side_channel_host_and_port(
-    hostname: Optional[str] = None, port: Optional[int] = None
-):
-    """vLLM V1 NixlConnector creates a side channel to exchange metadata with other NIXL connectors.
-    This sets the port number for the side channel.
-    """
-    if hostname is None:
-        hostname = socket.gethostname()
-        # Test if hostname is usable by attempting to bind to it
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as test_socket:
-                test_socket.bind((hostname, 0))
-        except (socket.error, socket.gaierror):
-            # If hostname is not usable, fall back to localhost
-            logger.warning(
-                f"Hostname '{hostname}' is not usable, falling back to '127.0.0.1'"
-            )
-            hostname = "127.0.0.1"
-    if port is None:
-        port = find_free_port()
-    logger.debug("Setting VLLM_NIXL_SIDE_CHANNEL_HOST to %s", hostname)
-    os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = hostname
-    logger.debug("Setting VLLM_NIXL_SIDE_CHANNEL_PORT to %s", port)
-    os.environ["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(port)
 
 
 async def init_prefill(runtime: DistributedRuntime, config: Config):
@@ -172,7 +146,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
     prefill_worker_client = (
-        await runtime.namespace("dynamo")
+        await runtime.namespace(config.namespace)
         .component("prefill")  # TODO don't hardcode
         .endpoint("generate")
         .client()

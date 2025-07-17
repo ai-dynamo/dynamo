@@ -46,26 +46,6 @@ uv pip install maturin
 maturin develop --uv
 ```
 
-5. Experimental: To allow using mistral.rs and llama.cpp via the bindings, build with feature flags:
-
-```
-maturin develop --features mistralrs,llamacpp --release
-```
-
-`--release` is optional. It builds slower but the resulting library is significantly faster.
-
-See `examples/cli/cli.py` for usage.
-
-They will both be built for CUDA by default. If you see a runtime error `CUDA_ERROR_STUB_LIBRARY` this is because
-the stub `libcuda.so` is earlier on the library search path than the real libcuda. Try removing the `rpath` from the library:
-
-```
-patchelf --set-rpath '' _core.cpython-312-x86_64-linux-gnu.so
-```
-
-If you include the `llamacpp` feature flag, `libllama.so` and `libggml.so` (and family) will need to be available at runtime.
-
-
 ## Run Examples
 
 ### Prerequisite

@@ -176,8 +176,6 @@ RUN pyright --help > /dev/null 2>&1
 # Enable Git operations in the /workspace directory
 RUN printf "[safe]\n      directory=/workspace\n" > /root/.gitconfig
 
-RUN ln -sf /bin/bash /bin/sh
-
 # Rust build/dev dependencies
 RUN apt-get update && \
     apt-get install --no-install-recommends -y \
@@ -486,11 +484,11 @@ ENV TRTLLM_USE_UCX_KVCACHE=1
 COPY --from=dev /usr/local/bin/set_trtllm_env.sh /usr/local/bin/set_trtllm_env.sh
 RUN echo 'source /usr/local/bin/set_trtllm_env.sh' >> /root/.bashrc
 
-# Copy benchmarks, examples and tests for CI
+# Copy benchmarks, backends and tests for CI
 # TODO: Remove this once we have a functional CI image built on top of the runtime image
 COPY tests /workspace/tests
 COPY benchmarks /workspace/benchmarks
-COPY examples /workspace/examples
+COPY components/backends/trtllm /workspace/components/backends/trtllm
 RUN uv pip install /workspace/benchmarks
 
 # Copy files for legal compliance

@@ -165,7 +165,7 @@ pub trait AsyncEngineContext: Send + Sync + Debug {
 ///
 /// This trait is implemented by both unary and streaming engine results, allowing
 /// uniform access to context information regardless of the operation type.
-pub trait AsyncEngineContextProvider: Send + Sync + Debug {
+pub trait AsyncEngineContextProvider: Send + Debug {
     fn context(&self) -> Arc<dyn AsyncEngineContext>;
 }
 

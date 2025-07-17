@@ -191,7 +191,6 @@ RUN pyright --help > /dev/null 2>&1
 # Enable Git operations in the /workspace directory
 RUN printf "[safe]\n      directory=/workspace\n" > /root/.gitconfig
 
-RUN ln -sf /bin/bash /bin/sh
 
 ### BUILDS ###
 

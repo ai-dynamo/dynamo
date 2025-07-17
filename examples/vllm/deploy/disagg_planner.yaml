@@ -15,172 +15,124 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: disagg-planner
+  name: vllm-v1-disagg-planner
 spec:
   services:
     Frontend:
       dynamoNamespace: vllm-v1-disagg-planner
       componentType: main
       replicas: 1
-      resources:
-        requests:
-          cpu: "2"
-          memory: "4Gi"
-        limits:
-          cpu: "2"
-          memory: "4Gi"
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
-          workingDir: /workspace/examples/vllm_v1
-          args:
-            - dynamo
-            - serve
-            - graphs.disagg_planner:Frontend
-            - --system-app-port
-            - "5000"
-            - --enable-system-app
-            - --use-default-health-checks
-            - --service-name
-            - Frontend
-            - -f
-            - ./configs/disagg_planner.yaml
-    SimpleLoadBalancer:
-      envFromSecret: hf-token-secret
-      dynamoNamespace: vllm-v1-disagg-planner
-      replicas: 1
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
       resources:
         requests:
           cpu: "1"
-          memory: "20Gi"
+          memory: "2Gi"
         limits:
           cpu: "1"
-          memory: "20Gi"
+          memory: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
-          workingDir: /workspace/examples/vllm_v1
+          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.4
+          workingDir: /workspace/examples/vllm
           args:
             - dynamo
-            - serve
-            - graphs.disagg_planner:SimpleLoadBalancer
-            - --system-app-port
-            - "5000"
-            - --enable-system-app
-            - --use-default-health-checks
-            - --service-name
-            - SimpleLoadBalancer
-            - -f
-            - ./configs/disagg_planner.yaml
+            - run
+            - in=http
+            - out=dyn
+            - --http-port
+            - "8000"
     VllmDecodeWorker:
       dynamoNamespace: vllm-v1-disagg-planner
       envFromSecret: hf-token-secret
+      componentType: worker
       replicas: 1
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - 'grep "VllmWorker.*has been initialized" /tmp/vllm.log'
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
       resources:
         requests:
-          cpu: "20"
-          memory: "40Gi"
-          gpu: "2"
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
         limits:
-          cpu: "20"
-          memory: "40Gi"
-          gpu: "2"
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
-          workingDir: /workspace/examples/vllm_v1
+          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.4
+          workingDir: /workspace/examples/vllm
           args:
-            - dynamo
-            - serve
-            - graphs.disagg_planner:VllmDecodeWorker
-            - --system-app-port
-            - "5000"
-            - --enable-system-app
-            - --use-default-health-checks
-            - --service-name
-            - VllmDecodeWorker
-            - -f
-            - ./configs/disagg_planner.yaml
+            - "python3 components/main.py --model Qwen/Qwen3-0.6B --enforce-eager 2>&1 | tee /tmp/vllm.log"
     VllmPrefillWorker:
       dynamoNamespace: vllm-v1-disagg-planner
       envFromSecret: hf-token-secret
+      componentType: worker
       replicas: 1
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - 'grep "VllmWorker.*has been initialized" /tmp/vllm.log'
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
       resources:
         requests:
-          cpu: "20"
-          memory: "40Gi"
-          gpu: "2"
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
         limits:
-          cpu: "20"
-          memory: "40Gi"
-          gpu: "2"
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
-          workingDir: /workspace/examples/vllm_v1
+          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.4
+          workingDir: /workspace/examples/vllm
           args:
-            - dynamo
-            - serve
-            - graphs.disagg_planner:VllmPrefillWorker
-            - --system-app-port
-            - "5000"
-            - --enable-system-app
-            - --use-default-health-checks
-            - --service-name
-            - VllmPrefillWorker
-            - -f
-            - ./configs/disagg_planner.yaml
-    Planner:
-      dynamoNamespace: vllm-v1-disagg-planner
-      replicas: 1
-      componentType: planner
-      resources:
-        requests:
-          cpu: "2"
-          memory: "2Gi"
-        limits:
-          cpu: "2"
-          memory: "2Gi"
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
-          workingDir: /workspace/examples/vllm_v1
-          args:
-            - dynamo
-            - serve
-            - graphs.disagg_planner:Planner
-            - --system-app-port
-            - "5000"
-            - --enable-system-app
-            - --use-default-health-checks
-            - --service-name
-            - Planner
-            - --Planner.environment=kubernetes
-            - -f
-            - ./configs/disagg_planner.yaml
-    Prometheus:
-      dynamoNamespace: vllm-v1-disagg-planner
-      replicas: 1
-      resources:
-        requests:
-          cpu: "1000m"
-          memory: "1000Mi"
-        limits:
-          cpu: "1000m"
-          memory: "1000Mi"
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
-          workingDir: /workspace/examples/vllm_v1
-          args:
-            - dynamo
-            - serve
-            - graphs.disagg_planner:Prometheus
-            - --system-app-port
-            - "5000"
-            - --enable-system-app
-            - --use-default-health-checks
-            - --service-name
-            - Prometheus
-            - -f
-            - ./configs/disagg_planner.yaml
+            - "python3 components/main.py --model Qwen/Qwen3-0.6B --enforce-eager --is-prefill-worker 2>&1 | tee /tmp/vllm.log"

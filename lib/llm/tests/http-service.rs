@@ -14,12 +14,18 @@
 // limitations under the License.
 
 use anyhow::Error;
+use async_openai::config::OpenAIConfig;
 use async_stream::stream;
-use dynamo_llm::http::service::{
-    error::HttpError,
-    metrics::{Endpoint, RequestType, Status},
-    service_v2::HttpService,
-    Metrics,
+use dynamo_llm::http::{
+    client::{
+        GenericBYOTClient, HttpClientConfig, HttpRequestContext, NvCustomClient, PureOpenAIClient,
+    },
+    service::{
+        error::HttpError,
+        metrics::{Endpoint, RequestType, Status},
+        service_v2::HttpService,
+        Metrics,
+    },
 };
 use dynamo_llm::protocols::{
     openai::{
@@ -29,13 +35,16 @@ use dynamo_llm::protocols::{
     Annotated,
 };
 use dynamo_runtime::{
+    engine::AsyncEngineContext,
     pipeline::{
         async_trait, AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream, SingleIn,
     },
     CancellationToken,
 };
+use futures::StreamExt;
 use prometheus::{proto::MetricType, Registry};
 use reqwest::StatusCode;
+use rstest::*;
 use std::sync::Arc;
 
 struct CounterEngine {}
@@ -466,6 +475,407 @@ async fn test_http_service() {
 
     assert!(response.status().is_success(), "{:?}", response);
     println!("{}", response.text().await.unwrap());
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+// === HTTP Client Tests ===
+
+/// Wait for the HTTP service to be ready by checking its health endpoint
+async fn wait_for_service_ready(port: u16) {
+    let start = tokio::time::Instant::now();
+    let timeout = tokio::time::Duration::from_secs(5);
+    loop {
+        match reqwest::get(&format!("http://localhost:{}/health", port)).await {
+            Ok(_) => break,
+            Err(_) if start.elapsed() < timeout => {
+                tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+            }
+            Err(e) => panic!("Service failed to start within timeout: {}", e),
+        }
+    }
+}
+
+#[fixture]
+fn service_with_engines(
+    #[default(8990)] port: u16,
+) -> (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>) {
+    let service = HttpService::builder().port(port).build().unwrap();
+    let manager = service.model_manager();
+
+    let counter = Arc::new(CounterEngine {});
+    let failure = Arc::new(AlwaysFailEngine {});
+
+    manager
+        .add_chat_completions_model("foo", counter.clone())
+        .unwrap();
+    manager
+        .add_chat_completions_model("bar", failure.clone())
+        .unwrap();
+    manager
+        .add_completions_model("bar", failure.clone())
+        .unwrap();
+
+    (service, counter, failure)
+}
+
+#[fixture]
+fn pure_openai_client(#[default(8990)] port: u16) -> PureOpenAIClient {
+    let config = HttpClientConfig {
+        openai_config: OpenAIConfig::new().with_api_base(format!("http://localhost:{}/v1", port)),
+        verbose: false,
+    };
+    PureOpenAIClient::new(config)
+}
+
+#[fixture]
+fn nv_custom_client(#[default(8991)] port: u16) -> NvCustomClient {
+    let config = HttpClientConfig {
+        openai_config: OpenAIConfig::new().with_api_base(format!("http://localhost:{}/v1", port)),
+        verbose: false,
+    };
+    NvCustomClient::new(config)
+}
+
+#[fixture]
+fn generic_byot_client(#[default(8992)] port: u16) -> GenericBYOTClient {
+    let config = HttpClientConfig {
+        openai_config: OpenAIConfig::new().with_api_base(format!("http://localhost:{}/v1", port)),
+        verbose: false,
+    };
+    GenericBYOTClient::new(config)
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_pure_openai_client(
+    #[with(8990)] service_with_engines: (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>),
+    #[with(8990)] pure_openai_client: PureOpenAIClient,
+) {
+    let (service, _counter, _failure) = service_with_engines;
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+
+    // Start the service
+    let task = tokio::spawn(async move { service.run(token).await });
+
+    // Wait for service to be ready
+    wait_for_service_ready(8990).await;
+
+    // Test successful streaming request
+    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+        .model("foo")
+        .messages(vec![
+            async_openai::types::ChatCompletionRequestMessage::User(
+                async_openai::types::ChatCompletionRequestUserMessage {
+                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                        "Hi".to_string(),
+                    ),
+                    name: None,
+                },
+            ),
+        ])
+        .stream(true)
+        .max_tokens(50u32)
+        .build()
+        .unwrap();
+
+    let result = pure_openai_client.chat_stream(request).await;
+    assert!(result.is_ok(), "PureOpenAI client should succeed");
+
+    let (mut stream, _context) = result.unwrap().dissolve();
+    let mut count = 0;
+    while let Some(response) = stream.next().await {
+        count += 1;
+        assert!(response.is_ok(), "Response should be ok");
+        if count >= 3 {
+            break; // Don't consume entire stream
+        }
+    }
+    assert!(count > 0, "Should receive at least one response");
+
+    // Test error case with invalid model
+    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+        .model("bar") // This model will fail
+        .messages(vec![
+            async_openai::types::ChatCompletionRequestMessage::User(
+                async_openai::types::ChatCompletionRequestUserMessage {
+                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                        "Hi".to_string(),
+                    ),
+                    name: None,
+                },
+            ),
+        ])
+        .stream(true)
+        .max_tokens(50u32)
+        .build()
+        .unwrap();
+
+    let result = pure_openai_client.chat_stream(request).await;
+    assert!(
+        result.is_ok(),
+        "Client should return stream even for failing model"
+    );
+
+    let (mut stream, _context) = result.unwrap().dissolve();
+    if let Some(response) = stream.next().await {
+        assert!(
+            response.is_err(),
+            "Response should be error for failing model"
+        );
+    }
+
+    // Test context management
+    let ctx = HttpRequestContext::new();
+    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+        .model("foo")
+        .messages(vec![
+            async_openai::types::ChatCompletionRequestMessage::User(
+                async_openai::types::ChatCompletionRequestUserMessage {
+                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                        "Hi".to_string(),
+                    ),
+                    name: None,
+                },
+            ),
+        ])
+        .stream(true)
+        .max_tokens(50u32)
+        .build()
+        .unwrap();
+
+    let result = pure_openai_client
+        .chat_stream_with_context(request, ctx.clone())
+        .await;
+    assert!(result.is_ok(), "Context-based request should succeed");
+
+    let (_stream, context) = result.unwrap().dissolve();
+    assert_eq!(context.id(), ctx.id(), "Context ID should match");
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_nv_custom_client(
+    #[with(8991)] service_with_engines: (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>),
+    #[with(8991)] nv_custom_client: NvCustomClient,
+) {
+    let (service, _counter, _failure) = service_with_engines;
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+
+    // Start the service
+    let task = tokio::spawn(async move { service.run(token).await });
+
+    // Wait for service to be ready
+    wait_for_service_ready(8991).await;
+
+    // Test successful streaming request
+    let inner_request = async_openai::types::CreateChatCompletionRequestArgs::default()
+        .model("foo")
+        .messages(vec![
+            async_openai::types::ChatCompletionRequestMessage::User(
+                async_openai::types::ChatCompletionRequestUserMessage {
+                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                        "Hi".to_string(),
+                    ),
+                    name: None,
+                },
+            ),
+        ])
+        .stream(true)
+        .max_tokens(50u32)
+        .build()
+        .unwrap();
+
+    let request = NvCreateChatCompletionRequest {
+        inner: inner_request,
+        nvext: None,
+    };
+
+    let result = nv_custom_client.chat_stream(request).await;
+    assert!(result.is_ok(), "NvCustom client should succeed");
+
+    let (mut stream, _context) = result.unwrap().dissolve();
+    let mut count = 0;
+    while let Some(response) = stream.next().await {
+        count += 1;
+        assert!(response.is_ok(), "Response should be ok");
+        if count >= 3 {
+            break; // Don't consume entire stream
+        }
+    }
+    assert!(count > 0, "Should receive at least one response");
+
+    // Test error case with invalid model
+    let inner_request = async_openai::types::CreateChatCompletionRequestArgs::default()
+        .model("bar") // This model will fail
+        .messages(vec![
+            async_openai::types::ChatCompletionRequestMessage::User(
+                async_openai::types::ChatCompletionRequestUserMessage {
+                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                        "Hi".to_string(),
+                    ),
+                    name: None,
+                },
+            ),
+        ])
+        .stream(true)
+        .max_tokens(50u32)
+        .build()
+        .unwrap();
+
+    let request = NvCreateChatCompletionRequest {
+        inner: inner_request,
+        nvext: None,
+    };
+
+    let result = nv_custom_client.chat_stream(request).await;
+    assert!(
+        result.is_ok(),
+        "Client should return stream even for failing model"
+    );
+
+    let (mut stream, _context) = result.unwrap().dissolve();
+    if let Some(response) = stream.next().await {
+        assert!(
+            response.is_err(),
+            "Response should be error for failing model"
+        );
+    }
+
+    // Test context management
+    let ctx = HttpRequestContext::new();
+    let inner_request = async_openai::types::CreateChatCompletionRequestArgs::default()
+        .model("foo")
+        .messages(vec![
+            async_openai::types::ChatCompletionRequestMessage::User(
+                async_openai::types::ChatCompletionRequestUserMessage {
+                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                        "Hi".to_string(),
+                    ),
+                    name: None,
+                },
+            ),
+        ])
+        .stream(true)
+        .max_tokens(50u32)
+        .build()
+        .unwrap();
+
+    let request = NvCreateChatCompletionRequest {
+        inner: inner_request,
+        nvext: None,
+    };
+
+    let result = nv_custom_client
+        .chat_stream_with_context(request, ctx.clone())
+        .await;
+    assert!(result.is_ok(), "Context-based request should succeed");
+
+    let (_stream, context) = result.unwrap().dissolve();
+    assert_eq!(context.id(), ctx.id(), "Context ID should match");
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_generic_byot_client(
+    #[with(8992)] service_with_engines: (HttpService, Arc<CounterEngine>, Arc<AlwaysFailEngine>),
+    #[with(8992)] generic_byot_client: GenericBYOTClient,
+) {
+    let (service, _counter, _failure) = service_with_engines;
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+
+    // Start the service
+    let task = tokio::spawn(async move { service.run(token).await });
+
+    // Wait for service to be ready
+    wait_for_service_ready(8992).await;
+
+    // Test successful streaming request
+    let request = serde_json::json!({
+        "model": "foo",
+        "messages": [
+            {
+                "role": "user",
+                "content": "Hi"
+            }
+        ],
+        "stream": true,
+        "max_tokens": 50
+    });
+
+    let result = generic_byot_client.chat_stream(request).await;
+    assert!(result.is_ok(), "GenericBYOT client should succeed");
+
+    let (mut stream, _context) = result.unwrap().dissolve();
+    let mut count = 0;
+    while let Some(response) = stream.next().await {
+        println!("Response: {:?}", response);
+        count += 1;
+        assert!(response.is_ok(), "Response should be ok");
+        if count >= 3 {
+            break; // Don't consume entire stream
+        }
+    }
+    assert!(count > 0, "Should receive at least one response");
+
+    // Test error case with invalid model
+    let request = serde_json::json!({
+        "model": "bar", // This model will fail
+        "messages": [
+            {
+                "role": "user",
+                "content": "Hi"
+            }
+        ],
+        "stream": true,
+        "max_tokens": 50
+    });
+
+    let result = generic_byot_client.chat_stream(request).await;
+    assert!(
+        result.is_ok(),
+        "Client should return stream even for failing model"
+    );
+
+    let (mut stream, _context) = result.unwrap().dissolve();
+    if let Some(response) = stream.next().await {
+        assert!(
+            response.is_err(),
+            "Response should be error for failing model"
+        );
+    }
+
+    // Test context management
+    let ctx = HttpRequestContext::new();
+    let request = serde_json::json!({
+        "model": "foo",
+        "messages": [
+            {
+                "role": "user",
+                "content": "Hi"
+            }
+        ],
+        "stream": true,
+        "max_tokens": 50
+    });
+
+    let result = generic_byot_client
+        .chat_stream_with_context(request, ctx.clone())
+        .await;
+    assert!(result.is_ok(), "Context-based request should succeed");
+
+    let (_stream, context) = result.unwrap().dissolve();
+    assert_eq!(context.id(), ctx.id(), "Context ID should match");
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();

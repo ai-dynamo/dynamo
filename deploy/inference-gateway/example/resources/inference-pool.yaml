@@ -18,11 +18,11 @@ metadata:
   name: dynamo-deepseek
   namespace: default
 spec:
-  targetPortNumber: 3000
+  targetPortNumber: 8000
   selector:
-    nvidia.com/dynamo-component-type: Frontend
+    nvidia.com/dynamo-component: Frontend
   extensionRef:
-    failureMode: FailClose
+    failureMode: FailOpen
     group: ""
     kind: Service
     name: dynamo-deepseek-epp

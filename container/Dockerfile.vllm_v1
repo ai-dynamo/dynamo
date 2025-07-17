@@ -210,8 +210,6 @@ RUN pyright --help > /dev/null 2>&1
 # Enable Git operations in the /workspace directory
 RUN printf "[safe]\n      directory=/workspace\n" > /root/.gitconfig
 
-RUN ln -sf /bin/bash /bin/sh
-
 # Install prometheus
 ARG PROM_VERSION=3.4.1
 RUN apt-get update && apt-get install -y --no-install-recommends \

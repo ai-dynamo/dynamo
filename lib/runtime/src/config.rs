@@ -11,15 +11,15 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use validator::Validate;
 
-/// Default HTTP server host
-const DEFAULT_HTTP_SERVER_HOST: &str = "0.0.0.0";
+/// Default system host for health and metrics endpoints
+const DEFAULT_SYSTEM_HOST: &str = "0.0.0.0";
 
-/// Default HTTP server port
-const DEFAULT_HTTP_SERVER_PORT: u16 = 9090;
+/// Default system port for health and metrics endpoints
+const DEFAULT_SYSTEM_PORT: u16 = 9090;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerConfig {
-    /// Grace shutdown period for http-service.
+    /// Grace shutdown period for the system server.
     pub graceful_shutdown_timeout: u64,
 }
 
@@ -70,24 +70,24 @@ pub struct RuntimeConfig {
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub max_blocking_threads: usize,
 
-    /// HTTP server host for health and metrics endpoints
-    /// Set this at runtime with environment variable DYN_RUNTIME_HTTP_SERVER_HOST
-    #[builder(default = "DEFAULT_HTTP_SERVER_HOST.to_string()")]
+    /// System server host for health and metrics endpoints
+    /// Set this at runtime with environment variable DYN_SYSTEM_HOST
+    #[builder(default = "DEFAULT_SYSTEM_HOST.to_string()")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
-    pub http_server_host: String,
+    pub system_host: String,
 
-    /// HTTP server port for health and metrics endpoints
+    /// System server port for health and metrics endpoints
     /// If set to 0, the system will assign a random available port
-    /// Set this at runtime with environment variable DYN_RUNTIME_HTTP_SERVER_PORT
-    #[builder(default = "DEFAULT_HTTP_SERVER_PORT")]
+    /// Set this at runtime with environment variable DYN_SYSTEM_PORT
+    #[builder(default = "DEFAULT_SYSTEM_PORT")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
-    pub http_server_port: u16,
+    pub system_port: u16,
 
-    /// Health and metrics HTTP server enabled
-    /// Set this at runtime with environment variable DYN_RUNTIME_HTTP_ENABLED
+    /// Health and metrics System server enabled
+    /// Set this at runtime with environment variable DYN_SYSTEM_ENABLED
     #[builder(default = "false")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
-    pub http_enabled: bool,
+    pub system_enabled: bool,
 }
 
 impl fmt::Display for RuntimeConfig {
@@ -99,9 +99,9 @@ impl fmt::Display for RuntimeConfig {
         }
 
         write!(f, "max_blocking_threads={}, ", self.max_blocking_threads)?;
-        write!(f, "http_server_host={}, ", self.http_server_host)?;
-        write!(f, "http_server_port={}, ", self.http_server_port)?;
-        write!(f, "http_enabled={}", self.http_enabled)?;
+        write!(f, "system_host={}, ", self.system_host)?;
+        write!(f, "system_port={}, ", self.system_port)?;
+        write!(f, "system_enabled={}", self.system_enabled)?;
 
         Ok(())
     }
@@ -125,6 +125,23 @@ impl RuntimeConfig {
                     _ => None,
                 }
             }))
+            .merge(Env::prefixed("DYN_SYSTEM_").filter_map(|k| {
+                let full_key = format!("DYN_SYSTEM_{}", k.as_str());
+                // filters out empty environment variables
+                match std::env::var(&full_key) {
+                    Ok(v) if !v.is_empty() => {
+                        // Map DYN_SYSTEM_* to the correct field names
+                        let mapped_key = match k.as_str() {
+                            "HOST" => "system_host",
+                            "PORT" => "system_port",
+                            "ENABLED" => "system_enabled",
+                            _ => k.as_str(),
+                        };
+                        Some(mapped_key.into())
+                    }
+                    _ => None,
+                }
+            }))
     }
 
     /// Load the runtime configuration from the environment and configuration files
@@ -141,20 +158,19 @@ impl RuntimeConfig {
         Ok(config)
     }
 
-    /// Check if HTTP server should be enabled
-    /// HTTP server is enabled by default, but can be disabled by setting DYN_RUNTIME_HTTP_ENABLED to false
-    /// If a port is explicitly provided, HTTP server will be enabled regardless
-    pub fn http_server_enabled(&self) -> bool {
-        self.http_enabled
+    /// Check if System server should be enabled
+    /// System server is disabled by default, but can be enabled by setting DYN_SYSTEM_ENABLED to true
+    pub fn system_server_enabled(&self) -> bool {
+        self.system_enabled
     }
 
     pub fn single_threaded() -> Self {
         RuntimeConfig {
             num_worker_threads: Some(1),
             max_blocking_threads: 1,
-            http_server_host: DEFAULT_HTTP_SERVER_HOST.to_string(),
-            http_server_port: DEFAULT_HTTP_SERVER_PORT,
-            http_enabled: false,
+            system_host: DEFAULT_SYSTEM_HOST.to_string(),
+            system_port: DEFAULT_SYSTEM_PORT,
+            system_enabled: false,
         }
     }
 
@@ -177,9 +193,9 @@ impl Default for RuntimeConfig {
         Self {
             num_worker_threads: Some(num_cores),
             max_blocking_threads: num_cores,
-            http_server_host: DEFAULT_HTTP_SERVER_HOST.to_string(),
-            http_server_port: DEFAULT_HTTP_SERVER_PORT,
-            http_enabled: false,
+            system_host: DEFAULT_SYSTEM_HOST.to_string(),
+            system_port: DEFAULT_SYSTEM_PORT,
+            system_enabled: false,
         }
     }
 }
@@ -308,51 +324,51 @@ mod tests {
     }
 
     #[test]
-    fn test_runtime_config_http_server_env_vars() -> Result<()> {
+    fn test_runtime_config_system_server_env_vars() -> Result<()> {
         temp_env::with_vars(
             vec![
-                ("DYN_RUNTIME_HTTP_SERVER_HOST", Some("127.0.0.1")),
-                ("DYN_RUNTIME_HTTP_SERVER_PORT", Some("9090")),
+                ("DYN_SYSTEM_HOST", Some("127.0.0.1")),
+                ("DYN_SYSTEM_PORT", Some("9090")),
             ],
             || {
                 let config = RuntimeConfig::from_settings()?;
-                assert_eq!(config.http_server_host, "127.0.0.1");
-                assert_eq!(config.http_server_port, 9090);
+                assert_eq!(config.system_host, "127.0.0.1");
+                assert_eq!(config.system_port, 9090);
                 Ok(())
             },
         )
     }
 
     #[test]
-    fn test_http_server_enabled_by_default() {
-        temp_env::with_vars(vec![("DYN_RUNTIME_HTTP_ENABLED", None::<&str>)], || {
+    fn test_system_server_enabled_by_default() {
+        temp_env::with_vars(vec![("DYN_SYSTEM_ENABLED", None::<&str>)], || {
             let config = RuntimeConfig::from_settings().unwrap();
-            assert!(!config.http_server_enabled());
+            assert!(!config.system_server_enabled());
         });
     }
 
     #[test]
-    fn test_http_server_disabled_explicitly() {
-        temp_env::with_vars(vec![("DYN_RUNTIME_HTTP_ENABLED", Some("false"))], || {
+    fn test_system_server_disabled_explicitly() {
+        temp_env::with_vars(vec![("DYN_SYSTEM_ENABLED", Some("false"))], || {
             let config = RuntimeConfig::from_settings().unwrap();
-            assert!(!config.http_server_enabled());
+            assert!(!config.system_server_enabled());
         });
     }
 
     #[test]
-    fn test_http_server_enabled_explicitly() {
-        temp_env::with_vars(vec![("DYN_RUNTIME_HTTP_ENABLED", Some("true"))], || {
+    fn test_system_server_enabled_explicitly() {
+        temp_env::with_vars(vec![("DYN_SYSTEM_ENABLED", Some("true"))], || {
             let config = RuntimeConfig::from_settings().unwrap();
-            assert!(config.http_server_enabled());
+            assert!(config.system_server_enabled());
         });
     }
 
     #[test]
-    fn test_http_server_enabled_by_port() {
-        temp_env::with_vars(vec![("DYN_RUNTIME_HTTP_SERVER_PORT", Some("8080"))], || {
+    fn test_system_server_enabled_by_port() {
+        temp_env::with_vars(vec![("DYN_SYSTEM_PORT", Some("8080"))], || {
             let config = RuntimeConfig::from_settings().unwrap();
-            assert!(!config.http_server_enabled());
-            assert_eq!(config.http_server_port, 8080);
+            assert!(!config.system_server_enabled());
+            assert_eq!(config.system_port, 8080);
         });
     }
 

@@ -191,7 +191,7 @@ $HELM_CMD dep build ./platform/
 
 # Install platform
 echo "Installing platform..."
-helm install dynamo-platform ./platform/ \
+helm upgrade --install dynamo-platform ./platform/ \
   --namespace ${NAMESPACE} \
   --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
   --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \

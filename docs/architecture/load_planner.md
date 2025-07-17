@@ -2,6 +2,9 @@
 
 This document covers load-based planner in `examples/llm/components/planner.py`.
 
+> [!WARNING]
+> Bare metal deployment with local connector is deprecated. The only option to deploy load-based planner is via k8s. We will update the examples in this document soon.
+
 ## Load-based Scaling Up/Down Prefill/Decode Workers
 
 To adjust the number of prefill/decode workers, planner monitors the following metrics:

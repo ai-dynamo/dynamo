@@ -31,28 +31,55 @@ You can find the latest release [here](https://github.com/ai-dynamo/dynamo/relea
 git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 ```
 
-## Deployment Architectures
+---
 
-See [deployment architectures](../llm/README.md#deployment-architectures) to learn about the general idea of the architecture. SGLang currently supports aggregated and disaggregated serving. KV routing support is coming soon!
+## Table of Contents
+- [Feature Support Matrix](#feature-support-matrix)
+- [Quick Start](#quick-start)
+- [Single Node Examples](#run-single-node-examples)
+- [Multi-Node and Advanced Examples](#advanced-examples)
+- [Deploy on SLURM or Kubernetes](#deployment)
 
-## Getting Started
+## Feature Support Matrix
 
-1. Choose a deployment architecture based on your requirements
-2. Configure the components as needed
-3. Deploy using the provided scripts
+### Core Dynamo Features
 
-### Prerequisites
+| Feature | SGLang | Notes |
+|---------|--------|-------|
+| [**Disaggregated Serving**](../../docs/architecture/disagg_serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
+| [**KV-Aware Routing**](../../docs/architecture/kv_cache_routing.md) | ✅ |  |
+| [**SLA-Based Planner**](../../docs/architecture/sla_planner.md) | ❌ | Planned |
+| [**Load Based Planner**](../../docs/architecture/load_planner.md) | ❌ | Planned |
+| [**KVBM**](../../docs/architecture/kvbm_architecture.md) | ❌ | Planned |
 
-Start required services (etcd and NATS) using [Docker Compose](../../deploy/metrics/docker-compose.yml)
+### Large Scale P/D and WideEP Features
+
+| Feature            | SGLang | Notes                                                                 |
+|--------------------|--------|-----------------------------------------------------------------------|
+| **WideEP**         | ✅/🚧 | Full support on H100s/GB200 WIP [PR](https://github.com/sgl-project/sglang/pull/7556)                                     |
+| **DP Rank Routing**| 🚧    | Direct routing supported. Process per DP rank is not supported        |
+| **GB200 Support**  | 🚧    | WIP [PR](https://github.com/sgl-project/sglang/pull/7556) |
+
+
+## Quick Start
+
+Below we provide a guide that lets you run all of our the common deployment patterns on a single node. See our different [architectures](../llm/README.md#deployment-architectures) for a high level overview of each pattern and the architecture diagram for each.
+
+### Start NATS and ETCD in the background
+
+Start using [Docker Compose](../../deploy/metrics/docker-compose.yml)
 
 ```bash
 docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
 
-### Build docker
+### Build container
 
 ```bash
-# On an x86 machine - sglang does not support ARM yet
+# pull our pre-build sglang runtime container
+docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.3.2
+# or build from source
 ./container/build.sh --framework sglang
 ```
 
@@ -62,44 +89,22 @@ docker compose -f deploy/metrics/docker-compose.yml up -d
 ./container/run.sh -it --framework sglang
 ```
 
-## Run Deployment
-
-This figure shows an overview of the major components to deploy:
-
-
-
-```
-
-+------+      +-----------+      +------------------+             +---------------+
-| HTTP |----->| processor |----->|      Worker      |------------>|     Prefill   |
-|      |<-----|           |<-----|                  |<------------|     Worker    |
-+------+      +-----------+      +------------------+             +---------------+
-                  |    ^                  |
-       query best |    | return           | publish kv events
-           worker |    | worker_id        v
-                  |    |         +------------------+
-                  |    +---------|     kv-router    |
-                  +------------->|                  |
-                                 +------------------+
-
-```
-
-Note: The above architecture illustrates all the components. The final components
-that get spawned depend upon the chosen graph.
-
-### Example architectures
+## Run Single Node Examples
 
 > [!IMPORTANT]
-> Below we provide some simple shell scripts that run the components for each configuration. Each shell script is simply running the `dynamo-run` to start up the ingress and using `python3` to start up the workers. You can easily take each commmand and run them in separate terminals.
+> Each example corresponds to a simple bash script that runs the OpenAI compatible server, processor, and optional router (written in Rust) and LLM engine (written in Python) in a single terminal. You can easily take each command and run them in separate terminals.
+>
+> Additionally - because we use sglang's argument parser, you can pass in any argument that sglang supports to the worker!
 
-#### Aggregated
+
+### Aggregated Serving
 
 ```bash
 cd $DYNAMO_ROOT/examples/sglang
 ./launch/agg.sh
 ```
 
-#### Aggregated serving with KV Routing
+### Aggregated Serving with KV Routing
 
 > [!NOTE]
 > The current implementation of `examples/sglang/components/worker.py` publishes _placeholder_ engine metrics to keep the Dynamo KV-router happy. Real-time metrics will be surfaced directly from the SGLang engine once the following pull requests are merged:
@@ -112,10 +117,10 @@ cd $DYNAMO_ROOT/examples/sglang
 ./launch/agg_router.sh
 ```
 
-#### Disaggregated serving
+### Disaggregated serving
 
 <details>
-<summary>SGLang Load Balancer vs Dynamo Discovery</summary>
+<summary>Under the hood: SGLang Load Balancer vs Dynamo Discovery</summary>
 
 SGLang uses a mini load balancer to route requests to handle disaggregated serving. The load balancer functions as follows:
 
@@ -136,9 +141,9 @@ cd $DYNAMO_ROOT/examples/sglang
 ./launch/disagg.sh
 ```
 
-##### Disaggregated with MoE models and DP attention
+### Disaggregated Serving with Mixture-of-Experts (MoE) models and DP attention
 
-SGLang also supports DP attention for MoE models. We provide an example config for this in `configs/disagg-dp-attention.yaml` which is based on the [DeepSeek-R1-Small-2layers](https://huggingface.co/silence09/DeepSeek-R1-Small-2layers) model. You can use this configuration to test out disaggregated serving on a single node before scaling to the full DeepSeek-R1 model across multiple nodes.
+You can use this configuration to test out disaggregated serving with dp attention and expert parallelism on a single node before scaling to the full DeepSeek-R1 model across multiple nodes.
 
 ```bash
 # note this will require 4 GPUs
@@ -146,8 +151,32 @@ cd $DYNAMO_ROOT/examples/sglang
 ./launch/disagg_dp_attn.sh
 ```
 
-In order to scale to the full DeepSeek-R1 model, you can follow the instructions in the [multinode-examples.md](./multinode-examples.md) file.
+## Advanced Examples
 
-##### Disaggregated with WideEP
+Below we provide a selected list of advanced examples. Please open up an issue if you'd like to see a specific example!
 
-Dynamo supports SGLang's implementation of wide expert parallelism and large scale P/D for DeepSeek-R1! You can find detailed deployment and benchmarking instructions [here](./dsr1-wideep.md)
+### Run on multi-node
+- **[Run a multi-node model](docs/multinode-examples.md)**
+
+### Large scale P/D disaggregation with WideEP
+- **[Run DeepSeek-R1 on 104+ H100s](docs/dsr1-wideep-h100.md)**
+- **[Run DeepSeek-R1 on GB200s](docs/dsr1-wideep-gb200.md)**
+
+### Speculative Decoding
+- **[Deploying DeepSeek-R1 with MTP - coming soon!](.)**
+
+### Structured Output and Tool Calling
+- **[Tool calling with Dynamo - coming soon!](.)**
+
+### Supporting SGLang's native endpoints via Dynamo
+- **[HTTP Server for native SGLang endpoints](docs/sgl-http-server.md)**
+
+## Deployment
+
+We currently provide deployment examples for Kubernetes (coming soon!) and SLURM
+
+## Kubernetes
+- **[Deploying Dynamo with SGLang on Kubernetes - coming soon!](.)**
+
+## SLURM
+- **[Deploying Dynamo with SGLang on SLURM](slurm_jobs/README.md)**
