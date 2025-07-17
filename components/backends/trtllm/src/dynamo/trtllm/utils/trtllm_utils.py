@@ -2,18 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
+from enum import Enum
 from typing import Optional
 
 from dynamo.trtllm.utils.request_handlers.handler_base import (
     DisaggregationMode,
     DisaggregationStrategy,
 )
-from enum import Enum
+
 
 class RouterMode(Enum):
     ROUND_ROBIN = "RoundRobin"
     KV = "KV"
     RANDOM = "Random"
+
 
 # Default endpoint for the next worker.
 DEFAULT_ENDPOINT = "dyn://dynamo.tensorrt_llm.generate"
@@ -22,6 +24,7 @@ DEFAULT_NEXT_ENDPOINT = "dyn://dynamo.tensorrt_llm_next.generate"
 DEFAULT_DISAGGREGATION_STRATEGY = DisaggregationStrategy.DECODE_FIRST
 DEFAULT_DISAGGREGATION_MODE = DisaggregationMode.AGGREGATED
 DEFAULT_ROUTER_MODE = RouterMode.ROUND_ROBIN
+
 
 class Config:
     """Command line parameters or defaults"""
@@ -109,7 +112,7 @@ def cmd_line_args():
         "--served-model-name",
         type=str,
         default="",
-        help=f"Name to serve the model under. Defaults to deriving it from model path.",
+        help="Name to serve the model under. Defaults to deriving it from model path.",
     )
     parser.add_argument(
         "--tensor-parallel-size", type=int, default=1, help="Number of GPUs to use."

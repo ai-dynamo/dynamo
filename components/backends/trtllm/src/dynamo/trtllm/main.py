@@ -3,10 +3,8 @@
 
 import asyncio
 import logging
-import os
 import signal
 import sys
-from typing import TYPE_CHECKING
 
 import uvloop
 from tensorrt_llm import SamplingParams
@@ -187,7 +185,8 @@ async def init(runtime: DistributedRuntime, config: Config):
             handler = RequestHandlerFactory().get_request_handler(handler_config)
             await endpoint.serve_endpoint(handler.generate)
 
+def main():
+    uvloop.run(worker())
 
 if __name__ == "__main__":
-    uvloop.install()
-    asyncio.run(worker())
+    main()
