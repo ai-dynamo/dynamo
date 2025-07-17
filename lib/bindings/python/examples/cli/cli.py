@@ -3,7 +3,7 @@
 
 # Example cli using the Python bindings, similar to `dynamo-run`.
 #
-# Usage: `python cli.py in=text out=mistralrs <your-model>`.
+# Usage: `python cli.py in=text out=echo <your-model>`.
 # `in` can be:
 # - "http": OpenAI compliant HTTP server
 # - "text": Interactive text chat
@@ -13,28 +13,12 @@
 #
 # `out` can be:
 # - "dyn": Run as the frontend node. Auto-discover workers and route traffic to them.
-# - "mistralrs", "llamacpp", "sglang", "vllm", "trtllm", "echo": An LLM worker.
+# - "sglang", "vllm", "trtllm", "echo": An LLM worker.
 #
 # Must be in a virtualenv with the Dynamo bindings (or wheel) installed.
 #
-# To use mistralrs or llamacpp you must build the library with those features:
-# ```
-# maturin develop --features mistralrs,llamacpp --release
-# ```
-#
-# `--release` is optional. It builds slower but the resulting library is significantly faster.
-#
-# They will both be built for CUDA by default. If you see a runtime error `CUDA_ERROR_STUB_LIBRARY` this is because
-# the stub `libcuda.so` is earlier on the library search path than the real libcuda. Try removing
-# the `rpath` from the library:
-#
-# ```
-# patchelf --set-rpath '' _core.cpython-312-x86_64-linux-gnu.so
-# ```
-#
-# If you include the `llamacpp` feature flag, `libllama.so` and `libggml.so` (and family) will need to be
-# available at runtime.
-#
+# There is no provided llama.cpp engine here, but there is one in components/llama_cpp/. It would be
+# easy enough to copy the few Python lines from there to here and add an `out=llama_cpp`.
 
 import argparse
 import asyncio
@@ -79,7 +63,7 @@ def parse_args():
     # --- Step 2: Argparse for flags and the model path ---
     parser = argparse.ArgumentParser(
         description="Dynamo example CLI: Connect inputs to an engine",
-        usage="python cli.py in=text out=mistralrs <your-model>",
+        usage="python cli.py in=text out=echo <your-model>",
         formatter_class=argparse.RawTextHelpFormatter,  # To preserve multi-line help formatting
     )
 
@@ -186,8 +170,6 @@ async def run():
 
     engine_type_map = {
         "echo": EngineType.Echo,
-        "mistralrs": EngineType.MistralRs,
-        "llamacpp": EngineType.LlamaCpp,
         "dyn": EngineType.Dynamic,
     }
     out_mode = args["out_mode"]
