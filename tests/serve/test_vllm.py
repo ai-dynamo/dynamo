@@ -186,7 +186,7 @@ class VLLMProcess(ManagedProcess):
 vllm_configs = {
     "aggregated": VLLMConfig(
         name="aggregated",
-        directory="/workspace/examples/llm",
+        directory="/workspace/examples/vllm",
         script_name="agg.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.vllm],
         endpoints=["v1/chat/completions", "v1/completions"],
@@ -199,7 +199,7 @@ vllm_configs = {
     ),
     "disaggregated": VLLMConfig(
         name="disaggregated",
-        directory="/workspace/examples/llm",
+        directory="/workspace/examples/vllm",
         script_name="disagg.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.vllm],
         endpoints=["v1/chat/completions", "v1/completions"],
