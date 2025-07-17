@@ -123,7 +123,7 @@ def cmd_line_args():
     parser.add_argument(
         "--publish-events-and-metrics",
         action="store_true",
-        help="If set, publish events and metrics to the next worker. Default: False",
+        help="If set, publish events and metrics to the dynamo components.",
     )
     parser.add_argument(
         "--disaggregation-mode",
