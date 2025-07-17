@@ -10,7 +10,11 @@ ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
-ARG VLLM_REF="059d4cd"
+# [gluo NOTE] currently using a fork of vllm until the fix
+# for multi-modal disaggregated serving is merged upstream.
+# see https://github.com/vllm-project/vllm/pull/21074
+ARG VLLM_REF="eaadf838ebe93e29a38a6fc1bab5a9801abe7d2c"
+ARG VLLM_GIT_URL="https://github.com/GuanLuo/vllm.git"
 ARG TORCH_BACKEND="cu128"
 
 # After this commit deepgemm API changed
@@ -183,6 +187,7 @@ RUN if [ "$ARCH" = "arm64" ]; then \
 # Install vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
 ARG VLLM_REF
+ARG VLLM_GIT_URL
 ARG DEEPGEMM_REF
 ARG FLASHINF_REF
 
@@ -196,7 +201,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
     cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
     chmod +x /tmp/install_vllm.sh && \
-    /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt --deepgemm-ref $DEEPGEMM_REF --flashinf-ref $FLASHINF_REF --torch-backend $TORCH_BACKEND
+    /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --vllm-git-url $VLLM_GIT_URL --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt --deepgemm-ref $DEEPGEMM_REF --flashinf-ref $FLASHINF_REF --torch-backend $TORCH_BACKEND
 
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\

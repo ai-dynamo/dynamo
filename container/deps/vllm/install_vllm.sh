@@ -21,6 +21,7 @@ set -euo pipefail
 # Parse arguments
 EDITABLE=true
 VLLM_REF="059d4cd"
+VLLM_GIT_URL="https://github.com/vllm-project/vllm.git"
 MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 ARCH=$(uname -m)
@@ -47,6 +48,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --vllm-ref)
             VLLM_REF="$2"
+            shift 2
+            ;;
+        --vllm-git-url)
+            VLLM_GIT_URL="$2"
             shift 2
             ;;
         --max-jobs)
@@ -110,7 +115,7 @@ uv pip install pip cuda-python
 # Create vllm directory and clone
 mkdir -p $INSTALLATION_DIR
 cd $INSTALLATION_DIR
-git clone https://github.com/vllm-project/vllm.git
+git clone $VLLM_GIT_URL vllm
 cd vllm
 git checkout $VLLM_REF
 
