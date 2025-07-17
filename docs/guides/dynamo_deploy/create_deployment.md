@@ -1,7 +1,7 @@
 # Creating Kubernetes Deployments
 
 The scripts in the `launch` folder like [agg.sh](../../../examples/vllm/launch/agg.sh) demonstrate how you can serve your models locally.
-The corresponding yaml files like [agg.yaml](../../../examples/vllm/deploy/agg.yaml) show you how you could create a kubernetes deployment for your inference graph.
+The corresponding YAML files like [agg.yaml](../../../examples/vllm/deploy/agg.yaml) show you how you could create a kubernetes deployment for your inference graph.
 
 
 This guide explains how to create your own deployment files.
@@ -27,22 +27,22 @@ For example, when using the `vLLM` inference backend:
 You can run the Frontend on one machine, for example a CPU node, and the worker on a different machine (a GPU node).
 The Frontend serves as a framework-agnostic HTTP entry point and is likely not to need many changes.
 
-It serves the following role:
+It serves the following roles:
 1. OpenAI-Compatible HTTP Server
-Provides `/v1/chat/completions` endpoint
-Handles HTTP request/response formatting
-Supports streaming responses
-Validates incoming requests
+  * Provides `/v1/chat/completions` endpoint
+  * Handles HTTP request/response formatting
+  * Supports streaming responses
+  * Validates incoming requests
 
 2. Service Discovery and Routing
-Auto-discovers backend workers via etcd
-Routes requests to the appropriate Processor/Worker components
-Handles load balancing between multiple workers
+  * Auto-discovers backend workers via etcd
+  * Routes requests to the appropriate Processor/Worker components
+  * Handles load balancing between multiple workers
 
 3. Request Preprocessing
-Initial request validation
-Model name verification
-Request format standardization
+  * Initial request validation
+  * Model name verification
+  * Request format standardization
 
 You should then pick a worker and specialize the config. For example,
 
@@ -86,8 +86,8 @@ Consult the corresponding sh file. Each of the python commands to launch a compo
 `extraPodSpec: -> mainContainer: -> args:`
 
 The front end will launch `dynamo run in=http out=dyn &` or its python counterpart `python -m dynamo.frontend`
-Each worker will launch `dynamo-run in=dyn//name out=sglang <model>`command or its python counterpart `python -m dynamo.sglang <model>`.
-See the [dynamo-run guide](../dynamo_run.md) for details on how to run this command.
+Each worker will launch `dynamo run in=dyn//name out=sglang <model>`command or its python counterparts `"python3 components/*.py`
+See the [dynamo run guide](../dynamo_run.md) for details on how to run this command.
 
 
 ## Step 3: Key Customization Points
