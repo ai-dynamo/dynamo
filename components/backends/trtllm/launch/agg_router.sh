@@ -23,6 +23,7 @@ python3 utils/clear_namespace.py --namespace dynamo
 # FIXME: --router-mode=kv is not supported in the frontend
 #python3 -m dynamo.frontend --router-mode=kv --http-port=8000 &
 dynamo run in=http out=dyn --router-mode=kv --http-port=8000 &
+DYNAMO_PID=$!
 
 # run worker
 python3 -m dynamo.trtllm \
