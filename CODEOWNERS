@@ -17,7 +17,7 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 /deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @nnshah1 @mohammedabdulwahhab
 
 # Examples
-/examples/*/deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @mohammedabdulwahhab @atchernych
+/examples/**/deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @mohammedabdulwahhab @atchernych
 /examples/ @ai-dynamo/Devops @nnshah1 @whoisj @ai-dynamo/dynamo-rust-codeowners
 /examples/common/ @ai-dynamo/Devops @tedzhouhk
 /examples/hello_world/ @alec-flowers @biswapanda @grahamking @hhzhang16 @ishandhanani @julienmancuso @kkranen @mohammedabdulwahhab @nnshah1 @tedzhouhk
