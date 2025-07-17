@@ -186,7 +186,7 @@ class VLLMProcess(ManagedProcess):
 vllm_configs = {
     "aggregated": VLLMConfig(
         name="aggregated",
-        directory="/workspace/examples/vllm",
+        directory="/workspace/examples/llm",
         script_name="agg.sh",
         marks=[pytest.mark.gpu_1, pytest.mark.vllm],
         endpoints=["v1/chat/completions", "v1/completions"],
@@ -199,7 +199,7 @@ vllm_configs = {
     ),
     "disaggregated": VLLMConfig(
         name="disaggregated",
-        directory="/workspace/examples/vllm",
+        directory="/workspace/examples/llm",
         script_name="disagg.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.vllm],
         endpoints=["v1/chat/completions", "v1/completions"],
@@ -226,9 +226,9 @@ def vllm_config_test(request):
 
 @pytest.mark.e2e
 @pytest.mark.slow
-def test_deployment(vllm_config_test, request, runtime_services):
+def test_serve_deployment(vllm_config_test, request, runtime_services):
     """
-    Test dynamo deployments with different configurations.
+    Test dynamo serve deployments with different graph configurations.
     """
 
     # runtime_services is used to start nats and etcd
