@@ -46,6 +46,7 @@ pub struct LocalModelBuilder {
     router_config: Option<RouterConfig>,
     kv_cache_block_size: u32,
     http_port: u16,
+    migration_limit: u32,
 }
 
 impl Default for LocalModelBuilder {
@@ -60,6 +61,7 @@ impl Default for LocalModelBuilder {
             context_length: Default::default(),
             template_file: Default::default(),
             router_config: Default::default(),
+            migration_limit: Default::default(),
         }
     }
 }
@@ -112,6 +114,11 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn migration_limit(&mut self, migration_limit: Option<u32>) -> &mut Self {
+        self.migration_limit = migration_limit.unwrap_or(0);
+        self
+    }
+
     /// Make an LLM ready for use:
     /// - Download it from Hugging Face (and NGC in future) if necessary
     /// - Resolve the path
@@ -137,10 +144,12 @@ impl LocalModelBuilder {
 
         // echo_full engine doesn't need a path. It's an edge case, move it out of the way.
         if self.model_path.is_none() {
+            let mut card = ModelDeploymentCard::with_name_only(
+                self.model_name.as_deref().unwrap_or(DEFAULT_NAME),
+            );
+            card.migration_limit = self.migration_limit;
             return Ok(LocalModel {
-                card: ModelDeploymentCard::with_name_only(
-                    self.model_name.as_deref().unwrap_or(DEFAULT_NAME),
-                ),
+                card,
                 full_path: PathBuf::new(),
                 endpoint_id,
                 template,
@@ -193,6 +202,8 @@ impl LocalModelBuilder {
         if let Some(context_length) = self.context_length {
             card.context_length = context_length;
         }
+
+        card.migration_limit = self.migration_limit;
 
         Ok(LocalModel {
             card,

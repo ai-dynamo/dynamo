@@ -21,48 +21,29 @@ use futures::{stream, stream::StreamExt};
 use async_nats::client::{
     RequestError as NatsRequestError, RequestErrorKind::NoResponders as NatsNoResponders,
 };
-use tokenizers::Tokenizer as HfTokenizer;
 
 use crate::{
-    model_card::model::{ModelDeploymentCard, TokenizerKind},
+    model_card::model::ModelDeploymentCard,
     protocols::common::llm_backend::{LLMEngineOutput, PreprocessedRequest},
-    tokenizers::{HuggingFaceTokenizer, Tokenizer},
 };
 
 use dynamo_runtime::{
     pipeline::{
-        async_trait, AsyncEngineContext, AsyncEngineContextProvider, ManyOut, Operator,
-        ResponseStream, ServerStreamingEngine, SingleIn,
+        async_trait, AsyncEngineContextProvider, ManyOut, Operator, ResponseStream,
+        ServerStreamingEngine, SingleIn,
     },
     protocols::{annotated::Annotated, maybe_error::MaybeError},
 };
 
-#[allow(dead_code)]
 pub struct Migration {
-    pub tokenizer: Option<Tokenizer>,
+    migration_limit: u32,
 }
 
 impl Migration {
-    pub async fn from_tokenizer(tokenizer: HfTokenizer) -> Result<Arc<Self>> {
-        let tokenizer = HuggingFaceTokenizer::from_tokenizer(tokenizer);
-        let tokenizer = Tokenizer::from(Arc::new(tokenizer));
-
-        Ok(Arc::new(Self {
-            tokenizer: Some(tokenizer),
-        }))
-    }
-
     pub async fn from_mdc(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
-        let tokenizer = match &mdc.tokenizer {
-            Some(TokenizerKind::HfTokenizerJson(file)) => {
-                HfTokenizer::from_file(file).map_err(Error::msg)?
-            }
-            Some(TokenizerKind::GGUF(t)) => *t.clone(),
-            None => {
-                return Ok(Arc::new(Self { tokenizer: None }));
-            }
-        };
-        Self::from_tokenizer(tokenizer).await
+        Ok(Arc::new(Self {
+            migration_limit: mdc.migration_limit,
+        }))
     }
 }
 
@@ -82,10 +63,8 @@ impl
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         let (preprocessed_request, context) = request.transfer(());
         let engine_ctx = context.context();
-        const MAX_RETRIES: u16 = 3;
         let retry_manager =
-            RetryManager::build(preprocessed_request, engine_ctx.clone(), next, MAX_RETRIES)
-                .await?;
+            RetryManager::build(preprocessed_request, next, self.migration_limit).await?;
         let response_stream = stream::unfold(retry_manager, |mut retry_manager| async move {
             retry_manager
                 .next()
@@ -96,25 +75,21 @@ impl
     }
 }
 
-#[allow(dead_code)]
 struct RetryManager {
     request: PreprocessedRequest,
-    engine_ctx: Arc<dyn AsyncEngineContext>,
     next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
     next_stream: Option<ManyOut<Annotated<LLMEngineOutput>>>,
-    retries_left: u16,
+    retries_left: u32,
 }
 
 impl RetryManager {
     pub async fn build(
         preprocessed_request: PreprocessedRequest,
-        engine_ctx: Arc<dyn AsyncEngineContext>,
         next: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>>,
-        retries_left: u16,
+        retries_left: u32,
     ) -> Result<Self> {
         let mut slf = Self {
             request: preprocessed_request,
-            engine_ctx,
             next_generate: next,
             next_stream: None,
             retries_left: retries_left + 1, // +1 to account for the initial attempt
@@ -518,12 +493,11 @@ mod tests {
     #[tokio::test]
     async fn test_retry_manager_no_migration() {
         let request = create_mock_request();
-        let engine_ctx = Arc::new(Controller::default()) as Arc<dyn AsyncEngineContext>;
         let mock_engine = Arc::new(MockEngine::new(MockBehavior::Success, 10, 100));
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             mock_engine;
 
-        let mut retry_manager = RetryManager::build(request, engine_ctx, next_generate, 0)
+        let mut retry_manager = RetryManager::build(request, next_generate, 0)
             .await
             .expect("Failed to build RetryManager");
 
@@ -550,12 +524,11 @@ mod tests {
     #[tokio::test]
     async fn test_retry_manager_new_request_migration() {
         let request = create_mock_request();
-        let engine_ctx = Arc::new(Controller::default()) as Arc<dyn AsyncEngineContext>;
         let mock_engine = Arc::new(MockEngine::new(MockBehavior::FailThenSuccess, 10, 100));
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             mock_engine;
 
-        let mut retry_manager = RetryManager::build(request, engine_ctx, next_generate, 3)
+        let mut retry_manager = RetryManager::build(request, next_generate, 3)
             .await
             .expect("Failed to build RetryManager");
 
@@ -582,7 +555,6 @@ mod tests {
     #[tokio::test]
     async fn test_retry_manager_ongoing_request_migration() {
         let request = create_mock_request();
-        let engine_ctx = Arc::new(Controller::default()) as Arc<dyn AsyncEngineContext>;
         let mock_engine = Arc::new(MockEngine::new(
             MockBehavior::MidStreamFail { fail_after: 5 },
             10,
@@ -591,7 +563,7 @@ mod tests {
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             mock_engine;
 
-        let mut retry_manager = RetryManager::build(request, engine_ctx, next_generate, 3)
+        let mut retry_manager = RetryManager::build(request, next_generate, 3)
             .await
             .expect("Failed to build RetryManager");
 
@@ -619,13 +591,12 @@ mod tests {
     #[tokio::test]
     async fn test_retry_manager_new_request_migration_indefinite_failure() {
         let request = create_mock_request();
-        let engine_ctx = Arc::new(Controller::default()) as Arc<dyn AsyncEngineContext>;
         let mock_engine = Arc::new(MockEngine::new(MockBehavior::AlwaysFail, 0, 100));
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             mock_engine;
 
         // Should fail to build due to initial stream creation failure after exhausting all 3 retries
-        let retry_manager_result = RetryManager::build(request, engine_ctx, next_generate, 3).await;
+        let retry_manager_result = RetryManager::build(request, next_generate, 3).await;
 
         assert!(retry_manager_result.is_err());
         if let Err(error) = retry_manager_result {
@@ -640,7 +611,6 @@ mod tests {
     #[tokio::test]
     async fn test_retry_manager_ongoing_request_migration_indefinite_failure() {
         let request = create_mock_request();
-        let engine_ctx = Arc::new(Controller::default()) as Arc<dyn AsyncEngineContext>;
         let mock_engine = Arc::new(MockEngine::new(
             MockBehavior::MidStreamFailAlways { fail_after: 3 },
             10,
@@ -649,7 +619,7 @@ mod tests {
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             mock_engine;
 
-        let mut retry_manager = RetryManager::build(request, engine_ctx, next_generate, 3) // 3 retries
+        let mut retry_manager = RetryManager::build(request, next_generate, 3) // 3 retries
             .await
             .expect("Failed to build RetryManager");
 
@@ -688,7 +658,6 @@ mod tests {
     #[tokio::test]
     async fn test_retry_manager_ongoing_request_migration_indefinite_failure_stream_error() {
         let request = create_mock_request();
-        let engine_ctx = Arc::new(Controller::default()) as Arc<dyn AsyncEngineContext>;
         let mock_engine = Arc::new(MockEngine::new(
             MockBehavior::MidStreamFailAlwaysStreamError { fail_after: 3 },
             10,
@@ -697,7 +666,7 @@ mod tests {
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             mock_engine;
 
-        let mut retry_manager = RetryManager::build(request, engine_ctx, next_generate, 3) // 3 retries
+        let mut retry_manager = RetryManager::build(request, next_generate, 3) // 3 retries
             .await
             .expect("Failed to build RetryManager");
 

@@ -92,6 +92,7 @@ impl ModelDeploymentCard {
             last_published: None,
             context_length,
             kv_cache_block_size: 0,
+            migration_limit: 0,
         })
     }
 
@@ -131,6 +132,7 @@ impl ModelDeploymentCard {
             last_published: None,
             context_length,
             kv_cache_block_size: 0, // set later
+            migration_limit: 0,
         })
     }
 }
