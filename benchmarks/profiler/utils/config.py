@@ -31,6 +31,7 @@ formatter = logging.Formatter(
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
+
 def break_arguments(args: list[str]) -> list[str]:
     ans = []
     if isinstance(args, str):
@@ -40,8 +41,10 @@ def break_arguments(args: list[str]) -> list[str]:
             ans.extend(arg.split(" "))
     return ans
 
+
 def join_arguments(args: list[str]) -> str:
     return [" ".join(args)]
+
 
 def append_argument(args: list[str], to_append) -> list[str]:
     idx = find_arg_index(args)
@@ -50,6 +53,7 @@ def append_argument(args: list[str], to_append) -> list[str]:
     else:
         args.insert(idx, to_append)
     return args
+
 
 def find_arg_index(args: list[str]) -> int:
     # find the correct index to insert an argument
@@ -107,10 +111,10 @@ class VllmV1ConfigModifier:
                 args.remove("--enable-prefix-caching")
             if "--no-enable-prefix-caching" not in args:
                 args = append_argument(args, "--no-enable-prefix-caching")
-            
-            config["spec"]["services"][
-                WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker
-            ]["extraPodSpec"]["mainContainer"]["args"] = join_arguments(args)
+
+            config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
+                "extraPodSpec"
+            ]["mainContainer"]["args"] = join_arguments(args)
 
         elif target == "decode":
             # delete prefill worker
@@ -130,9 +134,9 @@ class VllmV1ConfigModifier:
             if "--no-enable-prefix-caching" in args:
                 args.remove("--no-enable-prefix-caching")
 
-            config["spec"]["services"][
-                WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker
-            ]["extraPodSpec"]["mainContainer"]["args"] = join_arguments(args)
+            config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
+                "extraPodSpec"
+            ]["mainContainer"]["args"] = join_arguments(args)
 
         # set num workers to 1
         decode_worker_config = config["spec"]["services"][
@@ -146,8 +150,12 @@ class VllmV1ConfigModifier:
     def set_config_tp_size(cls, config: dict, tp_size: int):
         config = deepcopy(config)
 
-        config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker]["resources"]["requests"]["gpu"] = str(tp_size)
-        config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker]["resources"]["limits"]["gpu"] = str(tp_size)
+        config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
+            "resources"
+        ]["requests"]["gpu"] = str(tp_size)
+        config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
+            "resources"
+        ]["limits"]["gpu"] = str(tp_size)
 
         args = config["spec"]["services"][
             WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker
@@ -160,10 +168,10 @@ class VllmV1ConfigModifier:
             args[idx + 1] = str(tp_size)
         except ValueError:
             args = append_argument(args, ["--tensor-parallel-size", str(tp_size)])
-        
-        config["spec"]["services"][
-            WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker
-        ]["extraPodSpec"]["mainContainer"]["args"] = join_arguments(args)
+
+        config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
+            "extraPodSpec"
+        ]["mainContainer"]["args"] = join_arguments(args)
 
         return config
 
