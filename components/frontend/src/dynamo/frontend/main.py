@@ -60,11 +60,18 @@ def parse_args():
         help="KV Router: Temperature for worker sampling via softmax. Higher values promote more randomness, and 0 fallbacks to deterministic.",
     )
     parser.add_argument(
-        "--use-kv-events",
-        type=bool,
-        default=True,
+        "--kv-events",
+        action="store_true",
+        dest="use_kv_events",
         help=" KV Router: Whether to use KV events to maintain the view of cached blocks. If false, would use ApproxKvRouter for predicting block creation / deletion based only on incoming requests at a timer.",
     )
+    parser.add_argument(
+        "--no-kv-events",
+        action="store_false",
+        dest="use_kv_events",
+        help=" KV Router. Disable KV events.",
+    )
+    parser.set_defaults(use_kv_events=True)
 
     return parser.parse_args()
 

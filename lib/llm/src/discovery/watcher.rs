@@ -220,7 +220,7 @@ impl ModelWatcher {
                                 &model_entry.name,
                                 &component,
                                 card.kv_cache_block_size,
-                                self.kv_router_config.clone(),
+                                self.kv_router_config,
                             )
                             .await?;
                         let kv_push_router = KvPushRouter::new(router, chooser);
@@ -261,7 +261,7 @@ impl ModelWatcher {
                                 &model_entry.name,
                                 &component,
                                 card.kv_cache_block_size,
-                                self.kv_router_config.clone(),
+                                self.kv_router_config,
                             )
                             .await?;
                         let kv_push_router = KvPushRouter::new(router, chooser);
