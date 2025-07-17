@@ -13,9 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from components.frontend import Frontend
-from components.worker import VllmPDWorker
-from components.processor import Processor
 from components.encode_worker import VllmEncodeWorker
+from components.processor import Processor
+from components.web import Frontend
+from components.worker import VllmPDWorker
 
 Frontend.link(Processor).link(VllmEncodeWorker).link(VllmPDWorker)

@@ -15,107 +15,322 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# vLLM Deployment Examples
+# Multimodal Deployment Examples
 
-This directory contains examples for deploying vLLM models in both aggregated and disaggregated configurations.
+This directory provides example workflows and reference implementations for deploying a multimodal model using Dynamo and vLLM v1.
 
-## Prerequisites
+## Use the Latest Release
 
-1. Install vLLM:
+We recommend using the latest stable release of dynamo to avoid breaking changes:
+
+[![GitHub Release](https://img.shields.io/github/v/release/ai-dynamo/dynamo)](https://github.com/ai-dynamo/dynamo/releases/latest)
+
+You can find the latest release [here](https://github.com/ai-dynamo/dynamo/releases/latest) and check out the corresponding branch with:
+
 ```bash
-# Note: Currently requires installation from main branch
-# From vLLM 0.8.6 onwards, you can install directly from wheel
-git clone https://github.com/vllm-project/vllm.git
-VLLM_USE_PRECOMPILED=1 uv pip install --editable ./vllm/
+git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 ```
 
-2. Start required services:
-```bash
-docker compose -f deploy/metrics/docker-compose.yml up -d
+## Multimodal Aggregated Serving
+
+### Components
+
+- workers: For aggregated serving, we have two workers, [VllmEncodeWorker](components/encode_worker.py) for encoding and [VllmPDWorker](components/worker.py) for prefilling and decoding.
+- processor: Tokenizes the prompt and passes it to the VllmEncodeWorker.
+- frontend: HTTP endpoint to handle incoming requests.
+
+### Graph
+
+In this graph, we have two workers, [VllmEncodeWorker](components/encode_worker.py) and [VllmPDWorker](components/worker.py).
+The VllmEncodeWorker is responsible for encoding the image and passing the embeddings to the VllmPDWorker via a combination of NATS and RDMA.
+The work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface.
+Its VllmPDWorker then prefills and decodes the prompt, just like the [LLM aggregated serving](../llm/README.md) example.
+By separating the encode from the prefill and decode stages, we can have a more flexible deployment and scale the
+VllmEncodeWorker independently from the prefill and decode workers if needed.
+
+This figure shows the flow of the graph:
+```mermaid
+flowchart LR
+  HTTP --> processor
+  processor --> HTTP
+  processor --image_url--> encode_worker
+  encode_worker --> processor
+  encode_worker --embeddings--> pd_worker
+  pd_worker --> encode_worker
 ```
 
-## Running the Server
-
-### Aggregated Deployment
 ```bash
-cd examples/vllm_v1
-dynamo serve graphs.agg:Frontend -f configs/agg.yaml
+cd $DYNAMO_HOME/examples/multimodal_v1
+# Serve a LLaVA 1.5 7B model:
+dynamo serve graphs.agg:Frontend -f ./configs/agg-llava.yaml
+# Serve a Qwen2.5-VL model:
+# dynamo serve graphs.agg:Frontend -f ./configs/agg-qwen.yaml
+# Serve a Phi3V model:
+# dynamo serve graphs.agg:Frontend -f ./configs/agg-phi3v.yaml
 ```
 
-### Disaggregated Deployment
+### Client
+
+In another terminal:
 ```bash
-cd examples/vllm_v1
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+      "model": "llava-hf/llava-1.5-7b-hf",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "What is in this image?"
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+              }
+            }
+          ]
+        }
+      ],
+      "max_tokens": 300,
+      "temperature": 0.0,
+      "stream": false
+    }'
+```
+
+If serving the example Qwen model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"Qwen/Qwen2.5-VL-7B-Instruct"`. If serving the example Phi3V model, replace `"llava-hf/llava-1.5-7b-hf"` in the `"model"` field with `"microsoft/Phi-3.5-vision-instruct"`.
+
+You should see a response similar to this:
+```json
+{"id": "c37b946e-9e58-4d54-88c8-2dbd92c47b0c", "object": "chat.completion", "created": 1747725277, "model": "llava-hf/llava-1.5-7b-hf", "choices": [{"index": 0, "message": {"role": "assistant", "content": " In the image, there is a city bus parked on a street, with a street sign nearby on the right side. The bus appears to be stopped out of service. The setting is in a foggy city, giving it a slightly moody atmosphere."}, "finish_reason": "stop"}]}
+```
+
+## Multimodal Disaggregated Serving
+
+### Components
+
+- workers: For disaggregated serving, we have three workers, [VllmEncodeWorker](components/encode_worker.py) for encoding, [VllmDecodeWorker](components/worker.py) for decoding, and [VllmPDWorker](components/worker.py) for prefilling.
+- processor: Tokenizes the prompt and passes it to the VllmEncodeWorker.
+- frontend: HTTP endpoint to handle incoming requests.
+
+### Graph
+
+In this graph, we have three workers, [VllmEncodeWorker](components/encode_worker.py), [VllmDecodeWorker](components/worker.py), and [VllmPDWorker](components/worker.py).
+For the Llava model, embeddings are only required during the prefill stage. As such, the VllmEncodeWorker is connected directly to the prefill worker.
+The VllmEncodeWorker is responsible for encoding the image and passing the embeddings to the prefill worker via a combination of NATS and RDMA.
+Its work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface.
+The prefill worker performs the prefilling step and forwards the KV cache to the decode worker for decoding.
+For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](../llm/README.md) example.
+
+This figure shows the flow of the graph:
+```mermaid
+flowchart LR
+  HTTP --> processor
+  processor --> HTTP
+  processor --image_url--> encode_worker
+  encode_worker --> processor
+  encode_worker --embeddings--> prefill_worker
+  prefill_worker --> encode_worker
+  prefill_worker --> decode_worker
+  decode_worker --> prefill_worker
+```
+
+```bash
+cd $DYNAMO_HOME/examples/multimodal
 dynamo serve graphs.disagg:Frontend -f configs/disagg.yaml
 ```
 
-## Testing the API
+### Client
 
-Send a test request using curl:
+In another terminal:
 ```bash
-curl localhost:8000/v1/completions \
+curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    "prompt": "In the heart of Eldoria...",
-    "stream": false,
-    "max_tokens": 30
-  }'
+      "model": "llava-hf/llava-1.5-7b-hf",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "What is in this image?"
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+              }
+            }
+          ]
+        }
+      ],
+      "max_tokens": 300,
+      "temperature": 0.0,
+      "stream": false
+    }'
 ```
 
-For more detailed explenations, refer to the main [LLM examples README](../llm/README.md).
-
-
-
-## Deepseek R1
-
-To run DSR1 model please first follow the Ray setup from the [multinode documentation](../../docs/examples/multinode.md).
-
-### Aggregated Deployment
-
-```bash
-cd examples/vllm_v1
-dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/agg.yaml
+You should see a response similar to this:
+```json
+{"id": "c1774d61-3299-4aa3-bea1-a0af6c055ba8", "object": "chat.completion", "created": 1747725645, "model": "llava-hf/llava-1.5-7b-hf", "choices": [{"index": 0, "message": {"role": "assistant", "content": " This image shows a passenger bus traveling down the road near power lines and trees. The bus displays a sign that says \"OUT OF SERVICE\" on its front."}, "finish_reason": "stop"}]}
 ```
 
+***Note***: disaggregation is currently only confirmed to work with LLaVA. Qwen VL and PhiV are not confirmed to be supported.
 
-### Disaggregated Deployment
+## Llama 4 family Serving
 
-To create frontend with a single decode worker:
-```bash
-cd examples/vllm_v1
-dynamo serve graphs.agg:Frontend -f configs/deepseek_r1/disagg.yaml
+The family of Llama 4 models is natively multimodal, however, different
+from Llava, they do not directly consume image embedding as input
+(see the [support metrics](https://docs.vllm.ai/en/latest/models/supported_models.html#text-generation_1)
+from vLLM for the types of multi-modal inputs supported by the model).
+Therefore, encoder worker will not be used in the following example and the
+encoding will be done along side with prefill.
+
+`meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8` will be used as an example
+for the content below. And the system will be H100x8 which can hold one instance
+of the model per node.
+
+### Multimodal Aggregated Serving
+
+#### Components
+
+- workers: For aggregated serving, we have one worker, [VllmPDWorker](components/worker.py) for prefilling and decoding.
+- processor: Tokenizes the prompt and passes it to the VllmEncodeWorker.
+- frontend: HTTP endpoint to handle incoming requests.
+
+### Graph
+
+In this graph, we have [VllmPDWorker](components/worker.py) which will encode the image, prefill and decode the prompt, just like the [LLM aggregated serving](../llm/README.md) example.
+
+This figure shows the flow of the graph:
+```mermaid
+flowchart LR
+  HTTP --> processor
+  processor --> HTTP
+  processor --image_url--> pd_worker
+  pd_worker --> processor
 ```
 
-To create a single decode worker:
 ```bash
-cd examples/vllm_v1
-dynamo serve components.worker:VllmDecodeWorker -f configs/deepseek_r1/disagg.yaml
+cd $DYNAMO_HOME/examples/multimodal_v1
+export CONFIG_FILE=configs/llama.yaml
+# start components individually as the model is too large that addition
+# node will be needed to scale up number of workers. And graph deployment
+# doesn't work well in multi-node case.
+dynamo serve components.web:Frontend --service-name Frontend -f $CONFIG_FILE &
+dynamo serve components.direct_processor:Processor --service-name Processor -f $CONFIG_FILE &
+dynamo serve components.worker:VllmPDWorker --service-name VllmPDWorker -f $CONFIG_FILE &
 ```
 
-To create a single prefill worker:
-```bash
-cd examples/vllm_v1
-dynamo serve components.worker:VllmPrefillWorker -f configs/deepseek_r1/disagg.yaml
-```
+### Client
 
-## Testing
-
-Send a test request using curl:
+In another terminal:
 ```bash
-curl localhost:8000/v1/completions \
+curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-R1",
-    "prompt": "In the heart of Eldoria...",
-    "stream": false,
-    "max_tokens": 30
-  }'
+      "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "What is in this image?"
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+              }
+            }
+          ]
+        }
+      ],
+      "max_tokens": 300,
+      "temperature": 0.0,
+      "stream": false
+    }'
 ```
 
+You should see a response similar to this:
+```json
+{"id": "c37b946e-9e58-4d54-88c8-2dbd92c47b0c", "object": "chat.completion", "created": 1747725277, "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", "choices": [{"index": 0, "message": {"role": "assistant", "content": " In the image, there is a city bus parked on a street, with a street sign nearby on the right side. The bus appears to be stopped out of service. The setting is in a foggy city, giving it a slightly moody atmosphere."}, "finish_reason": "stop"}]}
 ```
-dynamo serve components.frontend:Frontend --service-name Frontend -f configs/agg-llama.yaml &
-dynamo serve components.direct_processor:Processor --service-name Processor -f configs/agg-llama.yaml &
-dynamo serve components.encode_worker:VllmEncodeWorker --service-name VllmEncodeWorker -f configs/agg-llama.yaml &
-dynamo serve components.worker:VllmPDWorker --service-name VllmPDWorker -f configs/agg-llama.yaml
-dynamo serve components.worker:VllmDecodeWorker --service-name VllmDecodeWorker -f configs/agg-llama.yaml
+
+## Multimodal Disaggregated Serving
+
+### Components
+
+- workers: For disaggregated serving, we have two workers, [VllmDecodeWorker](components/worker.py) for decoding, and [VllmPDWorker](components/worker.py) for encoding and prefilling.
+- processor: Tokenizes the prompt and passes it to the VllmPDWorker.
+- frontend: HTTP endpoint to handle incoming requests.
+
+### Graph
+
+In this graph, we have two workers, [VllmDecodeWorker](components/worker.py), and [VllmPDWorker](components/worker.py).
+The prefill worker performs the encoding and prefilling steps and forwards the KV cache to the decode worker for decoding.
+For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](../llm/README.md) example.
+
+This figure shows the flow of the graph:
+```mermaid
+flowchart LR
+  HTTP --> processor
+  processor --> HTTP
+  processor --image_url--> prefill_worker
+  prefill_worker --> processor
+  prefill_worker --> decode_worker
+  decode_worker --> prefill_worker
 ```
+
+```bash
+cd $DYNAMO_HOME/examples/multimodal_v1
+export CONFIG_FILE=configs/llama.yaml
+# start components individually as the model is too large that addition
+# node will be needed to scale up number of workers. And graph deployment
+# doesn't work well in multi-node case.
+dynamo serve components.web:Frontend --service-name Frontend -f $CONFIG_FILE &
+dynamo serve components.direct_processor:Processor --service-name Processor -f $CONFIG_FILE &
+dynamo serve components.worker:VllmPDWorker --service-name VllmPDWorker --VllmPDWorker.enable_disagg true -f $CONFIG_FILE &
+# On a separate node with standard dynamo setup
+# (i.e. nats and etcd environment variables are set)
+dynamo serve components.worker:VllmDecodeWorker --service-name VllmDecodeWorker -f $CONFIG_FILE &
+```
+
+### Client
+
+In another terminal:
+```bash
+curl http://localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+      "model": "Llama-4-Maverick-17B-128E-Instruct-FP8",
+      "messages": [
+        {
+          "role": "user",
+          "content": [
+            {
+              "type": "text",
+              "text": "What is in this image?"
+            },
+            {
+              "type": "image_url",
+              "image_url": {
+                "url": "http://images.cocodataset.org/test2017/000000155781.jpg"
+              }
+            }
+          ]
+        }
+      ],
+      "max_tokens": 300,
+      "temperature": 0.0,
+      "stream": false
+    }'
+```
+
+You should see a response similar to this:
+```json
+{"id": "c1774d61-3299-4aa3-bea1-a0af6c055ba8", "object": "chat.completion", "created": 1747725645, "model": "Llama-4-Maverick-17B-128E-Instruct-FP8", "choices": [{"index": 0, "message": {"role": "assistant", "content": " This image shows a passenger bus traveling down the road near power lines and trees. The bus displays a sign that says \"OUT OF SERVICE\" on its front."}, "finish_reason": "stop"}]}

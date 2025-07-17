@@ -19,8 +19,8 @@ import logging
 from components.processor import Processor
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse, StreamingResponse
-from utils.protocol import MultiModalRequest
 from utils.args import parse_vllm_args
+from utils.protocol import MultiModalRequest
 
 from dynamo.sdk import DYNAMO_IMAGE, api, depends, service
 

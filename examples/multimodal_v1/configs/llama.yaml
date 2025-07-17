@@ -18,15 +18,6 @@ Common:
   image-token-id: 32000
   num-patches: 576
 
-# VllmDecodeWorker:
-#   tensor_parallel_size: 8
-#   max-model-len: 430000
-#   ServiceArgs:
-#     workers: 1
-#     resources:
-#       gpu: '8'
-#   common-configs: [model, served_model_name]
-
 Frontend:
   common-configs: [model]
 
