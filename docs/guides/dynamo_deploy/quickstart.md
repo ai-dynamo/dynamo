@@ -91,7 +91,7 @@ kubectl create secret docker-registry docker-imagepullsecret \
   --namespace=${NAMESPACE}
 ```
 
-If bitnami is not installed, install it by
+You need to add the bitnami helm repository by running:
 
 ```bash
 helm repo add bitnami https://charts.bitnami.com/bitnami
