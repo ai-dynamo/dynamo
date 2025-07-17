@@ -14,9 +14,8 @@
 # limitations under the License.
 Common:
   model: meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8
+  kv-transfer-config: '{"kv_connector":"NixlConnector","kv_role":"kv_both"}'
   max-model-len: 208960
-  image-token-id: 32000
-  num-patches: 576
 
 Frontend:
   common-configs: [model]
@@ -42,7 +41,7 @@ VllmDecodeWorker:
     workers: 1
     resources:
       gpu: '8'
-  common-configs: [model, block-size, max-model-len]
+  common-configs: [model, kv-transfer-config, block-size, max-model-len]
 
 VllmPDWorker:
   enable_disagg: false
@@ -52,4 +51,4 @@ VllmPDWorker:
     workers: 1
     resources:
       gpu: '8'
-  common-configs: [model, block-size, max-model-len]
+  common-configs: [model, kv-transfer-config, block-size, max-model-len]

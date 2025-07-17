@@ -13,27 +13,27 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import copy
 import asyncio
+import copy
 import logging
 import os
 import signal
 import socket
-from typing import Optional, AsyncGenerator
+from typing import Optional
+
 import connect
 import torch
-from utils.image_loader import ImageLoader
-from utils.model import get_vision_embeddings_info
+from transformers import AutoImageProcessor
 from utils.args import parse_vllm_args
-from utils.protocol import MyRequestOutput, vLLMGenerateRequest, vLLMMultimodalRequest
+from utils.image_loader import ImageLoader
 from utils.logging import check_required_workers
+from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
 from vllm.entrypoints.openai.api_server import (
     build_async_engine_client_from_engine_args,
 )
 from vllm.inputs.data import TokensPrompt
 
-from dynamo.sdk import async_on_start, endpoint, service, depends, dynamo_context
-from transformers import AutoImageProcessor
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +109,9 @@ class VllmDecodeWorker(VllmBaseWorker):
 
     @endpoint()
     async def generate(self, request: vLLMMultimodalRequest):
-        logger.debug(f"Received generate request in DecodeWorker: {{ id: {request.request_id} }}.")
+        logger.debug(
+            f"Received generate request in DecodeWorker: {{ id: {request.request_id} }}."
+        )
 
         # Decode worker doesn't process embeddings, so we pass None or empty tensor
         gen = self.engine_client.generate(
@@ -172,7 +174,7 @@ class VllmPDWorker(VllmBaseWorker):
         # embeddings_shape, self.embeddings_dtype = get_vision_embeddings_info(
         #     self.engine_args.model, self.engine_args.num_patches
         # )
-        embeddings_shape = (1, 5, 144, 5120)
+        embeddings_shape = (1, 577, 4096)
         logger.debug(f"Embeddings shape: {embeddings_shape}")
         self.embedding_size = embeddings_shape[1]
 
@@ -195,22 +197,23 @@ class VllmPDWorker(VllmBaseWorker):
 
     @endpoint()
     async def generate(self, request: vLLMMultimodalRequest):
-        logger.debug(f"Received generate request in PDWorker: {{ id: {request.request_id} }}.")
+        logger.debug(
+            f"Received generate request in PDWorker: {{ id: {request.request_id} }}."
+        )
 
         if request.image_url is None:
             # Process embeddings using the connector
             embeddings, descriptor = self._embeddings_descriptor
 
             if descriptor is None:
-                logger.error(f"in PD worker, descriptor is None")
+                logger.error("in PD worker, descriptor is None")
 
             read_op = await self._connector.begin_read(
-                request.serialized_request,
-                descriptor
+                request.serialized_request, descriptor
             )
             await read_op.wait_for_completion()
             logger.debug(f"in PD worker, image features: {embeddings}")
-            multi_modal_data=embeddings
+            multi_modal_data = embeddings
         else:
             # Use PIL image instead of image embeddings
             multi_modal_data = await self.image_loader.load_image(request.image_url)
@@ -222,7 +225,7 @@ class VllmPDWorker(VllmBaseWorker):
         # Remove the image features from the request as they are not required
         request.image_url = None
         request.serialized_request = None
-        
+
         pd_request = copy.deepcopy(request)
         # Do prefill and remote decode if enable_disagg is true
         if self.enable_disagg:
@@ -233,28 +236,32 @@ class VllmPDWorker(VllmBaseWorker):
             pd_request.sampling_params.extra_args = extra_args
             pd_request.sampling_params.max_tokens = 1
             pd_request.sampling_params.min_tokens = 1
-        
+
             logger.debug("Prefill request: %s", pd_request)
 
         gen = self.engine_client.generate(
             prompt=TokensPrompt(
                 prompt_token_ids=pd_request.engine_prompt["prompt_token_ids"],
-                multi_modal_data={"image": multi_modal_data}
+                multi_modal_data={"image": multi_modal_data},
             ),
             sampling_params=pd_request.sampling_params,
             request_id=pd_request.request_id,
         )
 
-    
         if self.enable_disagg:
             decode_request = copy.deepcopy(request)
             async for prefill_response in gen:
                 # Update the prompt token id in the decode request to the one
-                # in response, which has image templated filled in.
-                decode_request.engine_prompt["prompt_token_ids"] = prefill_response.prompt_token_ids
+                # in response, which has image templated filled in. So that
+                # the decode worker will fetch correct amount of KV blocks.
+                decode_request.engine_prompt[
+                    "prompt_token_ids"
+                ] = prefill_response.prompt_token_ids
                 # logger.debug(f"Prefill response: {prefill_response}")
                 # request_output = MyRequestOutput.model_validate_json(prefill_response.model_dump_json())
-                logger.debug(f"Prefill response kv_transfer_params: {prefill_response.kv_transfer_params}")
+                logger.debug(
+                    f"Prefill response kv_transfer_params: {prefill_response.kv_transfer_params}"
+                )
                 extra_args = decode_request.sampling_params.extra_args or {}
                 extra_args["kv_transfer_params"] = prefill_response.kv_transfer_params
                 extra_args.pop("serialized_request", None)
@@ -277,7 +284,9 @@ class VllmPDWorker(VllmBaseWorker):
 
         else:
             async for response in gen:
-                logger.debug(f"Response kv_transfer_params: {response.kv_transfer_params}")
+                logger.debug(
+                    f"Response kv_transfer_params: {response.kv_transfer_params}"
+                )
                 yield MyRequestOutput(
                     request_id=response.request_id,
                     prompt=response.prompt,

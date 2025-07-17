@@ -145,6 +145,8 @@ class VllmEncodeWorker:
 
             with self._connector.create_readable(descriptor) as readable:
                 request.serialized_request = readable.to_serialized()
+                # Clear the image URL as hint that the image is passed as embeddings.
+                request.image_url = None
 
                 logger.debug(f"Request: {request.model_dump_json()}")
 
