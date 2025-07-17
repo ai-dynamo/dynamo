@@ -13,28 +13,19 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import asyncio
-import base64
-import binascii
 import logging
-from io import BytesIO
-from queue import Queue
-from typing import AsyncIterator, Optional
-from urllib.parse import urlparse
+from typing import AsyncIterator
 
 import connect
-import httpx
 import torch
-from PIL import Image
-from utils.model import load_vision_model
-from utils.protocol import EncodeRequest, EncodeResponse, vLLMMultimodalRequest, MyRequestOutput
+from components.worker import VllmPDWorker
+from transformers import AutoImageProcessor, LlavaForConditionalGeneration
 from utils.args import parse_vllm_args
 from utils.image_loader import ImageLoader
-from components.worker import VllmPDWorker
-from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 from utils.logging import check_required_workers
-from transformers import AutoImageProcessor, Llama4ForConditionalGeneration
+from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
 
+from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +43,7 @@ except ImportError as e:
     DEVICE = "cpu"
 
 CACHE_SIZE_MAXIMUM = 8
+
 
 @service(
     dynamo={
@@ -74,14 +66,16 @@ class VllmEncodeWorker:
             self.MODEL_ID, trust_remote_code=True
         )
         # self.vision_model = load_vision_model(self.MODEL_ID)
-        self.vision_model = Llama4ForConditionalGeneration.from_pretrained(
+        self.vision_model = LlavaForConditionalGeneration.from_pretrained(
             self.MODEL_ID, device_map="auto", torch_dtype=torch.float16
         ).eval()
 
         self.min_workers = 1
 
     @endpoint()
-    async def encode(self, request: vLLMMultimodalRequest) -> AsyncIterator[MyRequestOutput]:
+    async def encode(
+        self, request: vLLMMultimodalRequest
+    ) -> AsyncIterator[MyRequestOutput]:
         logger.debug(f"Received encode request: {{ id: {request.request_id} }}.")
 
         request_id = request.request_id
@@ -97,7 +91,7 @@ class VllmEncodeWorker:
         # 8. Yield the encode response.
 
         try:
-            image = await self.image_loader.load_image(request.image_url)
+            image = await self.load_image(request.image_url)
 
             logger.debug(f"Processing image for request: {{ id: {request_id} }}")
             image_embeds = self.image_processor(images=image, return_tensors="pt")
@@ -136,20 +130,16 @@ class VllmEncodeWorker:
             #         image_grid_thw=image_grid_thw,
             #         image_sizes=image_sizes,
             #     ).model_dump_json()
-    
+
             with torch.no_grad():
-                embeddings = self.vision_model.vision_model(
-                                image_embeds["pixel_values"].to(dtype=torch.float16).cuda()).last_hidden_state
+                logger.debug(f"Vision model device: {self.vision_model.device}")
+                vision_outputs = self.vision_model.vision_tower(
+                    image_embeds["pixel_values"].to(self.vision_model.device)
+                )
+                logger.debug("Vision model completed.")
+
+                embeddings = vision_outputs.last_hidden_state
                 embeddings = self.vision_model.multi_modal_projector(embeddings)
-                # logger.debug(f"Vision model device: {self.vision_model.device}")
-                # vision_outputs = self.vision_model.vision_tower(
-                #     image_embeds["pixel_values"].to(self.vision_model.device)
-                # )
-                # logger.debug("Vision model completed.")
-
-                # embeddings = vision_outputs.last_hidden_state
-                # embeddings = self.vision_model.multi_modal_projector(embeddings)
-
 
             descriptor = connect.Descriptor(embeddings)
 
