@@ -27,7 +27,7 @@ use crate::protocols::openai::chat_completions::{
 };
 use crate::protocols::Annotated;
 use dynamo_runtime::engine::{
-    AsyncEngineContext, AsyncEngineContextProvider, AsyncEngineStream, Data,
+    AsyncEngineContext, AsyncEngineContextProvider, AsyncEngineStream, Data, DataStream,
 };
 
 /// Configuration for HTTP clients
@@ -226,43 +226,29 @@ impl BaseHttpClient {
 }
 
 /// Type alias for NV chat response stream
-pub type NvChatResponseStream = Pin<
-    Box<
-        dyn Stream<Item = Result<Annotated<NvCreateChatCompletionStreamResponse>, OpenAIError>>
-            + Send
-            + Sync,
-    >,
->;
+pub type NvChatResponseStream =
+    DataStream<Result<Annotated<NvCreateChatCompletionStreamResponse>, OpenAIError>>;
 
 /// Type alias for generic BYOT response stream
-pub type ByotResponseStream = Pin<Box<dyn Stream<Item = Result<Value, OpenAIError>> + Send + Sync>>;
+pub type ByotResponseStream = DataStream<Result<Value, OpenAIError>>;
 
 /// Type alias for pure OpenAI chat response stream
-pub type OpenAIChatResponseStream = Pin<
-    Box<
-        dyn Stream<
-                Item = Result<async_openai::types::CreateChatCompletionStreamResponse, OpenAIError>,
-            > + Send
-            + Sync,
-    >,
->;
+pub type OpenAIChatResponseStream =
+    DataStream<Result<async_openai::types::CreateChatCompletionStreamResponse, OpenAIError>>;
 
 /// A wrapped HTTP response stream that combines a stream with its context
 /// This provides a unified interface for HTTP client responses
 #[derive(Dissolve)]
 pub struct HttpResponseStream<T> {
     /// The underlying stream of responses
-    pub stream: Pin<Box<dyn Stream<Item = T> + Send>>,
+    pub stream: DataStream<T>,
     /// The context for this request
     pub context: Arc<dyn AsyncEngineContext>,
 }
 
 impl<T> HttpResponseStream<T> {
     /// Create a new HttpResponseStream
-    pub fn new(
-        stream: Pin<Box<dyn Stream<Item = T> + Send>>,
-        context: Arc<dyn AsyncEngineContext>,
-    ) -> Self {
+    pub fn new(stream: DataStream<T>, context: Arc<dyn AsyncEngineContext>) -> Self {
         Self { stream, context }
     }
 }
@@ -299,7 +285,7 @@ impl<T: Data> HttpResponseStream<T> {
 
 /// A wrapper that implements AsyncEngineStream for streams that are Send + Sync
 struct AsyncEngineStreamWrapper<T> {
-    stream: Pin<Box<dyn Stream<Item = T> + Send>>,
+    stream: DataStream<T>,
     context: Arc<dyn AsyncEngineContext>,
 }
 
@@ -316,10 +302,6 @@ impl<T: Data> AsyncEngineContextProvider for AsyncEngineStreamWrapper<T> {
         self.context.clone()
     }
 }
-
-// This is unsafe because we're claiming the stream is Sync when it might not be
-// But this is needed for the AsyncEngineStream trait
-unsafe impl<T> Sync for AsyncEngineStreamWrapper<T> {}
 
 impl<T: Data> AsyncEngineStream<T> for AsyncEngineStreamWrapper<T> {}
 
