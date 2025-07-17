@@ -107,7 +107,7 @@ fn setup_logging() {
         .with_ansi(!disable_ansi_logging())
         .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
         .with_writer(std::io::stderr)
-        .with_filter(filter(load_config));
+        .with_filter(filters(load_config()));
     tracing_subscriber::registry()
         .with(l)
         .with(tokio_console_layer.with_filter(tokio_console_target))
