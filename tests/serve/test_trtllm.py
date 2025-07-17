@@ -207,6 +207,9 @@ trtllm_configs = {
         model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         delayed_start=60,
     ),
+    # TODO: These are sanity tests that the kv router examples launch
+    # and inference without error, but do not do detailed checks on the
+    # behavior of KV routing.
     "aggregated_router": TRTLLMConfig(
         name="aggregated_router",
         directory="/workspace/components/backends/trtllm",
