@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
-from enum import Enum
 from typing import Optional
 
 from dynamo.trtllm.utils.request_handlers.handler_base import (
@@ -10,20 +9,12 @@ from dynamo.trtllm.utils.request_handlers.handler_base import (
     DisaggregationStrategy,
 )
 
-
-class RouterMode(Enum):
-    ROUND_ROBIN = "RoundRobin"
-    KV = "KV"
-    RANDOM = "Random"
-
-
 # Default endpoint for the next worker.
 DEFAULT_ENDPOINT = "dyn://dynamo.tensorrt_llm.generate"
 DEFAULT_MODEL_PATH = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 DEFAULT_NEXT_ENDPOINT = "dyn://dynamo.tensorrt_llm_next.generate"
 DEFAULT_DISAGGREGATION_STRATEGY = DisaggregationStrategy.DECODE_FIRST
 DEFAULT_DISAGGREGATION_MODE = DisaggregationMode.AGGREGATED
-DEFAULT_ROUTER_MODE = RouterMode.ROUND_ROBIN
 
 
 class Config:
@@ -38,7 +29,7 @@ class Config:
         self.tensor_parallel_size: int = 1
         self.kv_block_size: int = 32
         self.extra_engine_args: str = ""
-        self.router_mode: RouterMode = DEFAULT_ROUTER_MODE
+        self.publish_events_and_metrics: bool = False
         self.disaggregation_mode: DisaggregationMode = DEFAULT_DISAGGREGATION_MODE
         self.disaggregation_strategy: DisaggregationStrategy = (
             DEFAULT_DISAGGREGATION_STRATEGY
@@ -55,7 +46,7 @@ class Config:
             f"tensor_parallel_size={self.tensor_parallel_size}, "
             f"kv_block_size={self.kv_block_size}, "
             f"extra_engine_args={self.extra_engine_args}, "
-            f"router_mode={self.router_mode}, "
+            f"publish_events_and_metrics={self.publish_events_and_metrics}, "
             f"disaggregation_mode={self.disaggregation_mode}, "
             f"disaggregation_strategy={self.disaggregation_strategy}, "
             f"next_endpoint={self.next_endpoint})"
@@ -130,11 +121,9 @@ def cmd_line_args():
         help="Path to a YAML file containing additional keyword arguments to pass to the TRTLLM engine.",
     )
     parser.add_argument(
-        "--router-mode",
-        type=str,
-        default=DEFAULT_ROUTER_MODE,
-        choices=[mode.value for mode in RouterMode],
-        help=f"Router mode to use for this worker. Default: {DEFAULT_ROUTER_MODE}",
+        "--publish-events-and-metrics",
+        action="store_true",
+        help="If set, publish events and metrics to the next worker. Default: False",
     )
     parser.add_argument(
         "--disaggregation-mode",
@@ -200,6 +189,6 @@ def cmd_line_args():
     config.tensor_parallel_size = args.tensor_parallel_size
     config.kv_block_size = args.kv_block_size
     config.extra_engine_args = args.extra_engine_args
-    config.router_mode = RouterMode(args.router_mode)
+    config.publish_events_and_metrics = args.publish_events_and_metrics
 
     return config
