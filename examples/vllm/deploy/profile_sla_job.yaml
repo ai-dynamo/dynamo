@@ -7,14 +7,27 @@ spec:
   template:
     spec:
       serviceAccountName: profile-sla-sa
+      # Add node affinity to avoid problematic nodes with GPU/NVLink issues
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: kubernetes.io/hostname
+                operator: NotIn
+                values:
+                - aks-agentpool-36388387-vmss000003  # NVLink communication failure
+                - aks-agentpool-36388387-vmss000005  # NotReady status
       containers:
       - name: profile-sla
-        image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-233.3
+        image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-233.8
         resources:
           requests:
-            nvidia.com/gpu: 8
+            cpu: "1"
+            memory: "2Gi"
           limits:
-            nvidia.com/gpu: 8
+            cpu: "2"
+            memory: "4Gi"
         env:
           - name: HUGGING_FACE_HUB_TOKEN
             valueFrom:
