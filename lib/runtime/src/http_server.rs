@@ -321,8 +321,8 @@ mod tests {
         println!("[test] Server should be up, starting requests...");
         let client = reqwest::Client::new();
         for (path, expect_200, expect_body) in [
-            ("/health", true, "OK"),
-            ("/live", true, "OK"),
+            ("/health", true, "ready"),
+            ("/live", true, "ready"),
             ("/someRandomPathNotFoundHere", false, "Route not found"),
         ] {
             println!("[test] Sending request to {}", path);
