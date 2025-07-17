@@ -36,6 +36,10 @@ def _get_common_genai_perf_cmd(
     model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     base_url="http://localhost:8000",
 ):
+    # Use base_url if provided, otherwise fall back to localhost:port for backward compatibility
+    if base_url is None:
+        base_url = f"http://localhost:{port}"
+
     return [
         "genai-perf",
         "profile",
