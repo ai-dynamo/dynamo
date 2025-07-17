@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+uvloop
+vllm @ git+https://github.com/vllm-project/vllm.git@059d4cd
