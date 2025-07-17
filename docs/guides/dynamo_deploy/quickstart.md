@@ -181,8 +181,3 @@ kubectl create secret generic hf-token-secret \
 ```
 
 Follow the [Examples](../../examples/README.md)
-
-
-
-
-

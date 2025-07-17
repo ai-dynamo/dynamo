@@ -102,7 +102,7 @@ export DYNAMO_IMAGE=<your-registry>/dynamo-base:latest-vllm
 You can run a model and interact with it locally using commands below.
 We support several backends including: `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
 
-#### Example Command
+#### Example Commands
 
 ```
 python -m dynamo.frontend [--http-port 8080]
