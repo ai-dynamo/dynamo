@@ -13,18 +13,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::pin::Pin;
-
-use futures::{Stream, StreamExt};
-
 use super::NvCreateEmbeddingResponse;
 use crate::protocols::{
     codec::{Message, SseCodecError},
     convert_sse_stream, Annotated,
 };
 
-/// A type alias for a pinned, dynamically-dispatched stream that is `Send` and `Sync`.
-type DataStream<T> = Pin<Box<dyn Stream<Item = T> + Send + Sync>>;
+use dynamo_runtime::engine::DataStream;
+use futures::StreamExt;
 
 /// Aggregates a stream of [`NvCreateEmbeddingResponse`]s into a single
 /// [`NvCreateEmbeddingResponse`]. For embeddings, this is typically simpler

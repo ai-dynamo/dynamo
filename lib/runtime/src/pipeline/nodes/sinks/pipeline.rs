@@ -26,7 +26,7 @@ impl<Req: PipelineIO, Resp: PipelineIO> ServiceBackend<Req, Resp> {
 }
 
 #[async_trait]
-impl<Req: PipelineIO, Resp: PipelineIO> Sink<Req> for ServiceBackend<Req, Resp> {
+impl<Req: PipelineIO + Sync, Resp: PipelineIO> Sink<Req> for ServiceBackend<Req, Resp> {
     async fn on_data(&self, data: Req, _: Token) -> Result<(), Error> {
         let stream = self.engine.generate(data).await?;
         self.on_next(stream, Token).await

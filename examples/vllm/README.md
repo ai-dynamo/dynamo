@@ -36,11 +36,11 @@ docker compose -f deploy/metrics/docker-compose.yml up -d
 ### Build and Run docker
 
 ```bash
-./container/build.sh --framework VLLM_V1
+./container/build.sh
 ```
 
 ```bash
-./container/run.sh -it --framework VLLM_V1 [--mount-workspace]
+./container/run.sh -it [--mount-workspace]
 ```
 
 This includes the specific commit [vllm-project/vllm#19790](https://github.com/vllm-project/vllm/pull/19790) which enables support for external control of the DP ranks.
@@ -129,9 +129,9 @@ For Kubernetes deployment, YAML manifests are provided in the `deploy/` director
 
 - **Dynamo Cloud**: Follow the [Quickstart Guide](../../docs/guides/dynamo_deploy/quickstart.md) to deploy Dynamo Cloud first.
 
-- **Container Images**: The deployment files currently require access to `nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime`. If you don't have access, build and push your own image:
+- **Container Images**: The deployment files currently require access to `nvcr.io/nvidian/nim-llm-dev/vllm-runtime`. If you don't have access, build and push your own image:
   ```bash
-  ./container/build.sh --framework VLLM_V1
+  ./container/build.sh --framework VLLM
   # Tag and push to your container registry
   # Update the image references in the YAML files
   ```

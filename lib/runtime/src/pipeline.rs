@@ -69,7 +69,7 @@ pub type ServerStreamingEngine<T, U> = ServiceEngine<SingleIn<T>, ManyOut<U>>;
 /// are considered independent of each other; however, they could be constrained to be related.
 pub type BidirectionalStreamingEngine<T, U> = ServiceEngine<ManyIn<T>, ManyOut<U>>;
 
-pub trait AsyncTransportEngine<T: PipelineIO, U: PipelineIO>:
+pub trait AsyncTransportEngine<T: Data + PipelineIO, U: Data + PipelineIO>:
     AsyncEngine<T, U, Error> + Send + Sync + 'static
 {
 }
@@ -97,7 +97,7 @@ mod sealed {
     }
 }
 
-pub trait PipelineIO: Data + sealed::Connectable + AsyncEngineContextProvider {
+pub trait PipelineIO: sealed::Connectable + AsyncEngineContextProvider + 'static {
     fn id(&self) -> String;
 }
 

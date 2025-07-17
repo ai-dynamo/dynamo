@@ -13,6 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
@@ -159,12 +161,14 @@ impl<T: Data, U: Data> AsyncEngine<SingleIn<T>, ManyOut<U>, Error>
     for MockNetworkEgress<SingleIn<T>, ManyOut<U>>
 where
     T: Data + Serialize,
-    U: for<'de> Deserialize<'de> + Data,
+    U: for<'de> Deserialize<'de> + Data + Send + Sync + 'static,
+    Self: Send + Sync,
 {
     async fn generate(&self, request: SingleIn<T>) -> Result<ManyOut<U>, Error> {
+        let ctrl_tx = self.ctrl_tx.clone();
         let id = request.id().to_string();
 
-        // serialze the request
+        // serialize the request
         let request = request.try_map(|req| serde_json::to_vec(&req))?;
 
         // transfer the request context to a stream context
@@ -172,14 +176,11 @@ where
         let context = Arc::new(StreamContext::from(context));
 
         // subscribe to the response stream
-        // but in this case, we are doing a mock, so we are going to be more explicit
-        // since we are transferring data over a channel instead of the networ, creating the channel
-        // is the same as subscribing to the response stream
+        // in this mock, we use a channel for the data plane
         let (data_tx, data_rx) = mpsc::channel::<DataPlaneMessage>(16);
         let mut byte_stream = tokio_stream::wrappers::ReceiverStream::new(data_rx);
 
         // prepare the stateful objects that will be used to monitor the response stream
-        // finish_rx is a oneshot channel that will be used to signal the natural termination of the stream
         let (finished_tx, finished_rx) = tokio::sync::oneshot::channel::<()>();
         let stream_monitor = ResponseMonitor {
             ctx: context.clone(),
@@ -187,9 +188,6 @@ where
         };
 
         // create the control plane request
-        // when this is issued, control is handed off to the control plane and the downstream segment
-        // sometimes we might include the local server address and port for the response find its way home
-        // todo(design) this will be part of the generalization error for multiple transport types
         let request = ControlPlaneRequest {
             id,
             request: data,
@@ -197,108 +195,83 @@ where
         };
 
         // send the request to the control plane
-        self.ctrl_tx
+        ctrl_tx
             .send(MockNetworkControlEvents::ControlPlaneRequest(request))
             .await
             .map_err(|e| PipelineError::ControlPlaneRequestError(e.to_string()))?;
 
         // the first message from the remote publisher on the data plane needs to be a handshake message
-        // the handshake will indicate to what stream the data belongs to and if the remote segment was
-        // able to process the request.
-        //
-        // note: in the case of the mock transport, the handshaking of the request id is not strictly
-        // because the channel is specific to the request. this is similar to other transports like nats
-        // where we will subscribe to a response stream on a subject unique to the stream.
         match byte_stream.next().await {
             Some(DataPlaneMessage { headers, body }) => {
                 if !body.is_empty() {
-                    Err(PipelineError::ControlPlaneRequestError(
+                    return Err(PipelineError::ControlPlaneRequestError(
                         "Expected an empty body for the handshake message".to_string(),
-                    ))?;
+                    )
+                    .into());
                 }
                 match headers {
-                    Some(header) => {
-                        match header {
-                            MockNetworkDataPlaneHeaders::Handshake(handshake) => {
-                                match handshake.status {
-                                    Status::Ok => {}
-                                    Status::Error(e) => {
-                                        // todo(metrics): increment metric counter for failed handshakes
-                                        Err(PipelineError::ControlPlaneRequestError(format!(
-                                            "remote segment was unable to process request: {}",
-                                            e
-                                        )))?;
-                                    }
+                    Some(header) => match header {
+                        MockNetworkDataPlaneHeaders::Handshake(handshake) => {
+                            match handshake.status {
+                                Status::Ok => {}
+                                Status::Error(e) => {
+                                    return Err(PipelineError::ControlPlaneRequestError(format!(
+                                        "remote segment was unable to process request: {}",
+                                        e
+                                    ))
+                                    .into());
                                 }
                             }
-                            _ => {
-                                Err(PipelineError::ControlPlaneRequestError(format!(
-                                    "Expected a handshake message; got: {:?}",
-                                    header
-                                )))?;
-                            }
                         }
-                    }
+                        _ => {
+                            return Err(PipelineError::ControlPlaneRequestError(format!(
+                                "Expected a handshake message; got: {:?}",
+                                header
+                            ))
+                            .into());
+                        }
+                    },
                     _ => {
-                        Err(PipelineError::ControlPlaneRequestError(
+                        return Err(PipelineError::ControlPlaneRequestError(
                             "Failed to receive properly formatted handshake on data plane"
                                 .to_string(),
-                        ))?;
+                        )
+                        .into());
                     }
                 }
             }
             None => {
-                // todo(metrics): increment metric counter for failed requests
-                Err(PipelineError::ControlPlaneRequestError(
+                return Err(PipelineError::ControlPlaneRequestError(
                     "Failed data plane connection closed before receiving handshake".to_string(),
-                ))?;
+                )
+                .into());
             }
         }
 
         let decoded = byte_stream
-            // .inspect(|_item| {
-            //     // todo(metrics) increment the metrics counter by the number of bytes
-            // })
             .scan(Some(stream_monitor), move |_stream_monitor, item| {
-                // we could check the kill state of the context and terminate the stream here
-                // if our transport needs a heartbeat, trigger a heartbeat here the monitor
                 if let Some(headers) = &item.headers {
                     match headers {
                         MockNetworkDataPlaneHeaders::HeartBeat => {
-                            // todo(metrics): increment metric counter for heartbeats
-                            // send a heartbeat to the control plane
-                            // this is a good place to send a heartbeat to the control plane
-                            // to keep the connection alive
+                            // Heartbeat received, do nothing special
                         }
                         MockNetworkDataPlaneHeaders::Sentinel => {
-                            // todo(metrics): increment metric counter for sentinels
-                            // the stream has ended
-                            // send a sentinel to the control plane
-                            // this is a good place to send a sentinel to the control plane
-                            // to indicate the end of the stream
+                            // End of stream
                             return futures::future::ready(None);
                         }
                         _ => {}
                     }
                 }
-
                 futures::future::ready(Some(item))
             })
-            // decode the response
             .map(move |item| {
                 serde_json::from_slice::<U>(&item.body).expect("failed to deserialize response")
             });
 
-        // cancellation can be tricky and is transport / protocol specific
-        // in this case, our channel for this is both ordered and 1:1, thus we can
-        // use that fact to first send the request, then forward any cancellation requests
-        // this ensures the downstream node should register the context/request id before any
-        // cancellation requests are sent
-
         // create the cancellation monitor object
         let cancellation_monitor = CancellationMonitor {
             ctx: context.clone(),
-            ctrl_tx: self.ctrl_tx.clone(),
+            ctrl_tx,
             finish_tx: finished_tx,
         };
 
