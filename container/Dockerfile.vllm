@@ -69,7 +69,8 @@ RUN apt-get update -y && \
     tmux \
     vim \
     autoconf \
-    libtool
+    libtool \
+    net-tools
 
 # These headers are missing with the hpcx installer, required
 # by UCX to find RDMA devices
@@ -118,14 +119,24 @@ WORKDIR /workspace
 
 ### NIXL SETUP ###
 # Copy nixl source, and use commit hash as cache hint
+# TEMP: disable gds backend for arm64
 COPY --from=nixl_base /opt/nixl /opt/nixl
 COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
-RUN cd /opt/nixl && \
-    mkdir build && \
-    meson setup build/ --buildtype=release --prefix=/usr/local/nixl && \
-    cd build/ && \
-    ninja && \
-    ninja install
+RUN if [ "$ARCH" = "arm64" ]; then \
+        cd /opt/nixl && \
+        mkdir build && \
+        meson setup build/ --buildtype=release --prefix=/usr/local/nixl -Ddisable_gds_backend=true -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
+        cd build/ && \
+        ninja && \
+        ninja install; \
+    else \
+        cd /opt/nixl && \
+        mkdir build && \
+        meson setup build/ --buildtype=release --prefix=/usr/local/nixl && \
+        cd build/ && \
+        ninja && \
+        ninja install; \
+    fi
 
 ### NATS & ETCD SETUP ###
 # nats
@@ -152,64 +163,59 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 # Install NIXL Python module
-RUN cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl
+# TODO: Move gds_path selection based on arch into NIXL build
+# TEMP: disable gds backend for arm64
+RUN if [ "$ARCH" = "arm64" ]; then \
+        cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl \
+        --config-settings=setup-args="-Ddisable_gds_backend=true" \
+        --config-settings=setup-args="-Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
+    else \
+        cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl; \
+    fi
 
 # Install the wheel
 # TODO: Move NIXL wheel install to the wheel_builder stage
 RUN uv pip install /workspace/wheels/nixl/*.whl
 
-# Install patched vllm - keep this early in Dockerfile to avoid
+# Install vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
-ARG VLLM_REF="0.8.4"
-ARG VLLM_PATCH="vllm_v${VLLM_REF}-dynamo-kv-disagg-patch.patch"
-ARG VLLM_PATCHED_PACKAGE_NAME="ai_dynamo_vllm"
-ARG VLLM_PATCHED_PACKAGE_VERSION="0.8.4.post4"
-ARG VLLM_MAX_JOBS=4
+ARG VLLM_REF="059d4cd"
+ARG MAX_JOBS=16
+ENV MAX_JOBS=$MAX_JOBS
+ENV CUDA_HOME=/usr/local/cuda
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
-    mkdir /tmp/vllm && \
-    uv pip install pip wheel && \
-    # NOTE: vLLM build from source on ARM can take several hours, see VLLM_MAX_JOBS details.
     if [ "$ARCH" = "arm64" ]; then \
-        # PyTorch 2.7 supports CUDA 12.8 and aarch64 installs
-        # NIXL has a torch dependency, so need to force-reinstall to install the correct version
-        uv pip install torch==2.7.0 torchvision torchaudio --force-reinstall --index-url https://download.pytorch.org/whl/cu128 && \
-        # Download vLLM source with version matching patch
-        git clone --branch v${VLLM_REF} --depth 1 https://github.com/vllm-project/vllm.git /tmp/vllm/vllm-${VLLM_REF} && \
-        cd /tmp/vllm/vllm-${VLLM_REF}/ && \
-        # Patch vLLM source with dynamo additions
-        patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
-        # WAR: Set package version check to 'vllm' instead of 'ai_dynamo_vllm' to avoid
-        # platform detection issues on ARM install.
-        # TODO: Rename package from vllm to ai_dynamo_vllm like x86 path below to remove this WAR.
-        sed -i 's/version("ai_dynamo_vllm")/version("vllm")/g' vllm/platforms/__init__.py && \
-        # Remove pytorch from vllm install dependencies
+        uv pip install pip cuda-python && \
+        mkdir /opt/vllm && \
+        cd /opt/vllm && \
+        git clone https://github.com/vllm-project/vllm.git && \
+        cd vllm && \
+        git checkout $VLLM_REF && \
+        uv pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 && \
         python use_existing_torch.py && \
-        # Build/install vllm from source
         uv pip install -r requirements/build.txt && \
-        # MAX_JOBS set to avoid running OOM on vllm-flash-attn build, this can
-        # significantly impact the overall build time. Each job can take up
-        # to -16GB RAM each, so tune according to available system memory.
-        MAX_JOBS=${VLLM_MAX_JOBS} uv pip install -vv . --no-build-isolation ; \
-    # Handle x86_64: Download wheel, unpack, setup for later steps
+        MAX_JOBS=${MAX_JOBS} uv pip install --no-build-isolation -e . -v && \
+        cd tools/ep_kernels && \
+        bash install_python_libraries.sh && \
+        cd ep_kernels_workspace && \
+        git clone --recursive https://github.com/deepseek-ai/DeepGEMM.git && \
+        cd DeepGEMM && \
+        python setup.py install; \
     else \
-        python -m pip download --only-binary=:all: --no-deps --dest /tmp/vllm vllm==v${VLLM_REF} && \
-        # Patch vLLM pre-built download with dynamo additions
-        cd /tmp/vllm && \
-        wheel unpack *.whl && \
-        cd vllm-${VLLM_REF}/ && \
-        patch -p1 < /tmp/deps/vllm/${VLLM_PATCH} && \
-        # Rename the package from vllm to ai_dynamo_vllm
-        mv vllm-${VLLM_REF}.dist-info ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info && \
-        sed -i "s/^Name: vllm/Name: ${VLLM_PATCHED_PACKAGE_NAME}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/METADATA && \
-        sed -i "s/^Version: ${VLLM_REF}/Version: ${VLLM_PATCHED_PACKAGE_VERSION}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/METADATA && \
-        # Update wheel tag from linux_${ARCH_ALT} to manylinux1_${ARCH_ALT} in WHEEL file
-        sed -i "s/Tag: cp38-abi3-linux_${ARCH_ALT}/Tag: cp38-abi3-manylinux1_${ARCH_ALT}/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/WHEEL && \
-        # Also update the tag in RECORD file to match
-        sed -i "s/-cp38-abi3-linux_${ARCH_ALT}.whl/-cp38-abi3-manylinux1_${ARCH_ALT}.whl/g" ${VLLM_PATCHED_PACKAGE_NAME}-${VLLM_PATCHED_PACKAGE_VERSION}.dist-info/RECORD && \
-        mkdir -p /workspace/dist && \
-        wheel pack . --dest-dir /workspace/dist && \
-        uv pip install /workspace/dist/${VLLM_PATCHED_PACKAGE_NAME}-*.whl ; \
+        uv pip install pip cuda-python && \
+        mkdir /opt/vllm && \
+        cd /opt/vllm && \
+        git clone https://github.com/vllm-project/vllm.git && \
+        cd vllm && \
+        git checkout $VLLM_REF && \
+        VLLM_USE_PRECOMPILED=1 uv pip install -e . && \
+        cd tools/ep_kernels && \
+        bash install_python_libraries.sh && \
+        cd ep_kernels_workspace && \
+        git clone --recursive https://github.com/deepseek-ai/DeepGEMM.git && \
+        cd DeepGEMM && \
+        python setup.py install; \
     fi
 
 # Common dependencies
@@ -227,8 +233,6 @@ RUN pyright --help > /dev/null 2>&1
 
 # Enable Git operations in the /workspace directory
 RUN printf "[safe]\n      directory=/workspace\n" > /root/.gitconfig
-
-RUN ln -sf /bin/bash /bin/sh
 
 # Install prometheus
 ARG PROM_VERSION=3.4.1
@@ -325,8 +329,6 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.comman
     && echo "$SNIPPET" >> "$HOME/.bashrc"
 
 RUN mkdir -p /home/$USERNAME/.cache/
-
-ENV VLLM_KV_CAPI_PATH=$HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
@@ -445,12 +447,7 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
-# Tell vllm to use the Dynamo LLM C API for KV Cache Routing
-ENV VLLM_KV_CAPI_PATH=/opt/dynamo/bindings/lib/libdynamo_llm_capi.so
-
-ARG ARCH_ALT
-ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins
-ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/
 
 ########################################
 ########## Development Image ###########
@@ -521,16 +518,13 @@ COPY --from=base /workspace/wheels/nixl/*.whl wheelhouse/
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
     uv pip install nixl --find-links wheelhouse && \
-    ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/
-
-# Tell vllm to use the Dynamo LLM C API for KV Cache Routing
-ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
+    ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
+    rm -r wheelhouse
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
-
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

@@ -23,6 +23,8 @@ metal = ["dynamo-engine-llamacpp/metal", "dynamo-engine-mistralrs/metal"]
 vulkan = ["dynamo-engine-llamacpp/vulkan"]
 openmp = ["dynamo-engine-llamacpp/openmp"]
 
+tokio-console = ["dynamo-runtime/tokio-console"]
+
 [dependencies]
 dynamo-llm = { workspace = true }
 dynamo-runtime = { workspace = true }

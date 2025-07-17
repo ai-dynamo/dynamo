@@ -280,7 +280,7 @@ pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
     segment: OnceLock<Arc<SegmentSource<Req, Resp>>>,
 }
 
-impl<Req: PipelineIO, Resp: PipelineIO> Ingress<Req, Resp> {
+impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             segment: OnceLock::new(),

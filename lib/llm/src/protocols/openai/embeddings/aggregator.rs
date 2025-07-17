@@ -13,8 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use futures::StreamExt;
-
 use super::NvCreateEmbeddingResponse;
 use crate::protocols::{
     codec::{Message, SseCodecError},
@@ -22,6 +20,7 @@ use crate::protocols::{
 };
 
 use dynamo_runtime::engine::DataStream;
+use futures::StreamExt;
 
 /// Aggregates a stream of [`NvCreateEmbeddingResponse`]s into a single
 /// [`NvCreateEmbeddingResponse`]. For embeddings, this is typically simpler

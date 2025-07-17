@@ -19,9 +19,7 @@
 //! both publicly via the HTTP API and internally between Dynamo components.
 //!
 
-use std::pin::Pin;
-
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 pub mod codec;

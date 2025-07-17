@@ -16,8 +16,7 @@ for i in {0..3}; do
     --data-parallel-rank $i \
     --data-parallel-size 4 \
     --enable-expert-parallel \
-    --enforce-eager \
-    --kv-events-port 49500 &
+    --enforce-eager &
 done
 
 echo "All workers starting. (press Ctrl+C to stop)..."
