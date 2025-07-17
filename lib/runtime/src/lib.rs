@@ -101,4 +101,8 @@ pub struct DistributedRuntime {
 
     // Start time for tracking uptime
     start_time: std::time::Instant,
+
+    // List of endpoints to wait for before being considered ready
+    // via system health. If system endpoints are not enabled has no effect.
+    served_endpoints: Arc<Mutex<HashMap<String, bool>>>,
 }

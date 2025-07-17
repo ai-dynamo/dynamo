@@ -17,6 +17,8 @@ use axum::{body, http::StatusCode, response::IntoResponse, routing::get, Router}
 use prometheus::{
     proto, register_gauge_with_registry, Encoder, Gauge, Opts, Registry, TextEncoder,
 };
+use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -145,11 +147,44 @@ pub async fn spawn_http_server(
 }
 
 /// Health handler
+#[tracing::instrument(skip_all, level = "trace")]
 async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
-    tracing::info!("[health_handler] called");
     let uptime = state.drt.uptime();
-    let response = format!("OK\nUptime: {} seconds\n", uptime.as_secs());
-    (StatusCode::OK, response)
+    let map = state.drt.served_endpoints.lock().await;
+    let mut healthy = true;
+    let mut status_code = StatusCode::OK;
+    let mut endpoints: HashMap<String, String> = HashMap::<String, String>::new();
+
+    // Check Status for all Endpoints
+
+    for (endpoint, ready) in map.iter() {
+        healthy = healthy && *ready;
+        endpoints.insert(
+            endpoint.to_string(),
+            if *ready {
+                "ready".to_string()
+            } else {
+                "not_ready".to_string()
+            },
+        );
+    }
+
+    let mut healthy_string = "ready";
+
+    if !healthy {
+        healthy_string = "not_ready";
+        status_code = StatusCode::SERVICE_UNAVAILABLE;
+    }
+
+    let response = json!({
+    "status": healthy_string,
+    "uptime": uptime.as_secs(),
+    "endpoints":endpoints
+    });
+
+    tracing::trace!("Response {}", response.to_string());
+
+    (status_code, response.to_string())
 }
 
 /// Metrics handler with DistributedRuntime uptime
@@ -264,7 +299,6 @@ mod tests {
         assert!(response.contains("Total uptime of the DistributedRuntime in seconds"));
     }
 
-    /*
     #[tokio::test]
     async fn test_spawn_http_server_endpoints() {
         use std::sync::Arc;
@@ -324,5 +358,4 @@ mod tests {
             }
         }
     }
-    */
 }

@@ -31,12 +31,12 @@ from dynamo._core import ModelDeploymentCard as ModelDeploymentCard
 from dynamo._core import OAIChatPreprocessor as OAIChatPreprocessor
 
 
-def dynamo_worker(static=False):
+def dynamo_worker(static=False, wait_for_served=None):
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
             loop = asyncio.get_running_loop()
-            runtime = DistributedRuntime(loop, static)
+            runtime = DistributedRuntime(loop, static, wait_for_served)
 
             await func(runtime, *args, **kwargs)
 
