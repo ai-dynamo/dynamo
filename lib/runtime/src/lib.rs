@@ -100,5 +100,9 @@ pub struct DistributedRuntime {
 
     instance_sources: Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
 
-    metrics_registries_by_prefix: std::sync::Mutex<HashMap<String, prometheus::Registry>>,
+    metrics_registries_by_prefix: Arc<std::sync::Mutex<HashMap<String, prometheus::Registry>>>,
+    // Just 1 /metrics HTTP endpoint
+    // Likewise, /health, /live
+    is_healthy: bool,
+    is_live: bool,
 }

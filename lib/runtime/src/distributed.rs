@@ -74,7 +74,12 @@ impl DistributedRuntime {
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
-            metrics_registries_by_prefix: std::sync::Mutex::new(HashMap::new()),
+            metrics_registries_by_prefix: Arc::new(std::sync::Mutex::new(HashMap::<
+                String,
+                prometheus::Registry,
+            >::new())),
+            is_healthy: false,
+            is_live: false,
         };
 
         Ok(distributed_runtime)
@@ -205,5 +210,9 @@ impl MetricsRegistry for DistributedRuntime {
 
     fn metrics_hierarchy(&self) -> Vec<String> {
         vec![self.metrics_prefix()]
+    }
+
+    fn drt(&self) -> &crate::DistributedRuntime {
+        self
     }
 }

@@ -21,59 +21,69 @@ use dynamo_runtime::{
         async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
         ResponseStream, SingleIn,
     },
-    profiling::{MetricCounter, MetricGauge, MetricHistogram, MetricsRegistry},
+    profiling::MetricsRegistry,
     protocols::annotated::Annotated,
     stream, DistributedRuntime, Result, Runtime, Worker,
 };
 
+use prometheus::{Counter, Gauge, Histogram};
 use std::sync::Arc;
 
 /// Service metrics struct using the metric classes from profiling.rs
-pub struct ExampleHTTPMetrics {
-    registry: Arc<dyn MetricsRegistry>,
-    pub request_counter: Box<dyn MetricCounter>,
-    pub active_requests_gauge: Box<dyn MetricGauge>,
-    pub request_duration_histogram: Box<dyn MetricHistogram>,
+pub struct MySystemStatsMetrics {
+    drt: Arc<dyn MetricsRegistry>,
+    pub request_counter: Arc<Counter>,
+    pub active_requests_gauge: Arc<Gauge>,
+    pub request_duration_histogram: Arc<Histogram>,
 }
 
-impl ExampleHTTPMetrics {
+impl MetricsRegistry for MySystemStatsMetrics {
+    fn metrics_prefix(&self) -> String {
+        "example_system_stats".to_string()
+    }
+
+    fn metrics_hierarchy(&self) -> Vec<String> {
+        vec![self.metrics_prefix()]
+    }
+
+    fn drt(&self) -> &crate::DistributedRuntime {
+        self.drt.drt()
+    }
+}
+
+impl MySystemStatsMetrics {
     /// Create a new ServiceMetrics instance using the metric backend
     pub fn new(
+        drt: Arc<dyn MetricsRegistry>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::create_with_registry(drt)
+    }
+
+    fn create_with_registry(
         registry: Arc<dyn MetricsRegistry>,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        // Create request counter
-        // TODO: namespace - component - name
         let request_counter = registry.create_counter(
             "service_requests_total",
             "Total number of requests processed",
             &[("service", "backend")],
         )?;
-
-        // Create active requests gauge
         let active_requests_gauge = registry.create_gauge(
             "service_active_requests",
             "Number of requests currently being processed",
             &[("service", "backend")],
         )?;
-
-        // Create request duration histogram
         let request_duration_histogram = registry.create_histogram(
             "service_request_duration_seconds",
             "Request duration in seconds",
             &[("service", "backend")],
         )?;
 
-        Ok(ExampleHTTPMetrics {
-            registry,
+        Ok(Self {
+            drt: registry,
             request_counter,
             active_requests_gauge,
             request_duration_histogram,
         })
-    }
-
-    /// Get a read-only reference to the backend
-    pub fn backend(&self) -> &Arc<dyn MetricsRegistry> {
-        &self.registry
     }
 }
 
@@ -89,11 +99,11 @@ async fn app(runtime: Runtime) -> Result<()> {
 }
 
 struct RequestHandler {
-    metrics: Arc<ExampleHTTPMetrics>,
+    metrics: Arc<MySystemStatsMetrics>,
 }
 
 impl RequestHandler {
-    fn new(metrics: Arc<ExampleHTTPMetrics>) -> Arc<Self> {
+    fn new(metrics: Arc<MySystemStatsMetrics>) -> Arc<Self> {
         Arc::new(Self { metrics })
     }
 }
@@ -105,7 +115,7 @@ impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for Reques
 
         // Record request start
         self.metrics.request_counter.inc();
-        self.metrics.active_requests_gauge.inc(1.0);
+        self.metrics.active_requests_gauge.inc();
 
         let (data, ctx) = input.into_parts();
 
@@ -120,7 +130,7 @@ impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for Reques
         let duration = start_time.elapsed().as_secs_f64();
 
         // Record request end
-        self.metrics.active_requests_gauge.dec(1.0);
+        self.metrics.active_requests_gauge.dec();
         self.metrics.request_duration_histogram.observe(duration);
         // self.metrics.response_size_histogram.observe(response_size); // This line was removed
 
@@ -128,20 +138,20 @@ impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for Reques
     }
 }
 
-async fn backend(runtime: DistributedRuntime) -> Result<()> {
+async fn backend(drt: DistributedRuntime) -> Result<()> {
     /*
     service, <namespace>_<service>__<metric_name>
     component, <namespace>_<component>__<metric_name>
     endpoint, <namespace>_<service>_<component>_<endpoint>__<metric_name>
         */
-    let namespace = runtime
-        .namespace(DEFAULT_NAMESPACE)?;
+    let namespace = drt.namespace(DEFAULT_NAMESPACE)?;
 
     // Get the metrics backend from the runtime
     let metrics_registry = namespace.metrics_registry();
     // Initialize metrics using the profiling-based struct
-    let metrics =
-        Arc::new(ExampleHTTPMetrics::new(metrics_registry.clone()).map_err(|e| Error::msg(e.to_string()))?);
+    let metrics = Arc::new(
+        MySystemStatsMetrics::new(metrics_registry.clone()).map_err(|e| Error::msg(e.to_string()))?,
+    );
 
     // make the ingress discoverable via a component service
     // we must first create a service, then we can attach one more more endpoints
@@ -170,69 +180,75 @@ async fn backend(runtime: DistributedRuntime) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use dynamo_runtime::profiling::PrometheusRegistry;
 
     #[test]
-    fn test_service_metrics_with_profiling_backend() {
-        println!("=== ServiceMetrics with Profiling Backend Test ===");
+    fn test_my_system_stats_metrics_with_profiling_backend() {
+        println!("=== MySystemStatsMetrics with Profiling Backend Test ===");
 
-        // Create a Prometheus backend using the profiling module
-        let metrics_backend =
-            Arc::new(PrometheusRegistry::new("prefix")) as Arc<dyn MetricsRegistry>;
+        // Create a distributed runtime for testing
+        let runtime = Runtime::from_settings().unwrap();
+        let drt = tokio::runtime::Runtime::new().unwrap().block_on(async {
+            DistributedRuntime::from_settings(runtime.clone())
+                .await
+                .unwrap()
+        });
 
-        // Create ServiceMetrics using the new struct
-        let service_metrics = ExampleHTTPMetrics::new(metrics_backend.clone()).unwrap();
+        // Create MySystemStatsMetrics using the new struct
+        let metrics = MySystemStatsMetrics::new(Arc::new(drt)).unwrap();
 
-        println!("Created ServiceMetrics with profiling backend");
+        println!("Created MySystemStatsMetrics with profiling backend");
 
         // Test the metrics functionality
-        service_metrics.request_counter.inc();
-        service_metrics.request_counter.inc_by(2);
-        service_metrics.active_requests_gauge.set(5.0);
-        service_metrics.active_requests_gauge.inc(1.0);
-        service_metrics.request_duration_histogram.observe(0.1);
-        service_metrics.request_duration_histogram.observe(0.25);
-
-        // Verify the metrics values
-        assert_eq!(
-            service_metrics.request_counter.get_value(),
-            3,
-            "Request counter should be 3"
-        );
-        assert_eq!(
-            service_metrics.active_requests_gauge.get_value(),
-            6.0,
-            "Active requests should be 6.0"
-        );
-        assert_eq!(
-            service_metrics.request_duration_histogram.get_count(),
-            2,
-            "Should have 2 duration observations"
-        );
-        assert!(
-            (service_metrics.request_duration_histogram.get_sum() - 0.35).abs() < f64::EPSILON,
-            "Sum should be 0.35"
-        );
+        metrics.request_counter.inc();
+        metrics.request_counter.inc_by(2.0);
+        metrics.active_requests_gauge.set(5.0);
+        metrics.active_requests_gauge.inc();
+        metrics.request_duration_histogram.observe(0.1);
+        metrics.request_duration_histogram.observe(0.25);
 
         // Get the Prometheus metrics output
-        match service_metrics.backend().root_prometheus_format_str() {
-            Ok(metrics) => {
-                println!("Prometheus metrics output:");
-                println!("{}", metrics);
+        match metrics.drt.encode_prometheus_str() {
+            Ok(prometheus_text) => {
+                println!("\n=== PROMETHEUS METRICS OUTPUT ===");
+                println!("{}", prometheus_text);
+                println!("=== END PROMETHEUS METRICS OUTPUT ===\n");
 
-                // Verify the output contains expected metric names
-                assert!(
-                    metrics.contains("prefix_service_requests_total"),
-                    "Should contain request counter"
+                // Define the expected exact Prometheus text
+                let expected_prometheus_text = r#"# HELP service_active_requests Number of requests currently being processed
+# TYPE service_active_requests gauge
+service_active_requests 6
+# HELP service_request_duration_seconds Request duration in seconds
+# TYPE service_request_duration_seconds histogram
+service_request_duration_seconds_bucket{le="0.005"} 0
+service_request_duration_seconds_bucket{le="0.01"} 0
+service_request_duration_seconds_bucket{le="0.025"} 0
+service_request_duration_seconds_bucket{le="0.05"} 0
+service_request_duration_seconds_bucket{le="0.1"} 1
+service_request_duration_seconds_bucket{le="0.25"} 2
+service_request_duration_seconds_bucket{le="0.5"} 2
+service_request_duration_seconds_bucket{le="1"} 2
+service_request_duration_seconds_bucket{le="2.5"} 2
+service_request_duration_seconds_bucket{le="5"} 2
+service_request_duration_seconds_bucket{le="10"} 2
+service_request_duration_seconds_bucket{le="+Inf"} 2
+service_request_duration_seconds_sum 0.35
+service_request_duration_seconds_count 2
+# HELP service_requests_total Total number of requests processed
+# TYPE service_requests_total counter
+service_requests_total 3
+"#;
+
+                // Compare the entire text content
+                assert_eq!(
+                    prometheus_text, expected_prometheus_text,
+                    "\n=== COMPARISON FAILED ===\n\
+                     Expected:\n{}\n\
+                     Actual:\n{}\n\
+                     =========================",
+                    expected_prometheus_text, prometheus_text
                 );
-                assert!(
-                    metrics.contains("prefix_service_active_requests"),
-                    "Should contain active requests gauge"
-                );
-                assert!(
-                    metrics.contains("prefix_service_request_duration_seconds"),
-                    "Should contain duration histogram"
-                );
+
+                println!("✅ All metric assertions passed! Exact text match.");
             }
             Err(e) => {
                 panic!("Failed to get metrics: {}", e);

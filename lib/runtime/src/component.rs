@@ -439,16 +439,6 @@ impl std::fmt::Debug for Namespace {
     }
 }
 
-pub struct NamespaceMetrics {
-    registry: Arc<dyn MetricsRegistry>,
-}
-
-impl NamespaceMetrics {
-    pub fn new(registry: Arc<dyn MetricsRegistry>) -> anyhow::Result<Self> {
-        Ok(Self { registry })
-    }
-}
-
 impl RuntimeProvider for Namespace {
     fn rt(&self) -> &Runtime {
         self.runtime.rt()
@@ -463,15 +453,10 @@ impl std::fmt::Display for Namespace {
 
 impl Namespace {
     pub(crate) fn new(runtime: DistributedRuntime, name: String, is_static: bool) -> Result<Self> {
-        // Create a new metrics registry for this namespace. This is the top level (parent) metrics registry.
-        // TODO(keiven): parameterize this to pick PrometheusMetrics, NullMetrics, etc...
-        let metrics_registry = Arc::new(PrometheusRegistry::new(&name));
-
         NamespaceBuilder::default()
             .runtime(Arc::new(runtime))
             .name(name.clone())
             .is_static(is_static)
-            .metrics_registry(metrics_registry.clone())
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to build namespace: {}", e))?
             .start_http_server()

@@ -31,13 +31,57 @@ pub const COUNTER_METRIC_TYPE: &str = "counter";
 pub const GAUGE_METRIC_TYPE: &str = "gauge";
 pub const HISTOGRAM_METRIC_TYPE: &str = "histogram";
 
+// Private macro for internal metric registration within this module
+// This macro can only be used within the MetricsRegistry trait methods
+//
+// ### Why This Macro is Needed
+//
+// **Problem 1: Generic Functions and dyn Compatibility**
+// - We cannot add a generic `register_metric<T>(&self, metric: T)` function directly to the
+//   `MetricsRegistry` trait because traits with generic methods are not `dyn`-compatible in Rust.
+// - This would break the ability to use `dyn MetricsRegistry` as a trait object, which is
+//   required throughout the codebase.
+// - The macro provides generic-like functionality while maintaining `dyn` compatibility.
+//
+// **Problem 2: Box<dyn Collector> Clone Issues**
+// - The Prometheus register type parameter **MUST** be `Box<dyn prometheus::core::Collector>`.
+// - `Box<dyn Collector>` cannot be cloned because trait objects don't implement `Clone`.
+// - To register a metric in multiple registries (one per prefix in the hierarchy), we must:
+//   1. Clone the concrete metric type **BEFORE** boxing it
+//   2. Create a new `Box<dyn Collector>` for each registry
+// - The macro encapsulates this complex logic and ensures consistency.
+//
+// **Solution Benefits**
+// - Maintains `dyn MetricsRegistry` compatibility throughout the codebase
+// - Provides generic-like functionality without breaking trait object usage
+// - Encapsulates the complex Box/clone logic in one place
+// - Ensures consistent registration behavior across all metric types
+macro_rules! register_metric_inline {
+    ($registry:expr, $metric:expr) => {{
+        let mut registry = $registry.drt().metrics_registries_by_prefix.lock().unwrap();
+        for prefix in $registry.metrics_hierarchy() {
+            let collector: Box<dyn prometheus::core::Collector> = Box::new($metric.clone());
+            registry
+                .entry(prefix)
+                .or_insert(prometheus::Registry::new())
+                .register(collector);
+        }
+    }};
+}
+
 /// This trait should be implemented by all metric registries, including Prometheus, Envy, OpenTelemetry, and others.
 /// It offers a unified interface for creating and managing metrics, organizing sub-registries, and
 /// generating output in Prometheus text format.
 pub trait MetricsRegistry: Send + Sync {
-    /// Get the metric prefix for this registry
+    /// Get the prefix for this registry
     fn metrics_prefix(&self) -> String;
+
+    /// Get the hierarchy for this registry (includes its own metrics_prefix)
     fn metrics_hierarchy(&self) -> Vec<String>;
+
+    // Get a reference to the distributed runtime. You cannot call this
+    // drt because it'll collide with the DistributedRuntimeProvider trait.
+    fn drt(&self) -> &crate::DistributedRuntime;
 
     fn registry(&self) -> prometheus::Registry {
         let mut registry = self.drt().metrics_registries_by_prefix.lock().unwrap();
@@ -47,16 +91,30 @@ pub trait MetricsRegistry: Send + Sync {
             .clone()
     }
 
-    fn register_metric(&self, metric: Box<dyn prometheus::core::Collector>) {
-        let mut registry = self.drt().metrics_registries_by_prefix.lock().unwrap();
-
-        for prefix in self.metrics_hierarchy() {
-            registry
-                .entry(prefix)
-                .or_insert(prometheus::Registry::new())
-                .register(metric.clone());
+    /// Helper method to build the full metric name with prefix
+    fn build_metric_name(&self, name: &str) -> String {
+        if self.metrics_prefix().is_empty() {
+            name.to_string()
+        } else {
+            format!("{}__{}", self.metrics_prefix(), name)
         }
     }
+
+    // TODO: Add support for Prometheus labels using *Vec types (CounterVec, GaugeVec, HistogramVec)
+    // - When labels are provided, use the Vec types with label names and values
+    // - When no labels are provided, fall back to simple types (Counter, Gauge, Histogram)
+    // - This would allow metrics like: create_counter("requests", "Total requests", &[("service", "api"), ("method", "GET")])
+    //
+    // TODO: Add support for additional Prometheus metric types:
+    // - Summary: create_summary() - for quantiles and sum/count metrics
+    // - IntCounter/IntCounterVec: create_int_counter() - for integer counters
+    // - IntGauge/IntGaugeVec: create_int_gauge() - for integer gauges
+    // - HistogramVec with custom buckets: create_histogram_with_buckets()
+    // - SummaryVec: create_summary_vec() - for labeled summaries
+    // - Untyped: create_untyped() - for untyped metrics
+    // - Info: create_info() - for info metrics with labels
+    // - Stateset: create_stateset() - for state-based metrics
+    // - GaugeHistogram: create_gauge_histogram() - for gauge histograms
 
     /// Create a new counter metric
     fn create_counter(
@@ -64,843 +122,253 @@ pub trait MetricsRegistry: Send + Sync {
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
-    ) -> anyhow::Result<prometheus::Counter> {
-        let prefix = if self.metrics_prefix().is_empty() {
-            name.to_string()
-        } else {
-            format!("{}_{}", self.metrics_prefix(), name)
-        };
-
-        let counter = prometheus::Counter::new(&prefix, description)?;
-
-        let registry = self.registry();
-
-        let collector = Box::new(counter.clone());
-
-        registry.register(collector.clone());
-
-        Ok(counter)
+    ) -> anyhow::Result<Arc<prometheus::Counter>> {
+        let full_name = self.build_metric_name(name);
+        let counter = prometheus::Counter::new(&full_name, description)?;
+        // Use the private macro to register the metric inline
+        register_metric_inline!(self, counter.clone());
+        Ok(Arc::new(counter.clone()))
     }
 
-    // /// Create a new gauge metric
-    // fn create_gauge(
-    //     &self,
-    //     name: &str,
-    //     description: &str,
-    //     labels: &[(&str, &str)],
-    // ) -> Result<Box<dyn MetricGauge>, Box<dyn std::error::Error + Send + Sync>>;
+    /// Create a new gauge metric
+    fn create_gauge(
+        &self,
+        name: &str,
+        description: &str,
+        labels: &[(&str, &str)],
+    ) -> anyhow::Result<Arc<prometheus::Gauge>> {
+        let full_name = self.build_metric_name(name);
+        let gauge = prometheus::Gauge::new(&full_name, description)?;
+        // Use the private macro to register the metric inline
+        register_metric_inline!(self, gauge.clone());
+        Ok(Arc::new(gauge))
+    }
 
-    // /// Create a new histogram metric
-    // fn create_histogram(
-    //     &self,
-    //     name: &str,
-    //     description: &str,
-    //     labels: &[(&str, &str)],
-    // ) -> Result<Box<dyn MetricHistogram>, Box<dyn std::error::Error + Send + Sync>>;
+    /// Create a new histogram metric
+    fn create_histogram(
+        &self,
+        name: &str,
+        description: &str,
+        labels: &[(&str, &str)],
+    ) -> anyhow::Result<Arc<prometheus::Histogram>> {
+        let full_name = self.build_metric_name(name);
+        let opts = prometheus::HistogramOpts::new(&full_name, description);
+        let histogram = prometheus::Histogram::with_opts(opts)?;
+        // Use the private macro to register the metric inline
+        register_metric_inline!(self, histogram.clone());
+        Ok(Arc::new(histogram))
+    }
 
-    // /// Get parent metrics only (without children)
-    // fn root_prometheus_format_str(
-    //     &self,
-    // ) -> Result<String, Box<dyn std::error::Error + Send + Sync>>;
-
-    // /// Get combined metrics from parent and all children recursively
-    // fn all_prometheus_format_str(
-    //     &self,
-    // ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    //     self.update()?;
-    //     let mut result = self.root_prometheus_format_str()?;
-
-    //     // Recursively get metrics from all child registries
-    //     for child in self.get_children_registries() {
-    //         match child.all_prometheus_format_str() {
-    //             Ok(child_metrics) => {
-    //                 if !result.is_empty() && !result.ends_with('\n') {
-    //                     result.push('\n');
-    //                 }
-    //                 result.push_str(&child_metrics);
-    //             }
-    //             Err(e) => {
-    //                 eprintln!("Failed to get metrics from child registry: {}", e);
-    //             }
-    //         }
-    //     }
-
-    //     Ok(result)
-    // }
-
-    // /// Iterate over all created metrics
-    // fn for_each_metric(&self, f: &mut dyn FnMut(&dyn Metric));
-
-    // /// Run all registered update functions
-    // fn update(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
+    /// Get metrics in Prometheus text format
+    fn encode_prometheus_str(&self) -> anyhow::Result<String> {
+        let metric_families = self.registry().gather();
+        let encoder = prometheus::TextEncoder::new();
+        let mut buffer = Vec::new();
+        encoder.encode(&metric_families, &mut buffer)?;
+        Ok(String::from_utf8(buffer)?)
+    }
 }
 
-// Prometheus Registry
-// pub struct PrometheusRegistry {
-//     prefix: String,
-//     metrics: Arc<Mutex<std::collections::HashMap<String, Box<dyn Metric>>>>,
-//     children_registries: Arc<Mutex<Vec<Arc<dyn MetricsRegistry>>>>,
-//     update_functions: Arc<Mutex<Vec<Box<dyn Fn() + Send + Sync>>>>,
-//     prom_registry: prometheus::Registry,
-// }
-
-// impl PrometheusRegistry {
-//     /// Create a new Prometheus registry
-//     pub fn new(prefix: &str) -> Self {
-//         Self {
-//             prefix: prefix.to_string(),
-//             metrics: Arc::new(Mutex::new(std::collections::HashMap::new())),
-//             children_registries: Arc::new(Mutex::new(Vec::new())),
-//             update_functions: Arc::new(Mutex::new(Vec::new())),
-//             prom_registry: prometheus::Registry::new(),
-//         }
-//     }
-// }
-
-// impl MetricsRegistry for PrometheusRegistry {
-//     fn prefix(&self) -> &str {
-//         &self.prefix
-//     }
-
-//     fn get_children_registries(&self) -> Vec<Arc<dyn MetricsRegistry>> {
-//         self.children_registries.lock().unwrap().clone()
-//     }
-
-//     fn create_child_registry(&self, prefix: &str) -> Arc<dyn MetricsRegistry> {
-//         let child_prefix = format!("{}_{}", self.prefix, prefix);
-//         let child = Arc::new(PrometheusRegistry::new(&child_prefix));
-//         self.children_registries.lock().unwrap().push(child.clone());
-//         child
-//     }
-
-//     fn create_counter(
-//         &self,
-//         name: &str,
-//         description: &str,
-//         _labels: &[(&str, &str)],
-//     ) -> Result<Box<dyn MetricCounter>, Box<dyn std::error::Error + Send + Sync>> {
-//         let prefixed_name = format!("{}__{}", self.prefix(), name);
-
-//         // Check if metric name is already registered and add to metrics
-//         let mut metrics = self.metrics.lock().unwrap();
-//         if metrics.contains_key(&prefixed_name) {
-//             return Err(format!("Counter with name '{}' already exists", prefixed_name).into());
-//         }
-
-//         let prom_counter = prometheus::Counter::new(&prefixed_name, description)
-//             .map_err(|e| format!("Failed to create counter '{}': {}", prefixed_name, e))?;
-//         self.prom_registry
-//             .register(Box::new(prom_counter.clone()))
-//             .map_err(|e| format!("Failed to register counter '{}': {}", prefixed_name, e))?;
-
-//         let metric_counter = PrometheusCounter {
-//             prom_counter,
-//             name: prefixed_name.clone(),
-//             description: description.to_string(),
-//         };
-
-//         // Add to our metrics HashMap
-//         metrics.insert(
-//             prefixed_name,
-//             Box::new(metric_counter.clone()) as Box<dyn Metric>,
-//         );
-//         drop(metrics); // Release lock early
-
-//         Ok(Box::new(metric_counter))
-//     }
-
-//     fn create_gauge(
-//         &self,
-//         name: &str,
-//         description: &str,
-//         _labels: &[(&str, &str)],
-//     ) -> Result<Box<dyn MetricGauge>, Box<dyn std::error::Error + Send + Sync>> {
-//         let prefixed_name = format!("{}__{}", self.prefix(), name);
-
-//         // Check if metric name is already registered and add to metrics
-//         let mut metrics = self.metrics.lock().unwrap();
-//         if metrics.contains_key(&prefixed_name) {
-//             return Err(format!("Gauge with name '{}' already exists", prefixed_name).into());
-//         }
-
-//         let prom_gauge = prometheus::Gauge::new(&prefixed_name, description)
-//             .map_err(|e| format!("Failed to create gauge '{}': {}", prefixed_name, e))?;
-//         self.prom_registry
-//             .register(Box::new(prom_gauge.clone()))
-//             .map_err(|e| format!("Failed to register gauge '{}': {}", prefixed_name, e))?;
-
-//         let metric_gauge = PrometheusGauge {
-//             prom_gauge,
-//             name: prefixed_name.clone(),
-//             description: description.to_string(),
-//         };
-
-//         // Add to our metrics HashMap
-//         metrics.insert(
-//             prefixed_name,
-//             Box::new(metric_gauge.clone()) as Box<dyn Metric>,
-//         );
-//         drop(metrics); // Release lock early
-
-//         Ok(Box::new(metric_gauge))
-//     }
-
-//     fn create_histogram(
-//         &self,
-//         name: &str,
-//         description: &str,
-//         _labels: &[(&str, &str)],
-//     ) -> Result<Box<dyn MetricHistogram>, Box<dyn std::error::Error + Send + Sync>> {
-//         let prefixed_name = format!("{}__{}", self.prefix(), name);
-
-//         // Check if metric name is already registered and add to metrics
-//         let mut metrics = self.metrics.lock().unwrap();
-//         if metrics.contains_key(&prefixed_name) {
-//             return Err(format!("Histogram with name '{}' already exists", prefixed_name).into());
-//         }
-
-//         let prom_histogram = prometheus::Histogram::with_opts(prometheus::HistogramOpts::new(
-//             &prefixed_name,
-//             description,
-//         ))
-//         .map_err(|e| format!("Failed to create histogram '{}': {}", prefixed_name, e))?;
-//         self.prom_registry
-//             .register(Box::new(prom_histogram.clone()))
-//             .map_err(|e| format!("Failed to register histogram '{}': {}", prefixed_name, e))?;
-
-//         let metric_histogram = PrometheusHistogram {
-//             prom_histogram,
-//             name: prefixed_name.clone(),
-//             description: description.to_string(),
-//         };
-
-//         // Add to our metrics HashMap
-//         metrics.insert(
-//             prefixed_name,
-//             Box::new(metric_histogram.clone()) as Box<dyn Metric>,
-//         );
-//         drop(metrics); // Release lock early
-
-//         Ok(Box::new(metric_histogram))
-//     }
-
-//     fn root_prometheus_format_str(
-//         &self,
-//     ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-//         let mut buffer = Vec::new();
-//         let encoder = prometheus::TextEncoder::new();
-//         let metric_families = self.prom_registry.gather();
-//         encoder.encode(&metric_families, &mut buffer)?;
-//         Ok(String::from_utf8(buffer)?)
-//     }
-
-//     fn for_each_metric(&self, f: &mut dyn FnMut(&dyn Metric)) {
-//         let metrics = self.metrics.lock().unwrap();
-//         for metric in metrics.values() {
-//             f(metric.as_ref());
-//         }
-//     }
-
-//     fn update(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-//         let update_functions = self.update_functions.lock().unwrap();
-//         for func in update_functions.iter() {
-//             func();
-//         }
-//         Ok(())
-//     }
-// }
-
-// // ------------------------------------------------------------------------------------------------
-// // Metric Traits
-// // ------------------------------------------------------------------------------------------------
-
-// /// Generic trait for all metric types
-// pub trait Metric: Send + Sync + Any {
-//     /// Get the metric name
-//     fn get_name(&self) -> &str;
-
-//     /// Get the metric type as a string
-//     fn metric_type(&self) -> &'static str;
-
-//     /// Get the metric description
-//     fn description(&self) -> &str;
-// }
-
-// /// Shared trait for counter operations
-// pub trait MetricCounter: Metric {
-//     /// Increment the counter by 1
-//     fn inc(&self);
-
-//     /// Increment the counter by a specific amount
-//     fn inc_by(&self, amount: u64);
-
-//     /// Get the current value
-//     fn get_value(&self) -> u64;
-// }
-
-// /// Shared trait for gauge operations
-// pub trait MetricGauge: Metric {
-//     /// Set the gauge value
-//     fn set(&self, value: f64);
-
-//     /// Increment the gauge by a value
-//     fn inc(&self, value: f64);
-
-//     /// Decrement the gauge by a value
-//     fn dec(&self, value: f64);
-
-//     /// Get the current value
-//     fn get_value(&self) -> f64;
-// }
-
-// /// Shared trait for histogram operations
-// pub trait MetricHistogram: Metric {
-//     /// Observe a value in the histogram
-//     fn observe(&self, value: f64);
-
-//     /// Get the total count of observations
-//     fn get_count(&self) -> u64;
-
-//     /// Get the sum of all observed values
-//     fn get_sum(&self) -> f64;
-// }
-
-// /// Prometheus Counter implementation
-// #[derive(Clone)]
-// pub struct PrometheusCounter {
-//     prom_counter: prometheus::Counter,
-//     name: String,
-//     description: String,
-// }
-
-// impl Metric for PrometheusCounter {
-//     fn get_name(&self) -> &str {
-//         &self.name
-//     }
-
-//     fn metric_type(&self) -> &'static str {
-//         COUNTER_METRIC_TYPE
-//     }
-
-//     fn description(&self) -> &str {
-//         &self.description
-//     }
-// }
-
-// impl MetricCounter for PrometheusCounter {
-//     fn inc(&self) {
-//         self.prom_counter.inc();
-//     }
-
-//     fn inc_by(&self, amount: u64) {
-//         self.prom_counter.inc_by(amount as f64);
-//     }
-
-//     fn get_value(&self) -> u64 {
-//         self.prom_counter.get() as u64
-//     }
-// }
-
-// /// Prometheus Gauge implementation
-// #[derive(Clone)]
-// pub struct PrometheusGauge {
-//     prom_gauge: prometheus::Gauge,
-//     name: String,
-//     description: String,
-// }
-
-// impl Metric for PrometheusGauge {
-//     fn get_name(&self) -> &str {
-//         &self.name
-//     }
-
-//     fn metric_type(&self) -> &'static str {
-//         GAUGE_METRIC_TYPE
-//     }
-
-//     fn description(&self) -> &str {
-//         &self.description
-//     }
-// }
-
-// impl MetricGauge for PrometheusGauge {
-//     fn set(&self, value: f64) {
-//         self.prom_gauge.set(value);
-//     }
-
-//     fn inc(&self, value: f64) {
-//         self.prom_gauge.add(value);
-//     }
-
-//     fn dec(&self, value: f64) {
-//         self.prom_gauge.sub(value);
-//     }
-
-//     fn get_value(&self) -> f64 {
-//         self.prom_gauge.get()
-//     }
-// }
-
-// /// Prometheus Histogram implementation
-// #[derive(Clone)]
-// pub struct PrometheusHistogram {
-//     prom_histogram: prometheus::Histogram,
-//     name: String,
-//     description: String,
-// }
-
-// impl Metric for PrometheusHistogram {
-//     fn get_name(&self) -> &str {
-//         &self.name
-//     }
-
-//     fn metric_type(&self) -> &'static str {
-//         HISTOGRAM_METRIC_TYPE
-//     }
-
-//     fn description(&self) -> &str {
-//         &self.description
-//     }
-// }
-
-// impl MetricHistogram for PrometheusHistogram {
-//     fn observe(&self, value: f64) {
-//         self.prom_histogram.observe(value);
-//     }
-
-//     fn get_count(&self) -> u64 {
-//         self.prom_histogram.get_sample_count() as u64
-//     }
-
-//     fn get_sum(&self) -> f64 {
-//         self.prom_histogram.get_sample_sum()
-//     }
-// }
-
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-
-//     #[test]
-//     fn test_prometheus_metric_registries() {
-//         println!("=== Prometheus Registry Tests ===");
-
-//         // Test Prometheus Registry
-//         println!("\n--- Prometheus Registry ---");
-//         let prom = PrometheusRegistry::new("myapp");
-//         assert_eq!(prom.prefix(), "myapp", "The prefix should be 'myapp'");
-//         println!("Registry prefix: {}", prom.prefix());
-
-//         // Create and use a counter
-//         let prom_counter = prom
-//             .create_counter(
-//                 "test_prom_counter",
-//                 "Test Prometheus counter",
-//                 &[("service", "test"), ("protocol", "prometheus")],
-//             )
-//             .unwrap();
-//         prom_counter.inc();
-//         prom_counter.inc_by(3);
-
-//         // Add a value check
-//         let counter_value = prom_counter.get_value();
-//         assert_eq!(
-//             counter_value, 4,
-//             "Counter value should be 4 after incrementing by 1 and then by 3"
-//         );
-//         println!(
-//             "Prometheus counter '{}': {} (type: {})",
-//             prom_counter.get_name(),
-//             prom_counter.get_value(),
-//             prom_counter.metric_type()
-//         );
-
-//         // Create and use a gauge
-//         let prom_gauge = prom
-//             .create_gauge(
-//                 "test_prom_gauge",
-//                 "Test Prometheus gauge",
-//                 &[("service", "test"), ("protocol", "prometheus")],
-//             )
-//             .unwrap();
-//         prom_gauge.set(15.0);
-//         prom_gauge.inc(3.0);
-//         prom_gauge.dec(2.0);
-
-//         // Add a value check
-//         let gauge_value = prom_gauge.get_value();
-//         assert_eq!(gauge_value, 16.0, "Gauge value should be 16.0 after setting to 15.0, incrementing by 3.0, and decrementing by 2.0");
-//         println!(
-//             "Prometheus gauge '{}': {} (type: {})",
-//             prom_gauge.get_name(),
-//             prom_gauge.get_value(),
-//             prom_gauge.metric_type()
-//         );
-
-//         // Create and use a histogram
-//         let prom_histogram = prom
-//             .create_histogram(
-//                 "test_prom_histogram",
-//                 "Test Prometheus histogram",
-//                 &[("service", "test"), ("protocol", "prometheus")],
-//             )
-//             .unwrap();
-//         prom_histogram.observe(1.5);
-//         prom_histogram.observe(2.3);
-//         prom_histogram.observe(0.8);
-//         prom_histogram.observe(3.1);
-
-//         // Add a value check
-//         let histogram_count = prom_histogram.get_count();
-//         let histogram_sum = prom_histogram.get_sum();
-//         println!(
-//             "DEBUG: Expected sum: 7.7, Actual sum: {}, Difference: {}",
-//             histogram_sum,
-//             (histogram_sum - 7.7).abs()
-//         );
-//         assert_eq!(
-//             histogram_count, 4,
-//             "Histogram count should be 4 after observing 4 values"
-//         );
-//         assert!((histogram_sum - 7.7).abs() < 1e-9, "Histogram sum should be approximately 7.7 after observing values 1.5, 2.3, 0.8, and 3.1");
-//         println!(
-//             "Prometheus histogram '{}': count={}, sum={} (type: {})",
-//             prom_histogram.get_name(),
-//             prom_histogram.get_count(),
-//             prom_histogram.get_sum(),
-//             prom_histogram.metric_type()
-//         );
-
-//         println!("\n=== Registry Tests Complete ===");
-//     }
-
-//     #[test]
-//     fn test_duplicate_metric_names() {
-//         println!("=== Duplicate Metric Names Test ===");
-
-//         let registry = PrometheusRegistry::new("test");
-
-//         // Create a counter successfully
-//         let counter1 = registry.create_counter("duplicate_test", "Test counter", &[]);
-//         assert!(counter1.is_ok(), "First counter creation should succeed");
-
-//         // Try to create another counter with the same name
-//         let counter2 = registry.create_counter("duplicate_test", "Test counter", &[]);
-//         assert!(counter2.is_err(), "Second counter creation should fail");
-//         if let Err(e) = counter2 {
-//             println!("Expected error for duplicate counter: {}", e);
-//         }
-
-//         // Create a gauge successfully
-//         let gauge1 = registry.create_gauge("duplicate_gauge", "Test gauge", &[]);
-//         assert!(gauge1.is_ok(), "First gauge creation should succeed");
-
-//         // Try to create another gauge with the same name
-//         let gauge2 = registry.create_gauge("duplicate_gauge", "Test gauge", &[]);
-//         assert!(gauge2.is_err(), "Second gauge creation should fail");
-//         if let Err(e) = gauge2 {
-//             println!("Expected error for duplicate gauge: {}", e);
-//         }
-
-//         // Create a histogram successfully
-//         let histogram1 = registry.create_histogram("duplicate_hist", "Test histogram", &[]);
-//         assert!(
-//             histogram1.is_ok(),
-//             "First histogram creation should succeed"
-//         );
-
-//         // Try to create another histogram with the same name
-//         let histogram2 = registry.create_histogram("duplicate_hist", "Test histogram", &[]);
-//         assert!(histogram2.is_err(), "Second histogram creation should fail");
-//         if let Err(e) = histogram2 {
-//             println!("Expected error for duplicate histogram: {}", e);
-//         }
-
-//         println!("=== Duplicate Metric Names Test Complete ===");
-//     }
-
-//     #[test]
-//     fn test_service_metrics() {
-//         println!("=== Service Metrics with Traits Test ===");
-
-//         // Define TestMetrics struct within the test
-//         struct TestMetrics<R: MetricsRegistry> {
-//             registry: Arc<R>,
-//             pub request_counter: Box<dyn MetricCounter>,
-//             pub active_requests_gauge: Box<dyn MetricGauge>,
-//             pub request_duration_histogram: Box<dyn MetricHistogram>,
-//         }
-
-//         impl<R: MetricsRegistry> TestMetrics<R> {
-//             /// Create a new TestMetrics instance using the metric registry
-//             fn new(registry: Arc<R>) -> Self {
-//                 // Create request counter
-//                 let request_counter = registry
-//                     .create_counter(
-//                         "requests_total",
-//                         "Total number of requests processed",
-//                         &[("service", "registry")],
-//                     )
-//                     .unwrap();
-
-//                 // Create active requests gauge
-//                 let active_requests_gauge = registry
-//                     .create_gauge(
-//                         "active_requests",
-//                         "Number of requests currently being processed",
-//                         &[("service", "registry")],
-//                     )
-//                     .unwrap();
-
-//                 // Create request duration histogram
-//                 let request_duration_histogram = registry
-//                     .create_histogram(
-//                         "request_duration_seconds",
-//                         "Request duration in seconds",
-//                         &[("service", "registry")],
-//                     )
-//                     .unwrap();
-
-//                 TestMetrics {
-//                     registry: registry,
-//                     request_counter: request_counter,
-//                     active_requests_gauge: active_requests_gauge,
-//                     request_duration_histogram: request_duration_histogram,
-//                 }
-//             }
-//         }
-
-//         // Create a new Prometheus registry
-//         // Create a service metrics struct using the metric traits
-//         let test_metrics =
-//             TestMetrics::<PrometheusRegistry>::new(Arc::new(PrometheusRegistry::new("service")));
-//         println!("Created TestMetrics with trait-based metrics");
-
-//         // Simulate some request processing
-//         println!("\n--- Simulating Request Processing ---");
-
-//         // Simulate request start
-//         test_metrics.request_counter.inc();
-//         test_metrics.active_requests_gauge.inc(1.0);
-//         println!(
-//             "Request started - Counter: {}, Active: {}",
-//             test_metrics.request_counter.get_value(),
-//             test_metrics.active_requests_gauge.get_value()
-//         );
-//         assert_eq!(
-//             test_metrics.request_counter.get_value(),
-//             1,
-//             "Should have processed 1 request"
-//         );
-//         assert_eq!(
-//             test_metrics.active_requests_gauge.get_value(),
-//             1.0,
-//             "Should have 1 active request"
-//         );
-
-//         // Simulate some processing time
-//         std::thread::sleep(std::time::Duration::from_millis(100));
-
-//         // Simulate request completion
-//         test_metrics.active_requests_gauge.dec(1.0);
-//         let duration = 0.1; // Simulated duration
-//         test_metrics.request_duration_histogram.observe(duration);
-//         println!(
-//             "Request completed - Counter: {}, Active: {}, Duration: {}s",
-//             test_metrics.request_counter.get_value(),
-//             test_metrics.active_requests_gauge.get_value(),
-//             duration
-//         );
-//         assert_eq!(
-//             test_metrics.active_requests_gauge.get_value(),
-//             0.0,
-//             "Should have no active requests"
-//         );
-//         assert_eq!(
-//             test_metrics.request_duration_histogram.get_count(),
-//             1,
-//             "Should have 1 duration observation"
-//         );
-//         assert!(
-//             (test_metrics.request_duration_histogram.get_sum() - 0.1).abs() < f64::EPSILON,
-//             "Sum should be approximately 0.1"
-//         );
-
-//         // Simulate another request
-//         test_metrics.request_counter.inc();
-//         test_metrics.active_requests_gauge.inc(1.0);
-//         test_metrics.active_requests_gauge.dec(1.0);
-//         test_metrics.request_duration_histogram.observe(0.05);
-//         println!(
-//             "Second request completed - Counter: {}, Active: {}",
-//             test_metrics.request_counter.get_value(),
-//             test_metrics.active_requests_gauge.get_value()
-//         );
-//         assert_eq!(
-//             test_metrics.request_counter.get_value(),
-//             2,
-//             "Should have processed 2 requests"
-//         );
-//         assert_eq!(
-//             test_metrics.active_requests_gauge.get_value(),
-//             0.0,
-//             "Should have no active requests"
-//         );
-//         assert_eq!(
-//             test_metrics.request_duration_histogram.get_count(),
-//             2,
-//             "Should have 2 duration observations"
-//         );
-//         assert!(
-//             (test_metrics.request_duration_histogram.get_sum() - 0.15).abs() < f64::EPSILON,
-//             "Sum should be approximately 0.15"
-//         );
-
-//         // Print final metrics
-//         println!("\n--- Final Metrics ---");
-//         println!(
-//             "Request Counter: {} (type: {})",
-//             test_metrics.request_counter.get_value(),
-//             test_metrics.request_counter.metric_type()
-//         );
-//         println!(
-//             "Active Requests: {} (type: {})",
-//             test_metrics.active_requests_gauge.get_value(),
-//             test_metrics.active_requests_gauge.metric_type()
-//         );
-//         println!(
-//             "Request Duration - Count: {}, Sum: {} (type: {})",
-//             test_metrics.request_duration_histogram.get_count(),
-//             test_metrics.request_duration_histogram.get_sum(),
-//             test_metrics.request_duration_histogram.metric_type()
-//         );
-
-//         println!("\n=== Service Metrics Test Complete ===");
-//     }
-
-//     #[test]
-//     fn test_hierarchical_metrics() {
-//         println!("=== Hierarchical Metrics Test ===");
-
-//         // Define ParentMetrics struct
-//         struct ParentMetrics<R: MetricsRegistry> {
-//             registry: Arc<R>,
-//             pub parent_counter: Box<dyn MetricCounter>,
-//         }
-
-//         impl<R: MetricsRegistry> ParentMetrics<R> {
-//             fn new(registry: Arc<R>) -> Self {
-//                 let parent_counter = registry
-//                     .create_counter(
-//                         "requests",
-//                         "Total number of parent requests",
-//                         &[("service", "parent")],
-//                     )
-//                     .unwrap();
-
-//                 ParentMetrics {
-//                     registry,
-//                     parent_counter,
-//                 }
-//             }
-//         }
-
-//         // Define ChildMetrics struct
-//         struct ChildMetrics {
-//             registry: Arc<dyn MetricsRegistry>,
-//             pub child_histogram: Box<dyn MetricHistogram>,
-//         }
-
-//         impl ChildMetrics {
-//             fn new(registry: Arc<dyn MetricsRegistry>) -> Self {
-//                 let child_histogram = registry
-//                     .create_histogram(
-//                         "requests",
-//                         "Total number of child requests",
-//                         &[("service", "child")],
-//                     )
-//                     .unwrap();
-
-//                 ChildMetrics {
-//                     registry,
-//                     child_histogram,
-//                 }
-//             }
-//         }
-
-//         // Create parent registry
-//         let parent_registry = PrometheusRegistry::new("parent");
-
-//         // Create child registry and add it to parent
-//         let child_registry = parent_registry.create_child_registry("child");
-//         let child_metrics = ChildMetrics::new(child_registry.clone());
-
-//         // Now wrap parent in Arc after adding children
-//         let parent_registry = Arc::new(parent_registry);
-//         let parent_metrics = ParentMetrics::new(parent_registry.clone());
-
-//         // Simulate some metrics
-//         parent_metrics.parent_counter.inc();
-//         parent_metrics.parent_counter.inc_by(2);
-//         child_metrics.child_histogram.observe(1.5);
-//         child_metrics.child_histogram.observe(2.5);
-
-//         // Verify metrics
-//         assert_eq!(
-//             parent_metrics.parent_counter.get_value(),
-//             3,
-//             "Parent counter should be 3"
-//         );
-//         assert_eq!(
-//             child_metrics.child_histogram.get_count(),
-//             2,
-//             "Child histogram should have 2 observations"
-//         );
-
-//         println!(
-//             "Parent counter: {} (type: {})",
-//             parent_metrics.parent_counter.get_value(),
-//             parent_metrics.parent_counter.metric_type()
-//         );
-//         println!(
-//             "Child histogram: count={}, sum={} (type: {})",
-//             child_metrics.child_histogram.get_count(),
-//             child_metrics.child_histogram.get_sum(),
-//             child_metrics.child_histogram.metric_type()
-//         );
-
-//         // Test hierarchical metrics output
-//         match parent_registry.all_prometheus_format_str() {
-//             Ok(metrics) => {
-//                 println!("\n--- Hierarchical Prometheus Metrics ---");
-//                 println!("{}", metrics);
-
-//                 // Check that the output contains expected content
-//                 assert!(
-//                     metrics.contains("parent__requests 3"),
-//                     "Should contain parent counter value"
-//                 );
-//                 assert!(
-//                     metrics.contains("parent_child__requests_bucket"),
-//                     "Should contain child histogram bucket"
-//                 );
-//                 assert!(
-//                     metrics.contains("parent_child__requests_sum 4"),
-//                     "Should contain child histogram sum"
-//                 );
-//                 assert!(
-//                     metrics.contains("parent_child__requests_count 2"),
-//                     "Should contain child histogram count"
-//                 );
-
-//                 println!("✓ All Prometheus format checks passed");
-//             }
-//             Err(e) => {
-//                 println!("Failed to get hierarchical metrics: {}", e);
-//                 panic!("Failed to get hierarchical metrics: {}", e);
-//             }
-//         }
-
-//         println!("=== Hierarchical Metrics Test Complete ===");
-//     }
-// }
+#[cfg(test)]
+mod test_simple_registry_trait {
+    use super::*;
+    use prometheus::Counter;
+    use std::sync::Arc;
+
+    struct TestRegistry {
+        drt: Arc<crate::DistributedRuntime>,
+        prefix: String,
+    }
+
+    impl MetricsRegistry for TestRegistry {
+        fn metrics_prefix(&self) -> String {
+            "testprefix".to_string()
+        }
+        fn metrics_hierarchy(&self) -> Vec<String> {
+            vec![self.prefix.clone()]
+        }
+        fn drt(&self) -> &crate::DistributedRuntime {
+            &self.drt
+        }
+
+        // fn registry(&self) -> prometheus::Registry {
+        //     let mut registry = self.drt.metrics_registries_by_prefix.lock().unwrap();
+        //     registry
+        //         .entry(self.metrics_prefix())
+        //         .or_insert(prometheus::Registry::new())
+        //         .clone()
+        // }
+    }
+
+    #[tokio::test]
+    async fn test_factory_methods_via_registry_trait() {
+        // Setup real DRT and registry using the test-friendly constructor
+        let rt = crate::Runtime::from_current().unwrap();
+        let drt = Arc::new(
+            crate::DistributedRuntime::from_settings_without_discovery(rt)
+                .await
+                .unwrap(),
+        );
+        let registry = TestRegistry {
+            drt,
+            prefix: "testprefix".to_string(),
+        };
+
+        // Test Counter creation
+        let counter = registry
+            .create_counter("my_counter", "A test counter", &[])
+            .unwrap();
+        counter.inc_by(42.0);
+        assert_eq!(counter.get() as u64, 42);
+        println!("Counter value via MetricsRegistry: {}", counter.get());
+
+        // Test Gauge creation
+        let gauge = registry
+            .create_gauge("my_gauge", "A test gauge", &[])
+            .unwrap();
+        gauge.set(123.45);
+        assert_eq!(gauge.get(), 123.45);
+        println!("Gauge value via MetricsRegistry: {}", gauge.get());
+
+        // Test Histogram creation
+        let histogram = registry
+            .create_histogram("my_histogram", "A test histogram", &[])
+            .unwrap();
+        histogram.observe(1.5);
+        histogram.observe(2.5);
+        histogram.observe(3.5);
+        // We can't assert the exact histogram buckets, but we can check the output contains the metric name
+        println!("Histogram observations: 1.5, 2.5, 3.5");
+
+        // Test Prometheus format output
+        let prometheus_output = registry.encode_prometheus_str().unwrap();
+        println!("Prometheus format output:");
+        println!("{}", prometheus_output);
+
+        // Print only the histogram section for inspection
+        println!("Histogram section:");
+        for line in prometheus_output.lines() {
+            if line.contains("my_histogram")
+                || line.contains("# HELP testprefix_my_histogram")
+                || line.contains("# TYPE testprefix_my_histogram")
+            {
+                println!("{}", line);
+            }
+        }
+
+        // Verify all metrics are present in the output
+        assert!(prometheus_output.contains("testprefix_my_counter"));
+        assert!(prometheus_output.contains("testprefix_my_gauge"));
+        assert!(prometheus_output.contains("testprefix_my_histogram"));
+        assert!(prometheus_output.contains("# HELP testprefix_my_counter A test counter"));
+        assert!(prometheus_output.contains("# HELP testprefix_my_gauge A test gauge"));
+        assert!(prometheus_output.contains("# HELP testprefix_my_histogram A test histogram"));
+
+        println!("All metric types test passed!");
+    }
+}
+
+#[cfg(test)]
+mod test_runtime_and_namespace_registry_trait {
+    use super::*;
+    use std::sync::Arc;
+
+    /// Test registry representing a runtime-level metrics registry
+    struct MyRuntimeRegistry {
+        drt: Arc<crate::DistributedRuntime>,
+    }
+
+    impl MetricsRegistry for MyRuntimeRegistry {
+        fn metrics_prefix(&self) -> String {
+            "runtime".to_string()
+        }
+
+        fn metrics_hierarchy(&self) -> Vec<String> {
+            vec![self.metrics_prefix()]
+        }
+
+        fn drt(&self) -> &crate::DistributedRuntime {
+            &self.drt
+        }
+    }
+
+    /// Test registry representing a namespace-level metrics registry
+    struct MyNamespaceRegistry {
+        drt: Arc<crate::DistributedRuntime>,
+    }
+
+    impl MetricsRegistry for MyNamespaceRegistry {
+        fn metrics_prefix(&self) -> String {
+            "runtime_namespace".to_string()
+        }
+
+        fn metrics_hierarchy(&self) -> Vec<String> {
+            vec!["runtime".to_string(), self.metrics_prefix()]
+        }
+
+        fn drt(&self) -> &crate::DistributedRuntime {
+            &self.drt
+        }
+    }
+
+    #[tokio::test]
+    async fn test_runtime_and_namespace_registry_trait() {
+        // Setup real DRT
+        let rt = crate::Runtime::from_current().unwrap();
+        let drt = Arc::new(
+            crate::DistributedRuntime::from_settings_without_discovery(rt)
+                .await
+                .unwrap(),
+        );
+
+        // Create runtime-level registry
+        let runtime_registry = MyRuntimeRegistry { drt: drt.clone() };
+
+        // Create namespace-level registry
+        let namespace_registry = MyNamespaceRegistry { drt: drt.clone() };
+
+        // Create metrics using factory methods and increment some values
+        let runtime_counter = runtime_registry
+            .create_counter("total_requests", "Total requests across all runtime", &[])
+            .unwrap();
+        runtime_counter.inc_by(100.0);
+
+        let namespace_gauge = namespace_registry
+            .create_gauge(
+                "active_connections",
+                "Active connections for this namespace",
+                &[],
+            )
+            .unwrap();
+        namespace_gauge.set(25.0);
+
+        // Test Prometheus format output for both registries
+        let runtime_output = runtime_registry.encode_prometheus_str().unwrap();
+        let namespace_output = namespace_registry.encode_prometheus_str().unwrap();
+
+        println!("Runtime Prometheus output:");
+        println!("{}", runtime_output);
+
+        println!("Namespace Prometheus output:");
+        println!("{}", namespace_output);
+
+        // Verify exact content in runtime output (this includes ALL)
+        let expected_runtime_output = "\
+# HELP runtime_namespace__active_connections Active connections for this namespace\n\
+# TYPE runtime_namespace__active_connections gauge\n\
+runtime_namespace__active_connections 25\n\
+# HELP runtime__total_requests Total requests across all runtime\n\
+# TYPE runtime__total_requests counter\n\
+runtime__total_requests 100\n";
+        assert_eq!(runtime_output, expected_runtime_output);
+
+        // Verify exact content in namespace output (this only includes runtime_namespace))
+        let expected_namespace_output = "\
+# HELP runtime_namespace__active_connections Active connections for this namespace\n\
+# TYPE runtime_namespace__active_connections gauge\n\
+runtime_namespace__active_connections 25\n";
+        assert_eq!(namespace_output, expected_namespace_output);
+
+        println!("Runtime and Namespace registry tests passed!");
+    }
+}

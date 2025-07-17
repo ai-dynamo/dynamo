@@ -24,6 +24,7 @@ repository.workspace = true
 
 [dependencies]
 dynamo-runtime = { workspace = true }
+prometheus = { workspace = true }
 
 # third-party
 futures = "0.3"
