@@ -13,9 +13,10 @@
 
 import argparse
 import asyncio
+import os
 import random
-import time 
 import socket
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Union
@@ -77,6 +78,26 @@ class DynamoDeploymentClient:
         self.custom_api = client.CustomObjectsApi(self.k8s_client)
         self.core_api = client.CoreV1Api(self.k8s_client)
 
+    def _is_running_in_kubernetes(self) -> bool:
+        """
+        Detect if we're running inside a Kubernetes cluster by checking for the service account token.
+        """
+        return os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/token")
+
+    def _get_service_url(self) -> str:
+        """
+        Get the service URL. Returns service DNS if running in Kubernetes, otherwise localhost with port forwarding.
+        """
+        if self._is_running_in_kubernetes():
+            # Use Kubernetes service DNS: service-name.namespace.svc.cluster.local:port
+            svc_name = f"{self.deployment_name}-frontend"
+            return f"http://{svc_name}.{self.namespace}.svc.cluster.local:8000"
+        else:
+            # For local development, we need to use port forwarding
+            raise RuntimeError(
+                "Port forwarding is required when not running in Kubernetes. Use get_service_url_with_port_forward() instead."
+            )
+
     async def create_deployment(self, deployment: Union[dict, str]):
         """
         Create a DynamoGraphDeployment from either a dict or yaml file path.
@@ -128,20 +149,22 @@ class DynamoDeploymentClient:
         # TODO: A little brittle, also should output intermediate status every so often.
         while (time.time() - start_time) < timeout:
             try:
-                status = await self.custom_api.get_namespaced_custom_object_status(
+                status = await self.custom_api.get_namespaced_custom_object(
                     group="nvidia.com",
                     version="v1alpha1",
                     namespace=self.namespace,
                     plural="dynamographdeployments",
                     name=self.deployment_name,
                 )
-                # print(f"Current status: {status.get('status', {})}")
-
                 # Check both conditions:
                 # 1. Ready condition is True
                 # 2. State is successful
                 status_obj = status.get("status", {})
                 conditions = status_obj.get("conditions", [])
+                current_state = status_obj.get("state", "unknown")
+
+                print(f"Current deployment state: {current_state}")
+                print(f"Current conditions: {conditions}")
 
                 ready_condition = False
                 for condition in conditions:
@@ -159,11 +182,31 @@ class DynamoDeploymentClient:
                         "Deployment is ready: Ready condition is True and state is successful"
                     )
                     return True
+                else:
+                    print(
+                        f"Deployment not ready yet - Ready condition: {ready_condition}, State successful: {state_successful}"
+                    )
 
             except kubernetes.client.rest.ApiException:
                 pass
             await asyncio.sleep(20)
         raise TimeoutError("Deployment failed to become ready within timeout")
+
+    @contextmanager
+    def get_service_url_with_port_forward(self, port: Optional[int] = None):
+        """
+        Get the service URL with automatic detection of environment.
+
+        When running in Kubernetes: yields the service DNS URL directly (no port forwarding needed)
+        When running locally: sets up port forwarding and yields localhost URL
+        """
+        if self._is_running_in_kubernetes():
+            # No port forwarding needed, use service DNS directly
+            yield self._get_service_url()
+        else:
+            # Use port forwarding for local development - delegate to existing method
+            with self.port_forward(port) as forwarded_port:
+                yield f"http://localhost:{forwarded_port}"
 
     @contextmanager
     def port_forward(self, port: Optional[int] = None):
@@ -176,7 +219,7 @@ class DynamoDeploymentClient:
                 candidate_port = random.randint(49152, 65535)
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     try:
-                        s.bind(('localhost', candidate_port))
+                        s.bind(("localhost", candidate_port))
                         port = candidate_port
                         break
                     except OSError:
@@ -198,8 +241,8 @@ class DynamoDeploymentClient:
         Test the deployment with a chat completion request using httpx.
         """
         EXAMPLE_CHAT_REQUEST["model"] = self.model_name
-        with self.port_forward() as port:
-            url = f"http://localhost:{port}/v1/chat/completions"
+        with self.get_service_url_with_port_forward() as base_url:
+            url = f"{base_url}/v1/chat/completions"
             async with httpx.AsyncClient() as client:
                 response = await client.post(url, json=EXAMPLE_CHAT_REQUEST)
                 response.raise_for_status()
