@@ -533,7 +533,7 @@ impl tracing::field::Visit for JsonVisitor {
 mod tests {
     use super::*;
 
-    #[tracing::instrument(skip_all,fields(trace_id, span_id))]
+    #[tracing::instrument(skip_all,fields(trace_id, span_id, request_id))]
     async fn foo_3() {
 
 	println!("recording");
