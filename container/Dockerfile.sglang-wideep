@@ -149,6 +149,21 @@ RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/downlo
     rm /tmp/etcd.tar.gz
 ENV PATH=/usr/local/bin/etcd/:$PATH
 
+ARG CMAKE_VERSION=3.31.8
+RUN mkdir /sgl-workspace/cmake_build
+WORKDIR /sgl-workspace/cmake_build
+
+# uninstall CMake
+RUN apt-get purge -y cmake
+# download newer version of CMake
+RUN wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
+    tar -xvzf cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
+    mv cmake-${CMAKE_VERSION}-linux-$(uname -m) custom_cmake
+ENV PATH=/sgl-workspace/cmake_build/custom_cmake/bin:$PATH
+
+# should be 3.31.8
+RUN cmake --version
+
 # Install perf_analyzer and genai-perf
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
