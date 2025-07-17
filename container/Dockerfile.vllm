@@ -180,8 +180,8 @@ RUN uv pip install /workspace/wheels/nixl/*.whl
 # Install vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
 ARG VLLM_REF="059d4cd"
-ARG MAX_JOBS
-ENV MAX_JOBS=${MAX_JOBS:-72}
+ARG MAX_JOBS=16
+ENV MAX_JOBS=$MAX_JOBS
 ENV CUDA_HOME=/usr/local/cuda
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
