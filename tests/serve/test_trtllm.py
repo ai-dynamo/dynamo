@@ -48,6 +48,7 @@ def create_payload_for_config(config: "TRTLLMConfig") -> Payload:
     )
 
 
+# TODO: Unify with vllm/sglang tests to reduce code duplication
 @dataclass
 class TRTLLMConfig:
     """Configuration for trtllm test scenarios"""
@@ -67,13 +68,17 @@ class TRTLLMProcess(ManagedProcess):
     """Simple process manager for trtllm shell scripts"""
 
     def __init__(self, config: TRTLLMConfig, request):
-        self.port = 8080
+        self.port = 8000
         self.config = config
         self.dir = config.directory
         script_path = os.path.join(self.dir, "launch", config.script_name)
 
         if not os.path.exists(script_path):
             raise FileNotFoundError(f"trtllm script not found: {script_path}")
+
+        # Set these env vars to customize model launched by launch script to match test
+        os.environ["MODEL_PATH"] = config.model
+        os.environ["SERVED_MODEL_NAME"] = config.model
 
         command = ["bash", script_path]
 
@@ -194,7 +199,7 @@ trtllm_configs = {
             chat_completions_response_handler,
             completions_response_handler,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         delayed_start=45,
     ),
     "disaggregated": TRTLLMConfig(
@@ -207,7 +212,7 @@ trtllm_configs = {
             chat_completions_response_handler,
             completions_response_handler,
         ],
-        model="Qwen/Qwen3-0.6B",
+        model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
         delayed_start=45,
     ),
 }
