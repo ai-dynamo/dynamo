@@ -389,6 +389,8 @@ ARCH="amd64"
 if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     ARCH="arm64"
     BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
+    # TEMP: Pin to nixl 0.3.1 for arm build, since 0.4.0 fails
+    NIXL_COMMIT=3503658e71143b56f9d5b1b440d84a94b9c41af8
 fi
 
 # Update DOCKERFILE if framework is VLLM
