@@ -11,33 +11,32 @@ from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
+from dynamo._core import RouterMode
 from dynamo.llm import (
     ModelType,
     get_tensorrtllm_engine,
     get_tensorrtllm_publisher,
     register_llm,
 )
-from dynamo._core import RouterMode
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
-
 from dynamo.trtllm.utils.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
+from dynamo.trtllm.utils.trtllm_utils import Config
+from dynamo.trtllm.utils.trtllm_utils import RouterMode as ConfigRouterMode
 from dynamo.trtllm.utils.trtllm_utils import (
-    Config,
     cmd_line_args,
     is_first_worker,
     parse_endpoint,
 )
 
-from dynamo.trtllm.utils.trtllm_utils import RouterMode as ConfigRouterMode
-
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
 configure_dynamo_logging()
+
 
 def get_router_mode(router_mode: ConfigRouterMode) -> RouterMode:
     if router_mode == ConfigRouterMode.KV:
@@ -185,8 +184,10 @@ async def init(runtime: DistributedRuntime, config: Config):
             handler = RequestHandlerFactory().get_request_handler(handler_config)
             await endpoint.serve_endpoint(handler.generate)
 
+
 def main():
     uvloop.run(worker())
+
 
 if __name__ == "__main__":
     main()
