@@ -58,6 +58,8 @@ spec:
             - out=dyn
             - --http-port
             - "8000"
+            - --router-mode
+            - kv
     VllmDecodeWorker:
       dynamoNamespace: vllm-v1-disagg-router
       envFromSecret: hf-token-secret

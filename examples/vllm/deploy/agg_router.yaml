@@ -15,7 +15,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-v1-agg
+  name: vllm-v1-agg-router
 spec:
   services:
     Frontend:
@@ -37,7 +37,7 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      dynamoNamespace: vllm-v1-agg
+      dynamoNamespace: vllm-v1-agg-router
       componentType: main
       replicas: 1
       resources:
@@ -58,6 +58,8 @@ spec:
             - out=dyn
             - --http-port
             - "8000"
+            - --router-mode
+            - kv
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       livenessProbe:
@@ -79,7 +81,7 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      dynamoNamespace: vllm-v1-agg
+      dynamoNamespace: vllm-v1-agg-router
       componentType: worker
       replicas: 2
       resources:

@@ -19,9 +19,7 @@
 //! both publicly via the HTTP API and internally between Dynamo components.
 //!
 
-use std::pin::Pin;
-
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 
 pub mod codec;
@@ -30,7 +28,7 @@ pub mod openai;
 
 /// The token ID type
 pub type TokenIdType = u32;
-pub type DataStream<T> = Pin<Box<dyn Stream<Item = T> + Send + Sync>>;
+pub use dynamo_runtime::engine::DataStream;
 
 // TODO: This is an awkward dependency that we need to address
 // Originally, all the Annotated/SSE Codec bits where in the LLM protocol module; however, [Annotated]

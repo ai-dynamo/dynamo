@@ -84,6 +84,8 @@ export IMAGE_TAG=RELEASE_VERSION # i.e. 0.3.2 - the release you are using or you
 # The  Nvidia Cloud Operator image will be pulled from the `$DOCKER_SERVER/dynamo-operator:$IMAGE_TAG`.
 ```
 
+The operator image will be pulled from `$DOCKER_SERVER/dynamo-operator:$IMAGE_TAG`.
+
 ### Install Dynamo Cloud
 
 You could run the `deploy.sh` or use the manual commands under Step 1 and Step 2.
@@ -99,6 +101,12 @@ kubectl create secret docker-registry docker-imagepullsecret \
   --docker-username=${DOCKER_USERNAME} \
   --docker-password=${DOCKER_PASSWORD} \
   --namespace=${NAMESPACE}
+```
+
+You need to add the bitnami helm repository by running:
+
+```bash
+helm repo add bitnami https://charts.bitnami.com/bitnami
 ```
 
 ```bash
