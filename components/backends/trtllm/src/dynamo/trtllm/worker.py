@@ -19,55 +19,37 @@ from dynamo.llm import (
     get_tensorrtllm_publisher,
     register_llm,
 )
+from dynamo._core import RouterMode
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
-if TYPE_CHECKING:
-    from utils.trtllm_utils import Config
-
-
-def _setup_path_and_imports():
-    """Setup path and import utils modules"""
-    # Add the parent directory to the Python path so we can import utils
-    parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    if parent_dir not in sys.path:
-        sys.path.insert(0, parent_dir)
-
-    from utils.request_handlers.handlers import (
-        RequestHandlerConfig,
-        RequestHandlerFactory,
-    )
-    from utils.trtllm_utils import (
-        Config,
-        cmd_line_args,
-        is_first_worker,
-        parse_endpoint,
-    )
-
-    return (
-        RequestHandlerConfig,
-        RequestHandlerFactory,
-        Config,
-        cmd_line_args,
-        is_first_worker,
-        parse_endpoint,
-    )
-
-
-# Import utils modules
-(
+from dynamo.trtllm.utils.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
+)
+from dynamo.trtllm.utils.trtllm_utils import (
     Config,
     cmd_line_args,
     is_first_worker,
     parse_endpoint,
-) = _setup_path_and_imports()
+)
+
+from dynamo.trtllm.utils.trtllm_utils import RouterMode as ConfigRouterMode
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
 configure_dynamo_logging()
+
+def get_router_mode(router_mode: ConfigRouterMode) -> RouterMode:
+    if router_mode == ConfigRouterMode.KV:
+        return RouterMode.KV
+    elif router_mode == ConfigRouterMode.ROUND_ROBIN:
+        return RouterMode.RoundRobin
+    elif router_mode == ConfigRouterMode.RANDOM:
+        return RouterMode.Random
+    else:
+        raise ValueError(f"Invalid router mode: {router_mode}")
 
 
 async def graceful_shutdown(runtime):
@@ -130,7 +112,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     if config.extra_engine_args != "":
         # TODO: Support extra engine args from json file as well.
         arg_map = update_llm_args_with_extra_options(arg_map, config.extra_engine_args)
-    if config.publish_events_and_metrics:
+    if config.router_mode == ConfigRouterMode.KV:
         # 'event_buffer_max_size' is required to enable TRTLLM to publish kv cache events.
         kv_cache_config = None
         if "kv_cache_config" not in arg_map:
@@ -171,6 +153,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 config.model_path,
                 config.served_model_name,
                 kv_cache_block_size=config.kv_block_size,
+                router_mode=get_router_mode(config.router_mode),
             )
 
         # publisher will be set later if publishing is enabled.
@@ -184,7 +167,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             next_client=next_client,
         )
 
-        if config.publish_events_and_metrics and is_first_worker(config):
+        if config.router_mode == ConfigRouterMode.KV and is_first_worker(config):
             # Initialize and pass in the publisher to the request handler to
             # publish events and metrics.
             kv_listener = runtime.namespace(config.namespace).component(

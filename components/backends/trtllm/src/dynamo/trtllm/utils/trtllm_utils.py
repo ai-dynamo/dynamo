@@ -4,18 +4,24 @@
 import argparse
 from typing import Optional
 
-from utils.request_handlers.handler_base import (
+from dynamo.trtllm.utils.request_handlers.handler_base import (
     DisaggregationMode,
     DisaggregationStrategy,
 )
+from enum import Enum
+
+class RouterMode(Enum):
+    ROUND_ROBIN = "RoundRobin"
+    KV = "KV"
+    RANDOM = "Random"
 
 # Default endpoint for the next worker.
 DEFAULT_ENDPOINT = "dyn://dynamo.tensorrt_llm.generate"
-DEFAULT_MODEL_PATH = "TinyLlama-1.1B-Instruct"
+DEFAULT_MODEL_PATH = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 DEFAULT_NEXT_ENDPOINT = "dyn://dynamo.tensorrt_llm_next.generate"
 DEFAULT_DISAGGREGATION_STRATEGY = DisaggregationStrategy.DECODE_FIRST
 DEFAULT_DISAGGREGATION_MODE = DisaggregationMode.AGGREGATED
-
+DEFAULT_ROUTER_MODE = RouterMode.ROUND_ROBIN
 
 class Config:
     """Command line parameters or defaults"""
@@ -29,7 +35,7 @@ class Config:
         self.tensor_parallel_size: int = 1
         self.kv_block_size: int = 32
         self.extra_engine_args: str = ""
-        self.publish_events_and_metrics: bool = False
+        self.router_mode: RouterMode = DEFAULT_ROUTER_MODE
         self.disaggregation_mode: DisaggregationMode = DEFAULT_DISAGGREGATION_MODE
         self.disaggregation_strategy: DisaggregationStrategy = (
             DEFAULT_DISAGGREGATION_STRATEGY
@@ -46,7 +52,7 @@ class Config:
             f"tensor_parallel_size={self.tensor_parallel_size}, "
             f"kv_block_size={self.kv_block_size}, "
             f"extra_engine_args={self.extra_engine_args}, "
-            f"publish_events_and_metrics={self.publish_events_and_metrics}, "
+            f"router_mode={self.router_mode}, "
             f"disaggregation_mode={self.disaggregation_mode}, "
             f"disaggregation_strategy={self.disaggregation_strategy}, "
             f"next_endpoint={self.next_endpoint})"
@@ -103,7 +109,7 @@ def cmd_line_args():
         "--served-model-name",
         type=str,
         default="",
-        help="Name to serve the model under. Defaults to deriving it from model path.",
+        help=f"Name to serve the model under. Defaults to deriving it from model path.",
     )
     parser.add_argument(
         "--tensor-parallel-size", type=int, default=1, help="Number of GPUs to use."
@@ -121,9 +127,11 @@ def cmd_line_args():
         help="Path to a YAML file containing additional keyword arguments to pass to the TRTLLM engine.",
     )
     parser.add_argument(
-        "--publish-events-and-metrics",
-        action="store_true",
-        help="Publish events and metrics to the dynamo components. Note: This is not supported when running in prefill disaggregation mode.",
+        "--router-mode",
+        type=str,
+        default=DEFAULT_ROUTER_MODE,
+        choices=[mode.value for mode in RouterMode],
+        help=f"Router mode to use for this worker. Default: {DEFAULT_ROUTER_MODE}",
     )
     parser.add_argument(
         "--disaggregation-mode",
@@ -189,6 +197,6 @@ def cmd_line_args():
     config.tensor_parallel_size = args.tensor_parallel_size
     config.kv_block_size = args.kv_block_size
     config.extra_engine_args = args.extra_engine_args
-    config.publish_events_and_metrics = args.publish_events_and_metrics
+    config.router_mode = RouterMode(args.router_mode)
 
     return config

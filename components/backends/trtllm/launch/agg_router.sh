@@ -19,13 +19,14 @@ trap cleanup EXIT INT TERM
 # run clear_namespace
 python3 utils/clear_namespace.py --namespace dynamo
 
-# run ingress
-dynamo run in=http out=dyn --router-mode kv --http-port=8000 &
-DYNAMO_PID=$!
+# run frontend
+# FIXME: --router-mode=kv is not supported in the frontend
+#python3 -m dynamo.frontend --router-mode=kv --http-port=8000 &
+dynamo run in=http out=dyn --router-mode=kv --http-port=8000 &
 
 # run worker
-python3 components/worker.py \
+python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$AGG_ENGINE_ARGS" \
-  --publish-events-and-metrics
+  --router-mode KV

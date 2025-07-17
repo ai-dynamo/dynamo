@@ -3,7 +3,7 @@
 
 import copy
 
-from utils.request_handlers.handler_base import (
+from dynamo.trtllm.utils.request_handlers.handler_base import (
     DisaggregationMode,
     DisaggregationStrategy,
     HandlerBase,

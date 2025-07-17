@@ -23,21 +23,23 @@ trap cleanup EXIT INT TERM
 # run clear_namespace
 python3 utils/clear_namespace.py --namespace dynamo
 
-# run ingress
-dynamo run in=http out=dyn --router-mode kv --http-port=8000 &
+# run frontend
+# FIXME: --router-mode=kv is not supported in the frontend
+#python3 -m dynamo.frontend --router-mode=kv --http-port=8000 &
+dynamo run in=http out=dyn --router-mode=kv --http-port=8000 &
 DYNAMO_PID=$!
 
 
 EXTRA_PREFILL_ARGS=()
 EXTRA_DECODE_ARGS=()
 if [ "$DISAGGREGATION_STRATEGY" == "prefill_first" ]; then
-  EXTRA_PREFILL_ARGS+=(--publish-events-and-metrics)
+  EXTRA_PREFILL_ARGS+=(--router-mode KV)
 else
-  EXTRA_DECODE_ARGS+=(--publish-events-and-metrics)
+  EXTRA_DECODE_ARGS+=(--router-mode KV)
 fi
 
 # run prefill worker
-CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 components/worker.py \
+CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$PREFILL_ENGINE_ARGS" \
@@ -47,7 +49,7 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 components/worker.py 
 PREFILL_PID=$!
 
 # run decode worker
-CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 components/worker.py \
+CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$DECODE_ENGINE_ARGS" \

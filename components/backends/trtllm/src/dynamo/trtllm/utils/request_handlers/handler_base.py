@@ -19,7 +19,7 @@ from enum import Enum
 
 from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
-from utils.disagg_utils import DisaggregatedParams, DisaggregatedParamsCodec
+from dynamo.trtllm.utils.disagg_utils import DisaggregatedParams, DisaggregatedParamsCodec
 
 from dynamo.llm.tensorrtllm.engine import TensorRTLLMEngine
 from dynamo.llm.tensorrtllm.publisher import Publisher
@@ -86,6 +86,16 @@ class HandlerBase:
         """
 
         logging.debug(f"Request: {request}")
+        print(f"Request: {request}")
+        print(f"self.disaggregation_mode: {self.disaggregation_mode}")
+        print(f"self.disaggregation_mode: {type(self.disaggregation_mode)}")
+        print(f"DisaggregationMode.PREFILL: {DisaggregationMode.PREFILL}")
+        print(f"DisaggregationMode.PREFILL type: {type(DisaggregationMode.PREFILL)}")
+        print(f"self.disaggregation_mode.value: {self.disaggregation_mode.value}")
+        print(f"DisaggregationMode.PREFILL.value: {DisaggregationMode.PREFILL.value}")
+        print(f"self.disaggregation_mode == DisaggregationMode.PREFILL: {self.disaggregation_mode == DisaggregationMode.PREFILL}")
+        print(f"self.disaggregation_mode is DisaggregationMode.PREFILL: {self.disaggregation_mode is DisaggregationMode.PREFILL}")
+        print(f"self.disaggregation_mode.value == DisaggregationMode.PREFILL.value: {self.disaggregation_mode.value == DisaggregationMode.PREFILL.value}")
 
         # Check if there is an error in the publisher error queue
         publishers_error = (
@@ -98,16 +108,24 @@ class HandlerBase:
 
         # Decode the disaggregated params from the request
         disaggregated_params = None
+        print(f"disaggregated_params1: {disaggregated_params}")
+        print(f"self.disaggregation_mode: {self.disaggregation_mode}")
+        print(f"Is prefill: {self.disaggregation_mode == DisaggregationMode.PREFILL}")
         if self.disaggregation_mode == DisaggregationMode.PREFILL:
             request["stop_conditions"]["max_tokens"] = 1
             disaggregated_params = LlmDisaggregatedParams(request_type="context_only")
 
+            print(f"disaggregated_params2: {disaggregated_params}")
+
         if "disaggregated_params" in request:
+            print(f"disaggregated_params3: {disaggregated_params}")
             if self.disaggregation_mode == DisaggregationMode.PREFILL:
                 raise ValueError("Cannot provide disaggregated_params in prefill mode")
+            print(f"disaggregated_params4: {disaggregated_params}")
             disaggregated_params = DisaggregatedParamsCodec.decode(
                 DisaggregatedParams(**request["disaggregated_params"])
             )
+            print(f"disaggregated_params5: {disaggregated_params}")
             disaggregated_params.request_type = "generation_only"
 
         if (
@@ -135,12 +153,18 @@ class HandlerBase:
             False if self.disaggregation_mode == DisaggregationMode.PREFILL else True
         )
 
+        print(f"inputs: {inputs}")
+        print(f"sampling_params: {sampling_params}")
+        print(f"disaggregated_params: {disaggregated_params}")
+        print(f"streaming: {streaming}")
+
         async for res in self.engine.llm.generate_async(
             inputs=inputs,
             sampling_params=sampling_params,
             disaggregated_params=disaggregated_params,
             streaming=streaming,
         ):
+            print(f"res: {res}")
             # TRTLLM engine needs to start generating tokens first before stats
             # can be retrieved.
             if self.first_generation and self.publisher:
