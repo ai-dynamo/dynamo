@@ -1,0 +1,105 @@
+FROM sgl-blackwell-wideep:latest
+
+# Define architecture variables for ARM64
+ARG ARCH=arm64
+ARG ARCH_ALT=aarch64
+
+WORKDIR /sgl-workspace
+# https://github.com/ai-dynamo/dynamo/pull/1938
+ARG DYNAMO_COMMIT="aba60996f225038b691d9f255da515b27695b179"
+RUN git clone https://github.com/ai-dynamo/dynamo.git && cd dynamo && git checkout ${DYNAMO_COMMIT}
+
+# install dynamo in editable mode
+WORKDIR /sgl-workspace/dynamo
+# Rust build/dev dependencies
+RUN apt update -y && \
+    apt install --no-install-recommends -y \
+    build-essential \
+    protobuf-compiler \
+    cmake \
+    libssl-dev \
+    pkg-config \
+    clang \
+    libclang-dev \
+    git
+
+# Define Rust target based on ARCH_ALT ARG
+ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH \
+    RUST_VERSION=1.86.0
+
+# Install Rust using RUSTARCH derived from ARCH_ALT
+RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
+    # TODO: Add SHA check back based on RUSTARCH
+    chmod +x rustup-init && \
+    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
+    rm rustup-init && \
+    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
+
+ARG CARGO_BUILD_JOBS
+# Set CARGO_BUILD_JOBS to 16 if not provided
+# This is to prevent cargo from building $(nproc) jobs in parallel,
+# which might exceed the number of opened files limit.
+ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
+
+RUN cargo build --release
+RUN mkdir -p deploy/sdk/src/dynamo/sdk/cli/bin
+RUN cp target/release/dynamo-run deploy/sdk/src/dynamo/sdk/cli/bin
+
+RUN cd lib/bindings/python && pip install --break-system-packages -e . && cd ../../..
+RUN pip install --break-system-packages -e .
+
+ENV PYTHONPATH=/sgl-workspace/dynamo/components/planner/src:/sgl-workspace/dynamo/examples/sglang:$PYTHONPATH
+
+RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-${ARCH}.deb && \
+    dpkg -i nats-server-v2.10.28-${ARCH}.deb && rm nats-server-v2.10.28-${ARCH}.deb
+
+ENV ETCD_VERSION="v3.5.21"
+RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
+    mkdir -p /usr/local/bin/etcd && \
+    tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
+    rm /tmp/etcd.tar.gz
+ENV PATH=/usr/local/bin/etcd/:$PATH
+
+COPY examples/sglang/configs/deepseek_r1/wideep/* /sgl-workspace/dynamo/examples/sglang/configs/
+COPY examples/sglang/utils/benchmarking/* /sgl-workspace/dynamo/examples/sglang/utils/
+
+ENV PYTHONPATH=/sgl-workspace/dynamo/deploy/sdk/src:/workspace/dynamo/components/planner/src:/workspace/examples/sglang:$PYTHONPATH
+
+# properly install cmake so that gap can be installed
+RUN cmake --version
+
+ARG CMAKE_VERSION=3.31.8
+RUN mkdir /sgl-workspace/cmake_build
+WORKDIR /sgl-workspace/cmake_build
+
+# uninstall CMake
+RUN apt-get purge -y cmake
+# download newer version of CMake
+RUN wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
+    tar -xvzf cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
+    mv cmake-${CMAKE_VERSION}-linux-$(uname -m) custom_cmake
+ENV PATH=/sgl-workspace/cmake_build/custom_cmake/bin:$PATH
+
+# should be 3.31.8
+RUN cmake --version
+
+# Install perf_analyzer and genai-perf
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    rapidjson-dev \
+    zlib1g-dev
+
+RUN git clone --depth=1 https://github.com/triton-inference-server/perf_analyzer.git && \
+    mkdir perf_analyzer/build && \
+    cmake -B perf_analyzer/build -S perf_analyzer && \
+    cmake --build perf_analyzer/build -- -j8
+
+ENV PATH=/sgl-workspace/perf_analyzer/build/perf_analyzer/src/perf-analyzer-build:$PATH
+
+RUN pip install --break-system-packages genai-perf
+
+WORKDIR /sgl-workspace/dynamo/examples/sglang

@@ -71,10 +71,8 @@ RUN rm -rf /opt/hpcx/ucx && \
 
 ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
 
-# Pinning to NIXL 0.2.1 right now
-# There is a fix that was merged into SGLang after 0.4.8.post1
-# TODO: Investigate perf hit of that change before we bump to up to date NIXL
-ARG NIXL_COMMIT="5e4c179ee850d482a83cb2a211e0947e46281060"
+# Pinnning to NIXL 0.3.1
+ARG NIXL_COMMIT="3503658e71143b56f9d5b1b440d84a94b9c41af8"
 RUN git clone https://github.com/ai-dynamo/nixl.git && cd nixl && git checkout ${NIXL_COMMIT} && pip install --break-system-packages . --config-settings=setup-args="-Ducx_path=/usr/local/ucx"
 
 WORKDIR /sgl-workspace
@@ -89,10 +87,7 @@ RUN pip install --break-system-packages "sglang==0.4.8.post1"
 ENV SGL_FORCE_SHUTDOWN=1
 
 WORKDIR /sgl-workspace
-# include flush cache endpoint and server support
-# https://github.com/ai-dynamo/dynamo/pull/1769
-ARG DYNAMO_COMMIT="bd91dca6141e05bcfbe9bd4dea54cc58b9e37d75"
-RUN git clone https://github.com/ai-dynamo/dynamo.git && cd dynamo && git checkout ${DYNAMO_COMMIT}
+RUN git clone https://github.com/ai-dynamo/dynamo.git
 
 # install dynamo in editable mode
 WORKDIR /sgl-workspace/dynamo

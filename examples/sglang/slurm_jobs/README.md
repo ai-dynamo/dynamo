@@ -61,6 +61,9 @@ For simplicity of the example, we will make some assumptions about your SLURM cl
 
 ## Usage
 
+> [!NOTE]
+> The logic for finding prefill and decode node IPs in [`job_script_template.j2`](job_script_template.j2) is still a work in progress. You may need to tweak the `srun`/`ip route`/`getent`/`awk` bits for your cluster, especially if your networking or hostname conventions differ. PRs and suggestions welcome.
+
 1. **Submit a benchmark job**:
    ```bash
    python submit_job_script.py \
@@ -85,20 +88,54 @@ For simplicity of the example, we will make some assumptions about your SLURM cl
    - `--network-interface`: Network interface to use (default: `eth3`)
    - `--job-name`: SLURM job name (default: `dynamo_setup`)
    - `--time-limit`: Time limit in HH:MM:SS format (default: `01:00:00`)
+   - `--gpu-type`: GPU type to use, choices: `h100`, `gb200` (default: `h100`)
+   - `--use-sglang-commands`: Use SGLang commands instead of Dynamo (default: `false`)
 
    **Note**: The script automatically calculates the total number of nodes needed based on `--prefill-nodes` and `--decode-nodes` parameters.
 
-2. **Monitor job progress**:
+2. **Example with different GPU types**:
+   ```bash
+   # For H100 with Dynamo (default)
+   python submit_job_script.py \
+     --template job_script_template.j2 \
+     --model-dir /path/to/model \
+     --config-dir /path/to/configs \
+     --container-image container-image-uri \
+     --account your-slurm-account \
+     --gpu-type h100
+
+   # For GB200 with SGLang
+   python submit_job_script.py \
+     --template job_script_template.j2 \
+     --model-dir /path/to/model \
+     --config-dir /path/to/configs \
+     --container-image container-image-uri \
+     --account your-slurm-account \
+     --gpu-type gb200 \
+     --use-sglang-commands
+     --gpus-per-node 4
+   ```
+
+3. **Monitor job progress**:
    ```bash
    squeue -u $USER
    ```
 
-3. **Check logs in real-time**:
+4. **Check logs in real-time**:
    ```bash
    tail -f logs/{JOB_ID}/log.out
    ```
 
-4. **Monitor GPU utilization**:
+   You can view logs of all prefill or decode workers simultaneously by running:
+   ```bash
+   # prefill workers err (or .out)
+   tail -f logs/{JOB_ID}/*_prefill.err
+
+   # decode workers err (or .out)
+   tail -f logs/{JOB_ID}/*_decode.err
+   ```
+
+5. **Monitor GPU utilization**:
    ```bash
    tail -f logs/{JOB_ID}/{node}_prefill_gpu_utilization.log
    ```
