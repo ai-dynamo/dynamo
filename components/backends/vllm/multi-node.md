@@ -63,10 +63,10 @@ Deploy vLLM workers across multiple nodes for horizontal scaling:
 **Node 1 (Head Node)**: Run ingress and first worker
 ```bash
 # Start ingress
-dynamo run in=http out=dyn
+python -m dynamo.frontend --router-mode kv
 
 # Start vLLM worker
-python3 components/main.py \
+python -m dynamo.vllm \
   --model meta-llama/Llama-3.3-70B-Instruct \
   --tensor-parallel-size 8 \
   --enforce-eager
@@ -75,7 +75,7 @@ python3 components/main.py \
 **Node 2**: Run additional worker
 ```bash
 # Start vLLM worker
-python3 components/main.py \
+python -m dynamo.vllm \
   --model meta-llama/Llama-3.3-70B-Instruct \
   --tensor-parallel-size 8 \
   --enforce-eager
@@ -88,10 +88,10 @@ Deploy prefill and decode workers on separate nodes for optimized resource utili
 **Node 1**: Run ingress and prefill workers
 ```bash
 # Start ingress
-dynamo run in=http out=dyn &
+python -m dynamo.frontend --router-mode kv &
 
 # Start prefill worker
-python3 components/main.py \
+python -m dynamo.vllm \
   --model meta-llama/Llama-3.3-70B-Instruct
   --tensor-parallel-size 8 \
   --enforce-eager
@@ -100,7 +100,7 @@ python3 components/main.py \
 **Node 2**: Run decode workers
 ```bash
 # Start decode worker
-python3 components/main.py \
+python -m dynamo.vllm \
   --model meta-llama/Llama-3.3-70B-Instruct
   --tensor-parallel-size 8 \
   --enforce-eager \
@@ -117,6 +117,6 @@ For models requiring more GPUs than available on a single node such as tensor-pa
 **Node 1**: First part of tensor-parallel model
 ```bash
 # Start ingress
-dynamo run in=http out=dyn &
+python -m dynamo.frontend --router-mode kv &
 ```
 
