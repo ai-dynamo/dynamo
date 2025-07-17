@@ -76,7 +76,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 
 # run ingress if it's node 0
 if [ $NODE_RANK -eq 0 ]; then
-    DYN_LOG=debug dynamo-run in=http out=dyn --router-mode kv 2>&1 | tee $LOG_DIR/dsr1_dep_ingress.log &
+    DYN_LOG=debug python -m dynamo.frontend --router-mode kv 2>&1 | tee $LOG_DIR/dsr1_dep_ingress.log &
 fi
 
 mkdir -p $LOG_DIR
@@ -89,7 +89,7 @@ for ((i=0; i<GPUS_PER_NODE; i++)); do
         VLLM_ALL2ALL_BACKEND="deepep_low_latency" \
         VLLM_USE_DEEP_GEMM=1 \
         VLLM_RANDOMIZE_DP_DUMMY_INPUTS=1 \
-        python3 components/main.py \
+        python3 -m dynamo.vllm \
         --model deepseek-ai/DeepSeek-R1 \
         --data_parallel_size $DATA_PARALLEL_SIZE \
         --data-parallel-rank $dp_rank \
