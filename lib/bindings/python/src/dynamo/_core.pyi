@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from enum import Enum
 from typing import (
     Any,
     AsyncGenerator,
@@ -829,11 +830,20 @@ class ModelType:
     """What type of request this model needs: Chat, Component or Backend (pre-processed)"""
     ...
 
-class RouterMode:
+class RouterMode(Enum):
     """Router mode for load balancing requests across workers"""
-    RoundRobin: 'RouterMode'
-    Random: 'RouterMode'
-    KV: 'RouterMode'
+    ...
+    #RoundRobin: 'RouterMode'
+    #Random: 'RouterMode'
+    #KV: 'RouterMode'
+
+class RouterConfig:
+    """How to route the request"""
+    ...
+
+class KvRouterConfig:
+    """Values for KV router"""
+    ...
 
 async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str] = None, context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None, router_mode: Optional[RouterMode] = None) -> None:
     """Attach the model at path to the given endpoint, and advertise it as model_type"""

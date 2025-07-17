@@ -102,8 +102,8 @@ impl LocalModelBuilder {
         self
     }
 
-    pub fn router_config(&mut self, router_config: RouterConfig) -> &mut Self {
-        self.router_config = Some(router_config);
+    pub fn router_config(&mut self, router_config: Option<RouterConfig>) -> &mut Self {
+        self.router_config = router_config;
         self
     }
 
