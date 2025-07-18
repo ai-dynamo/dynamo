@@ -765,7 +765,7 @@ mod tests {
             "Scheduler still have {active_tokens} active tokens but expected 0"
         );
 
-        let waiting_tokens = scheduler.active_tokens().await;
+        let waiting_tokens = scheduler.waiting_tokens().await;
         assert!(
             waiting_tokens == 0,
             "Scheduler still have {waiting_tokens} waiting tokens but expected 0"
