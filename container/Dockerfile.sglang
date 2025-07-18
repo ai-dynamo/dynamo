@@ -38,6 +38,7 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 # Redeclare ARCH and ARCH_ALT so they're available in this stage
 ARG ARCH
 ARG ARCH_ALT
+ARG NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
 
 USER root
 ARG PYTHON_VERSION=3.12
