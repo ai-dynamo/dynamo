@@ -33,4 +33,6 @@ const (
 	ComponentTypePlanner      = "planner"
 	ComponentTypeMain         = "main"
 	PlannerServiceAccountName = "planner-serviceaccount"
+
+	DefaultIngressSuffix = "local"
 )

@@ -34,6 +34,7 @@ dynamo-operator:
   imagePullSecrets: []
   dynamo:
     enableLWS: false
+    enableGrove: false
     internalImages:
       debugger: python:3.12-slim
     enableRestrictedSecurityContext: false

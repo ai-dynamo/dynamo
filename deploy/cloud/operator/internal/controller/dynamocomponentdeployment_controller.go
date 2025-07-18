@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/imdario/mergo"
@@ -41,7 +40,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
-	istioNetworking "istio.io/api/networking/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -73,7 +72,6 @@ const (
 	DeploymentTargetTypeProduction                       = "production"
 	DeploymentTargetTypeDebug                            = "debug"
 	HeaderNameDebug                                      = "X-Nvidia-Debug"
-	DefaultIngressSuffix                                 = "local"
 	KubernetesDeploymentStrategy                         = "kubernetes"
 
 	KubeAnnotationDeploymentType = "nvidia.com/deployment-type"
@@ -88,10 +86,7 @@ type DynamoComponentDeploymentReconciler struct {
 	client.Client
 	Recorder              record.EventRecorder
 	Config                controller_common.Config
-	NatsAddr              string
-	EtcdAddr              string
 	EtcdStorage           etcdStorage
-	UseVirtualService     bool
 	DockerSecretRetriever dockerSecretRetriever
 }
 
@@ -952,7 +947,7 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx 
 	if err != nil {
 		return false, err
 	}
-	if r.UseVirtualService {
+	if r.Config.IngressConfig.UseVirtualService() {
 		modified_, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
 			return r.generateVirtualService(ctx, opt)
 		})
@@ -975,49 +970,11 @@ func (r *DynamoComponentDeploymentReconciler) generateIngress(ctx context.Contex
 		},
 	}
 
-	if !opt.dynamoComponentDeployment.Spec.Ingress.Enabled || opt.dynamoComponentDeployment.Spec.Ingress.IngressControllerClassName == nil {
+	if opt.dynamoComponentDeployment.Spec.Ingress == nil || !opt.dynamoComponentDeployment.Spec.Ingress.Enabled || opt.dynamoComponentDeployment.Spec.Ingress.IngressControllerClassName == nil {
 		log.Info("Ingress is not enabled")
 		return ingress, true, nil
 	}
-	host := getIngressHost(opt.dynamoComponentDeployment.Spec.Ingress)
-
-	ingress.Spec = networkingv1.IngressSpec{
-		IngressClassName: opt.dynamoComponentDeployment.Spec.Ingress.IngressControllerClassName,
-		Rules: []networkingv1.IngressRule{
-			{
-				Host: host,
-				IngressRuleValue: networkingv1.IngressRuleValue{
-					HTTP: &networkingv1.HTTPIngressRuleValue{
-						Paths: []networkingv1.HTTPIngressPath{
-							{
-								Path:     "/",
-								PathType: &[]networkingv1.PathType{networkingv1.PathTypePrefix}[0],
-								Backend: networkingv1.IngressBackend{
-									Service: &networkingv1.IngressServiceBackend{
-										Name: opt.dynamoComponentDeployment.Name,
-										Port: networkingv1.ServiceBackendPort{
-											Number: commonconsts.DynamoServicePort,
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	if opt.dynamoComponentDeployment.Spec.Ingress.TLS != nil {
-		ingress.Spec.TLS = []networkingv1.IngressTLS{
-			{
-				Hosts:      []string{host},
-				SecretName: opt.dynamoComponentDeployment.Spec.Ingress.TLS.SecretName,
-			},
-		}
-	}
-
-	return ingress, false, nil
+	return dynamo.GenerateComponentIngress(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, *opt.dynamoComponentDeployment.Spec.Ingress), false, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context.Context, opt generateResourceOption) (*networkingv1beta1.VirtualService, bool, error) {
@@ -1031,40 +988,12 @@ func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context
 		},
 	}
 
-	vsEnabled := opt.dynamoComponentDeployment.Spec.Ingress.Enabled && opt.dynamoComponentDeployment.Spec.Ingress.UseVirtualService && opt.dynamoComponentDeployment.Spec.Ingress.VirtualServiceGateway != nil
+	vsEnabled := opt.dynamoComponentDeployment.Spec.Ingress != nil && opt.dynamoComponentDeployment.Spec.Ingress.Enabled && opt.dynamoComponentDeployment.Spec.Ingress.UseVirtualService && opt.dynamoComponentDeployment.Spec.Ingress.VirtualServiceGateway != nil
 	if !vsEnabled {
 		log.Info("VirtualService is not enabled")
 		return vs, true, nil
 	}
-
-	vs.Spec = istioNetworking.VirtualService{
-		Hosts: []string{
-			getIngressHost(opt.dynamoComponentDeployment.Spec.Ingress),
-		},
-		Gateways: []string{*opt.dynamoComponentDeployment.Spec.Ingress.VirtualServiceGateway},
-		Http: []*istioNetworking.HTTPRoute{
-			{
-				Match: []*istioNetworking.HTTPMatchRequest{
-					{
-						Uri: &istioNetworking.StringMatch{
-							MatchType: &istioNetworking.StringMatch_Prefix{Prefix: "/"},
-						},
-					},
-				},
-				Route: []*istioNetworking.HTTPRouteDestination{
-					{
-						Destination: &istioNetworking.Destination{
-							Host: opt.dynamoComponentDeployment.Name,
-							Port: &istioNetworking.PortSelector{
-								Number: commonconsts.DynamoServicePort,
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-	return vs, false, nil
+	return dynamo.GenerateComponentVirtualService(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, *opt.dynamoComponentDeployment.Spec.Ingress), false, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) getKubeName(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, debug bool) string {
@@ -1274,7 +1203,6 @@ func (r *DynamoComponentDeploymentReconciler) generateHPA(opt generateResourceOp
 
 //nolint:gocyclo,nakedret
 func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption) (podTemplateSpec *corev1.PodTemplateSpec, err error) {
-	logs := log.FromContext(ctx)
 	podLabels := r.getKubeLabels(opt.dynamoComponentDeployment)
 	if opt.isStealingTrafficDebugModeEnabled {
 		podLabels[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
@@ -1333,17 +1261,17 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		},
 	}
 
-	if r.NatsAddr != "" {
+	if r.Config.NatsAddress != "" {
 		defaultEnvs = append(defaultEnvs, corev1.EnvVar{
 			Name:  "NATS_SERVER",
-			Value: r.NatsAddr,
+			Value: r.Config.NatsAddress,
 		})
 	}
 
-	if r.EtcdAddr != "" {
+	if r.Config.EtcdAddress != "" {
 		defaultEnvs = append(defaultEnvs, corev1.EnvVar{
 			Name:  "ETCD_ENDPOINTS",
-			Value: r.EtcdAddr,
+			Value: r.Config.EtcdAddress,
 		})
 	}
 
@@ -1365,34 +1293,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	volumes := make([]corev1.Volume, 0)
 	volumeMounts := make([]corev1.VolumeMount, 0)
-
-	args := make([]string, 0)
-
-	args = append(args, "cd", "src", "&&", "uv", "run", "dynamo", "serve")
-
-	// ensure liveness and readiness probes are enabled for the dynamo components
-	args = append(args, "--system-app-port", fmt.Sprintf("%d", commonconsts.DynamoHealthPort))
-	args = append(args, "--enable-system-app")
-	args = append(args, "--use-default-health-checks")
-
-	if opt.dynamoComponentDeployment.Spec.ServiceName != "" {
-		args = append(args, []string{"--service-name", opt.dynamoComponentDeployment.Spec.ServiceName}...)
-		args = append(args, opt.dynamoComponentDeployment.Spec.DynamoTag)
-		if opt.dynamoComponentDeployment.Spec.DynamoNamespace != nil && *opt.dynamoComponentDeployment.Spec.DynamoNamespace != "" {
-			args = append(args, fmt.Sprintf("--%s.ServiceArgs.dynamo.namespace=%s", opt.dynamoComponentDeployment.Spec.ServiceName, *opt.dynamoComponentDeployment.Spec.DynamoNamespace))
-		}
-		if componentType, exists := opt.dynamoComponentDeployment.Labels[commonconsts.KubeLabelDynamoComponent]; exists && componentType == ComponentTypePlanner {
-			args = append(args, fmt.Sprintf("--%s.environment=%s", opt.dynamoComponentDeployment.Spec.ServiceName, KubernetesDeploymentStrategy))
-		}
-	}
-
-	if len(opt.dynamoComponentDeployment.Spec.Envs) > 0 {
-		for _, env := range opt.dynamoComponentDeployment.Spec.Envs {
-			if env.Name == "DYNAMO_CONFIG_PATH" {
-				args = append(args, "-f", env.Value)
-			}
-		}
-	}
 
 	dynamoResources := opt.dynamoComponentDeployment.Spec.Resources
 
@@ -1468,8 +1368,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	container := corev1.Container{
 		Name:           "main",
 		Image:          imageName,
-		Command:        []string{"sh", "-c"},
-		Args:           []string{strings.Join(args, " ")},
 		LivenessProbe:  livenessProbe,
 		ReadinessProbe: readinessProbe,
 		Resources:      resources,
@@ -1566,23 +1464,8 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	if opt.dynamoComponentDeployment.Spec.ExtraPodSpec != nil {
 		extraPodSpecMainContainer := opt.dynamoComponentDeployment.Spec.ExtraPodSpec.MainContainer
 		if extraPodSpecMainContainer != nil {
-			if len(extraPodSpecMainContainer.Command) > 0 {
-				logs.Info("Overriding container '" + container.Name + "' Command with: " + strings.Join(extraPodSpecMainContainer.Command, " "))
-				container.Command = extraPodSpecMainContainer.Command
-			}
-			if len(extraPodSpecMainContainer.Args) > 0 {
-				// Special case: if command is "sh -c", we must collapse args into a single string
-				if len(container.Command) == 2 && container.Command[0] == "sh" && container.Command[1] == "-c" {
-					joinedArgs := strings.Join(extraPodSpecMainContainer.Args, " ")
-					logs.Info("Special case detected for container '" + container.Name + "': Command is 'sh -c'; collapsing Args to: " + joinedArgs)
-					container.Args = []string{joinedArgs}
-				} else {
-					logs.Info("Overriding container '" + container.Name + "' Args with: " + strings.Join(extraPodSpecMainContainer.Args, " "))
-					container.Args = extraPodSpecMainContainer.Args
-				}
-			}
-			// finally, Merge non empty fields from extraPodSpecMainContainer into container, only overriding empty fields
-			err := mergo.Merge(&container, extraPodSpecMainContainer)
+			// Merge non empty fields from extraPodSpecMainContainer into container, only overriding empty fields
+			err := mergo.Merge(&container, extraPodSpecMainContainer.DeepCopy())
 			if err != nil {
 				err = errors.Wrapf(err, "failed to merge extraPodSpecMainContainer into container")
 				return nil, err
@@ -1723,7 +1606,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 }
 
 func getResourcesConfig(resources *dynamoCommon.Resources) (corev1.ResourceRequirements, error) {
-	currentResources := corev1.ResourceRequirements{
+	defaultResources := corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("300m"),
 			corev1.ResourceMemory: resource.MustParse("500Mi"),
@@ -1733,86 +1616,18 @@ func getResourcesConfig(resources *dynamoCommon.Resources) (corev1.ResourceRequi
 			corev1.ResourceMemory: resource.MustParse("1Gi"),
 		},
 	}
-
 	if resources == nil {
-		return currentResources, nil
+		return defaultResources, nil
 	}
-
-	if resources.Limits != nil {
-		if resources.Limits.CPU != "" {
-			q, err := resource.ParseQuantity(resources.Limits.CPU)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse limits cpu quantity")
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceCPU] = q
-		}
-		if resources.Limits.Memory != "" {
-			q, err := resource.ParseQuantity(resources.Limits.Memory)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse limits memory quantity")
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceMemory] = q
-		}
-		if resources.Limits.GPU != "" {
-			q, err := resource.ParseQuantity(resources.Limits.GPU)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse limits gpu quantity")
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[commonconsts.KubeResourceGPUNvidia] = q
-		}
-		for k, v := range resources.Limits.Custom {
-			q, err := resource.ParseQuantity(v)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse limits %s quantity", k)
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceName(k)] = q
-		}
+	resourcesConfig, err := controller_common.GetResourcesConfig(resources)
+	if err != nil {
+		return corev1.ResourceRequirements{}, errors.Wrapf(err, "failed to get resources config")
 	}
-	if resources.Requests != nil {
-		if resources.Requests.CPU != "" {
-			q, err := resource.ParseQuantity(resources.Requests.CPU)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse requests cpu quantity")
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[corev1.ResourceCPU] = q
-		}
-		if resources.Requests.Memory != "" {
-			q, err := resource.ParseQuantity(resources.Requests.Memory)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse requests memory quantity")
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[corev1.ResourceMemory] = q
-		}
-		for k, v := range resources.Requests.Custom {
-			q, err := resource.ParseQuantity(v)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse requests %s quantity", k)
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[corev1.ResourceName(k)] = q
-		}
+	err = mergo.Merge(resourcesConfig, defaultResources.DeepCopy())
+	if err != nil {
+		return corev1.ResourceRequirements{}, errors.Wrapf(err, "failed to merge resources config")
 	}
-	return currentResources, nil
+	return *resourcesConfig, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResourceOption) (*corev1.Service, bool, error) {
@@ -1930,7 +1745,7 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 			}))
 	}
 
-	if r.UseVirtualService {
+	if r.Config.IngressConfig.UseVirtualService() {
 		m.Owns(&networkingv1beta1.VirtualService{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))
 	}
 	m.Owns(&autoscalingv2.HorizontalPodAutoscaler{})

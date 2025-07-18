@@ -278,7 +278,7 @@ func TestDynamoComponentDeploymentReconciler_generateIngress(t *testing.T) {
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								ServiceName:     "service1",
 								DynamoNamespace: &[]string{"default"}[0],
-								Ingress: v1alpha1.IngressSpec{
+								Ingress: &v1alpha1.IngressSpec{
 									Enabled:                    true,
 									Host:                       "someservice",
 									IngressControllerClassName: &[]string{"nginx"}[0],
@@ -337,7 +337,7 @@ func TestDynamoComponentDeploymentReconciler_generateIngress(t *testing.T) {
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								ServiceName:     "service1",
 								DynamoNamespace: &[]string{"default"}[0],
-								Ingress: v1alpha1.IngressSpec{
+								Ingress: &v1alpha1.IngressSpec{
 									Enabled: false,
 								},
 							},
@@ -400,7 +400,7 @@ func TestDynamoComponentDeploymentReconciler_generateVirtualService(t *testing.T
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								ServiceName:     "service1",
 								DynamoNamespace: &[]string{"default"}[0],
-								Ingress: v1alpha1.IngressSpec{
+								Ingress: &v1alpha1.IngressSpec{
 									Enabled: true,
 								},
 							},
@@ -432,7 +432,7 @@ func TestDynamoComponentDeploymentReconciler_generateVirtualService(t *testing.T
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								ServiceName:     "service1",
 								DynamoNamespace: &[]string{"default"}[0],
-								Ingress: v1alpha1.IngressSpec{
+								Ingress: &v1alpha1.IngressSpec{
 									Enabled:               true,
 									Host:                  "someservice",
 									UseVirtualService:     true,
@@ -495,13 +495,10 @@ func TestDynamoComponentDeploymentReconciler_generateVirtualService(t *testing.T
 
 func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.T) {
 	type fields struct {
-		Client            client.Client
-		Recorder          record.EventRecorder
-		Config            controller_common.Config
-		NatsAddr          string
-		EtcdAddr          string
-		EtcdStorage       etcdStorage
-		UseVirtualService bool
+		Client      client.Client
+		Recorder    record.EventRecorder
+		Config      controller_common.Config
+		EtcdStorage etcdStorage
 	}
 	type args struct {
 		ctx context.Context
@@ -755,13 +752,10 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 			r := &DynamoComponentDeploymentReconciler{
-				Client:            tt.fields.Client,
-				Recorder:          tt.fields.Recorder,
-				Config:            tt.fields.Config,
-				NatsAddr:          tt.fields.NatsAddr,
-				EtcdAddr:          tt.fields.EtcdAddr,
-				EtcdStorage:       tt.fields.EtcdStorage,
-				UseVirtualService: tt.fields.UseVirtualService,
+				Client:      tt.fields.Client,
+				Recorder:    tt.fields.Recorder,
+				Config:      tt.fields.Config,
+				EtcdStorage: tt.fields.EtcdStorage,
 			}
 			got, got1, err := r.generateVolcanoPodGroup(tt.args.ctx, tt.args.opt)
 			if (err != nil) != tt.wantErr {
@@ -789,10 +783,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 		Client                client.Client
 		Recorder              record.EventRecorder
 		Config                controller_common.Config
-		NatsAddr              string
-		EtcdAddr              string
 		EtcdStorage           etcdStorage
-		UseVirtualService     bool
 		DockerSecretRetriever *mockDockerSecretRetriever
 	}
 	type args struct {
@@ -847,6 +838,13 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								ExtraPodSpec: &dynamoCommon.ExtraPodSpec{
 									MainContainer: &corev1.Container{
 										Image: "test-image:latest",
+										Command: []string{
+											"sh",
+											"-c",
+										},
+										Args: []string{
+											"some dynamo command",
+										},
 									},
 								},
 							},
@@ -897,7 +895,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Name:    "main",
 										Image:   "test-image:latest",
 										Command: []string{"sh", "-c"},
-										Args:    []string{"ray start --head --port=6379 && cd src && uv run dynamo serve --system-app-port 5000 --enable-system-app --use-default-health-checks --service-name test-lws-deploy-service test-tag --test-lws-deploy-service.ServiceArgs.dynamo.namespace=default"},
+										Args:    []string{"ray start --head --port=6379 && some dynamo command"},
 										Env:     []corev1.EnvVar{{Name: "DYNAMO_PORT", Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort)}},
 										VolumeMounts: []corev1.VolumeMount{
 											{
@@ -1095,10 +1093,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 				Client:                fakeKubeClient, // Use the fake client
 				Recorder:              tt.fields.Recorder,
 				Config:                tt.fields.Config,
-				NatsAddr:              tt.fields.NatsAddr,
-				EtcdAddr:              tt.fields.EtcdAddr,
 				EtcdStorage:           tt.fields.EtcdStorage,
-				UseVirtualService:     tt.fields.UseVirtualService,
 				DockerSecretRetriever: tt.fields.DockerSecretRetriever,
 				// Scheme: s, // Pass scheme if reconciler uses it directly, often client uses it
 			}
