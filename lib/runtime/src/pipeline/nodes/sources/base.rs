@@ -68,7 +68,7 @@ impl<In: PipelineIO, Out: PipelineIO + AsyncEngineContextProvider> Sink<Out> for
 }
 
 #[async_trait]
-impl<In: PipelineIO, Out: PipelineIO> AsyncEngine<In, Out, Error> for Frontend<In, Out> {
+impl<In: PipelineIO + Sync, Out: PipelineIO> AsyncEngine<In, Out, Error> for Frontend<In, Out> {
     async fn generate(&self, request: In) -> Result<Out, Error> {
         let (tx, rx) = oneshot::channel::<Out>();
         {

@@ -44,7 +44,7 @@ pub async fn run(
         // Only set if user provides. Usually loaded from tokenizer_config.json
         .context_length(flags.context_length)
         .http_port(Some(flags.http_port))
-        .router_config(flags.router_config())
+        .router_config(Some(flags.router_config()))
         .request_template(flags.request_template.clone());
 
     // If `in=dyn` we want the trtllm/sglang/vllm subprocess to listen on that endpoint.

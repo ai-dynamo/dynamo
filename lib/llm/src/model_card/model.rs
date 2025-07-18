@@ -62,6 +62,7 @@ pub enum TokenizerKind {
 #[serde(rename_all = "snake_case")]
 pub enum PromptFormatterArtifact {
     HfTokenizerConfigJson(String),
+    HfChatTemplate(String),
     GGUF(PathBuf),
 }
 
@@ -100,6 +101,10 @@ pub struct ModelDeploymentCard {
     /// Prompt Formatter configuration
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_formatter: Option<PromptFormatterArtifact>,
+
+    /// chat template may be stored as a separate file instead of in `prompt_formatter`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_template_file: Option<PromptFormatterArtifact>,
 
     /// Generation config - default sampling params
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -260,6 +265,11 @@ impl ModelDeploymentCard {
             "tokenizer_config.json"
         );
         nats_upload!(
+            self.chat_template_file,
+            PromptFormatterArtifact::HfChatTemplate,
+            "chat_template.jinja"
+        );
+        nats_upload!(
             self.tokenizer,
             TokenizerKind::HfTokenizerJson,
             "tokenizer.json"
@@ -307,6 +317,11 @@ impl ModelDeploymentCard {
             self.prompt_formatter,
             PromptFormatterArtifact::HfTokenizerConfigJson,
             "tokenizer_config.json"
+        );
+        nats_download!(
+            self.chat_template_file,
+            PromptFormatterArtifact::HfChatTemplate,
+            "chat_template.jinja"
         );
         nats_download!(
             self.tokenizer,

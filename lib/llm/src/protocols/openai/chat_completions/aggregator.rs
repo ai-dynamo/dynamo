@@ -13,9 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::{collections::HashMap, pin::Pin};
-
-use futures::{Stream, StreamExt};
+use futures::StreamExt;
+use std::collections::HashMap;
 
 use super::{NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse};
 use crate::protocols::{
@@ -24,7 +23,7 @@ use crate::protocols::{
 };
 
 /// A type alias for a pinned, dynamically-dispatched stream that is `Send` and `Sync`.
-type DataStream<T> = Pin<Box<dyn Stream<Item = T> + Send + Sync>>;
+use dynamo_runtime::engine::DataStream;
 
 /// Aggregates a stream of [`NvCreateChatCompletionStreamResponse`]s into a single
 /// [`NvCreateChatCompletionResponse`]. This struct accumulates incremental responses
