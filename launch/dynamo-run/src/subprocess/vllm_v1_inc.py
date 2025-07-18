@@ -65,6 +65,7 @@ class Config:
     tensor_parallel_size: int
     kv_block_size: int
     context_length: int
+    migration_limit: int
     extra_engine_args: str
 
 
@@ -218,6 +219,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         config.model_path,
         config.model_name,
         kv_cache_block_size=config.kv_block_size,
+        migration_limit=config.migration_limit,
     )
 
     arg_map = {
@@ -334,6 +336,12 @@ def cmd_line_args():
         help="Max model context length. Defaults to models max, usually model_max_length from tokenizer_config.json. Reducing this reduces VRAM requirements.",
     )
     parser.add_argument(
+        "--migration-limit",
+        type=int,
+        default=0,
+        help="Maximum number of times a request may be migrated to a different engine worker. The number may be overridden by the engine.",
+    )
+    parser.add_argument(
         "--extra-engine-args",
         type=str,
         default="",
@@ -365,6 +373,7 @@ def cmd_line_args():
     config.tensor_parallel_size = args.tensor_parallel_size
     config.kv_block_size = args.kv_block_size
     config.context_length = args.context_length
+    config.migration_limit = args.migration_limit
     config.extra_engine_args = args.extra_engine_args
 
     return config

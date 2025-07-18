@@ -8,9 +8,13 @@ use pyo3::{exceptions::PyException, prelude::*};
 
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::EngineConfig as RsEngineConfig;
+use dynamo_llm::entrypoint::RouterConfig as RsRouterConfig;
+use dynamo_llm::kv_router::KvRouterConfig as RsKvRouterConfig;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_llm::mocker::protocols::MockEngineArgs;
 use dynamo_runtime::protocols::Endpoint as EndpointId;
+
+use crate::RouterMode;
 
 #[pyclass(eq, eq_int)]
 #[derive(Clone, Debug, PartialEq)]
@@ -19,6 +23,56 @@ pub enum EngineType {
     Echo = 1,
     Dynamic = 2,
     Mocker = 3,
+}
+
+#[pyclass]
+#[derive(Default, Clone, Debug, Copy)]
+pub struct KvRouterConfig {
+    inner: RsKvRouterConfig,
+}
+
+#[pymethods]
+impl KvRouterConfig {
+    #[new]
+    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true))]
+    fn new(overlap_score_weight: f64, router_temperature: f64, use_kv_events: bool) -> Self {
+        KvRouterConfig {
+            inner: RsKvRouterConfig {
+                overlap_score_weight,
+                router_temperature,
+                use_kv_events,
+                ..Default::default()
+            },
+        }
+    }
+}
+
+#[pyclass]
+#[derive(Clone, Debug)]
+pub struct RouterConfig {
+    router_mode: RouterMode,
+    kv_router_config: KvRouterConfig,
+}
+
+#[pymethods]
+impl RouterConfig {
+    #[new]
+    #[pyo3(signature = (mode, config=None))]
+    pub fn new(mode: RouterMode, config: Option<KvRouterConfig>) -> Self {
+        Self {
+            router_mode: mode,
+            kv_router_config: config.unwrap_or_default(),
+        }
+    }
+}
+
+impl From<RouterConfig> for RsRouterConfig {
+    fn from(rc: RouterConfig) -> RsRouterConfig {
+        RsRouterConfig {
+            router_mode: rc.router_mode.into(),
+            kv_router_config: rc.kv_router_config.inner,
+        }
+    }
 }
 
 #[pyclass]
@@ -31,7 +85,7 @@ pub(crate) struct EntrypointArgs {
     endpoint_id: Option<EndpointId>,
     context_length: Option<u32>,
     template_file: Option<PathBuf>,
-    //router_config: Option<RouterConfig>,
+    router_config: Option<RouterConfig>,
     kv_cache_block_size: Option<u32>,
     http_port: Option<u16>,
     extra_engine_args: Option<PathBuf>,
@@ -41,7 +95,7 @@ pub(crate) struct EntrypointArgs {
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, model_config=None, endpoint_id=None, context_length=None, template_file=None, kv_cache_block_size=None, http_port=None, extra_engine_args=None))]
+    #[pyo3(signature = (engine_type, model_path=None, model_name=None, model_config=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_port=None, extra_engine_args=None))]
     pub fn new(
         engine_type: EngineType,
         model_path: Option<PathBuf>,
@@ -50,7 +104,7 @@ impl EntrypointArgs {
         endpoint_id: Option<String>,
         context_length: Option<u32>,
         template_file: Option<PathBuf>,
-        //router_config: Option<RouterConfig>,
+        router_config: Option<RouterConfig>,
         kv_cache_block_size: Option<u32>,
         http_port: Option<u16>,
         extra_engine_args: Option<PathBuf>,
@@ -71,7 +125,7 @@ impl EntrypointArgs {
             endpoint_id: endpoint_id_obj,
             context_length,
             template_file,
-            //router_config,
+            router_config,
             kv_cache_block_size,
             http_port,
             extra_engine_args,
@@ -101,6 +155,7 @@ pub fn make_engine<'p>(
         .context_length(args.context_length)
         .request_template(args.template_file.clone())
         .kv_cache_block_size(args.kv_cache_block_size)
+        .router_config(args.router_config.clone().map(|rc| rc.into()))
         .http_port(args.http_port);
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let local_model = builder.build().await.map_err(to_pyerr)?;

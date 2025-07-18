@@ -75,8 +75,14 @@ impl<T: Send + Sync + 'static> Context<T> {
         }
     }
 
+    /// Get the id of the context
     pub fn id(&self) -> &str {
         self.controller.id()
+    }
+
+    /// Get the content of the context
+    pub fn content(&self) -> &T {
+        &self.current
     }
 
     pub fn controller(&self) -> &Controller {

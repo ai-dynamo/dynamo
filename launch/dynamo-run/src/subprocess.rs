@@ -48,6 +48,8 @@ pub async fn start(
         card.kv_cache_block_size.to_string(),
         "--context-length".to_string(),
         card.context_length.to_string(),
+        "--migration-limit".to_string(),
+        card.migration_limit.to_string(),
     ];
     // TRTLLM only
     // The worker node will only publish events and metrics if the router mode is KV

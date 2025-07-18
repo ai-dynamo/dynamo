@@ -29,20 +29,6 @@ ARG ARCH_ALT=x86_64
 ARG SGLANG_VERSION="0.4.9.post1"
 ARG SGL_KERNEL_VERSION="0.2.4"
 
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS nixl_base
-
-# Redeclare ARCH and ARCH_ALT so they're available in this stage
-ARG ARCH
-ARG ARCH_ALT
-
-WORKDIR /opt/nixl
-# Add a cache hint that only changes when the nixl commit changes
-ARG NIXL_COMMIT
-# This line acts as a cache key - it only changes when NIXL_COMMIT changes
-RUN echo "NIXL commit: ${NIXL_COMMIT}" > /opt/nixl/commit.txt
-# Copy the nixl source
-COPY --from=nixl . .
-
 ##################################
 ########## Base Image ############
 ##################################
@@ -52,6 +38,7 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 # Redeclare ARCH and ARCH_ALT so they're available in this stage
 ARG ARCH
 ARG ARCH_ALT
+ARG NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
 
 USER root
 ARG PYTHON_VERSION=3.12
@@ -111,9 +98,10 @@ SHELL ["/bin/bash", "-c"]
 WORKDIR /workspace
 
 ### NIXL SETUP ###
-# Copy nixl source, and use commit hash as cache hint
-COPY --from=nixl_base /opt/nixl /opt/nixl
-COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
+# Clone nixl source, and checkout the nixl ref
+RUN git clone "https://github.com/ai-dynamo/nixl.git" /opt/nixl && \
+    cd /opt/nixl && \
+    git checkout ${NIXL_REF}
 RUN if [ "$ARCH" = "arm64" ]; then \
         cd /opt/nixl && \
         mkdir build && \

@@ -162,6 +162,11 @@ pub struct Flags {
     #[arg(long)]
     pub request_template: Option<PathBuf>,
 
+    /// How many times a request can be migrated to another worker if the HTTP server lost
+    /// connection to the current worker.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(0..1024))]
+    pub migration_limit: Option<u32>,
+
     /// Everything after a `--`.
     /// These are the command line arguments to the python engine when using `pystr` or `pytok`.
     #[arg(index = 2, last = true, hide = true, allow_hyphen_values = true)]
@@ -179,6 +184,9 @@ impl Flags {
                 }
                 if self.kv_cache_block_size.is_some() {
                     anyhow::bail!("'--kv-cache-block-size' flag should only be used on the worker node, not on the ingress");
+                }
+                if self.migration_limit.is_some() {
+                    anyhow::bail!("'--migration-limit' flag should only be used on the worker node, not on the ingress");
                 }
             }
             Output::EchoFull => {}

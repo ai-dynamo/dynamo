@@ -6,14 +6,8 @@ use crate::pipeline::{
     SingleIn,
 };
 use arc_swap::ArcSwap;
-use rand::Rng;
 use std::collections::HashMap;
-use std::sync::RwLock;
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc, Mutex,
-};
-use std::time::Instant;
+use std::sync::Arc;
 use tokio::net::unix::pipe::Receiver;
 
 use crate::{
@@ -48,10 +42,8 @@ pub struct Client {
     pub endpoint: Endpoint,
     // These are the remotes I know about from watching etcd
     pub instance_source: Arc<InstanceSource>,
-    // These are the instances that are reported as down from sending rpc
-    instance_inhibited: Arc<Mutex<HashMap<i64, Instant>>>,
-    // The current active IDs
-    instance_cache: Arc<ArcSwap<Vec<i64>>>,
+    // These are the instance source ids less those reported as down from sending rpc
+    instance_avail: Arc<ArcSwap<Vec<i64>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -60,16 +52,13 @@ pub enum InstanceSource {
     Dynamic(tokio::sync::watch::Receiver<Vec<Instance>>),
 }
 
-// TODO: Avoid returning a full clone of `Vec<Instance>` everytime from Client
-//       See instances() and instances_avail() methods
 impl Client {
     // Client will only talk to a single static endpoint
     pub(crate) async fn new_static(endpoint: Endpoint) -> Result<Self> {
         Ok(Client {
             endpoint,
             instance_source: Arc::new(InstanceSource::Static),
-            instance_inhibited: Arc::new(Mutex::new(HashMap::new())),
-            instance_cache: Arc::new(ArcSwap::from(Arc::new(vec![]))),
+            instance_avail: Arc::new(ArcSwap::from(Arc::new(vec![]))),
         })
     }
 
@@ -85,26 +74,12 @@ impl Client {
         let instance_source =
             Self::get_or_create_dynamic_instance_source(etcd_client, &endpoint).await?;
 
-        let cancel_token = endpoint.drt().primary_token();
         let client = Client {
             endpoint,
             instance_source,
-            instance_inhibited: Arc::new(Mutex::new(HashMap::new())),
-            instance_cache: Arc::new(ArcSwap::from(Arc::new(vec![]))),
+            instance_avail: Arc::new(ArcSwap::from(Arc::new(vec![]))),
         };
-
-        let instance_source_c = client.instance_source.clone();
-        let instance_inhibited_c = Arc::clone(&client.instance_inhibited);
-        let instance_cache_c = Arc::clone(&client.instance_cache);
-        tokio::task::spawn(async move {
-            while !cancel_token.is_cancelled() {
-                refresh_instances(&instance_source_c, &instance_inhibited_c, &instance_cache_c);
-                tokio::select! {
-                    _ = cancel_token.cancelled() => {}
-                    _ = tokio::time::sleep(INSTANCE_REFRESH_PERIOD) => {}
-                }
-            }
-        });
+        client.monitor_instance_source();
         Ok(client)
     }
 
@@ -119,11 +94,18 @@ impl Client {
 
     /// Instances available from watching etcd
     pub fn instances(&self) -> Vec<Instance> {
-        instances_inner(self.instance_source.as_ref())
+        match self.instance_source.as_ref() {
+            InstanceSource::Static => vec![],
+            InstanceSource::Dynamic(watch_rx) => watch_rx.borrow().clone(),
+        }
     }
 
     pub fn instance_ids(&self) -> Vec<i64> {
         self.instances().into_iter().map(|ep| ep.id()).collect()
+    }
+
+    pub fn instance_ids_avail(&self) -> arc_swap::Guard<Arc<Vec<i64>>> {
+        self.instance_avail.load()
     }
 
     /// Wait for at least one Instance to be available for this Endpoint
@@ -143,24 +125,51 @@ impl Client {
         Ok(instances)
     }
 
-    /// Instances available from watching etcd minus those reported as down
-    pub fn instance_ids_avail(&self) -> arc_swap::Guard<Arc<Vec<i64>>> {
-        self.instance_cache.load()
+    /// Is this component know at startup and not discovered via etcd?
+    pub fn is_static(&self) -> bool {
+        matches!(self.instance_source.as_ref(), InstanceSource::Static)
     }
 
     /// Mark an instance as down/unavailable
     pub fn report_instance_down(&self, instance_id: i64) {
-        self.instance_inhibited
-            .lock()
-            .unwrap()
-            .insert(instance_id, Instant::now());
+        let filtered = self
+            .instance_ids_avail()
+            .iter()
+            .filter_map(|&id| if id == instance_id { None } else { Some(id) })
+            .collect::<Vec<_>>();
+        self.instance_avail.store(Arc::new(filtered));
 
         tracing::debug!("inhibiting instance {instance_id}");
     }
 
-    /// Is this component know at startup and not discovered via etcd?
-    pub fn is_static(&self) -> bool {
-        matches!(self.instance_source.as_ref(), InstanceSource::Static)
+    /// Monitor the ETCD instance source and update instance_avail.
+    fn monitor_instance_source(&self) {
+        let cancel_token = self.endpoint.drt().primary_token();
+        let client = self.clone();
+        tokio::task::spawn(async move {
+            let mut rx = match client.instance_source.as_ref() {
+                InstanceSource::Static => {
+                    tracing::error!("Static instance source is not watchable");
+                    return;
+                }
+                InstanceSource::Dynamic(rx) => rx.clone(),
+            };
+            while !cancel_token.is_cancelled() {
+                let instance_ids: Vec<i64> = rx
+                    .borrow_and_update()
+                    .iter()
+                    .map(|instance| instance.id())
+                    .collect();
+                client.instance_avail.store(Arc::new(instance_ids));
+
+                tracing::debug!("instance source updated");
+
+                if let Err(err) = rx.changed().await {
+                    tracing::error!("The Sender is dropped: {}", err);
+                    cancel_token.cancel();
+                }
+            }
+        });
     }
 
     async fn get_or_create_dynamic_instance_source(
@@ -251,51 +260,5 @@ impl Client {
         let instance_source = Arc::new(InstanceSource::Dynamic(watch_rx));
         instance_sources.insert(endpoint.clone(), Arc::downgrade(&instance_source));
         Ok(instance_source)
-    }
-}
-
-/// Update the instance id cache
-fn refresh_instances(
-    instance_source: &InstanceSource,
-    instance_inhibited: &Arc<Mutex<HashMap<i64, Instant>>>,
-    instance_cache: &Arc<ArcSwap<Vec<i64>>>,
-) {
-    const ETCD_LEASE_TTL: u64 = 10; // seconds
-
-    // TODO: Can we get the remaining TTL from the lease for the instance?
-    let now = Instant::now();
-
-    let instances = instances_inner(instance_source);
-    let mut inhibited = instance_inhibited.lock().unwrap();
-
-    // 1. Remove inhibited instances that are no longer in `self.instances()`
-    // 2. Remove inhibited instances that have expired
-    // 3. Only return instances that are not inhibited after removals
-    let mut new_inhibited = HashMap::<i64, Instant>::new();
-    let filtered: Vec<i64> = instances
-        .into_iter()
-        .filter_map(|instance| {
-            let id = instance.id();
-            if let Some(&timestamp) = inhibited.get(&id) {
-                if now.duration_since(timestamp).as_secs() > ETCD_LEASE_TTL {
-                    Some(id)
-                } else {
-                    new_inhibited.insert(id, timestamp);
-                    None
-                }
-            } else {
-                Some(id)
-            }
-        })
-        .collect();
-
-    *inhibited = new_inhibited;
-    instance_cache.store(Arc::new(filtered));
-}
-
-fn instances_inner(instance_source: &InstanceSource) -> Vec<Instance> {
-    match instance_source {
-        InstanceSource::Static => vec![],
-        InstanceSource::Dynamic(watch_rx) => watch_rx.borrow().clone(),
     }
 }

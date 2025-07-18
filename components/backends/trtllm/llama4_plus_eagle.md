@@ -32,7 +32,6 @@ For advanced control over how requests are routed between prefill and decode wor
 ## Notes
 * To run Eagle Speculative Decoding with Llama 4, ensure the container meets the following criteria:
   * Built with a version of TensorRT-LLM based on the 0.21 release [Link](https://github.com/NVIDIA/TensorRT-LLM/tree/release/0.21)
-  * The TensorRT-LLM build includes the changes from this PR [Link](https://github.com/NVIDIA/TensorRT-LLM/pull/5975)
 * If you need to download model weights off huggingface, make sure you run the command `huggingface-cli login` and have access to the necessary gated models.
 
 

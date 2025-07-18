@@ -3,14 +3,13 @@
 
 use std::{
     collections::HashSet,
-    pin::Pin,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
@@ -18,14 +17,17 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use dynamo_runtime::pipeline::{AsyncEngineContext, Context};
-use futures::{Stream, StreamExt};
+use dynamo_runtime::{
+    pipeline::{AsyncEngineContextProvider, Context},
+    protocols::annotated::AnnotationsProvider,
+};
+use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
+    disconnect::{create_connection_monitor, monitor_for_disconnects, ConnectionHandle},
     error::HttpError,
-    metrics::{Endpoint, InflightGuard, ResponseMetricCollector},
+    metrics::{Endpoint, ResponseMetricCollector},
     service_v2, RouteDoc,
 };
 use crate::preprocessor::LLMMetricAnnotation;
@@ -38,17 +40,24 @@ use crate::protocols::openai::{
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
 
+pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
+
+/// Dynamo Annotation for the request ID
+pub const ANNOTATION_REQUEST_ID: &str = "request_id";
+
+pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
+
 #[derive(Serialize, Deserialize)]
-pub(crate) struct ErrorResponse {
+pub(crate) struct ErrorMessage {
     error: String,
 }
 
-impl ErrorResponse {
+impl ErrorMessage {
     /// Not Found Error
-    pub fn model_not_found() -> (StatusCode, Json<ErrorResponse>) {
+    pub fn model_not_found() -> ErrorResponse {
         (
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
+            Json(ErrorMessage {
                 error: "Model not found".to_string(),
             }),
         )
@@ -56,10 +65,10 @@ impl ErrorResponse {
 
     /// Service Unavailable
     /// This is returned when the service is live, but not ready.
-    pub fn _service_unavailable() -> (StatusCode, Json<ErrorResponse>) {
+    pub fn _service_unavailable() -> ErrorResponse {
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(ErrorResponse {
+            Json(ErrorMessage {
                 error: "Service is not ready".to_string(),
             }),
         )
@@ -69,11 +78,11 @@ impl ErrorResponse {
     /// Return this error when the service encounters an internal error.
     /// We should return a generic message to the client instead of the real error.
     /// Internal Services errors are the result of misconfiguration or bugs in the service.
-    pub fn internal_server_error(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
+    pub fn internal_server_error(msg: &str) -> ErrorResponse {
         tracing::error!("Internal server error: {msg}");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
+            Json(ErrorMessage {
                 error: msg.to_string(),
             }),
         )
@@ -82,11 +91,11 @@ impl ErrorResponse {
     /// Not Implemented Error
     /// Return this error when the client requests a feature that is not yet implemented.
     /// This should be used for features that are planned but not available.
-    pub fn not_implemented_error(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
+    pub fn not_implemented_error(msg: &str) -> ErrorResponse {
         tracing::error!("Not Implemented error: {msg}");
         (
             StatusCode::NOT_IMPLEMENTED,
-            Json(ErrorResponse {
+            Json(ErrorMessage {
                 error: msg.to_string(),
             }),
         )
@@ -94,31 +103,56 @@ impl ErrorResponse {
 
     /// The OAI endpoints call an [`dynamo.runtime::engine::AsyncEngine`] which are specialized to return
     /// an [`anyhow::Error`]. This method will convert the [`anyhow::Error`] into an [`HttpError`].
-    /// If successful, it will return the [`HttpError`] as an [`ErrorResponse::internal_server_error`]
+    /// If successful, it will return the [`HttpError`] as an [`ErrorMessage::internal_server_error`]
     /// with the details of the error.
-    pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> (StatusCode, Json<ErrorResponse>) {
+    pub fn from_anyhow(err: anyhow::Error, alt_msg: &str) -> ErrorResponse {
         match err.downcast::<HttpError>() {
-            Ok(http_error) => ErrorResponse::from_http_error(http_error),
-            Err(err) => ErrorResponse::internal_server_error(&format!("{alt_msg}: {err}")),
+            Ok(http_error) => ErrorMessage::from_http_error(http_error),
+            Err(err) => ErrorMessage::internal_server_error(&format!("{alt_msg}: {err}")),
         }
     }
 
     /// Implementers should only be able to throw 400-499 errors.
-    pub fn from_http_error(err: HttpError) -> (StatusCode, Json<ErrorResponse>) {
+    pub fn from_http_error(err: HttpError) -> ErrorResponse {
         if err.code < 400 || err.code >= 500 {
-            return ErrorResponse::internal_server_error(&err.message);
+            return ErrorMessage::internal_server_error(&err.message);
         }
         match StatusCode::from_u16(err.code) {
-            Ok(code) => (code, Json(ErrorResponse { error: err.message })),
-            Err(_) => ErrorResponse::internal_server_error(&err.message),
+            Ok(code) => (code, Json(ErrorMessage { error: err.message })),
+            Err(_) => ErrorMessage::internal_server_error(&err.message),
         }
     }
 }
 
-impl From<HttpError> for ErrorResponse {
+impl From<HttpError> for ErrorMessage {
     fn from(err: HttpError) -> Self {
-        ErrorResponse { error: err.message }
+        ErrorMessage { error: err.message }
     }
+}
+
+/// Get the request ID from a primary source, or next from the headers, or lastly create a new one if not present
+fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
+    // Try to get the request ID from the primary source
+    if let Some(primary) = primary {
+        if let Ok(uuid) = uuid::Uuid::parse_str(primary) {
+            return uuid.to_string();
+        }
+    }
+
+    // Try to get the request ID header as a string slice
+    let request_id_opt = headers
+        .get(DYNAMO_REQUEST_ID_HEADER)
+        .and_then(|h| h.to_str().ok());
+
+    // Try to parse the request ID as a UUID, or generate a new one if missing/invalid
+    let uuid = match request_id_opt {
+        Some(request_id) => {
+            uuid::Uuid::parse_str(request_id).unwrap_or_else(|_| uuid::Uuid::new_v4())
+        }
+        None => uuid::Uuid::new_v4(),
+    };
+
+    uuid.to_string()
 }
 
 /// OpenAI Completions Request Handler
@@ -129,11 +163,46 @@ impl From<HttpError> for ErrorResponse {
 ///
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
+async fn handler_completions(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(request): Json<NvCreateCompletionRequest>,
+) -> Result<Response, ErrorResponse> {
+    // return a 503 if the service is not ready
+    check_ready(&state)?;
+
+    // create the context for the request
+    let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let request = Context::with_id(request, request_id);
+    let context = request.context();
+
+    // create the connection handles
+    let (mut connection_handle, stream_handle) = create_connection_monitor(context.clone()).await;
+
+    // possibly long running task
+    // if this returns a streaming response, the stream handle will be armed and captured by the response stream
+    let response = tokio::spawn(completions(state, request, stream_handle))
+        .await
+        .map_err(|e| {
+            ErrorMessage::internal_server_error(&format!(
+                "Failed to await chat completions task: {:?}",
+                e,
+            ))
+        })?;
+
+    // if we got here, then we will return a response and the potentially long running task has completed successfully
+    // without need to be cancelled.
+    connection_handle.disarm();
+
+    response
+}
+
 #[tracing::instrument(skip_all)]
 async fn completions(
-    State(state): State<Arc<service_v2::State>>,
-    Json(request): Json<NvCreateCompletionRequest>,
-) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    state: Arc<service_v2::State>,
+    request: Context<NvCreateCompletionRequest>,
+    stream_handle: ConnectionHandle,
+) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
@@ -144,15 +213,10 @@ async fn completions(
     let streaming = request.inner.stream.unwrap_or(false);
 
     // update the request to always stream
-    let inner = async_openai::types::CreateCompletionRequest {
-        stream: Some(true),
-        ..request.inner
-    };
-
-    let request = NvCreateCompletionRequest {
-        inner,
-        nvext: request.nvext,
-    };
+    let request = request.map(|mut req| {
+        req.inner.stream = Some(true);
+        req
+    });
 
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
@@ -162,7 +226,7 @@ async fn completions(
     let engine = state
         .manager()
         .get_completions_engine(model)
-        .map_err(|_| ErrorResponse::model_not_found())?;
+        .map_err(|_| ErrorMessage::model_not_found())?;
 
     let mut inflight_guard =
         state
@@ -171,27 +235,43 @@ async fn completions(
 
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
-    // setup context
-    // todo - inherit request_id from distributed trace details
-    let request = Context::with_id(request, request_id.clone());
+    // prepare to process any annotations
+    let annotations = request.annotations();
 
     // issue the generate call on the engine
     let stream = engine
         .generate(request)
         .await
-        .map_err(|e| ErrorResponse::from_anyhow(e, "Failed to generate completions"))?;
+        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
 
-    // todo - tap the stream and propagate request level metrics
-    // note - we might do this as part of the post processing set to make it more generic
+    let annotations = annotations.map_or(Vec::new(), |annotations| {
+        annotations
+            .iter()
+            .filter_map(|annotation| {
+                if annotation == ANNOTATION_REQUEST_ID {
+                    Annotated::<NvCreateCompletionResponse>::from_annotation(
+                        ANNOTATION_REQUEST_ID,
+                        &request_id,
+                    )
+                    .ok()
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+
+    // apply any annotations to the front of the stream
+    let stream = stream::iter(annotations).chain(stream);
 
     if streaming {
         let stream = stream.map(move |response| {
             process_event_converter(EventConverter::from(response), &mut response_collector)
         });
-        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight_guard).await;
+        let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
         let mut sse_stream = Sse::new(stream);
 
@@ -202,7 +282,7 @@ async fn completions(
         Ok(sse_stream.into_response())
     } else {
         // TODO: report ISL/OSL for non-streaming requests
-        let response = NvCreateCompletionResponse::from_annotated_stream(stream.into())
+        let response = NvCreateCompletionResponse::from_annotated_stream(stream)
             .await
             .map_err(|e| {
                 tracing::error!(
@@ -210,7 +290,7 @@ async fn completions(
                     request_id,
                     e
                 );
-                ErrorResponse::internal_server_error("Failed to fold completions stream")
+                ErrorMessage::internal_server_error("Failed to fold completions stream")
             })?;
 
         inflight_guard.mark_ok();
@@ -222,7 +302,7 @@ async fn completions(
 async fn embeddings(
     State(state): State<Arc<service_v2::State>>,
     Json(request): Json<NvCreateEmbeddingRequest>,
-) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
@@ -240,7 +320,7 @@ async fn embeddings(
     let engine = state
         .manager()
         .get_embeddings_engine(model)
-        .map_err(|_| ErrorResponse::model_not_found())?;
+        .map_err(|_| ErrorMessage::model_not_found())?;
 
     // this will increment the inflight gauge for the model
     let mut inflight =
@@ -256,11 +336,11 @@ async fn embeddings(
     let stream = engine
         .generate(request)
         .await
-        .map_err(|e| ErrorResponse::from_anyhow(e, "Failed to generate embeddings"))?;
+        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate embeddings"))?;
 
     // Embeddings are typically returned as a single response (non-streaming)
     // so we fold the stream into a single response
-    let response = NvCreateEmbeddingResponse::from_annotated_stream(stream.into())
+    let response = NvCreateEmbeddingResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -268,11 +348,43 @@ async fn embeddings(
                 request_id,
                 e
             );
-            ErrorResponse::internal_server_error("Failed to fold embeddings stream")
+            ErrorMessage::internal_server_error("Failed to fold embeddings stream")
         })?;
 
     inflight.mark_ok();
     Ok(Json(response).into_response())
+}
+
+async fn handler_chat_completions(
+    State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    headers: HeaderMap,
+    Json(request): Json<NvCreateChatCompletionRequest>,
+) -> Result<Response, ErrorResponse> {
+    // return a 503 if the service is not ready
+    check_ready(&state)?;
+
+    // create the context for the request
+    let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let request = Context::with_id(request, request_id);
+    let context = request.context();
+
+    // create the connection handles
+    let (mut connection_handle, stream_handle) = create_connection_monitor(context.clone()).await;
+
+    let response = tokio::spawn(chat_completions(state, template, request, stream_handle))
+        .await
+        .map_err(|e| {
+            ErrorMessage::internal_server_error(&format!(
+                "Failed to await chat completions task: {:?}",
+                e,
+            ))
+        })?;
+
+    // if we got here, then we will return a response and the potentially long running task has completed successfully
+    // without need to be cancelled.
+    connection_handle.disarm();
+
+    response
 }
 
 /// OpenAI Chat Completions Request Handler
@@ -283,21 +395,23 @@ async fn embeddings(
 ///
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
-#[tracing::instrument(skip_all)]
+#[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id()))]
 async fn chat_completions(
-    State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
-    Json(mut request): Json<NvCreateChatCompletionRequest>,
-) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    state: Arc<service_v2::State>,
+    template: Option<RequestTemplate>,
+    mut request: Context<NvCreateChatCompletionRequest>,
+    mut stream_handle: ConnectionHandle,
+) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
+
+    let request_id = request.id().to_string();
 
     // Handle unsupported fields - if Some(resp) is returned by
     // validate_chat_completion_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
     // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceeed.
-    if let Some(resp) = validate_chat_completion_unsupported_fields(&request) {
-        return Ok(resp.into_response());
-    }
+    validate_chat_completion_unsupported_fields(&request)?;
 
     // Apply template values if present
     if let Some(template) = template {
@@ -311,24 +425,16 @@ async fn chat_completions(
             request.inner.max_completion_tokens = Some(template.max_completion_tokens);
         }
     }
-    tracing::trace!("Received chat completions request: {:?}", request.inner);
-
-    // todo - extract distributed tracing id and context id from headers
-    let request_id = uuid::Uuid::new_v4().to_string();
+    tracing::trace!("Received chat completions request: {:?}", request.content());
 
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
 
     // update the request to always stream
-    let inner_request = async_openai::types::CreateChatCompletionRequest {
-        stream: Some(true),
-        ..request.inner
-    };
-
-    let request = NvCreateChatCompletionRequest {
-        inner: inner_request,
-        nvext: request.nvext,
-    };
+    let request = request.map(|mut req| {
+        req.inner.stream = Some(true);
+        req
+    });
 
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
@@ -340,7 +446,7 @@ async fn chat_completions(
     let engine = state
         .manager()
         .get_chat_completions_engine(model)
-        .map_err(|_| ErrorResponse::model_not_found())?;
+        .map_err(|_| ErrorMessage::model_not_found())?;
 
     let mut inflight_guard =
         state
@@ -349,29 +455,45 @@ async fn chat_completions(
 
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
-    // setup context
-    // todo - inherit request_id from distributed trace details
-    let request = Context::with_id(request, request_id.clone());
-
     tracing::trace!("Issuing generate call for chat completions");
+    let annotations = request.annotations();
 
     // issue the generate call on the engine
     let stream = engine
         .generate(request)
         .await
-        .map_err(|e| ErrorResponse::from_anyhow(e, "Failed to generate completions"))?;
+        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
 
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
+
+    // prepare any requested annotations
+    let annotations = annotations.map_or(Vec::new(), |annotations| {
+        annotations
+            .iter()
+            .filter_map(|annotation| {
+                if annotation == ANNOTATION_REQUEST_ID {
+                    Annotated::from_annotation(ANNOTATION_REQUEST_ID, &request_id).ok()
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+
+    // apply any annotations to the front of the stream
+    let stream = stream::iter(annotations).chain(stream);
 
     // todo - tap the stream and propagate request level metrics
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
+        stream_handle.arm();
+
         let stream = stream.map(move |response| {
             process_event_converter(EventConverter::from(response), &mut response_collector)
         });
-        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight_guard).await;
+        let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
         let mut sse_stream = Sse::new(stream);
 
@@ -382,7 +504,7 @@ async fn chat_completions(
         Ok(sse_stream.into_response())
     } else {
         // TODO: report ISL/OSL for non-streaming requests
-        let response = NvCreateChatCompletionResponse::from_annotated_stream(stream.into())
+        let response = NvCreateChatCompletionResponse::from_annotated_stream(stream)
             .await
             .map_err(|e| {
                 tracing::error!(
@@ -390,7 +512,7 @@ async fn chat_completions(
                     "Failed to fold chat completions stream for: {:?}",
                     e
                 );
-                ErrorResponse::internal_server_error(&format!(
+                ErrorMessage::internal_server_error(&format!(
                     "Failed to fold chat completions stream: {}",
                     e
                 ))
@@ -406,44 +528,77 @@ async fn chat_completions(
 #[allow(deprecated)]
 pub fn validate_chat_completion_unsupported_fields(
     request: &NvCreateChatCompletionRequest,
-) -> Option<impl IntoResponse> {
+) -> Result<(), ErrorResponse> {
     let inner = &request.inner;
 
     if inner.parallel_tool_calls == Some(true) {
-        return Some(ErrorResponse::not_implemented_error(
+        return Err(ErrorMessage::not_implemented_error(
             "`parallel_tool_calls: true` is not supported.",
         ));
     }
 
     if inner.stream == Some(true) && inner.tools.is_some() {
-        return Some(ErrorResponse::not_implemented_error(
+        return Err(ErrorMessage::not_implemented_error(
             "`stream: true` is not supported when `tools` are provided.",
         ));
     }
 
     if inner.function_call.is_some() {
-        return Some(ErrorResponse::not_implemented_error(
+        return Err(ErrorMessage::not_implemented_error(
             "`function_call` is deprecated. Please migrate to use `tool_choice` instead.",
         ));
     }
 
     if inner.functions.is_some() {
-        return Some(ErrorResponse::not_implemented_error(
+        return Err(ErrorMessage::not_implemented_error(
             "`functions` is deprecated. Please migrate to use `tools` instead.",
         ));
     }
 
-    None
+    Ok(())
 }
 
 /// OpenAI Responses Request Handler
 ///
 /// This method will handle the incoming request for the /v1/responses endpoint.
-#[tracing::instrument(skip_all)]
-async fn responses(
+async fn handler_responses(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
-    Json(mut request): Json<NvCreateResponse>,
-) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+    headers: HeaderMap,
+    Json(request): Json<NvCreateResponse>,
+) -> Result<Response, ErrorResponse> {
+    // return a 503 if the service is not ready
+    check_ready(&state)?;
+
+    // create the context for the request
+    let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let request = Context::with_id(request, request_id);
+    let context = request.context();
+
+    // create the connection handles
+    let (mut connection_handle, _stream_handle) = create_connection_monitor(context.clone()).await;
+
+    let response = tokio::spawn(responses(state, template, request))
+        .await
+        .map_err(|e| {
+            ErrorMessage::internal_server_error(&format!(
+                "Failed to await chat completions task: {:?}",
+                e,
+            ))
+        })?;
+
+    // if we got here, then we will return a response and the potentially long running task has completed successfully
+    // without need to be cancelled.
+    connection_handle.disarm();
+
+    response
+}
+
+#[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id()))]
+async fn responses(
+    state: Arc<service_v2::State>,
+    template: Option<RequestTemplate>,
+    mut request: Context<NvCreateResponse>,
+) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
@@ -476,20 +631,25 @@ async fn responses(
     }
     tracing::trace!("Received chat completions request: {:?}", request.inner);
 
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = request.id().to_string();
+    let (request, context) = request.into_parts();
 
-    // Convert NvCreateResponse --> NvCreateChatCompletionRequest
-    let request: NvCreateChatCompletionRequest = request.try_into().map_err(|e| {
+    let mut request: NvCreateChatCompletionRequest = request.try_into().map_err(|e| {
         tracing::error!(
             request_id,
             "Failed to convert NvCreateResponse to NvCreateChatCompletionRequest: {:?}",
             e
         );
-        ErrorResponse::not_implemented_error(&format!(
+        ErrorMessage::not_implemented_error(&format!(
             "Only Input::Text(_) is currently supported: {}",
             e
         ))
     })?;
+
+    let request = context.map(|mut _req| {
+        request.inner.stream = Some(false);
+        request
+    });
 
     let model = &request.inner.model;
 
@@ -498,7 +658,7 @@ async fn responses(
     let engine = state
         .manager()
         .get_chat_completions_engine(model)
-        .map_err(|_| ErrorResponse::model_not_found())?;
+        .map_err(|_| ErrorMessage::model_not_found())?;
 
     let mut inflight_guard =
         state
@@ -507,18 +667,16 @@ async fn responses(
 
     let _response_collector = state.metrics_clone().create_response_collector(model);
 
-    let request = Context::with_id(request, request_id.clone());
-
     tracing::trace!("Issuing generate call for chat completions");
 
     // issue the generate call on the engine
     let stream = engine
         .generate(request)
         .await
-        .map_err(|e| ErrorResponse::from_anyhow(e, "Failed to generate completions"))?;
+        .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
 
     // TODO: handle streaming, currently just unary
-    let response = NvCreateChatCompletionResponse::from_annotated_stream(stream.into())
+    let response = NvCreateChatCompletionResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -526,7 +684,7 @@ async fn responses(
                 "Failed to fold chat completions stream for: {:?}",
                 e
             );
-            ErrorResponse::internal_server_error(&format!(
+            ErrorMessage::internal_server_error(&format!(
                 "Failed to fold chat completions stream: {}",
                 e
             ))
@@ -539,7 +697,7 @@ async fn responses(
             "Failed to convert NvCreateChatCompletionResponse to NvResponse: {:?}",
             e
         );
-        ErrorResponse::internal_server_error("Failed to convert internal response")
+        ErrorMessage::internal_server_error("Failed to convert internal response")
     })?;
 
     inflight_guard.mark_ok();
@@ -552,7 +710,7 @@ pub fn validate_response_input_is_text_only(
 ) -> Option<impl IntoResponse> {
     match &request.inner.input {
         async_openai::types::responses::Input::Text(_) => None,
-        _ => Some(ErrorResponse::not_implemented_error("Only `Input::Text` is supported. Structured, multimedia, or custom input types are not yet implemented.")),
+        _ => Some(ErrorMessage::not_implemented_error("Only `Input::Text` is supported. Structured, multimedia, or custom input types are not yet implemented.")),
     }
 }
 
@@ -564,87 +722,87 @@ pub fn validate_response_unsupported_fields(
     let inner = &request.inner;
 
     if inner.background == Some(true) {
-        return Some(ErrorResponse::not_implemented_error(
+        return Some(ErrorMessage::not_implemented_error(
             "`background: true` is not supported.",
         ));
     }
     if inner.include.is_some() {
-        return Some(ErrorResponse::not_implemented_error(
+        return Some(ErrorMessage::not_implemented_error(
             "`include` is not supported.",
         ));
     }
     if inner.instructions.is_some() {
-        return Some(ErrorResponse::not_implemented_error(
+        return Some(ErrorMessage::not_implemented_error(
             "`instructions` is not supported.",
         ));
     }
     if inner.max_tool_calls.is_some() {
-        return Some(ErrorResponse::not_implemented_error(
+        return Some(ErrorMessage::not_implemented_error(
             "`max_tool_calls` is not supported.",
         ));
     }
     if inner.metadata.is_some() {
-        return Some(ErrorResponse::not_implemented_error(
+        return Some(ErrorMessage::not_implemented_error(
             "`metadata` is not supported.",
         ));
     }
     if inner.parallel_tool_calls == Some(true) {
-        return Some(ErrorResponse::not_implemented_error(
+        return Some(ErrorMessage::not_implemented_error(
             "`parallel_tool_calls: true` is not supported.",
         ));
     }
     if inner.previous_response_id.is_some() {
-        return Some(ErrorResponse::not_implemented_error(
+        return Some(ErrorMessage::not_implemented_error(
             "`previous_response_id` is not supported.",
         ));
     }
     if inner.prompt.is_some() {
-        return Some(ErrorResponse::not_implemented_error(
+        return Some(ErrorMessage::not_implemented_error(
             "`prompt` is not supported.",
         ));
     }
     if inner.reasoning.is_some() {
-        return Some(ErrorResponse::not_implemented_error(
+        return Some(ErrorMessage::not_implemented_error(
             "`reasoning` is not supported.",
         ));
     }
     if inner.service_tier.is_some() {
-        return Some(ErrorResponse::not_implemented_error(
+        return Some(ErrorMessage::not_implemented_error(
             "`service_tier` is not supported.",
         ));
     }
     if inner.store == Some(true) {
-        return Some(ErrorResponse::not_implemented_error(
+        return Some(ErrorMessage::not_implemented_error(
             "`store: true` is not supported.",
         ));
     }
     if inner.stream == Some(true) {
-        return Some(ErrorResponse::not_implemented_error(
+        return Some(ErrorMessage::not_implemented_error(
             "`stream: true` is not supported.",
         ));
     }
     if inner.text.is_some() {
-        return Some(ErrorResponse::not_implemented_error(
+        return Some(ErrorMessage::not_implemented_error(
             "`text` is not supported.",
         ));
     }
     if inner.tool_choice.is_some() {
-        return Some(ErrorResponse::not_implemented_error(
+        return Some(ErrorMessage::not_implemented_error(
             "`tool_choice` is not supported.",
         ));
     }
     if inner.tools.is_some() {
-        return Some(ErrorResponse::not_implemented_error(
+        return Some(ErrorMessage::not_implemented_error(
             "`tools` is not supported.",
         ));
     }
     if inner.truncation.is_some() {
-        return Some(ErrorResponse::not_implemented_error(
+        return Some(ErrorMessage::not_implemented_error(
             "`truncation` is not supported.",
         ));
     }
     if inner.user.is_some() {
-        return Some(ErrorResponse::not_implemented_error(
+        return Some(ErrorMessage::not_implemented_error(
             "`user` is not supported.",
         ));
     }
@@ -654,9 +812,9 @@ pub fn validate_response_unsupported_fields(
 
 // todo - abstract this to the top level lib.rs to be reused
 // todo - move the service_observer to its own state/arc
-fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), ErrorResponse> {
     // if state.service_observer.stage() != ServiceStage::Ready {
-    //     return Err(ErrorResponse::service_unavailable());
+    //     return Err(ErrorMessage::service_unavailable());
     // }
     Ok(())
 }
@@ -676,7 +834,7 @@ fn check_ready(_state: &Arc<service_v2::State>) -> Result<(), (StatusCode, Json<
 /// }
 async fn list_models_openai(
     State(state): State<Arc<service_v2::State>>,
-) -> Result<Response, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Response, ErrorResponse> {
     check_ready(&state)?;
 
     let created = SystemTime::now()
@@ -714,45 +872,6 @@ struct ModelListing {
     object: &'static str, // always "object"
     created: u64,         //  Seconds since epoch
     owned_by: String,
-}
-
-/// This method will consume a stream of SSE events and forward them to a new stream defined by a tokio channel.
-/// In this way, if the downstream is dropped, then the upstream will be unable to send any more events. This is
-/// how we can monitor for disconnects and stop the generation of completions.
-///
-/// If a disconnect is detected, then the context will issue a `stop_generating` call to the context which will
-/// propagate the cancellation signal to the backend.
-async fn monitor_for_disconnects(
-    stream: Pin<
-        Box<dyn Stream<Item = Result<axum::response::sse::Event, axum::Error>> + std::marker::Send>,
-    >,
-    context: Arc<dyn AsyncEngineContext>,
-    mut inflight_guard: InflightGuard,
-) -> ReceiverStream<Result<Event, axum::Error>> {
-    let (tx, rx) = tokio::sync::mpsc::channel(8);
-
-    tokio::spawn(async move {
-        let mut stream = stream;
-        while let Some(event) = stream.next().await {
-            let event = match event {
-                Ok(event) => Ok(event),
-                Err(err) => Ok(Event::default().event("error").comment(err.to_string())),
-            };
-
-            if (tx.send(event).await).is_err() {
-                tracing::trace!("Forwarding SSE stream was dropped; breaking loop");
-                context.stop_generating();
-                break;
-            }
-        }
-
-        // Stream completed successfully - mark as ok
-        if tx.send(Ok(Event::default().data("[DONE]"))).await.is_ok() {
-            inflight_guard.mark_ok();
-        }
-    });
-
-    ReceiverStream::new(rx)
 }
 
 struct EventConverter<T>(Annotated<T>);
@@ -816,7 +935,7 @@ pub fn completions_router(
     let path = path.unwrap_or("/v1/completions".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
-        .route(&path, post(completions))
+        .route(&path, post(handler_completions))
         .with_state(state);
     (vec![doc], router)
 }
@@ -831,7 +950,7 @@ pub fn chat_completions_router(
     let path = path.unwrap_or("/v1/chat/completions".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
-        .route(&path, post(chat_completions))
+        .route(&path, post(handler_chat_completions))
         .with_state((state, template));
     (vec![doc], router)
 }
@@ -876,7 +995,7 @@ pub fn responses_router(
     let path = path.unwrap_or("/v1/responses".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
-        .route(&path, post(responses))
+        .route(&path, post(handler_responses))
         .with_state((state, template));
     (vec![doc], router)
 }
@@ -942,7 +1061,7 @@ mod tests {
     #[test]
     fn test_http_error_response_from_anyhow() {
         let err = http_error_from_engine(400).unwrap_err();
-        let (status, response) = ErrorResponse::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(status, StatusCode::BAD_REQUEST);
         assert_eq!(response.error, "custom error message");
     }
@@ -950,17 +1069,17 @@ mod tests {
     #[test]
     fn test_error_response_from_anyhow_out_of_range() {
         let err = http_error_from_engine(399).unwrap_err();
-        let (status, response) = ErrorResponse::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(response.error, "custom error message");
 
         let err = http_error_from_engine(500).unwrap_err();
-        let (status, response) = ErrorResponse::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(response.error, "custom error message");
 
         let err = http_error_from_engine(501).unwrap_err();
-        let (status, response) = ErrorResponse::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(response.error, "custom error message");
     }
@@ -968,7 +1087,7 @@ mod tests {
     #[test]
     fn test_other_error_response_from_anyhow() {
         let err = other_error_from_engine().unwrap_err();
-        let (status, response) = ErrorResponse::from_anyhow(err, BACKUP_ERROR_MESSAGE);
+        let (status, response) = ErrorMessage::from_anyhow(err, BACKUP_ERROR_MESSAGE);
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(
             response.error,

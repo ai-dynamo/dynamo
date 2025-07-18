@@ -122,6 +122,7 @@ class Config:
     model_name: Optional[str] = None
     tensor_parallel_size: int
     kv_block_size: int
+    migration_limit: int
     extra_engine_args: str
     publish_events_and_metrics: bool
     disaggregation_mode: str
@@ -136,6 +137,7 @@ class Config:
             f"model_name={self.model_name}, "
             f"tensor_parallel_size={self.tensor_parallel_size}, "
             f"kv_block_size={self.kv_block_size}, "
+            f"migration_limit={self.migration_limit}, "
             f"extra_engine_args={self.extra_engine_args}, "
             f"publish_events_and_metrics={self.publish_events_and_metrics}, "
             f"disaggregation_mode={self.disaggregation_mode}, "
@@ -404,6 +406,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 config.model_path,
                 config.model_name,
                 kv_cache_block_size=config.kv_block_size,
+                migration_limit=config.migration_limit,
             )
 
         # publisher will be set later if publishing is enabled.
@@ -475,6 +478,12 @@ def cmd_line_args():
         type=int,
         default=None,
         help="This argument is not used by TRTLLM. Please provide max_input_len, max_seq_len and max_output_len in yaml file and point --extra-engine-args to the yaml file.",
+    )
+    parser.add_argument(
+        "--migration-limit",
+        type=int,
+        default=0,
+        help="Maximum number of times a request may be migrated to a different engine worker. The number may be overridden by the engine.",
     )
     parser.add_argument(
         "--extra-engine-args",
@@ -557,6 +566,7 @@ def cmd_line_args():
     config.endpoint = parsed_endpoint_name
     config.tensor_parallel_size = args.tensor_parallel_size
     config.kv_block_size = args.kv_block_size
+    config.migration_limit = args.migration_limit
     config.extra_engine_args = args.extra_engine_args
     config.publish_events_and_metrics = args.publish_events_and_metrics
     config.disaggregation_mode = disaggregation_mode
