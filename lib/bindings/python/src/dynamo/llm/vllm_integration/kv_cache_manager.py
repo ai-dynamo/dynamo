@@ -217,7 +217,7 @@ class KvbmCacheManager(KVConnectorBase_V1):
             KVCacheBlock(block_id=block_id) for block_id in new_blocks.block_ids()
         ]
 
-        return KVCacheBlocks(blocks=new_blocks)
+        return KVCacheBlocks(blocks=(new_blocks,))
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.

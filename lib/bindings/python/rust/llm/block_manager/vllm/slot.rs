@@ -374,7 +374,7 @@ impl<L: LocalityProvider> Slot<DeviceStorage, L> {
         block_manager: &dynamo_llm::block_manager::KvBlockManager<L, BasicMetadata>,
     ) -> Result<(), SlotError> {
         if self.onboard_from_host.is_none() && self.onboard_from_disk.is_none() {
-            return Err(SlotError::from_str("no onboard blocks to trigger"));
+            return Ok(());
         }
 
         if let Some(host_blocks) = self.onboard_from_host.take() {
