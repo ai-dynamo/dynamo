@@ -85,10 +85,10 @@ docker compose -f deploy/metrics/docker-compose.yml up -d
 
 ```bash
 # On an x86 machine
-./container/build.sh --framework VLLM_V1
+./container/build.sh --framework VLLM
 
 # On an ARM machine (ex: GB200)
-./container/build.sh --framework VLLM_V1 --platform linux/arm64
+./container/build.sh --framework VLLM --platform linux/arm64
 ```
 
 ```{note}
@@ -98,10 +98,10 @@ You can tune the number of parallel build jobs for building VLLM from source
 on ARM based on your available cores and system RAM with `VLLM_MAX_JOBS`.
 
 For example, on an ARM machine with low system resources:
-`./container/build.sh --framework VLLM_V1 --platform linux/arm64 --build-arg VLLM_MAX_JOBS=2`
+`./container/build.sh --framework VLLM --platform linux/arm64 --build-arg VLLM_MAX_JOBS=2`
 
 For example, on a GB200 which has very high CPU cores and memory resource:
-`./container/build.sh --framework VLLM_V1 --platform linux/arm64 --build-arg VLLM_MAX_JOBS=64`
+`./container/build.sh --framework VLLM --platform linux/arm64 --build-arg VLLM_MAX_JOBS=64`
 
 When vLLM has pre-built ARM wheels published, this process can be improved.
 
@@ -109,17 +109,17 @@ You can tune the number of parallel build jobs for building VLLM from source
 on ARM based on your available cores and system RAM with `VLLM_MAX_JOBS`.
 
 For example, on an ARM machine with low system resources:
-`./container/build.sh --framework VLLM_V1 --platform linux/arm64 --build-arg VLLM_MAX_JOBS=2`
+`./container/build.sh --framework VLLM --platform linux/arm64 --build-arg VLLM_MAX_JOBS=2`
 
 For example, on a GB200 which has very high CPU cores and memory resource:
-`./container/build.sh --framework VLLM_V1 --platform linux/arm64 --build-arg VLLM_MAX_JOBS=64`
+`./container/build.sh --framework VLLM --platform linux/arm64 --build-arg VLLM_MAX_JOBS=64`
 
 When vLLM has pre-built ARM wheels published, this process can be improved.
 ```
 ### Run the container you have built
 
 ```
-./container/run.sh -it --framework VLLM_V1
+./container/run.sh -it --framework VLLM
 ```
 
 ## Run Deployment
