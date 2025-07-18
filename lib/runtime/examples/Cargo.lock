@@ -1089,18 +1089,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "http_server_metrics"
-version = "0.3.2"
-dependencies = [
- "dynamo-runtime",
- "futures",
- "prometheus",
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "httparse"
 version = "1.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2570,6 +2558,18 @@ dependencies = [
  "pkg-config",
  "toml",
  "version-compare",
+]
+
+[[package]]
+name = "system_stats_endpoint"
+version = "0.3.2"
+dependencies = [
+ "dynamo-runtime",
+ "futures",
+ "prometheus",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]

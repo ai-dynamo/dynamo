@@ -31,6 +31,16 @@ use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
+impl MetricsRegistry for DistributedRuntime {
+    fn basename(&self) -> String {
+        "".to_string() // drt has no basename. Basename only begins with the Namespace.
+    }
+
+    fn parent_hierarchy(&self) -> Vec<String> {
+        vec![] // drt is the root, so no parent hierarchy
+    }
+}
+
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
         let secondary = runtime.secondary();
@@ -247,19 +257,5 @@ impl DistributedConfig {
         config.etcd_config.attach_lease = false;
 
         config
-    }
-}
-
-impl MetricsRegistry for DistributedRuntime {
-    fn basename(&self) -> String {
-        "".to_string() // drt has no basename. Basename only begins with the Namespace.
-    }
-
-    fn parent_hierarchy(&self) -> Vec<String> {
-        vec![] // drt is the root, so no parent hierarchy
-    }
-
-    fn root_drt(&self) -> &crate::DistributedRuntime {
-        self
     }
 }

@@ -24,10 +24,10 @@ repository.workspace = true
 
 [dependencies]
 dynamo-runtime = { workspace = true }
-prometheus = { workspace = true }
 
 # third-party
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 tokio = { version = "1", features = ["full"] }
+prometheus = { version = "0.14" }

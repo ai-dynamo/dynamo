@@ -31,6 +31,23 @@ pub const COUNTER_METRIC_TYPE: &str = "counter";
 pub const GAUGE_METRIC_TYPE: &str = "gauge";
 pub const HISTOGRAM_METRIC_TYPE: &str = "histogram";
 
+#[cfg(test)]
+mod test_helpers {
+    use super::*;
+    use std::sync::Arc;
+
+    /// Helper function to create a DRT instance for testing in sync contexts
+    /// Uses the test-friendly constructor without discovery
+    pub fn create_test_drt_sync() -> crate::DistributedRuntime {
+        let rt = crate::Runtime::from_settings().unwrap();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            crate::DistributedRuntime::from_settings(rt.clone())
+                .await
+                .unwrap()
+        })
+    }
+}
+
 // Private macro for internal metric registration within this module
 // This macro can only be used within the MetricsRegistry trait methods
 //
@@ -56,21 +73,23 @@ pub const HISTOGRAM_METRIC_TYPE: &str = "histogram";
 // - Provides generic-like functionality without breaking trait object usage
 // - Encapsulates the complex Box/clone logic in one place
 // - Ensures consistent registration behavior across all metric types
+// - Registers metrics hierarchically at all parent levels for proper aggregation
 macro_rules! register_metric_inline {
     ($registry:expr, $metric:expr) => {{
         let mut registry = $registry
-            .root_drt()
+            .drt()
             .prometheus_registries_by_prefix
             .lock()
             .unwrap();
-        let hierarchy = {
-            let mut h = $registry.parent_hierarchy();
-            h.push($registry.prefix());
-            h
-        };
+
+        // Register at all hierarchy levels, including the current level
+        let mut hierarchy = $registry.parent_hierarchy();
+        hierarchy.push($registry.prefix());
+
         for prefix in hierarchy {
+            // Always register, even for empty prefixes (for DRT)
             let collector: Box<dyn prometheus::core::Collector> = Box::new($metric.clone());
-            registry
+            let _ = registry
                 .entry(prefix)
                 .or_insert(prometheus::Registry::new())
                 .register(collector);
@@ -81,7 +100,7 @@ macro_rules! register_metric_inline {
 /// This trait should be implemented by all metric registries, including Prometheus, Envy, OpenTelemetry, and others.
 /// It offers a unified interface for creating and managing metrics, organizing sub-registries, and
 /// generating output in Prometheus text format.
-pub trait MetricsRegistry: Send + Sync {
+pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvider {
     // Get the name of this registry (without any prefix)
     fn basename(&self) -> String;
 
@@ -89,29 +108,17 @@ pub trait MetricsRegistry: Send + Sync {
     /// we need to handle it separately.
     fn prefix(&self) -> String {
         let parent_hierarchy = self.parent_hierarchy();
-        let joined_hierarchy = [parent_hierarchy, vec![self.basename()]].concat().join("_");
-        joined_hierarchy.trim_start_matches('_').to_string()
+        if parent_hierarchy.is_empty() {
+            self.basename()
+        } else {
+            let last_element = parent_hierarchy.last().unwrap();
+            let combined = format!("{}_{}", last_element, self.basename());
+            combined.trim_start_matches('_').to_string()
+        }
     }
 
     // Get the parent hierarchy for this registry (does not include this registry's prefix)
     fn parent_hierarchy(&self) -> Vec<String>;
-
-    // Get a reference to the distributed runtime. You should not call this
-    // drt because it'll collide with the DistributedRuntimeProvider trait,
-    // which is used along with MetricsRegistry.
-    fn root_drt(&self) -> &crate::DistributedRuntime;
-
-    fn prom_registry(&self) -> prometheus::Registry {
-        let mut registry = self
-            .root_drt()
-            .prometheus_registries_by_prefix
-            .lock()
-            .unwrap();
-        registry
-            .entry(self.prefix())
-            .or_insert(prometheus::Registry::new())
-            .clone()
-    }
 
     /// Helper method to build the full metric name with prefix
     fn build_metric_name(&self, metric_name: &str) -> String {
@@ -183,8 +190,13 @@ pub trait MetricsRegistry: Send + Sync {
     }
 
     /// Get metrics in Prometheus text format
-    fn encode_prometheus_fmt(&self) -> anyhow::Result<String> {
-        let metric_families = self.prom_registry().gather();
+    fn prometheus_metrics_fmt(&self) -> anyhow::Result<String> {
+        let mut registry = self.drt().prometheus_registries_by_prefix.lock().unwrap();
+        let prometheus_registry = registry
+            .entry(self.prefix())
+            .or_insert(prometheus::Registry::new())
+            .clone();
+        let metric_families = prometheus_registry.gather();
         let encoder = prometheus::TextEncoder::new();
         let mut buffer = Vec::new();
         encoder.encode(&metric_families, &mut buffer)?;
@@ -195,12 +207,19 @@ pub trait MetricsRegistry: Send + Sync {
 #[cfg(test)]
 mod test_simple_registry_trait {
     use super::*;
+    use super::test_helpers::create_test_drt_sync;
     use prometheus::Counter;
     use std::sync::Arc;
 
     struct TestRegistry {
         drt: Arc<crate::DistributedRuntime>,
         prefix: String,
+    }
+
+    impl crate::traits::DistributedRuntimeProvider for TestRegistry {
+        fn drt(&self) -> &crate::DistributedRuntime {
+            &self.drt
+        }
     }
 
     impl MetricsRegistry for TestRegistry {
@@ -210,22 +229,14 @@ mod test_simple_registry_trait {
         fn parent_hierarchy(&self) -> Vec<String> {
             vec![]
         }
-        fn root_drt(&self) -> &crate::DistributedRuntime {
-            &self.drt
-        }
     }
 
-    #[tokio::test]
-    async fn test_factory_methods_via_registry_trait() {
+    #[test]
+    fn test_factory_methods_via_registry_trait() {
         // Setup real DRT and registry using the test-friendly constructor
-        let rt = crate::Runtime::from_current().unwrap();
-        let drt = Arc::new(
-            crate::DistributedRuntime::from_settings_without_discovery(rt)
-                .await
-                .unwrap(),
-        );
+        let drt = create_test_drt_sync();
         let registry = TestRegistry {
-            drt,
+            drt: Arc::new(drt),
             prefix: "testprefix".to_string(),
         };
 
@@ -235,7 +246,6 @@ mod test_simple_registry_trait {
             .unwrap();
         counter.inc_by(42.0);
         assert_eq!(counter.get() as u64, 42);
-        println!("Counter value via MetricsRegistry: {}", counter.get());
 
         // Test Gauge creation
         let gauge = registry
@@ -243,7 +253,6 @@ mod test_simple_registry_trait {
             .unwrap();
         gauge.set(123.45);
         assert_eq!(gauge.get(), 123.45);
-        println!("Gauge value via MetricsRegistry: {}", gauge.get());
 
         // Test Histogram creation
         let histogram = registry
@@ -253,12 +262,9 @@ mod test_simple_registry_trait {
         histogram.observe(2.5);
         histogram.observe(3.5);
         // We can't assert the exact histogram buckets, but we can check the output contains the metric name
-        println!("Histogram observations: 1.5, 2.5, 3.5");
 
-        // Test Prometheus format output
-        let prometheus_output = registry.encode_prometheus_fmt().unwrap();
-        println!("Prometheus format output:");
-        println!("{}", prometheus_output);
+        // Get Prometheus format output
+        let prometheus_output = registry.prometheus_metrics_fmt().unwrap();
 
         // Print only the histogram section for inspection
         println!("Histogram section:");
@@ -286,11 +292,18 @@ mod test_simple_registry_trait {
 #[cfg(test)]
 mod test_runtime_and_namespace_registry_trait {
     use super::*;
+    use super::test_helpers::create_test_drt_sync;
     use std::sync::Arc;
 
     /// Test registry representing a runtime-level metrics registry
     struct MyRuntimeRegistry {
         drt: Arc<crate::DistributedRuntime>,
+    }
+
+    impl crate::traits::DistributedRuntimeProvider for MyRuntimeRegistry {
+        fn drt(&self) -> &crate::DistributedRuntime {
+            &self.drt
+        }
     }
 
     impl MetricsRegistry for MyRuntimeRegistry {
@@ -300,14 +313,17 @@ mod test_runtime_and_namespace_registry_trait {
         fn parent_hierarchy(&self) -> Vec<String> {
             vec![]
         }
-        fn root_drt(&self) -> &crate::DistributedRuntime {
-            &self.drt
-        }
     }
 
     /// Test registry representing a namespace-level metrics registry
     struct MyNamespaceRegistry {
         drt: Arc<crate::DistributedRuntime>,
+    }
+
+    impl crate::traits::DistributedRuntimeProvider for MyNamespaceRegistry {
+        fn drt(&self) -> &crate::DistributedRuntime {
+            &self.drt
+        }
     }
 
     impl MetricsRegistry for MyNamespaceRegistry {
@@ -317,26 +333,18 @@ mod test_runtime_and_namespace_registry_trait {
         fn parent_hierarchy(&self) -> Vec<String> {
             vec!["runtime".to_string()]
         }
-        fn root_drt(&self) -> &crate::DistributedRuntime {
-            &self.drt
-        }
     }
 
-    #[tokio::test]
-    async fn test_runtime_and_namespace_registry_trait() {
+    #[test]
+    fn test_runtime_and_namespace() {
         // Setup real DRT
-        let rt = crate::Runtime::from_current().unwrap();
-        let drt = Arc::new(
-            crate::DistributedRuntime::from_settings_without_discovery(rt)
-                .await
-                .unwrap(),
-        );
+        let drt = create_test_drt_sync();
 
         // Create runtime-level registry
-        let runtime_registry = MyRuntimeRegistry { drt: drt.clone() };
+        let runtime_registry = MyRuntimeRegistry { drt: Arc::new(drt.clone()) };
 
         // Create namespace-level registry
-        let namespace_registry = MyNamespaceRegistry { drt: drt.clone() };
+        let namespace_registry = MyNamespaceRegistry { drt: Arc::new(drt.clone()) };
 
         // Create metrics using factory methods and increment some values
         let runtime_counter = runtime_registry
@@ -354,14 +362,8 @@ mod test_runtime_and_namespace_registry_trait {
         namespace_gauge.set(25.0);
 
         // Test Prometheus format output for both registries
-        let runtime_output = runtime_registry.encode_prometheus_fmt().unwrap();
-        let namespace_output = namespace_registry.encode_prometheus_fmt().unwrap();
-
-        println!("Runtime Prometheus output:");
-        println!("{}", runtime_output);
-
-        println!("Namespace Prometheus output:");
-        println!("{}", namespace_output);
+        let runtime_output = runtime_registry.prometheus_metrics_fmt().unwrap();
+        let namespace_output = namespace_registry.prometheus_metrics_fmt().unwrap();
 
         // Verify exact content in runtime output (this includes ALL)
         let expected_runtime_output = "\
@@ -381,5 +383,314 @@ runtime_namespace__active_connections 25\n";
         assert_eq!(namespace_output, expected_namespace_output);
 
         println!("Runtime and Namespace registry tests passed!");
+    }
+}
+
+#[cfg(test)]
+mod test_prefixes {
+    use super::*;
+    use super::test_helpers::create_test_drt_sync;
+
+    #[test]
+    fn test_hierarchical_prefixes_and_parent_hierarchies() {
+        println!("=== Testing Names, Prefixes, and Parent Hierarchies ===");
+
+        // Create a distributed runtime for testing
+        let drt = create_test_drt_sync();
+
+        // Create namespace
+        let ns = drt.namespace("mynamespace").unwrap();
+
+        // Create component
+        let component = ns.component("mycomponent").unwrap();
+
+        // Create endpoint
+        let endpoint = component.endpoint("myendpoint");
+
+        // Test DistributedRuntime hierarchy
+        println!("\n=== DistributedRuntime ===");
+        println!("basename: '{}'", drt.basename());
+        println!("parent_hierarchy: {:?}", drt.parent_hierarchy());
+        println!("prefix: '{}'", drt.prefix());
+
+        assert_eq!(drt.basename(), "", "DRT basename should be empty");
+        assert_eq!(
+            drt.parent_hierarchy(),
+            Vec::<String>::new(),
+            "DRT parent hierarchy should be empty"
+        );
+        assert_eq!(drt.prefix(), "", "DRT prefix should be empty");
+
+        // Test Namespace hierarchy
+        println!("\n=== Namespace ===");
+        println!("basename: '{}'", ns.basename());
+        println!("parent_hierarchy: {:?}", ns.parent_hierarchy());
+        println!("prefix: '{}'", ns.prefix());
+
+        assert_eq!(
+            ns.basename(),
+            "mynamespace",
+            "Namespace basename should be 'mynamespace'"
+        );
+        assert_eq!(
+            ns.parent_hierarchy(),
+            vec![""],
+            "Namespace parent hierarchy should be [\"\"]"
+        );
+        assert_eq!(
+            ns.prefix(),
+            "mynamespace",
+            "Namespace prefix should be 'mynamespace'"
+        );
+
+        // Test Component hierarchy
+        println!("\n=== Component ===");
+        println!("basename: '{}'", component.basename());
+        println!("parent_hierarchy: {:?}", component.parent_hierarchy());
+        println!("prefix: '{}'", component.prefix());
+
+        assert_eq!(
+            component.basename(),
+            "mycomponent",
+            "Component basename should be 'mycomponent'"
+        );
+        assert_eq!(
+            component.parent_hierarchy(),
+            vec!["", "mynamespace"],
+            "Component parent hierarchy should be [\"\", \"mynamespace\"]"
+        );
+        assert_eq!(
+            component.prefix(),
+            "mynamespace_mycomponent",
+            "Component prefix should be 'mynamespace_mycomponent'"
+        );
+
+        // Test Endpoint hierarchy
+        println!("\n=== Endpoint ===");
+        println!("basename: '{}'", endpoint.basename());
+        println!("parent_hierarchy: {:?}", endpoint.parent_hierarchy());
+        println!("prefix: '{}'", endpoint.prefix());
+
+        assert_eq!(
+            endpoint.basename(),
+            "myendpoint",
+            "Endpoint basename should be 'myendpoint'"
+        );
+        assert_eq!(endpoint.parent_hierarchy(), vec!["", "mynamespace", "mynamespace_mycomponent"], "Endpoint parent hierarchy should be [\"\", \"mynamespace\", \"mynamespace_mycomponent\"]");
+        assert_eq!(
+            endpoint.prefix(),
+            "mynamespace_mycomponent_myendpoint",
+            "Endpoint prefix should be 'mynamespace_mycomponent_myendpoint'"
+        );
+
+        // Test hierarchy relationships
+        println!("\n=== Hierarchy Relationships ===");
+        assert!(
+            ns.parent_hierarchy().contains(&drt.prefix()),
+            "Namespace should have DRT prefix in parent hierarchy"
+        );
+        assert!(
+            component.parent_hierarchy().contains(&ns.prefix()),
+            "Component should have Namespace prefix in parent hierarchy"
+        );
+        assert!(
+            endpoint.parent_hierarchy().contains(&component.prefix()),
+            "Endpoint should have Component prefix in parent hierarchy"
+        );
+        println!("✓ All parent-child relationships verified");
+
+        // Test prefix relationships
+        println!("\n=== Prefix Relationships ===");
+        assert!(
+            component.prefix().starts_with(&ns.prefix()),
+            "Component prefix should start with namespace prefix"
+        );
+        assert!(
+            endpoint.prefix().starts_with(&component.prefix()),
+            "Endpoint prefix should start with component prefix"
+        );
+        println!("✓ All prefix containment relationships verified");
+
+        // Test format validation
+        println!("\n=== Format Validation ===");
+        assert!(
+            !ns.prefix().starts_with('_'),
+            "Namespace prefix should not start with underscore"
+        );
+        assert!(
+            !component.prefix().starts_with('_'),
+            "Component prefix should not start with underscore"
+        );
+        assert!(
+            !endpoint.prefix().starts_with('_'),
+            "Endpoint prefix should not start with underscore"
+        );
+        println!("✓ All prefixes properly formatted (no leading underscores)");
+
+        // Test hierarchy depth
+        println!("\n=== Hierarchy Depth ===");
+        assert_eq!(
+            drt.parent_hierarchy().len(),
+            0,
+            "DRT should have 0 parent hierarchy levels"
+        );
+        assert_eq!(
+            ns.parent_hierarchy().len(),
+            1,
+            "Namespace should have 1 parent hierarchy level"
+        );
+        assert_eq!(
+            component.parent_hierarchy().len(),
+            2,
+            "Component should have 2 parent hierarchy levels"
+        );
+        assert_eq!(
+            endpoint.parent_hierarchy().len(),
+            3,
+            "Endpoint should have 3 parent hierarchy levels"
+        );
+        println!("✓ All hierarchy depths verified");
+
+        // Summary
+        println!("\n=== Summary ===");
+        println!("DRT prefix: '{}'", drt.prefix());
+        println!("Namespace prefix: '{}'", ns.prefix());
+        println!("Component prefix: '{}'", component.prefix());
+        println!("Endpoint prefix: '{}'", endpoint.prefix());
+        println!("All hierarchy assertions passed!");
+    }
+
+    #[test]
+    fn test_prometheus_metrics_fmt_in_hierarchical_prefixes() {
+        println!("=== MySystemStatsMetrics with Profiling Backend Test ===");
+
+        // Create a distributed runtime for testing
+        let drt = create_test_drt_sync();
+
+        // Test Endpoint metrics first (Endpoint implements MetricsRegistry)
+        let ns = drt.namespace("mynamespace").unwrap();
+        let component = ns.component("mycomponent").unwrap();
+        let endpoint = component.endpoint("myendpoint");
+        let endpoint_count = endpoint
+            .clone()
+            .create_counter(
+                "count",
+                "Total number of requests processed",
+                &[("service", "endpoint")],
+            )
+            .unwrap();
+        endpoint_count.inc_by(4.0);
+        let endpoint_output = endpoint.prometheus_metrics_fmt().unwrap();
+
+        // Assert Endpoint metrics output
+        let expected_endpoint_output = r#"# HELP mynamespace_mycomponent_myendpoint__count Total number of requests processed
+# TYPE mynamespace_mycomponent_myendpoint__count counter
+mynamespace_mycomponent_myendpoint__count 4
+"#;
+        assert_eq!(
+            endpoint_output, expected_endpoint_output,
+            "\n=== ENDPOINT COMPARISON FAILED ===\n\
+             Expected:\n{}\n\
+             Actual:\n{}\n\
+             ==================================",
+            expected_endpoint_output, endpoint_output
+        );
+
+        // Test Component metrics
+        let component_count = component
+            .clone()
+            .create_counter(
+                "count",
+                "Total number of requests processed",
+                &[("service", "component")],
+            )
+            .unwrap();
+        component_count.inc_by(3.0);
+        let component_output = component.prometheus_metrics_fmt().unwrap();
+
+        // Assert Component metrics output
+        let expected_component_output = r#"# HELP mynamespace_mycomponent__count Total number of requests processed
+# TYPE mynamespace_mycomponent__count counter
+mynamespace_mycomponent__count 3
+# HELP mynamespace_mycomponent_myendpoint__count Total number of requests processed
+# TYPE mynamespace_mycomponent_myendpoint__count counter
+mynamespace_mycomponent_myendpoint__count 4
+"#;
+        assert_eq!(
+            component_output, expected_component_output,
+            "\n=== COMPONENT COMPARISON FAILED ===\n\
+             Expected:\n{}\n\
+             Actual:\n{}\n\
+             ====================================",
+            expected_component_output, component_output
+        );
+
+        // Test Namespace metrics
+        let ns_count = ns
+            .clone()
+            .create_counter(
+                "count",
+                "Total number of requests processed",
+                &[("service", "ns")],
+            )
+            .unwrap();
+        ns_count.inc_by(2.0);
+        let ns_output = ns.prometheus_metrics_fmt().unwrap();
+
+        // Assert Namespace metrics output
+        let expected_ns_output = r#"# HELP mynamespace__count Total number of requests processed
+# TYPE mynamespace__count counter
+mynamespace__count 2
+# HELP mynamespace_mycomponent__count Total number of requests processed
+# TYPE mynamespace_mycomponent__count counter
+mynamespace_mycomponent__count 3
+# HELP mynamespace_mycomponent_myendpoint__count Total number of requests processed
+# TYPE mynamespace_mycomponent_myendpoint__count counter
+mynamespace_mycomponent_myendpoint__count 4
+"#;
+        assert_eq!(
+            ns_output, expected_ns_output,
+            "\n=== NAMESPACE COMPARISON FAILED ===\n\
+             Expected:\n{}\n\
+             Actual:\n{}\n\
+             ==================================",
+            expected_ns_output, ns_output
+        );
+
+        // Test DRT metrics last
+        let drt_count = drt
+            .clone()
+            .create_counter(
+                "count",
+                "Total number of requests processed",
+                &[("service", "drt")],
+            )
+            .unwrap();
+        drt_count.inc_by(1.0);
+        let drt_output = drt.prometheus_metrics_fmt().unwrap();
+        println!("drt.prometheus_metrics_fmt(): {}", drt_output);
+
+        // Assert DRT metrics output. This should contain ALL the metrics.
+        let expected_drt_output = r#"# HELP count Total number of requests processed
+# TYPE count counter
+count 1
+# HELP mynamespace__count Total number of requests processed
+# TYPE mynamespace__count counter
+mynamespace__count 2
+# HELP mynamespace_mycomponent__count Total number of requests processed
+# TYPE mynamespace_mycomponent__count counter
+mynamespace_mycomponent__count 3
+# HELP mynamespace_mycomponent_myendpoint__count Total number of requests processed
+# TYPE mynamespace_mycomponent_myendpoint__count counter
+mynamespace_mycomponent_myendpoint__count 4
+"#;
+        assert_eq!(
+            drt_output, expected_drt_output,
+            "\n=== DRT COMPARISON FAILED ===\n\
+             Expected:\n{}\n\
+             Actual:\n{}\n\
+             ==============================",
+            expected_drt_output, drt_output
+        );
     }
 }

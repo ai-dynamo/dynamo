@@ -15,7 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_NAMESPACE: &str = "system_stats";
+pub const DEFAULT_NAMESPACE: &str = "system";
 
 #[derive(Serialize, Deserialize)]
 // Dummy Stats object to demonstrate how to attach a custom stats handler

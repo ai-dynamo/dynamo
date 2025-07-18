@@ -170,6 +170,20 @@ impl RuntimeProvider for Component {
     }
 }
 
+impl MetricsRegistry for Component {
+    fn basename(&self) -> String {
+        self.name.clone()
+    }
+
+    fn parent_hierarchy(&self) -> Vec<String> {
+        vec![
+            self.namespace.parent_hierarchy(),
+            vec![self.namespace.prefix()],
+        ]
+        .concat()
+    }
+}
+
 impl Component {
     /// The component part of an instance path in etcd.
     pub fn etcd_root(&self) -> String {
@@ -302,6 +316,20 @@ impl RuntimeProvider for Endpoint {
     }
 }
 
+impl MetricsRegistry for Endpoint {
+    fn basename(&self) -> String {
+        self.name.clone()
+    }
+
+    fn parent_hierarchy(&self) -> Vec<String> {
+        vec![
+            self.component.parent_hierarchy(),
+            vec![self.component.prefix()],
+        ]
+        .concat()
+    }
+}
+
 impl Endpoint {
     pub fn id(&self) -> EndpointId {
         EndpointId {
@@ -418,9 +446,6 @@ pub struct Namespace {
 
     #[builder(default = "None")]
     parent: Option<Arc<Namespace>>,
-
-    #[builder(private)]
-    metrics_registry: Arc<dyn MetricsRegistry>,
 }
 
 impl DistributedRuntimeProvider for Namespace {
@@ -453,13 +478,11 @@ impl std::fmt::Display for Namespace {
 
 impl Namespace {
     pub(crate) fn new(runtime: DistributedRuntime, name: String, is_static: bool) -> Result<Self> {
-        NamespaceBuilder::default()
-            .runtime(Arc::new(runtime.clone()))
-            .name(name.clone())
+        Ok(NamespaceBuilder::default()
+            .runtime(Arc::new(runtime))
+            .name(name)
             .is_static(is_static)
-            .metrics_registry(Arc::new(runtime))
-            .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build namespace: {}", e))
+            .build()?)
     }
 
     /// Create a [`Component`] in the namespace who's endpoints can be discovered with etcd
@@ -478,7 +501,6 @@ impl Namespace {
             .name(name.into())
             .is_static(self.is_static)
             .parent(Some(Arc::new(self.clone())))
-            .metrics_registry(self.runtime.clone())
             .build()?)
     }
 
@@ -491,11 +513,6 @@ impl Namespace {
             Some(parent) => format!("{}.{}", parent.name(), self.name),
             None => self.name.clone(),
         }
-    }
-
-    /// Get a reference to the metrics registry
-    pub fn metrics_registry(&self) -> &Arc<dyn MetricsRegistry> {
-        &self.metrics_registry
     }
 }
 

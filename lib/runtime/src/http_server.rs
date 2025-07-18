@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use crate::profiling::MetricsRegistry;
+use crate::traits::DistributedRuntimeProvider;
 use axum::{body, http::StatusCode, response::IntoResponse, routing::get, Router};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -26,21 +27,19 @@ pub struct HttpMetricsRegistry {
     pub drt: Arc<crate::DistributedRuntime>,
 }
 
+impl crate::traits::DistributedRuntimeProvider for HttpMetricsRegistry {
+    fn drt(&self) -> &crate::DistributedRuntime {
+        &self.drt
+    }
+}
+
 impl MetricsRegistry for HttpMetricsRegistry {
     fn basename(&self) -> String {
         "http_server".to_string()
     }
 
     fn parent_hierarchy(&self) -> Vec<String> {
-        vec![
-            self.root_drt().parent_hierarchy(),
-            vec![self.root_drt().basename()],
-        ]
-        .concat()
-    }
-
-    fn root_drt(&self) -> &crate::DistributedRuntime {
-        &self.drt
+        vec![self.drt().parent_hierarchy(), vec![self.drt().basename()]].concat()
     }
 }
 
@@ -83,8 +82,8 @@ impl HttpServerState {
             .elapsed()
     }
 
-    /// Get a reference to the metrics registry (self as MetricsRegistry)
-    pub fn root_drt(&self) -> &crate::DistributedRuntime {
+    /// Get a reference to the distributed runtime
+    pub fn drt(&self) -> &crate::DistributedRuntime {
         &*self.root_drt
     }
 
@@ -186,7 +185,7 @@ async fn metrics_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
     state.update_uptime_gauge();
 
     // Get metrics from the registry
-    match state.root_drt().encode_prometheus_fmt() {
+    match state.drt().prometheus_metrics_fmt() {
         Ok(response) => (StatusCode::OK, response),
         Err(e) => {
             tracing::error!("Failed to get metrics from registry: {}", e);
@@ -235,6 +234,13 @@ mod tests {
     }
 
     #[cfg(test)]
+    impl DistributedRuntimeProvider for TestMetricsRegistry {
+        fn drt(&self) -> &crate::DistributedRuntime {
+            &self.drt
+        }
+    }
+
+    #[cfg(test)]
     impl MetricsRegistry for TestMetricsRegistry {
         fn basename(&self) -> String {
             self.prefix.clone()
@@ -242,10 +248,6 @@ mod tests {
 
         fn parent_hierarchy(&self) -> Vec<String> {
             vec![]
-        }
-
-        fn root_drt(&self) -> &crate::DistributedRuntime {
-            &self.drt
         }
     }
 
@@ -299,7 +301,7 @@ mod tests {
         drt.debug_prometheus_registry_keys();
 
         // Get metrics from the registry
-        let response = runtime_metrics.root_drt().encode_prometheus_fmt().unwrap();
+        let response = runtime_metrics.drt().prometheus_metrics_fmt().unwrap();
         println!("Full metrics response:\n{}", response);
 
         let expected = "\
@@ -321,7 +323,7 @@ http_server__uptime_seconds 123.456
 
         runtime_metrics.uptime_gauge.set(42.0);
 
-        let response = runtime_metrics.root_drt().encode_prometheus_fmt().unwrap();
+        let response = runtime_metrics.drt().prometheus_metrics_fmt().unwrap();
         println!("Full metrics response:\n{}", response);
 
         let expected = "\

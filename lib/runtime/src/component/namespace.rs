@@ -88,11 +88,7 @@ impl MetricsRegistry for Namespace {
     }
 
     fn parent_hierarchy(&self) -> Vec<String> {
-        vec![self.drt().prefix()] // drt's prefix is an empty string
-    }
-
-    fn root_drt(&self) -> &crate::DistributedRuntime {
-        self.drt()
+        vec![self.drt().prefix()]
     }
 }
 

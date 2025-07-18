@@ -102,7 +102,7 @@ pub struct DistributedRuntime {
 
     // Used by MetricsRegistry, which has a reference to the DistributedRuntime.
     prometheus_registries_by_prefix: Arc<std::sync::Mutex<HashMap<String, prometheus::Registry>>>,
-    // TODO(nnshah|keiven): For now we are not using these.
+    // TODO(nnshah1|keiven): For now we are not using these, but will do that soon.
     // is_healthy: bool,
     // is_live: bool,
 }
