@@ -4,14 +4,14 @@
 import argparse
 from typing import Optional
 
-from utils.request_handlers.handler_base import (
+from dynamo.trtllm.utils.request_handlers.handler_base import (
     DisaggregationMode,
     DisaggregationStrategy,
 )
 
 # Default endpoint for the next worker.
 DEFAULT_ENDPOINT = "dyn://dynamo.tensorrt_llm.generate"
-DEFAULT_MODEL_PATH = "TinyLlama-1.1B-Instruct"
+DEFAULT_MODEL_PATH = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
 DEFAULT_NEXT_ENDPOINT = "dyn://dynamo.tensorrt_llm_next.generate"
 DEFAULT_DISAGGREGATION_STRATEGY = DisaggregationStrategy.DECODE_FIRST
 DEFAULT_DISAGGREGATION_MODE = DisaggregationMode.AGGREGATED
@@ -123,7 +123,7 @@ def cmd_line_args():
     parser.add_argument(
         "--publish-events-and-metrics",
         action="store_true",
-        help="Publish events and metrics to the dynamo components. Note: This is not supported when running in prefill disaggregation mode.",
+        help="If set, publish events and metrics to the dynamo components.",
     )
     parser.add_argument(
         "--disaggregation-mode",

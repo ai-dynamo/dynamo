@@ -178,20 +178,14 @@ where
             Ok(stream) => {
                 let engine_ctx = stream.context();
                 let client = self.client.clone();
-                let stream = stream.then(move |res| {
-                    let mut report_instance_down: Option<(Client, i64)> = None;
+                let stream = stream.map(move |res| {
                     if let Some(err) = res.err() {
                         const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
                         if format!("{:?}", err) == STREAM_ERR_MSG {
-                            report_instance_down = Some((client.clone(), instance_id));
-                        }
-                    }
-                    async move {
-                        if let Some((client, instance_id)) = report_instance_down {
                             client.report_instance_down(instance_id);
                         }
-                        res
                     }
+                    res
                 });
                 Ok(ResponseStream::new(Box::pin(stream), engine_ctx))
             }

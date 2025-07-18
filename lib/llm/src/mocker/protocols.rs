@@ -58,7 +58,13 @@ pub struct DirectRequest {
 pub struct PrefillCost {
     pub new_blocks: usize,
     pub new_tokens: usize,
-    pub prefill_compute: f64,
+}
+
+impl PrefillCost {
+    pub fn predict_prefill_compute(&self, new_tokens: Option<usize>) -> f64 {
+        let tokens = new_tokens.unwrap_or(self.new_tokens);
+        1.25e-6 * (tokens as f64).powi(2) + 7.41e-2 * (tokens as f64) + 2.62e1
+    }
 }
 
 /// Signal for output token generation with completion status
@@ -88,6 +94,9 @@ pub struct MockEngineArgs {
 
     #[builder(default = true)]
     pub enable_prefix_caching: bool,
+
+    #[builder(default = true)]
+    pub enable_chunked_prefill: bool,
 
     #[builder(default = "0.01")]
     pub watermark: f64,
@@ -127,6 +136,7 @@ impl MockEngineArgs {
             "max_num_seqs",
             "max_num_batched_tokens",
             "enable_prefix_caching",
+            "enable_chunked_prefill",
             "watermark",
             "speedup_ratio",
             "dp_size",
@@ -178,6 +188,12 @@ impl MockEngineArgs {
         if let Some(value) = extra_args.get("enable_prefix_caching") {
             if let Some(enabled) = value.as_bool() {
                 builder = builder.enable_prefix_caching(enabled);
+            }
+        }
+
+        if let Some(value) = extra_args.get("enable_chunked_prefill") {
+            if let Some(enabled) = value.as_bool() {
+                builder = builder.enable_chunked_prefill(enabled);
             }
         }
 

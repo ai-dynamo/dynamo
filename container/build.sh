@@ -111,9 +111,7 @@ NONE_BASE_IMAGE_TAG="24.04"
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-NIXL_COMMIT=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
-NIXL_REPO=ai-dynamo/nixl.git
-
+NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
 NIXL_UCX_EFA_REF=7ec95b95e524a87e81cac92f5ca8523e3966b16b
 
 NO_CACHE=""
@@ -390,7 +388,7 @@ if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     ARCH="arm64"
     BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
     # TEMP: Pin to nixl 0.3.1 for arm build, since 0.4.0 fails
-    NIXL_COMMIT=3503658e71143b56f9d5b1b440d84a94b9c41af8
+    NIXL_REF=3503658e71143b56f9d5b1b440d84a94b9c41af8
 fi
 
 # Update DOCKERFILE if framework is VLLM
@@ -404,36 +402,8 @@ elif [[ $FRAMEWORK == "SGLANG" ]]; then
     DOCKERFILE=${SOURCE_DIR}/Dockerfile.sglang
 fi
 
-NIXL_DIR="/tmp/nixl/nixl_src"
-
-# Clone original NIXL to temp directory
-if [ -d "$NIXL_DIR" ]; then
-    echo "Warning: $NIXL_DIR already exists, skipping clone"
-else
-    if [ -n "${GITHUB_TOKEN}" ]; then
-        git clone "https://oauth2:${GITHUB_TOKEN}@github.com/${NIXL_REPO}" "$NIXL_DIR"
-    else
-        # Try HTTPS first with credential prompting disabled, fall back to SSH if it fails
-        if ! GIT_TERMINAL_PROMPT=0 git clone https://github.com/${NIXL_REPO} "$NIXL_DIR"; then
-            echo "HTTPS clone failed, falling back to SSH..."
-            git clone git@github.com:${NIXL_REPO} "$NIXL_DIR"
-        fi
-    fi
-fi
-
-pushd "$NIXL_DIR" || exit
-if ! git checkout ${NIXL_COMMIT}; then
-    echo "ERROR: Failed to checkout NIXL commit ${NIXL_COMMIT}. The cached directory may be out of date."
-    echo "Please delete $NIXL_DIR and re-run the build script."
-    exit 1
-fi
-
-popd
-
-BUILD_CONTEXT_ARG+=" --build-context nixl=$NIXL_DIR"
-
-# Add NIXL_COMMIT as a build argument to enable caching
-BUILD_ARGS+=" --build-arg NIXL_COMMIT=${NIXL_COMMIT} "
+# Add NIXL_REF as a build argument
+BUILD_ARGS+=" --build-arg NIXL_REF=${NIXL_REF} "
 
 if [[ $TARGET == "local-dev" ]]; then
     BUILD_ARGS+=" --build-arg USER_UID=$(id -u) --build-arg USER_GID=$(id -g) "
@@ -519,7 +489,7 @@ if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
         echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
         if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}" "${ARCH}_${TRTLLM_COMMIT}"; then
             echo "WARN: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL_DIR}, attempting to build from source"
-            if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_COMMIT}; then
+            if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_REF}; then
                 error "ERROR: Failed to build TensorRT-LLM wheel"
             fi
         fi
