@@ -3,14 +3,13 @@
 
 use std::{
     collections::HashSet,
-    pin::Pin,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
@@ -18,14 +17,17 @@ use axum::{
     routing::{get, post},
     Json, Router,
 };
-use dynamo_runtime::pipeline::{AsyncEngineContext, AsyncEngineContextProvider, Context};
-use futures::{Stream, StreamExt};
+use dynamo_runtime::{
+    pipeline::{AsyncEngineContextProvider, Context},
+    protocols::annotated::AnnotationsProvider,
+};
+use futures::{stream, StreamExt};
 use serde::{Deserialize, Serialize};
-use tokio_stream::wrappers::ReceiverStream;
 
 use super::{
+    disconnect::{create_connection_monitor, monitor_for_disconnects, ConnectionHandle},
     error::HttpError,
-    metrics::{Endpoint, InflightGuard, ResponseMetricCollector},
+    metrics::{Endpoint, ResponseMetricCollector},
     service_v2, RouteDoc,
 };
 use crate::preprocessor::LLMMetricAnnotation;
@@ -37,6 +39,11 @@ use crate::protocols::openai::{
 };
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
+
+pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
+
+/// Dynamo Annotation for the request ID
+pub const ANNOTATION_REQUEST_ID: &str = "request_id";
 
 pub type ErrorResponse = (StatusCode, Json<ErrorMessage>);
 
@@ -123,6 +130,31 @@ impl From<HttpError> for ErrorMessage {
     }
 }
 
+/// Get the request ID from a primary source, or next from the headers, or lastly create a new one if not present
+fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
+    // Try to get the request ID from the primary source
+    if let Some(primary) = primary {
+        if let Ok(uuid) = uuid::Uuid::parse_str(primary) {
+            return uuid.to_string();
+        }
+    }
+
+    // Try to get the request ID header as a string slice
+    let request_id_opt = headers
+        .get(DYNAMO_REQUEST_ID_HEADER)
+        .and_then(|h| h.to_str().ok());
+
+    // Try to parse the request ID as a UUID, or generate a new one if missing/invalid
+    let uuid = match request_id_opt {
+        Some(request_id) => {
+            uuid::Uuid::parse_str(request_id).unwrap_or_else(|_| uuid::Uuid::new_v4())
+        }
+        None => uuid::Uuid::new_v4(),
+    };
+
+    uuid.to_string()
+}
+
 /// OpenAI Completions Request Handler
 ///
 /// This method will handle the incoming request for the `/v1/completions endpoint`. The endpoint is a "source"
@@ -131,10 +163,45 @@ impl From<HttpError> for ErrorMessage {
 ///
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
+async fn handler_completions(
+    State(state): State<Arc<service_v2::State>>,
+    headers: HeaderMap,
+    Json(request): Json<NvCreateCompletionRequest>,
+) -> Result<Response, ErrorResponse> {
+    // return a 503 if the service is not ready
+    check_ready(&state)?;
+
+    // create the context for the request
+    let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let request = Context::with_id(request, request_id);
+    let context = request.context();
+
+    // create the connection handles
+    let (mut connection_handle, stream_handle) = create_connection_monitor(context.clone()).await;
+
+    // possibly long running task
+    // if this returns a streaming response, the stream handle will be armed and captured by the response stream
+    let response = tokio::spawn(completions(state, request, stream_handle))
+        .await
+        .map_err(|e| {
+            ErrorMessage::internal_server_error(&format!(
+                "Failed to await chat completions task: {:?}",
+                e,
+            ))
+        })?;
+
+    // if we got here, then we will return a response and the potentially long running task has completed successfully
+    // without need to be cancelled.
+    connection_handle.disarm();
+
+    response
+}
+
 #[tracing::instrument(skip_all)]
 async fn completions(
-    State(state): State<Arc<service_v2::State>>,
-    Json(request): Json<NvCreateCompletionRequest>,
+    state: Arc<service_v2::State>,
+    request: Context<NvCreateCompletionRequest>,
+    stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -146,15 +213,10 @@ async fn completions(
     let streaming = request.inner.stream.unwrap_or(false);
 
     // update the request to always stream
-    let inner = async_openai::types::CreateCompletionRequest {
-        stream: Some(true),
-        ..request.inner
-    };
-
-    let request = NvCreateCompletionRequest {
-        inner,
-        nvext: request.nvext,
-    };
+    let request = request.map(|mut req| {
+        req.inner.stream = Some(true);
+        req
+    });
 
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
@@ -173,9 +235,8 @@ async fn completions(
 
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
-    // setup context
-    // todo - inherit request_id from distributed trace details
-    let request = Context::with_id(request, request_id.clone());
+    // prepare to process any annotations
+    let annotations = request.annotations();
 
     // issue the generate call on the engine
     let stream = engine
@@ -186,14 +247,31 @@ async fn completions(
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
 
-    // todo - tap the stream and propagate request level metrics
-    // note - we might do this as part of the post processing set to make it more generic
+    let annotations = annotations.map_or(Vec::new(), |annotations| {
+        annotations
+            .iter()
+            .filter_map(|annotation| {
+                if annotation == ANNOTATION_REQUEST_ID {
+                    Annotated::<NvCreateCompletionResponse>::from_annotation(
+                        ANNOTATION_REQUEST_ID,
+                        &request_id,
+                    )
+                    .ok()
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+
+    // apply any annotations to the front of the stream
+    let stream = stream::iter(annotations).chain(stream);
 
     if streaming {
         let stream = stream.map(move |response| {
             process_event_converter(EventConverter::from(response), &mut response_collector)
         });
-        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight_guard).await;
+        let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
         let mut sse_stream = Sse::new(stream);
 
@@ -204,7 +282,7 @@ async fn completions(
         Ok(sse_stream.into_response())
     } else {
         // TODO: report ISL/OSL for non-streaming requests
-        let response = NvCreateCompletionResponse::from_annotated_stream(stream.into())
+        let response = NvCreateCompletionResponse::from_annotated_stream(stream)
             .await
             .map_err(|e| {
                 tracing::error!(
@@ -262,7 +340,7 @@ async fn embeddings(
 
     // Embeddings are typically returned as a single response (non-streaming)
     // so we fold the stream into a single response
-    let response = NvCreateEmbeddingResponse::from_annotated_stream(stream.into())
+    let response = NvCreateEmbeddingResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -277,39 +355,23 @@ async fn embeddings(
     Ok(Json(response).into_response())
 }
 
-enum ConnectionStatus {
-    ClosedGracefully,
-}
-
-#[tracing::instrument(level = "trace", skip_all, fields(request_id = %engine_context.id()))]
-async fn connection_monitor(
-    engine_context: Arc<dyn AsyncEngineContext>,
-    connection_rx: tokio::sync::oneshot::Receiver<ConnectionStatus>,
-) {
-    match connection_rx.await {
-        Err(_) => {
-            // the client has disconnected, no need to gracefully cancel, just kill the context
-            tracing::trace!("Connection closed unexpectedly; issuing cancellation");
-            engine_context.kill();
-        }
-        Ok(ConnectionStatus::ClosedGracefully) => {
-            tracing::trace!("Connection closed gracefully");
-        }
-    }
-}
-
-async fn chat_completions(
+async fn handler_chat_completions(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
+    headers: HeaderMap,
     Json(request): Json<NvCreateChatCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
-    let request = Context::new(request);
-    let context = request.context();
-    let (connection_tx, connection_rx) = tokio::sync::oneshot::channel();
-    tokio::spawn(connection_monitor(context, connection_rx));
 
-    let response = tokio::spawn(chat_completions_impl(state, template, request))
+    // create the context for the request
+    let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let request = Context::with_id(request, request_id);
+    let context = request.context();
+
+    // create the connection handles
+    let (mut connection_handle, stream_handle) = create_connection_monitor(context.clone()).await;
+
+    let response = tokio::spawn(chat_completions(state, template, request, stream_handle))
         .await
         .map_err(|e| {
             ErrorMessage::internal_server_error(&format!(
@@ -318,8 +380,9 @@ async fn chat_completions(
             ))
         })?;
 
-    // send a signal to the connection monitor that the connection is closed gracefully
-    let _ = connection_tx.send(ConnectionStatus::ClosedGracefully);
+    // if we got here, then we will return a response and the potentially long running task has completed successfully
+    // without need to be cancelled.
+    connection_handle.disarm();
 
     response
 }
@@ -333,10 +396,11 @@ async fn chat_completions(
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
 #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id()))]
-async fn chat_completions_impl(
+async fn chat_completions(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
     mut request: Context<NvCreateChatCompletionRequest>,
+    mut stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -361,7 +425,7 @@ async fn chat_completions_impl(
             request.inner.max_completion_tokens = Some(template.max_completion_tokens);
         }
     }
-    tracing::trace!("Received chat completions request: {:?}", request);
+    tracing::trace!("Received chat completions request: {:?}", request.content());
 
     // todo - decide on default
     let streaming = request.inner.stream.unwrap_or(false);
@@ -392,6 +456,7 @@ async fn chat_completions_impl(
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     tracing::trace!("Issuing generate call for chat completions");
+    let annotations = request.annotations();
 
     // issue the generate call on the engine
     let stream = engine
@@ -402,14 +467,33 @@ async fn chat_completions_impl(
     // capture the context to cancel the stream if the client disconnects
     let ctx = stream.context();
 
+    // prepare any requested annotations
+    let annotations = annotations.map_or(Vec::new(), |annotations| {
+        annotations
+            .iter()
+            .filter_map(|annotation| {
+                if annotation == ANNOTATION_REQUEST_ID {
+                    Annotated::from_annotation(ANNOTATION_REQUEST_ID, &request_id).ok()
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+    });
+
+    // apply any annotations to the front of the stream
+    let stream = stream::iter(annotations).chain(stream);
+
     // todo - tap the stream and propagate request level metrics
     // note - we might do this as part of the post processing set to make it more generic
 
     if streaming {
+        stream_handle.arm();
+
         let stream = stream.map(move |response| {
             process_event_converter(EventConverter::from(response), &mut response_collector)
         });
-        let stream = monitor_for_disconnects(stream.boxed(), ctx, inflight_guard).await;
+        let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
 
         let mut sse_stream = Sse::new(stream);
 
@@ -420,7 +504,7 @@ async fn chat_completions_impl(
         Ok(sse_stream.into_response())
     } else {
         // TODO: report ISL/OSL for non-streaming requests
-        let response = NvCreateChatCompletionResponse::from_annotated_stream(stream.into())
+        let response = NvCreateChatCompletionResponse::from_annotated_stream(stream)
             .await
             .map_err(|e| {
                 tracing::error!(
@@ -477,10 +561,43 @@ pub fn validate_chat_completion_unsupported_fields(
 /// OpenAI Responses Request Handler
 ///
 /// This method will handle the incoming request for the /v1/responses endpoint.
-#[tracing::instrument(skip_all)]
-async fn responses(
+async fn handler_responses(
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
-    Json(mut request): Json<NvCreateResponse>,
+    headers: HeaderMap,
+    Json(request): Json<NvCreateResponse>,
+) -> Result<Response, ErrorResponse> {
+    // return a 503 if the service is not ready
+    check_ready(&state)?;
+
+    // create the context for the request
+    let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
+    let request = Context::with_id(request, request_id);
+    let context = request.context();
+
+    // create the connection handles
+    let (mut connection_handle, _stream_handle) = create_connection_monitor(context.clone()).await;
+
+    let response = tokio::spawn(responses(state, template, request))
+        .await
+        .map_err(|e| {
+            ErrorMessage::internal_server_error(&format!(
+                "Failed to await chat completions task: {:?}",
+                e,
+            ))
+        })?;
+
+    // if we got here, then we will return a response and the potentially long running task has completed successfully
+    // without need to be cancelled.
+    connection_handle.disarm();
+
+    response
+}
+
+#[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id()))]
+async fn responses(
+    state: Arc<service_v2::State>,
+    template: Option<RequestTemplate>,
+    mut request: Context<NvCreateResponse>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -514,10 +631,10 @@ async fn responses(
     }
     tracing::trace!("Received chat completions request: {:?}", request.inner);
 
-    let request_id = uuid::Uuid::new_v4().to_string();
+    let request_id = request.id().to_string();
+    let (request, context) = request.into_parts();
 
-    // Convert NvCreateResponse --> NvCreateChatCompletionRequest
-    let request: NvCreateChatCompletionRequest = request.try_into().map_err(|e| {
+    let mut request: NvCreateChatCompletionRequest = request.try_into().map_err(|e| {
         tracing::error!(
             request_id,
             "Failed to convert NvCreateResponse to NvCreateChatCompletionRequest: {:?}",
@@ -528,6 +645,11 @@ async fn responses(
             e
         ))
     })?;
+
+    let request = context.map(|mut _req| {
+        request.inner.stream = Some(false);
+        request
+    });
 
     let model = &request.inner.model;
 
@@ -545,8 +667,6 @@ async fn responses(
 
     let _response_collector = state.metrics_clone().create_response_collector(model);
 
-    let request = Context::with_id(request, request_id.clone());
-
     tracing::trace!("Issuing generate call for chat completions");
 
     // issue the generate call on the engine
@@ -556,7 +676,7 @@ async fn responses(
         .map_err(|e| ErrorMessage::from_anyhow(e, "Failed to generate completions"))?;
 
     // TODO: handle streaming, currently just unary
-    let response = NvCreateChatCompletionResponse::from_annotated_stream(stream.into())
+    let response = NvCreateChatCompletionResponse::from_annotated_stream(stream)
         .await
         .map_err(|e| {
             tracing::error!(
@@ -754,45 +874,6 @@ struct ModelListing {
     owned_by: String,
 }
 
-/// This method will consume a stream of SSE events and forward them to a new stream defined by a tokio channel.
-/// In this way, if the downstream is dropped, then the upstream will be unable to send any more events. This is
-/// how we can monitor for disconnects and stop the generation of completions.
-///
-/// If a disconnect is detected, then the context will issue a `stop_generating` call to the context which will
-/// propagate the cancellation signal to the backend.
-async fn monitor_for_disconnects(
-    stream: Pin<
-        Box<dyn Stream<Item = Result<axum::response::sse::Event, axum::Error>> + std::marker::Send>,
-    >,
-    context: Arc<dyn AsyncEngineContext>,
-    mut inflight_guard: InflightGuard,
-) -> ReceiverStream<Result<Event, axum::Error>> {
-    let (tx, rx) = tokio::sync::mpsc::channel(8);
-
-    tokio::spawn(async move {
-        let mut stream = stream;
-        while let Some(event) = stream.next().await {
-            let event = match event {
-                Ok(event) => Ok(event),
-                Err(err) => Ok(Event::default().event("error").comment(err.to_string())),
-            };
-
-            if (tx.send(event).await).is_err() {
-                tracing::trace!("Forwarding SSE stream was dropped; breaking loop");
-                context.stop_generating();
-                break;
-            }
-        }
-
-        // Stream completed successfully - mark as ok
-        if tx.send(Ok(Event::default().data("[DONE]"))).await.is_ok() {
-            inflight_guard.mark_ok();
-        }
-    });
-
-    ReceiverStream::new(rx)
-}
-
 struct EventConverter<T>(Annotated<T>);
 
 impl<T> From<Annotated<T>> for EventConverter<T> {
@@ -854,7 +935,7 @@ pub fn completions_router(
     let path = path.unwrap_or("/v1/completions".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
-        .route(&path, post(completions))
+        .route(&path, post(handler_completions))
         .with_state(state);
     (vec![doc], router)
 }
@@ -869,7 +950,7 @@ pub fn chat_completions_router(
     let path = path.unwrap_or("/v1/chat/completions".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
-        .route(&path, post(chat_completions))
+        .route(&path, post(handler_chat_completions))
         .with_state((state, template));
     (vec![doc], router)
 }
@@ -914,7 +995,7 @@ pub fn responses_router(
     let path = path.unwrap_or("/v1/responses".to_string());
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
-        .route(&path, post(responses))
+        .route(&path, post(handler_responses))
         .with_state((state, template));
     (vec![doc], router)
 }

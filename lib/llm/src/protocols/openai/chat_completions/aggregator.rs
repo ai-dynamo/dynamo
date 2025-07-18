@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 use std::collections::HashMap;
 
 use super::{NvCreateChatCompletionResponse, NvCreateChatCompletionStreamResponse};
@@ -94,7 +94,7 @@ impl DeltaAggregator {
     /// * `Ok(NvCreateChatCompletionResponse)` if aggregation is successful.
     /// * `Err(String)` if an error occurs during processing.
     pub async fn apply(
-        stream: DataStream<Annotated<NvCreateChatCompletionStreamResponse>>,
+        stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
     ) -> Result<NvCreateChatCompletionResponse, String> {
         let aggregator = stream
             .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
@@ -259,7 +259,7 @@ impl NvCreateChatCompletionResponse {
     /// * `Ok(NvCreateChatCompletionResponse)` if aggregation succeeds.
     /// * `Err(String)` if an error occurs.
     pub async fn from_annotated_stream(
-        stream: DataStream<Annotated<NvCreateChatCompletionStreamResponse>>,
+        stream: impl Stream<Item = Annotated<NvCreateChatCompletionStreamResponse>>,
     ) -> Result<NvCreateChatCompletionResponse, String> {
         DeltaAggregator::apply(stream).await
     }
