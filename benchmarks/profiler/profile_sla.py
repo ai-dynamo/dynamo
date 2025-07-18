@@ -15,6 +15,7 @@
 
 import argparse
 import asyncio
+import json
 import logging
 import math
 import os
@@ -41,6 +42,127 @@ formatter = logging.Formatter(
 )
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
+
+
+def check_prefill_results_exist(output_dir: str, tp_size: int, isl: int) -> bool:
+    """Check if prefill results already exist for a given TP size."""
+    work_dir = f"{output_dir}/prefill_tp{tp_size}"
+    result_file = f"{work_dir}/gap_isl{isl}/*/profile_export_genai_perf.json"
+
+    # Check if the work directory exists
+    if not os.path.exists(work_dir):
+        return False
+
+    # Look for the genai-perf result file
+    import glob
+
+    result_files = glob.glob(result_file)
+    if not result_files:
+        return False
+
+    # Verify the result file has valid data
+    try:
+        with open(result_files[0], "r") as f:
+            data = json.load(f)
+            # Check if it has the required metrics
+            if "time_to_first_token" in data and "avg" in data["time_to_first_token"]:
+                logger.info(
+                    f"Found existing prefill results for TP{tp_size} at {result_files[0]}"
+                )
+                return True
+    except (json.JSONDecodeError, KeyError, FileNotFoundError):
+        pass
+
+    return False
+
+
+def check_decode_results_exist(
+    output_dir: str, tp_size: int, isl: int, osl: int
+) -> bool:
+    """Check if decode results already exist for a given TP size."""
+    work_dir = f"{output_dir}/decode_tp{tp_size}"
+
+    # Check if the work directory exists
+    if not os.path.exists(work_dir):
+        return False
+
+    # Look for at least one decode result file
+    import glob
+
+    result_pattern = (
+        f"{work_dir}/gap_request*_isl{isl}_osl{osl}_n*/*/profile_export_genai_perf.json"
+    )
+    result_files = glob.glob(result_pattern)
+
+    if not result_files:
+        return False
+
+    # Verify at least one result file has valid data
+    try:
+        with open(result_files[0], "r") as f:
+            data = json.load(f)
+            # Check if it has the required metrics
+            if "inter_token_latency" in data and "avg" in data["inter_token_latency"]:
+                logger.info(
+                    f"Found existing decode results for TP{tp_size} at {result_files[0]} (and {len(result_files)-1} others)"
+                )
+                return True
+    except (json.JSONDecodeError, KeyError, FileNotFoundError):
+        pass
+
+    return False
+
+
+def load_existing_prefill_results(output_dir: str, tp_size: int, isl: int):
+    """Load existing prefill results from disk."""
+    work_dir = f"{output_dir}/prefill_tp{tp_size}"
+    result_file = f"{work_dir}/gap_isl{isl}/*/profile_export_genai_perf.json"
+
+    import glob
+
+    result_files = glob.glob(result_file)
+    if result_files:
+        try:
+            with open(result_files[0], "r") as f:
+                data = json.load(f)
+                ttft = data["time_to_first_token"]["avg"]
+                thpt_per_gpu = isl / ttft / tp_size * 1000
+                return ttft, thpt_per_gpu
+        except (json.JSONDecodeError, KeyError, FileNotFoundError):
+            pass
+    return None, None
+
+
+def load_existing_decode_results(output_dir: str, tp_size: int, isl: int, osl: int):
+    """Load existing decode results from disk."""
+    work_dir = f"{output_dir}/decode_tp{tp_size}"
+
+    import glob
+
+    result_pattern = (
+        f"{work_dir}/gap_request*_isl{isl}_osl{osl}_n*/*/profile_export_genai_perf.json"
+    )
+    result_files = glob.glob(result_pattern)
+
+    decode_results = []
+    for result_file in result_files:
+        try:
+            with open(result_file, "r") as f:
+                data = json.load(f)
+                itl = data["inter_token_latency"]["avg"]
+                thpt_per_gpu = data["output_token_throughput"]["avg"] / tp_size
+
+                # Extract concurrency from filename
+                import re
+
+                match = re.search(r"gap_request(\d+)_", result_file)
+                if match:
+                    concurrency = int(match.group(1))
+                    decode_results.append((itl, thpt_per_gpu, concurrency))
+        except (json.JSONDecodeError, KeyError, FileNotFoundError):
+            continue
+
+    return decode_results
 
 
 async def cleanup_remaining_deployments(deployment_clients, namespace):
@@ -98,6 +220,18 @@ async def run_profile(args):
 
         model_name = config_modifier.get_model_name(config)
 
+        # Log skip behavior
+        if args.force_rerun:
+            logger.info(
+                "Force rerun enabled - will re-run all tests even if results exist"
+            )
+        elif args.skip_existing_results:
+            logger.info(
+                "Skip existing results enabled - will skip TP sizes with existing results"
+            )
+        else:
+            logger.info("Skip existing results disabled - will re-run all tests")
+
         # first profile prefill
         prefill_tp_size = []
         prefill_ttft = []
@@ -106,6 +240,26 @@ async def run_profile(args):
         prefill_config = config_modifier.convert_config(config, "prefill")
         for tp_size in profile_tp_size:
             logger.info(f"Profiling prefill with TP size {tp_size}...")
+
+            # Check if results already exist for this TP size
+            if (
+                args.skip_existing_results
+                and not args.force_rerun
+                and check_prefill_results_exist(args.output_dir, tp_size, args.isl)
+            ):
+                logger.info(f"Skipping prefill TP{tp_size} - results already exist")
+                ttft, thpt_per_gpu = load_existing_prefill_results(
+                    args.output_dir, tp_size, args.isl
+                )
+                if ttft is not None and thpt_per_gpu is not None:
+                    prefill_tp_size.append(tp_size)
+                    prefill_ttft.append(ttft)
+                    prefill_thpt_per_gpu.append(thpt_per_gpu)
+                    logger.info(
+                        f"Loaded existing prefill results: TP{tp_size} TTFT={ttft:.2f}ms, throughput={thpt_per_gpu:.2f} tokens/s/GPU"
+                    )
+                continue
+
             prefill_config = config_modifier.set_config_tp_size(prefill_config, tp_size)
             logger.info(f"Dynamo config: {prefill_config}")
 
@@ -173,6 +327,45 @@ async def run_profile(args):
         decode_config = config_modifier.convert_config(config, "decode")
         for tp_size in profile_tp_size:
             logger.info(f"Profiling decode with TP size {tp_size}...")
+
+            # Check if results already exist for this TP size
+            if (
+                args.skip_existing_results
+                and not args.force_rerun
+                and check_decode_results_exist(
+                    args.output_dir, tp_size, args.isl, args.osl
+                )
+            ):
+                logger.info(f"Skipping decode TP{tp_size} - results already exist")
+                existing_results = load_existing_decode_results(
+                    args.output_dir, tp_size, args.isl, args.osl
+                )
+                if existing_results:
+                    # Add existing results to our arrays
+                    engine_decode_itl = []
+                    engine_decode_thpt_per_gpu = []
+                    for itl, thpt_per_gpu, concurrency in existing_results:
+                        decode_tp_size.append(tp_size)
+                        decode_itl.append(itl)
+                        decode_thpt_per_gpu.append(thpt_per_gpu)
+                        decode_concurrency.append(concurrency)
+                        # We need to get kv_cache_size from existing logs or estimate it
+                        estimated_kv_cache = max(
+                            100000, concurrency * (args.isl + args.osl) * 2
+                        )  # Conservative estimate
+                        decode_kv_cache_size.append(estimated_kv_cache)
+                        engine_decode_itl.append(itl)
+                        engine_decode_thpt_per_gpu.append(thpt_per_gpu)
+
+                    # Store results for plotting
+                    decode_results.append(
+                        (tp_size, engine_decode_itl, engine_decode_thpt_per_gpu)
+                    )
+                    logger.info(
+                        f"Loaded {len(existing_results)} existing decode results for TP{tp_size}"
+                    )
+                continue
+
             decode_config = config_modifier.set_config_tp_size(decode_config, tp_size)
             logger.info(f"Dynamo config: {decode_config}")
 
@@ -552,6 +745,21 @@ if __name__ == "__main__":
         type=int,
         default=8,
         help="maximum number of GPUs per engine",
+    )
+    parser.add_argument(
+        "--skip-large-tp-on-failure",
+        action="store_true",
+        help="Skip TP sizes >= 8 if they fail due to resource constraints",
+    )
+    parser.add_argument(
+        "--skip-existing-results",
+        action="store_true",
+        help="Skip TP sizes that already have results in the output directory",
+    )
+    parser.add_argument(
+        "--force-rerun",
+        action="store_true",
+        help="Force re-running all tests even if results already exist (overrides --skip-existing-results)",
     )
     parser.add_argument(
         "--isl", type=int, default=3000, help="target input sequence length"

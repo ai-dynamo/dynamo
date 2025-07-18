@@ -84,11 +84,11 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "64"
+          cpu: "32"
           memory: "40Gi"
           gpu: "1"
         limits:
-          cpu: "64"
+          cpu: "32"
           memory: "40Gi"
           gpu: "1"
       extraPodSpec:

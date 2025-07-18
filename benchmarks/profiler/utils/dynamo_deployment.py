@@ -122,10 +122,12 @@ class DynamoDeploymentClient:
                 plural="dynamographdeployments",
                 body=self.deployment_spec,
             )
+            print(f"Successfully created deployment {self.deployment_name}")
         except kubernetes.client.rest.ApiException as e:
             if e.status == 409:  # Already exists
                 print(f"Deployment {self.deployment_name} already exists")
             else:
+                print(f"Failed to create deployment {self.deployment_name}: {e}")
                 raise
 
     async def wait_for_deployment_ready(self, timeout: int = 600):
@@ -136,6 +138,7 @@ class DynamoDeploymentClient:
             timeout: Maximum time to wait in seconds
         """
         start_time = time.time()
+        consecutive_404s = 0
         # TODO: A little brittle, also should output intermediate status every so often.
         while (time.time() - start_time) < timeout:
             try:
@@ -146,6 +149,8 @@ class DynamoDeploymentClient:
                     plural="dynamographdeployments",
                     name=self.deployment_name,
                 )
+                consecutive_404s = 0  # Reset counter on successful API call
+
                 # Check both conditions:
                 # 1. Ready condition is True
                 # 2. State is successful
@@ -179,8 +184,25 @@ class DynamoDeploymentClient:
                     )
 
             except kubernetes.client.rest.ApiException as e:
-                print(f"API Exception while checking deployment status: {e}")
-                print(f"Status code: {e.status}, Reason: {e.reason}")
+                if e.status == 404:
+                    consecutive_404s += 1
+                    print(f"Deployment not found (404) - attempt {consecutive_404s}")
+                    if consecutive_404s >= 3:
+                        print("ERROR: Deployment has disappeared! This usually means:")
+                        print(
+                            "  1. Resource constraints prevented scheduling (check GPU/CPU/memory availability)"
+                        )
+                        print("  2. Node affinity rules excluded all available nodes")
+                        print("  3. Image pull failures or other pod startup issues")
+                        print(
+                            "Consider reducing resource requirements or checking node capacity"
+                        )
+                        raise RuntimeError(
+                            f"Deployment {self.deployment_name} disappeared - likely scheduling failure"
+                        )
+                else:
+                    print(f"API Exception while checking deployment status: {e}")
+                    print(f"Status code: {e.status}, Reason: {e.reason}")
             except Exception as e:
                 print(f"Unexpected exception while checking deployment status: {e}")
             await asyncio.sleep(20)

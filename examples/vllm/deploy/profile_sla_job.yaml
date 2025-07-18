@@ -34,7 +34,7 @@ spec:
                 - aks-agentpool-36388387-vmss000005  # NotReady status
       containers:
       - name: profile-sla
-        image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-233.11
+        image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-233.13
         resources:
           requests:
             cpu: "1"
@@ -62,6 +62,10 @@ spec:
           - ${NAMESPACE}
           - --service-name
           - vllm-v1-agg-frontend
+          - --skip-existing-results
+          - --skip-large-tp-on-failure
+          # - --max-num-gpus-per-engine
+          # - "4"  # Limit to TP4 max if cluster is small
         volumeMounts:
           - name: output-volume
             mountPath: /workspace/profiling_results
@@ -70,4 +74,4 @@ spec:
         - name: output-volume
           persistentVolumeClaim:
             claimName: profiling-pvc
-  backoffLimit: 1
+  backoffLimit: 0
