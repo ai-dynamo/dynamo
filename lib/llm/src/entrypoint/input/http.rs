@@ -42,7 +42,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                         etcd_client.clone(),
                         MODEL_ROOT_PATH,
                         router_config.router_mode,
-                        Some(router_config.kv_router_config.clone()),
+                        Some(router_config.kv_router_config),
                     )
                     .await?;
                 }
