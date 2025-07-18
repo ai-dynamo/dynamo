@@ -453,10 +453,19 @@ ARG ARCH_ALT
 ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins
 ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:$LD_LIBRARY_PATH
 
-# Copy the virtual environment from base stage (includes vllm and all dependencies)
+# Setup the python environment
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-COPY --from=base /opt/dynamo/venv /opt/dynamo/venv
-RUN echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
+RUN uv venv $VIRTUAL_ENV --python 3.12 && \
+    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
+
+# Common dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
+
+# Install test dependencies
+#TODO: Remove this once we have a functional ci_minimum image built on top of the runtime image
+RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
 
 # Install vllm in non-editable mode for runtime
 ARG VLLM_REF
@@ -469,15 +478,6 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     chmod +x /tmp/install_vllm.sh && \
     /tmp/install_vllm.sh --no-editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --installation-dir /tmp/vllm && \
     rm -rf /tmp/vllm
-
-# Common dependencies - these may already be installed in the copied venv, but run anyway for safety
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
-
-# Install test dependencies
-#TODO: Remove this once we have a functional ci_minimum image built on top of the runtime image
-RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
 
 #TODO: Remove this once we have a functional ci_minimum image built on top of the runtime image
 COPY . /workspace
