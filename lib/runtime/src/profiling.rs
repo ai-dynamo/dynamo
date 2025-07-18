@@ -206,8 +206,8 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
 
 #[cfg(test)]
 mod test_simple_registry_trait {
-    use super::*;
     use super::test_helpers::create_test_drt_sync;
+    use super::*;
     use prometheus::Counter;
     use std::sync::Arc;
 
@@ -291,8 +291,8 @@ mod test_simple_registry_trait {
 
 #[cfg(test)]
 mod test_runtime_and_namespace_registry_trait {
-    use super::*;
     use super::test_helpers::create_test_drt_sync;
+    use super::*;
     use std::sync::Arc;
 
     /// Test registry representing a runtime-level metrics registry
@@ -341,10 +341,14 @@ mod test_runtime_and_namespace_registry_trait {
         let drt = create_test_drt_sync();
 
         // Create runtime-level registry
-        let runtime_registry = MyRuntimeRegistry { drt: Arc::new(drt.clone()) };
+        let runtime_registry = MyRuntimeRegistry {
+            drt: Arc::new(drt.clone()),
+        };
 
         // Create namespace-level registry
-        let namespace_registry = MyNamespaceRegistry { drt: Arc::new(drt.clone()) };
+        let namespace_registry = MyNamespaceRegistry {
+            drt: Arc::new(drt.clone()),
+        };
 
         // Create metrics using factory methods and increment some values
         let runtime_counter = runtime_registry
@@ -388,8 +392,8 @@ runtime_namespace__active_connections 25\n";
 
 #[cfg(test)]
 mod test_prefixes {
-    use super::*;
     use super::test_helpers::create_test_drt_sync;
+    use super::*;
 
     #[test]
     fn test_hierarchical_prefixes_and_parent_hierarchies() {

@@ -214,43 +214,6 @@ mod tests {
     use std::sync::Arc;
     use tokio::time::{sleep, Duration};
 
-    // Test wrapper that implements MetricsRegistry for prometheus::Registry
-    #[cfg(test)]
-    struct TestMetricsRegistry {
-        registry: Arc<prometheus::Registry>,
-        prefix: String,
-        drt: Arc<crate::DistributedRuntime>,
-    }
-
-    #[cfg(test)]
-    impl TestMetricsRegistry {
-        fn new(registry: Arc<prometheus::Registry>, drt: Arc<crate::DistributedRuntime>) -> Self {
-            Self {
-                registry,
-                prefix: "namespace".to_string(),
-                drt,
-            }
-        }
-    }
-
-    #[cfg(test)]
-    impl DistributedRuntimeProvider for TestMetricsRegistry {
-        fn drt(&self) -> &crate::DistributedRuntime {
-            &self.drt
-        }
-    }
-
-    #[cfg(test)]
-    impl MetricsRegistry for TestMetricsRegistry {
-        fn basename(&self) -> String {
-            self.prefix.clone()
-        }
-
-        fn parent_hierarchy(&self) -> Vec<String> {
-            vec![]
-        }
-    }
-
     #[tokio::test]
     async fn test_http_server_lifecycle() {
         let cancel_token = CancellationToken::new();
@@ -296,9 +259,6 @@ mod tests {
         // Test updating uptime
         let uptime_seconds = 123.456;
         runtime_metrics.uptime_gauge.set(uptime_seconds);
-
-        // DEBUG: Print registry keys
-        drt.debug_prometheus_registry_keys();
 
         // Get metrics from the registry
         let response = runtime_metrics.drt().prometheus_metrics_fmt().unwrap();
@@ -364,9 +324,6 @@ http_server__uptime_seconds 42
 
     #[tokio::test]
     async fn test_spawn_http_server_endpoints() {
-        use std::sync::Arc;
-        use tokio::time::sleep;
-        use tokio_util::sync::CancellationToken;
         // use reqwest for HTTP requests
         let cancel_token = CancellationToken::new();
         let drt = make_test_drt().await;
