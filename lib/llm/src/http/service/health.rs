@@ -92,7 +92,6 @@ async fn health_handler(
         vec![]
     };
 
-
     if model_entries.is_empty() {
         (
             StatusCode::SERVICE_UNAVAILABLE,

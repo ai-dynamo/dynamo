@@ -38,6 +38,7 @@ pub mod discovery;
 pub mod engine;
 pub mod http_server;
 pub use http_server::HttpServerInfo;
+pub mod instances;
 pub mod logging;
 pub mod metrics;
 pub mod pipeline;
@@ -52,7 +53,6 @@ pub mod traits;
 pub mod transports;
 pub mod utils;
 pub mod worker;
-pub mod instances;
 
 pub mod distributed;
 pub use futures::stream;

@@ -36,7 +36,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
 
     match engine_config {
         EngineConfig::Dynamic(_) => {
-            match etcd_client{
+            match etcd_client {
                 Some(ref etcd_client) => {
                     let router_config = engine_config.local_model().router_config();
                     // Listen for models registering themselves in etcd, add them to HTTP service

@@ -12,10 +12,9 @@ use crate::discovery::ModelManager;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
+use dynamo_runtime::transports::etcd;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use dynamo_runtime::transports::etcd;
-
 
 /// HTTP service shared state
 pub struct State {
