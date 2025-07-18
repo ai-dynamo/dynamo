@@ -495,13 +495,10 @@ func TestDynamoComponentDeploymentReconciler_generateVirtualService(t *testing.T
 
 func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.T) {
 	type fields struct {
-		Client            client.Client
-		Recorder          record.EventRecorder
-		Config            controller_common.Config
-		NatsAddr          string
-		EtcdAddr          string
-		EtcdStorage       etcdStorage
-		UseVirtualService bool
+		Client      client.Client
+		Recorder    record.EventRecorder
+		Config      controller_common.Config
+		EtcdStorage etcdStorage
 	}
 	type args struct {
 		ctx context.Context
@@ -755,13 +752,10 @@ func TestDynamoComponentDeploymentReconciler_generateVolcanoPodGroup(t *testing.
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 			r := &DynamoComponentDeploymentReconciler{
-				Client:            tt.fields.Client,
-				Recorder:          tt.fields.Recorder,
-				Config:            tt.fields.Config,
-				NatsAddr:          tt.fields.NatsAddr,
-				EtcdAddr:          tt.fields.EtcdAddr,
-				EtcdStorage:       tt.fields.EtcdStorage,
-				UseVirtualService: tt.fields.UseVirtualService,
+				Client:      tt.fields.Client,
+				Recorder:    tt.fields.Recorder,
+				Config:      tt.fields.Config,
+				EtcdStorage: tt.fields.EtcdStorage,
 			}
 			got, got1, err := r.generateVolcanoPodGroup(tt.args.ctx, tt.args.opt)
 			if (err != nil) != tt.wantErr {
@@ -789,10 +783,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 		Client                client.Client
 		Recorder              record.EventRecorder
 		Config                controller_common.Config
-		NatsAddr              string
-		EtcdAddr              string
 		EtcdStorage           etcdStorage
-		UseVirtualService     bool
 		DockerSecretRetriever *mockDockerSecretRetriever
 	}
 	type args struct {
@@ -1095,10 +1086,7 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 				Client:                fakeKubeClient, // Use the fake client
 				Recorder:              tt.fields.Recorder,
 				Config:                tt.fields.Config,
-				NatsAddr:              tt.fields.NatsAddr,
-				EtcdAddr:              tt.fields.EtcdAddr,
 				EtcdStorage:           tt.fields.EtcdStorage,
-				UseVirtualService:     tt.fields.UseVirtualService,
 				DockerSecretRetriever: tt.fields.DockerSecretRetriever,
 				// Scheme: s, // Pass scheme if reconciler uses it directly, often client uses it
 			}

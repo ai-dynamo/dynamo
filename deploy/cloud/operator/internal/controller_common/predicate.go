@@ -30,10 +30,11 @@ import (
 type Config struct {
 	// Enable resources filtering, only the resources belonging to the given namespace will be handled.
 	RestrictedNamespace string
-	// If true, assume VirtualService endpoints are HTTPS
-	VirtualServiceSupportsHTTPS bool
-	EnableLWS                   bool
-	EnableGrove                 bool
+	EnableLWS           bool
+	EnableGrove         bool
+	EtcdAddress         string
+	NatsAddress         string
+	UseVirtualService   bool
 }
 
 func EphemeralDeploymentEventFilter(config Config) predicate.Predicate {

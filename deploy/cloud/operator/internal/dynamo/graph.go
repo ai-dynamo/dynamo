@@ -307,7 +307,7 @@ func GetDynamoComponentName(dynamoDeployment *v1alpha1.DynamoGraphDeployment, co
 	return fmt.Sprintf("%s-%s", dynamoDeployment.Name, strings.ToLower(component))
 }
 
-func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment) (*grovev1alpha1.PodGangSet, error) {
+func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, controllerConfig controller_common.Config) (*grovev1alpha1.PodGangSet, error) {
 	gangSet := &grovev1alpha1.PodGangSet{}
 	gangSet.Name = dynamoDeployment.Name
 	gangSet.Namespace = dynamoDeployment.Namespace
@@ -318,6 +318,18 @@ func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.Dyn
 			LivenessProbe:  component.LivenessProbe,
 			ReadinessProbe: component.ReadinessProbe,
 			Env:            component.Envs,
+			Ports: []corev1.ContainerPort{
+				{
+					Protocol:      corev1.ProtocolTCP,
+					Name:          commonconsts.DynamoContainerPortName,
+					ContainerPort: int32(commonconsts.DynamoServicePort),
+				},
+				{
+					Protocol:      corev1.ProtocolTCP,
+					Name:          commonconsts.DynamoHealthPortName,
+					ContainerPort: int32(commonconsts.DynamoHealthPort),
+				},
+			},
 		}
 		resourcesConfig, err := controller_common.GetResourcesConfig(component.Resources)
 		if err != nil {
@@ -334,6 +346,22 @@ func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.Dyn
 		// merge the envs from the parent deployment with the envs from the service
 		if len(dynamoDeployment.Spec.Envs) > 0 {
 			container.Env = mergeEnvs(dynamoDeployment.Spec.Envs, container.Env)
+		}
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  commonconsts.EnvDynamoServicePort,
+			Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+		})
+		if controllerConfig.NatsAddress != "" {
+			container.Env = append(container.Env, corev1.EnvVar{
+				Name:  "NATS_SERVER",
+				Value: controllerConfig.NatsAddress,
+			})
+		}
+		if controllerConfig.EtcdAddress != "" {
+			container.Env = append(container.Env, corev1.EnvVar{
+				Name:  "ETCD_ENDPOINTS",
+				Value: controllerConfig.EtcdAddress,
+			})
 		}
 		if component.EnvFromSecret != nil {
 			container.EnvFrom = append(container.EnvFrom, corev1.EnvFromSource{

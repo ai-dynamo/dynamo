@@ -131,10 +131,12 @@ func main() {
 	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
 
 	ctrlConfig := commonController.Config{
-		RestrictedNamespace:         restrictedNamespace,
-		VirtualServiceSupportsHTTPS: virtualServiceSupportsHTTPS,
-		EnableLWS:                   enableLWS,
-		EnableGrove:                 enableGrove,
+		RestrictedNamespace: restrictedNamespace,
+		EnableLWS:           enableLWS,
+		EnableGrove:         enableGrove,
+		EtcdAddress:         etcdAddr,
+		NatsAddress:         natsAddr,
+		UseVirtualService:   istioVirtualServiceGateway != "",
 	}
 
 	mainCtx := ctrl.SetupSignalHandler()
@@ -296,10 +298,7 @@ func main() {
 		Client:                mgr.GetClient(),
 		Recorder:              mgr.GetEventRecorderFor("dynamocomponentdeployment"),
 		Config:                ctrlConfig,
-		NatsAddr:              natsAddr,
-		EtcdAddr:              etcdAddr,
 		EtcdStorage:           etcd.NewStorage(cli),
-		UseVirtualService:     istioVirtualServiceGateway != "",
 		DockerSecretRetriever: dockerSecretRetriever,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponentDeployment")

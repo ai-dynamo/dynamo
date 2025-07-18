@@ -87,10 +87,7 @@ type DynamoComponentDeploymentReconciler struct {
 	client.Client
 	Recorder              record.EventRecorder
 	Config                controller_common.Config
-	NatsAddr              string
-	EtcdAddr              string
 	EtcdStorage           etcdStorage
-	UseVirtualService     bool
 	DockerSecretRetriever dockerSecretRetriever
 }
 
@@ -951,7 +948,7 @@ func (r *DynamoComponentDeploymentReconciler) createOrUpdateOrDeleteIngress(ctx 
 	if err != nil {
 		return false, err
 	}
-	if r.UseVirtualService {
+	if r.Config.UseVirtualService {
 		modified_, _, err := commonController.SyncResource(ctx, r, opt.dynamoComponentDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
 			return r.generateVirtualService(ctx, opt)
 		})
@@ -1266,17 +1263,17 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		},
 	}
 
-	if r.NatsAddr != "" {
+	if r.Config.NatsAddress != "" {
 		defaultEnvs = append(defaultEnvs, corev1.EnvVar{
 			Name:  "NATS_SERVER",
-			Value: r.NatsAddr,
+			Value: r.Config.NatsAddress,
 		})
 	}
 
-	if r.EtcdAddr != "" {
+	if r.Config.EtcdAddress != "" {
 		defaultEnvs = append(defaultEnvs, corev1.EnvVar{
 			Name:  "ETCD_ENDPOINTS",
-			Value: r.EtcdAddr,
+			Value: r.Config.EtcdAddress,
 		})
 	}
 
@@ -1795,7 +1792,7 @@ func (r *DynamoComponentDeploymentReconciler) SetupWithManager(mgr ctrl.Manager)
 			}))
 	}
 
-	if r.UseVirtualService {
+	if r.Config.UseVirtualService {
 		m.Owns(&networkingv1beta1.VirtualService{}, builder.WithPredicates(predicate.GenerationChangedPredicate{}))
 	}
 	m.Owns(&autoscalingv2.HorizontalPodAutoscaler{})

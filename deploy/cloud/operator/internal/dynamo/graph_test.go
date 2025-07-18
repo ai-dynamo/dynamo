@@ -30,6 +30,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -1120,6 +1121,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 	type args struct {
 		ctx              context.Context
 		dynamoDeployment *v1alpha1.DynamoGraphDeployment
+		controllerConfig controller_common.Config
 	}
 	tests := []struct {
 		name    string
@@ -1131,6 +1133,10 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 			name: "test_generate_grove_pod_gang_set",
 			args: args{
 				ctx: context.Background(),
+				controllerConfig: controller_common.Config{
+					EtcdAddress: "etcd-address",
+					NatsAddress: "nats-address",
+				},
 				dynamoDeployment: &v1alpha1.DynamoGraphDeployment{
 					Spec: v1alpha1.DynamoGraphDeploymentSpec{
 						Envs: []corev1.EnvVar{
@@ -1312,6 +1318,18 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Name:  "FRONTEND_ENV_1",
 														Value: "1",
 													},
+													{
+														Name:  "DYNAMO_PORT",
+														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+													},
+													{
+														Name:  "NATS_SERVER",
+														Value: "nats-address",
+													},
+													{
+														Name:  "ETCD_ENDPOINTS",
+														Value: "etcd-address",
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -1322,6 +1340,18 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														corev1.ResourceCPU:                    resource.MustParse("1"),
 														corev1.ResourceMemory:                 resource.MustParse("1Gi"),
 														corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
+													},
+												},
+												Ports: []corev1.ContainerPort{
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoContainerPortName,
+														ContainerPort: int32(commonconsts.DynamoServicePort),
+													},
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoHealthPortName,
+														ContainerPort: int32(commonconsts.DynamoHealthPort),
 													},
 												},
 											},
@@ -1392,6 +1422,18 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														Name:  "PLANNER_ENV_1",
 														Value: "2",
 													},
+													{
+														Name:  "DYNAMO_PORT",
+														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+													},
+													{
+														Name:  "NATS_SERVER",
+														Value: "nats-address",
+													},
+													{
+														Name:  "ETCD_ENDPOINTS",
+														Value: "etcd-address",
+													},
 												},
 												Resources: corev1.ResourceRequirements{
 													Requests: corev1.ResourceList{
@@ -1410,6 +1452,18 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														MountPath: "/planner",
 													},
 												},
+												Ports: []corev1.ContainerPort{
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoContainerPortName,
+														ContainerPort: int32(commonconsts.DynamoServicePort),
+													},
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoHealthPortName,
+														ContainerPort: int32(commonconsts.DynamoHealthPort),
+													},
+												},
 											},
 										},
 									},
@@ -1424,7 +1478,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateGrovePodGangSet(tt.args.ctx, tt.args.dynamoDeployment)
+			got, err := GenerateGrovePodGangSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateGrovePodGangSet() error = %v, wantErr %v", err, tt.wantErr)
 				return

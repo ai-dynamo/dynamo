@@ -170,7 +170,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) ([]Resource, error) {
 	logger := log.FromContext(ctx)
 	// generate the dynamoComponentsDeployments from the config
-	groveGangSet, err := dynamo.GenerateGrovePodGangSet(ctx, dynamoDeployment)
+	groveGangSet, err := dynamo.GenerateGrovePodGangSet(ctx, dynamoDeployment, r.Config)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return nil, err
