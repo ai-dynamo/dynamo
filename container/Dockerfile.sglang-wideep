@@ -71,19 +71,10 @@ RUN rm -rf /opt/hpcx/ucx && \
 
 ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
 
-# Pinning to NIXL 0.2.1 right now
-# There is a fix that was merged into SGLang after 0.4.8.post1
-# TODO: Investigate perf hit of that change before we bump to up to date NIXL
-ARG NIXL_COMMIT="5e4c179ee850d482a83cb2a211e0947e46281060"
-RUN git clone https://github.com/ai-dynamo/nixl.git && cd nixl && git checkout ${NIXL_COMMIT} && pip install --break-system-packages . --config-settings=setup-args="-Ducx_path=/usr/local/ucx"
+ARG NIXL_TAG=0.3.1
+RUN git clone https://github.com/ai-dynamo/nixl.git && cd nixl && git checkout ${NIXL_TAG} && pip install --break-system-packages . --config-settings=setup-args="-Ducx_path=/usr/local/ucx"
 
 WORKDIR /sgl-workspace
-
-RUN pip uninstall --break-system-packages -y sglang
-RUN rm -rf sglang
-# Pinning to 0.4.8.post1 for now which solves a TBO issue
-# https://github.com/sgl-project/sglang/issues/7511
-RUN pip install --break-system-packages "sglang==0.4.8.post1"
 
 # Allow forceful shutdown of inflight requests
 ENV SGL_FORCE_SHUTDOWN=1
@@ -148,6 +139,21 @@ RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/downlo
     tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
     rm /tmp/etcd.tar.gz
 ENV PATH=/usr/local/bin/etcd/:$PATH
+
+ARG CMAKE_VERSION=3.31.8
+RUN mkdir /sgl-workspace/cmake_build
+WORKDIR /sgl-workspace/cmake_build
+
+# uninstall CMake
+RUN apt-get purge -y cmake
+# download newer version of CMake
+RUN wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
+    tar -xvzf cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
+    mv cmake-${CMAKE_VERSION}-linux-$(uname -m) custom_cmake
+ENV PATH=/sgl-workspace/cmake_build/custom_cmake/bin:$PATH
+
+# should be 3.31.8
+RUN cmake --version
 
 # Install perf_analyzer and genai-perf
 RUN apt-get update -y && \

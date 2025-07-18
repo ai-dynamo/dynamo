@@ -669,3 +669,12 @@ More fully-featured Backend engines (used by `dynamo-run`):
 - [vllm](https://github.com/ai-dynamo/dynamo/blob/main/launch/dynamo-run/src/subprocess/vllm_inc.py)
 - [sglang](https://github.com/ai-dynamo/dynamo/blob/main/launch/dynamo-run/src/subprocess/sglang_inc.py)
 
+### Debugging
+
+`dynamo-run` and `dynamo-runtime` support [tokio-console](https://github.com/tokio-rs/console). Build with the feature to enable:
+```
+cargo build --features cuda,tokio-console -p dynamo-run
+```
+
+The listener uses the default tokio console port, and all interfaces (0.0.0.0).
+

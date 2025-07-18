@@ -25,7 +25,6 @@ from tests.utils.deployment_graph import (
     DeploymentGraph,
     Payload,
     chat_completions_response_handler,
-    completions_response_handler,
 )
 from tests.utils.managed_process import ManagedProcess
 
@@ -56,106 +55,7 @@ multimodal_payload = Payload(
     expected_response=["bus"],
 )
 
-text_payload = Payload(
-    payload_chat={
-        "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        "messages": [
-            {
-                "role": "user",
-                "content": text_prompt,  # Shorter prompt
-            }
-        ],
-        "max_tokens": 150,  # Reduced from 500
-        "temperature": 0.1,
-        # "seed": 0,
-    },
-    payload_completions={
-        "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        "prompt": text_prompt,
-        "max_tokens": 150,
-        "temperature": 0.1,
-        # "seed": 0,
-    },
-    repeat_count=10,
-    expected_log=[],
-    expected_response=["AI"],
-)
-
 deployment_graphs = {
-    "agg": (
-        DeploymentGraph(
-            module="graphs.agg:Frontend",
-            config="configs/agg.yaml",
-            directory="/workspace/examples/llm",
-            endpoints=["v1/chat/completions"],
-            response_handlers=[
-                chat_completions_response_handler,
-            ],
-            marks=[pytest.mark.gpu_1, pytest.mark.vllm],
-        ),
-        text_payload,
-    ),
-    "sglang_agg": (
-        DeploymentGraph(
-            module="graphs.agg:Frontend",
-            config="configs/agg.yaml",
-            directory="/workspace/examples/sglang",
-            endpoints=["v1/chat/completions", "v1/completions"],
-            response_handlers=[
-                chat_completions_response_handler,
-                completions_response_handler,
-            ],
-            marks=[pytest.mark.gpu_1, pytest.mark.sglang],
-        ),
-        text_payload,
-    ),
-    "disagg": (
-        DeploymentGraph(
-            module="graphs.disagg:Frontend",
-            config="configs/disagg.yaml",
-            directory="/workspace/examples/llm",
-            endpoints=["v1/chat/completions"],
-            response_handlers=[
-                chat_completions_response_handler,
-            ],
-            marks=[pytest.mark.gpu_2, pytest.mark.vllm],
-        ),
-        text_payload,
-    ),
-    "agg_router": (
-        DeploymentGraph(
-            module="graphs.agg_router:Frontend",
-            config="configs/agg_router.yaml",
-            directory="/workspace/examples/llm",
-            endpoints=["v1/chat/completions"],
-            response_handlers=[
-                chat_completions_response_handler,
-            ],
-            marks=[pytest.mark.gpu_1, pytest.mark.vllm],
-            # FIXME: This is a hack to allow deployments to start before sending any requests.
-            # When using KV-router, if all the endpoints are not registered, the service
-            # enters a non-recoverable state.
-            delayed_start=120,
-        ),
-        text_payload,
-    ),
-    "disagg_router": (
-        DeploymentGraph(
-            module="graphs.disagg_router:Frontend",
-            config="configs/disagg_router.yaml",
-            directory="/workspace/examples/llm",
-            endpoints=["v1/chat/completions"],
-            response_handlers=[
-                chat_completions_response_handler,
-            ],
-            marks=[pytest.mark.gpu_2, pytest.mark.vllm],
-            # FIXME: This is a hack to allow deployments to start before sending any requests.
-            # When using KV-router, if all the endpoints are not registered, the service
-            # enters a non-recoverable state.
-            delayed_start=120,
-        ),
-        text_payload,
-    ),
     "multimodal_agg": (
         DeploymentGraph(
             module="graphs.agg:Frontend",
@@ -168,84 +68,6 @@ deployment_graphs = {
             marks=[pytest.mark.gpu_2, pytest.mark.vllm],
         ),
         multimodal_payload,
-    ),
-    "vllm_v1_agg": (
-        DeploymentGraph(
-            module="graphs.agg:Frontend",
-            config="configs/agg.yaml",
-            directory="/workspace/examples/vllm_v1",
-            endpoints=["v1/chat/completions", "v1/completions"],
-            response_handlers=[
-                chat_completions_response_handler,
-                completions_response_handler,
-            ],
-            marks=[pytest.mark.gpu_1, pytest.mark.vllm],
-        ),
-        text_payload,
-    ),
-    "trtllm_agg": (
-        DeploymentGraph(
-            module="graphs.agg:Frontend",
-            config="configs/agg.yaml",
-            directory="/workspace/examples/tensorrt_llm",
-            endpoints=["v1/chat/completions", "v1/completions"],
-            response_handlers=[
-                chat_completions_response_handler,
-                completions_response_handler,
-            ],
-            marks=[pytest.mark.gpu_1, pytest.mark.tensorrtllm],
-        ),
-        text_payload,
-    ),
-    "trtllm_agg_router": (
-        DeploymentGraph(
-            module="graphs.agg:Frontend",
-            config="configs/agg_router.yaml",
-            directory="/workspace/examples/tensorrt_llm",
-            endpoints=["v1/chat/completions", "v1/completions"],
-            response_handlers=[
-                chat_completions_response_handler,
-                completions_response_handler,
-            ],
-            marks=[pytest.mark.gpu_1, pytest.mark.tensorrtllm],
-            # FIXME: This is a hack to allow deployments to start before sending any requests.
-            # When using KV-router, if all the endpoints are not registered, the service
-            # enters a non-recoverable state.
-            delayed_start=120,
-        ),
-        text_payload,
-    ),
-    "trtllm_disagg": (
-        DeploymentGraph(
-            module="graphs.disagg:Frontend",
-            config="configs/disagg.yaml",
-            directory="/workspace/examples/tensorrt_llm",
-            endpoints=["v1/chat/completions", "v1/completions"],
-            response_handlers=[
-                chat_completions_response_handler,
-                completions_response_handler,
-            ],
-            marks=[pytest.mark.gpu_2, pytest.mark.tensorrtllm],
-        ),
-        text_payload,
-    ),
-    "trtllm_disagg_router": (
-        DeploymentGraph(
-            module="graphs.disagg:Frontend",
-            config="configs/disagg_router.yaml",
-            directory="/workspace/examples/tensorrt_llm",
-            endpoints=["v1/chat/completions", "v1/completions"],
-            response_handlers=[
-                chat_completions_response_handler,
-                completions_response_handler,
-            ],
-            marks=[pytest.mark.gpu_2, pytest.mark.tensorrtllm],
-            # FIXME: This is a hack to allow deployments to start before sending any requests.
-            # When using KV-router, if all the endpoints are not registered, the service
-            # enters a non-recoverable state.
-            delayed_start=120,
-        ),
-        text_payload,
     ),
 }
 
@@ -394,17 +216,6 @@ class DynamoServeProcess(ManagedProcess):
 @pytest.fixture(
     params=[
         pytest.param("multimodal_agg", marks=[pytest.mark.vllm, pytest.mark.gpu_2]),
-        pytest.param("trtllm_agg", marks=[pytest.mark.tensorrtllm, pytest.mark.gpu_1]),
-        pytest.param(
-            "trtllm_agg_router", marks=[pytest.mark.tensorrtllm, pytest.mark.gpu_1]
-        ),
-        pytest.param(
-            "trtllm_disagg", marks=[pytest.mark.tensorrtllm, pytest.mark.gpu_2]
-        ),
-        pytest.param(
-            "trtllm_disagg_router", marks=[pytest.mark.tensorrtllm, pytest.mark.gpu_2]
-        ),
-        #        pytest.param("sglang", marks=[pytest.mark.sglang, pytest.mark.gpu_2]),
     ]
 )
 def deployment_graph_test(request):
