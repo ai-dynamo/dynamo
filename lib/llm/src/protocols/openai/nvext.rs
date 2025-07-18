@@ -61,6 +61,17 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub annotations: Option<Vec<String>>,
+
+    /// Url for multimodal model asset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    pub multimodal_url: Option<String>,
+
+    /// Modality of the multimodal url.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[builder(default, setter(strip_option))]
+    #[validate(custom(function = "validate_modality"))]
+    pub modality: Option<String>,
 }
 
 impl Default for NvExt {
@@ -86,6 +97,16 @@ fn validate_top_k(top_k: i64) -> Result<(), ValidationError> {
     let mut error = ValidationError::new("top_k");
     error.message = Some("top_k must be -1 or greater than or equal to 1".into());
     Err(error)
+}
+
+fn validate_modality(modality: &str) -> Result<(), ValidationError> {
+    if modality == "image" {
+        Ok(())
+    } else {
+        let mut error = ValidationError::new("modality");
+        error.message = Some("modality must be 'image'".into());
+        Err(error)
+    }
 }
 
 impl NvExtBuilder {
@@ -114,6 +135,8 @@ mod tests {
         assert_eq!(nv_ext.top_k, None);
         assert_eq!(nv_ext.repetition_penalty, None);
         assert_eq!(nv_ext.greed_sampling, None);
+        assert_eq!(nv_ext.multimodal_url, None);
+        assert_eq!(nv_ext.modality, None);
     }
 
     // Test valid builder configurations
@@ -124,6 +147,8 @@ mod tests {
             .top_k(10)
             .repetition_penalty(1.5)
             .greed_sampling(true)
+            .multimodal_url("https://example.com/multimodal.url".to_string())
+            .modality("image".to_string())
             .build()
             .unwrap();
 
@@ -131,6 +156,8 @@ mod tests {
         assert_eq!(nv_ext.top_k, Some(10));
         assert_eq!(nv_ext.repetition_penalty, Some(1.5));
         assert_eq!(nv_ext.greed_sampling, Some(true));
+        assert_eq!(nv_ext.multimodal_url, Some("https://example.com/multimodal.url".to_string()));
+        assert_eq!(nv_ext.modality, Some("image".to_string()));
 
         // Validate the built struct
         assert!(nv_ext.validate().is_ok());
@@ -188,6 +215,21 @@ mod tests {
 
             let validation_result = nv_ext.validate();
             assert!(validation_result.is_err(), "repetition_penalty should fail validation when outside the range (0, 2]");
+        }
+    }
+
+    // Test modality values
+    proptest! {
+        #[test]
+        fn test_modality_validation(modality in any::<String>()) {
+            let nv_ext = NvExt::builder().modality(modality.clone()).build().unwrap();
+            let validation_result = nv_ext.validate();
+
+            if modality == "image" {
+                assert!(validation_result.is_ok(), "modality 'image' should be valid");
+            } else {
+                assert!(validation_result.is_err(), "modality '{}' should be invalid", modality);
+            }
         }
     }
 }
