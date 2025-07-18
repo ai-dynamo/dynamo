@@ -51,6 +51,7 @@ class DynamoDeploymentClient:
         model_name: str = "Qwen/Qwen3-0.6B",
         deployment_name: str = "vllm-v1-agg",
         base_log_dir: Optional[str] = None,
+        service_name: Optional[str] = None,
     ):
         """
         Initialize the client with the namespace and deployment name.
@@ -59,10 +60,12 @@ class DynamoDeploymentClient:
             namespace: The Kubernetes namespace
             deployment_name: Name of the deployment, defaults to vllm-v1-agg
             base_log_dir: Base directory for storing logs, defaults to ./logs if not specified
+            service_name: Service name for port forwarding, defaults to {deployment_name}-frontend
         """
         self.namespace = namespace
         self.deployment_name = deployment_name
         self.model_name = model_name
+        self.service_name = service_name or f"{deployment_name}-frontend"
         self.components = []  # Will store component names from CR
         self.deployment_spec = None  # Will store the full deployment spec
         self.base_log_dir = Path(base_log_dir) if base_log_dir else Path("logs")
@@ -92,8 +95,7 @@ class DynamoDeploymentClient:
         """
         if self._is_running_in_kubernetes():
             # Use Kubernetes service DNS: service-name.namespace.svc.cluster.local:port
-            svc_name = f"{self.deployment_name}-frontend"
-            return f"http://{svc_name}.{self.namespace}.svc.cluster.local:8000"
+            return f"http://{self.service_name}.{self.namespace}.svc.cluster.local:8000"
         else:
             # For local development, we need to use port forwarding
             raise RuntimeError(
@@ -228,9 +230,8 @@ class DynamoDeploymentClient:
                         continue  # Port is in use, try another
             if port is None:
                 raise RuntimeError("Could not find a free port after 100 attempts")
-        svc_name = f"{self.deployment_name}-frontend"
         # Get the Service and forward its HTTP port (8000)
-        service = Service.get(svc_name, namespace=self.namespace)
+        service = Service.get(self.service_name, namespace=self.namespace)
         pf = service.portforward(remote_port=8000, local_port=port)
         pf.start()
         try:
@@ -322,11 +323,20 @@ async def main():
         default="/tmp/dynamo_logs",
         help="Base directory for logs (default: /tmp/dynamo_logs)",
     )
+    parser.add_argument(
+        "--service-name",
+        "-s",
+        help="Service name for port forwarding (default: {deployment_name}-frontend)",
+    )
 
     args = parser.parse_args()
 
     # Example usage with parsed arguments
-    client = DynamoDeploymentClient(namespace=args.namespace, base_log_dir=args.log_dir)
+    client = DynamoDeploymentClient(
+        namespace=args.namespace,
+        base_log_dir=args.log_dir,
+        service_name=args.service_name,
+    )
 
     try:
         # Create deployment from yaml file

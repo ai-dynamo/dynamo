@@ -91,7 +91,10 @@ async def run_profile(args):
             yaml.dump(prefill_config, f)
 
         client = DynamoDeploymentClient(
-            namespace=args.namespace, base_log_dir=work_dir, model_name=model_name
+            namespace=args.namespace,
+            base_log_dir=work_dir,
+            model_name=model_name,
+            service_name=args.service_name,
         )
         await client.create_deployment(prefill_config_fn)
         logger.info("Waiting for deployment to be ready...")
@@ -152,7 +155,10 @@ async def run_profile(args):
             yaml.dump(decode_config, f)
 
         client = DynamoDeploymentClient(
-            namespace=args.namespace, base_log_dir=work_dir, model_name=model_name
+            namespace=args.namespace,
+            base_log_dir=work_dir,
+            model_name=model_name,
+            service_name=args.service_name,
         )
         await client.create_deployment(decode_config_fn)
         logger.info("Waiting for deployment to be ready...")
@@ -289,7 +295,10 @@ async def run_profile(args):
         yaml.dump(prefill_config, f)
 
     client = DynamoDeploymentClient(
-        namespace=args.namespace, base_log_dir=work_dir, model_name=model_name
+        namespace=args.namespace,
+        base_log_dir=work_dir,
+        model_name=model_name,
+        service_name=args.service_name,
     )
     await client.create_deployment(prefill_config_fn)
     logger.info("Waiting for deployment to be ready...")
@@ -366,7 +375,9 @@ async def run_profile(args):
     with open(decode_config_fn, "w") as f:
         yaml.dump(decode_config, f)
 
-    client = DynamoDeploymentClient(namespace=args.namespace, base_log_dir=work_dir)
+    client = DynamoDeploymentClient(
+        namespace=args.namespace, base_log_dir=work_dir, service_name=args.service_name
+    )
     await client.create_deployment(decode_config_fn)
     logger.info("Waiting for deployment to be ready...")
     await client.wait_for_deployment_ready()
@@ -517,6 +528,11 @@ if __name__ == "__main__":
         type=int,
         default=6,
         help="how many samples to benchmark to interpolate ITL under different active kv cache size and decode context length",
+    )
+    parser.add_argument(
+        "--service-name",
+        type=str,
+        help="Service name for port forwarding (default: {deployment_name}-frontend)",
     )
     args = parser.parse_args()
 

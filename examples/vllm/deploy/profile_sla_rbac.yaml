@@ -18,22 +18,22 @@ metadata:
   name: profile-sla-role
   namespace: ${NAMESPACE}
 rules:
-  # DynamoGraphDeployment custom resources
+  # DynamoGraphDeployment custom resources - needed for create/get/delete operations
   - apiGroups: ["nvidia.com"]
     resources: ["dynamographdeployments"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # Core resources needed for deployment management
+    verbs: ["get", "create", "delete"]
+  # Pods - needed for listing pods by label selector and getting logs
   - apiGroups: [""]
-    resources: ["pods", "services", "configmaps", "secrets"]
-    verbs: ["get", "list", "watch"]
+    resources: ["pods"]
+    verbs: ["list"]
   - apiGroups: [""]
     resources: ["pods/log"]
-    verbs: ["get", "list"]
-  # Apps resources
-  - apiGroups: ["apps"]
-    resources: ["deployments", "replicasets"]
-    verbs: ["get", "list", "watch"]
-  # For port forwarding
+    verbs: ["get"]
+  # Services - needed for Service.get() to enable port forwarding
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get"]
+  # Port forwarding - needed when running locally (outside cluster)
   - apiGroups: [""]
     resources: ["pods/portforward"]
     verbs: ["create"]
