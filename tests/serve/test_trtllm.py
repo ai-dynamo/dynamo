@@ -192,7 +192,7 @@ trtllm_configs = {
             completions_response_handler,
         ],
         model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        delayed_start=45,
+        delayed_start=60,
     ),
     "disaggregated": TRTLLMConfig(
         name="disaggregated",
@@ -205,7 +205,36 @@ trtllm_configs = {
             completions_response_handler,
         ],
         model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-        delayed_start=45,
+        delayed_start=60,
+    ),
+    # TODO: These are sanity tests that the kv router examples launch
+    # and inference without error, but do not do detailed checks on the
+    # behavior of KV routing.
+    "aggregated_router": TRTLLMConfig(
+        name="aggregated_router",
+        directory="/workspace/components/backends/trtllm",
+        script_name="agg_router.sh",
+        marks=[pytest.mark.gpu_1, pytest.mark.tensorrtllm],
+        endpoints=["v1/chat/completions", "v1/completions"],
+        response_handlers=[
+            chat_completions_response_handler,
+            completions_response_handler,
+        ],
+        model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        delayed_start=60,
+    ),
+    "disaggregated_router": TRTLLMConfig(
+        name="disaggregated_router",
+        directory="/workspace/components/backends/trtllm",
+        script_name="disagg_router.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.tensorrtllm],
+        endpoints=["v1/chat/completions", "v1/completions"],
+        response_handlers=[
+            chat_completions_response_handler,
+            completions_response_handler,
+        ],
+        model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+        delayed_start=60,
     ),
 }
 
