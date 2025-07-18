@@ -52,6 +52,7 @@ pub mod traits;
 pub mod transports;
 pub mod utils;
 pub mod worker;
+pub mod instances;
 
 pub mod distributed;
 pub use futures::stream;
