@@ -48,6 +48,7 @@ import (
 	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
 	volcanoscheme "volcano.sh/apis/pkg/client/clientset/versioned/scheme"
 
+	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -70,6 +71,8 @@ func init() {
 	utilruntime.Must(lwsscheme.AddToScheme(scheme))
 
 	utilruntime.Must(volcanoscheme.AddToScheme(scheme))
+
+	utilruntime.Must(grovev1alpha1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
