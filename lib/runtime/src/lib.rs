@@ -40,6 +40,7 @@ pub mod http_server;
 pub mod logging;
 pub mod pipeline;
 pub mod prelude;
+pub mod profiling;
 pub mod protocols;
 pub mod runnable;
 pub mod runtime;
@@ -99,6 +100,9 @@ pub struct DistributedRuntime {
 
     instance_sources: Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
 
-    // Start time for tracking uptime
-    start_time: std::time::Instant,
+    // Used by MetricsRegistry, which has a reference to the DistributedRuntime.
+    prometheus_registries_by_prefix: Arc<std::sync::Mutex<HashMap<String, prometheus::Registry>>>,
+    // TODO(nnshah1|keiven): For now we are not using these, but will do that soon.
+    // is_healthy: bool,
+    // is_live: bool,
 }

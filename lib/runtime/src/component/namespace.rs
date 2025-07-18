@@ -19,8 +19,9 @@ use futures::stream::StreamExt;
 use futures::{Stream, TryStreamExt};
 
 use super::*;
-
+use crate::profiling::MetricsRegistry;
 use crate::traits::events::{EventPublisher, EventSubscriber};
+use crate::traits::DistributedRuntimeProvider;
 
 #[async_trait]
 impl EventPublisher for Namespace {
@@ -43,8 +44,7 @@ impl EventPublisher for Namespace {
         bytes: Vec<u8>,
     ) -> Result<()> {
         let subject = format!("{}.{}", self.subject(), event_name.as_ref());
-        Ok(self
-            .drt()
+        Ok(DistributedRuntimeProvider::drt(self)
             .nats_client()
             .client()
             .publish(subject, bytes.into())
@@ -59,7 +59,11 @@ impl EventSubscriber for Namespace {
         event_name: impl AsRef<str> + Send + Sync,
     ) -> Result<async_nats::Subscriber> {
         let subject = format!("{}.{}", self.subject(), event_name.as_ref());
-        Ok(self.drt().nats_client().client().subscribe(subject).await?)
+        Ok(DistributedRuntimeProvider::drt(self)
+            .nats_client()
+            .client()
+            .subscribe(subject)
+            .await?)
     }
 
     async fn subscribe_with_type<T: for<'de> Deserialize<'de> + Send + 'static>(
@@ -75,6 +79,16 @@ impl EventSubscriber for Namespace {
         });
 
         Ok(stream)
+    }
+}
+
+impl MetricsRegistry for Namespace {
+    fn basename(&self) -> String {
+        self.name.clone()
+    }
+
+    fn parent_hierarchy(&self) -> Vec<String> {
+        vec![self.drt().prefix()]
     }
 }
 

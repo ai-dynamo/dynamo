@@ -31,6 +31,8 @@ use dynamo_llm::kv_router::scheduler::KVHitRateEvent;
 use dynamo_llm::kv_router::KV_HIT_RATE_SUBJECT;
 use dynamo_runtime::{
     error, logging,
+    pipeline::PushRouter,
+    protocols::annotated::Annotated,
     traits::events::{EventPublisher, EventSubscriber},
     utils::{Duration, Instant},
     DistributedRuntime, ErrorContext, Result, Runtime, Worker,
@@ -173,6 +175,7 @@ async fn app(runtime: Runtime) -> Result<()> {
     let namespace_clone = namespace.clone();
     let metrics_collector_clone = metrics_collector.clone();
 
+    // Note: Subscribing to KVHitRateEvent for illustration purposes. They're not used in production.
     // Spawn a task to handle KV hit rate events
     tokio::spawn(async move {
         match namespace_clone.subscribe(kv_hit_rate_subject).await {

@@ -13,76 +13,101 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::profiling::MetricsRegistry;
+use crate::traits::DistributedRuntimeProvider;
 use axum::{body, http::StatusCode, response::IntoResponse, routing::get, Router};
-use prometheus::{
-    proto, register_gauge_with_registry, Encoder, Gauge, Opts, Registry, TextEncoder,
-};
 use std::sync::Arc;
+use std::sync::OnceLock;
+use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing;
 
-/// Runtime metrics for HTTP server
-pub struct RuntimeMetrics {
-    uptime_gauge: Gauge,
+pub struct HttpMetricsRegistry {
+    pub drt: Arc<crate::DistributedRuntime>,
 }
 
-impl RuntimeMetrics {
-    pub fn new(metrics_registry: &Arc<Registry>) -> anyhow::Result<Arc<Self>> {
-        let uptime_opts = Opts::new(
-            "uptime_seconds",
-            "Total uptime of the DistributedRuntime in seconds",
-        )
-        .namespace("dynamo")
-        .subsystem("runtime");
+impl crate::traits::DistributedRuntimeProvider for HttpMetricsRegistry {
+    fn drt(&self) -> &crate::DistributedRuntime {
+        &self.drt
+    }
+}
 
-        let uptime_gauge = register_gauge_with_registry!(uptime_opts, metrics_registry)?;
-
-        Ok(Arc::new(Self { uptime_gauge }))
+impl MetricsRegistry for HttpMetricsRegistry {
+    fn basename(&self) -> String {
+        "http_server".to_string()
     }
 
-    pub fn update_uptime(&self, uptime_seconds: f64) {
+    fn parent_hierarchy(&self) -> Vec<String> {
+        vec![self.drt().parent_hierarchy(), vec![self.drt().basename()]].concat()
+    }
+}
+
+/// HTTP server state containing metrics and uptime tracking
+pub struct HttpServerState {
+    // global drt registry is for printing out the entire Prometheus format output
+    root_drt: Arc<crate::DistributedRuntime>,
+    start_time: OnceLock<Instant>,
+    uptime_gauge: Arc<prometheus::Gauge>,
+}
+
+impl HttpServerState {
+    /// Create new HTTP server state with the provided metrics registry
+    pub fn new(drt: Arc<crate::DistributedRuntime>) -> anyhow::Result<Self> {
+        let http_metrics_registry = Arc::new(HttpMetricsRegistry { drt: drt.clone() });
+        let uptime_gauge = http_metrics_registry.create_gauge(
+            "uptime_seconds",
+            "Total uptime of the DistributedRuntime in seconds",
+            &[("service", "dynamo"), ("subsystem", "runtime")],
+        )?;
+        let state = Self {
+            root_drt: drt,
+            start_time: OnceLock::new(),
+            uptime_gauge,
+        };
+        Ok(state)
+    }
+
+    /// Initialize the start time (can only be called once)
+    pub fn initialize_start_time(&self) -> Result<(), &'static str> {
+        self.start_time
+            .set(Instant::now())
+            .map_err(|_| "Start time already initialized")
+    }
+
+    pub fn uptime(&self) -> std::time::Duration {
+        self.start_time
+            .get()
+            .expect("Start time not initialized")
+            .elapsed()
+    }
+
+    /// Get a reference to the distributed runtime
+    pub fn drt(&self) -> &crate::DistributedRuntime {
+        &*self.root_drt
+    }
+
+    /// Update the uptime gauge with current value
+    pub fn update_uptime_gauge(&self) {
+        let uptime_seconds = self.uptime().as_secs_f64();
         self.uptime_gauge.set(uptime_seconds);
     }
 }
 
-/// HTTP server state containing pre-created metrics
-pub struct HttpServerState {
-    drt: Arc<crate::DistributedRuntime>,
-    registry: Arc<Registry>,
-    runtime_metrics: Arc<RuntimeMetrics>,
-}
-
-impl HttpServerState {
-    /// Create new HTTP server state with pre-created metrics
-    pub fn new(drt: Arc<crate::DistributedRuntime>) -> anyhow::Result<Self> {
-        let registry = Arc::new(Registry::new());
-
-        // Create runtime metrics
-        let runtime_metrics = RuntimeMetrics::new(&registry)?;
-
-        Ok(Self {
-            drt,
-            registry,
-            runtime_metrics,
-        })
-    }
-}
-
-/// Start HTTP server with DistributedRuntime support
+/// Start HTTP server with metrics support
 pub async fn spawn_http_server(
     host: &str,
     port: u16,
     cancel_token: CancellationToken,
     drt: Arc<crate::DistributedRuntime>,
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
-    tracing::info!(
-        "[spawn_http_server] called with host={}, port={}",
-        host,
-        port
-    );
-    // Create HTTP server state with pre-created metrics
+    // Create HTTP server state with the provided metrics registry
     let server_state = Arc::new(HttpServerState::new(drt)?);
+
+    // // Initialize the start time
+    server_state
+        .initialize_start_time()
+        .map_err(|e| anyhow::anyhow!("Failed to initialize start time: {}", e))?;
 
     let app = Router::new()
         .route(
@@ -141,53 +166,52 @@ pub async fn spawn_http_server(
             tracing::error!("HTTP server error: {}", e);
         }
     });
+
     Ok((actual_address, handle))
 }
 
 /// Health handler
 async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
     tracing::info!("[health_handler] called");
-    let uptime = state.drt.uptime();
+    let uptime = state.uptime();
     let response = format!("OK\nUptime: {} seconds\n", uptime.as_secs());
+    //let health = state.DB_errors <= 0;
     (StatusCode::OK, response)
 }
 
 /// Metrics handler with DistributedRuntime uptime
 async fn metrics_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
     // Update the uptime gauge with current value
-    let uptime_seconds = state.drt.uptime().as_secs_f64();
-    state.runtime_metrics.update_uptime(uptime_seconds);
+    state.update_uptime_gauge();
 
-    // Gather metrics from the registry
-    let metric_families = state.registry.gather();
-
-    let encoder = TextEncoder::new();
-    let mut buffer = Vec::new();
-
-    match encoder.encode(&metric_families, &mut buffer) {
-        Ok(()) => match String::from_utf8(buffer) {
-            Ok(response) => (StatusCode::OK, response),
-            Err(e) => {
-                tracing::error!("Failed to encode metrics as UTF-8: {}", e);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    "Failed to encode metrics as UTF-8".to_string(),
-                )
-            }
-        },
+    // Get metrics from the registry
+    match state.drt().prometheus_metrics_fmt() {
+        Ok(response) => (StatusCode::OK, response),
         Err(e) => {
-            tracing::error!("Failed to encode metrics: {}", e);
+            tracing::error!("Failed to get metrics from registry: {}", e);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to encode metrics".to_string(),
+                "Failed to get metrics".to_string(),
             )
         }
     }
 }
 
 #[cfg(test)]
+async fn make_test_drt() -> Arc<crate::DistributedRuntime> {
+    let rt = crate::Runtime::from_current().unwrap();
+    Arc::new(
+        crate::DistributedRuntime::from_settings_without_discovery(rt)
+            .await
+            .unwrap(),
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profiling::MetricsRegistry;
+    use std::sync::Arc;
     use tokio::time::{sleep, Duration};
 
     #[tokio::test]
@@ -223,62 +247,86 @@ mod tests {
     #[tokio::test]
     async fn test_runtime_metrics_creation() {
         // Test RuntimeMetrics creation and functionality
-        let registry = Arc::new(Registry::new());
-        let runtime_metrics = RuntimeMetrics::new(&registry).unwrap();
+        let drt = make_test_drt().await;
+        let runtime_metrics = HttpServerState::new(drt.clone()).unwrap();
+
+        // Initialize start time
+        runtime_metrics.initialize_start_time().unwrap();
 
         // Wait a bit to ensure uptime is measurable
         tokio::time::sleep(Duration::from_millis(10)).await;
 
         // Test updating uptime
         let uptime_seconds = 123.456;
-        runtime_metrics.update_uptime(uptime_seconds);
+        runtime_metrics.uptime_gauge.set(uptime_seconds);
 
-        // Gather metrics from the registry
-        let metric_families = registry.gather();
+        // Get metrics from the registry
+        let response = runtime_metrics.drt().prometheus_metrics_fmt().unwrap();
+        println!("Full metrics response:\n{}", response);
 
-        let encoder = TextEncoder::new();
-        let mut buffer = Vec::new();
-        encoder.encode(&metric_families, &mut buffer).unwrap();
-
-        let response = String::from_utf8(buffer).unwrap();
-        assert!(response.contains("dynamo_runtime_uptime_seconds"));
-        assert!(response.contains("123.456"));
+        let expected = "\
+# HELP http_server__uptime_seconds Total uptime of the DistributedRuntime in seconds
+# TYPE http_server__uptime_seconds gauge
+http_server__uptime_seconds 123.456
+";
+        assert_eq!(response, expected);
     }
 
     #[tokio::test]
     async fn test_runtime_metrics_namespace() {
         // Test that metrics have correct namespace
-        let registry = Arc::new(Registry::new());
-        let runtime_metrics = RuntimeMetrics::new(&registry).unwrap();
+        let drt = make_test_drt().await;
+        let runtime_metrics = HttpServerState::new(drt).unwrap();
 
-        runtime_metrics.update_uptime(42.0);
+        // Initialize start time
+        runtime_metrics.initialize_start_time().unwrap();
 
-        let metric_families = registry.gather();
-        let encoder = TextEncoder::new();
-        let mut buffer = Vec::new();
-        encoder.encode(&metric_families, &mut buffer).unwrap();
+        runtime_metrics.uptime_gauge.set(42.0);
 
-        let response = String::from_utf8(buffer).unwrap();
-        // Check for the full metric name with namespace and subsystem
-        assert!(response.contains("dynamo_runtime_uptime_seconds"));
-        assert!(response.contains("Total uptime of the DistributedRuntime in seconds"));
+        let response = runtime_metrics.drt().prometheus_metrics_fmt().unwrap();
+        println!("Full metrics response:\n{}", response);
+
+        let expected = "\
+# HELP http_server__uptime_seconds Total uptime of the DistributedRuntime in seconds
+# TYPE http_server__uptime_seconds gauge
+http_server__uptime_seconds 42
+";
+        assert_eq!(response, expected);
     }
 
-    /*
+    #[tokio::test]
+    async fn test_start_time_initialization() {
+        // Test that start time can only be initialized once
+        let drt = make_test_drt().await;
+        let runtime_metrics = HttpServerState::new(drt).unwrap();
+
+        // First initialization should succeed
+        assert!(runtime_metrics.initialize_start_time().is_ok());
+
+        // Second initialization should fail
+        assert!(runtime_metrics.initialize_start_time().is_err());
+
+        // Uptime should work after initialization
+        let _uptime = runtime_metrics.uptime();
+        // If we get here, uptime calculation works correctly
+    }
+
+    #[tokio::test]
+    #[should_panic(expected = "Start time not initialized")]
+    async fn test_uptime_without_initialization() {
+        // Test that uptime panics if start time is not initialized
+        let drt = make_test_drt().await;
+        let runtime_metrics = HttpServerState::new(drt).unwrap();
+
+        // This should panic because start time is not initialized
+        let _uptime = runtime_metrics.uptime();
+    }
+
     #[tokio::test]
     async fn test_spawn_http_server_endpoints() {
-        use std::sync::Arc;
-        use tokio::time::sleep;
-        use tokio_util::sync::CancellationToken;
-        // use tokio::io::{AsyncReadExt, AsyncWriteExt};
         // use reqwest for HTTP requests
-        let runtime = crate::Runtime::from_settings().unwrap();
-        let drt = Arc::new(
-            crate::DistributedRuntime::from_settings_without_discovery(runtime)
-                .await
-                .unwrap(),
-        );
         let cancel_token = CancellationToken::new();
+        let drt = make_test_drt().await;
         let (addr, server_handle) = spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt)
             .await
             .unwrap();
@@ -324,5 +372,4 @@ mod tests {
             }
         }
     }
-    */
 }

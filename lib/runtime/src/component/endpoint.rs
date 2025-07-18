@@ -82,7 +82,9 @@ impl EndpointConfigBuilder {
             .get(&service_name)
             .cloned()
             .expect("no stats handler registry; this is unexpected");
-
+        // TODO: Neelay code - these assignments are not possible with immutable references
+        // endpoint.drt().is_healthy = true;
+        // endpoint.drt().is_live = true;
         drop(registry);
 
         // insert the stats handler

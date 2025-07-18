@@ -8,6 +8,10 @@ members = [
     "launch/*",
     "lib/llm",
     "lib/runtime",
+    # Uncomment this during development. Do not add this for production.
+    "lib/runtime/examples/hello_world",
+    "lib/runtime/examples/system_stats_endpoint",
+    "lib/runtime/examples/service_metrics",
     "lib/tokens",
     "lib/bindings/c",
     "lib/engines/*",
@@ -49,7 +53,7 @@ hf-hub = { version = "0.4.2", default-features = false, features = ["tokio", "ru
 humantime = { version = "2.2.0" }
 libc = { version = "0.2" }
 oneshot = { version = "0.1.11", features = ["std", "async"] }
-opentelemetry = { version = "0.27" }
+# TODO: Move Prometheus to lib/runtime to use a common profiling API
 prometheus = { version = "0.14" }
 rand = { version = "0.9.0" }
 reqwest = { version = "0.12.22", default-features = false, features = ["json", "stream", "rustls-tls"] }

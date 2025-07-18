@@ -2945,6 +2945,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2304e00983f87ffb38b55b444b5e3b60a884b5d30c0fca7d82fe33449bbe55ea"
 
 [[package]]
+name = "hello_world"
+version = "0.3.2"
+dependencies = [
+ "dynamo-runtime",
+]
+
+[[package]]
 name = "hermit-abi"
 version = "0.1.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6344,6 +6351,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "service_metrics"
+version = "0.3.2"
+dependencies = [
+ "dynamo-runtime",
+ "futures",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "servo_arc"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6879,6 +6897,18 @@ dependencies = [
  "pkg-config",
  "toml",
  "version-compare",
+]
+
+[[package]]
+name = "system_stats_endpoint"
+version = "0.3.2"
+dependencies = [
+ "dynamo-runtime",
+ "futures",
+ "prometheus",
+ "serde",
+ "serde_json",
+ "tokio",
 ]
 
 [[package]]
