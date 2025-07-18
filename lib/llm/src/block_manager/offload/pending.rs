@@ -42,6 +42,7 @@ use nixl_sys::NixlDescriptor;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -52,6 +53,7 @@ use crate::block_manager::block::{
     BlockDataProvider, BlockDataProviderMut, BlockError, BlockMetadata, BlockState, ImmutableBlock,
     MutableBlock, ReadableBlock, WritableBlock,
 };
+use crate::block_manager::metrics::PoolMetrics;
 use crate::block_manager::pool::BlockPoolError;
 use crate::block_manager::storage::{Local, Storage};
 use crate::block_manager::BlockPool;
@@ -63,6 +65,8 @@ use futures::{stream::FuturesUnordered, StreamExt};
 use super::BlockResult;
 
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
+
+const BLOCKS_BW_MIN_PUBLISH_INTERVAL_MS: u64 = 50;
 
 /// Manage a set of pending transfers.
 pub struct PendingTransfer<
@@ -167,141 +171,104 @@ pub trait TransferManager<
     ) -> Result<()>;
 }
 
-pub type TransferRequestSender<Source, Target, Locality, Metadata> = mpsc::Sender<(
-    PendingTransfer<Source, Target, Locality, Metadata>,
-    tokio::sync::oneshot::Receiver<()>,
-)>;
-
-pub struct CudaTransferManager<
+struct TransferCompletionManager<
     Source: Storage,
     Target: Storage,
     Locality: LocalityProvider,
     Metadata: BlockMetadata,
 > {
-    pending_transfer_q: TransferRequestSender<Source, Target, Locality, Metadata>,
-    transfer_ctx: Arc<TransferContext>,
+    pool_metrics: Arc<PoolMetrics>,
+    transfer_type: String,
+    last_publish_time: Option<Instant>,
+    transfer_start: Instant,
+    num_blocks_transferred: usize,
+    _phantom: PhantomData<(Source, Target, Locality, Metadata)>,
 }
 
-impl<
-        Source: Storage,
-        Target: Storage,
-        Locality: LocalityProvider + 'static,
-        Metadata: BlockMetadata,
-    > CudaTransferManager<Source, Target, Locality, Metadata>
+impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: BlockMetadata>
+    TransferCompletionManager<Source, Target, Locality, Metadata>
 {
-    pub fn new(
-        transfer_ctx: Arc<TransferContext>,
-        max_concurrent_transfers: usize,
-        runtime: &Handle,
-        cancellation_token: CancellationToken,
-    ) -> Result<Self> {
-        let (tx, mut rx) = mpsc::channel::<(
-            PendingTransfer<Source, Target, Locality, Metadata>,
-            tokio::sync::oneshot::Receiver<()>,
-        )>(max_concurrent_transfers);
-
-        CriticalTaskExecutionHandle::new_with_runtime(
-            move |cancel_token| async move {
-                loop {
-                    tokio::select! {
-                        Some((pending_transfer, notify)) = rx.recv() => {
-                            // Wait for the event.
-                            notify.await.map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
-                            // Only finalize the transfer after the event is signaled.
-                            match pending_transfer.handle_complete().await {
-                                Ok(_) => {}
-                                Err(e) => {
-                                    // The only case where this can fail is if the progress engine is being shutdown.
-                                    // This is not a problem, so we can just ignore it.
-                                    tracing::warn!("Error handling transfer completion: {:?}", e);
-                                }
-                            }
-                        }
-
-                        _ = cancel_token.cancelled() => {
-                            return Ok(());
-                        }
-                    }
-                }
-            },
-            cancellation_token.clone(),
-            "Cuda Transfer Manager",
-            runtime,
-        )?
-        .detach();
-
-        Ok(Self {
-            pending_transfer_q: tx,
-            transfer_ctx,
-        })
+    pub fn new(pool_metrics: Arc<PoolMetrics>, transfer_type: String) -> Self {
+        Self {
+            pool_metrics,
+            transfer_type,
+            last_publish_time: None,
+            transfer_start: Instant::now(),
+            num_blocks_transferred: 0,
+            _phantom: PhantomData,
+        }
     }
-}
 
-#[async_trait]
-impl<Source, Target, Locality, Metadata> TransferManager<Source, Target, Locality, Metadata>
-    for CudaTransferManager<Source, Target, Locality, Metadata>
-where
-    Source: Storage + NixlDescriptor,
-    Target: Storage + NixlDescriptor,
-    Locality: LocalityProvider,
-    Metadata: BlockMetadata,
-    // Check that the source block is readable, local, and writable to the target block.
-    ImmutableBlock<Source, Locality, Metadata>: ReadableBlock<StorageType = Source>
-        + Local
-        + WriteToStrategy<MutableBlock<Target, Locality, Metadata>>,
-    // Check that the target block is writable.
-    MutableBlock<Target, Locality, Metadata>: WritableBlock<StorageType = Target>,
-    // Check that the source and target blocks have the same locality.
-    ImmutableBlock<Source, Locality, Metadata>: BlockDataProvider<Locality = Locality>,
-    MutableBlock<Target, Locality, Metadata>: BlockDataProviderMut<Locality = Locality>,
-{
-    async fn enqueue_transfer(
-        &self,
-        mut pending_transfer: PendingTransfer<Source, Target, Locality, Metadata>,
+    pub async fn handle_complete(
+        &mut self,
+        pending_transfer: PendingTransfer<Source, Target, Locality, Metadata>,
     ) -> Result<()> {
-        let notify = pending_transfer
-            .sources
-            .write_to(
-                &mut pending_transfer.targets,
-                true,
-                self.transfer_ctx.clone(),
-            )?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "write_to returned None when notify was true. This should never happen!"
-                )
-            })?;
+        self.num_blocks_transferred += pending_transfer.sources.len();
 
-        // Send the pending transfer and event to the worker thread.
-        // If the queue is full, we block the worker until space becomes available.
-        self.pending_transfer_q
-            .send((pending_transfer, notify))
-            .await?;
+        let should_publish = self.last_publish_time.is_none_or(|last_publish_time| {
+            last_publish_time.elapsed() > Duration::from_millis(BLOCKS_BW_MIN_PUBLISH_INTERVAL_MS)
+        });
+
+        if should_publish {
+            self.last_publish_time = Some(Instant::now());
+            let duration = self.transfer_start.elapsed();
+            let blocks_per_sec = self.num_blocks_transferred as f64 / duration.as_secs_f64();
+
+            self.pool_metrics
+                .gauge(self.transfer_type.as_str())
+                .set(blocks_per_sec as i64);
+        }
+
+        match pending_transfer.handle_complete().await {
+            Ok(_) => {}
+            Err(e) => {
+                // The only case where this can fail is if the progress engine is being shutdown.
+                // This is not a problem, so we can just ignore it.
+                tracing::warn!("Error handling transfer completion: {:?}", e);
+            }
+        }
 
         Ok(())
     }
 }
 
-pub struct DiskTransferManager {
-    futures_tx: mpsc::Sender<Pin<Box<dyn std::future::Future<Output = ()> + Send + Sync>>>,
+type TransferFuture<Source, Target, Locality, Metadata> = Pin<
+    Box<
+        dyn std::future::Future<Output = PendingTransfer<Source, Target, Locality, Metadata>>
+            + Send
+            + Sync,
+    >,
+>;
+
+pub struct LocalTransferManager<
+    Source: Storage,
+    Target: Storage,
+    Locality: LocalityProvider,
+    Metadata: BlockMetadata,
+> {
+    futures_tx: mpsc::Sender<TransferFuture<Source, Target, Locality, Metadata>>,
     transfer_ctx: Arc<TransferContext>,
 }
 
-impl DiskTransferManager {
+impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: BlockMetadata>
+    LocalTransferManager<Source, Target, Locality, Metadata>
+{
     pub fn new(
         transfer_ctx: Arc<TransferContext>,
         max_concurrent_transfers: usize,
         runtime: &Handle,
         cancellation_token: CancellationToken,
+        pool_metrics: Arc<PoolMetrics>,
+        transfer_type: String,
     ) -> Result<Self> {
         let (futures_tx, mut futures_rx) = mpsc::channel(1);
 
+        let mut completion_manager =
+            TransferCompletionManager::new(pool_metrics.clone(), transfer_type.clone());
+
         CriticalTaskExecutionHandle::new_with_runtime(
             move |cancel_token| async move {
-                // Keep track of our pending transfers.
-                // Consume the futures as they complete, while also receiving new ones.
-
-                let mut pending_transfers = FuturesUnordered::new();
+                let mut pending_transfers: FuturesUnordered<TransferFuture<Source, Target, Locality, Metadata>> = FuturesUnordered::new();
                 loop {
                     tokio::select! {
 
@@ -312,19 +279,23 @@ impl DiskTransferManager {
                         Some(future) = futures_rx.recv() => {
                             // If we're at max size, block the worker thread on the next() call until we have capacity.
                             while pending_transfers.len() >= max_concurrent_transfers {
-                                pending_transfers.next().await;
+                                if let Some(pending_transfer) = pending_transfers.next().await {
+                                    completion_manager.handle_complete(pending_transfer).await?;
+                                } else {
+                                    break;
+                                }
                             }
-                            // Once we have capacity, push the new future onto the queue.
+
                             pending_transfers.push(future);
                         }
-                        Some(_) = pending_transfers.next(), if !pending_transfers.is_empty() => {
-                            // A transfer completed, just continue to process more
+                        Some(pending_transfer) = pending_transfers.next(), if !pending_transfers.is_empty() => {
+                            completion_manager.handle_complete(pending_transfer).await?;
                         }
                     }
                 }
             },
             cancellation_token.clone(),
-            "Disk Transfer Manager",
+            "Local Transfer Manager",
             runtime,
         )?
         .detach();
@@ -338,7 +309,7 @@ impl DiskTransferManager {
 
 #[async_trait]
 impl<Source, Target, Locality, Metadata> TransferManager<Source, Target, Locality, Metadata>
-    for DiskTransferManager
+    for LocalTransferManager<Source, Target, Locality, Metadata>
 where
     Source: Storage + NixlDescriptor,
     Target: Storage + NixlDescriptor,
@@ -360,27 +331,11 @@ where
     ) -> Result<()> {
         let notify = pending_transfer
             .sources
-            .write_to(
-                &mut pending_transfer.targets,
-                true,
-                self.transfer_ctx.clone(),
-            )?
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "write_to returned None when notify was true. This should never happen!"
-                )
-            })?;
+            .write_to(&mut pending_transfer.targets, self.transfer_ctx.clone())?;
 
         let completion_future = async move {
             let _ = notify.await;
-            match pending_transfer.handle_complete().await {
-                Ok(_) => {}
-                Err(e) => {
-                    // The only case where this can fail is if the progress engine is being shutdown.
-                    // This is not a problem, so we can just ignore it.
-                    tracing::warn!("Error handling transfer completion: {:?}", e);
-                }
-            }
+            pending_transfer
         };
 
         // Futures_(tx/rx) has a capacity of 1. If the queue worker has received another future and is awaiting next() due to a full `FuturesUnordered`,

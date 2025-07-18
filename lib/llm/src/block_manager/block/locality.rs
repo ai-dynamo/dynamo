@@ -33,18 +33,14 @@ pub trait LocalityProvider: Send + Sync + 'static + std::fmt::Debug {
     fn handle_transfer<RB, WB>(
         _sources: &[RB],
         _targets: &mut [WB],
-        _notify: bool,
         _ctx: Arc<TransferContext>,
-    ) -> Result<Option<oneshot::Receiver<()>>, TransferError>
+    ) -> Result<oneshot::Receiver<()>, TransferError>
     where
         RB: ReadableBlock + WriteToStrategy<WB> + storage::Local,
         <RB as StorageTypeProvider>::StorageType: NixlDescriptor,
         <WB as StorageTypeProvider>::StorageType: NixlDescriptor,
         RB: BlockDataProvider<Locality = Self>,
-        WB: WritableBlock + BlockDataProviderMut<Locality = Self>,
-    {
-        panic!("Transfers are not supported for this locality provider");
-    }
+        WB: WritableBlock + BlockDataProviderMut<Locality = Self>;
 }
 
 /// Local locality provider for direct memory access
@@ -57,9 +53,8 @@ impl LocalityProvider for Local {
     fn handle_transfer<RB, WB>(
         sources: &[RB],
         targets: &mut [WB],
-        notify: bool,
         ctx: Arc<TransferContext>,
-    ) -> Result<Option<oneshot::Receiver<()>>, TransferError>
+    ) -> Result<oneshot::Receiver<()>, TransferError>
     where
         RB: ReadableBlock + WriteToStrategy<WB> + storage::Local,
         <RB as StorageTypeProvider>::StorageType: NixlDescriptor,
@@ -67,7 +62,7 @@ impl LocalityProvider for Local {
         RB: BlockDataProvider<Locality = Self>,
         WB: WritableBlock + BlockDataProviderMut<Locality = Self>,
     {
-        handle_local_transfer(sources, targets, notify, ctx)
+        handle_local_transfer(sources, targets, ctx)
     }
 }
 
@@ -121,9 +116,8 @@ impl<R: LogicalResources> LocalityProvider for Logical<R> {
     fn handle_transfer<RB, WB>(
         sources: &[RB],
         targets: &mut [WB],
-        notify: bool,
         ctx: Arc<TransferContext>,
-    ) -> Result<Option<oneshot::Receiver<()>>, TransferError>
+    ) -> Result<oneshot::Receiver<()>, TransferError>
     where
         RB: ReadableBlock + WriteToStrategy<WB> + storage::Local,
         <RB as StorageTypeProvider>::StorageType: NixlDescriptor,
@@ -149,6 +143,6 @@ impl<R: LogicalResources> LocalityProvider for Logical<R> {
 
         let common_resource = all_resources[0].clone();
 
-        common_resource.handle_transfer(sources, targets, notify, ctx)
+        common_resource.handle_transfer(sources, targets, ctx)
     }
 }

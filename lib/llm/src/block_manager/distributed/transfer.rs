@@ -106,14 +106,11 @@ impl BlockTransferHandler {
             .collect();
 
         // Perform the transfer, and return the notifying channel.
-        let channel = match sources.write_to(&mut targets, true, self.context.clone()) {
-            Ok(Some(channel)) => Ok(channel),
+        let channel = match sources.write_to(&mut targets, self.context.clone()) {
+            Ok(channel) => Ok(channel),
             Err(e) => {
                 tracing::error!("Failed to write to blocks: {:?}", e);
                 Err(e.into())
-            }
-            Ok(None) => {
-                panic!("Failed to write blocks. No channel returned. This should never happen.")
             }
         };
 

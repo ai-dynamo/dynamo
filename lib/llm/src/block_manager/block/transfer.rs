@@ -150,9 +150,8 @@ where
 pub fn handle_local_transfer<RB, WB>(
     sources: &[RB],
     targets: &mut [WB],
-    notify: bool,
     ctx: Arc<TransferContext>,
-) -> Result<Option<oneshot::Receiver<()>>, TransferError>
+) -> Result<oneshot::Receiver<()>, TransferError>
 where
     RB: ReadableBlock + WriteToStrategy<WB> + Local,
     WB: WritableBlock,
@@ -169,12 +168,8 @@ where
                 memcpy::copy_block(src, dst)?;
             }
 
-            if notify {
-                tx.send(()).unwrap();
-                Ok(Some(rx))
-            } else {
-                Ok(None)
-            }
+            tx.send(()).unwrap();
+            Ok(rx)
         }
         TransferStrategy::CudaAsyncH2D
         | TransferStrategy::CudaAsyncD2H
@@ -183,26 +178,17 @@ where
                 cuda::copy_block(src, dst, ctx.stream().as_ref(), RB::write_to_strategy())?;
             }
 
-            if notify {
-                let (tx, rx) = oneshot::channel();
-                ctx.cuda_event(tx)?;
-                Ok(Some(rx))
-            } else {
-                Ok(None)
-            }
+            ctx.cuda_event(tx)?;
+            Ok(rx)
         }
         TransferStrategy::Nixl(transfer_type) => {
             let transfer_fut = nixl::write_blocks_to(sources, targets, &ctx, transfer_type)?;
 
-            if notify {
-                ctx.async_rt_handle().spawn(async move {
-                    transfer_fut.await;
-                    tx.send(()).unwrap();
-                });
-                Ok(Some(rx))
-            } else {
-                Ok(None)
-            }
+            ctx.async_rt_handle().spawn(async move {
+                transfer_fut.await;
+                tx.send(()).unwrap();
+            });
+            Ok(rx)
         }
         _ => Err(TransferError::IncompatibleTypes(format!(
             "Unsupported copy strategy: {:?}",
@@ -215,9 +201,8 @@ pub trait WriteTo<Target> {
     fn write_to(
         &self,
         dst: &mut Vec<Target>,
-        notify: bool,
         ctx: Arc<TransferContext>,
-    ) -> Result<Option<oneshot::Receiver<()>>, TransferError>;
+    ) -> Result<oneshot::Receiver<()>, TransferError>;
 }
 
 impl<RB, WB, L: LocalityProvider> WriteTo<WB> for Vec<RB>
@@ -231,10 +216,9 @@ where
     fn write_to(
         &self,
         dst: &mut Vec<WB>,
-        notify: bool,
         ctx: Arc<TransferContext>,
-    ) -> Result<Option<oneshot::Receiver<()>>, TransferError> {
-        L::handle_transfer(self, dst, notify, ctx)
+    ) -> Result<oneshot::Receiver<()>, TransferError> {
+        L::handle_transfer(self, dst, ctx)
     }
 }
 

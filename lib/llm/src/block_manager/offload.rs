@@ -69,9 +69,7 @@ use std::collections::BTreeSet;
 mod pending;
 pub mod request;
 
-use pending::{
-    CudaTransferManager, DiskTransferManager, PendingTransfer, TransferBatcher, TransferManager,
-};
+use pending::{LocalTransferManager, PendingTransfer, TransferBatcher, TransferManager};
 use request::{BlockResult, OffloadRequest, OffloadRequestKey, OnboardRequest};
 
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
@@ -138,23 +136,29 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             async_rt_handle.clone(),
         ));
 
+        let device_metrics = metrics.pool("device");
+        let host_metrics = metrics.pool("host");
+        let disk_metrics = metrics.pool("disk");
+
         // Device -> Host offload
         let device_to_host_task = OffloadManager::offload_worker(
             this.device.clone(),
             this.host.clone(),
             device_offload_rx,
             Arc::new(TransferBatcher::new(
-                CudaTransferManager::new(
+                LocalTransferManager::new(
                     device_offload_transfer_ctx,
                     MAX_CONCURRENT_TRANSFERS,
                     &async_rt_handle,
                     cancellation_token.clone(),
+                    device_metrics.clone(),
+                    "offload_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &async_rt_handle,
                 cancellation_token.clone(),
             )),
-            metrics.pool("device"),
+            device_metrics.clone(),
             cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
@@ -177,17 +181,19 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             this.disk.clone(),
             host_offload_rx,
             Arc::new(TransferBatcher::new(
-                DiskTransferManager::new(
+                LocalTransferManager::new(
                     transfer_ctx.clone(),
                     MAX_CONCURRENT_TRANSFERS,
                     &async_rt_handle,
                     cancellation_token.clone(),
+                    host_metrics.clone(),
+                    "offload_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &async_rt_handle,
                 cancellation_token.clone(),
             )),
-            metrics.pool("host"),
+            host_metrics.clone(),
             cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
@@ -204,17 +210,19 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             this.device.clone(),
             host_onboard_rx,
             Arc::new(TransferBatcher::new(
-                CudaTransferManager::new(
+                LocalTransferManager::new(
                     transfer_ctx.clone(),
                     MAX_CONCURRENT_TRANSFERS,
                     &async_rt_handle,
                     cancellation_token.clone(),
+                    host_metrics.clone(),
+                    "onboard_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &async_rt_handle,
                 cancellation_token.clone(),
             )),
-            metrics.pool("host"),
+            host_metrics.clone(),
             cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
@@ -231,17 +239,19 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             this.device.clone(),
             disk_onboard_rx,
             Arc::new(TransferBatcher::new(
-                DiskTransferManager::new(
+                LocalTransferManager::new(
                     transfer_ctx.clone(),
                     MAX_CONCURRENT_TRANSFERS,
                     &async_rt_handle,
                     cancellation_token.clone(),
+                    disk_metrics.clone(),
+                    "onboard_bw".to_string(),
                 )?,
                 MAX_TRANSFER_BATCH_SIZE,
                 &async_rt_handle,
                 cancellation_token.clone(),
             )),
-            metrics.pool("disk"),
+            disk_metrics.clone(),
             cancellation_token.clone(),
         );
         CriticalTaskExecutionHandle::new_with_runtime(
