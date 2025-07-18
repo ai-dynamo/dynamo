@@ -26,20 +26,6 @@ ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS nixl_base
-
-# Redeclare ARCH and ARCH_ALT so they're available in this stage
-ARG ARCH
-ARG ARCH_ALT
-
-WORKDIR /opt/nixl
-# Add a cache hint that only changes when the nixl commit changes
-ARG NIXL_COMMIT
-# This line acts as a cache key - it only changes when NIXL_COMMIT changes
-RUN echo "NIXL commit: ${NIXL_COMMIT}" > /opt/nixl/commit.txt
-# Copy the nixl source
-COPY --from=nixl . .
-
 ##################################
 ########## Base Image ############
 ##################################
@@ -80,6 +66,7 @@ RUN apt-get update -y && \
     libnuma-dev librdmacm-dev ibverbs-providers
 
 ARG NIXL_UCX_REF=v1.19.x
+ARG NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
 
 WORKDIR /workspace
 
@@ -118,10 +105,11 @@ SHELL ["/bin/bash", "-c"]
 WORKDIR /workspace
 
 ### NIXL SETUP ###
-# Copy nixl source, and use commit hash as cache hint
+# Clone nixl source
 # TEMP: disable gds backend for arm64
-COPY --from=nixl_base /opt/nixl /opt/nixl
-COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
+RUN git clone "https://github.com/ai-dynamo/nixl.git" /opt/nixl && \
+    cd /opt/nixl && \
+    git checkout ${NIXL_REF}
 RUN if [ "$ARCH" = "arm64" ]; then \
         cd /opt/nixl && \
         mkdir build && \
@@ -199,9 +187,13 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
         cd tools/ep_kernels && \
         bash install_python_libraries.sh && \
         cd ep_kernels_workspace && \
-        git clone --recursive https://github.com/deepseek-ai/DeepGEMM.git && \
+        git clone https://github.com/deepseek-ai/DeepGEMM.git && \
         cd DeepGEMM && \
-        python setup.py install; \
+        sed -i 's|git@github.com:|https://github.com/|g' .gitmodules && \
+        git submodule sync --recursive && \
+        git submodule update --init --recursive && \
+        cat install.sh && \
+        ./install.sh; \
     else \
         uv pip install pip cuda-python && \
         mkdir /opt/vllm && \
@@ -213,9 +205,13 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
         cd tools/ep_kernels && \
         bash install_python_libraries.sh && \
         cd ep_kernels_workspace && \
-        git clone --recursive https://github.com/deepseek-ai/DeepGEMM.git && \
+        git clone https://github.com/deepseek-ai/DeepGEMM.git && \
         cd DeepGEMM && \
-        python setup.py install; \
+        sed -i 's|git@github.com:|https://github.com/|g' .gitmodules && \
+        git submodule sync --recursive && \
+        git submodule update --init --recursive && \
+        cat install.sh && \
+        ./install.sh; \
     fi
 
 # Common dependencies

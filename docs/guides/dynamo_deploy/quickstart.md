@@ -140,6 +140,13 @@ helm install dynamo-platform ./platform/ \
 
 [More on Deploying to Dynamo Cloud](./dynamo_cloud.md)
 
+## Uninstall CRDs for a clean start
+
+We provide a script to uninstall CRDs should you need a clean start.
+
+```bash
+./uninstall.sh
+```
 
 ## Explore Examples
 
