@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
         let secondary = runtime.secondary();
-        let (etcd_config, nats_config, is_static) = config.dissolve();
+        let (etcd_config, nats_config, is_static, wait_for_served) = config.dissolve();
 
         let runtime_clone = runtime.clone();
 
@@ -65,6 +65,14 @@ impl DistributedRuntime {
             })
             .await??;
 
+        let served_endpoints_hashmap: HashMap<String, bool> = wait_for_served
+            .unwrap_or_default()
+            .into_iter()
+            .map(|k| (k, false))
+            .collect();
+
+        let served_endpoints = Arc::new(Mutex::new(served_endpoints_hashmap));
+
         let distributed_runtime = Self {
             runtime,
             etcd_client,
@@ -74,6 +82,7 @@ impl DistributedRuntime {
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
             start_time: std::time::Instant::now(),
+            served_endpoints,
         };
 
         // Start HTTP server for health and metrics (if enabled)
@@ -104,14 +113,17 @@ impl DistributedRuntime {
         Ok(distributed_runtime)
     }
 
-    pub async fn from_settings(runtime: Runtime) -> Result<Self> {
-        let config = DistributedConfig::from_settings(false);
+    pub async fn from_settings(
+        runtime: Runtime,
+        wait_for_served: Option<Vec<String>>,
+    ) -> Result<Self> {
+        let config = DistributedConfig::from_settings(false, wait_for_served);
         Self::new(runtime, config).await
     }
 
     // Call this if you are using static workers that do not need etcd-based discovery.
     pub async fn from_settings_without_discovery(runtime: Runtime) -> Result<Self> {
-        let config = DistributedConfig::from_settings(true);
+        let config = DistributedConfig::from_settings(true, None);
         Self::new(runtime, config).await
     }
 
@@ -203,14 +215,19 @@ pub struct DistributedConfig {
     pub etcd_config: etcd::ClientOptions,
     pub nats_config: nats::ClientOptions,
     pub is_static: bool,
+    pub wait_for_served: Option<Vec<String>>,
 }
 
 impl DistributedConfig {
-    pub fn from_settings(is_static: bool) -> DistributedConfig {
+    pub fn from_settings(
+        is_static: bool,
+        wait_for_served: Option<Vec<String>>,
+    ) -> DistributedConfig {
         DistributedConfig {
             etcd_config: etcd::ClientOptions::default(),
             nats_config: nats::ClientOptions::default(),
             is_static,
+            wait_for_served,
         }
     }
 
@@ -219,6 +236,7 @@ impl DistributedConfig {
             etcd_config: etcd::ClientOptions::default(),
             nats_config: nats::ClientOptions::default(),
             is_static: false,
+            wait_for_served: None,
         };
 
         config.etcd_config.attach_lease = false;

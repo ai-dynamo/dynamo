@@ -151,7 +151,7 @@ impl RuntimeConfig {
     /// 2. /opt/dynamo/etc/runtime.toml
     /// 3. /opt/dynamo/defaults/runtime.toml (lowest priority)
     ///
-    /// Environment variables are prefixed with `DYN_RUNTIME_`
+    /// Environment variables are prefixed with `DYN_RUNTIME_` and `DYN_SYSTEM`
     pub fn from_settings() -> Result<RuntimeConfig> {
         let config: RuntimeConfig = Self::figment().extract()?;
         config.validate()?;

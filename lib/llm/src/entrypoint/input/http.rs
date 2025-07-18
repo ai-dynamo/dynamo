@@ -31,7 +31,8 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
         .build()?;
     match engine_config {
         EngineConfig::Dynamic(_) => {
-            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
+            let distributed_runtime =
+                DistributedRuntime::from_settings(runtime.clone(), None).await?;
             match distributed_runtime.etcd_client() {
                 Some(etcd_client) => {
                     let router_config = engine_config.local_model().router_config();
