@@ -1,4 +1,4 @@
-#!/bin/bash -e
+#!/usr/bin/env bash
 # SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -16,7 +16,7 @@
 
 # Install vllm and wideEP kernels from a specific git reference
 
-set -ex
+set -euo pipefail
 
 # Parse arguments
 EDITABLE=true
