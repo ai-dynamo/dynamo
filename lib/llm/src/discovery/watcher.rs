@@ -250,6 +250,7 @@ impl ModelWatcher {
                 >::new();
                 let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
                 let backend = Backend::from_mdc(card.clone()).await?.into_operator();
+                let migration = Migration::from_mdc(card.clone()).await?.into_operator();
                 let router =
                     PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
                         client,
@@ -278,7 +279,9 @@ impl ModelWatcher {
                 let completions_engine = frontend
                     .link(preprocessor.forward_edge())?
                     .link(backend.forward_edge())?
+                    .link(migration.forward_edge())?
                     .link(service_backend)?
+                    .link(migration.backward_edge())?
                     .link(backend.backward_edge())?
                     .link(preprocessor.backward_edge())?
                     .link(frontend)?;

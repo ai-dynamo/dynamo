@@ -158,6 +158,9 @@ impl RetryManager {
     }
 
     fn track_response(&mut self, response: &Annotated<LLMEngineOutput>) {
+        if self.retries_left == 0 {
+            return;
+        }
         let llm_engine_output = match response.data.as_ref() {
             Some(output) => output,
             None => return,
