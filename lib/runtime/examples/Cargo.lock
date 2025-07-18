@@ -1094,6 +1094,7 @@ version = "0.3.2"
 dependencies = [
  "dynamo-runtime",
  "futures",
+ "prometheus",
  "serde",
  "serde_json",
  "tokio",

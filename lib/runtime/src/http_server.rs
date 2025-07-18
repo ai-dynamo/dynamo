@@ -13,7 +13,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::component::Namespace;
 use crate::profiling::MetricsRegistry;
 use axum::{body, http::StatusCode, response::IntoResponse, routing::get, Router};
 use std::sync::Arc;
@@ -23,31 +22,51 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing;
 
+pub struct HttpMetricsRegistry {
+    pub drt: Arc<crate::DistributedRuntime>,
+}
+
+impl MetricsRegistry for HttpMetricsRegistry {
+    fn basename(&self) -> String {
+        "http_server".to_string()
+    }
+
+    fn parent_hierarchy(&self) -> Vec<String> {
+        vec![
+            self.root_drt().parent_hierarchy(),
+            vec![self.root_drt().basename()],
+        ]
+        .concat()
+    }
+
+    fn root_drt(&self) -> &crate::DistributedRuntime {
+        &self.drt
+    }
+}
+
 /// HTTP server state containing metrics and uptime tracking
 pub struct HttpServerState {
-    registry: Arc<dyn MetricsRegistry>,
-    namespace: Option<Namespace>,
+    // global drt registry is for printing out the entire Prometheus format output
+    root_drt: Arc<crate::DistributedRuntime>,
     start_time: OnceLock<Instant>,
     uptime_gauge: Arc<prometheus::Gauge>,
 }
 
 impl HttpServerState {
     /// Create new HTTP server state with the provided metrics registry
-    pub fn new(registry: Arc<dyn MetricsRegistry>) -> anyhow::Result<Self> {
-        let uptime_gauge = match registry.create_gauge(
+    pub fn new(drt: Arc<crate::DistributedRuntime>) -> anyhow::Result<Self> {
+        let http_metrics_registry = Arc::new(HttpMetricsRegistry { drt: drt.clone() });
+        let uptime_gauge = http_metrics_registry.create_gauge(
             "uptime_seconds",
             "Total uptime of the DistributedRuntime in seconds",
             &[("service", "dynamo"), ("subsystem", "runtime")],
-        ) {
-            Ok(gauge) => gauge,
-            Err(e) => return Err(anyhow::anyhow!("Failed to create uptime gauge: {}", e)),
-        };
-        Ok(Self {
-            namespace: None,
+        )?;
+        let state = Self {
+            root_drt: drt,
             start_time: OnceLock::new(),
-            registry,
             uptime_gauge,
-        })
+        };
+        Ok(state)
     }
 
     /// Initialize the start time (can only be called once)
@@ -64,20 +83,15 @@ impl HttpServerState {
             .elapsed()
     }
 
-    /// Get a reference to the metrics registry
-    pub fn get_registry(&self) -> &Arc<dyn MetricsRegistry> {
-        &self.registry
+    /// Get a reference to the metrics registry (self as MetricsRegistry)
+    pub fn root_drt(&self) -> &crate::DistributedRuntime {
+        &*self.root_drt
     }
 
     /// Update the uptime gauge with current value
     pub fn update_uptime_gauge(&self) {
         let uptime_seconds = self.uptime().as_secs_f64();
         self.uptime_gauge.set(uptime_seconds);
-    }
-
-    /// Set the namespace for this HTTP server state
-    pub fn set_namespace(&mut self, namespace: Namespace) {
-        self.namespace = Some(namespace);
     }
 }
 
@@ -86,10 +100,10 @@ pub async fn spawn_http_server(
     host: &str,
     port: u16,
     cancel_token: CancellationToken,
-    metrics_registry: Arc<dyn MetricsRegistry>,
+    drt: Arc<crate::DistributedRuntime>,
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
     // Create HTTP server state with the provided metrics registry
-    let server_state = Arc::new(HttpServerState::new(metrics_registry)?);
+    let server_state = Arc::new(HttpServerState::new(drt)?);
 
     // // Initialize the start time
     server_state
@@ -172,7 +186,7 @@ async fn metrics_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
     state.update_uptime_gauge();
 
     // Get metrics from the registry
-    match state.get_registry().encode_prometheus_str() {
+    match state.root_drt().encode_prometheus_fmt() {
         Ok(response) => (StatusCode::OK, response),
         Err(e) => {
             tracing::error!("Failed to get metrics from registry: {}", e);
@@ -185,9 +199,20 @@ async fn metrics_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
 }
 
 #[cfg(test)]
+async fn make_test_drt() -> Arc<crate::DistributedRuntime> {
+    let rt = crate::Runtime::from_current().unwrap();
+    Arc::new(
+        crate::DistributedRuntime::from_settings_without_discovery(rt)
+            .await
+            .unwrap(),
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::profiling::MetricsRegistry;
+    use std::sync::Arc;
     use tokio::time::{sleep, Duration};
 
     // Test wrapper that implements MetricsRegistry for prometheus::Registry
@@ -195,34 +220,32 @@ mod tests {
     struct TestMetricsRegistry {
         registry: Arc<prometheus::Registry>,
         prefix: String,
+        drt: Arc<crate::DistributedRuntime>,
     }
 
     #[cfg(test)]
     impl TestMetricsRegistry {
-        fn new(registry: Arc<prometheus::Registry>) -> Self {
+        fn new(registry: Arc<prometheus::Registry>, drt: Arc<crate::DistributedRuntime>) -> Self {
             Self {
                 registry,
                 prefix: "namespace".to_string(),
+                drt,
             }
         }
     }
 
     #[cfg(test)]
     impl MetricsRegistry for TestMetricsRegistry {
-        fn metrics_prefix(&self) -> String {
+        fn basename(&self) -> String {
             self.prefix.clone()
         }
 
-        fn metrics_hierarchy(&self) -> Vec<String> {
-            vec![self.prefix.clone()]
+        fn parent_hierarchy(&self) -> Vec<String> {
+            vec![]
         }
 
-        fn drt(&self) -> &crate::DistributedRuntime {
-            panic!("drt() not implemented for TestMetricsRegistry")
-        }
-
-        fn registry(&self) -> prometheus::Registry {
-            self.registry.as_ref().clone()
+        fn root_drt(&self) -> &crate::DistributedRuntime {
+            &self.drt
         }
     }
 
@@ -259,9 +282,8 @@ mod tests {
     #[tokio::test]
     async fn test_runtime_metrics_creation() {
         // Test RuntimeMetrics creation and functionality
-        let prometheus_registry = Arc::new(prometheus::Registry::new());
-        let registry = Arc::new(TestMetricsRegistry::new(prometheus_registry));
-        let runtime_metrics = HttpServerState::new(registry).unwrap();
+        let drt = make_test_drt().await;
+        let runtime_metrics = HttpServerState::new(drt.clone()).unwrap();
 
         // Initialize start time
         runtime_metrics.initialize_start_time().unwrap();
@@ -273,14 +295,17 @@ mod tests {
         let uptime_seconds = 123.456;
         runtime_metrics.uptime_gauge.set(uptime_seconds);
 
+        // DEBUG: Print registry keys
+        drt.debug_prometheus_registry_keys();
+
         // Get metrics from the registry
-        let response = runtime_metrics.registry.encode_prometheus_str().unwrap();
+        let response = runtime_metrics.root_drt().encode_prometheus_fmt().unwrap();
         println!("Full metrics response:\n{}", response);
 
         let expected = "\
-# HELP namespace__uptime_seconds Total uptime of the DistributedRuntime in seconds
-# TYPE namespace__uptime_seconds gauge
-namespace__uptime_seconds 123.456
+# HELP http_server__uptime_seconds Total uptime of the DistributedRuntime in seconds
+# TYPE http_server__uptime_seconds gauge
+http_server__uptime_seconds 123.456
 ";
         assert_eq!(response, expected);
     }
@@ -288,22 +313,21 @@ namespace__uptime_seconds 123.456
     #[tokio::test]
     async fn test_runtime_metrics_namespace() {
         // Test that metrics have correct namespace
-        let prometheus_registry = Arc::new(prometheus::Registry::new());
-        let registry = Arc::new(TestMetricsRegistry::new(prometheus_registry));
-        let runtime_metrics = HttpServerState::new(registry).unwrap();
+        let drt = make_test_drt().await;
+        let runtime_metrics = HttpServerState::new(drt).unwrap();
 
         // Initialize start time
         runtime_metrics.initialize_start_time().unwrap();
 
         runtime_metrics.uptime_gauge.set(42.0);
 
-        let response = runtime_metrics.registry.encode_prometheus_str().unwrap();
+        let response = runtime_metrics.root_drt().encode_prometheus_fmt().unwrap();
         println!("Full metrics response:\n{}", response);
 
         let expected = "\
-# HELP namespace__uptime_seconds Total uptime of the DistributedRuntime in seconds
-# TYPE namespace__uptime_seconds gauge
-namespace__uptime_seconds 42
+# HELP http_server__uptime_seconds Total uptime of the DistributedRuntime in seconds
+# TYPE http_server__uptime_seconds gauge
+http_server__uptime_seconds 42
 ";
         assert_eq!(response, expected);
     }
@@ -311,9 +335,8 @@ namespace__uptime_seconds 42
     #[tokio::test]
     async fn test_start_time_initialization() {
         // Test that start time can only be initialized once
-        let prometheus_registry = Arc::new(prometheus::Registry::new());
-        let registry = Arc::new(TestMetricsRegistry::new(prometheus_registry));
-        let runtime_metrics = HttpServerState::new(registry).unwrap();
+        let drt = make_test_drt().await;
+        let runtime_metrics = HttpServerState::new(drt).unwrap();
 
         // First initialization should succeed
         assert!(runtime_metrics.initialize_start_time().is_ok());
@@ -330,9 +353,8 @@ namespace__uptime_seconds 42
     #[should_panic(expected = "Start time not initialized")]
     async fn test_uptime_without_initialization() {
         // Test that uptime panics if start time is not initialized
-        let prometheus_registry = Arc::new(prometheus::Registry::new());
-        let registry = Arc::new(TestMetricsRegistry::new(prometheus_registry));
-        let runtime_metrics = HttpServerState::new(registry).unwrap();
+        let drt = make_test_drt().await;
+        let runtime_metrics = HttpServerState::new(drt).unwrap();
 
         // This should panic because start time is not initialized
         let _uptime = runtime_metrics.uptime();
@@ -345,12 +367,10 @@ namespace__uptime_seconds 42
         use tokio_util::sync::CancellationToken;
         // use reqwest for HTTP requests
         let cancel_token = CancellationToken::new();
-        let prometheus_registry = Arc::new(prometheus::Registry::new());
-        let metrics_registry = Arc::new(TestMetricsRegistry::new(prometheus_registry));
-        let (addr, server_handle) =
-            spawn_http_server("127.0.0.1", 0, cancel_token.clone(), metrics_registry)
-                .await
-                .unwrap();
+        let drt = make_test_drt().await;
+        let (addr, server_handle) = spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt)
+            .await
+            .unwrap();
         println!("[test] Waiting for server to start...");
         sleep(std::time::Duration::from_millis(1000)).await;
         println!("[test] Server should be up, starting requests...");

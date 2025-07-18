@@ -17,7 +17,7 @@ pub use crate::component::Component;
 use crate::{
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
     discovery::DiscoveryClient,
-    profiling::{self, MetricsRegistry},
+    profiling::MetricsRegistry,
     service::ServiceClient,
     transports::{etcd, nats, tcp},
     ErrorContext,
@@ -66,6 +66,16 @@ impl DistributedRuntime {
             })
             .await??;
 
+        // Start HTTP server for health and metrics if enabled in configuration
+        let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
+        // IMPORTANT: We must extract cancel_token from runtime BEFORE moving runtime into the struct below.
+        // This is because after moving, runtime is no longer accessible in this scope (ownership rules).
+        let cancel_token = if config.system_server_enabled() {
+            Some(runtime.clone().child_token())
+        } else {
+            None
+        };
+
         let distributed_runtime = Self {
             runtime,
             etcd_client,
@@ -74,13 +84,36 @@ impl DistributedRuntime {
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
-            metrics_registries_by_prefix: Arc::new(std::sync::Mutex::new(HashMap::<
+            prometheus_registries_by_prefix: Arc::new(std::sync::Mutex::new(HashMap::<
                 String,
                 prometheus::Registry,
             >::new())),
-            is_healthy: false,
-            is_live: false,
         };
+
+        // Start HTTP server if enabled
+        if let Some(cancel_token) = cancel_token {
+            let host = config.system_host.clone();
+            let port = config.system_port;
+
+            // Start HTTP server (it spawns its own task internally)
+            match crate::http_server::spawn_http_server(
+                &host,
+                port,
+                cancel_token,
+                Arc::new(distributed_runtime.clone()),
+            )
+            .await
+            {
+                Ok((addr, _)) => {
+                    tracing::info!("HTTP server started successfully on {}", addr);
+                }
+                Err(e) => {
+                    tracing::error!("HTTP server startup failed: {}", e);
+                }
+            }
+        } else {
+            tracing::debug!("Health and metrics HTTP server is disabled via DYN_SYSTEM_ENABLED");
+        }
 
         Ok(distributed_runtime)
     }
@@ -172,6 +205,20 @@ impl DistributedRuntime {
     pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>> {
         self.instance_sources.clone()
     }
+
+    /// Debug function to print out all the keys of prometheus_registries_by_prefix
+    pub fn debug_prometheus_registry_keys(&self) {
+        let registries = self.prometheus_registries_by_prefix.lock().unwrap();
+        println!("=== Prometheus Registry Keys ===");
+        if registries.is_empty() {
+            println!("No registries found");
+        } else {
+            for (key, _registry) in registries.iter() {
+                println!("Registry key: '{}'", key);
+            }
+        }
+        println!("=== End Prometheus Registry Keys ===");
+    }
 }
 
 #[derive(Dissolve)]
@@ -204,15 +251,15 @@ impl DistributedConfig {
 }
 
 impl MetricsRegistry for DistributedRuntime {
-    fn metrics_prefix(&self) -> String {
-        "".to_string()
+    fn basename(&self) -> String {
+        "".to_string() // drt has no basename. Basename only begins with the Namespace.
     }
 
-    fn metrics_hierarchy(&self) -> Vec<String> {
-        vec![self.metrics_prefix()]
+    fn parent_hierarchy(&self) -> Vec<String> {
+        vec![] // drt is the root, so no parent hierarchy
     }
 
-    fn drt(&self) -> &crate::DistributedRuntime {
+    fn root_drt(&self) -> &crate::DistributedRuntime {
         self
     }
 }

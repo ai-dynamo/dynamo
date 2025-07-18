@@ -83,25 +83,16 @@ impl EventSubscriber for Namespace {
 }
 
 impl MetricsRegistry for Namespace {
-    fn metrics_prefix(&self) -> String {
-        // example: <runtime>_<component>
-        format!(
-            "{}_{}",
-            DistributedRuntimeProvider::drt(self).metrics_prefix(),
-            self.name
-        )
+    fn basename(&self) -> String {
+        self.name.clone()
     }
 
-    fn metrics_hierarchy(&self) -> Vec<String> {
-        // example: ["<runtime>", "<runtime>_<component>"]
-        vec![
-            DistributedRuntimeProvider::drt(self).metrics_prefix(),
-            self.metrics_prefix(),
-        ]
+    fn parent_hierarchy(&self) -> Vec<String> {
+        vec![self.drt().prefix()] // drt's prefix is an empty string
     }
 
-    fn drt(&self) -> &crate::DistributedRuntime {
-        DistributedRuntimeProvider::drt(self)
+    fn root_drt(&self) -> &crate::DistributedRuntime {
+        self.drt()
     }
 }
 

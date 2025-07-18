@@ -58,8 +58,17 @@ pub const HISTOGRAM_METRIC_TYPE: &str = "histogram";
 // - Ensures consistent registration behavior across all metric types
 macro_rules! register_metric_inline {
     ($registry:expr, $metric:expr) => {{
-        let mut registry = $registry.drt().metrics_registries_by_prefix.lock().unwrap();
-        for prefix in $registry.metrics_hierarchy() {
+        let mut registry = $registry
+            .root_drt()
+            .prometheus_registries_by_prefix
+            .lock()
+            .unwrap();
+        let hierarchy = {
+            let mut h = $registry.parent_hierarchy();
+            h.push($registry.prefix());
+            h
+        };
+        for prefix in hierarchy {
             let collector: Box<dyn prometheus::core::Collector> = Box::new($metric.clone());
             registry
                 .entry(prefix)
@@ -73,30 +82,44 @@ macro_rules! register_metric_inline {
 /// It offers a unified interface for creating and managing metrics, organizing sub-registries, and
 /// generating output in Prometheus text format.
 pub trait MetricsRegistry: Send + Sync {
-    /// Get the prefix for this registry
-    fn metrics_prefix(&self) -> String;
+    // Get the name of this registry (without any prefix)
+    fn basename(&self) -> String;
 
-    /// Get the hierarchy for this registry (includes its own metrics_prefix)
-    fn metrics_hierarchy(&self) -> Vec<String>;
+    /// Get the full hierarchy+basename for this registry. Because drt's prefix is an empty string,
+    /// we need to handle it separately.
+    fn prefix(&self) -> String {
+        let parent_hierarchy = self.parent_hierarchy();
+        let joined_hierarchy = [parent_hierarchy, vec![self.basename()]].concat().join("_");
+        joined_hierarchy.trim_start_matches('_').to_string()
+    }
 
-    // Get a reference to the distributed runtime. You cannot call this
-    // drt because it'll collide with the DistributedRuntimeProvider trait.
-    fn drt(&self) -> &crate::DistributedRuntime;
+    // Get the parent hierarchy for this registry (does not include this registry's prefix)
+    fn parent_hierarchy(&self) -> Vec<String>;
 
-    fn registry(&self) -> prometheus::Registry {
-        let mut registry = self.drt().metrics_registries_by_prefix.lock().unwrap();
+    // Get a reference to the distributed runtime. You should not call this
+    // drt because it'll collide with the DistributedRuntimeProvider trait,
+    // which is used along with MetricsRegistry.
+    fn root_drt(&self) -> &crate::DistributedRuntime;
+
+    fn prom_registry(&self) -> prometheus::Registry {
+        let mut registry = self
+            .root_drt()
+            .prometheus_registries_by_prefix
+            .lock()
+            .unwrap();
         registry
-            .entry(self.metrics_prefix())
+            .entry(self.prefix())
             .or_insert(prometheus::Registry::new())
             .clone()
     }
 
     /// Helper method to build the full metric name with prefix
-    fn build_metric_name(&self, name: &str) -> String {
-        if self.metrics_prefix().is_empty() {
-            name.to_string()
+    fn build_metric_name(&self, metric_name: &str) -> String {
+        if self.prefix().is_empty() {
+            metric_name.to_string()
         } else {
-            format!("{}__{}", self.metrics_prefix(), name)
+            // Double underscore to separate between prefix and actual metric name
+            format!("{}__{}", self.prefix(), metric_name)
         }
     }
 
@@ -160,8 +183,8 @@ pub trait MetricsRegistry: Send + Sync {
     }
 
     /// Get metrics in Prometheus text format
-    fn encode_prometheus_str(&self) -> anyhow::Result<String> {
-        let metric_families = self.registry().gather();
+    fn encode_prometheus_fmt(&self) -> anyhow::Result<String> {
+        let metric_families = self.prom_registry().gather();
         let encoder = prometheus::TextEncoder::new();
         let mut buffer = Vec::new();
         encoder.encode(&metric_families, &mut buffer)?;
@@ -181,23 +204,15 @@ mod test_simple_registry_trait {
     }
 
     impl MetricsRegistry for TestRegistry {
-        fn metrics_prefix(&self) -> String {
+        fn basename(&self) -> String {
             "testprefix".to_string()
         }
-        fn metrics_hierarchy(&self) -> Vec<String> {
-            vec![self.prefix.clone()]
+        fn parent_hierarchy(&self) -> Vec<String> {
+            vec![]
         }
-        fn drt(&self) -> &crate::DistributedRuntime {
+        fn root_drt(&self) -> &crate::DistributedRuntime {
             &self.drt
         }
-
-        // fn registry(&self) -> prometheus::Registry {
-        //     let mut registry = self.drt.metrics_registries_by_prefix.lock().unwrap();
-        //     registry
-        //         .entry(self.metrics_prefix())
-        //         .or_insert(prometheus::Registry::new())
-        //         .clone()
-        // }
     }
 
     #[tokio::test]
@@ -241,7 +256,7 @@ mod test_simple_registry_trait {
         println!("Histogram observations: 1.5, 2.5, 3.5");
 
         // Test Prometheus format output
-        let prometheus_output = registry.encode_prometheus_str().unwrap();
+        let prometheus_output = registry.encode_prometheus_fmt().unwrap();
         println!("Prometheus format output:");
         println!("{}", prometheus_output);
 
@@ -257,12 +272,12 @@ mod test_simple_registry_trait {
         }
 
         // Verify all metrics are present in the output
-        assert!(prometheus_output.contains("testprefix_my_counter"));
-        assert!(prometheus_output.contains("testprefix_my_gauge"));
-        assert!(prometheus_output.contains("testprefix_my_histogram"));
-        assert!(prometheus_output.contains("# HELP testprefix_my_counter A test counter"));
-        assert!(prometheus_output.contains("# HELP testprefix_my_gauge A test gauge"));
-        assert!(prometheus_output.contains("# HELP testprefix_my_histogram A test histogram"));
+        assert!(prometheus_output.contains("testprefix__my_counter"));
+        assert!(prometheus_output.contains("testprefix__my_gauge"));
+        assert!(prometheus_output.contains("testprefix__my_histogram"));
+        assert!(prometheus_output.contains("# HELP testprefix__my_counter A test counter"));
+        assert!(prometheus_output.contains("# HELP testprefix__my_gauge A test gauge"));
+        assert!(prometheus_output.contains("# HELP testprefix__my_histogram A test histogram"));
 
         println!("All metric types test passed!");
     }
@@ -279,15 +294,13 @@ mod test_runtime_and_namespace_registry_trait {
     }
 
     impl MetricsRegistry for MyRuntimeRegistry {
-        fn metrics_prefix(&self) -> String {
+        fn basename(&self) -> String {
             "runtime".to_string()
         }
-
-        fn metrics_hierarchy(&self) -> Vec<String> {
-            vec![self.metrics_prefix()]
+        fn parent_hierarchy(&self) -> Vec<String> {
+            vec![]
         }
-
-        fn drt(&self) -> &crate::DistributedRuntime {
+        fn root_drt(&self) -> &crate::DistributedRuntime {
             &self.drt
         }
     }
@@ -298,15 +311,13 @@ mod test_runtime_and_namespace_registry_trait {
     }
 
     impl MetricsRegistry for MyNamespaceRegistry {
-        fn metrics_prefix(&self) -> String {
-            "runtime_namespace".to_string()
+        fn basename(&self) -> String {
+            "namespace".to_string()
         }
-
-        fn metrics_hierarchy(&self) -> Vec<String> {
-            vec!["runtime".to_string(), self.metrics_prefix()]
+        fn parent_hierarchy(&self) -> Vec<String> {
+            vec!["runtime".to_string()]
         }
-
-        fn drt(&self) -> &crate::DistributedRuntime {
+        fn root_drt(&self) -> &crate::DistributedRuntime {
             &self.drt
         }
     }
@@ -343,8 +354,8 @@ mod test_runtime_and_namespace_registry_trait {
         namespace_gauge.set(25.0);
 
         // Test Prometheus format output for both registries
-        let runtime_output = runtime_registry.encode_prometheus_str().unwrap();
-        let namespace_output = namespace_registry.encode_prometheus_str().unwrap();
+        let runtime_output = runtime_registry.encode_prometheus_fmt().unwrap();
+        let namespace_output = namespace_registry.encode_prometheus_fmt().unwrap();
 
         println!("Runtime Prometheus output:");
         println!("{}", runtime_output);
@@ -354,12 +365,12 @@ mod test_runtime_and_namespace_registry_trait {
 
         // Verify exact content in runtime output (this includes ALL)
         let expected_runtime_output = "\
-# HELP runtime_namespace__active_connections Active connections for this namespace\n\
-# TYPE runtime_namespace__active_connections gauge\n\
-runtime_namespace__active_connections 25\n\
 # HELP runtime__total_requests Total requests across all runtime\n\
 # TYPE runtime__total_requests counter\n\
-runtime__total_requests 100\n";
+runtime__total_requests 100\n\
+# HELP runtime_namespace__active_connections Active connections for this namespace\n\
+# TYPE runtime_namespace__active_connections gauge\n\
+runtime_namespace__active_connections 25\n";
         assert_eq!(runtime_output, expected_runtime_output);
 
         // Verify exact content in namespace output (this only includes runtime_namespace))

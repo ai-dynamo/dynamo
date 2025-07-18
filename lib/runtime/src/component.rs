@@ -454,42 +454,12 @@ impl std::fmt::Display for Namespace {
 impl Namespace {
     pub(crate) fn new(runtime: DistributedRuntime, name: String, is_static: bool) -> Result<Self> {
         NamespaceBuilder::default()
-            .runtime(Arc::new(runtime))
+            .runtime(Arc::new(runtime.clone()))
             .name(name.clone())
             .is_static(is_static)
+            .metrics_registry(Arc::new(runtime))
             .build()
-            .map_err(|e| anyhow::anyhow!("Failed to build namespace: {}", e))?
-            .start_http_server()
-    }
-
-    /// Start HTTP server for health and metrics if enabled in configuration
-    pub(crate) fn start_http_server(self) -> Result<Self> {
-        let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
-        if !config.system_server_enabled() {
-            tracing::debug!("Health and metrics HTTP server is disabled via DYN_SYSTEM_ENABLED");
-            return Ok(self);
-        }
-
-        let host = config.system_host.clone();
-        let port = config.system_port;
-        let cancel_token = self.runtime.child_token();
-        let metrics_registry = self.metrics_registry.clone();
-
-        // Spawn HTTP server startup in background
-        tokio::spawn(async move {
-            match crate::http_server::spawn_http_server(&host, port, cancel_token, metrics_registry)
-                .await
-            {
-                Ok((addr, _)) => {
-                    tracing::info!("HTTP server started successfully on {}", addr);
-                }
-                Err(e) => {
-                    tracing::error!("HTTP server startup failed: {}", e);
-                }
-            }
-        });
-
-        Ok(self)
+            .map_err(|e| anyhow::anyhow!("Failed to build namespace: {}", e))
     }
 
     /// Create a [`Component`] in the namespace who's endpoints can be discovered with etcd
@@ -508,6 +478,7 @@ impl Namespace {
             .name(name.into())
             .is_static(self.is_static)
             .parent(Some(Arc::new(self.clone())))
+            .metrics_registry(self.runtime.clone())
             .build()?)
     }
 
