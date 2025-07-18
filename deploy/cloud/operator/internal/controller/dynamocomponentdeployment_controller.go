@@ -41,7 +41,7 @@ import (
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
-	istioNetworking "istio.io/api/networking/v1beta1"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -73,7 +73,6 @@ const (
 	DeploymentTargetTypeProduction                       = "production"
 	DeploymentTargetTypeDebug                            = "debug"
 	HeaderNameDebug                                      = "X-Nvidia-Debug"
-	DefaultIngressSuffix                                 = "local"
 	KubernetesDeploymentStrategy                         = "kubernetes"
 
 	KubeAnnotationDeploymentType = "nvidia.com/deployment-type"
@@ -975,49 +974,11 @@ func (r *DynamoComponentDeploymentReconciler) generateIngress(ctx context.Contex
 		},
 	}
 
-	if !opt.dynamoComponentDeployment.Spec.Ingress.Enabled || opt.dynamoComponentDeployment.Spec.Ingress.IngressControllerClassName == nil {
+	if opt.dynamoComponentDeployment.Spec.Ingress == nil || !opt.dynamoComponentDeployment.Spec.Ingress.Enabled || opt.dynamoComponentDeployment.Spec.Ingress.IngressControllerClassName == nil {
 		log.Info("Ingress is not enabled")
 		return ingress, true, nil
 	}
-	host := getIngressHost(opt.dynamoComponentDeployment.Spec.Ingress)
-
-	ingress.Spec = networkingv1.IngressSpec{
-		IngressClassName: opt.dynamoComponentDeployment.Spec.Ingress.IngressControllerClassName,
-		Rules: []networkingv1.IngressRule{
-			{
-				Host: host,
-				IngressRuleValue: networkingv1.IngressRuleValue{
-					HTTP: &networkingv1.HTTPIngressRuleValue{
-						Paths: []networkingv1.HTTPIngressPath{
-							{
-								Path:     "/",
-								PathType: &[]networkingv1.PathType{networkingv1.PathTypePrefix}[0],
-								Backend: networkingv1.IngressBackend{
-									Service: &networkingv1.IngressServiceBackend{
-										Name: opt.dynamoComponentDeployment.Name,
-										Port: networkingv1.ServiceBackendPort{
-											Number: commonconsts.DynamoServicePort,
-										},
-									},
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	if opt.dynamoComponentDeployment.Spec.Ingress.TLS != nil {
-		ingress.Spec.TLS = []networkingv1.IngressTLS{
-			{
-				Hosts:      []string{host},
-				SecretName: opt.dynamoComponentDeployment.Spec.Ingress.TLS.SecretName,
-			},
-		}
-	}
-
-	return ingress, false, nil
+	return dynamo.GenerateComponentIngress(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, *opt.dynamoComponentDeployment.Spec.Ingress), false, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context.Context, opt generateResourceOption) (*networkingv1beta1.VirtualService, bool, error) {
@@ -1036,35 +997,7 @@ func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context
 		log.Info("VirtualService is not enabled")
 		return vs, true, nil
 	}
-
-	vs.Spec = istioNetworking.VirtualService{
-		Hosts: []string{
-			getIngressHost(opt.dynamoComponentDeployment.Spec.Ingress),
-		},
-		Gateways: []string{*opt.dynamoComponentDeployment.Spec.Ingress.VirtualServiceGateway},
-		Http: []*istioNetworking.HTTPRoute{
-			{
-				Match: []*istioNetworking.HTTPMatchRequest{
-					{
-						Uri: &istioNetworking.StringMatch{
-							MatchType: &istioNetworking.StringMatch_Prefix{Prefix: "/"},
-						},
-					},
-				},
-				Route: []*istioNetworking.HTTPRouteDestination{
-					{
-						Destination: &istioNetworking.Destination{
-							Host: opt.dynamoComponentDeployment.Name,
-							Port: &istioNetworking.PortSelector{
-								Number: commonconsts.DynamoServicePort,
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-	return vs, false, nil
+	return dynamo.GenerateComponentVirtualService(ctx, opt.dynamoComponentDeployment.Name, opt.dynamoComponentDeployment.Namespace, *opt.dynamoComponentDeployment.Spec.Ingress), false, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) getKubeName(dynamoComponentDeployment *v1alpha1.DynamoComponentDeployment, debug bool) string {
@@ -1723,7 +1656,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 }
 
 func getResourcesConfig(resources *dynamoCommon.Resources) (corev1.ResourceRequirements, error) {
-	currentResources := corev1.ResourceRequirements{
+	defaultResources := corev1.ResourceRequirements{
 		Requests: corev1.ResourceList{
 			corev1.ResourceCPU:    resource.MustParse("300m"),
 			corev1.ResourceMemory: resource.MustParse("500Mi"),
@@ -1733,86 +1666,18 @@ func getResourcesConfig(resources *dynamoCommon.Resources) (corev1.ResourceRequi
 			corev1.ResourceMemory: resource.MustParse("1Gi"),
 		},
 	}
-
 	if resources == nil {
-		return currentResources, nil
+		return defaultResources, nil
 	}
-
-	if resources.Limits != nil {
-		if resources.Limits.CPU != "" {
-			q, err := resource.ParseQuantity(resources.Limits.CPU)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse limits cpu quantity")
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceCPU] = q
-		}
-		if resources.Limits.Memory != "" {
-			q, err := resource.ParseQuantity(resources.Limits.Memory)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse limits memory quantity")
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceMemory] = q
-		}
-		if resources.Limits.GPU != "" {
-			q, err := resource.ParseQuantity(resources.Limits.GPU)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse limits gpu quantity")
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[commonconsts.KubeResourceGPUNvidia] = q
-		}
-		for k, v := range resources.Limits.Custom {
-			q, err := resource.ParseQuantity(v)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse limits %s quantity", k)
-			}
-			if currentResources.Limits == nil {
-				currentResources.Limits = make(corev1.ResourceList)
-			}
-			currentResources.Limits[corev1.ResourceName(k)] = q
-		}
+	resourcesConfig, err := controller_common.GetResourcesConfig(resources)
+	if err != nil {
+		return corev1.ResourceRequirements{}, errors.Wrapf(err, "failed to get resources config")
 	}
-	if resources.Requests != nil {
-		if resources.Requests.CPU != "" {
-			q, err := resource.ParseQuantity(resources.Requests.CPU)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse requests cpu quantity")
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[corev1.ResourceCPU] = q
-		}
-		if resources.Requests.Memory != "" {
-			q, err := resource.ParseQuantity(resources.Requests.Memory)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse requests memory quantity")
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[corev1.ResourceMemory] = q
-		}
-		for k, v := range resources.Requests.Custom {
-			q, err := resource.ParseQuantity(v)
-			if err != nil {
-				return currentResources, errors.Wrapf(err, "parse requests %s quantity", k)
-			}
-			if currentResources.Requests == nil {
-				currentResources.Requests = make(corev1.ResourceList)
-			}
-			currentResources.Requests[corev1.ResourceName(k)] = q
-		}
+	err = mergo.Merge(resourcesConfig, defaultResources)
+	if err != nil {
+		return corev1.ResourceRequirements{}, errors.Wrapf(err, "failed to merge resources config")
 	}
-	return currentResources, nil
+	return *resourcesConfig, nil
 }
 
 func (r *DynamoComponentDeploymentReconciler) generateService(opt generateResourceOption) (*corev1.Service, bool, error) {

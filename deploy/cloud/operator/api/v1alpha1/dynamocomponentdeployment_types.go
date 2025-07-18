@@ -72,7 +72,7 @@ type DynamoComponentDeploymentSharedSpec struct {
 	RunMode          *RunMode                   `json:"runMode,omitempty"`
 	ExternalServices map[string]ExternalService `json:"externalServices,omitempty"`
 
-	Ingress IngressSpec `json:"ingress,omitempty"`
+	Ingress *IngressSpec `json:"ingress,omitempty"`
 
 	// +optional
 	ExtraPodMetadata *dynamoCommon.ExtraPodMetadata `json:"extraPodMetadata,omitempty"`
@@ -147,6 +147,14 @@ type DynamoComponentDeploymentList struct {
 
 func init() {
 	SchemeBuilder.Register(&DynamoComponentDeployment{}, &DynamoComponentDeploymentList{})
+}
+
+func (s *DynamoComponentDeployment) IsReady() bool {
+	return s.Status.IsReady()
+}
+
+func (s *DynamoComponentDeployment) GetName() string {
+	return s.Name
 }
 
 func (s *DynamoComponentDeploymentStatus) IsReady() bool {

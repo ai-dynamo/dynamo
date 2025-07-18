@@ -89,6 +89,7 @@ func main() {
 	var ingressControllerTLSSecretName string
 	var ingressHostSuffix string
 	var enableLWS bool
+	var enableGrove bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -116,6 +117,8 @@ func main() {
 		"The suffix to use for the ingress host")
 	flag.BoolVar(&enableLWS, "enable-lws", false,
 		"If set, enable leader worker set")
+	flag.BoolVar(&enableGrove, "enable-grove", false,
+		"If set, enable grove")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -128,6 +131,7 @@ func main() {
 		RestrictedNamespace:         restrictedNamespace,
 		VirtualServiceSupportsHTTPS: virtualServiceSupportsHTTPS,
 		EnableLWS:                   enableLWS,
+		EnableGrove:                 enableGrove,
 	}
 
 	mainCtx := ctrl.SetupSignalHandler()
