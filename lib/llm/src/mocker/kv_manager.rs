@@ -293,14 +293,9 @@ impl KvManager {
         let overlap_blocks = seq_blocks.len() - new_blocks;
         let new_tokens = sequence.num_input_tokens() - overlap_blocks * self.block_size;
 
-        // Calculate prefill compute
-        let prefill_compute =
-            1.25e-6 * (new_tokens as f64).powi(2) + 7.41e-2 * (new_tokens as f64) + 2.62e1;
-
         PrefillCost {
             new_blocks,
             new_tokens,
-            prefill_compute,
         }
     }
 }
