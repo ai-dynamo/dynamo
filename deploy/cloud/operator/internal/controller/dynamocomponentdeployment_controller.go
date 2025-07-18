@@ -1671,11 +1671,11 @@ func getResourcesConfig(resources *dynamoCommon.Resources) (corev1.ResourceRequi
 	}
 	resourcesConfig, err := controller_common.GetResourcesConfig(resources)
 	if err != nil {
-		return defaultResources, errors.Wrapf(err, "failed to get resources config")
+		return corev1.ResourceRequirements{}, errors.Wrapf(err, "failed to get resources config")
 	}
 	err = mergo.Merge(resourcesConfig, defaultResources)
 	if err != nil {
-		return defaultResources, errors.Wrapf(err, "failed to merge resources config")
+		return corev1.ResourceRequirements{}, errors.Wrapf(err, "failed to merge resources config")
 	}
 	return *resourcesConfig, nil
 }

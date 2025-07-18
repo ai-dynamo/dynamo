@@ -1265,16 +1265,6 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									RoleName: "Frontend",
 									Replicas: 1,
 									PodSpec: corev1.PodSpec{
-										Volumes: []corev1.Volume{
-											{
-												Name: "planner-pvc",
-												VolumeSource: corev1.VolumeSource{
-													PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-														ClaimName: "planner-pvc",
-													},
-												},
-											},
-										},
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -1334,12 +1324,6 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
 													},
 												},
-												VolumeMounts: []corev1.VolumeMount{
-													{
-														Name:      "planner-pvc",
-														MountPath: "/planner",
-													},
-												},
 											},
 										},
 									},
@@ -1351,6 +1335,16 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									RoleName: "Planner",
 									Replicas: 2,
 									PodSpec: corev1.PodSpec{
+										Volumes: []corev1.Volume{
+											{
+												Name: "planner-pvc",
+												VolumeSource: corev1.VolumeSource{
+													PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+														ClaimName: "planner-pvc",
+													},
+												},
+											},
+										},
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -1408,6 +1402,12 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														corev1.ResourceCPU:                    resource.MustParse("2"),
 														corev1.ResourceMemory:                 resource.MustParse("2Gi"),
 														corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
+													},
+												},
+												VolumeMounts: []corev1.VolumeMount{
+													{
+														Name:      "planner-pvc",
+														MountPath: "/planner",
 													},
 												},
 											},

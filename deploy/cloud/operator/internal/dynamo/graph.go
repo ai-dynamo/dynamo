@@ -346,14 +346,20 @@ func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.Dyn
 			Name: componentName,
 			Spec: grovev1alpha1.PodCliqueSpec{
 				RoleName: componentName,
-				Replicas: *component.Replicas,
+				Replicas: func() int32 {
+					if component.Replicas != nil {
+						return *component.Replicas
+					}
+					return 1
+				}(),
 				PodSpec: corev1.PodSpec{
 					Containers: []corev1.Container{container},
 				},
 			},
 		})
 		if component.PVC != nil {
-			gangSet.Spec.Template.Cliques[0].Spec.PodSpec.Volumes = append(gangSet.Spec.Template.Cliques[0].Spec.PodSpec.Volumes, corev1.Volume{
+			cliqueIndex := len(gangSet.Spec.Template.Cliques) - 1
+			gangSet.Spec.Template.Cliques[cliqueIndex].Spec.PodSpec.Volumes = append(gangSet.Spec.Template.Cliques[cliqueIndex].Spec.PodSpec.Volumes, corev1.Volume{
 				Name: *component.PVC.Name,
 				VolumeSource: corev1.VolumeSource{
 					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
@@ -361,7 +367,7 @@ func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.Dyn
 					},
 				},
 			})
-			gangSet.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0].VolumeMounts = append(gangSet.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
+			gangSet.Spec.Template.Cliques[cliqueIndex].Spec.PodSpec.Containers[0].VolumeMounts = append(gangSet.Spec.Template.Cliques[cliqueIndex].Spec.PodSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
 				Name:      *component.PVC.Name,
 				MountPath: *component.PVC.MountPoint,
 			})

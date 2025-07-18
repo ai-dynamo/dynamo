@@ -183,7 +183,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 		return nil, err
 	}
 	groveGangSetAsResource := commonController.WrapResource(syncedGroveGangSet, func() bool {
-		if groveGangSet.Status.LastOperation != nil && groveGangSet.Status.LastOperation.State == grovev1alpha1.LastOperationStateSucceeded {
+		if syncedGroveGangSet.Status.LastOperation != nil && syncedGroveGangSet.Status.LastOperation.State == grovev1alpha1.LastOperationStateSucceeded {
 			return true
 		}
 		return false
