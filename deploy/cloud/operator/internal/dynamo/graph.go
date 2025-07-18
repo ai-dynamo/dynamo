@@ -343,9 +343,9 @@ func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.Dyn
 			})
 		}
 		gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, &grovev1alpha1.PodCliqueTemplateSpec{
-			Name: componentName,
+			Name: strings.ToLower(componentName),
 			Spec: grovev1alpha1.PodCliqueSpec{
-				RoleName: componentName,
+				RoleName: strings.ToLower(componentName),
 				Replicas: func() int32 {
 					if component.Replicas != nil {
 						return *component.Replicas

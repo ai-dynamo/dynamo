@@ -1260,9 +1260,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 					Template: grovev1alpha1.PodGangSetTemplateSpec{
 						Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
 							{
-								Name: "Frontend",
+								Name: "frontend",
 								Spec: grovev1alpha1.PodCliqueSpec{
-									RoleName: "Frontend",
+									RoleName: "frontend",
 									Replicas: 1,
 									PodSpec: corev1.PodSpec{
 										Containers: []corev1.Container{
@@ -1330,9 +1330,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 								},
 							},
 							{
-								Name: "Planner",
+								Name: "planner",
 								Spec: grovev1alpha1.PodCliqueSpec{
-									RoleName: "Planner",
+									RoleName: "planner",
 									Replicas: 2,
 									PodSpec: corev1.PodSpec{
 										Volumes: []corev1.Volume{
