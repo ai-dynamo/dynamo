@@ -16,7 +16,7 @@ limitations under the License.
 -->
 
 > [!WARNING]
-> The content of this README is derived from `example/multimodal` and have not been validated in `example/multimodal_v1`.
+> The content of this README is derived from `examples/multimodal` and have not been validated in `examples/multimodal_v1`.
 > If needed, should validate the content and port to `README.md`
 
 

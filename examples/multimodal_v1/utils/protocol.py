@@ -147,7 +147,7 @@ class EncodeResponse(BaseModel):
     image_grid_thw: Optional[List[Any]] = None
     image_sizes: Optional[List[Any]] = None
     serialized_request: Optional[connect.SerializedRequest] = None
-    image_features: List[List[List[float]]] # Remove once have NIXL support
+    image_features: List[List[List[float]]]  # Remove once have NIXL support
 
 
 class MyRequestOutput(BaseModel):

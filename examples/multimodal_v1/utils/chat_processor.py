@@ -193,10 +193,10 @@ class ChatProcessor:
                 if raw_response.startswith("data: [DONE]"):
                     yield raw_response
                     break
-                
+
                 # Parse the response
                 response = json.loads(raw_response.lstrip("data: "))
-                
+
                 # Process delta content to extract only new text
                 if "choices" in response and len(response["choices"]) > 0:
                     if "delta" in response["choices"][0]:
@@ -206,7 +206,7 @@ class ChatProcessor:
                             new_content = content[num_output_text_so_far:]
                             response["choices"][0]["delta"]["content"] = new_content
                             num_output_text_so_far = len(content)
-                
+
                 # Yield the processed response
                 yield f"data: {json.dumps(response)}\n\n"
         else:
@@ -250,7 +250,9 @@ class ChatProcessor:
                         if content:
                             # Extract only the new part from the full content
                             new_content = content[num_output_text_so_far:]
-                            full_response["choices"][0]["message"]["content"] += new_content
+                            full_response["choices"][0]["message"][
+                                "content"
+                            ] += new_content
                             num_output_text_so_far = len(content)
 
                     # Update finish reason if present

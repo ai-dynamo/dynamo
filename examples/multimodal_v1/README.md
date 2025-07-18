@@ -138,7 +138,7 @@ flowchart LR
 ```
 
 ```bash
-cd $DYNAMO_HOME/examples/multimodal
+cd $DYNAMO_HOME/examples/multimodal_v1
 dynamo serve graphs.disagg:Frontend -f configs/disagg.yaml
 ```
 
@@ -198,10 +198,10 @@ of the model per node.
 #### Components
 
 - workers: For aggregated serving, we have one worker, [VllmPDWorker](components/worker.py) for prefilling and decoding.
-- processor: Tokenizes the prompt and passes it to the VllmEncodeWorker.
+- processor: Tokenizes the prompt and passes it to the VllmPDWorker.
 - frontend: HTTP endpoint to handle incoming requests.
 
-### Graph
+#### Graph
 
 In this graph, we have [VllmPDWorker](components/worker.py) which will encode the image, prefill and decode the prompt, just like the [LLM aggregated serving](../llm/README.md) example.
 
@@ -225,7 +225,7 @@ dynamo serve components.direct_processor:Processor --service-name Processor -f $
 dynamo serve components.worker:VllmPDWorker --service-name VllmPDWorker -f $CONFIG_FILE &
 ```
 
-### Client
+#### Client
 
 In another terminal:
 ```bash
@@ -258,18 +258,18 @@ curl http://localhost:8000/v1/chat/completions \
 
 You should see a response similar to this:
 ```json
-{"id": "c37b946e-9e58-4d54-88c8-2dbd92c47b0c", "object": "chat.completion", "created": 1747725277, "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", "choices": [{"index": 0, "message": {"role": "assistant", "content": " In the image, there is a city bus parked on a street, with a street sign nearby on the right side. The bus appears to be stopped out of service. The setting is in a foggy city, giving it a slightly moody atmosphere."}, "finish_reason": "stop"}]}
+{"id": "b8f060fa95584e34b9204eaba7b105cc", "object": "chat.completion", "created": 1752706281, "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", "choices": [{"index": 0, "message": {"role": "assistant", "content": "The image depicts a street scene with a trolley bus as the central focus. The trolley bus is positioned on the left side of the road, facing the camera, and features a white and yellow color scheme. A prominent sign on the front of the bus reads \"OUT OF SERVICE\" in orange letters.\n\n**Key Elements:**\n\n* **Trolley Bus:** The bus is the main subject of the image, showcasing its distinctive design and color.\n* **Sign:** The \"OUT OF SERVICE\" sign is clearly visible on the front of the bus, indicating its current status.\n* **Street Scene:** The surrounding environment includes trees, buildings, and power lines, creating a sense of context and atmosphere.\n* **Lighting:** The image is characterized by a misty or foggy quality, with soft lighting that adds to the overall ambiance.\n\n**Overall Impression:**\n\nThe image presents a serene and somewhat melancholic scene, with the out-of-service trolley bus serving as a focal point. The misty atmosphere and soft lighting contribute to a dreamy or nostalgic feel, inviting the viewer to reflect on the scene."}, "finish_reason": "stop"}]}
 ```
 
-## Multimodal Disaggregated Serving
+### Multimodal Disaggregated Serving
 
-### Components
+#### Components
 
 - workers: For disaggregated serving, we have two workers, [VllmDecodeWorker](components/worker.py) for decoding, and [VllmPDWorker](components/worker.py) for encoding and prefilling.
 - processor: Tokenizes the prompt and passes it to the VllmPDWorker.
 - frontend: HTTP endpoint to handle incoming requests.
 
-### Graph
+#### Graph
 
 In this graph, we have two workers, [VllmDecodeWorker](components/worker.py), and [VllmPDWorker](components/worker.py).
 The prefill worker performs the encoding and prefilling steps and forwards the KV cache to the decode worker for decoding.
@@ -300,14 +300,14 @@ dynamo serve components.worker:VllmPDWorker --service-name VllmPDWorker --VllmPD
 dynamo serve components.worker:VllmDecodeWorker --service-name VllmDecodeWorker -f $CONFIG_FILE &
 ```
 
-### Client
+#### Client
 
 In another terminal:
 ```bash
 curl http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-      "model": "Llama-4-Maverick-17B-128E-Instruct-FP8",
+      "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
       "messages": [
         {
           "role": "user",
@@ -333,4 +333,5 @@ curl http://localhost:8000/v1/chat/completions \
 
 You should see a response similar to this:
 ```json
-{"id": "c1774d61-3299-4aa3-bea1-a0af6c055ba8", "object": "chat.completion", "created": 1747725645, "model": "Llama-4-Maverick-17B-128E-Instruct-FP8", "choices": [{"index": 0, "message": {"role": "assistant", "content": " This image shows a passenger bus traveling down the road near power lines and trees. The bus displays a sign that says \"OUT OF SERVICE\" on its front."}, "finish_reason": "stop"}]}
+{"id": "6cc99123ad6948d685b8695428238d4b", "object": "chat.completion", "created": 1752708043, "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8", "choices": [{"index": 0, "message": {"role": "assistant", "content": "The image depicts a street scene with a trolley bus as the central focus. The trolley bus is positioned on the left side of the road, facing the camera, and features a white and yellow color scheme. A prominent sign on the front of the bus reads \"OUT OF SERVICE\" in orange letters.\n\n**Key Elements:**\n\n* **Trolley Bus:** The bus is the main subject of the image, showcasing its distinctive design and color.\n* **Sign:** The \"OUT OF SERVICE\" sign is clearly visible on the front of the bus, indicating its current status.\n* **Street Scene:** The surrounding environment includes trees, buildings, and power lines, creating a sense of context and atmosphere.\n* **Lighting:** The image is characterized by a misty or foggy quality, with soft lighting that adds to the overall mood.\n\n**Overall Impression:**\n\nThe image presents a serene and somewhat melancholic scene, with the out-of-service trolley bus serving as a focal point. The misty atmosphere and soft lighting contribute to a contemplative ambiance, inviting the viewer to reflect on the situation."}, "finish_reason": "stop"}]}
+```

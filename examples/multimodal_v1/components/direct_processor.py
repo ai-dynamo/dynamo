@@ -18,20 +18,18 @@ import logging
 import uuid
 from enum import Enum
 from typing import AsyncIterator, Tuple, Union
-import torch
 
 from components.worker import VllmPDWorker
 from transformers import AutoTokenizer
+from utils.args import parse_vllm_args
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.logging import check_required_workers
-from utils.protocol import MultiModalRequest, MyRequestOutput, vLLMMultimodalRequest, EncodeRequest, EncodeResponse
-from utils.args import parse_vllm_args
+from utils.protocol import MultiModalRequest, MyRequestOutput, vLLMMultimodalRequest
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 
-from dynamo.runtime import EtcdKvCache
 from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
 
 logger = logging.getLogger(__name__)
@@ -96,12 +94,6 @@ class Processor(ProcessMixIn):
 
         await check_required_workers(self.encode_worker_client, self.min_workers)
 
-        # self.etcd_kv_cache = await EtcdKvCache.create(
-        #     runtime.etcd_client(),
-        #     "/dynamo/processor/",
-        #     {"router": self.engine_args.router},
-        # )
-
     # Main method to parse the request and send the request to the vllm worker.
     async def _generate(
         self,
@@ -119,8 +111,6 @@ class Processor(ProcessMixIn):
             sampling_params,
         ) = await self._parse_raw_request(raw_request)
 
-        logger.info(f"Parsed request: {request}, conversation: {conversation}, prompt: {prompt}, engine_prompt: {engine_prompt}, sampling_params: {sampling_params}")
-
         worker_request = vLLMMultimodalRequest(
             engine_prompt=engine_prompt,
             sampling_params=sampling_params,
@@ -133,7 +123,7 @@ class Processor(ProcessMixIn):
         )
 
         output = self._generate_responses(response_generator, request_type)
-        
+
         # Stream the processed responses
         async for response in await self._stream_response(
             request, output, request_id, conversation
@@ -146,9 +136,7 @@ class Processor(ProcessMixIn):
         response_generator: AsyncIterator[RequestOutput],
         request_type: RequestType,
     ) -> AsyncIterator[Union[RequestOutput, Tuple[int, RequestOutput]]]:
-        prompt_idx = 0
-
-        async for resp in response_generator:                
+        async for resp in response_generator:
             # Deserialize the response from the engine
             # Creates correct vLLM objects for each field
             output = MyRequestOutput.model_validate_json(resp.data())
@@ -171,7 +159,6 @@ class Processor(ProcessMixIn):
                 raise NotImplementedError(
                     f"Request type {request_type} not implemented"
                 )
-
 
     # The generate endpoint will be used by the frontend to handle incoming requests.
     @endpoint()

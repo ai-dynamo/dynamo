@@ -104,6 +104,6 @@ class NixlMetadataStore:
             # )
 
         except Exception as e:
-            raise Exception("Error retrieving metadata for engine {engine_id}") from e
+            raise Exception(f"Error retrieving metadata for engine {engine_id}") from e
 
         return deserialized_metadata

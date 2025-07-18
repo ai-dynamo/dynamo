@@ -89,13 +89,13 @@ class ImageLoader:
                 image_url_lower = image_url.lower()
                 # Cache the image for future use, and evict the oldest image if the cache is full
                 if self._cache_queue.full():
-                    oldest_image_url = self._cache_queue.get()
+                    oldest_image_url = await self._cache_queue.get()
                     del self._image_cache[oldest_image_url]
 
                 self._image_cache[image_url_lower] = image_converted
-                self._cache_queue.put(image_url_lower)
+                await self._cache_queue.put(image_url_lower)
 
-            return image
+            return image_converted
 
         except httpx.HTTPError as e:
             logger.error(f"HTTP error loading image: {e}")

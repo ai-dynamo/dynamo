@@ -91,7 +91,7 @@ class VllmEncodeWorker:
         # 8. Yield the encode response.
 
         try:
-            image = await self.load_image(request.image_url)
+            image = await self.image_loader.load_image(request.image_url)
 
             logger.debug(f"Processing image for request: {{ id: {request_id} }}")
             image_embeds = self.image_processor(images=image, return_tensors="pt")

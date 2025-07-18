@@ -21,10 +21,11 @@ from transformers import AutoConfig
 from utils.protocol import EncodeResponse
 from vllm import AsyncEngineArgs
 from vllm.utils import get_distributed_init_method, get_ip, get_open_port
-from transformers import AutoImageProcessor, LlavaForConditionalGeneration
-from transformers import Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoProcessor
-
 from vllm.worker.worker import Worker
+
+# from transformers import AutoImageProcessor, LlavaForConditionalGeneration
+# from transformers import Qwen2_5_VLForConditionalGeneration, AutoTokenizer, AutoProcessor
+
 
 logger = logging.getLogger(__name__)
 
