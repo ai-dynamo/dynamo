@@ -12,23 +12,10 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
-DECODE_NUM_REQUESTS_RANGE = [
-    1,
-    5,
-    10,
-    25,
-    50,
-    100,
-    150,
-    200,
-    250,
-    300,
-    350,
-    400,
-    450,
-    500,
-]
-
-DEFAULT_MODEL_NAME = "Qwen/Qwen3-0.6B"
-DYNAMO_RUN_DEFAULT_PORT = 8080
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: profile-sla-sa
+  namespace: ${NAMESPACE}
+imagePullSecrets:
+  - name: nvcr-imagepullsecret

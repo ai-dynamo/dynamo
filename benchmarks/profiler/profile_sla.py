@@ -14,27 +14,22 @@
 # limitations under the License.
 
 import argparse
+import asyncio
 import logging
 import math
 import os
-import subprocess
 
 import numpy as np
 import yaml
 from utils.config import CONFIG_MODIFIERS
 from utils.defaults import DECODE_NUM_REQUESTS_RANGE
+from utils.dynamo_deployment import DynamoDeploymentClient
 from utils.genai_perf import benchmark_decode, benchmark_prefill
 from utils.plot import (
     plot_decode_3d_surface,
     plot_decode_performance,
     plot_prefill_interpolation,
     plot_prefill_performance,
-)
-from utils.utils import (
-    get_available_gpu_count,
-    get_dynamo_serve_cmd,
-    shutdown_deployment,
-    wait_for_server_ready,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,63 +42,8 @@ formatter = logging.Formatter(
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--backend",
-        type=str,
-        default="vllm_v0",
-        choices=["vllm_v0", "vllm_v1"],
-        help="backend type (currently only vllm is supported)",
-    )
-    parser.add_argument(
-        "--config", type=str, required=True, help="Path to the dynamo config file"
-    )
-    parser.add_argument(
-        "--example-dir",
-        type=str,
-        default=None,
-        help="path to the example directory, if not provided, will try to infer from config file location",
-    )
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="profiling_results",
-        help="Path to the output results directory",
-    )
-    parser.add_argument(
-        "--isl", type=int, default=3000, help="target input sequence length"
-    )
-    parser.add_argument(
-        "--osl", type=int, default=500, help="target output sequence length"
-    )
-    parser.add_argument(
-        "--ttft", type=int, default=50, help="target Time To First Token in ms"
-    )
-    parser.add_argument(
-        "--itl", type=int, default=10, help="target Inter Token Latency in ms"
-    )
-    # below are arguments used for interpolating TTFT and ITL under different ISL/OSL
-    parser.add_argument(
-        "--max-context-length",
-        type=int,
-        default=16384,
-        help="maximum context length supported by the served model",
-    )
-    parser.add_argument(
-        "--prefill-interpolation-granularity",
-        type=int,
-        default=16,
-        help="how many samples to benchmark to interpolate TTFT under different ISL",
-    )
-    parser.add_argument(
-        "--decode-interpolation-granularity",
-        type=int,
-        default=6,
-        help="how many samples to benchmark to interpolate ITL under different active kv cache size and decode context length",
-    )
-    args = parser.parse_args()
 
+async def run_profile(args):
     config_modifier = CONFIG_MODIFIERS[args.backend]
 
     if args.example_dir is None:
@@ -121,16 +61,16 @@ if __name__ == "__main__":
     with open(args.config, "r") as f:
         config = yaml.safe_load(f)
 
-    # Get the number of available GPUs
-    available_gpus = get_available_gpu_count()
-
-    profile_tp_size = [2**i for i in range(int(math.log2(available_gpus)) + 1)]
+    profile_tp_size = [
+        2**i
+        for i in range(int(math.log2(args.max_num_gpus_per_engine)) + 1)
+        if args.min_num_gpus_per_engine <= 2**i <= args.max_num_gpus_per_engine
+    ]
     logger.info(f"Profiling TP sizes: {profile_tp_size}")
 
     os.makedirs(args.output_dir, exist_ok=True)
 
     model_name = config_modifier.get_model_name(config)
-    port = config_modifier.get_port(config)
 
     # first profile prefill
     prefill_tp_size = []
@@ -147,31 +87,35 @@ if __name__ == "__main__":
         os.makedirs(work_dir, exist_ok=True)
 
         prefill_config_fn = f"{work_dir}/config.yaml"
-        dynamo_log_fn = f"{work_dir}/dynamo.log"
         with open(prefill_config_fn, "w") as f:
             yaml.dump(prefill_config, f)
 
-        # Start the dynamo serve process
-        logger.info(f"Starting dynamo serve with TP size {tp_size}...")
-        dynamo_serve_cmd = get_dynamo_serve_cmd(prefill_config_fn)
-        with open(dynamo_log_fn, "w") as dynamo_log_f:
-            dynamo_process = subprocess.Popen(
-                dynamo_serve_cmd,
-                stdout=dynamo_log_f,
-                stderr=subprocess.STDOUT,
-                text=True,
-                cwd=args.example_dir,
-                preexec_fn=os.setsid,  # Use process group for clean termination
-            )
+        client = DynamoDeploymentClient(
+            namespace=args.namespace,
+            base_log_dir=work_dir,
+            model_name=model_name,
+            service_name=args.service_name,
+        )
+        await client.create_deployment(prefill_config_fn)
+        logger.info("Waiting for deployment to be ready...")
+        try:
+            await client.wait_for_deployment_ready()
+            logger.info("Deployment is ready")
+        except TimeoutError:
+            logger.error("Deployment failed to become ready within timeout, skipping profiling")
+            continue
 
-        if not wait_for_server_ready(model_name, port):
-            logger.error(f"Server did not become ready, skip profiling tp={tp_size}")
-            break
+        logger.info("Getting deployment logs...")
+        await client.get_deployment_logs()
+        logger.info(
+            f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
+        )
 
         # run genai-perf
+        base_url = client.get_service_url()
         genai_perf_artifact_dir = f"{work_dir}/gap_isl{args.isl}"
         gap_result = benchmark_prefill(
-            args.isl, genai_perf_artifact_dir, model_name, port
+            args.isl, genai_perf_artifact_dir, model_name, base_url=base_url
         )
         if gap_result is not None:
             ttft = gap_result["time_to_first_token"]["avg"]
@@ -179,7 +123,9 @@ if __name__ == "__main__":
             prefill_ttft.append(ttft)
             prefill_thpt_per_gpu.append(args.isl / ttft / tp_size * 1000)
 
-        shutdown_deployment(dynamo_process)
+        print("Cleaning up deployment...")
+        await client.delete_deployment()
+        print("Deployment deleted")
 
     # Plot the results as a 2D scatter plot
     if prefill_tp_size and prefill_ttft and prefill_thpt_per_gpu:
@@ -209,28 +155,33 @@ if __name__ == "__main__":
         os.makedirs(work_dir, exist_ok=True)
 
         decode_config_fn = f"{work_dir}/config.yaml"
-        dynamo_log_fn = f"{work_dir}/dynamo.log"
         with open(decode_config_fn, "w") as f:
             yaml.dump(decode_config, f)
 
-        # Start the dynamo serve process
-        logger.info(f"Starting dynamo serve with TP size {tp_size}...")
-        dynamo_serve_cmd = get_dynamo_serve_cmd(decode_config_fn)
-        with open(dynamo_log_fn, "w") as dynamo_log_f:
-            dynamo_process = subprocess.Popen(
-                dynamo_serve_cmd,
-                stdout=dynamo_log_f,
-                stderr=subprocess.STDOUT,
-                text=True,
-                cwd=args.example_dir,
-                preexec_fn=os.setsid,  # Use process group for clean termination
-            )
+        client = DynamoDeploymentClient(
+            namespace=args.namespace,
+            base_log_dir=work_dir,
+            model_name=model_name,
+            service_name=args.service_name,
+        )
+        await client.create_deployment(decode_config_fn)
+        logger.info("Waiting for deployment to be ready...")
+        try:
+            await client.wait_for_deployment_ready()
+            logger.info("Deployment is ready")
+        except TimeoutError:
+            logger.error("Deployment failed to become ready within timeout, skipping profiling")
+            continue
 
-        if not wait_for_server_ready(model_name, port):
-            logger.error(f"Server did not become ready, skip profiling tp={tp_size}")
-            break
+        logger.info("Getting deployment logs...")
+        await client.get_deployment_logs()
+        logger.info(
+            f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
+        )
 
-        max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(dynamo_log_fn)
+        max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
+            f"{work_dir}/vllm-v1-agg/vllmdecodeworker/0.log"
+        )
         max_concurrency = max_kv_tokens // (args.isl + args.osl)
         sweep_num_request = [
             num for num in DECODE_NUM_REQUESTS_RANGE if num < max_concurrency
@@ -241,6 +192,7 @@ if __name__ == "__main__":
 
         engine_decode_itl = []
         engine_decode_thpt_per_gpu = []
+        base_url = client.get_service_url()
         for num_request in sweep_num_request:
             genai_perf_artifact_dir = f"{work_dir}/gap_request{num_request}_isl{args.isl}_osl{args.osl}_n{num_request}"
             gap_result = benchmark_decode(
@@ -249,7 +201,7 @@ if __name__ == "__main__":
                 num_request,
                 genai_perf_artifact_dir,
                 model_name,
-                port,
+                base_url=base_url,
             )
             if gap_result is not None:
                 itl = gap_result["inter_token_latency"]["avg"]
@@ -262,7 +214,9 @@ if __name__ == "__main__":
                 decode_concurrency.append(num_request)
                 decode_kv_cache_size.append(max_kv_tokens)
 
-        shutdown_deployment(dynamo_process)
+        print("Cleaning up deployment...")
+        await client.delete_deployment()
+        print("Deployment deleted")
 
         # Store partial results for plotting later
         decode_results.append((tp_size, engine_decode_itl, engine_decode_thpt_per_gpu))
@@ -343,27 +297,33 @@ if __name__ == "__main__":
     os.makedirs(work_dir, exist_ok=True)
 
     prefill_config_fn = f"{work_dir}/config.yaml"
-
-    dynamo_log_fn = f"{work_dir}/dynamo.log"
     with open(prefill_config_fn, "w") as f:
         yaml.dump(prefill_config, f)
 
-    # Start the dynamo serve process
-    logger.info(f"Starting dynamo serve with TP size {tp_size}...")
-    dynamo_serve_cmd = get_dynamo_serve_cmd(prefill_config_fn)
-    with open(dynamo_log_fn, "w") as dynamo_log_f:
-        dynamo_process = subprocess.Popen(
-            dynamo_serve_cmd,
-            stdout=dynamo_log_f,
-            stderr=subprocess.STDOUT,
-            text=True,
-            cwd=args.example_dir,
-            preexec_fn=os.setsid,  # Use process group for clean termination
+    client = DynamoDeploymentClient(
+        namespace=args.namespace,
+        base_log_dir=work_dir,
+        model_name=model_name,
+        service_name=args.service_name,
+    )
+    await client.create_deployment(prefill_config_fn)
+    logger.info("Waiting for deployment to be ready...")
+    try:
+        await client.wait_for_deployment_ready()
+        logger.info("Deployment is ready")
+        skip_profile = False
+    except TimeoutError:
+        logger.error("Deployment failed to become ready within timeout, skipping profiling")
+        skip_profile = True
+
+    if not skip_profile:
+        logger.info("Getting deployment logs...")
+        await client.get_deployment_logs()
+        logger.info(
+            f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
         )
 
-    if not wait_for_server_ready(model_name, port):
-        logger.error(f"Server did not become ready, skip profiling tp={tp_size}")
-    else:
+        base_url = client.get_service_url()
         for isl in range(
             100,
             args.max_context_length,
@@ -372,7 +332,7 @@ if __name__ == "__main__":
             # run genai-perf
             genai_perf_artifact_dir = f"{work_dir}/gap_isl{isl}"
             gap_result = benchmark_prefill(
-                isl, genai_perf_artifact_dir, model_name, port
+                isl, genai_perf_artifact_dir, model_name, base_url=base_url
             )
             if gap_result is not None:
                 ttft = gap_result["time_to_first_token"]["avg"]
@@ -380,7 +340,9 @@ if __name__ == "__main__":
                 prefill_ttft.append(ttft)
                 prefill_thpt_per_gpu.append(isl / ttft / best_prefill_tp * 1000)
 
-    shutdown_deployment(dynamo_process)
+    print("Cleaning up deployment...")
+    await client.delete_deployment()
+    print("Deployment deleted")
 
     # Interpolate prefill_ttft vs prefill_isl with quadratic function (y=ax^2+bx+c)
     if len(prefill_isl) > 2:
@@ -422,29 +384,35 @@ if __name__ == "__main__":
     os.makedirs(work_dir, exist_ok=True)
 
     decode_config_fn = f"{work_dir}/config.yaml"
-    dynamo_log_fn = f"{work_dir}/dynamo.log"
     with open(decode_config_fn, "w") as f:
         yaml.dump(decode_config, f)
 
-    # Start the dynamo serve process
-    logger.info(f"Starting dynamo serve with TP size {tp_size}...")
-    dynamo_serve_cmd = get_dynamo_serve_cmd(decode_config_fn)
-    with open(dynamo_log_fn, "w") as dynamo_log_f:
-        dynamo_process = subprocess.Popen(
-            dynamo_serve_cmd,
-            stdout=dynamo_log_f,
-            stderr=subprocess.STDOUT,
-            text=True,
-            cwd=args.example_dir,
-            preexec_fn=os.setsid,  # Use process group for clean termination
+    client = DynamoDeploymentClient(
+        namespace=args.namespace, base_log_dir=work_dir, service_name=args.service_name
+    )
+    await client.create_deployment(decode_config_fn)
+    logger.info("Waiting for deployment to be ready...")
+    try:
+        await client.wait_for_deployment_ready()
+        logger.info("Deployment is ready")
+        skip_profile = False
+    except TimeoutError:
+        logger.error("Deployment failed to become ready within timeout, skipping profiling")
+        skip_profile = True
+
+    if not skip_profile:
+        logger.info("Getting deployment logs...")
+        await client.get_deployment_logs()
+        logger.info(
+            f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
         )
 
-    if not wait_for_server_ready(model_name, port):
-        logger.error(f"Server did not become ready, skip profiling tp={tp_size}")
-    else:
-        max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(dynamo_log_fn)
+        max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
+            f"{work_dir}/vllm-v1-agg/vllmdecodeworker/0.log"
+        )
 
         osl = 500  # not too large to reduce ITL variance, not too small to have stable measurement
+        base_url = client.get_service_url()
         for isl in range(
             100,
             args.max_context_length - osl,
@@ -459,11 +427,14 @@ if __name__ == "__main__":
                 )
             )
             for num_request in sweep_num_request:
-                genai_perf_artifact_dir = (
-                    f"{work_dir}/gap_isl{isl}_osl{osl}_n{num_request}"
-                )
+                genai_perf_artifact_dir = f"{work_dir}/gap_isl{isl}_osl{osl}_n{num_request}"
                 gap_result = benchmark_decode(
-                    isl, osl, num_request, genai_perf_artifact_dir, model_name, port
+                    isl,
+                    osl,
+                    num_request,
+                    genai_perf_artifact_dir,
+                    model_name,
+                    base_url=base_url,
                 )
                 if gap_result is not None:
                     itl = gap_result["inter_token_latency"]["avg"]
@@ -474,21 +445,111 @@ if __name__ == "__main__":
                         gap_result["output_token_throughput"]["avg"] / tp_size
                     )
 
-        shutdown_deployment(dynamo_process)
+    print("Cleaning up deployment...")
+    await client.delete_deployment()
+    print("Deployment deleted")
 
-        # Save the data points to a .npz file
-        save_path = f"{work_dir}/raw_data.npz"
-        np.savez(
-            save_path,
-            x_kv_usage=np.array(x_kv_usage),
-            y_context_length=np.array(y_context_length),
-            z_itl=np.array(z_itl),
-            z_thpt_per_gpu=np.array(z_thpt_per_gpu),
-            max_kv_tokens=np.array([max_kv_tokens]),
-        )
-        logger.info(f"Saved data points to {save_path}")
+    # Save the data points to a .npz file
+    save_path = f"{work_dir}/raw_data.npz"
+    np.savez(
+        save_path,
+        x_kv_usage=np.array(x_kv_usage),
+        y_context_length=np.array(y_context_length),
+        z_itl=np.array(z_itl),
+        z_thpt_per_gpu=np.array(z_thpt_per_gpu),
+        max_kv_tokens=np.array([max_kv_tokens]),
+    )
+    logger.info(f"Saved data points to {save_path}")
 
-        # Plot 3D surface
-        plot_decode_3d_surface(
-            x_kv_usage, y_context_length, z_itl, best_decode_tp, work_dir
-        )
+    # Plot 3D surface
+    plot_decode_3d_surface(
+        x_kv_usage, y_context_length, z_itl, best_decode_tp, work_dir
+    )
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+        description="Profile the TTFT and ITL of the Prefill and Decode engine with different parallelization mapping. When profiling prefill we mock/fix decode,when profiling decode we mock/fix prefill."
+    )
+    parser.add_argument(
+        "--namespace",
+        type=str,
+        default="dynamo-sla-profiler",
+        help="Kubernetes namespace to deploy the DynamoGraphDeployment",
+    )
+    parser.add_argument(
+        "--backend",
+        type=str,
+        default="vllm_v1",
+        choices=["vllm_v1"],
+        help="backend type, currently support [vllm_v1]",
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        required=True,
+        help="Path to the DynamoGraphDeployment config file",
+    )
+    parser.add_argument(
+        "--example-dir",
+        type=str,
+        default=None,
+        help="path to the example directory, if not provided, will try to infer from config file location",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default="profiling_results",
+        help="Path to the output results directory",
+    )
+    parser.add_argument(
+        "--min-num-gpus-per-engine",
+        type=int,
+        default=1,
+        help="minimum number of GPUs per engine",
+    )
+    parser.add_argument(
+        "--max-num-gpus-per-engine",
+        type=int,
+        default=8,
+        help="maximum number of GPUs per engine",
+    )
+    parser.add_argument(
+        "--isl", type=int, default=3000, help="target input sequence length"
+    )
+    parser.add_argument(
+        "--osl", type=int, default=500, help="target output sequence length"
+    )
+    parser.add_argument(
+        "--ttft", type=int, default=50, help="target Time To First Token in ms"
+    )
+    parser.add_argument(
+        "--itl", type=int, default=10, help="target Inter Token Latency in ms"
+    )
+    # below are arguments used for interpolating TTFT and ITL under different ISL/OSL
+    parser.add_argument(
+        "--max-context-length",
+        type=int,
+        default=16384,
+        help="maximum context length supported by the served model",
+    )
+    parser.add_argument(
+        "--prefill-interpolation-granularity",
+        type=int,
+        default=16,
+        help="how many samples to benchmark to interpolate TTFT under different ISL",
+    )
+    parser.add_argument(
+        "--decode-interpolation-granularity",
+        type=int,
+        default=6,
+        help="how many samples to benchmark to interpolate ITL under different active kv cache size and decode context length",
+    )
+    parser.add_argument(
+        "--service-name",
+        type=str,
+        help="Service name for port forwarding (default: {deployment_name}-frontend)",
+    )
+    args = parser.parse_args()
+
+    asyncio.run(run_profile(args))

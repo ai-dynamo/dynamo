@@ -85,11 +85,11 @@ spec:
       resources:
         requests:
           cpu: "10"
-          memory: "20Gi"
+          memory: "40Gi"
           gpu: "1"
         limits:
           cpu: "10"
-          memory: "20Gi"
+          memory: "40Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:
@@ -124,11 +124,11 @@ spec:
       resources:
         requests:
           cpu: "10"
-          memory: "20Gi"
+          memory: "40Gi"
           gpu: "1"
         limits:
           cpu: "10"
-          memory: "20Gi"
+          memory: "40Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:
