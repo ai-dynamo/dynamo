@@ -15,11 +15,7 @@
 
 import argparse
 import asyncio
-import os
-import random
-import socket
 import time
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional, Union
 
@@ -27,7 +23,6 @@ import aiofiles
 import httpx  # added for HTTP requests
 import kubernetes_asyncio as kubernetes
 import yaml
-from kr8s.objects import Service
 from kubernetes_asyncio import client, config
 
 # Example chat completion request for testing deployments
@@ -60,7 +55,7 @@ class DynamoDeploymentClient:
             namespace: The Kubernetes namespace
             deployment_name: Name of the deployment, defaults to vllm-v1-agg
             base_log_dir: Base directory for storing logs, defaults to ./logs if not specified
-            service_name: Service name for port forwarding, defaults to {deployment_name}-frontend
+            service_name: Service name for connecting to the service, defaults to {deployment_name}-frontend
         """
         self.namespace = namespace
         self.deployment_name = deployment_name
@@ -83,24 +78,15 @@ class DynamoDeploymentClient:
         self.custom_api = client.CustomObjectsApi(self.k8s_client)
         self.core_api = client.CoreV1Api(self.k8s_client)
 
-    def _is_running_in_kubernetes(self) -> bool:
+    def get_service_url(self) -> str:
         """
-        Detect if we're running inside a Kubernetes cluster by checking for the service account token.
+        Get the service URL using Kubernetes service DNS.
         """
-        return os.path.exists("/var/run/secrets/kubernetes.io/serviceaccount/token")
-
-    def _get_service_url(self) -> str:
-        """
-        Get the service URL. Returns service DNS if running in Kubernetes, otherwise localhost with port forwarding.
-        """
-        if self._is_running_in_kubernetes():
-            # Use Kubernetes service DNS: service-name.namespace.svc.cluster.local:port
-            return f"http://{self.service_name}.{self.namespace}.svc.cluster.local:8000"
-        else:
-            # For local development, we need to use port forwarding
-            raise RuntimeError(
-                "Port forwarding is required when not running in Kubernetes. Use get_service_url_with_port_forward() instead."
-            )
+        service_url = (
+            f"http://{self.service_name}.{self.namespace}.svc.cluster.local:8000"
+        )
+        print(f"Using service URL: {service_url}")
+        return service_url
 
     async def create_deployment(self, deployment: Union[dict, str]):
         """
@@ -196,60 +182,17 @@ class DynamoDeploymentClient:
             await asyncio.sleep(20)
         raise TimeoutError("Deployment failed to become ready within timeout")
 
-    @contextmanager
-    def get_service_url_with_port_forward(self, port: Optional[int] = None):
-        """
-        Get the service URL with automatic detection of environment.
-
-        When running in Kubernetes: yields the service DNS URL directly (no port forwarding needed)
-        When running locally: sets up port forwarding and yields localhost URL
-        """
-        if self._is_running_in_kubernetes():
-            # No port forwarding needed, use service DNS directly
-            yield self._get_service_url()
-        else:
-            # Use port forwarding for local development - delegate to existing method
-            with self.port_forward(port) as forwarded_port:
-                yield f"http://localhost:{forwarded_port}"
-
-    @contextmanager
-    def port_forward(self, port: Optional[int] = None):
-        """
-        Forward the service's HTTP port to a local port.
-        """
-        if port is None:
-            # Find a free port in the ephemeral port range
-            for _ in range(100):  # Try up to 100 times
-                candidate_port = random.randint(49152, 65535)
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    try:
-                        s.bind(("localhost", candidate_port))
-                        port = candidate_port
-                        break
-                    except OSError:
-                        continue  # Port is in use, try another
-            if port is None:
-                raise RuntimeError("Could not find a free port after 100 attempts")
-        # Get the Service and forward its HTTP port (8000)
-        service = Service.get(self.service_name, namespace=self.namespace)
-        pf = service.portforward(remote_port=8000, local_port=port)
-        pf.start()
-        try:
-            yield port
-        finally:
-            pf.stop()
-
     async def check_chat_completion(self):
         """
         Test the deployment with a chat completion request using httpx.
         """
         EXAMPLE_CHAT_REQUEST["model"] = self.model_name
-        with self.get_service_url_with_port_forward() as base_url:
-            url = f"{base_url}/v1/chat/completions"
-            async with httpx.AsyncClient() as client:
-                response = await client.post(url, json=EXAMPLE_CHAT_REQUEST)
-                response.raise_for_status()
-                return response.text
+        base_url = self.get_service_url()
+        url = f"{base_url}/v1/chat/completions"
+        async with httpx.AsyncClient() as client:
+            response = await client.post(url, json=EXAMPLE_CHAT_REQUEST)
+            response.raise_for_status()
+            return response.text
 
     async def get_deployment_logs(self):
         """
@@ -326,7 +269,7 @@ async def main():
     parser.add_argument(
         "--service-name",
         "-s",
-        help="Service name for port forwarding (default: {deployment_name}-frontend)",
+        help="Service name for connecting to the service (default: {deployment_name}-frontend)",
     )
 
     args = parser.parse_args()
