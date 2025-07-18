@@ -278,7 +278,7 @@ func TestDynamoComponentDeploymentReconciler_generateIngress(t *testing.T) {
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								ServiceName:     "service1",
 								DynamoNamespace: &[]string{"default"}[0],
-								Ingress: v1alpha1.IngressSpec{
+								Ingress: &v1alpha1.IngressSpec{
 									Enabled:                    true,
 									Host:                       "someservice",
 									IngressControllerClassName: &[]string{"nginx"}[0],
@@ -337,7 +337,7 @@ func TestDynamoComponentDeploymentReconciler_generateIngress(t *testing.T) {
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								ServiceName:     "service1",
 								DynamoNamespace: &[]string{"default"}[0],
-								Ingress: v1alpha1.IngressSpec{
+								Ingress: &v1alpha1.IngressSpec{
 									Enabled: false,
 								},
 							},
@@ -400,7 +400,7 @@ func TestDynamoComponentDeploymentReconciler_generateVirtualService(t *testing.T
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								ServiceName:     "service1",
 								DynamoNamespace: &[]string{"default"}[0],
-								Ingress: v1alpha1.IngressSpec{
+								Ingress: &v1alpha1.IngressSpec{
 									Enabled: true,
 								},
 							},
@@ -432,7 +432,7 @@ func TestDynamoComponentDeploymentReconciler_generateVirtualService(t *testing.T
 							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 								ServiceName:     "service1",
 								DynamoNamespace: &[]string{"default"}[0],
-								Ingress: v1alpha1.IngressSpec{
+								Ingress: &v1alpha1.IngressSpec{
 									Enabled:               true,
 									Host:                  "someservice",
 									UseVirtualService:     true,

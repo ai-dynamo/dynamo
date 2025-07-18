@@ -21,13 +21,24 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
+	istioNetworking "istio.io/api/networking/v1beta1"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
+
+	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
+	"github.com/imdario/mergo"
+	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
 	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 )
 
 // ServiceConfig represents the YAML configuration structure for a service
@@ -129,13 +140,13 @@ func SetLwsAnnotations(serviceArgs *ServiceArgs, deployment *v1alpha1.DynamoComp
 }
 
 // GenerateDynamoComponentsDeployments generates a map of DynamoComponentDeployments from a DynamoGraphConfig
-func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, ingressSpec *v1alpha1.IngressSpec) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
+func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphDeployment *v1alpha1.DynamoGraphDeployment, defaultIngressSpec *v1alpha1.IngressSpec) (map[string]*v1alpha1.DynamoComponentDeployment, error) {
 	deployments := make(map[string]*v1alpha1.DynamoComponentDeployment)
 	graphDynamoNamespace := ""
 	for componentName, component := range parentDynamoGraphDeployment.Spec.Services {
 		deployment := &v1alpha1.DynamoComponentDeployment{}
 		deployment.Spec.DynamoComponentDeploymentSharedSpec = component.DynamoComponentDeploymentSharedSpec
-		deployment.Name = getDynamoComponentName(parentDynamoGraphDeployment, componentName)
+		deployment.Name = GetDynamoComponentName(parentDynamoGraphDeployment, componentName)
 		deployment.Namespace = parentDynamoGraphDeployment.Namespace
 		deployment.Spec.ServiceName = componentName
 		dynamoNamespace := GetDefaultDynamoNamespace(ctx, parentDynamoGraphDeployment)
@@ -160,8 +171,8 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 			}
 			deployment.Spec.ExtraPodSpec.ServiceAccountName = commonconsts.PlannerServiceAccountName
 		}
-		if deployment.IsMainComponent() && ingressSpec != nil {
-			deployment.Spec.Ingress = *ingressSpec
+		if deployment.IsMainComponent() && defaultIngressSpec != nil && deployment.Spec.Ingress == nil {
+			deployment.Spec.Ingress = defaultIngressSpec
 		}
 		// merge the envs from the parent deployment with the envs from the service
 		if len(parentDynamoGraphDeployment.Spec.Envs) > 0 {
@@ -286,9 +297,190 @@ func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 	for _, env := range envMap {
 		merged = append(merged, env)
 	}
+	sort.Slice(merged, func(i, j int) bool {
+		return merged[i].Name < merged[j].Name
+	})
 	return merged
 }
 
-func getDynamoComponentName(dynamoDeployment *v1alpha1.DynamoGraphDeployment, component string) string {
+func GetDynamoComponentName(dynamoDeployment *v1alpha1.DynamoGraphDeployment, component string) string {
 	return fmt.Sprintf("%s-%s", dynamoDeployment.Name, strings.ToLower(component))
+}
+
+func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment) (*grovev1alpha1.PodGangSet, error) {
+	gangSet := &grovev1alpha1.PodGangSet{}
+	gangSet.Name = dynamoDeployment.Name
+	gangSet.Namespace = dynamoDeployment.Namespace
+	gangSet.Spec.Replicas = 1
+	for componentName, component := range dynamoDeployment.Spec.Services {
+		container := corev1.Container{
+			Name:           "main",
+			LivenessProbe:  component.LivenessProbe,
+			ReadinessProbe: component.ReadinessProbe,
+			Env:            component.Envs,
+		}
+		resourcesConfig, err := controller_common.GetResourcesConfig(component.Resources)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get resources config: %w", err)
+		}
+		container.Resources = *resourcesConfig
+		if component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil {
+			// merge the extraPodSpec from the parent deployment with the extraPodSpec from the service
+			err := mergo.Merge(&container, *component.ExtraPodSpec.MainContainer, mergo.WithOverride)
+			if err != nil {
+				return nil, fmt.Errorf("failed to merge extraPodSpec: %w", err)
+			}
+		}
+		// merge the envs from the parent deployment with the envs from the service
+		if len(dynamoDeployment.Spec.Envs) > 0 {
+			container.Env = mergeEnvs(dynamoDeployment.Spec.Envs, container.Env)
+		}
+		if component.EnvFromSecret != nil {
+			container.EnvFrom = append(container.EnvFrom, corev1.EnvFromSource{
+				SecretRef: &corev1.SecretEnvSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: *component.EnvFromSecret},
+				},
+			})
+		}
+		gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, &grovev1alpha1.PodCliqueTemplateSpec{
+			Name: componentName,
+			Spec: grovev1alpha1.PodCliqueSpec{
+				RoleName: componentName,
+				Replicas: *component.Replicas,
+				PodSpec: corev1.PodSpec{
+					Containers: []corev1.Container{container},
+				},
+			},
+		})
+		if component.PVC != nil {
+			gangSet.Spec.Template.Cliques[0].Spec.PodSpec.Volumes = append(gangSet.Spec.Template.Cliques[0].Spec.PodSpec.Volumes, corev1.Volume{
+				Name: *component.PVC.Name,
+				VolumeSource: corev1.VolumeSource{
+					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+						ClaimName: *component.PVC.Name,
+					},
+				},
+			})
+			gangSet.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0].VolumeMounts = append(gangSet.Spec.Template.Cliques[0].Spec.PodSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
+				Name:      *component.PVC.Name,
+				MountPath: *component.PVC.MountPoint,
+			})
+		}
+	}
+	return gangSet, nil
+}
+
+func GenerateComponentService(ctx context.Context, componentName, componentNamespace string) (*corev1.Service, error) {
+	service := &corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      componentName,
+			Namespace: componentNamespace,
+		},
+		Spec: corev1.ServiceSpec{
+			Ports: []corev1.ServicePort{
+				{
+					Name:       commonconsts.DynamoServicePortName,
+					Port:       commonconsts.DynamoServicePort,
+					TargetPort: intstr.FromString(commonconsts.DynamoContainerPortName),
+					Protocol:   corev1.ProtocolTCP,
+				},
+			},
+		},
+	}
+	return service, nil
+}
+
+func GenerateComponentIngress(ctx context.Context, componentName, componentNamespace string, ingressSpec v1alpha1.IngressSpec) *networkingv1.Ingress {
+	resourceName := componentName
+	ingress := &networkingv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      resourceName,
+			Namespace: componentNamespace,
+		},
+	}
+	host := getIngressHost(ingressSpec)
+	ingress.Spec = networkingv1.IngressSpec{
+		IngressClassName: ingressSpec.IngressControllerClassName,
+		Rules: []networkingv1.IngressRule{
+			{
+				Host: host,
+				IngressRuleValue: networkingv1.IngressRuleValue{
+					HTTP: &networkingv1.HTTPIngressRuleValue{
+						Paths: []networkingv1.HTTPIngressPath{
+							{
+								Path:     "/",
+								PathType: &[]networkingv1.PathType{networkingv1.PathTypePrefix}[0],
+								Backend: networkingv1.IngressBackend{
+									Service: &networkingv1.IngressServiceBackend{
+										Name: resourceName,
+										Port: networkingv1.ServiceBackendPort{
+											Number: commonconsts.DynamoServicePort,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	if ingressSpec.TLS != nil {
+		ingress.Spec.TLS = []networkingv1.IngressTLS{
+			{
+				Hosts:      []string{host},
+				SecretName: ingressSpec.TLS.SecretName,
+			},
+		}
+	}
+	return ingress
+}
+
+func getIngressHost(ingressSpec v1alpha1.IngressSpec) string {
+	host := ingressSpec.Host
+	if ingressSpec.HostPrefix != nil {
+		host = *ingressSpec.HostPrefix + host
+	}
+	ingressSuffix := commonconsts.DefaultIngressSuffix
+	if ingressSpec.HostSuffix != nil {
+		ingressSuffix = *ingressSpec.HostSuffix
+	}
+	return fmt.Sprintf("%s.%s", host, ingressSuffix)
+}
+
+func GenerateComponentVirtualService(ctx context.Context, componentName, componentNamespace string, ingressSpec v1alpha1.IngressSpec) *networkingv1beta1.VirtualService {
+	vs := &networkingv1beta1.VirtualService{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      componentName,
+			Namespace: componentNamespace,
+		},
+	}
+	vs.Spec = istioNetworking.VirtualService{
+		Hosts: []string{
+			getIngressHost(ingressSpec),
+		},
+		Gateways: []string{*ingressSpec.VirtualServiceGateway},
+		Http: []*istioNetworking.HTTPRoute{
+			{
+				Match: []*istioNetworking.HTTPMatchRequest{
+					{
+						Uri: &istioNetworking.StringMatch{
+							MatchType: &istioNetworking.StringMatch_Prefix{Prefix: "/"},
+						},
+					},
+				},
+				Route: []*istioNetworking.HTTPRouteDestination{
+					{
+						Destination: &istioNetworking.Destination{
+							Host: componentName,
+							Port: &istioNetworking.PortSelector{
+								Number: commonconsts.DynamoServicePort,
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	return vs
 }

@@ -33,6 +33,7 @@ type Config struct {
 	// If true, assume VirtualService endpoints are HTTPS
 	VirtualServiceSupportsHTTPS bool
 	EnableLWS                   bool
+	EnableGrove                 bool
 }
 
 func EphemeralDeploymentEventFilter(config Config) predicate.Predicate {

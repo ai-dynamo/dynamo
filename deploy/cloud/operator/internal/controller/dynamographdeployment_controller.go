@@ -21,6 +21,10 @@ import (
 	"context"
 	"fmt"
 
+	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
+	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
+	corev1 "k8s.io/api/core/v1"
+	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -31,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/dynamo"
 )
@@ -59,6 +64,7 @@ type DynamoGraphDeploymentReconciler struct {
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments/finalizers,verbs=update
+// +kubebuilder:rbac:groups=grove.io,resources=podgangsets,verbs=get;list;watch;create;update;patch;delete
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
@@ -117,22 +123,153 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		return ctrl.Result{}, nil
 	}
 
-	// generate the dynamoComponentsDeployments from the config
-	dynamoComponentsDeployments, err := dynamo.GenerateDynamoComponentsDeployments(ctx, dynamoDeployment, r.generateDefaultIngressSpec(dynamoDeployment))
+	notReadyResources := []string{}
+	resources, err := r.reconcileResources(ctx, dynamoDeployment)
 	if err != nil {
-		logger.Error(err, "failed to generate the DynamoComponentsDeployments and DynamoComponents")
-		reason = "failed_to_generate_the_DynamoComponentsDeployments"
+		logger.Error(err, "failed to reconcile the resources")
+		reason = "failed_to_reconcile_the_resources"
 		return ctrl.Result{}, err
 	}
 
-	// merge the dynamoComponentsDeployments with the dynamoComponentsDeployments from the CRD
-	for _, deployment := range dynamoComponentsDeployments {
-		if deployment.Spec.Ingress.Enabled {
-			dynamoDeployment.SetEndpointStatus(r.isEndpointSecured(), getIngressHost(deployment.Spec.Ingress))
+	// check if resources are ready
+	for _, resource := range resources {
+		if !resource.IsReady() {
+			notReadyResources = append(notReadyResources, resource.GetName())
 		}
 	}
 
-	notReadyDeployments := []string{}
+	if len(notReadyResources) == 0 {
+		dynamoDeployment.SetState(ReadyState)
+		reason = "all_resources_are_ready"
+		message = "All resources are ready"
+		readyStatus = metav1.ConditionTrue
+	} else {
+		reason = "some_resources_are_not_ready"
+		message = fmt.Sprintf("%d resources not ready: %v", len(notReadyResources), notReadyResources)
+		dynamoDeployment.SetState(PendingState)
+	}
+
+	return ctrl.Result{}, nil
+
+}
+
+type Resource interface {
+	IsReady() bool
+	GetName() string
+}
+
+func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) ([]Resource, error) {
+
+	if r.Config.EnableGrove {
+		return r.reconcileGroveResources(ctx, dynamoDeployment)
+	}
+	return r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment)
+
+}
+
+func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) ([]Resource, error) {
+	logger := log.FromContext(ctx)
+	// generate the dynamoComponentsDeployments from the config
+	groveGangSet, err := dynamo.GenerateGrovePodGangSet(ctx, dynamoDeployment)
+	if err != nil {
+		logger.Error(err, "failed to generate the Grove GangSet")
+		return nil, err
+	}
+	_, syncedGroveGangSet, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*grovev1alpha1.PodGangSet, bool, error) {
+		return groveGangSet, false, nil
+	})
+	if err != nil {
+		logger.Error(err, "failed to sync the Grove GangSet")
+		return nil, err
+	}
+	groveGangSetAsResource := commonController.WrapResource(syncedGroveGangSet, func() bool {
+		if groveGangSet.Status.LastOperation != nil && groveGangSet.Status.LastOperation.State == grovev1alpha1.LastOperationStateSucceeded {
+			return true
+		}
+		return false
+	})
+	resources := []Resource{groveGangSetAsResource}
+	for componentName, component := range dynamoDeployment.Spec.Services {
+		if component.ComponentType == consts.ComponentTypeMain {
+			// generate the main component service
+			mainComponentService, err := dynamo.GenerateComponentService(ctx, dynamo.GetDynamoComponentName(dynamoDeployment, componentName), dynamoDeployment.Namespace)
+			if err != nil {
+				logger.Error(err, "failed to generate the main component service")
+				return nil, err
+			}
+			_, syncedMainComponentService, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*corev1.Service, bool, error) {
+				return mainComponentService, false, nil
+			})
+			if err != nil {
+				logger.Error(err, "failed to sync the main component service")
+				return nil, err
+			}
+			mainComponentServiceAsResource := commonController.WrapResource(syncedMainComponentService, func() bool {
+				return true
+			})
+			resources = append(resources, mainComponentServiceAsResource)
+			// generate the main component ingress
+			ingressSpec := r.generateDefaultIngressSpec(dynamoDeployment)
+			if component.Ingress != nil {
+				ingressSpec = *component.Ingress
+			}
+			mainComponentIngress := dynamo.GenerateComponentIngress(ctx, dynamo.GetDynamoComponentName(dynamoDeployment, componentName), dynamoDeployment.Namespace, ingressSpec)
+			if err != nil {
+				logger.Error(err, "failed to generate the main component ingress")
+				return nil, err
+			}
+			_, syncedMainComponentIngress, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*networkingv1.Ingress, bool, error) {
+				if !ingressSpec.Enabled || ingressSpec.IngressControllerClassName == nil {
+					logger.Info("Ingress is not enabled")
+					return mainComponentIngress, true, nil
+				}
+				return mainComponentIngress, false, nil
+			})
+			if err != nil {
+				logger.Error(err, "failed to sync the main component ingress")
+				return nil, err
+			}
+			resources = append(resources, commonController.WrapResource(syncedMainComponentIngress, func() bool {
+				return true
+			}))
+			// generate the main component virtual service
+			mainComponentVirtualService := dynamo.GenerateComponentVirtualService(ctx, dynamo.GetDynamoComponentName(dynamoDeployment, componentName), dynamoDeployment.Namespace, ingressSpec)
+			if err != nil {
+				logger.Error(err, "failed to generate the main component virtual service")
+				return nil, err
+			}
+			_, syncedMainComponentVirtualService, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
+				vsEnabled := ingressSpec.Enabled && ingressSpec.UseVirtualService && ingressSpec.VirtualServiceGateway != nil
+				if !vsEnabled {
+					logger.Info("VirtualService is not enabled")
+					return mainComponentVirtualService, true, nil
+				}
+				return mainComponentVirtualService, false, nil
+			})
+			if err != nil {
+				logger.Error(err, "failed to sync the main component virtual service")
+				return nil, err
+			}
+			resources = append(resources, commonController.WrapResource(syncedMainComponentVirtualService, func() bool {
+				return true
+			}))
+		}
+	}
+	return resources, nil
+}
+
+func (r *DynamoGraphDeploymentReconciler) reconcileDynamoComponentsDeployments(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) ([]Resource, error) {
+	resources := []Resource{}
+	logger := log.FromContext(ctx)
+
+	// generate the dynamoComponentsDeployments from the config
+	defaultIngressSpec := r.generateDefaultIngressSpec(dynamoDeployment)
+	dynamoComponentsDeployments, err := dynamo.GenerateDynamoComponentsDeployments(ctx, dynamoDeployment, &defaultIngressSpec)
+	if err != nil {
+		logger.Error(err, "failed to generate the DynamoComponentsDeployments")
+		return nil, err
+	}
+
 	// reconcile the dynamoComponentsDeployments
 	for serviceName, dynamoComponentDeployment := range dynamoComponentsDeployments {
 		logger.Info("Reconciling the DynamoComponentDeployment", "serviceName", serviceName, "dynamoComponentDeployment", dynamoComponentDeployment)
@@ -141,30 +278,16 @@ func (r *DynamoGraphDeploymentReconciler) Reconcile(ctx context.Context, req ctr
 		})
 		if err != nil {
 			logger.Error(err, "failed to sync the DynamoComponentDeployment")
-			reason = "failed_to_sync_the_DynamoComponentDeployment"
-			return ctrl.Result{}, err
+			return nil, err
 		}
-		if !dynamoComponentDeployment.Status.IsReady() {
-			notReadyDeployments = append(notReadyDeployments, dynamoComponentDeployment.Name)
-		}
-	}
-	if len(notReadyDeployments) == 0 {
-		dynamoDeployment.SetState(ReadyState)
-		reason = "all_deployments_are_ready"
-		message = "All deployments are ready"
-		readyStatus = metav1.ConditionTrue
-	} else {
-		reason = "some_deployments_are_not_ready"
-		message = fmt.Sprintf("The following deployments are not ready: %v", notReadyDeployments)
-		dynamoDeployment.SetState(PendingState)
+		resources = append(resources, dynamoComponentDeployment)
 	}
 
-	return ctrl.Result{}, nil
-
+	return resources, nil
 }
 
-func (r *DynamoGraphDeploymentReconciler) generateDefaultIngressSpec(dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) *nvidiacomv1alpha1.IngressSpec {
-	res := &nvidiacomv1alpha1.IngressSpec{
+func (r *DynamoGraphDeploymentReconciler) generateDefaultIngressSpec(dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) nvidiacomv1alpha1.IngressSpec {
+	res := nvidiacomv1alpha1.IngressSpec{
 		Enabled:           r.VirtualServiceGateway != "" || r.IngressControllerClassName != "",
 		Host:              dynamoDeployment.Name,
 		UseVirtualService: r.VirtualServiceGateway != "",
@@ -200,7 +323,7 @@ func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, 
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+	ctrlBuilder := ctrl.NewControllerManagedBy(mgr).
 		For(&nvidiacomv1alpha1.DynamoGraphDeployment{}, builder.WithPredicates(
 			predicate.GenerationChangedPredicate{},
 		)).
@@ -212,8 +335,17 @@ func (r *DynamoGraphDeploymentReconciler) SetupWithManager(mgr ctrl.Manager) err
 			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
 			GenericFunc: func(ge event.GenericEvent) bool { return true },
 		})).
-		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config)).
-		Complete(r)
+		WithEventFilter(commonController.EphemeralDeploymentEventFilter(r.Config))
+	if r.Config.EnableGrove {
+		ctrlBuilder = ctrlBuilder.Owns(&grovev1alpha1.PodGangSet{}, builder.WithPredicates(predicate.Funcs{
+			// ignore creation cause we don't want to be called again after we create the pod gang set
+			CreateFunc:  func(ce event.CreateEvent) bool { return false },
+			DeleteFunc:  func(de event.DeleteEvent) bool { return true },
+			UpdateFunc:  func(de event.UpdateEvent) bool { return true },
+			GenericFunc: func(ge event.GenericEvent) bool { return true },
+		}))
+	}
+	return ctrlBuilder.Complete(r)
 }
 
 func (r *DynamoGraphDeploymentReconciler) GetRecorder() record.EventRecorder {
