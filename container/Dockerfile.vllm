@@ -187,9 +187,13 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
         cd tools/ep_kernels && \
         bash install_python_libraries.sh && \
         cd ep_kernels_workspace && \
-        git clone --recursive https://github.com/deepseek-ai/DeepGEMM.git && \
+        git clone https://github.com/deepseek-ai/DeepGEMM.git && \
         cd DeepGEMM && \
-        python setup.py install; \
+        sed -i 's|git@github.com:|https://github.com/|g' .gitmodules && \
+        git submodule sync --recursive && \
+        git submodule update --init --recursive && \
+        cat install.sh && \
+        ./install.sh; \
     else \
         uv pip install pip cuda-python && \
         mkdir /opt/vllm && \
@@ -201,9 +205,13 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
         cd tools/ep_kernels && \
         bash install_python_libraries.sh && \
         cd ep_kernels_workspace && \
-        git clone --recursive https://github.com/deepseek-ai/DeepGEMM.git && \
+        git clone https://github.com/deepseek-ai/DeepGEMM.git && \
         cd DeepGEMM && \
-        python setup.py install; \
+        sed -i 's|git@github.com:|https://github.com/|g' .gitmodules && \
+        git submodule sync --recursive && \
+        git submodule update --init --recursive && \
+        cat install.sh && \
+        ./install.sh; \
     fi
 
 # Common dependencies
