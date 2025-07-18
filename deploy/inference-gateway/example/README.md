@@ -138,8 +138,10 @@ export GATEWAY_URL=<Gateway-URL>
 
 To test the gateway in minikube, use the following command:
 ```bash
-minikube tunnel &
+# start minikube tunnel
+minikube tunnel
 
+# in a separate terminal
 GATEWAY_URL=$(kubectl get svc inference-gateway -o yaml -o jsonpath='{.spec.clusterIP}')
 echo $GATEWAY_URL
 ```
@@ -157,7 +159,7 @@ Send inference request to gateway:
 curl $GATEWAY_URL/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "model": "google/gemma-3-1b-it",
     "messages": [
     {
         "role": "user",
