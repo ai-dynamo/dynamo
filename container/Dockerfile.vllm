@@ -176,7 +176,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
     cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
     chmod +x /tmp/install_vllm.sh && \
-    /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH
+    /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt/vllm
 
 # Common dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
@@ -467,7 +467,8 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
     cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
     chmod +x /tmp/install_vllm.sh && \
-    /tmp/install_vllm.sh --no-editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS
+    /tmp/install_vllm.sh --no-editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --installation-dir /tmp/vllm && \
+    rm -rf /tmp/vllm
 
 # Common dependencies - these may already be installed in the copied venv, but run anyway for safety
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \

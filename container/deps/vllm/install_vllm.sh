@@ -22,6 +22,7 @@ set -ex
 EDITABLE=true
 VLLM_REF="059d4cd"
 MAX_JOBS=16
+INSTALLATION_DIR=/tmp/vllm
 ARCH=$(uname -m)
 
 # Convert x86_64 to amd64 for consistency with Docker ARG
@@ -53,6 +54,10 @@ while [[ $# -gt 0 ]]; do
             ARCH="$2"
             shift 2
             ;;
+        --installation-dir)
+            INSTALLATION_DIR="$2"
+            shift 2
+            ;;
         -h|--help)
             echo "Usage: $0 [--editable|--no-editable] [--vllm-ref REF] [--max-jobs NUM] [--arch ARCH]"
             echo "Options:"
@@ -61,6 +66,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --vllm-ref REF    Git reference to checkout (default: 059d4cd)"
             echo "  --max-jobs NUM    Maximum number of parallel jobs (default: 16)"
             echo "  --arch ARCH       Architecture (amd64|arm64, default: auto-detect)"
+            echo "  --installation-dir DIR  Directory to install vllm (default: /tmp/vllm)"
             exit 0
             ;;
         *)
@@ -83,8 +89,8 @@ echo "  ARCH: $ARCH"
 uv pip install pip cuda-python
 
 # Create vllm directory and clone
-mkdir -p /opt/vllm
-cd /opt/vllm
+mkdir -p $INSTALLATION_DIR
+cd $INSTALLATION_DIR
 git clone https://github.com/vllm-project/vllm.git
 cd vllm
 git checkout $VLLM_REF
