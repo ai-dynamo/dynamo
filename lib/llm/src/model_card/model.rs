@@ -127,6 +127,10 @@ pub struct ModelDeploymentCard {
     /// Size of a KV cache block - vllm only currently
     /// Passed to the engine and the KV router.
     pub kv_cache_block_size: u32,
+
+    /// How many times a request can be migrated to another worker if the HTTP server lost
+    /// connection to the current worker.
+    pub migration_limit: u32,
 }
 
 impl ModelDeploymentCard {

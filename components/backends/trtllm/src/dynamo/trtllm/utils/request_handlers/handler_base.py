@@ -19,11 +19,14 @@ from enum import Enum
 
 from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi import DisaggregatedParams as LlmDisaggregatedParams
-from utils.disagg_utils import DisaggregatedParams, DisaggregatedParamsCodec
 
 from dynamo.llm.tensorrtllm.engine import TensorRTLLMEngine
 from dynamo.llm.tensorrtllm.publisher import Publisher
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.trtllm.utils.disagg_utils import (
+    DisaggregatedParams,
+    DisaggregatedParamsCodec,
+)
 
 configure_dynamo_logging()
 

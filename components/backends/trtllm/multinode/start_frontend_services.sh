@@ -13,4 +13,4 @@ sleep 3
 
 # Start OpenAI Frontend which will dynamically discover workers when they startup
 # NOTE: This is a blocking call.
-dynamo-run in=http out=dyn --http-port 8000
+python3 -m dynamo.frontend --http-port 8000

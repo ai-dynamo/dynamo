@@ -3,10 +3,8 @@
 
 import asyncio
 import logging
-import os
 import signal
 import sys
-from typing import TYPE_CHECKING
 
 import uvloop
 from tensorrt_llm import SamplingParams
@@ -21,48 +19,16 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
-
-if TYPE_CHECKING:
-    from utils.trtllm_utils import Config
-
-
-def _setup_path_and_imports():
-    """Setup path and import utils modules"""
-    # Add the parent directory to the Python path so we can import utils
-    parent_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-    if parent_dir not in sys.path:
-        sys.path.insert(0, parent_dir)
-
-    from utils.request_handlers.handlers import (
-        RequestHandlerConfig,
-        RequestHandlerFactory,
-    )
-    from utils.trtllm_utils import (
-        Config,
-        cmd_line_args,
-        is_first_worker,
-        parse_endpoint,
-    )
-
-    return (
-        RequestHandlerConfig,
-        RequestHandlerFactory,
-        Config,
-        cmd_line_args,
-        is_first_worker,
-        parse_endpoint,
-    )
-
-
-# Import utils modules
-(
+from dynamo.trtllm.utils.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
+)
+from dynamo.trtllm.utils.trtllm_utils import (
     Config,
     cmd_line_args,
     is_first_worker,
     parse_endpoint,
-) = _setup_path_and_imports()
+)
 
 # Default buffer size for kv cache events.
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
@@ -205,6 +171,9 @@ async def init(runtime: DistributedRuntime, config: Config):
             await endpoint.serve_endpoint(handler.generate)
 
 
+def main():
+    uvloop.run(worker())
+
+
 if __name__ == "__main__":
-    uvloop.install()
-    asyncio.run(worker())
+    main()

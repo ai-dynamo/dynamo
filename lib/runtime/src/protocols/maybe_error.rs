@@ -17,10 +17,10 @@ use std::error::Error;
 
 pub trait MaybeError {
     /// Construct an instance from an error.
-    fn from_err(err: Box<dyn Error>) -> Self;
+    fn from_err(err: Box<dyn Error + Send + Sync>) -> Self;
 
     /// Construct into an error instance.
-    fn err(&self) -> Option<Box<dyn Error>>;
+    fn err(&self) -> Option<Box<dyn Error + Send + Sync>>;
 
     /// Check if the current instance represents a success.
     fn is_ok(&self) -> bool {
@@ -41,12 +41,12 @@ mod tests {
         message: String,
     }
     impl MaybeError for TestError {
-        fn from_err(err: Box<dyn Error>) -> Self {
+        fn from_err(err: Box<dyn Error + Send + Sync>) -> Self {
             TestError {
                 message: err.to_string(),
             }
         }
-        fn err(&self) -> Option<Box<dyn Error>> {
+        fn err(&self) -> Option<Box<dyn Error + Send + Sync>> {
             Some(anyhow::Error::msg(self.message.clone()).into())
         }
     }

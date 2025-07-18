@@ -39,7 +39,7 @@ if [[ -n ${DISAGGREGATION_STRATEGY} ]]; then
 fi
 
 trtllm-llmapi-launch \
-  python3 /mnt/components/worker.py \
+  python3 -m dynamo.trtllm \
     --model-path "${MODEL_PATH}" \
     --served-model-name "${SERVED_MODEL_NAME}" \
     --extra-engine-args "${ENGINE_CONFIG}" \
