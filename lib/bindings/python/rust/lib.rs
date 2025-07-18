@@ -98,6 +98,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<http::HttpService>()?;
     m.add_class::<http::HttpError>()?;
     m.add_class::<http::HttpAsyncEngine>()?;
+    m.add_class::<http::RateLimiterConfig>()?;
     m.add_class::<EtcdKvCache>()?;
     m.add_class::<ModelType>()?;
     m.add_class::<llm::kv::ForwardPassMetrics>()?;

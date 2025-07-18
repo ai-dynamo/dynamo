@@ -28,15 +28,21 @@ use super::{
     metrics::{Endpoint, InflightGuard, ResponseMetricCollector},
     service_v2, RouteDoc,
 };
-use crate::preprocessor::LLMMetricAnnotation;
-use crate::protocols::openai::{
-    chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse},
-    completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
-    embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
-    responses::{NvCreateResponse, NvResponse},
-};
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
+use crate::{
+    http::service::metrics::{RequestType, Status},
+    preprocessor::LLMMetricAnnotation,
+};
+use crate::{
+    http::service::rate_limiter::ShouldRejectResult,
+    protocols::openai::{
+        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse},
+        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+        embeddings::{NvCreateEmbeddingRequest, NvCreateEmbeddingResponse},
+        responses::{NvCreateResponse, NvResponse},
+    },
+};
 
 #[derive(Serialize, Deserialize)]
 pub(crate) struct ErrorResponse {
@@ -92,6 +98,17 @@ impl ErrorResponse {
         )
     }
 
+    /// Rate Limit Exceeded
+    /// Return this error when the request is rejected due to rate limiting.
+    pub fn rate_limit_exceeded(msg: &str) -> (StatusCode, Json<ErrorResponse>) {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(ErrorResponse {
+                error: msg.to_string(),
+            }),
+        )
+    }
+
     /// The OAI endpoints call an [`dynamo.runtime::engine::AsyncEngine`] which are specialized to return
     /// an [`anyhow::Error`]. This method will convert the [`anyhow::Error`] into an [`HttpError`].
     /// If successful, it will return the [`HttpError`] as an [`ErrorResponse::internal_server_error`]
@@ -137,6 +154,14 @@ async fn completions(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
+    // Rate limit check
+    should_reject_request(
+        &state,
+        &request.inner.model,
+        &Endpoint::Completions,
+        &RequestType::from_streaming_boolean(request.inner.stream.unwrap_or(false)),
+    )?;
+
     // todo - extract distributed tracing id and context id from headers
     let request_id = uuid::Uuid::new_v4().to_string();
 
@@ -169,7 +194,9 @@ async fn completions(
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::Completions, streaming);
 
-    let mut response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(model, state.rate_limiter_clone());
 
     // setup context
     // todo - inherit request_id from distributed trace details
@@ -291,6 +318,14 @@ async fn chat_completions(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
+    // Rate limit check
+    should_reject_request(
+        &state,
+        &request.inner.model,
+        &Endpoint::ChatCompletions,
+        &RequestType::from_streaming_boolean(request.inner.stream.unwrap_or(false)),
+    )?;
+
     // Handle unsupported fields - if Some(resp) is returned by
     // validate_chat_completion_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
@@ -347,7 +382,9 @@ async fn chat_completions(
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::ChatCompletions, streaming);
 
-    let mut response_collector = state.metrics_clone().create_response_collector(model);
+    let mut response_collector = state
+        .metrics_clone()
+        .create_response_collector(model, state.rate_limiter_clone());
 
     // setup context
     // todo - inherit request_id from distributed trace details
@@ -447,6 +484,15 @@ async fn responses(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
+    // Rate limit check
+    // TODO: handle streaming, currently just unary
+    should_reject_request(
+        &state,
+        &request.inner.model,
+        &Endpoint::Responses,
+        &RequestType::Unary,
+    )?;
+
     // Handle unsupported fields - if Some(resp) is returned by validate_unsupported_fields,
     // then a field was used that is unsupported. We will log an error message
     // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceeed.
@@ -505,7 +551,9 @@ async fn responses(
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::Responses, false);
 
-    let _response_collector = state.metrics_clone().create_response_collector(model);
+    let _response_collector = state
+        .metrics_clone()
+        .create_response_collector(model, state.rate_limiter_clone());
 
     let request = Context::with_id(request, request_id.clone());
 
@@ -545,6 +593,44 @@ async fn responses(
     inflight_guard.mark_ok();
 
     Ok(Json(response).into_response())
+}
+
+pub fn should_reject_request(
+    state: &Arc<service_v2::State>,
+    model: &str,
+    endpoint: &Endpoint,
+    request_type: &RequestType,
+) -> Result<(), (StatusCode, Json<ErrorResponse>)> {
+    if !state.rate_limiter().is_enabled() {
+        return Ok(());
+    }
+
+    let ShouldRejectResult {
+        should_reject,
+        decayed_ttft_ema,
+        decayed_itl_ema,
+    } = state.rate_limiter().should_reject(model);
+
+    state
+        .metrics_clone()
+        .record_rate_limit_ttft(decayed_ttft_ema, model);
+    state
+        .metrics_clone()
+        .record_rate_limit_itl(decayed_itl_ema, model);
+
+    if should_reject {
+        state.metrics_clone().inc_rate_limit_requests_counter(
+            model,
+            endpoint,
+            request_type,
+            &Status::Rejected,
+        );
+        return Err(ErrorResponse::rate_limit_exceeded(&format!(
+            "Too many requests: rate limit exceeded for current request and model: {model}. Please retry later."
+        )));
+    }
+
+    Ok(())
 }
 
 pub fn validate_response_input_is_text_only(
