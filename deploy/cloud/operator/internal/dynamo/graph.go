@@ -307,7 +307,11 @@ func GetDynamoComponentName(dynamoDeployment *v1alpha1.DynamoGraphDeployment, co
 	return fmt.Sprintf("%s-%s", dynamoDeployment.Name, strings.ToLower(component))
 }
 
-func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, controllerConfig controller_common.Config) (*grovev1alpha1.PodGangSet, error) {
+type SecretsRetriever interface {
+	GetSecrets(namespace, registry string) ([]string, error)
+}
+
+func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, controllerConfig controller_common.Config, secretsRetriever SecretsRetriever) (*grovev1alpha1.PodGangSet, error) {
 	gangSet := &grovev1alpha1.PodGangSet{}
 	gangSet.Name = dynamoDeployment.Name
 	gangSet.Namespace = dynamoDeployment.Namespace
@@ -343,6 +347,19 @@ func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.Dyn
 				return nil, fmt.Errorf("failed to merge extraPodSpec: %w", err)
 			}
 		}
+		// retrueve the image pull secrets for the container
+		imagePullSecrets := []corev1.LocalObjectReference{}
+		if secretsRetriever != nil {
+			secretsName, err := secretsRetriever.GetSecrets(dynamoDeployment.Namespace, container.Image)
+			if err != nil {
+				return nil, fmt.Errorf("failed to get secrets for component %s and image %s: %w", dynamoDeployment.Name, container.Image, err)
+			}
+			for _, secretName := range secretsName {
+				imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{
+					Name: secretName,
+				})
+			}
+		}
 		// merge the envs from the parent deployment with the envs from the service
 		if len(dynamoDeployment.Spec.Envs) > 0 {
 			container.Env = mergeEnvs(dynamoDeployment.Spec.Envs, container.Env)
@@ -372,6 +389,9 @@ func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.Dyn
 		}
 		gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, &grovev1alpha1.PodCliqueTemplateSpec{
 			Name: strings.ToLower(componentName),
+			Labels: map[string]string{
+				commonconsts.KubeLabelDynamoSelector: GetDynamoComponentName(dynamoDeployment, componentName),
+			},
 			Spec: grovev1alpha1.PodCliqueSpec{
 				RoleName: strings.ToLower(componentName),
 				Replicas: func() int32 {
@@ -381,7 +401,8 @@ func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.Dyn
 					return 1
 				}(),
 				PodSpec: corev1.PodSpec{
-					Containers: []corev1.Container{container},
+					Containers:       []corev1.Container{container},
+					ImagePullSecrets: imagePullSecrets,
 				},
 			},
 		})
@@ -411,6 +432,9 @@ func GenerateComponentService(ctx context.Context, componentName, componentNames
 			Namespace: componentNamespace,
 		},
 		Spec: corev1.ServiceSpec{
+			Selector: map[string]string{
+				commonconsts.KubeLabelDynamoSelector: componentName,
+			},
 			Ports: []corev1.ServicePort{
 				{
 					Name:       commonconsts.DynamoServicePortName,

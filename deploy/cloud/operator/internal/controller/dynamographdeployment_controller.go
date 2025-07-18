@@ -59,6 +59,7 @@ type DynamoGraphDeploymentReconciler struct {
 	IngressControllerClassName string
 	IngressControllerTLSSecret string
 	IngressHostSuffix          string
+	DockerSecretRetriever      dockerSecretRetriever
 }
 
 // +kubebuilder:rbac:groups=nvidia.com,resources=dynamographdeployments,verbs=get;list;watch;create;update;patch;delete
@@ -170,7 +171,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context
 func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) ([]Resource, error) {
 	logger := log.FromContext(ctx)
 	// generate the dynamoComponentsDeployments from the config
-	groveGangSet, err := dynamo.GenerateGrovePodGangSet(ctx, dynamoDeployment, r.Config)
+	groveGangSet, err := dynamo.GenerateGrovePodGangSet(ctx, dynamoDeployment, r.Config, r.DockerSecretRetriever)
 	if err != nil {
 		logger.Error(err, "failed to generate the Grove GangSet")
 		return nil, err

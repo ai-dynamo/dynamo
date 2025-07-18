@@ -1138,6 +1138,10 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 					NatsAddress: "nats-address",
 				},
 				dynamoDeployment: &v1alpha1.DynamoGraphDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dynamo-graph-deployment",
+						Namespace: "test-namespace",
+					},
 					Spec: v1alpha1.DynamoGraphDeploymentSpec{
 						Envs: []corev1.EnvVar{
 							{
@@ -1261,16 +1265,24 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 				},
 			},
 			want: &grovev1alpha1.PodGangSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dynamo-graph-deployment",
+					Namespace: "test-namespace",
+				},
 				Spec: grovev1alpha1.PodGangSetSpec{
 					Replicas: 1,
 					Template: grovev1alpha1.PodGangSetTemplateSpec{
 						Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
 							{
 								Name: "frontend",
+								Labels: map[string]string{
+									commonconsts.KubeLabelDynamoSelector: "test-dynamo-graph-deployment-frontend",
+								},
 								Spec: grovev1alpha1.PodCliqueSpec{
 									RoleName: "frontend",
 									Replicas: 1,
 									PodSpec: corev1.PodSpec{
+										ImagePullSecrets: []corev1.LocalObjectReference{},
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -1361,10 +1373,14 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 							},
 							{
 								Name: "planner",
+								Labels: map[string]string{
+									commonconsts.KubeLabelDynamoSelector: "test-dynamo-graph-deployment-planner",
+								},
 								Spec: grovev1alpha1.PodCliqueSpec{
 									RoleName: "planner",
 									Replicas: 2,
 									PodSpec: corev1.PodSpec{
+										ImagePullSecrets: []corev1.LocalObjectReference{},
 										Volumes: []corev1.Volume{
 											{
 												Name: "planner-pvc",
@@ -1478,7 +1494,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := GenerateGrovePodGangSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig)
+			got, err := GenerateGrovePodGangSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, nil)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("GenerateGrovePodGangSet() error = %v, wantErr %v", err, tt.wantErr)
 				return

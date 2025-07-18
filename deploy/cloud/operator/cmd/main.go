@@ -312,6 +312,7 @@ func main() {
 		IngressControllerClassName: ingressControllerClassName,
 		IngressControllerTLSSecret: ingressControllerTLSSecretName,
 		IngressHostSuffix:          ingressHostSuffix,
+		DockerSecretRetriever:      dockerSecretRetriever,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeployment")
 		os.Exit(1)
