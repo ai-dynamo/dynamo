@@ -10,6 +10,7 @@ ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
+ARG VLLM_REF="059d4cd"
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -167,52 +168,15 @@ RUN uv pip install /workspace/wheels/nixl/*.whl
 
 # Install vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
-ARG VLLM_REF="059d4cd"
+ARG VLLM_REF
 ARG MAX_JOBS=16
 ENV MAX_JOBS=$MAX_JOBS
 ENV CUDA_HOME=/usr/local/cuda
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
-    if [ "$ARCH" = "arm64" ]; then \
-        uv pip install pip cuda-python && \
-        mkdir /opt/vllm && \
-        cd /opt/vllm && \
-        git clone https://github.com/vllm-project/vllm.git && \
-        cd vllm && \
-        git checkout $VLLM_REF && \
-        uv pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128 && \
-        python use_existing_torch.py && \
-        uv pip install -r requirements/build.txt && \
-        MAX_JOBS=${MAX_JOBS} uv pip install --no-build-isolation -e . -v && \
-        cd tools/ep_kernels && \
-        bash install_python_libraries.sh && \
-        cd ep_kernels_workspace && \
-        git clone https://github.com/deepseek-ai/DeepGEMM.git && \
-        cd DeepGEMM && \
-        sed -i 's|git@github.com:|https://github.com/|g' .gitmodules && \
-        git submodule sync --recursive && \
-        git submodule update --init --recursive && \
-        cat install.sh && \
-        ./install.sh; \
-    else \
-        uv pip install pip cuda-python && \
-        mkdir /opt/vllm && \
-        cd /opt/vllm && \
-        git clone https://github.com/vllm-project/vllm.git && \
-        cd vllm && \
-        git checkout $VLLM_REF && \
-        VLLM_USE_PRECOMPILED=1 uv pip install -e . && \
-        cd tools/ep_kernels && \
-        bash install_python_libraries.sh && \
-        cd ep_kernels_workspace && \
-        git clone https://github.com/deepseek-ai/DeepGEMM.git && \
-        cd DeepGEMM && \
-        sed -i 's|git@github.com:|https://github.com/|g' .gitmodules && \
-        git submodule sync --recursive && \
-        git submodule update --init --recursive && \
-        cat install.sh && \
-        ./install.sh; \
-    fi
+    cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
+    chmod +x /tmp/install_vllm.sh && \
+    /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH
 
 # Common dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
@@ -489,12 +453,23 @@ ARG ARCH_ALT
 ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins
 ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:$LD_LIBRARY_PATH
 
-# Setup the python environment
+# Copy the virtual environment from base stage (includes vllm and all dependencies)
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN uv venv $VIRTUAL_ENV --python 3.12 && \
-    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
+COPY --from=base /opt/dynamo/venv /opt/dynamo/venv
+RUN echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
-# Common dependencies
+# Install vllm in non-editable mode for runtime
+ARG VLLM_REF
+ARG MAX_JOBS=16
+ENV MAX_JOBS=$MAX_JOBS
+ENV CUDA_HOME=/usr/local/cuda
+RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
+    --mount=type=cache,target=/root/.cache/uv \
+    cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
+    chmod +x /tmp/install_vllm.sh && \
+    /tmp/install_vllm.sh --no-editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS
+
+# Common dependencies - these may already be installed in the copied venv, but run anyway for safety
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
     uv pip install --requirement /tmp/requirements.txt
 
@@ -512,7 +487,7 @@ RUN uv pip install /workspace/benchmarks
 #Copy NIXL and Dynamo wheels into wheelhouse
 COPY --from=base /workspace/wheels/nixl/*.whl wheelhouse/
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
-RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
+RUN uv pip install ai-dynamo --find-links wheelhouse && \
     uv pip install nixl --find-links wheelhouse && \
     ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
     rm -r wheelhouse
