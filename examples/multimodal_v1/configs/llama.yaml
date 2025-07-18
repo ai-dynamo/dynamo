@@ -25,15 +25,6 @@ Processor:
   prompt-template: "<|image|>\n<prompt>"
   common-configs: [model, block-size, max-model-len]
 
-VllmEncodeWorker:
-  tensor-parallel-size: 1
-  router: random
-  ServiceArgs:
-    workers: 1
-    resources:
-      gpu: '1'
-  common-configs: [model]
-
 VllmDecodeWorker:
   router: random
   tensor_parallel_size: 8
