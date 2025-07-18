@@ -26,11 +26,22 @@ This approach allows you to install Dynamo directly using a DynamoGraphDeploymen
 - Kubernetes 1.16+
 - ETCD v3.5+ (without auth)
 - NATS v2.10+ (with jetstream enabled)
+- Grove v0.1.0+ (optional if deploying using Grove)
 
 ### Basic Installation
 
+This will deploy the graph using the basic k8s Deployment resources.
+
 ```bash
 helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud -f ./examples/vllm_v1/deploy/agg.yaml
+```
+
+### Installation using Grove
+
+This will deploy the graph using Grove PodGangSet resources.
+
+```bash
+helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud -f ./examples/vllm_v1/deploy/agg.yaml --set deploymentType=grove
 ```
 
 ### Customizable Properties
@@ -52,6 +63,7 @@ helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud \
 | `imagePullSecrets` | Array of image pull secrets for accessing private registries | `imagePullSecrets[0].name=docker-secret-1` |
 | `etcdAddr` | Address of the etcd service | `dynamo-platform-etcd:2379` |
 | `natsAddr` | Address of the NATS messaging service | `nats://dynamo-platform-nats:4222` |
+| `deploymentType` | Type of deployment to use. Can be `basic` or `grove`. If not specified, `basic` is used. | `deploymentType=grove` |
 
 
 
