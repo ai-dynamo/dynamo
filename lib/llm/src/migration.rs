@@ -114,8 +114,7 @@ impl RetryManager {
                     const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
                     if format!("{:?}", err) == STREAM_ERR_MSG {
                         tracing::info!("Stream disconnected... recreating stream...");
-                        // TODO: Why generate() does not implement Sync?
-                        if let Err(err) = self.new_stream_spawn().await {
+                        if let Err(err) = self.new_stream().await {
                             tracing::info!("Cannot recreate stream: {:?}", err);
                         } else {
                             continue;
@@ -136,46 +135,6 @@ impl RetryManager {
             // TODO: Is there anything needed to pass between context?
             let request = SingleIn::new(self.request.clone());
             response_stream = Some(self.next_generate.generate(request).await);
-            if let Some(err) = response_stream.as_ref().unwrap().as_ref().err() {
-                if let Some(req_err) = err.downcast_ref::<NatsRequestError>() {
-                    if matches!(req_err.kind(), NatsNoResponders) {
-                        tracing::info!("Creating new stream... retrying...");
-                        continue;
-                    }
-                }
-            }
-            break;
-        }
-        match response_stream {
-            Some(Ok(next_stream)) => {
-                self.next_stream = Some(next_stream);
-                Ok(())
-            }
-            Some(Err(err)) => Err(err), // should propagate streaming error if stream started
-            None => Err(Error::msg(
-                "Retries exhausted - should propagate streaming error",
-            )),
-        }
-    }
-
-    // Same as `new_stream`, but spawns a new task to create the stream.
-    // This can be used in place of `new_stream`, but keeping `new_stream` for the initial stream
-    // creation due to performance reasons.
-    async fn new_stream_spawn(&mut self) -> Result<()> {
-        let mut response_stream: Option<Result<ManyOut<Annotated<LLMEngineOutput>>>> = None;
-        while self.retries_left > 0 {
-            self.retries_left -= 1;
-            // TODO: Is there anything needed to pass between context?
-            let request = SingleIn::new(self.request.clone());
-            let next = self.next_generate.clone();
-            let handle = tokio::spawn(async move { next.generate(request).await });
-            response_stream = Some(match handle.await {
-                Ok(response_stream) => response_stream,
-                Err(err) => {
-                    tracing::error!("Failed to spawn generate stream: {:?}", err);
-                    return Err(Error::msg("Failed to spawn generate stream"));
-                }
-            });
             if let Some(err) = response_stream.as_ref().unwrap().as_ref().err() {
                 if let Some(req_err) = err.downcast_ref::<NatsRequestError>() {
                     if matches!(req_err.kind(), NatsNoResponders) {
