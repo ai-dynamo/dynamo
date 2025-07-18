@@ -99,4 +99,8 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ActiveBlockPool<S, L, M>
             None
         }
     }
+
+    pub fn status(&self) -> Vec<SequenceHash> {
+        self.map.keys().cloned().collect()
+    }
 }
