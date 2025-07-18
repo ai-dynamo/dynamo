@@ -52,7 +52,7 @@ class Processor(ProcessMixIn):
     vLLM pre and post processing
     """
 
-    encode_worker = depends(VllmPDWorker)
+    pd_worker = depends(VllmPDWorker)
 
     def __init__(self):
         class_name = self.__class__.__name__

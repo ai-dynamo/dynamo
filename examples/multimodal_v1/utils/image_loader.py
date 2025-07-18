@@ -33,7 +33,7 @@ class ImageLoader:
         self._http_timeout = 30.0
         self._http_client = httpx.AsyncClient(timeout=self._http_timeout)
         self._image_cache: dict[str, Image.Image] = {}
-        self._cache_queue = asyncio.Queue(maxsize=cache_size)
+        self._cache_queue: asyncio.Queue[str] = asyncio.Queue(maxsize=cache_size)
 
     async def load_image(self, image_url: str) -> Image.Image:
         parsed_url = urlparse(image_url)
