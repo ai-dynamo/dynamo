@@ -309,13 +309,6 @@ func (r *DynamoGraphDeploymentReconciler) generateDefaultIngressSpec(dynamoDeplo
 	return res
 }
 
-func (r *DynamoGraphDeploymentReconciler) isEndpointSecured() bool {
-	if r.VirtualServiceGateway != "" && r.Config.VirtualServiceSupportsHTTPS {
-		return true
-	}
-	return r.IngressControllerTLSSecret != ""
-}
-
 func (r *DynamoGraphDeploymentReconciler) FinalizeResource(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) error {
 	// for now doing nothing
 	return nil
