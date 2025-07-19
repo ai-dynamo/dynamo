@@ -43,6 +43,7 @@ allow = [
 # MIT: https://github.com/guidance-ai/llguidance/toktrie_hf_tokenizers
 #  "toktrie_hf_tokenizers",
 
+
 [[licenses.clarify]]
 
 name = "ring"
@@ -50,6 +51,7 @@ expression = "MIT AND ISC AND OpenSSL"
 license-files = [
     { path = "LICENSE", hash = 0xbd0eed23 }
 ]
+
 
 [bans]
 deny = [

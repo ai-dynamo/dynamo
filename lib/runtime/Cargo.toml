@@ -70,3 +70,10 @@ env_logger = { version = "0.11" }
 reqwest = { workspace = true }
 rstest = { version = "0.23.0" }
 temp-env = { version = "0.3.6" }
+
+
+[profile.ci]
+debug = 0            # No debug symbols
+opt-level = 1        # Some optimizations
+codegen-units = 4    # Faster compilation
+incremental = false  # Smaller artifacts, slower rebuild

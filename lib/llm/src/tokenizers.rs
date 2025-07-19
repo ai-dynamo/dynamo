@@ -85,6 +85,36 @@ pub mod traits {
         // fn get_vocab_size(&self) -> usize;
         // fn make_unique_clone(&self) -> Box<dyn Tokenizer>;
     }
+
+    /// Trait for counting tokens in text without requiring full decoding capabilities
+    pub trait TokenCounter: Send + Sync {
+        /// Count the number of tokens in the input text
+        fn count_tokens(&self, input: &str) -> Result<usize>;
+
+        /// Get both token IDs and count for the input text
+        fn count_tokens_with_ids(&self, input: &str) -> Result<(Vec<TokenIdType>, usize)>;
+
+        /// Get the full encoding for detailed analysis (optional)
+        fn encode_detailed(&self, input: &str) -> Result<Encoding>;
+    }
+
+    /// Blanket implementation for anything that implements Encoder
+    impl<T: Encoder> TokenCounter for T {
+        fn count_tokens(&self, input: &str) -> Result<usize> {
+            Ok(self.encode(input)?.token_ids().len())
+        }
+
+        fn count_tokens_with_ids(&self, input: &str) -> Result<(Vec<TokenIdType>, usize)> {
+            let encoding = self.encode(input)?;
+            let token_ids = encoding.token_ids().to_vec();
+            let count = token_ids.len();
+            Ok((token_ids, count))
+        }
+
+        fn encode_detailed(&self, input: &str) -> Result<Encoding> {
+            self.encode(input)
+        }
+    }
 }
 
 impl Encoding {
@@ -121,6 +151,23 @@ impl Deref for Tokenizer {
 impl From<Arc<dyn traits::Tokenizer>> for Tokenizer {
     fn from(tokenizer: Arc<dyn traits::Tokenizer>) -> Self {
         Tokenizer(tokenizer)
+    }
+}
+
+impl traits::TokenCounter for Tokenizer {
+    fn count_tokens(&self, input: &str) -> Result<usize> {
+        Ok(self.0.encode(input)?.token_ids().len())
+    }
+
+    fn count_tokens_with_ids(&self, input: &str) -> Result<(Vec<TokenIdType>, usize)> {
+        let encoding = self.0.encode(input)?;
+        let token_ids = encoding.token_ids().to_vec();
+        let count = token_ids.len();
+        Ok((token_ids, count))
+    }
+
+    fn encode_detailed(&self, input: &str) -> Result<Encoding> {
+        self.0.encode(input)
     }
 }
 

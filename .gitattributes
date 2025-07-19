@@ -7,7 +7,7 @@
 *.[Pp][Nn][Gg]      binary
 *.[Zz][Ii][Pp]      binary
 *.[Tt][Gg][Zz]      binary
-
 # Exclude test data files from linguist language detection
 lib/llm/tests/data/** linguist-vendored
 lib/llm/tests/snapshots/** linguist-vendored
+lib/llm/tests/data/replays/deepseek-r1-distill-llama-8b/tokenizer-deepseek-r1-distill-llama-8b.json.gz filter=lfs diff=lfs merge=lfs -text

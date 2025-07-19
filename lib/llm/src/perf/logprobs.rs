@@ -568,9 +568,10 @@ mod tests {
     type TestTokenAlternative = (&'static str, f32);
     type TestTokenData = (&'static str, f32, Vec<TestTokenAlternative>);
     type TestTokenDataVec = Vec<TestTokenData>;
-    use crate::perf::{record_stream_with_context, RecordingMode, TimestampedResponse};
-    use crate::protocols::codec::create_message_stream;
-    use crate::protocols::convert_sse_stream;
+    use crate::perf::{
+        read_annotated_stream_from_file, record_stream_with_context, RecordingMode,
+        TimestampedResponse,
+    };
     use approx::assert_abs_diff_eq;
     use async_openai::types::{
         ChatChoiceLogprobs, ChatChoiceStream, ChatCompletionStreamResponseDelta,
@@ -1449,21 +1450,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_real_sse_stream_analysis() {
-        // Read the real SSE data with logprobs
-        let data = std::fs::read_to_string(
+        let stream = read_annotated_stream_from_file::<NvCreateChatCompletionStreamResponse>(
             "tests/data/replays/deepseek-r1-distill-llama-8b/chat-completions.stream.1",
         )
-        .expect("Failed to read test data file");
-
-        // Create stream from SSE data
-        let sse_stream = create_message_stream(&data);
-
-        // Convert SSE messages to our stream response format using the existing converter
-        let response_stream =
-            convert_sse_stream::<NvCreateChatCompletionStreamResponse>(Box::pin(sse_stream));
+        .unwrap();
 
         // Filter out errors and extract successful responses
-        let filtered_stream = response_stream.filter_map(|annotated| async move { annotated.data });
+        let filtered_stream = stream.filter_map(|annotated| async move { annotated.data });
 
         // Create a mock context for recording
         let ctx = Arc::new(MockContext::new());
