@@ -88,7 +88,7 @@ impl MetricsRegistry for Namespace {
     }
 
     fn parent_hierarchy(&self) -> Vec<String> {
-        vec![self.drt().prefix()]
+        vec![self.drt().basename()]
     }
 }
 

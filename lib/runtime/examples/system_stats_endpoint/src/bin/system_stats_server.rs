@@ -44,11 +44,13 @@ impl MySystemStatsMetrics {
             "service_requests_total",
             "Total number of requests processed",
             &[("service", "backend")],
+            true,
         )?;
         let request_duration = metrics_registry.create_histogram(
             "service_request_duration_seconds",
             "Time spent processing requests",
             &[("service", "backend")],
+            true,
         )?;
         Ok(Self {
             request_counter,

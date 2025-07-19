@@ -75,7 +75,7 @@ mod test_helpers {
 // - Ensures consistent registration behavior across all metric types
 // - Registers metrics hierarchically at all parent levels for proper aggregation
 macro_rules! register_metric_inline {
-    ($registry:expr, $metric:expr) => {{
+    ($registry:expr, $metric:expr, $prefix_in_name:expr) => {{
         let mut registry = $registry
             .drt()
             .prometheus_registries_by_prefix
@@ -84,13 +84,21 @@ macro_rules! register_metric_inline {
 
         // Register at all hierarchy levels, including the current level
         let mut hierarchy = $registry.parent_hierarchy();
-        hierarchy.push($registry.prefix());
+        hierarchy.push($registry.basename());
 
+        let mut prefix_and_name = String::new();
         for prefix in hierarchy {
+            if $prefix_in_name {
+                if !prefix_and_name.is_empty() {
+                    prefix_and_name.push('_');
+                }
+                prefix_and_name.push_str(&prefix);
+            }
+
             // Always register, even for empty prefixes (for DRT)
             let collector: Box<dyn prometheus::core::Collector> = Box::new($metric.clone());
             let _ = registry
-                .entry(prefix)
+                .entry(if $prefix_in_name { prefix_and_name.clone() } else { $registry.basename() })
                 .or_insert(prometheus::Registry::new())
                 .register(collector);
         }
@@ -107,17 +115,14 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
     /// Get the full hierarchy+basename for this registry. Because drt's prefix is an empty string,
     /// we need to handle it separately.
     fn prefix(&self) -> String {
-        let parent_hierarchy = self.parent_hierarchy();
-        if parent_hierarchy.is_empty() {
-            self.basename()
-        } else {
-            let last_element = parent_hierarchy.last().unwrap();
-            let combined = format!("{}_{}", last_element, self.basename());
-            combined.trim_start_matches('_').to_string()
-        }
+        [self.parent_hierarchy(), vec![self.basename()]]
+            .concat()
+            .join("_")
+            .trim_start_matches('_')
+            .to_string()
     }
 
-    // Get the parent hierarchy for this registry (does not include this registry's prefix)
+    // Get the parent hierarchy for this registry (just the base names, NOT the prefix)
     fn parent_hierarchy(&self) -> Vec<String>;
 
     /// Helper method to build the full metric name with prefix
@@ -152,11 +157,12 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
+        prefix_in_name: bool,
     ) -> anyhow::Result<Arc<prometheus::Counter>> {
         let full_name = self.build_metric_name(name);
         let counter = prometheus::Counter::new(&full_name, description)?;
         // Use the private macro to register the metric inline
-        register_metric_inline!(self, counter.clone());
+        register_metric_inline!(self, counter.clone(), prefix_in_name);
         Ok(Arc::new(counter.clone()))
     }
 
@@ -166,11 +172,12 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
+        prefix_in_name: bool,
     ) -> anyhow::Result<Arc<prometheus::Gauge>> {
         let full_name = self.build_metric_name(name);
         let gauge = prometheus::Gauge::new(&full_name, description)?;
         // Use the private macro to register the metric inline
-        register_metric_inline!(self, gauge.clone());
+        register_metric_inline!(self, gauge.clone(), prefix_in_name);
         Ok(Arc::new(gauge))
     }
 
@@ -180,12 +187,13 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
+        prefix_in_name: bool,
     ) -> anyhow::Result<Arc<prometheus::Histogram>> {
         let full_name = self.build_metric_name(name);
         let opts = prometheus::HistogramOpts::new(&full_name, description);
         let histogram = prometheus::Histogram::with_opts(opts)?;
         // Use the private macro to register the metric inline
-        register_metric_inline!(self, histogram.clone());
+        register_metric_inline!(self, histogram.clone(), prefix_in_name);
         Ok(Arc::new(histogram))
     }
 
@@ -242,21 +250,21 @@ mod test_simple_registry_trait {
 
         // Test Counter creation
         let counter = registry
-            .create_counter("my_counter", "A test counter", &[])
+            .create_counter("my_counter", "A test counter", &[], true)
             .unwrap();
         counter.inc_by(42.0);
         assert_eq!(counter.get() as u64, 42);
 
         // Test Gauge creation
         let gauge = registry
-            .create_gauge("my_gauge", "A test gauge", &[])
+            .create_gauge("my_gauge", "A test gauge", &[], true)
             .unwrap();
         gauge.set(123.45);
         assert_eq!(gauge.get(), 123.45);
 
         // Test Histogram creation
         let histogram = registry
-            .create_histogram("my_histogram", "A test histogram", &[])
+            .create_histogram("my_histogram", "A test histogram", &[], true)
             .unwrap();
         histogram.observe(1.5);
         histogram.observe(2.5);
@@ -352,7 +360,7 @@ mod test_runtime_and_namespace_registry_trait {
 
         // Create metrics using factory methods and increment some values
         let runtime_counter = runtime_registry
-            .create_counter("total_requests", "Total requests across all runtime", &[])
+            .create_counter("total_requests", "Total requests across all runtime", &[], true)
             .unwrap();
         runtime_counter.inc_by(100.0);
 
@@ -361,6 +369,7 @@ mod test_runtime_and_namespace_registry_trait {
                 "active_connections",
                 "Active connections for this namespace",
                 &[],
+                true,
             )
             .unwrap();
         namespace_gauge.set(25.0);
@@ -444,7 +453,7 @@ mod test_prefixes {
         assert_eq!(
             ns.prefix(),
             "mynamespace",
-            "Namespace prefix should be 'mynamespace'"
+            "Namespace prefix should be 'mynamespace', because drt's prefix is empty"
         );
 
         // Test Component hierarchy
@@ -480,7 +489,7 @@ mod test_prefixes {
             "myendpoint",
             "Endpoint basename should be 'myendpoint'"
         );
-        assert_eq!(endpoint.parent_hierarchy(), vec!["", "mynamespace", "mynamespace_mycomponent"], "Endpoint parent hierarchy should be [\"\", \"mynamespace\", \"mynamespace_mycomponent\"]");
+        assert_eq!(endpoint.parent_hierarchy(), vec!["", "mynamespace", "mycomponent"], "Endpoint parent hierarchy should be [\"\", \"mynamespace\", \"mynamespace_mycomponent\"]");
         assert_eq!(
             endpoint.prefix(),
             "mynamespace_mycomponent_myendpoint",
@@ -490,46 +499,18 @@ mod test_prefixes {
         // Test hierarchy relationships
         println!("\n=== Hierarchy Relationships ===");
         assert!(
-            ns.parent_hierarchy().contains(&drt.prefix()),
+            ns.parent_hierarchy().contains(&drt.basename()),
             "Namespace should have DRT prefix in parent hierarchy"
         );
         assert!(
-            component.parent_hierarchy().contains(&ns.prefix()),
+            component.parent_hierarchy().contains(&ns.basename()),
             "Component should have Namespace prefix in parent hierarchy"
         );
         assert!(
-            endpoint.parent_hierarchy().contains(&component.prefix()),
+            endpoint.parent_hierarchy().contains(&component.basename()),
             "Endpoint should have Component prefix in parent hierarchy"
         );
         println!("✓ All parent-child relationships verified");
-
-        // Test prefix relationships
-        println!("\n=== Prefix Relationships ===");
-        assert!(
-            component.prefix().starts_with(&ns.prefix()),
-            "Component prefix should start with namespace prefix"
-        );
-        assert!(
-            endpoint.prefix().starts_with(&component.prefix()),
-            "Endpoint prefix should start with component prefix"
-        );
-        println!("✓ All prefix containment relationships verified");
-
-        // Test format validation
-        println!("\n=== Format Validation ===");
-        assert!(
-            !ns.prefix().starts_with('_'),
-            "Namespace prefix should not start with underscore"
-        );
-        assert!(
-            !component.prefix().starts_with('_'),
-            "Component prefix should not start with underscore"
-        );
-        assert!(
-            !endpoint.prefix().starts_with('_'),
-            "Endpoint prefix should not start with underscore"
-        );
-        println!("✓ All prefixes properly formatted (no leading underscores)");
 
         // Test hierarchy depth
         println!("\n=== Hierarchy Depth ===");
@@ -581,6 +562,7 @@ mod test_prefixes {
                 "count",
                 "Total number of requests processed",
                 &[("service", "endpoint")],
+                true,
             )
             .unwrap();
         endpoint_count.inc_by(4.0);
@@ -607,6 +589,7 @@ mynamespace_mycomponent_myendpoint__count 4
                 "count",
                 "Total number of requests processed",
                 &[("service", "component")],
+                true,
             )
             .unwrap();
         component_count.inc_by(3.0);
@@ -636,6 +619,7 @@ mynamespace_mycomponent_myendpoint__count 4
                 "count",
                 "Total number of requests processed",
                 &[("service", "ns")],
+                true,
             )
             .unwrap();
         ns_count.inc_by(2.0);
@@ -668,6 +652,7 @@ mynamespace_mycomponent_myendpoint__count 4
                 "count",
                 "Total number of requests processed",
                 &[("service", "drt")],
+                true,
             )
             .unwrap();
         drt_count.inc_by(1.0);

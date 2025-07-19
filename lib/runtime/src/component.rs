@@ -178,7 +178,7 @@ impl MetricsRegistry for Component {
     fn parent_hierarchy(&self) -> Vec<String> {
         vec![
             self.namespace.parent_hierarchy(),
-            vec![self.namespace.prefix()],
+            vec![self.namespace.basename()],
         ]
         .concat()
     }
@@ -324,7 +324,7 @@ impl MetricsRegistry for Endpoint {
     fn parent_hierarchy(&self) -> Vec<String> {
         vec![
             self.component.parent_hierarchy(),
-            vec![self.component.prefix()],
+            vec![self.component.basename()],
         ]
         .concat()
     }

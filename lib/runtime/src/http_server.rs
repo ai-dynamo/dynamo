@@ -59,6 +59,7 @@ impl HttpServerState {
             "uptime_seconds",
             "Total uptime of the DistributedRuntime in seconds",
             &[("service", "dynamo"), ("subsystem", "runtime")],
+            true,
         )?;
         let state = Self {
             root_drt: drt,
