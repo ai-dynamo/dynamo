@@ -71,26 +71,6 @@ impl<S: Storage, R: LogicalResources> LogicalBlockData<S, R> {
     }
 }
 
-impl<S: Storage, R: LogicalResources> StorageTypeProvider for LogicalBlockData<S, R> {
-    type StorageType = S;
-}
-
-impl<S: Storage, R: LogicalResources> BlockDataProvider for LogicalBlockData<S, R> {
-    type Locality = Logical<R>;
-
-    fn block_data(&self) -> &impl BlockDataExt<Self::StorageType> {
-        self
-    }
-}
-
-impl<S: Storage, R: LogicalResources> BlockDataProviderMut for LogicalBlockData<S, R> {
-    type Locality = Logical<R>;
-
-    fn block_data_mut(&mut self) -> &mut impl BlockDataExt<Self::StorageType> {
-        self
-    }
-}
-
 impl<S: Storage, R: LogicalResources> BlockDataExt<S> for LogicalBlockData<S, R> {
     fn block_id(&self) -> BlockId {
         self.block_id
