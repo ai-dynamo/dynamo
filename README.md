@@ -83,7 +83,7 @@ docker push <your-registry>/dynamo-base:latest-vllm
 ```
 
 Notes about builds for specific frameworks:
-- For specific details on the `--framework vllm` build, see [here](examples/llm/README.md).
+- For specific details on the `--framework vllm` build, see [here](examples/vllm/README.md).
 - For specific details on the `--framework tensorrtllm` build, see [here](examples/tensorrt_llm/README.md).
 
 Note about AWS environments:
@@ -99,14 +99,14 @@ export DYNAMO_IMAGE=<your-registry>/dynamo-base:latest-vllm
 
 ### Running and Interacting with an LLM Locally
 
-To run a model and interact with it locally you can call `dynamo
-run` with a hugging face model. `dynamo run` supports several backends
-including: `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
+You can run a model and interact with it locally using commands below.
+We support several backends including: `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
 
-#### Example Command
+#### Example Commands
 
 ```
-dynamo run out=vllm deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+python -m dynamo.frontend [--http-port 8080]
+python -m dynamo.vllm deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 ```
 
 ```

@@ -37,7 +37,7 @@ Use `run` to start an interactive chat session with a model. This command execut
 
 #### Example
 ```bash
-dynamo run deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+dynamo-run deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
 ```
 
 ### `serve`
