@@ -24,7 +24,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/imdario/mergo"
@@ -1204,7 +1203,6 @@ func (r *DynamoComponentDeploymentReconciler) generateHPA(opt generateResourceOp
 
 //nolint:gocyclo,nakedret
 func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx context.Context, opt generateResourceOption) (podTemplateSpec *corev1.PodTemplateSpec, err error) {
-	logs := log.FromContext(ctx)
 	podLabels := r.getKubeLabels(opt.dynamoComponentDeployment)
 	if opt.isStealingTrafficDebugModeEnabled {
 		podLabels[commonconsts.KubeLabelDynamoDeploymentTargetType] = DeploymentTargetTypeDebug
@@ -1296,34 +1294,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	volumes := make([]corev1.Volume, 0)
 	volumeMounts := make([]corev1.VolumeMount, 0)
 
-	args := make([]string, 0)
-
-	args = append(args, "cd", "src", "&&", "uv", "run", "dynamo", "serve")
-
-	// ensure liveness and readiness probes are enabled for the dynamo components
-	args = append(args, "--system-app-port", fmt.Sprintf("%d", commonconsts.DynamoHealthPort))
-	args = append(args, "--enable-system-app")
-	args = append(args, "--use-default-health-checks")
-
-	if opt.dynamoComponentDeployment.Spec.ServiceName != "" {
-		args = append(args, []string{"--service-name", opt.dynamoComponentDeployment.Spec.ServiceName}...)
-		args = append(args, opt.dynamoComponentDeployment.Spec.DynamoTag)
-		if opt.dynamoComponentDeployment.Spec.DynamoNamespace != nil && *opt.dynamoComponentDeployment.Spec.DynamoNamespace != "" {
-			args = append(args, fmt.Sprintf("--%s.ServiceArgs.dynamo.namespace=%s", opt.dynamoComponentDeployment.Spec.ServiceName, *opt.dynamoComponentDeployment.Spec.DynamoNamespace))
-		}
-		if componentType, exists := opt.dynamoComponentDeployment.Labels[commonconsts.KubeLabelDynamoComponent]; exists && componentType == ComponentTypePlanner {
-			args = append(args, fmt.Sprintf("--%s.environment=%s", opt.dynamoComponentDeployment.Spec.ServiceName, KubernetesDeploymentStrategy))
-		}
-	}
-
-	if len(opt.dynamoComponentDeployment.Spec.Envs) > 0 {
-		for _, env := range opt.dynamoComponentDeployment.Spec.Envs {
-			if env.Name == "DYNAMO_CONFIG_PATH" {
-				args = append(args, "-f", env.Value)
-			}
-		}
-	}
-
 	dynamoResources := opt.dynamoComponentDeployment.Spec.Resources
 
 	resources, err := getResourcesConfig(dynamoResources)
@@ -1398,8 +1368,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	container := corev1.Container{
 		Name:           "main",
 		Image:          imageName,
-		Command:        []string{"sh", "-c"},
-		Args:           []string{strings.Join(args, " ")},
 		LivenessProbe:  livenessProbe,
 		ReadinessProbe: readinessProbe,
 		Resources:      resources,
@@ -1496,23 +1464,8 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 	if opt.dynamoComponentDeployment.Spec.ExtraPodSpec != nil {
 		extraPodSpecMainContainer := opt.dynamoComponentDeployment.Spec.ExtraPodSpec.MainContainer
 		if extraPodSpecMainContainer != nil {
-			if len(extraPodSpecMainContainer.Command) > 0 {
-				logs.Info("Overriding container '" + container.Name + "' Command with: " + strings.Join(extraPodSpecMainContainer.Command, " "))
-				container.Command = extraPodSpecMainContainer.Command
-			}
-			if len(extraPodSpecMainContainer.Args) > 0 {
-				// Special case: if command is "sh -c", we must collapse args into a single string
-				if len(container.Command) == 2 && container.Command[0] == "sh" && container.Command[1] == "-c" {
-					joinedArgs := strings.Join(extraPodSpecMainContainer.Args, " ")
-					logs.Info("Special case detected for container '" + container.Name + "': Command is 'sh -c'; collapsing Args to: " + joinedArgs)
-					container.Args = []string{joinedArgs}
-				} else {
-					logs.Info("Overriding container '" + container.Name + "' Args with: " + strings.Join(extraPodSpecMainContainer.Args, " "))
-					container.Args = extraPodSpecMainContainer.Args
-				}
-			}
-			// finally, Merge non empty fields from extraPodSpecMainContainer into container, only overriding empty fields
-			err := mergo.Merge(&container, extraPodSpecMainContainer)
+			// Merge non empty fields from extraPodSpecMainContainer into container, only overriding empty fields
+			err := mergo.Merge(&container, extraPodSpecMainContainer.DeepCopy())
 			if err != nil {
 				err = errors.Wrapf(err, "failed to merge extraPodSpecMainContainer into container")
 				return nil, err
@@ -1670,7 +1623,7 @@ func getResourcesConfig(resources *dynamoCommon.Resources) (corev1.ResourceRequi
 	if err != nil {
 		return corev1.ResourceRequirements{}, errors.Wrapf(err, "failed to get resources config")
 	}
-	err = mergo.Merge(resourcesConfig, defaultResources)
+	err = mergo.Merge(resourcesConfig, defaultResources.DeepCopy())
 	if err != nil {
 		return corev1.ResourceRequirements{}, errors.Wrapf(err, "failed to merge resources config")
 	}

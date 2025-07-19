@@ -342,12 +342,12 @@ func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.Dyn
 		container.Resources = *resourcesConfig
 		if component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil {
 			// merge the extraPodSpec from the parent deployment with the extraPodSpec from the service
-			err := mergo.Merge(&container, *component.ExtraPodSpec.MainContainer, mergo.WithOverride)
+			err := mergo.Merge(&container, *component.ExtraPodSpec.MainContainer.DeepCopy(), mergo.WithOverride)
 			if err != nil {
 				return nil, fmt.Errorf("failed to merge extraPodSpec: %w", err)
 			}
 		}
-		// retrueve the image pull secrets for the container
+		// retrieve the image pull secrets for the container
 		imagePullSecrets := []corev1.LocalObjectReference{}
 		if secretsRetriever != nil {
 			secretsName, err := secretsRetriever.GetSecrets(dynamoDeployment.Namespace, container.Image)

@@ -97,8 +97,11 @@ spec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.4
           workingDir: /workspace/examples/vllm
+          command:
+            - /bin/sh
+            - -c
           args:
-            - "python3 components/main.py --model Qwen/Qwen3-0.6B --enforce-eager 2>&1 | tee /tmp/vllm.log"
+            - python3 components/main.py --model Qwen/Qwen3-0.6B --enforce-eager 2>&1 | tee /tmp/vllm.log
     VllmPrefillWorker:
       dynamoNamespace: vllm-v1-disagg-router
       envFromSecret: hf-token-secret
@@ -136,5 +139,8 @@ spec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.4
           workingDir: /workspace/examples/vllm
+          command:
+            - /bin/sh
+            - -c
           args:
-            - "python3 components/main.py --model Qwen/Qwen3-0.6B --enforce-eager --is-prefill-worker 2>&1 | tee /tmp/vllm.log"
+            - python3 components/main.py --model Qwen/Qwen3-0.6B --enforce-eager --is-prefill-worker 2>&1 | tee /tmp/vllm.log
