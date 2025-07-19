@@ -64,7 +64,7 @@ impl<S: Storage, R: LogicalResources> IntoBlocks<S, Logical<R>> for LogicalBlock
 #[cfg(test)]
 mod tests {
     use crate::block_manager::block::data::logical::null::NullResources;
-    use crate::block_manager::{BlockPool, PinnedStorage};
+    use crate::block_manager::{ManagedBlockPool, PinnedStorage};
 
     use super::*;
 
@@ -103,6 +103,6 @@ mod tests {
             .into_blocks_with_metadata(BasicMetadata::default())
             .unwrap();
 
-        BlockPool::builder().blocks(blocks).build().unwrap();
+        ManagedBlockPool::builder().blocks(blocks).build().unwrap();
     }
 }

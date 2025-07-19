@@ -89,7 +89,7 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
     pub fn apply_computed_tokens(
         &mut self,
         mut tokens_to_append: Vec<u32>,
-        block_pool: &BlockPool<S, L, BasicMetadata>,
+        block_pool: &dyn BlockPool<S, L, BasicMetadata>,
     ) -> Result<(), SlotError> {
         if tokens_to_append.is_empty() {
             return Ok(());
@@ -289,7 +289,7 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
     pub fn allocate_blocks(
         &mut self,
         num_new_tokens: usize,
-        block_pool: &BlockPool<S, L, BasicMetadata>,
+        block_pool: &dyn BlockPool<S, L, BasicMetadata>,
     ) -> Option<Vec<BlockId>> {
         let total_num_blocks =
             (self.computed_position + num_new_tokens).div_ceil(self.sequence.block_size());
@@ -437,17 +437,19 @@ mod tests {
     use dynamo_llm::block_manager::{
         block::locality::Local,
         block::{BasicMetadata, Blocks},
-        pool::BlockPool,
+        pool::{BlockPool, ManagedBlockPool},
         storage::tests::{NullDeviceAllocator, NullDeviceStorage},
     };
     use dynamo_llm::tokens::{SaltHash, Tokens};
+
+    use std::sync::Arc;
 
     const BLOCK_SIZE: usize = 4;
     const SALT_HASH: SaltHash = 12345;
 
     // Test fixture providing a pre-configured block pool for testing
     struct TestFixture {
-        pool: BlockPool<NullDeviceStorage, Local, BasicMetadata>,
+        pool: Arc<dyn BlockPool<NullDeviceStorage, Local, BasicMetadata>>,
         _runtime: tokio::runtime::Runtime,
     }
 
@@ -471,11 +473,13 @@ mod tests {
                 .unwrap();
 
             let runtime = tokio::runtime::Runtime::new().unwrap();
-            let pool = BlockPool::builder()
-                .blocks(blocks)
-                .async_runtime(runtime.handle().clone())
-                .build()
-                .unwrap();
+            let pool = Arc::new(
+                ManagedBlockPool::builder()
+                    .blocks(blocks)
+                    .async_runtime(runtime.handle().clone())
+                    .build()
+                    .unwrap(),
+            );
 
             Self {
                 pool,
@@ -495,7 +499,7 @@ mod tests {
     fn allocate_blocks_for_slot(
         slot: &mut Slot<NullDeviceStorage, Local>,
         num_tokens: usize,
-        pool: &BlockPool<NullDeviceStorage, Local, BasicMetadata>,
+        pool: &dyn BlockPool<NullDeviceStorage, Local, BasicMetadata>,
     ) -> Option<Vec<BlockId>> {
         slot.allocate_blocks(num_tokens, pool)
     }
@@ -524,12 +528,12 @@ mod tests {
 
         // Allocate blocks for initial tokens
         let allocated_blocks =
-            allocate_blocks_for_slot(&mut slot, initial_tokens.len(), &fixture.pool);
+            allocate_blocks_for_slot(&mut slot, initial_tokens.len(), fixture.pool.as_ref());
         assert!(allocated_blocks.is_some());
         assert_eq!(slot.mutable.len(), allocated_blocks.unwrap().len());
 
         // Apply empty token list - should succeed and not change state
-        let result = slot.apply_computed_tokens(vec![], &fixture.pool);
+        let result = slot.apply_computed_tokens(vec![], fixture.pool.as_ref());
         assert!(
             result.is_ok(),
             "Empty token application failed: {:?}",
@@ -555,11 +559,11 @@ mod tests {
 
         // Allocate blocks and apply the single token
         let allocated_blocks =
-            allocate_blocks_for_slot(&mut slot, initial_tokens.len(), &fixture.pool);
+            allocate_blocks_for_slot(&mut slot, initial_tokens.len(), fixture.pool.as_ref());
         assert!(allocated_blocks.is_some());
         assert_eq!(slot.mutable.len(), 1);
 
-        let result = slot.apply_computed_tokens(initial_tokens, &fixture.pool);
+        let result = slot.apply_computed_tokens(initial_tokens, fixture.pool.as_ref());
         assert!(
             result.is_ok(),
             "Single token prefill failed: {:?}",
@@ -594,7 +598,7 @@ mod tests {
 
         // Allocate blocks for initial tokens (will include extra capacity)
         let allocated_blocks =
-            allocate_blocks_for_slot(&mut slot, initial_tokens.len(), &fixture.pool);
+            allocate_blocks_for_slot(&mut slot, initial_tokens.len(), fixture.pool.as_ref());
         assert!(allocated_blocks.is_some());
         let block_ids = allocated_blocks.unwrap();
         // We expect at least 2 blocks (may be more due to extra capacity)
@@ -609,7 +613,7 @@ mod tests {
 
         // Complete prefill token by token to work around assertion bug
         for (i, token) in initial_tokens.iter().enumerate() {
-            let result = slot.apply_computed_tokens(vec![*token], &fixture.pool);
+            let result = slot.apply_computed_tokens(vec![*token], fixture.pool.as_ref());
             assert!(result.is_ok(), "Token {} failed: {:?}", i, result.err());
             assert_eq!(slot.num_tokens(SlotPosition::Computed), i + 1);
         }
@@ -639,10 +643,10 @@ mod tests {
 
         // Complete prefill first
         let allocated_blocks =
-            allocate_blocks_for_slot(&mut slot, initial_tokens.len(), &fixture.pool);
+            allocate_blocks_for_slot(&mut slot, initial_tokens.len(), fixture.pool.as_ref());
         assert!(allocated_blocks.is_some());
 
-        let result = slot.apply_computed_tokens(initial_tokens.clone(), &fixture.pool);
+        let result = slot.apply_computed_tokens(initial_tokens.clone(), fixture.pool.as_ref());
         assert!(result.is_ok(), "Prefill failed: {:?}", result.err());
 
         // Verify prefill completed
@@ -659,7 +663,7 @@ mod tests {
             let decode_token = 100 + i as u32; // Use distinct tokens for decode
 
             // Allocate space for the new token
-            let allocated_blocks = allocate_blocks_for_slot(&mut slot, 1, &fixture.pool);
+            let allocated_blocks = allocate_blocks_for_slot(&mut slot, 1, fixture.pool.as_ref());
             assert!(
                 allocated_blocks.is_some(),
                 "Failed to allocate block for decode token {}",
@@ -669,7 +673,7 @@ mod tests {
             assert_eq!(slot.mutable.len(), 1);
 
             // Apply the decode token
-            let result = slot.apply_computed_tokens(vec![decode_token], &fixture.pool);
+            let result = slot.apply_computed_tokens(vec![decode_token], fixture.pool.as_ref());
             assert!(
                 result.is_ok(),
                 "Decode token {} failed: {:?}",
@@ -760,7 +764,7 @@ mod tests {
 
         // Apply tokens one-by-one to avoid the assertion bug
         for (i, token) in initial_tokens.iter().enumerate() {
-            let result = slot.apply_computed_tokens(vec![*token], &fixture.pool);
+            let result = slot.apply_computed_tokens(vec![*token], fixture.pool.as_ref());
             assert!(result.is_ok(), "Token {} failed: {:?}", i, result.err());
         }
 
@@ -778,7 +782,8 @@ mod tests {
         let mut slot1 = Slot::new(tokens.clone().into(), BLOCK_SIZE, salt_hash);
 
         // Allocate blocks for first slot
-        let allocated_blocks = allocate_blocks_for_slot(&mut slot1, tokens.len(), &fixture.pool);
+        let allocated_blocks =
+            allocate_blocks_for_slot(&mut slot1, tokens.len(), fixture.pool.as_ref());
         assert!(
             allocated_blocks.is_some(),
             "Failed to allocate blocks for first slot"
@@ -786,7 +791,7 @@ mod tests {
 
         // Apply tokens token-by-token (work around assertion bug)
         for (i, token) in tokens.iter().enumerate() {
-            let result = slot1.apply_computed_tokens(vec![*token], &fixture.pool);
+            let result = slot1.apply_computed_tokens(vec![*token], fixture.pool.as_ref());
             assert!(
                 result.is_ok(),
                 "Token {} failed in first slot: {:?}",
@@ -879,11 +884,11 @@ mod tests {
             println!("Pass {}: Processing chunk {:?}", pass + 1, chunk);
 
             // Allocate blocks for this chunk
-            let allocated_blocks = slot1.allocate_blocks(chunk_size, &fixture.pool);
+            let allocated_blocks = slot1.allocate_blocks(chunk_size, fixture.pool.as_ref());
             println!("  Allocated blocks: {:?}", allocated_blocks);
 
             // Apply the chunk
-            let result = slot1.apply_computed_tokens(chunk.to_vec(), &fixture.pool);
+            let result = slot1.apply_computed_tokens(chunk.to_vec(), fixture.pool.as_ref());
             assert!(
                 result.is_ok(),
                 "Pass {} failed: {:?}",
@@ -1028,14 +1033,15 @@ mod tests {
 
         // WORKFLOW 1: Cache Miss Path (slot1)
         let mut slot1 = Slot::new(tokens.clone().into(), BLOCK_SIZE, salt);
-        let allocated_blocks = allocate_blocks_for_slot(&mut slot1, tokens.len(), &fixture.pool);
+        let allocated_blocks =
+            allocate_blocks_for_slot(&mut slot1, tokens.len(), fixture.pool.as_ref());
         assert!(allocated_blocks.is_some());
 
         let start_time = std::time::Instant::now();
 
         // Token-by-token application (cache miss path)
         for token in &tokens {
-            let result = slot1.apply_computed_tokens(vec![*token], &fixture.pool);
+            let result = slot1.apply_computed_tokens(vec![*token], fixture.pool.as_ref());
             assert!(result.is_ok());
         }
 
@@ -1100,11 +1106,11 @@ mod tests {
         // Create first slot with tokens_a (cache miss)
         let mut slot_a1 = Slot::new(tokens_a.clone().into(), BLOCK_SIZE, salt);
         let allocated_blocks =
-            allocate_blocks_for_slot(&mut slot_a1, tokens_a.len(), &fixture.pool);
+            allocate_blocks_for_slot(&mut slot_a1, tokens_a.len(), fixture.pool.as_ref());
         assert!(allocated_blocks.is_some());
 
         for token in &tokens_a {
-            let result = slot_a1.apply_computed_tokens(vec![*token], &fixture.pool);
+            let result = slot_a1.apply_computed_tokens(vec![*token], fixture.pool.as_ref());
             assert!(result.is_ok());
         }
 
@@ -1114,11 +1120,11 @@ mod tests {
         // Create first slot with tokens_b (cache miss)
         let mut slot_b1 = Slot::new(tokens_b.clone().into(), BLOCK_SIZE, salt);
         let allocated_blocks =
-            allocate_blocks_for_slot(&mut slot_b1, tokens_b.len(), &fixture.pool);
+            allocate_blocks_for_slot(&mut slot_b1, tokens_b.len(), fixture.pool.as_ref());
         assert!(allocated_blocks.is_some());
 
         for token in &tokens_b {
-            let result = slot_b1.apply_computed_tokens(vec![*token], &fixture.pool);
+            let result = slot_b1.apply_computed_tokens(vec![*token], fixture.pool.as_ref());
             assert!(result.is_ok());
         }
 
@@ -1186,20 +1192,22 @@ mod tests {
 
         // Create slots with same tokens but different salts
         let mut slot1 = Slot::new(tokens.clone().into(), BLOCK_SIZE, salt1);
-        let allocated_blocks = allocate_blocks_for_slot(&mut slot1, tokens.len(), &fixture.pool);
+        let allocated_blocks =
+            allocate_blocks_for_slot(&mut slot1, tokens.len(), fixture.pool.as_ref());
         assert!(allocated_blocks.is_some());
 
         for token in &tokens {
-            let result = slot1.apply_computed_tokens(vec![*token], &fixture.pool);
+            let result = slot1.apply_computed_tokens(vec![*token], fixture.pool.as_ref());
             assert!(result.is_ok());
         }
 
         let mut slot2 = Slot::new(tokens.clone().into(), BLOCK_SIZE, salt2);
-        let allocated_blocks = allocate_blocks_for_slot(&mut slot2, tokens.len(), &fixture.pool);
+        let allocated_blocks =
+            allocate_blocks_for_slot(&mut slot2, tokens.len(), fixture.pool.as_ref());
         assert!(allocated_blocks.is_some());
 
         for token in &tokens {
-            let result = slot2.apply_computed_tokens(vec![*token], &fixture.pool);
+            let result = slot2.apply_computed_tokens(vec![*token], fixture.pool.as_ref());
             assert!(result.is_ok());
         }
 
@@ -1238,13 +1246,13 @@ mod tests {
         println!("=== Insufficient Capacity Error Test ===");
 
         // Allocate exactly enough blocks for initial tokens (1 block for 2 tokens)
-        let allocated_blocks = slot.allocate_blocks(2, &fixture.pool);
+        let allocated_blocks = slot.allocate_blocks(2, fixture.pool.as_ref());
         assert!(allocated_blocks.is_some());
         assert_eq!(allocated_blocks.unwrap().len(), 1);
         println!("Allocated 1 block for 2 tokens");
 
         // Apply initial tokens successfully
-        let result = slot.apply_computed_tokens(initial_tokens, &fixture.pool);
+        let result = slot.apply_computed_tokens(initial_tokens, fixture.pool.as_ref());
         assert!(result.is_ok(), "Initial token application should succeed");
         println!("Applied initial 2 tokens successfully");
 
@@ -1268,7 +1276,7 @@ mod tests {
 
         // Now try to apply more tokens than available capacity
         let excessive_tokens = vec![3, 4, 5, 6, 7]; // 5 tokens, but only 2 slots left in block
-        let result = slot.apply_computed_tokens(excessive_tokens, &fixture.pool);
+        let result = slot.apply_computed_tokens(excessive_tokens, fixture.pool.as_ref());
 
         // Should fail with clear error message
         assert!(result.is_err(), "Should fail with insufficient capacity");
@@ -1333,7 +1341,7 @@ mod tests {
         );
 
         // Try to apply tokens without allocating blocks first
-        let result = slot.apply_computed_tokens(tokens, &fixture.pool);
+        let result = slot.apply_computed_tokens(tokens, fixture.pool.as_ref());
 
         // Should fail because no mutable blocks are allocated
         assert!(result.is_err(), "Should fail without block allocation");
@@ -1389,7 +1397,7 @@ mod tests {
             println!("Applying chunk {}: {:?}", i + 1, chunk);
 
             // Allocate capacity for this chunk
-            let allocated = slot.allocate_blocks(chunk.len(), &fixture.pool);
+            let allocated = slot.allocate_blocks(chunk.len(), fixture.pool.as_ref());
             assert!(
                 allocated.is_some(),
                 "Should successfully allocate for chunk {}",
@@ -1397,7 +1405,7 @@ mod tests {
             );
 
             // Apply the chunk
-            let result = slot.apply_computed_tokens(chunk.clone(), &fixture.pool);
+            let result = slot.apply_computed_tokens(chunk.clone(), fixture.pool.as_ref());
             assert!(
                 result.is_ok(),
                 "Chunk {} should apply successfully: {:?}",
@@ -1467,9 +1475,9 @@ mod tests {
         println!("=== Speculative Decode Over-Allocation Test ===");
 
         // Complete prefill first
-        let allocated_blocks = slot.allocate_blocks(initial_tokens.len(), &fixture.pool);
+        let allocated_blocks = slot.allocate_blocks(initial_tokens.len(), fixture.pool.as_ref());
         assert!(allocated_blocks.is_some());
-        let result = slot.apply_computed_tokens(initial_tokens, &fixture.pool);
+        let result = slot.apply_computed_tokens(initial_tokens, fixture.pool.as_ref());
         assert!(result.is_ok());
 
         println!(
@@ -1479,7 +1487,7 @@ mod tests {
 
         // Allocate capacity for speculative decode (more than we'll actually use)
         let speculative_capacity = 6; // Allocate for 6 tokens
-        let allocated_blocks = slot.allocate_blocks(speculative_capacity, &fixture.pool);
+        let allocated_blocks = slot.allocate_blocks(speculative_capacity, fixture.pool.as_ref());
         assert!(allocated_blocks.is_some());
         let allocated_count = allocated_blocks.unwrap().len();
         println!(
@@ -1489,7 +1497,7 @@ mod tests {
 
         // Only use partial capacity (simulate speculative decode where only some predictions are correct)
         let actual_decode_tokens = vec![100, 101]; // Only 2 tokens used out of 6 allocated
-        let result = slot.apply_computed_tokens(actual_decode_tokens, &fixture.pool);
+        let result = slot.apply_computed_tokens(actual_decode_tokens, fixture.pool.as_ref());
         assert!(result.is_ok(), "Partial utilization should succeed");
 
         // Verify state
@@ -1552,11 +1560,12 @@ mod tests {
 
         // Create first slot and complete cache miss workflow
         let mut slot1 = Slot::new(tokens.clone().into(), BLOCK_SIZE, salt);
-        let allocated_blocks = allocate_blocks_for_slot(&mut slot1, tokens.len(), &fixture.pool);
+        let allocated_blocks =
+            allocate_blocks_for_slot(&mut slot1, tokens.len(), fixture.pool.as_ref());
         assert!(allocated_blocks.is_some());
 
         for token in &tokens {
-            let result = slot1.apply_computed_tokens(vec![*token], &fixture.pool);
+            let result = slot1.apply_computed_tokens(vec![*token], fixture.pool.as_ref());
             assert!(result.is_ok());
         }
 
@@ -1602,12 +1611,13 @@ mod tests {
         let additional_tokens = vec![9, 10];
 
         // First allocate blocks for the additional tokens
-        let allocated_blocks = slot2.allocate_blocks(additional_tokens.len(), &fixture.pool);
+        let allocated_blocks =
+            slot2.allocate_blocks(additional_tokens.len(), fixture.pool.as_ref());
         if allocated_blocks.is_some() {
             let pre_decode_mutable = slot2.mutable.len();
             let _ = slot2.immutable.len();
 
-            let result = slot2.apply_computed_tokens(additional_tokens, &fixture.pool);
+            let result = slot2.apply_computed_tokens(additional_tokens, fixture.pool.as_ref());
             // This should work as decode tokens after cache hit
             assert!(result.is_ok(), "Decode after cache hit should work");
 
@@ -1665,7 +1675,7 @@ mod tests {
         );
 
         // Test 2: Apply empty token list (should succeed)
-        let result = empty_slot.apply_computed_tokens(vec![], &fixture.pool);
+        let result = empty_slot.apply_computed_tokens(vec![], fixture.pool.as_ref());
         assert!(result.is_ok(), "Empty token application should succeed");
 
         // Validate state unchanged after empty application
@@ -1687,7 +1697,7 @@ mod tests {
         );
 
         // Test 3: Allocate zero blocks
-        let allocated = empty_slot.allocate_blocks(0, &fixture.pool);
+        let allocated = empty_slot.allocate_blocks(0, fixture.pool.as_ref());
         assert!(allocated.is_some(), "Zero block allocation should succeed");
         assert_eq!(
             allocated.unwrap().len(),
@@ -1730,7 +1740,7 @@ mod tests {
         for i in 0..20 {
             // Try to create many slots
             let mut slot = create_slot_with_tokens(tokens.clone());
-            let allocated = slot.allocate_blocks(tokens.len(), &fixture.pool);
+            let allocated = slot.allocate_blocks(tokens.len(), fixture.pool.as_ref());
 
             if allocated.is_some() && !allocated.as_ref().unwrap().is_empty() {
                 successful_allocations += 1;
@@ -1753,7 +1763,7 @@ mod tests {
 
         // Try one more allocation that should fail
         let mut final_slot = create_slot_with_tokens(tokens.clone());
-        let final_allocation = final_slot.allocate_blocks(tokens.len(), &fixture.pool);
+        let final_allocation = final_slot.allocate_blocks(tokens.len(), fixture.pool.as_ref());
 
         if final_allocation.is_none() || final_allocation.unwrap().is_empty() {
             println!("✅ Pool exhaustion handled gracefully");
@@ -1775,11 +1785,12 @@ mod tests {
 
         // Create first slot and cache blocks
         let mut slot1 = Slot::new(tokens1.clone().into(), BLOCK_SIZE, salt);
-        let allocated_blocks = allocate_blocks_for_slot(&mut slot1, tokens1.len(), &fixture.pool);
+        let allocated_blocks =
+            allocate_blocks_for_slot(&mut slot1, tokens1.len(), fixture.pool.as_ref());
         assert!(allocated_blocks.is_some());
 
         for token in &tokens1 {
-            let result = slot1.apply_computed_tokens(vec![*token], &fixture.pool);
+            let result = slot1.apply_computed_tokens(vec![*token], fixture.pool.as_ref());
             assert!(result.is_ok());
         }
 
@@ -1826,10 +1837,10 @@ mod tests {
 
         let mut slot = Slot::new(tokens.clone().into(), BLOCK_SIZE, SALT_HASH);
 
-        let allocated_blocks = slot.allocate_blocks(tokens.len() + 2, &fixture.pool);
+        let allocated_blocks = slot.allocate_blocks(tokens.len() + 2, fixture.pool.as_ref());
         assert_eq!(allocated_blocks.unwrap().len(), 3);
 
-        slot.apply_computed_tokens(tokens[..BLOCK_SIZE].to_vec(), &fixture.pool)
+        slot.apply_computed_tokens(tokens[..BLOCK_SIZE].to_vec(), fixture.pool.as_ref())
             .unwrap();
 
         assert_eq!(slot.immutable.len(), 1);
@@ -1838,7 +1849,7 @@ mod tests {
         // Add the remaining prefill tokens along with some simulated decode tokens.
         let remaining_prefill_with_decode_tokens = vec![0; BLOCK_SIZE + 1];
 
-        slot.apply_computed_tokens(remaining_prefill_with_decode_tokens, &fixture.pool)
+        slot.apply_computed_tokens(remaining_prefill_with_decode_tokens, fixture.pool.as_ref())
             .unwrap();
 
         assert_eq!(slot.immutable.len(), 2);

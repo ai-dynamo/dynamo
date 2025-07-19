@@ -99,7 +99,9 @@ impl KvbmLeader {
             .await
             .map_err(|e| anyhow::anyhow!("Failed to sync leader barrier: {:?}", e))?;
 
-        let num_device_blocks = worker_data.values().map(|data| data.num_device_blocks)
+        let num_device_blocks = worker_data
+            .values()
+            .map(|data| data.num_device_blocks)
             .min()
             .unwrap();
 

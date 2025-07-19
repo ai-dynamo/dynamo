@@ -106,7 +106,7 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata>
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-etcd"))]
 mod tests {
     use super::super::tests::create_reference_block_manager;
     use super::*;

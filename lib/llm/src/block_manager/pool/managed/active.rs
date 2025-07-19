@@ -22,6 +22,12 @@ pub struct ActiveBlockPool<S: Storage, L: LocalityProvider, M: BlockMetadata> {
     pub(super) map: HashMap<SequenceHash, Weak<MutableBlock<S, L, M>>>,
 }
 
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Default for ActiveBlockPool<S, L, M> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ActiveBlockPool<S, L, M> {
     pub fn new() -> Self {
         Self {

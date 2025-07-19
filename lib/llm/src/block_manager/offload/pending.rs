@@ -54,9 +54,8 @@ use crate::block_manager::block::{
     MutableBlock, ReadableBlock, WritableBlock,
 };
 use crate::block_manager::metrics::PoolMetrics;
-use crate::block_manager::pool::BlockPoolError;
+use crate::block_manager::pool::{BlockPool, BlockPoolError};
 use crate::block_manager::storage::{Local, Storage};
-use crate::block_manager::BlockPool;
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -82,7 +81,7 @@ pub struct PendingTransfer<
     /// The oneshot sender that optionally returns the registered blocks once the transfer is complete.
     completion_indicator: Option<oneshot::Sender<BlockResult<Target, Locality, Metadata>>>,
     /// The target pool that will receive the registered block.
-    target_pool: Arc<BlockPool<Target, Locality, Metadata>>,
+    target_pool: Arc<dyn BlockPool<Target, Locality, Metadata>>,
 }
 
 impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: BlockMetadata>
@@ -92,7 +91,7 @@ impl<Source: Storage, Target: Storage, Locality: LocalityProvider, Metadata: Blo
         sources: Vec<ImmutableBlock<Source, Locality, Metadata>>,
         targets: Vec<MutableBlock<Target, Locality, Metadata>>,
         completion_indicator: Option<oneshot::Sender<BlockResult<Target, Locality, Metadata>>>,
-        target_pool: Arc<BlockPool<Target, Locality, Metadata>>,
+        target_pool: Arc<dyn BlockPool<Target, Locality, Metadata>>,
     ) -> Self {
         assert_eq!(sources.len(), targets.len());
         Self {

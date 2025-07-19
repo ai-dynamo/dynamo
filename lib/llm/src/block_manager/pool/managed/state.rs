@@ -20,8 +20,11 @@ use crate::block_manager::{
 
 use super::*;
 
+use active::ActiveBlockPool;
+use inactive::InactiveBlockPool;
+
 impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M> {
-    fn new(
+    pub fn new(
         event_manager: Arc<dyn EventManager>,
         return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, L, M>>,
         global_registry: GlobalRegistry,
@@ -38,7 +41,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         }
     }
 
-    async fn handle_priority_request(
+    pub async fn handle_priority_request(
         &mut self,
         req: PriorityRequest<S, L, M>,
         return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
@@ -93,7 +96,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         }
     }
 
-    fn handle_control_request(&mut self, req: ControlRequest<S, L, M>) {
+    pub fn handle_control_request(&mut self, req: ControlRequest<S, L, M>) {
         match req {
             ControlRequest::AddBlocks(blocks) => {
                 let (blocks, resp_rx) = blocks.dissolve();
@@ -105,7 +108,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         }
     }
 
-    fn handle_return_block(&mut self, block: Block<S, L, M>) {
+    pub fn handle_return_block(&mut self, block: Block<S, L, M>) {
         self.return_block(block);
     }
 
@@ -359,117 +362,3 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         Publisher::new(self.event_manager.clone())
     }
 }
-
-impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine<S, L, M> {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        event_manager: Arc<dyn EventManager>,
-        priority_rx: tokio::sync::mpsc::UnboundedReceiver<PriorityRequest<S, L, M>>,
-        ctrl_rx: tokio::sync::mpsc::UnboundedReceiver<ControlRequest<S, L, M>>,
-        cancel_token: CancellationToken,
-        blocks: Vec<Block<S, L, M>>,
-        global_registry: GlobalRegistry,
-        async_runtime: Handle,
-        metrics: Arc<PoolMetrics>,
-    ) -> Self {
-        let (return_tx, return_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = State::<S, L, M>::new(
-            event_manager,
-            return_tx,
-            global_registry,
-            async_runtime,
-            metrics.clone(),
-        );
-
-        let count = blocks.len();
-
-        tracing::debug!(count, "adding blocks to inactive pool");
-        state.inactive.add_blocks(blocks);
-
-        let available_blocks_counter = state.inactive.available_blocks_counter();
-        let total_blocks_counter = state.inactive.total_blocks_counter();
-
-        Self {
-            priority_rx,
-            ctrl_rx,
-            cancel_token,
-            state,
-            return_rx,
-            metrics,
-            available_blocks_counter,
-            total_blocks_counter,
-        }
-    }
-
-    pub async fn step(&mut self) -> bool {
-        tokio::select! {
-            biased;
-
-            Some(priority_req) = self.priority_rx.recv(), if !self.priority_rx.is_closed() => {
-                self.metrics.gauge("priority_request_queue_size").set(self.priority_rx.len() as i64);
-                self.state.handle_priority_request(priority_req, &mut self.return_rx).await;
-            }
-
-            Some(req) = self.ctrl_rx.recv(), if !self.ctrl_rx.is_closed() => {
-                self.metrics.gauge("control_request_queue_size").set(self.ctrl_rx.len() as i64);
-                self.state.handle_control_request(req);
-            }
-
-            Some(block) = self.return_rx.recv() => {
-                self.metrics.gauge("return_block_queue_size").set(self.return_rx.len() as i64);
-                self.state.handle_return_block(block);
-            }
-
-            _ = self.cancel_token.cancelled() => {
-                return false;
-            }
-        }
-
-        true
-    }
-}
-// pub(crate) async fn progress_engine<S: Storage, M: BlockMetadata>(
-//     event_manager: Arc<dyn EventManager>,
-//     mut priority_rx: tokio::sync::mpsc::UnboundedReceiver<PriorityRequest<S, M>>,
-//     mut ctrl_rx: tokio::sync::mpsc::UnboundedReceiver<ControlRequest<S, M>>,
-//     cancel_token: CancellationToken,
-// ) {
-//     let (return_tx, mut return_rx) = tokio::sync::mpsc::unbounded_channel();
-//     let mut state = State::<S, M>::new(event_manager, return_tx);
-
-//     loop {
-//         tokio::select! {
-//             biased;
-
-//             Some(priority_req) = priority_rx.recv(), if !priority_rx.is_closed() => {
-//                 state.handle_priority_request(priority_req, &mut return_rx).await;
-//             }
-
-//             Some(req) = ctrl_rx.recv(), if !ctrl_rx.is_closed() => {
-//                 state.handle_control_request(req);
-//             }
-
-//             Some(block) = return_rx.recv() => {
-//                 state.handle_return_block(block);
-//             }
-
-//             _ = cancel_token.cancelled() => {
-//                 break;
-//             }
-//         }
-//     }
-// }
-
-// pub(crate) async fn progress_engine_v2<S: Storage, M: BlockMetadata>(
-//     event_manager: Arc<dyn EventManager>,
-//     priority_rx: tokio::sync::mpsc::UnboundedReceiver<PriorityRequest<S, M>>,
-//     ctrl_rx: tokio::sync::mpsc::UnboundedReceiver<ControlRequest<S, M>>,
-//     cancel_token: CancellationToken,
-// ) {
-//     let mut progress_engine =
-//         ProgressEngine::<S, M>::new(event_manager, priority_rx, ctrl_rx, cancel_token);
-
-//     while progress_engine.step().await {
-//         tracing::trace!("progress engine step");
-//     }
-// }

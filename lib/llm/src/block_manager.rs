@@ -44,7 +44,7 @@ pub use config::*;
 
 pub use layout::{nixl::NixlLayout, LayoutConfig, LayoutConfigBuilder, LayoutError, LayoutType};
 pub use offload::request::BlockResult;
-pub use pool::BlockPool;
+pub use pool::{BlockPool, ManagedBlockPool};
 pub use storage::{
     nixl::NixlRegisterableStorage, DeviceStorage, DiskStorage, PinnedStorage, Storage,
     StorageAllocator,
@@ -129,17 +129,17 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManager<Localit
     }
 
     /// Get a reference to the disk block pool
-    pub fn disk(&self) -> Option<&BlockPool<DiskStorage, Locality, Metadata>> {
+    pub fn disk(&self) -> Option<&dyn BlockPool<DiskStorage, Locality, Metadata>> {
         self.state.disk()
     }
 
     /// Get a reference to the host block pool
-    pub fn host(&self) -> Option<&BlockPool<PinnedStorage, Locality, Metadata>> {
+    pub fn host(&self) -> Option<&dyn BlockPool<PinnedStorage, Locality, Metadata>> {
         self.state.host()
     }
 
     /// Get a reference to the device block pool
-    pub fn device(&self) -> Option<&BlockPool<DeviceStorage, Locality, Metadata>> {
+    pub fn device(&self) -> Option<&dyn BlockPool<DeviceStorage, Locality, Metadata>> {
         self.state.device()
     }
 

@@ -18,6 +18,8 @@ use std::sync::atomic::AtomicU64;
 use crate::block_manager::block::{locality::LocalityProvider, BlockState};
 
 use super::*;
+use priority_key::PriorityKey;
+
 use tracing::instrument;
 
 #[derive(Default)]
