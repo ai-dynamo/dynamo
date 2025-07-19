@@ -22,18 +22,22 @@ use dynamo_runtime::{DistributedRuntime, Runtime};
 
 /// Build and run an HTTP service
 pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Result<()> {
+    let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
+    let etcd_client = distributed_runtime.etcd_client().clone();
+
     let http_service = service_v2::HttpService::builder()
         .port(engine_config.local_model().http_port())
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
         .enable_embeddings_endpoints(true)
         .with_request_template(engine_config.local_model().request_template())
+        .with_etcd_client(etcd_client.clone())
         .build()?;
+
     match engine_config {
         EngineConfig::Dynamic(_) => {
-            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
-            match distributed_runtime.etcd_client() {
-                Some(etcd_client) => {
+            match etcd_client {
+                Some(ref etcd_client) => {
                     let router_config = engine_config.local_model().router_config();
                     // Listen for models registering themselves in etcd, add them to HTTP service
                     run_watcher(
