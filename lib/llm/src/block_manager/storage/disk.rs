@@ -20,6 +20,10 @@ use nix::fcntl::{fallocate, FallocateFlags};
 use nix::unistd::unlink;
 use std::ffi::CStr;
 use std::ffi::CString;
+use std::path::Path;
+
+const DISK_CACHE_KEY: &str = "DYNAMO_KVBM_DISK_CACHE_DIR";
+const DEFAULT_DISK_CACHE_DIR: &str = "/tmp/";
 
 #[derive(Debug)]
 pub struct DiskStorage {
@@ -38,7 +42,17 @@ impl DiskStorage {
         // We need to open our file with some special flags that aren't supported by the tempfile crate.
         // Instead, we'll use the mkostemp function to create a temporary file with the correct flags.
 
-        let template = CString::new("/tmp/dynamo-kvbm-disk-cache-XXXXXX").unwrap();
+        let specified_dir =
+            std::env::var(DISK_CACHE_KEY).unwrap_or_else(|_| DEFAULT_DISK_CACHE_DIR.to_string());
+        let file_path = Path::new(&specified_dir).join("dynamo-kvbm-disk-cache-XXXXXX");
+
+        if !file_path.exists() {
+            std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        }
+
+        tracing::debug!("Allocating disk cache file at {}", file_path.display());
+
+        let template = CString::new(file_path.to_str().unwrap()).unwrap();
         let mut template_bytes = template.into_bytes_with_nul();
 
         let raw_fd = unsafe {
