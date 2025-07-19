@@ -11,6 +11,8 @@ ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 ARG VLLM_REF="059d4cd"
+ARG DEEPGEMM_REF="6c9558e"
+ARG FLASHINF_REF="1d72ed4"
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -143,12 +145,12 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 ### VIRTUAL ENVIRONMENT SETUP ###
 
 # Install uv and create virtualenv
+ENV VIRTUAL_ENV=/opt/dynamo/venv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN mkdir /opt/dynamo && \
-    uv venv /opt/dynamo/venv --python 3.12
+    uv venv ${VIRTUAL_ENV} --python 3.12
 
 # Activate virtual environment
-ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 # Install NIXL Python module
@@ -169,6 +171,9 @@ RUN uv pip install /workspace/wheels/nixl/*.whl
 # Install vllm - keep this early in Dockerfile to avoid
 # rebuilds from unrelated source code changes
 ARG VLLM_REF
+ARG DEEPGEMM_REF
+ARG FLASHINF_REF
+
 ARG MAX_JOBS=16
 ENV MAX_JOBS=$MAX_JOBS
 ENV CUDA_HOME=/usr/local/cuda
@@ -176,7 +181,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
     cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
     chmod +x /tmp/install_vllm.sh && \
-    /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt/vllm
+    /tmp/install_vllm.sh --no-editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt --deepgemm-ref $DEEPGEMM_REF --flashinf-ref $FLASHINF_REF
 
 # Common dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
@@ -269,8 +274,8 @@ RUN apt-get update && apt-get install -y sudo gnupg2 gnupg1 \
 
 # This is a slow operation (~40s on my cpu)
 # Much better than chown -R $USERNAME:$USERNAME /opt/dynamo/venv (~10min on my cpu)
-COPY --from=base --chown=$USER_UID:$USER_GID /opt/dynamo/venv/ /opt/dynamo/venv/
-RUN chown $USERNAME:$USERNAME /opt/dynamo/venv
+COPY --from=base --chown=$USER_UID:$USER_GID ${VIRTUAL_ENV} ${VIRTUAL_ENV}
+RUN chown $USERNAME:$USERNAME ${VIRTUAL_ENV}
 COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
 
 # so we can use maturin develop
@@ -429,13 +434,6 @@ ENV DYNAMO_HOME=/workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
-# Install build-essential and python3-dev as apt dependencies
-RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-        build-essential \
-        python3-dev && \
-    rm -rf /var/lib/apt/lists/*
-
 ### COPY BINDINGS ###
 # Copy all bindings (wheels, lib, include) from ci_minimum
 COPY --from=ci_minimum /opt/dynamo/bindings /opt/dynamo/bindings
@@ -453,50 +451,22 @@ ARG ARCH_ALT
 ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins
 ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:$LD_LIBRARY_PATH
 
-# Setup the python environment
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN uv venv $VIRTUAL_ENV --python 3.12 && \
-    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
+# nvshmem for pplx and deepep kernels
+COPY --from=base /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install
+ENV LD_LIBRARY_PATH=/opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:$LD_LIBRARY_PATH
 
-# Common dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
+# Copy entire venv
+# Theres a lot of stuff we'd have to re-compile
+# Think its better to just copy
+COPY --from=ci_minimum ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
-# Install test dependencies
-#TODO: Remove this once we have a functional ci_minimum image built on top of the runtime image
-RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
-
-# Install vllm in non-editable mode for runtime
-ARG VLLM_REF
-ARG MAX_JOBS=16
-ENV MAX_JOBS=$MAX_JOBS
-ENV CUDA_HOME=/usr/local/cuda
-RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
-    --mount=type=cache,target=/root/.cache/uv \
-    cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
-    chmod +x /tmp/install_vllm.sh && \
-    /tmp/install_vllm.sh --no-editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --installation-dir /tmp/vllm && \
-    rm -rf /tmp/vllm
-
-#TODO: Remove this once we have a functional ci_minimum image built on top of the runtime image
 COPY . /workspace
-RUN uv pip install /workspace/benchmarks
-
-# Install the wheels and symlink executables to /usr/local/bin so dynamo components can use them
-# Dynamo components currently do not have the VIRTUAL_ENV in their PATH, so we need to symlink the executables
-#Copy NIXL and Dynamo wheels into wheelhouse
-COPY --from=base /workspace/wheels/nixl/*.whl wheelhouse/
-COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
-RUN uv pip install ai-dynamo --find-links wheelhouse && \
-    uv pip install nixl --find-links wheelhouse && \
-    ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
-    rm -r wheelhouse
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
-    echo "cat ~/.launch_screen" >> ~/.bashrc
+    echo "cat ~/.launch_screen" >> ~/.bashrc && \
+    echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

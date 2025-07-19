@@ -22,8 +22,10 @@ set -euo pipefail
 EDITABLE=true
 VLLM_REF="059d4cd"
 MAX_JOBS=16
-INSTALLATION_DIR=/tmp/vllm
+INSTALLATION_DIR=/tmp
 ARCH=$(uname -m)
+DEEPGEMM_REF="6c9558e"
+FLASHINF_REF="1d72ed4"
 
 # Convert x86_64 to amd64 for consistency with Docker ARG
 if [ "$ARCH" = "x86_64" ]; then
@@ -58,8 +60,16 @@ while [[ $# -gt 0 ]]; do
             INSTALLATION_DIR="$2"
             shift 2
             ;;
+        --deepgemm-ref)
+            DEEPGEMM_REF="$2"
+            shift 2
+            ;;
+        --flashinf-ref)
+            FLASHINF_REF="$2"
+            shift 2
+            ;;
         -h|--help)
-            echo "Usage: $0 [--editable|--no-editable] [--vllm-ref REF] [--max-jobs NUM] [--arch ARCH]"
+            echo "Usage: $0 [--editable|--no-editable] [--vllm-ref REF] [--max-jobs NUM] [--arch ARCH] [--deepgemm-ref REF] [--flashinf-ref REF]"
             echo "Options:"
             echo "  --editable        Install vllm in editable mode (default)"
             echo "  --no-editable     Install vllm in non-editable mode"
@@ -67,6 +77,8 @@ while [[ $# -gt 0 ]]; do
             echo "  --max-jobs NUM    Maximum number of parallel jobs (default: 16)"
             echo "  --arch ARCH       Architecture (amd64|arm64, default: auto-detect)"
             echo "  --installation-dir DIR  Directory to install vllm (default: /tmp/vllm)"
+            echo "  --deepgemm-ref REF  Git reference for DeepGEMM (default: 6c9558e)"
+            echo "  --flashinf-ref REF  Git reference for Flash Infer (default: 1d72ed4)"
             exit 0
             ;;
         *)
@@ -97,7 +109,14 @@ git checkout $VLLM_REF
 
 if [ "$ARCH" = "arm64" ]; then
     echo "Installing vllm for ARM64 architecture"
-    uv pip install --pre torch torchvision torchaudio --index-url https://download.pytorch.org/whl/nightly/cu128
+
+    # Try to install specific PyTorch version first, fallback to latest nightly
+    echo "Attempting to install pinned PyTorch nightly versions..."
+    if ! uv pip install torch==2.9.0.dev20250712+cu128 torchvision==0.24.0.dev20250712+cu128 torchaudio==2.8.0.dev20250712+cu128 --index-url https://download.pytorch.org/whl/nightly/cu128; then
+        echo "Pinned versions failed, falling back to latest stable..."
+        uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+    fi
+
     python use_existing_torch.py
     uv pip install -r requirements/build.txt
 
@@ -118,14 +137,24 @@ fi
 # Install ep_kernels and DeepGEMM
 echo "Installing ep_kernels and DeepGEMM"
 cd tools/ep_kernels
-bash install_python_libraries.sh
+bash install_python_libraries.sh # These libraries aren't pinned.
 cd ep_kernels_workspace
 git clone https://github.com/deepseek-ai/DeepGEMM.git
 cd DeepGEMM
+git checkout $DEEPGEMM_REF # Pin Version
+
 sed -i 's|git@github.com:|https://github.com/|g' .gitmodules
 git submodule sync --recursive
 git submodule update --init --recursive
 cat install.sh
 ./install.sh
+
+
+# Install Flash Infer
+cd $INSTALLATION_DIR
+git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
+cd flashinfer
+git checkout $FLASHINF_REF
+python -m pip install -v .
 
 echo "vllm installation completed successfully"
