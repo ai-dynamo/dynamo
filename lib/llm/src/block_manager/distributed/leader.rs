@@ -11,7 +11,6 @@ use dynamo_runtime::{DistributedRuntime, Runtime};
 
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
@@ -60,7 +59,7 @@ impl KvbmLeaderConfig {
 /// - Syncing the leader barrier with workers.
 /// - Sending messages to workers.
 pub struct KvbmLeader {
-    _worker_data: Arc<HashMap<String, ()>>, // TODO: Replace with KvbmLeaderData
+    num_device_blocks: usize,
     zmq_leader: ZmqActiveMessageLeader,
     config: KvbmLeaderConfig,
 }
@@ -88,16 +87,21 @@ impl KvbmLeader {
 
         // Build our leader barrier and publish the data.
         // TODO: Use a separate timeout parameter from the ZMQ connection timeout
-        let leader_barrier: LeaderBarrier<KvbmLeaderData, ()> = LeaderBarrier::new(
-            config.barrier_id.clone(),
-            config.world_size,
-            Some(Duration::from_secs(config.leader_init_timeout_secs)),
-        );
+        let leader_barrier: LeaderBarrier<KvbmLeaderData, worker::KvbmWorkerData> =
+            LeaderBarrier::new(
+                config.barrier_id.clone(),
+                config.world_size,
+                Some(Duration::from_secs(config.leader_init_timeout_secs)),
+            );
 
         let worker_data = leader_barrier
             .sync(&drt, zmq_data.as_ref())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to sync leader barrier: {:?}", e))?;
+
+        let num_device_blocks = worker_data.values().map(|data| data.num_device_blocks)
+            .min()
+            .unwrap();
 
         tracing::info!("Leader barrier synced with {} workers", config.world_size);
         tracing::debug!("Worker data: {:?}", worker_data);
@@ -114,7 +118,7 @@ impl KvbmLeader {
         .await?;
 
         Ok(Self {
-            _worker_data: Arc::new(worker_data),
+            num_device_blocks,
             zmq_leader,
             config,
         })
@@ -128,6 +132,10 @@ impl KvbmLeader {
         self.zmq_leader
             .broadcast(ZMQ_TRANSFER_BLOCKS_MESSAGE, data)
             .await
+    }
+
+    pub fn num_device_blocks(&self) -> usize {
+        self.num_device_blocks
     }
 
     pub fn num_host_blocks(&self) -> usize {
