@@ -24,8 +24,6 @@ class CustomBuildHook(BuildHookInterface):
             bin_path = os.getenv("DYNAMO_BIN_PATH", "target/release")
             build_data["force_include"] = {
                 f"{bin_path}/dynamo-run": "dynamo/sdk/cli/bin/dynamo-run",
-                f"{bin_path}/llmctl": "dynamo/sdk/cli/bin/llmctl",
-                f"{bin_path}/http": "dynamo/sdk/cli/bin/http",
                 f"{bin_path}/metrics": "dynamo/sdk/cli/bin/metrics",
                 f"{bin_path}/mock_worker": "dynamo/sdk/cli/bin/mock_worker",
                 f"{bin_path}/libdynamo_llm_capi.so": "dynamo/sdk/cli/bin/libdynamo_llm_capi.so",

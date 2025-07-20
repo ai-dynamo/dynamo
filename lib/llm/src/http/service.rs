@@ -20,6 +20,7 @@
 
 mod openai;
 
+pub mod disconnect;
 pub mod error;
 pub mod health;
 pub mod metrics;

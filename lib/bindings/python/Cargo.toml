@@ -36,14 +36,10 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 block-manager = ["dynamo-llm/block-manager", "dep:dlpark"]
-mistralrs = ["dep:dynamo-engine-mistralrs"]
-llamacpp = ["dep:dynamo-engine-llamacpp"]
 
 [dependencies]
 dynamo-llm = { path = "../../llm" }
 dynamo-runtime = { path = "../../runtime" }
-dynamo-engine-mistralrs = { path = "../../engines/mistralrs", features = ["cuda"], optional = true }
-dynamo-engine-llamacpp = { path = "../../engines/llamacpp", features = ["cuda", "dynamic-link"], optional = true }
 
 anyhow = { version = "1" }
 async-openai = { version = "0.29.0" }

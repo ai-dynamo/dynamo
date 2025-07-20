@@ -37,15 +37,42 @@ pub fn health_check_router(
     state: Arc<service_v2::State>,
     path: Option<String>,
 ) -> (Vec<RouteDoc>, Router) {
-    let path = path.unwrap_or_else(|| "/health".to_string());
+    let health_path = path.unwrap_or_else(|| "/health".to_string());
 
-    let docs: Vec<RouteDoc> = vec![RouteDoc::new(Method::GET, &path)];
+    let docs: Vec<RouteDoc> = vec![RouteDoc::new(Method::GET, &health_path)];
 
     let router = Router::new()
-        .route(&path, get(health_handler))
+        .route(&health_path, get(health_handler))
         .with_state(state);
 
     (docs, router)
+}
+
+pub fn live_check_router(
+    state: Arc<service_v2::State>,
+    path: Option<String>,
+) -> (Vec<RouteDoc>, Router) {
+    let live_path = path.unwrap_or_else(|| "/live".to_string());
+
+    let docs: Vec<RouteDoc> = vec![RouteDoc::new(Method::GET, &live_path)];
+
+    let router = Router::new()
+        .route(&live_path, get(live_handler))
+        .with_state(state);
+
+    (docs, router)
+}
+
+async fn live_handler(
+    axum::extract::State(_state): axum::extract::State<Arc<service_v2::State>>,
+) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        Json(json!({
+            "status": "live",
+            "message": "Service is live"
+        })),
+    )
 }
 
 async fn health_handler(

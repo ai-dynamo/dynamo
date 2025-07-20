@@ -34,16 +34,6 @@ ARG RUNTIME_IMAGE_TAG="12.9.0-runtime-ubuntu24.04"
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS nixl_base
-
-WORKDIR /opt/nixl
-# Add a cache hint that only changes when the nixl commit changes
-ARG NIXL_COMMIT
-# This line acts as a cache key - it only changes when NIXL_COMMIT changes
-RUN echo "NIXL commit: ${NIXL_COMMIT}" > /opt/nixl/commit.txt
-# Copy the nixl source
-COPY --from=nixl . .
-
 ##################################
 ########## Build Image ###########
 ##################################
@@ -53,6 +43,7 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS build
 # Redeclare ARCH and ARCH_ALT so they're available in this build stage
 ARG ARCH
 ARG ARCH_ALT
+ARG NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
 
 USER root
 
@@ -101,9 +92,10 @@ ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
 SHELL ["/bin/bash", "-c"]
 
 # NIXL SETUP
-# Copy nixl source, and use commit hash as cache hint
-COPY --from=nixl_base /opt/nixl /opt/nixl
-COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
+# Clone nixl source, and checkout the nixl ref
+RUN git clone "https://github.com/ai-dynamo/nixl.git" /opt/nixl && \
+    cd /opt/nixl && \
+    git checkout ${NIXL_REF}
 RUN if [ "$ARCH" = "arm64" ]; then \
         cd /opt/nixl && \
         mkdir build && \
@@ -175,8 +167,6 @@ RUN pyright --help > /dev/null 2>&1
 
 # Enable Git operations in the /workspace directory
 RUN printf "[safe]\n      directory=/workspace\n" > /root/.gitconfig
-
-RUN ln -sf /bin/bash /bin/sh
 
 # Rust build/dev dependencies
 RUN apt-get update && \
@@ -317,8 +307,6 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
     cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
     cp -r lib/bindings/c/include /opt/dynamo/bindings/.  && \
     cp target/release/dynamo-run /usr/local/bin && \
-    cp target/release/http /usr/local/bin && \
-    cp target/release/llmctl /usr/local/bin && \
     cp target/release/metrics /usr/local/bin && \
     cp target/release/mock_worker /usr/local/bin
 
@@ -488,12 +476,15 @@ ENV TRTLLM_USE_UCX_KVCACHE=1
 COPY --from=dev /usr/local/bin/set_trtllm_env.sh /usr/local/bin/set_trtllm_env.sh
 RUN echo 'source /usr/local/bin/set_trtllm_env.sh' >> /root/.bashrc
 
-# Copy benchmarks, examples and tests for CI
+# Copy benchmarks, backends and tests for CI
 # TODO: Remove this once we have a functional CI image built on top of the runtime image
 COPY tests /workspace/tests
 COPY benchmarks /workspace/benchmarks
-COPY examples /workspace/examples
+COPY components/backends/trtllm /workspace/components/backends/trtllm
 RUN uv pip install /workspace/benchmarks
+
+# Copy files for legal compliance
+COPY ATTRIBUTION* LICENSE /workspace/
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \

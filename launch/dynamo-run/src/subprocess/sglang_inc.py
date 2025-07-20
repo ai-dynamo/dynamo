@@ -42,6 +42,7 @@ class Config:
     nnodes: int
     node_rank: int
     dist_init_addr: str
+    migration_limit: int
     extra_engine_args: str
 
 
@@ -202,7 +203,13 @@ async def init(runtime: DistributedRuntime, config: Config):
     model_type = (
         ModelType.Backend if not engine_args.is_embedding else ModelType.Embedding
     )
-    await register_llm(model_type, endpoint, config.model_path, config.model_name)
+    await register_llm(
+        model_type,
+        endpoint,
+        config.model_path,
+        config.model_name,
+        migration_limit=config.migration_limit,
+    )
 
     # the server will gracefully shutdown (i.e., keep opened TCP streams finishes)
     # after the lease is revoked
@@ -269,6 +276,12 @@ def cmd_line_args():
         help="Host address (e.g., `192.168.0.2:25000`) of the node with rank 0",
     )
     parser.add_argument(
+        "--migration-limit",
+        type=int,
+        default=0,
+        help="Maximum number of times a request may be migrated to a different engine worker. The number may be overridden by the engine.",
+    )
+    parser.add_argument(
         "--extra-engine-args",
         type=str,
         default="",
@@ -304,6 +317,7 @@ def cmd_line_args():
     config.nnodes = args.nnodes
     config.node_rank = args.node_rank
     config.dist_init_addr = args.dist_init_addr
+    config.migration_limit = args.migration_limit
     config.extra_engine_args = args.extra_engine_args
     return config
 
