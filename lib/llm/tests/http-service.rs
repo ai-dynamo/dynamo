@@ -1411,7 +1411,7 @@ async fn test_rate_limiting_triggers_correctly() {
             ),
         ])
         .stream(true)
-        .max_tokens(10 as u32)
+        .max_tokens(10_u32)
         .build()
         .unwrap();
 
@@ -1659,7 +1659,7 @@ async fn test_per_model_vs_global_rate_limiting() {
             ),
         ])
         .stream(true)
-        .max_tokens(10 as u32)
+        .max_tokens(10_u32)
         .build()
         .unwrap();
 
@@ -1801,7 +1801,7 @@ async fn test_rate_limiting_recovery() {
             ),
         ])
         .stream(true)
-        .max_tokens(10 as u32)
+        .max_tokens(10_u32)
         .build()
         .unwrap();
 
@@ -1818,7 +1818,7 @@ async fn test_rate_limiting_recovery() {
             ),
         ])
         .stream(true)
-        .max_tokens(10 as u32)
+        .max_tokens(10_u32)
         .build()
         .unwrap();
 
