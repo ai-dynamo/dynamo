@@ -212,7 +212,7 @@ impl ModelManager {
         kv_cache_block_size: u32,
         kv_router_config: Option<KvRouterConfig>,
     ) -> anyhow::Result<Arc<KvRouter>> {
-        let selector = Box::new(DefaultWorkerSelector::new(kv_router_config.clone()));
+        let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
         let chooser = KvRouter::new(
             component.clone(),
             kv_cache_block_size,

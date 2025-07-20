@@ -36,7 +36,7 @@ pub struct HttpService {
 #[pymethods]
 impl HttpService {
     #[new]
-    #[pyo3(signature = (port=None))]
+    #[pyo3(signature = (port=None, rate_limiter_config=None))]
     pub fn new(
         port: Option<u16>,
         rate_limiter_config: Option<RateLimiterConfig>,
@@ -44,7 +44,7 @@ impl HttpService {
         let mut builder = service_v2::HttpService::builder().port(port.unwrap_or(8080));
 
         if let Some(rate_limiter_config) = rate_limiter_config {
-            builder = builder.with_rate_limiter(rate_limiter_config.inner);
+            builder = builder.rate_limiter_config(rate_limiter_config.inner);
         }
 
         let inner = builder.build().map_err(to_pyerr)?;

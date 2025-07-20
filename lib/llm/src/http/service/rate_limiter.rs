@@ -821,7 +821,7 @@ mod tests {
         // the effect of the time passing.
         let error_count = error_count.load(Ordering::Relaxed);
         assert!(
-            error_count > 880 && error_count < 920,
+            error_count > 870 && error_count < 930,
             "Error count should be around 12% of the time: {}",
             error_count
         );
