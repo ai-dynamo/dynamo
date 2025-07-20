@@ -107,11 +107,11 @@ RUN rm -rf /opt/hpcx/ucx && \
     make -j install-strip &&                        \
     ldconfig
 
-ENV LD_LIBRARY_PATH=\
-    /usr/lib:\
-    /usr/local/ucx/lib:\
-    /usr/local/ucx/lib/ucx:\
-    $LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH="\
+/usr/lib:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+$LD_LIBRARY_PATH"
 ENV CPATH=/usr/include
 ENV PATH=/usr/bin:$PATH
 ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig
@@ -195,9 +195,9 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     chmod +x /tmp/install_vllm.sh && \
     /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt --deepgemm-ref $DEEPGEMM_REF --flashinf-ref $FLASHINF_REF
 
-ENV LD_LIBRARY_PATH=\
-    /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
-    $LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH="\
+/opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
+$LD_LIBRARY_PATH"
 
 # Common dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
@@ -381,10 +381,10 @@ WORKDIR /workspace
 COPY --from=wheel_builder /workspace /workspace
 COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
 ARG ARCH_ALT
-ENV LD_LIBRARY_PATH=\
-    /opt/nvidia/nvda_nixl/lib/{ARCH_ALT}-linux-gnu:\
-    /opt/nvidia/nvda_nixl/lib/{ARCH_ALT}-linux-gnu/plugin:\
-    $LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH="\
+/opt/nvidia/nvda_nixl/lib/{ARCH_ALT}-linux-gnu:\
+/opt/nvidia/nvda_nixl/lib/{ARCH_ALT}-linux-gnu/plugin:\
+$LD_LIBRARY_PATH"
 
 # Copy Cargo cache to avoid re-downloading dependencies
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
@@ -467,13 +467,13 @@ COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
 # Copies vllm, DeepEP, DeepGEMM, PPLX repos (all editable installs) and nvshmem binaries
 COPY --from=base /opt/vllm /opt/vllm
 ARG ARCH_ALT
-ENV LD_LIBRARY_PATH=\
-    /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
-    /opt/nvidia/nvda_nixl/lib/{ARCH_ALT}-linux-gnu:\
-    /opt/nvidia/nvda_nixl/lib/{ARCH_ALT}-linux-gnu/plugin:\
-    /usr/local/ucx/lib:\
-    /usr/local/ucx/lib/ucx:\
-    $LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH="\
+/opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
+/opt/nvidia/nvda_nixl/lib/{ARCH_ALT}-linux-gnu:\
+/opt/nvidia/nvda_nixl/lib/{ARCH_ALT}-linux-gnu/plugin:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+$LD_LIBRARY_PATH"
 
 
 # Copy entire venv
