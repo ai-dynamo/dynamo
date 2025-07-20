@@ -1556,7 +1556,7 @@ async fn test_rate_limiting_http_integration() {
             ),
         ])
         .stream(true)
-        .max_tokens(3 as u32)
+        .max_tokens(3_u32)
         .build()
         .unwrap();
 
