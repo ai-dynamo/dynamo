@@ -544,8 +544,8 @@ mod tests {
         let mut tracker = TimeWeightedAverageTracker::new(TIME_CONSTANT_SECS);
 
         // Record samples with known values and controlled timing
-        let sample_values = vec![100.0, 200.0, 300.0, 400.0];
-        let sample_delays_ms = vec![0, 500, 1000, 1500]; // Delays in milliseconds
+        let sample_values = [100.0, 200.0, 300.0, 400.0];
+        let sample_delays_ms = [0, 500, 1000, 1500]; // Delays in milliseconds
 
         let start_time = Instant::now();
 
@@ -1155,7 +1155,7 @@ mod tests {
 
             assert!(avg.is_finite(), "Rapid updates should maintain stability");
             assert!(
-                avg >= 0.0 && avg <= 9.0,
+                (0.0..=9.0).contains(&avg),
                 "Average should be bounded: {}",
                 avg
             );
