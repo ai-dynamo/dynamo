@@ -146,8 +146,13 @@ git checkout $DEEPGEMM_REF # Pin Version
 sed -i 's|git@github.com:|https://github.com/|g' .gitmodules
 git submodule sync --recursive
 git submodule update --init --recursive
-cat install.sh
-./install.sh
+
+# command for 03d0be3
+python setup.py install
+
+# new install command for post 03d0be3
+# cat install.sh
+# ./install.sh
 
 
 # Install Flash Infer
