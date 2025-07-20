@@ -13,6 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::config::HealthStatus;
 use axum::{body, http::StatusCode, response::IntoResponse, routing::get, Router};
 use prometheus::{
     proto, register_gauge_with_registry, Encoder, Gauge, Opts, Registry, TextEncoder,
@@ -150,36 +151,46 @@ pub async fn spawn_http_server(
 #[tracing::instrument(skip_all, level = "trace")]
 async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
     let uptime = state.drt.uptime();
-    let map = state.drt.served_endpoints.lock().await;
+    let map = state.drt.system_health.endpoint_health.lock().await;
     let mut healthy = true;
     let mut status_code = StatusCode::OK;
-    let mut endpoints: HashMap<String, String> = HashMap::<String, String>::new();
+    let mut endpoints: HashMap<String, String> = HashMap::new();
 
-    // Check Status for all Endpoints
+    let use_endpoint_health_status = &state.drt.system_health.use_endpoint_health_status;
 
-    for (endpoint, ready) in map.iter() {
-        healthy = healthy && *ready;
+    // List all endpoint statuses
+    for (endpoint, ready) in &*map {
         endpoints.insert(
-            endpoint.to_string(),
-            if *ready {
+            endpoint.clone(),
+            if *ready == HealthStatus::Ready {
                 "ready".to_string()
             } else {
-                "not_ready".to_string()
+                "notready".to_string()
             },
         );
     }
 
-    let mut healthy_string = "ready";
+    // Determine overall health based on use_endpoint_health_status
+    if !use_endpoint_health_status.is_empty() {
+        healthy = use_endpoint_health_status.iter().all(|endpoint| {
+            map.get(endpoint)
+                .map_or(false, |status| *status == HealthStatus::Ready)
+        });
+    } else {
+        // Fallback to system health if no endpoints specified
+        healthy = state.drt.system_health.system_health == HealthStatus::Ready;
+    }
+
+    let healthy_string = if healthy { "ready" } else { "notready" };
 
     if !healthy {
-        healthy_string = "not_ready";
         status_code = StatusCode::SERVICE_UNAVAILABLE;
     }
 
     let response = json!({
-    "status": healthy_string,
-    "uptime": uptime.as_secs(),
-    "endpoints":endpoints
+        "status": healthy_string,
+        "uptime": uptime.as_secs(),
+        "endpoints": endpoints
     });
 
     tracing::trace!("Response {}", response.to_string());
@@ -298,152 +309,4 @@ mod tests {
         assert!(response.contains("dynamo_runtime_uptime_seconds"));
         assert!(response.contains("Total uptime of the DistributedRuntime in seconds"));
     }
-
-    #[tokio::test]
-    async fn test_not_ready() {
-        use std::sync::Arc;
-        use tokio::time::sleep;
-        use tokio_util::sync::CancellationToken;
-        // use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        // use reqwest for HTTP requests
-        let runtime = crate::Runtime::from_settings().unwrap();
-        let drt = Arc::new(
-            crate::DistributedRuntime::from_settings(runtime,vec!["never_start".to_string()].into())
-                .await
-                .unwrap(),
-        );
-        let cancel_token = CancellationToken::new();
-        let (addr, server_handle) = spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt)
-            .await
-            .unwrap();
-        println!("[test] Waiting for server to start...");
-        sleep(std::time::Duration::from_millis(1000)).await;
-        println!("[test] Server should be up, starting requests...");
-        let client = reqwest::Client::new();
-        for (path, expect_status, expect_body) in [
-            ("/health", 503, "not_ready"),
-            ("/live", 503, "not_ready"),
-        ] {
-            println!("[test] Sending request to {}", path);
-            let url = format!("http://{}{}", addr, path);
-            let response = client.get(&url).send().await.unwrap();
-            let status = response.status();
-            let body = response.text().await.unwrap();
-            println!(
-                "[test] Response for {}: status={}, body={:?}",
-                path, status, body
-            );
-
-	    assert_eq!(status, expect_status, "Response: status={}, body={:?}", status, body);
-
-            assert!(
-                body.contains(expect_body),
-                "Response: status={}, body={:?}",
-                status,
-                body
-            );
-        }
-        cancel_token.cancel();
-        match server_handle.await {
-            Ok(_) => println!("[test] Server shut down normally"),
-            Err(e) => {
-                if e.is_panic() {
-                    println!("[test] Server panicked: {:?}", e);
-                } else {
-                    println!("[test] Server cancelled: {:?}", e);
-                }
-            }
-        }
-    }
-
-    struct DelayedHandler {}
-
-    impl DelayedHandler {
-	fn new() -> Arc<Self> {
-	    Arc::new(Self {})
-	}
-    }
-
-
-    #[async_trait]
-    impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for DelayedHandler {
-	async fn generate(&self, input: SingleIn<String>) -> Result<ManyOut<Annotated<String>>> {
-	    "delayed handler"
-	}
-    }
-
-    #[tokio::test]
-    async fn test_delayed_ready() {
-        use std::sync::Arc;
-        use tokio::time::sleep;
-        use tokio_util::sync::CancellationToken;
-        // use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        // use reqwest for HTTP requests
-        let runtime = crate::Runtime::from_settings().unwrap();
-        let drt = Arc::new(
-            crate::DistributedRuntime::from_settings(runtime,vec!["delay_start".to_string()].into())
-                .await
-                .unwrap(),
-        );
-        let cancel_token = CancellationToken::new();
-        let (addr, server_handle) = spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt)
-            .await
-            .unwrap();
-        println!("[test] Waiting for server to start...");
-        sleep(std::time::Duration::from_millis(1000)).await;
-        println!("[test] Server should be up, starting requests...");
-        let client = reqwest::Client::new();
-        for (path, expect_status, expect_body) in [
-            ("/health", 503, "not_ready"),
-            ("/live", 503, "not_ready"),
-        ] {
-            println!("[test] Sending request to {}", path);
-            let url = format!("http://{}{}", addr, path);
-            let response = client.get(&url).send().await.unwrap();
-            let status = response.status();
-            let body = response.text().await.unwrap();
-            println!(
-                "[test] Response for {}: status={}, body={:?}",
-                path, status, body
-            );
-
-	    assert_eq!(status, expect_status, "Response: status={}, body={:?}", status, body);
-
-            assert!(
-                body.contains(expect_body),
-                "Response: status={}, body={:?}",
-                status,
-                body
-            );
-        }
-
-	let ingress = Ingress::for_engine(DelayedHandler::new())?;
-
-
-	runtime.namespace(DEFAULT_NAMESPACE)?
-	    .component("delayed")
-	    .service_builder()
-	    .create()
-	    .await?
-	    .endpoint("delay_start")
-	    .endpoint_builder()
-	    .handler(ingress)
-	    .start()
-	    .await
-
-
-
-        cancel_token.cancel();
-        match server_handle.await {
-            Ok(_) => println!("[test] Server shut down normally"),
-            Err(e) => {
-                if e.is_panic() {
-                    println!("[test] Server panicked: {:?}", e);
-                } else {
-                    println!("[test] Server cancelled: {:?}", e);
-                }
-            }
-        }
-    }
 }
-

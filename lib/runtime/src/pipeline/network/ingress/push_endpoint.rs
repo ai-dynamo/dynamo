@@ -16,20 +16,20 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
+use crate::config::HealthStatus;
+use crate::protocols::LeaseId;
 use anyhow::Result;
 use async_nats::service::endpoint::Endpoint;
 use derive_builder::Builder;
-use tokio::sync::Notify;
-use tokio_util::sync::CancellationToken;
 use std::collections::HashMap;
 use tokio::sync::Mutex;
-use crate::protocols::LeaseId;
+use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 #[derive(Builder)]
 pub struct PushEndpoint {
     pub service_handler: Arc<dyn PushWorkHandler>,
     pub cancellation_token: CancellationToken,
-    pub instance_id: LeaseId
 }
 
 /// version of crate
@@ -40,18 +40,22 @@ impl PushEndpoint {
         PushEndpointBuilder::default()
     }
 
-    pub async fn start(self, endpoint: Endpoint, endpoint_name:String, served_endpoints:Arc<Mutex<HashMap<String, bool>>>) -> Result<()> {
+    pub async fn start(
+        self,
+        endpoint: Endpoint,
+        endpoint_name: String,
+        endpoint_health: Arc<Mutex<HashMap<String, HealthStatus>>>,
+    ) -> Result<()> {
         let mut endpoint = endpoint;
 
         let inflight = Arc::new(AtomicU64::new(0));
         let notify = Arc::new(Notify::new());
 
-	{
-	    let mut mut_served_endpoints = served_endpoints.lock().await;
+        {
+            let mut mut_endpoint_health = endpoint_health.lock().await;
 
-	    mut_served_endpoints.insert(endpoint_name.clone(), true);
-	}
-
+            mut_endpoint_health.insert(endpoint_name.clone(), HealthStatus::Ready);
+        }
 
         loop {
             let req = tokio::select! {
@@ -79,6 +83,7 @@ impl PushEndpoint {
                 }
 
                 let ingress = self.service_handler.clone();
+                let worker_id = "".to_string();
 
                 // increment the inflight counter
                 inflight.fetch_add(1, Ordering::SeqCst);
@@ -86,11 +91,11 @@ impl PushEndpoint {
                 let notify_clone = notify.clone();
 
                 tokio::spawn(async move {
-                    tracing::trace!(self.instance_id, "handling new request");
+                    tracing::trace!(worker_id, "handling new request");
                     let result = ingress.handle_payload(req.message.payload).await;
                     match result {
                         Ok(_) => {
-                            tracing::trace!(self.instance_id, "request handled successfully");
+                            tracing::trace!(worker_id, "request handled successfully");
                         }
                         Err(e) => {
                             tracing::warn!("Failed to handle request: {:?}", e);
@@ -106,11 +111,11 @@ impl PushEndpoint {
             }
         }
 
-	{
-	    let mut mut_served_endpoints = served_endpoints.lock().await;
+        {
+            let mut mut_endpoint_health = endpoint_health.lock().await;
 
-	    mut_served_endpoints.insert(endpoint_name.clone(), false);
-	}
+            mut_endpoint_health.insert(endpoint_name.clone(), HealthStatus::NotReady);
+        }
 
         // await for all inflight requests to complete
         tracing::info!(

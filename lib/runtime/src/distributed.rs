@@ -22,7 +22,7 @@ use crate::{
     ErrorContext,
 };
 
-use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, Weak, OK};
+use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, SystemHealth, Weak, OK};
 
 use derive_getters::Dissolve;
 use figment::error;
@@ -33,7 +33,7 @@ use tokio_util::sync::CancellationToken;
 impl DistributedRuntime {
     pub async fn new(runtime: Runtime, config: DistributedConfig) -> Result<Self> {
         let secondary = runtime.secondary();
-        let (etcd_config, nats_config, is_static, wait_for_served) = config.dissolve();
+        let (etcd_config, nats_config, is_static) = config.dissolve();
 
         let runtime_clone = runtime.clone();
 
@@ -65,13 +65,11 @@ impl DistributedRuntime {
             })
             .await??;
 
-        let served_endpoints_hashmap: HashMap<String, bool> = wait_for_served
-            .unwrap_or_default()
-            .into_iter()
-            .map(|k| (k, false))
-            .collect();
+        let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
+        let starting_health_status = config.starting_health_status.clone();
+        let use_endpoint_health_status = config.use_endpoint_health_status.clone();
 
-        let served_endpoints = Arc::new(Mutex::new(served_endpoints_hashmap));
+        let system_health = SystemHealth::new(starting_health_status, use_endpoint_health_status);
 
         let distributed_runtime = Self {
             runtime,
@@ -82,11 +80,10 @@ impl DistributedRuntime {
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
             start_time: std::time::Instant::now(),
-            served_endpoints,
+            system_health,
         };
 
         // Start HTTP server for health and metrics (if enabled)
-        let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
         if config.system_server_enabled() {
             let drt_arc = Arc::new(distributed_runtime.clone());
             let runtime_clone = distributed_runtime.runtime.clone();
@@ -113,17 +110,14 @@ impl DistributedRuntime {
         Ok(distributed_runtime)
     }
 
-    pub async fn from_settings(
-        runtime: Runtime,
-        wait_for_served: Option<Vec<String>>,
-    ) -> Result<Self> {
-        let config = DistributedConfig::from_settings(false, wait_for_served);
+    pub async fn from_settings(runtime: Runtime) -> Result<Self> {
+        let config = DistributedConfig::from_settings(false);
         Self::new(runtime, config).await
     }
 
     // Call this if you are using static workers that do not need etcd-based discovery.
     pub async fn from_settings_without_discovery(runtime: Runtime) -> Result<Self> {
-        let config = DistributedConfig::from_settings(true, None);
+        let config = DistributedConfig::from_settings(true);
         Self::new(runtime, config).await
     }
 
@@ -215,19 +209,14 @@ pub struct DistributedConfig {
     pub etcd_config: etcd::ClientOptions,
     pub nats_config: nats::ClientOptions,
     pub is_static: bool,
-    pub wait_for_served: Option<Vec<String>>,
 }
 
 impl DistributedConfig {
-    pub fn from_settings(
-        is_static: bool,
-        wait_for_served: Option<Vec<String>>,
-    ) -> DistributedConfig {
+    pub fn from_settings(is_static: bool) -> DistributedConfig {
         DistributedConfig {
             etcd_config: etcd::ClientOptions::default(),
             nats_config: nats::ClientOptions::default(),
             is_static,
-            wait_for_served,
         }
     }
 
@@ -236,7 +225,6 @@ impl DistributedConfig {
             etcd_config: etcd::ClientOptions::default(),
             nats_config: nats::ClientOptions::default(),
             is_static: false,
-            wait_for_served: None,
         };
 
         config.etcd_config.attach_lease = false;

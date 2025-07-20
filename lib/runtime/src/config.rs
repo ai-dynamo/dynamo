@@ -48,6 +48,13 @@ impl Default for WorkerConfig {
     }
 }
 
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthStatus {
+    Ready,
+    NotReady,
+}
+
 /// Runtime configuration
 /// Defines the configuration for Tokio runtimes
 #[derive(Serialize, Deserialize, Validate, Debug, Builder, Clone)]
@@ -88,6 +95,21 @@ pub struct RuntimeConfig {
     #[builder(default = "false")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub system_enabled: bool,
+
+    /// Starting Health Status
+    /// Set this at runtime with environment variable DYN_SYSTEM_STARTING_HEALTH_STATUS
+    #[builder(default = "HealthStatus::NotReady")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub starting_health_status: HealthStatus,
+
+    /// Use Endpoint Health Status
+    /// When using endpoint health status, health status
+    /// is the AND of individual endpoint health
+    /// Set this at runtime with environment variable DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+    /// with the list of endpoints to consider for system health
+    #[builder(default = "vec![]")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub use_endpoint_health_status: Vec<String>,
 }
 
 impl fmt::Display for RuntimeConfig {
@@ -102,6 +124,11 @@ impl fmt::Display for RuntimeConfig {
         write!(f, "system_host={}, ", self.system_host)?;
         write!(f, "system_port={}, ", self.system_port)?;
         write!(f, "system_enabled={}", self.system_enabled)?;
+        write!(
+            f,
+            "use_endpoint_health_status={:?}",
+            self.use_endpoint_health_status
+        )?;
 
         Ok(())
     }
@@ -135,6 +162,8 @@ impl RuntimeConfig {
                             "HOST" => "system_host",
                             "PORT" => "system_port",
                             "ENABLED" => "system_enabled",
+                            "USE_ENDPOINT_HEALTH_STATUS" => "use_endpoint_health_status",
+                            "STARTING_HEALTH_STATUS" => "starting_health_status",
                             _ => k.as_str(),
                         };
                         Some(mapped_key.into())
@@ -171,6 +200,8 @@ impl RuntimeConfig {
             system_host: DEFAULT_SYSTEM_HOST.to_string(),
             system_port: DEFAULT_SYSTEM_PORT,
             system_enabled: false,
+            starting_health_status: HealthStatus::NotReady,
+            use_endpoint_health_status: vec![], // UPDATED DEFAULT TO EMPTY VECTOR
         }
     }
 
@@ -196,6 +227,8 @@ impl Default for RuntimeConfig {
             system_host: DEFAULT_SYSTEM_HOST.to_string(),
             system_port: DEFAULT_SYSTEM_PORT,
             system_enabled: false,
+            starting_health_status: HealthStatus::NotReady,
+            use_endpoint_health_status: vec![], // UPDATED DEFAULT TO EMPTY VECTOR
         }
     }
 }

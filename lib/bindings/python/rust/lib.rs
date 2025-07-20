@@ -238,8 +238,8 @@ enum ModelType {
 #[pymethods]
 impl DistributedRuntime {
     #[new]
-    #[pyo3(signature = (event_loop, is_static, wait_for_served=None))]
-    fn new(event_loop: PyObject, is_static: bool, wait_for_served: Option<Vec<String>>) -> PyResult<Self> {
+    #[pyo3(signature = (event_loop, is_static))]
+    fn new(event_loop: PyObject, is_static: bool) -> PyResult<Self> {
         let worker = rs::Worker::from_settings().map_err(to_pyerr)?;
         INIT.get_or_try_init(|| {
             let primary = worker.tokio_runtime()?;
@@ -259,7 +259,7 @@ impl DistributedRuntime {
             } else {
                 runtime
                     .secondary()
-                    .block_on(rs::DistributedRuntime::from_settings(runtime, wait_for_served))
+                    .block_on(rs::DistributedRuntime::from_settings(runtime))
             };
         let inner = inner.map_err(to_pyerr)?;
 

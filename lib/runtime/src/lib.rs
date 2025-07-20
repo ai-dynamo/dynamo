@@ -58,6 +58,8 @@ pub use worker::Worker;
 
 use component::{Endpoint, InstanceSource};
 
+use config::HealthStatus;
+
 /// Types of Tokio runtimes that can be used to construct a Dynamo [Runtime].
 #[derive(Clone)]
 enum RuntimeType {
@@ -72,6 +74,31 @@ pub struct Runtime {
     primary: RuntimeType,
     secondary: RuntimeType,
     cancellation_token: CancellationToken,
+}
+
+// Current Health Status
+#[derive(Clone)]
+pub struct SystemHealth {
+    system_health: HealthStatus,
+    endpoint_health: Arc<Mutex<HashMap<String, HealthStatus>>>,
+    use_endpoint_health_status: Vec<String>,
+}
+
+impl SystemHealth {
+    pub fn new(
+        starting_health_status: HealthStatus,
+        use_endpoint_health_status: Vec<String>,
+    ) -> Self {
+        let mut endpoint_health = HashMap::new();
+        for endpoint in &use_endpoint_health_status {
+            endpoint_health.insert(endpoint.clone(), starting_health_status.clone());
+        }
+        SystemHealth {
+            system_health: starting_health_status,
+            endpoint_health: Arc::new(Mutex::new(endpoint_health)),
+            use_endpoint_health_status,
+        }
+    }
 }
 
 /// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
@@ -102,7 +129,6 @@ pub struct DistributedRuntime {
     // Start time for tracking uptime
     start_time: std::time::Instant,
 
-    // List of endpoints to wait for before being considered ready
-    // via system health. If system endpoints are not enabled has no effect.
-    served_endpoints: Arc<Mutex<HashMap<String, bool>>>,
+    // Health Status
+    system_health: SystemHealth,
 }

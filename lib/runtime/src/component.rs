@@ -29,7 +29,9 @@
 //!
 //! TODO: Top-level Overview of Endpoints/Functions
 
-use crate::{discovery::Lease, service::ServiceSet, transports::etcd::EtcdPath};
+use crate::{
+    config::HealthStatus, discovery::Lease, service::ServiceSet, transports::etcd::EtcdPath,
+};
 
 use super::{
     error,

@@ -52,8 +52,7 @@ pub async fn prepare_engine(
 ) -> anyhow::Result<PreparedEngine> {
     match engine_config {
         EngineConfig::Dynamic(local_model) => {
-            let distributed_runtime =
-                DistributedRuntime::from_settings(runtime.clone(), None).await?;
+            let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
 
             let Some(etcd_client) = distributed_runtime.etcd_client() else {
                 anyhow::bail!("Cannot be both static mode and run with dynamic discovery.");
