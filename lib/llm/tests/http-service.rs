@@ -28,6 +28,8 @@ use dynamo_llm::http::{
     },
 };
 use dynamo_llm::protocols::{
+    codec::SseLineCodec,
+    convert_sse_stream,
     openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -45,11 +47,31 @@ use futures::StreamExt;
 use prometheus::{proto::MetricType, Registry};
 use reqwest::StatusCode;
 use rstest::*;
-use std::sync::Arc;
+use std::{io::Cursor, sync::Arc};
+use tokio::time::timeout;
+use tokio_util::codec::FramedRead;
 
 struct CounterEngine {}
 
-#[allow(deprecated)]
+// Add a new long-running test engine
+struct LongRunningEngine {
+    delay_ms: u64,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl LongRunningEngine {
+    fn new(delay_ms: u64) -> Self {
+        Self {
+            delay_ms,
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        }
+    }
+
+    fn was_cancelled(&self) -> bool {
+        self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
 #[async_trait]
 impl
     AsyncEngine<
@@ -66,6 +88,7 @@ impl
         let ctx = context.context();
 
         // ALLOW: max_tokens is deprecated in favor of completion_usage_tokens
+        #[allow(deprecated)]
         let max_tokens = request.inner.max_tokens.unwrap_or(0) as u64;
 
         // let generator = NvCreateChatCompletionStreamResponse::generator(request.model.clone());
@@ -82,6 +105,54 @@ impl
 
                 yield Annotated::from_data(output);
             }
+        };
+
+        Ok(ResponseStream::new(Box::pin(stream), ctx))
+    }
+}
+
+#[async_trait]
+impl
+    AsyncEngine<
+        SingleIn<NvCreateChatCompletionRequest>,
+        ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+        Error,
+    > for LongRunningEngine
+{
+    async fn generate(
+        &self,
+        request: SingleIn<NvCreateChatCompletionRequest>,
+    ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+        let (_request, context) = request.transfer(());
+        let ctx = context.context();
+
+        tracing::info!(
+            "LongRunningEngine: Starting generation with {}ms delay",
+            self.delay_ms
+        );
+
+        let cancelled_flag = self.cancelled.clone();
+        let delay_ms = self.delay_ms;
+
+        let ctx_clone = ctx.clone();
+        let stream = async_stream::stream! {
+
+            // the stream can be dropped or it can be cancelled
+            // either way we consider this a cancellation
+            cancelled_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_millis(delay_ms)) => {
+                    // the stream went to completion
+                    cancelled_flag.store(false, std::sync::atomic::Ordering::SeqCst);
+
+                }
+                _ = ctx_clone.stopped() => {
+                    cancelled_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+
+            yield Annotated::<NvCreateChatCompletionStreamResponse>::from_annotation("event.dynamo.test.sentinel", &"DONE".to_string()).expect("Failed to create annotated response");
         };
 
         Ok(ResponseStream::new(Box::pin(stream), ctx))
@@ -876,6 +947,314 @@ async fn test_generic_byot_client(
 
     let (_stream, context) = result.unwrap().dissolve();
     assert_eq!(context.id(), ctx.id(), "Context ID should match");
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_client_disconnect_cancellation_unary() {
+    let service = HttpService::builder().port(8993).build().unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+
+    // Start the service
+    let task = tokio::spawn(async move { service.run(token).await });
+
+    // Wait for service to be ready
+    wait_for_service_ready(8993).await;
+
+    // Create a long-running engine (10 seconds)
+    let long_running_engine = Arc::new(LongRunningEngine::new(10_000));
+    manager
+        .add_chat_completions_model("slow-model", long_running_engine.clone())
+        .unwrap();
+
+    let client = reqwest::Client::new();
+
+    let message = async_openai::types::ChatCompletionRequestMessage::User(
+        async_openai::types::ChatCompletionRequestUserMessage {
+            content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                "This will take a long time".to_string(),
+            ),
+            name: None,
+        },
+    );
+
+    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+        .model("slow-model")
+        .messages(vec![message])
+        .stream(false) // Test unary response
+        .build()
+        .expect("Failed to build request");
+
+    // Start the request and cancel it after 1 second
+    let start_time = std::time::Instant::now();
+
+    let request_future = async {
+        client
+            .post("http://localhost:8993/v1/chat/completions")
+            .json(&request)
+            .send()
+            .await
+    };
+
+    // Use timeout to simulate client disconnect after 1 second
+    let result = timeout(std::time::Duration::from_millis(1000), request_future).await;
+
+    let elapsed = start_time.elapsed();
+
+    // The request should timeout (simulating client disconnect)
+    assert!(result.is_err(), "Request should have timed out");
+
+    // Give the service a moment to detect the disconnect and propagate cancellation
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Verify the engine was cancelled
+    assert!(
+        long_running_engine.was_cancelled(),
+        "Engine should have been cancelled due to client disconnect"
+    );
+
+    // Verify cancellation happened quickly (within 2 seconds, not the full 10 seconds)
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "Cancellation should have propagated quickly, took {:?}",
+        elapsed
+    );
+
+    tracing::info!(
+        "✅ Client disconnect test passed! Request cancelled in {:?}, engine detected cancellation",
+        elapsed
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_client_disconnect_cancellation_streaming() {
+    dynamo_runtime::logging::init();
+
+    let service = HttpService::builder().port(8994).build().unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+
+    // Start the service
+    let task = tokio::spawn(async move { service.run(token).await });
+
+    // Wait for service to be ready
+    wait_for_service_ready(8994).await;
+
+    // Create a long-running engine (10 seconds)
+    let long_running_engine = Arc::new(LongRunningEngine::new(10_000));
+    manager
+        .add_chat_completions_model("slow-stream-model", long_running_engine.clone())
+        .unwrap();
+
+    let client = reqwest::Client::new();
+
+    let message = async_openai::types::ChatCompletionRequestMessage::User(
+        async_openai::types::ChatCompletionRequestUserMessage {
+            content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                "This will stream for a long time".to_string(),
+            ),
+            name: None,
+        },
+    );
+
+    let request = async_openai::types::CreateChatCompletionRequestArgs::default()
+        .model("slow-stream-model")
+        .messages(vec![message])
+        .stream(true) // Test streaming response
+        .build()
+        .expect("Failed to build request");
+
+    // Start the request and cancel it after 1 second
+    let start_time = std::time::Instant::now();
+
+    let request_future = async {
+        let response = client
+            .post("http://localhost:8994/v1/chat/completions")
+            .json(&request)
+            .send()
+            .await
+            .unwrap();
+
+        // Start reading the stream, then drop it to simulate client disconnect
+        let mut stream = response.bytes_stream();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // Read one chunk then drop the stream (simulating client disconnect)
+        let _ = StreamExt::next(&mut stream).await;
+        // Stream gets dropped here when function exits
+    };
+
+    // Use timeout to simulate the streaming request timing out
+    let _result = timeout(std::time::Duration::from_millis(1500), request_future).await;
+
+    let elapsed = start_time.elapsed();
+
+    // Give the service time to detect the disconnect
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+    // Verify the engine was cancelled
+    assert!(
+        long_running_engine.was_cancelled(),
+        "Engine should have been cancelled due to streaming client disconnect"
+    );
+
+    // Verify cancellation happened reasonably quickly
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "Stream cancellation should have propagated reasonably quickly, took {:?}",
+        elapsed
+    );
+
+    tracing::info!(
+        "✅ Streaming client disconnect test passed! Stream cancelled in {:?}, engine detected cancellation",
+        elapsed
+    );
+
+    cancel_token.cancel();
+    task.await.unwrap().unwrap();
+}
+
+#[rstest]
+#[tokio::test]
+async fn test_request_id_annotation() {
+    // TODO(ryan): make better fixtures, this is too much to test sometime so simple
+    dynamo_runtime::logging::init();
+
+    let service = HttpService::builder().port(8995).build().unwrap();
+    let state = service.state_clone();
+    let manager = state.manager();
+
+    let token = CancellationToken::new();
+    let cancel_token = token.clone();
+
+    // Start the service
+    let task = tokio::spawn(async move { service.run(token).await });
+
+    // Wait for service to be ready
+    wait_for_service_ready(8995).await;
+
+    // Add a counter engine for this test
+    let counter_engine = Arc::new(CounterEngine {});
+    manager
+        .add_chat_completions_model("test-model", counter_engine)
+        .unwrap();
+
+    // Create reqwest client directly
+    let client = reqwest::Client::new();
+
+    // Generate a UUID for the request ID
+    let request_uuid = uuid::Uuid::new_v4();
+
+    // Create the request JSON directly
+    let request_json = serde_json::json!({
+        "model": "test-model",
+        "messages": [
+            {
+                "role": "user",
+                "content": "Test request with annotation"
+            }
+        ],
+        "stream": true,
+        "max_tokens": 50,
+        "nvext": {
+            "annotations": ["request_id"]
+        }
+    });
+
+    // Make the streaming request with custom header
+    let response = client
+        .post("http://localhost:8995/v1/chat/completions")
+        .header("x-dynamo-request-id", request_uuid.to_string())
+        .json(&request_json)
+        .send()
+        .await
+        .expect("Request should succeed");
+
+    assert!(
+        response.status().is_success(),
+        "Response should be successful"
+    );
+
+    // Collect the entire response body as bytes first
+    let body_bytes = response
+        .bytes()
+        .await
+        .expect("Failed to read response body");
+    let body_text = String::from_utf8_lossy(&body_bytes);
+
+    // Create a cursor from the text and use SseLineCodec to parse it
+    let cursor = Cursor::new(body_text.to_string());
+    let framed = FramedRead::new(cursor, SseLineCodec::new());
+    let annotated_stream = convert_sse_stream::<NvCreateChatCompletionStreamResponse>(framed);
+
+    // Look for the annotation in the stream
+    let mut found_request_id_annotation = false;
+    let mut received_request_id = None;
+
+    // Process the annotated stream and look for the request_id annotation
+    let mut annotated_stream = std::pin::pin!(annotated_stream);
+    while let Some(annotated_response) = annotated_stream.next().await {
+        // Check if this is a request_id annotation
+        if let Some(event) = &annotated_response.event {
+            if event == "request_id" {
+                found_request_id_annotation = true;
+                // Extract the request ID from the annotation
+                if let Some(comments) = &annotated_response.comment {
+                    if let Some(comment) = comments.first() {
+                        // The comment contains a JSON-encoded string, so we need to parse it
+                        if let Ok(parsed_value) = serde_json::from_str::<String>(comment) {
+                            received_request_id = Some(parsed_value);
+                        } else {
+                            // Fallback: remove quotes manually if JSON parsing fails
+                            received_request_id = Some(comment.trim_matches('"').to_string());
+                        }
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    // Verify we found the annotation
+    assert!(
+        found_request_id_annotation,
+        "Should have received request_id annotation in the stream"
+    );
+
+    // Verify the request ID matches what we sent
+    assert!(
+        received_request_id.is_some(),
+        "Should have received the request ID in the annotation"
+    );
+
+    let received_uuid_str = received_request_id.unwrap();
+    assert_eq!(
+        received_uuid_str,
+        request_uuid.to_string(),
+        "Received request ID should match the one we sent: expected {}, got {}",
+        request_uuid,
+        received_uuid_str
+    );
+
+    tracing::info!(
+        "✅ Request ID annotation test passed! Sent UUID: {}, Received: {}",
+        request_uuid,
+        received_uuid_str
+    );
 
     cancel_token.cancel();
     task.await.unwrap().unwrap();
