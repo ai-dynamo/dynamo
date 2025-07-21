@@ -34,16 +34,6 @@ ARG RUNTIME_IMAGE_TAG="12.9.0-runtime-ubuntu24.04"
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS nixl_base
-
-WORKDIR /opt/nixl
-# Add a cache hint that only changes when the nixl commit changes
-ARG NIXL_COMMIT
-# This line acts as a cache key - it only changes when NIXL_COMMIT changes
-RUN echo "NIXL commit: ${NIXL_COMMIT}" > /opt/nixl/commit.txt
-# Copy the nixl source
-COPY --from=nixl . .
-
 ##################################
 ########## Build Image ###########
 ##################################
@@ -53,6 +43,7 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS build
 # Redeclare ARCH and ARCH_ALT so they're available in this build stage
 ARG ARCH
 ARG ARCH_ALT
+ARG NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
 
 USER root
 
@@ -101,9 +92,10 @@ ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
 SHELL ["/bin/bash", "-c"]
 
 # NIXL SETUP
-# Copy nixl source, and use commit hash as cache hint
-COPY --from=nixl_base /opt/nixl /opt/nixl
-COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
+# Clone nixl source, and checkout the nixl ref
+RUN git clone "https://github.com/ai-dynamo/nixl.git" /opt/nixl && \
+    cd /opt/nixl && \
+    git checkout ${NIXL_REF}
 RUN if [ "$ARCH" = "arm64" ]; then \
         cd /opt/nixl && \
         mkdir build && \
@@ -159,8 +151,7 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
         fi; \
     else \
          # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
-         pip install --index-url "${TENSORRTLLM_INDEX_URL}" \
-         --extra-index-url https://pypi.org/simple \
+         pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" \
          "${TENSORRTLLM_PIP_WHEEL}" ; \
     fi
 
@@ -474,8 +465,10 @@ ARG TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
 COPY --from=dev /workspace/wheels/nixl/*.whl wheelhouse/
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 
-RUN uv pip install --index-url "${TENSORRTLLM_INDEX_URL}" \
-    --extra-index-url https://pypi.org/simple \
+# NOTE: If a package (tensorrt_llm) exists on both --index-url and --extra-index-url,
+# uv will prioritize the --extra-index-url, unless --index-strategy unsafe-best-match
+# is also specified. So set the configurable index as a --extra-index-url for prioritization.
+RUN uv pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" \
     "${TENSORRTLLM_PIP_WHEEL}" && \
     uv pip install ai-dynamo nixl --find-links wheelhouse
 

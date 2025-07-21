@@ -25,16 +25,16 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "pytest>=8.3.4",
-    "types-psutil==7.0.0.20250218",
-    "kubernetes==32.0.1",
     "ai-dynamo-runtime==0.3.2",
-    "fastapi==0.115.6",
+    "pytest>=8.3.4",
+    "types-psutil>=7.0.0.20250218",
+    "kubernetes>=32.0.1,<33.0.0",
+    "fastapi>=0.115.0",
     "distro",
     # filelock: required by planner
     "filelock",
     "typer",
-    "circus==0.19.0",
+    "circus>=0.19.0",
     "click<8.2.0",
     "setuptools",
 ]
@@ -79,7 +79,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["deploy/sdk/src/dynamo", "components/planner/src/dynamo", "components/frontend/src/dynamo", "components/backends/llama_cpp/src/dynamo", "components/backends/mocker/src/dynamo"]
+packages = ["deploy/sdk/src/dynamo", "components/planner/src/dynamo", "components/frontend/src/dynamo", "components/backends/llama_cpp/src/dynamo", "components/backends/mocker/src/dynamo", "components/backends/trtllm/src/dynamo"]
 
 # This section is for including the binaries in the wheel package
 # but doesn't make them executable scripts in the venv bin directory

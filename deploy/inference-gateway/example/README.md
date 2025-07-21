@@ -13,42 +13,12 @@ This guide provides instructions for setting up the Inference Gateway with Dynam
 
 1. **Install Dynamo Cloud**
 
-Follow the instructions in [deploy/cloud/README.md](../../deploy/cloud/README.md) to deploy Dynamo Cloud on your Kubernetes cluster. This will set up the necessary infrastructure components for managing Dynamo inference graphs.
+[See Quickstart Guide](../../../docs/guides/dynamo_deploy/quickstart.md) to install Dynamo Cloud.
 
-2. **Launch 2 Dynamo Deployments**
 
-Deploy 2 Dynamo aggregated graphs following the instructions in [examples/llm/README.md](../../examples/llm/README.md):
+2. **Launch Dynamo Deployments**
 
-### Deploy Dynamo Graphs
-
-Follow the commands to deploy 2 dynamo graphs -
-
-```bash
-# Set pre-built vLLM dynamo base container image
-export VLLM_RUNTIME_IMAGE=<dynamo-vllm-base-image>
-# for example:
-# export VLLM_RUNTIME_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.1
-
-# run the following commands from dynamo repo's root folder
-
-# Deploy first graph
-export DEPLOYMENT_NAME=llm-agg1
-yq eval '
-  .metadata.name = env(DEPLOYMENT_NAME) |
-  .spec.services[].extraPodSpec.mainContainer.image = env(VLLM_RUNTIME_IMAGE)
-' examples/vllm_v0/deploy/agg.yaml > examples/vllm_v0/deploy/agg1.yaml
-
-kubectl apply -f examples/vllm_v0/deploy/agg1.yaml
-
-# Deploy second graph
-export DEPLOYMENT_NAME=llm-agg2
-yq eval '
-  .metadata.name = env(DEPLOYMENT_NAME) |
-  .spec.services[].extraPodSpec.mainContainer.image = env(VLLM_RUNTIME_IMAGE)
-' examples/vllm_v0/deploy/agg.yaml > examples/vllm_v0/deploy/agg2.yaml
-
-kubectl apply -f examples/vllm_v0/deploy/agg2.yaml
-```
+[See VLLM Example](../../../examples/vllm/README.md)
 
 3. **Deploy Inference Gateway**
 
