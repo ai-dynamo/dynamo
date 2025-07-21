@@ -17,11 +17,11 @@ use system_metrics::{MyStats, DEFAULT_NAMESPACE};
 
 use dynamo_runtime::{
     logging,
+    metrics::MetricsRegistry,
     pipeline::{
         async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
         ResponseStream, SingleIn,
     },
-    metrics::MetricsRegistry,
     protocols::annotated::Annotated,
     stream, DistributedRuntime, Result, Runtime, Worker,
 };
