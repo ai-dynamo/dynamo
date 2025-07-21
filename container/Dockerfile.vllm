@@ -39,9 +39,10 @@ ARG ARCH_ALT=x86_64
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
-# Redeclare ARCH and ARCH_ALT so they're available in this stage
+# Redeclare ARCH, ARCH_ALT, TORCH_BACKEND so they're available in this stage
 ARG ARCH
 ARG ARCH_ALT
+ARG TORCH_BACKEND
 
 USER root
 ARG PYTHON_VERSION=3.12
