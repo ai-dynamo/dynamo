@@ -42,14 +42,14 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "1"
-          memory: "2Gi"
+          cpu: "32"
+          memory: "10Gi"
         limits:
-          cpu: "1"
-          memory: "2Gi"
+          cpu: "32"
+          memory: "10Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-233.0
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.14
           workingDir: /workspace/examples/vllm
           args:
             - dynamo
@@ -93,10 +93,10 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-233.0
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.14
           workingDir: /workspace/examples/vllm
           args:
-            - "python3 components/main.py --model Qwen/Qwen3-0.6B --enforce-eager 2>&1 | tee /tmp/vllm.log"
+            - "python3 components/main.py --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B --enforce-eager 2>&1 | tee /tmp/vllm.log"
     VllmPrefillWorker:
       dynamoNamespace: vllm-v1-disagg
       envFromSecret: hf-token-secret
@@ -123,16 +123,16 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "64"
+          cpu: "32"
           memory: "40Gi"
           gpu: "1"
         limits:
-          cpu: "64"
+          cpu: "32"
           memory: "40Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-233.0
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.14
           workingDir: /workspace/examples/vllm
           args:
-            - "python3 components/main.py --model Qwen/Qwen3-0.6B --enforce-eager --is-prefill-worker 2>&1 | tee /tmp/vllm.log"
+            - "python3 components/main.py --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B --enforce-eager --is-prefill-worker 2>&1 | tee /tmp/vllm.log"
