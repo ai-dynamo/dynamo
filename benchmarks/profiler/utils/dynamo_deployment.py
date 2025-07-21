@@ -128,7 +128,7 @@ class DynamoDeploymentClient:
             else:
                 raise
 
-    async def wait_for_deployment_ready(self, timeout: int = 300):
+    async def wait_for_deployment_ready(self, timeout: int = 600):
         """
         Wait for the custom resource to be ready.
 
@@ -155,6 +155,7 @@ class DynamoDeploymentClient:
 
                 print(f"Current deployment state: {current_state}")
                 print(f"Current conditions: {conditions}")
+                print(f"Elapsed time: {time.time() - start_time:.1f}s / {timeout}s")
 
                 ready_condition = False
                 for condition in conditions:
@@ -177,8 +178,11 @@ class DynamoDeploymentClient:
                         f"Deployment not ready yet - Ready condition: {ready_condition}, State successful: {state_successful}"
                     )
 
-            except kubernetes.client.rest.ApiException:
-                pass
+            except kubernetes.client.rest.ApiException as e:
+                print(f"API Exception while checking deployment status: {e}")
+                print(f"Status code: {e.status}, Reason: {e.reason}")
+            except Exception as e:
+                print(f"Unexpected exception while checking deployment status: {e}")
             await asyncio.sleep(20)
         raise TimeoutError("Deployment failed to become ready within timeout")
 
