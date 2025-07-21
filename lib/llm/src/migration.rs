@@ -113,9 +113,9 @@ impl RetryManager {
                 if let Some(err) = response.err() {
                     const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
                     if format!("{:?}", err) == STREAM_ERR_MSG {
-                        tracing::info!("Stream disconnected... recreating stream...");
+                        tracing::warn!("Stream disconnected... recreating stream...");
                         if let Err(err) = self.new_stream().await {
-                            tracing::info!("Cannot recreate stream: {:?}", err);
+                            tracing::warn!("Cannot recreate stream: {:?}", err);
                         } else {
                             continue;
                         }
@@ -138,7 +138,7 @@ impl RetryManager {
             if let Some(err) = response_stream.as_ref().unwrap().as_ref().err() {
                 if let Some(req_err) = err.downcast_ref::<NatsRequestError>() {
                     if matches!(req_err.kind(), NatsNoResponders) {
-                        tracing::info!("Creating new stream... retrying...");
+                        tracing::warn!("Creating new stream... retrying...");
                         continue;
                     }
                 }
@@ -150,9 +150,9 @@ impl RetryManager {
                 self.next_stream = Some(next_stream);
                 Ok(())
             }
-            Some(Err(err)) => Err(err), // should propagate streaming error if stream started
+            Some(Err(err)) => Err(err), // should propagate original error if any
             None => Err(Error::msg(
-                "Retries exhausted - should propagate streaming error",
+                "Migration limit exhausted", // should propagate original error if any
             )),
         }
     }
