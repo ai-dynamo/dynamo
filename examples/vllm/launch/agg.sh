@@ -8,4 +8,4 @@ trap 'echo Cleaning up...; kill 0' EXIT
 dynamo run in=http out=dyn &
 
 # run worker
-python3 components/main.py --model Qwen/Qwen3-0.6B --enforce-eager
+python3 components/main.py --model Qwen/Qwen3-0.6B --enforce-eager --no-enable-prefix-caching

@@ -73,6 +73,12 @@ def parse_args() -> Config:
     args = parser.parse_args()
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
+    if engine_args.enable_prefix_caching is None:
+        logger.debug(
+            "--enable-prefix-caching or --no-enable-prefix-caching not specified. Defaulting to True (vLLM v1 default behavior)"
+        )
+        engine_args.enable_prefix_caching = True
+
     config = Config()
     config.model = args.model
     if args.served_model_name:
