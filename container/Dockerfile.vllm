@@ -10,7 +10,7 @@ ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
-ARG VLLM_REF="059d4cd"
+ARG VLLM_REF="18bdcf4"
 
 # After this commit deepgemm API changed
 # 1.0.0 -> 2.0.0
