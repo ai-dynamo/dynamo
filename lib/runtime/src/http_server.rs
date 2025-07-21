@@ -39,7 +39,7 @@ impl MetricsRegistry for HttpMetricsRegistry {
     }
 
     fn parent_hierarchy(&self) -> Vec<String> {
-        vec![self.drt().parent_hierarchy(), vec![self.drt().basename()]].concat()
+        [self.drt().parent_hierarchy(), vec![self.drt().basename()]].concat()
     }
 }
 
@@ -84,7 +84,7 @@ impl HttpServerState {
 
     /// Get a reference to the distributed runtime
     pub fn drt(&self) -> &crate::DistributedRuntime {
-        &*self.root_drt
+        &self.root_drt
     }
 
     /// Update the uptime gauge with current value
