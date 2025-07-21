@@ -208,13 +208,17 @@ async fn metrics_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
     }
 }
 
+// Test via: cargo test http_server --lib -- --ignored
+
 #[cfg(test)]
 async fn make_test_drt() -> Arc<crate::DistributedRuntime> {
+    // Since these tests are ignored, this function won't be called in normal test runs
+    // But if someone runs the ignored tests, they need NATS to be available
     let rt = crate::Runtime::from_current().unwrap();
     Arc::new(
         crate::DistributedRuntime::from_settings_without_discovery(rt)
             .await
-            .unwrap(),
+            .expect("NATS server must be running to run these tests"),
     )
 }
 
@@ -256,6 +260,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "Requires NATS server to be running"]
     async fn test_runtime_metrics_initialization_and_namespace() {
         // Test that metrics have correct namespace
         let drt = make_test_drt().await;
@@ -278,6 +283,7 @@ uptime_seconds{namespace=\"http_server\"} 42
     }
 
     #[tokio::test]
+    #[ignore = "Requires NATS server to be running"]
     async fn test_start_time_initialization() {
         // Test that start time can only be initialized once
         let drt = make_test_drt().await;
@@ -295,6 +301,7 @@ uptime_seconds{namespace=\"http_server\"} 42
     }
 
     #[tokio::test]
+    #[ignore = "Requires NATS server to be running"]
     async fn test_uptime_without_initialization() {
         // Test that uptime returns an error if start time is not initialized
         let drt = make_test_drt().await;
@@ -307,6 +314,7 @@ uptime_seconds{namespace=\"http_server\"} 42
     }
 
     #[tokio::test]
+    #[ignore = "Requires NATS server to be running"]
     async fn test_spawn_http_server_endpoints() {
         // use reqwest for HTTP requests
         let cancel_token = CancellationToken::new();
