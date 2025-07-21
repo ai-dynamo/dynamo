@@ -93,7 +93,7 @@ You will need [etcd](https://etcd.io/) and [nats](https://nats.io) with jetstrea
 **Node 1:** OpenAI compliant HTTP server, optional pre-processing, worker discovery:
 
 ```
-dynamo-run in=http out=dyn
+dynamo-run in=http out=auto
 ```
 
 **Node 2:** Vllm engine. Receives and returns requests over the network:
@@ -141,7 +141,18 @@ Example 4: Multiple component in a pipeline.
 
 In the P/D disaggregated setup you would have `deepseek-distill-llama8b.prefill.generate` (possibly multiple instances of this) and `deepseek-distill-llama8b.decode.generate`.
 
-For output it is always only `out=dyn`. This tells Dynamo to auto-discover the instances, group them by model, and load balance appropriately (depending on `--router-mode` flag). The old syntax of `dyn://...` is still accepted for backwards compatibility.
+For output it is always only `out=auto`. This tells Dynamo to auto-discover the instances, group them by model, and load balance appropriately (depending on `--router-mode` flag). The exception is static workers, see that section.
+
+### Static workers without etcd
+
+Normally in the distributed system the frontend uses etcd to discover workers. The option exists to have a static endpoint without etcd.
+
+```
+Node 1: dynamo-run in=http out=dyn://dynamo.backend.generate --model-name Qwen3-0.6B-Q8_0.gguf --model-path ~/llms/Qwen3-0.6B
+Node 2: dynamo-run in=dyn://dynamo.backend.generate out=llamacpp ~/llms/Qwen3-0.6B-Q8_0.gguf --static-worker --context-length 4096
+```
+
+Note how `out=` points to a single endpoint, which must match the worker. The model's name and config (to do pre-processing) are usually discovered by the frontend via etcd. Now we must pass them in (`--model-name` and `--model-path`).
 
 ### KV-aware routing
 
@@ -194,7 +205,7 @@ dynamo-run in=dyn://dynamo.endpoint.generate out=vllm /data/llms/Qwen/Qwen3-4B
 **Start the ingress node**
 
 ```
-dynamo-run in=http out=dyn --router-mode kv
+dynamo-run in=http out=auto --router-mode kv
 ```
 
 The only difference from the distributed system above is `--router-mode kv`. The patched vllm announces when a KV block is created or removed. The Dynamo router run finds the worker with the best match for those KV blocks and directs the traffic to that node.
@@ -569,7 +580,7 @@ And below are arguments that are mocker-specific:
 ```bash
 echo '{"speedup_ratio": 10.0}' > mocker_args.json
 dynamo-run in=dyn://dynamo.mocker.generate out=mocker --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 --extra-engine-args mocker_args.json
-dynamo-run in=http out=dyn --router-mode kv
+dynamo-run in=http out=auto --router-mode kv
 ```
 
 ### Extra engine arguments

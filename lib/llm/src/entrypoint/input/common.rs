@@ -6,7 +6,7 @@ use std::pin::Pin;
 use crate::{
     backend::{Backend, ExecutionContext},
     discovery::{ModelManager, ModelWatcher, MODEL_ROOT_PATH},
-    engines::StreamingEngineAdapter,
+    engines::{self, StreamingEngineAdapter},
     entrypoint::EngineConfig,
     model_card::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
@@ -21,8 +21,11 @@ use crate::{
     },
 };
 use dynamo_runtime::{
+    distributed::DistributedConfig,
     engine::{AsyncEngineStream, Data},
-    pipeline::{Context, ManyOut, Operator, ServiceBackend, ServiceFrontend, SingleIn, Source},
+    pipeline::{
+        Context, ManyOut, Operator, RouterMode, ServiceBackend, ServiceFrontend, SingleIn, Source,
+    },
     DistributedRuntime, Runtime,
 };
 use std::sync::Arc;
@@ -78,6 +81,7 @@ pub async fn prepare_engine(
             // '/models` to list, and notifications when models are added / removed.
 
             let model_service_name = watch_obj.wait_for_chat_model().await;
+            tracing::info!("Connected to {model_service_name}");
             let engine = model_manager.get_chat_completions_engine(&model_service_name)?;
             Ok(PreparedEngine {
                 service_name: model_service_name,
@@ -87,7 +91,54 @@ pub async fn prepare_engine(
                 request_template: local_model.request_template(),
             })
         }
-        EngineConfig::StaticFull { engine, model } => {
+        EngineConfig::StaticRemote(local_model) => {
+            // For now we only do ModelType.Backend
+            // For batch/text we only do Chat Completions
+
+            // The card should have been loaded at 'build' phase earlier
+            let card = local_model.card();
+            let router_mode = local_model.router_config().router_mode;
+
+            let dst_config = DistributedConfig::from_settings(true);
+            let distributed_runtime = DistributedRuntime::new(runtime, dst_config).await?;
+
+            let endpoint_id = local_model.endpoint_id();
+            let component = distributed_runtime
+                .namespace(&endpoint_id.namespace)?
+                .component(&endpoint_id.component)?;
+            let client = component.endpoint(&endpoint_id.name).client().await?;
+
+            let kv_chooser = if router_mode == RouterMode::KV {
+                let model_manager = Arc::new(ModelManager::new());
+                Some(
+                    model_manager
+                        .kv_chooser_for(
+                            local_model.display_name(),
+                            &component,
+                            card.kv_cache_block_size,
+                            Some(local_model.router_config().kv_router_config),
+                        )
+                        .await?,
+                )
+            } else {
+                None
+            };
+
+            let chat_engine =
+                engines::build_chat_completions(card, &client, router_mode, kv_chooser.clone())
+                    .await?;
+
+            let service_name = local_model.service_name().to_string();
+            tracing::info!("Static connecting to {service_name}");
+            Ok(PreparedEngine {
+                service_name,
+                engine: chat_engine,
+                inspect_template: false,
+                request_template: local_model.request_template(),
+                card: Some(local_model.into_card()),
+            })
+        }
+        EngineConfig::StaticFull { engine, model, .. } => {
             let service_name = model.service_name().to_string();
             tracing::debug!("Model: {service_name} with engine pre-processing");
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
@@ -102,6 +153,7 @@ pub async fn prepare_engine(
         EngineConfig::StaticCore {
             engine: inner_engine,
             model,
+            ..
         } => {
             let pipeline = build_pipeline::<
                 NvCreateChatCompletionRequest,
