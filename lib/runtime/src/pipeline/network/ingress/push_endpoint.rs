@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::*;
 use crate::config::HealthStatus;
 use crate::protocols::LeaseId;
+use crate::SystemHealth;
 use anyhow::Result;
 use async_nats::service::endpoint::Endpoint;
 use derive_builder::Builder;
@@ -44,18 +45,17 @@ impl PushEndpoint {
         self,
         endpoint: Endpoint,
         endpoint_name: String,
-        endpoint_health: Arc<Mutex<HashMap<String, HealthStatus>>>,
+        system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
         let mut endpoint = endpoint;
 
         let inflight = Arc::new(AtomicU64::new(0));
         let notify = Arc::new(Notify::new());
 
-        {
-            let mut mut_endpoint_health = endpoint_health.lock().await;
-
-            mut_endpoint_health.insert(endpoint_name.clone(), HealthStatus::Ready);
-        }
+        system_health
+            .lock()
+            .await
+            .set_endpoint_health_status(endpoint_name.clone(), HealthStatus::Ready);
 
         loop {
             let req = tokio::select! {
@@ -111,11 +111,10 @@ impl PushEndpoint {
             }
         }
 
-        {
-            let mut mut_endpoint_health = endpoint_health.lock().await;
-
-            mut_endpoint_health.insert(endpoint_name.clone(), HealthStatus::NotReady);
-        }
+        system_health
+            .lock()
+            .await
+            .set_endpoint_health_status(endpoint_name.clone(), HealthStatus::NotReady);
 
         // await for all inflight requests to complete
         tracing::info!(

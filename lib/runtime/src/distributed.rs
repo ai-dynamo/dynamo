@@ -68,8 +68,10 @@ impl DistributedRuntime {
         let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
         let starting_health_status = config.starting_health_status.clone();
         let use_endpoint_health_status = config.use_endpoint_health_status.clone();
-
-        let system_health = SystemHealth::new(starting_health_status, use_endpoint_health_status);
+        let system_health = Arc::new(Mutex::new(SystemHealth::new(
+            starting_health_status,
+            use_endpoint_health_status,
+        )));
 
         let distributed_runtime = Self {
             runtime,

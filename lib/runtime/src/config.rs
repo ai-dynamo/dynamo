@@ -201,7 +201,7 @@ impl RuntimeConfig {
             system_port: DEFAULT_SYSTEM_PORT,
             system_enabled: false,
             starting_health_status: HealthStatus::NotReady,
-            use_endpoint_health_status: vec![], // UPDATED DEFAULT TO EMPTY VECTOR
+            use_endpoint_health_status: vec![],
         }
     }
 
@@ -228,7 +228,7 @@ impl Default for RuntimeConfig {
             system_port: DEFAULT_SYSTEM_PORT,
             system_enabled: false,
             starting_health_status: HealthStatus::NotReady,
-            use_endpoint_health_status: vec![], // UPDATED DEFAULT TO EMPTY VECTOR
+            use_endpoint_health_status: vec![],
         }
     }
 }
@@ -403,6 +403,28 @@ mod tests {
             assert!(!config.system_server_enabled());
             assert_eq!(config.system_port, 8080);
         });
+    }
+
+    #[test]
+    fn test_system_server_starting_health_status_ready() {
+        temp_env::with_vars(
+            vec![("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("ready"))],
+            || {
+                let config = RuntimeConfig::from_settings().unwrap();
+                assert!(config.starting_health_status == HealthStatus::Ready);
+            },
+        );
+    }
+
+    #[test]
+    fn test_system_use_endpoint_health_status() {
+        temp_env::with_vars(
+            vec![("DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS", Some("[\"ready\"]"))],
+            || {
+                let config = RuntimeConfig::from_settings().unwrap();
+                assert!(config.use_endpoint_health_status == vec!["ready"]);
+            },
+        );
     }
 
     #[test]

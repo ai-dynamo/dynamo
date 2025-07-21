@@ -76,11 +76,14 @@ pub struct Runtime {
     cancellation_token: CancellationToken,
 }
 
-// Current Health Status
+/// Current Health Status
+/// If use_endpoint_health_status is set then
+/// initialize the endpoint_health hashmap to the
+/// starting health status
 #[derive(Clone)]
 pub struct SystemHealth {
     system_health: HealthStatus,
-    endpoint_health: Arc<Mutex<HashMap<String, HealthStatus>>>,
+    endpoint_health: HashMap<String, HealthStatus>,
     use_endpoint_health_status: Vec<String>,
 }
 
@@ -95,9 +98,44 @@ impl SystemHealth {
         }
         SystemHealth {
             system_health: starting_health_status,
-            endpoint_health: Arc::new(Mutex::new(endpoint_health)),
+            endpoint_health,
             use_endpoint_health_status,
         }
+    }
+    pub fn set_health_status(&mut self, status: HealthStatus) {
+        self.system_health = status;
+    }
+
+    pub fn set_endpoint_health_status(&mut self, endpoint: String, status: HealthStatus) {
+        self.endpoint_health.insert(endpoint, status);
+    }
+
+    /// Returns the overall health status and endpoint health statuses
+    pub fn get_health_status(&self) -> (bool, HashMap<String, String>) {
+        let mut endpoints: HashMap<String, String> = HashMap::new();
+        for (endpoint, ready) in &self.endpoint_health {
+            endpoints.insert(
+                endpoint.clone(),
+                if *ready == HealthStatus::Ready {
+                    "ready".to_string()
+                } else {
+                    "notready".to_string()
+                },
+            );
+        }
+
+        let healthy;
+        if !self.use_endpoint_health_status.is_empty() {
+            healthy = self.use_endpoint_health_status.iter().all(|endpoint| {
+                self.endpoint_health
+                    .get(endpoint)
+                    .map_or(false, |status| *status == HealthStatus::Ready)
+            });
+        } else {
+            healthy = self.system_health == HealthStatus::Ready;
+        }
+
+        (healthy, endpoints)
     }
 }
 
@@ -130,5 +168,5 @@ pub struct DistributedRuntime {
     start_time: std::time::Instant,
 
     // Health Status
-    system_health: SystemHealth,
+    system_health: Arc<Mutex<SystemHealth>>,
 }
