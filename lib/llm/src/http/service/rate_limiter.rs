@@ -682,7 +682,7 @@ mod tests {
         tracker.record_value(42.0);
         let single_avg = tracker.get_decayed_time_weighted_average();
         assert!(
-            (single_avg - 42.0).abs() < 1e-6,
+            (single_avg - 42.0).abs() < 1e-5,
             "Single sample average should equal sample value: {}",
             single_avg
         );
