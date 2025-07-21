@@ -126,6 +126,9 @@ async def init(runtime: DistributedRuntime, config: Config):
     default_sampling_params._setup(tokenizer)
     default_sampling_params.stop = None
 
+    # We already detokenize inside HandlerBase. No need to also do it in TRTLLM.
+    default_sampling_params.detokenize = False
+
     async with get_tensorrtllm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
 
