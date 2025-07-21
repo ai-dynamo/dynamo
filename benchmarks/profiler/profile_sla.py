@@ -398,14 +398,22 @@ async def run_profile(args):
         deployment_clients.append(client)  # Track for cleanup
         await client.create_deployment(prefill_config_fn)
         logger.info("Waiting for deployment to be ready...")
-        await client.wait_for_deployment_ready()
-        logger.info("Deployment is ready")
+        try:
+            await client.wait_for_deployment_ready()
+            logger.info("Deployment is ready")
+            skip_profile = False
+        except TimeoutError:
+            logger.error(
+                "Deployment failed to become ready within timeout, skipping profiling"
+            )
+            skip_profile = True
 
-        logger.info("Getting deployment logs...")
-        await client.get_deployment_logs()
-        logger.info(
-            f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
-        )
+        if not skip_profile:
+            logger.info("Getting deployment logs...")
+            await client.get_deployment_logs()
+            logger.info(
+                f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
+            )
 
         base_url = client.get_service_url()
         for isl in range(
@@ -477,7 +485,6 @@ async def run_profile(args):
         client = DynamoDeploymentClient(
             namespace=args.namespace,
             base_log_dir=work_dir,
-            model_name=model_name,
             service_name=args.service_name,
         )
         deployment_clients.append(client)  # Track for cleanup

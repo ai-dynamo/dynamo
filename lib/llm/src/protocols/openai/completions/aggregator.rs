@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 use anyhow::Result;
-use futures::StreamExt;
+use futures::{Stream, StreamExt};
 
 use super::NvCreateCompletionResponse;
 use crate::protocols::{
@@ -64,7 +64,7 @@ impl DeltaAggregator {
 
     /// Aggregates a stream of [`Annotated<CompletionResponse>`]s into a single [`CompletionResponse`].
     pub async fn apply(
-        stream: DataStream<Annotated<NvCreateCompletionResponse>>,
+        stream: impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
     ) -> Result<NvCreateCompletionResponse> {
         let aggregator = stream
             .fold(DeltaAggregator::new(), |mut aggregator, delta| async move {
@@ -183,7 +183,7 @@ impl NvCreateCompletionResponse {
     }
 
     pub async fn from_annotated_stream(
-        stream: DataStream<Annotated<NvCreateCompletionResponse>>,
+        stream: impl Stream<Item = Annotated<NvCreateCompletionResponse>>,
     ) -> Result<NvCreateCompletionResponse> {
         DeltaAggregator::apply(stream).await
     }

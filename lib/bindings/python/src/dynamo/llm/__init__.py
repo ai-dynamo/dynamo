@@ -24,10 +24,13 @@ from dynamo._core import KvEventPublisher as KvEventPublisher
 from dynamo._core import KvIndexer as KvIndexer
 from dynamo._core import KvMetricsAggregator as KvMetricsAggregator
 from dynamo._core import KvRecorder as KvRecorder
+from dynamo._core import KvRouterConfig as KvRouterConfig
 from dynamo._core import KvStats as KvStats
 from dynamo._core import ModelType as ModelType
 from dynamo._core import OverlapScores as OverlapScores
 from dynamo._core import RadixTree as RadixTree
+from dynamo._core import RouterConfig as RouterConfig
+from dynamo._core import RouterMode as RouterMode
 from dynamo._core import SpecDecodeStats as SpecDecodeStats
 from dynamo._core import WorkerMetricsPublisher as WorkerMetricsPublisher
 from dynamo._core import WorkerStats as WorkerStats

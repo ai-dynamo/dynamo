@@ -136,11 +136,11 @@ impl LLMEngineOutput {
 }
 
 impl MaybeError for LLMEngineOutput {
-    fn from_err(err: Box<dyn std::error::Error>) -> Self {
+    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
         LLMEngineOutput::error(format!("{:?}", err))
     }
 
-    fn err(&self) -> Option<Box<dyn std::error::Error>> {
+    fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>> {
         if let Some(FinishReason::Error(err_msg)) = &self.finish_reason {
             Some(anyhow::Error::msg(err_msg.clone()).into())
         } else {

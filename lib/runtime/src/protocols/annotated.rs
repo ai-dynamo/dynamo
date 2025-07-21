@@ -151,11 +151,11 @@ impl<R> MaybeError for Annotated<R>
 where
     R: for<'de> Deserialize<'de> + Serialize,
 {
-    fn from_err(err: Box<dyn std::error::Error>) -> Self {
+    fn from_err(err: Box<dyn std::error::Error + Send + Sync>) -> Self {
         Annotated::from_error(format!("{:?}", err))
     }
 
-    fn err(&self) -> Option<Box<dyn std::error::Error>> {
+    fn err(&self) -> Option<Box<dyn std::error::Error + Send + Sync>> {
         if self.is_error() {
             if let Some(comment) = &self.comment {
                 if !comment.is_empty() {
