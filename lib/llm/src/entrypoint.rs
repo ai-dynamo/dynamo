@@ -33,8 +33,11 @@ impl RouterConfig {
 
 #[derive(Clone)]
 pub enum EngineConfig {
-    /// Remote networked engines
+    /// Remote networked engines that we discover via etcd
     Dynamic(Box<LocalModel>),
+
+    /// Remote networked engines that we know about at startup
+    StaticRemote(Box<LocalModel>),
 
     /// A Full service engine does it's own tokenization and prompt formatting.
     StaticFull {
@@ -54,6 +57,7 @@ impl EngineConfig {
         use EngineConfig::*;
         match self {
             Dynamic(lm) => lm,
+            StaticRemote(lm) => lm,
             StaticFull { model, .. } => model,
             StaticCore { model, .. } => model,
         }
