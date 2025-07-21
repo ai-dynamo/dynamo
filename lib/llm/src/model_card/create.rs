@@ -86,11 +86,13 @@ impl ModelDeploymentCard {
             tokenizer: Some(TokenizerKind::from_gguf(gguf_file)?),
             gen_config: None, // AFAICT there is no equivalent in a GGUF
             prompt_formatter: Some(PromptFormatterArtifact::GGUF(gguf_file.to_path_buf())),
+            chat_template_file: None,
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
             last_published: None,
             context_length,
             kv_cache_block_size: 0,
+            migration_limit: 0,
         })
     }
 
@@ -124,11 +126,13 @@ impl ModelDeploymentCard {
             tokenizer: Some(TokenizerKind::from_repo(repo_id).await?),
             gen_config: GenerationConfig::from_repo(repo_id).await.ok(), // optional
             prompt_formatter: PromptFormatterArtifact::from_repo(repo_id).await?,
+            chat_template_file: PromptFormatterArtifact::chat_template_from_repo(repo_id).await?,
             prompt_context: None, // TODO - auto-detect prompt context
             revision: 0,
             last_published: None,
             context_length,
             kv_cache_block_size: 0, // set later
+            migration_limit: 0,
         })
     }
 }
@@ -155,6 +159,19 @@ impl PromptFormatterArtifact {
             .await
             .with_context(|| format!("unable to extract prompt format from repo {}", repo_id))
             .ok())
+    }
+
+    pub async fn chat_template_from_repo(repo_id: &str) -> Result<Option<Self>> {
+        Ok(Self::chat_template_try_is_hf_repo(repo_id)
+            .await
+            .with_context(|| format!("unable to extract prompt format from repo {}", repo_id))
+            .ok())
+    }
+
+    async fn chat_template_try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {
+        Ok(Self::HfChatTemplate(
+            check_for_file(repo, "chat_template.jinja").await?,
+        ))
     }
 
     async fn try_is_hf_repo(repo: &str) -> anyhow::Result<Self> {

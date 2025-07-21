@@ -98,8 +98,7 @@ for ((i=0; i<GPUS_PER_NODE; i++)); do
         --data-parallel-address $MASTER_ADDR \
         --data-parallel-rpc-port 13345 \
         --gpu-memory-utilization 0.95 \
-        --enforce-eager \
-        --kv-events-port 49700 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_rank}.log &
+        --enforce-eager 2>&1 | tee $LOG_DIR/dsr1_dep_${dp_rank}.log &
 done
 
 echo "All workers starting. (press Ctrl+C to stop)..."

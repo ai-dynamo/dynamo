@@ -14,11 +14,11 @@
 # limitations under the License.
 
 import argparse
+import contextlib
+import socket
 from argparse import Namespace
 
 from sglang.srt.server_args import ServerArgs
-
-from dynamo.sdk.cli.utils import reserve_free_port
 
 
 def parse_sglang_args_inc(args: list[str]) -> ServerArgs:
@@ -31,6 +31,20 @@ def parse_sglang_args_inc(args: list[str]) -> ServerArgs:
         args_dict["disaggregation_bootstrap_port"] = bootstrap_port
         parsed_args = Namespace(**args_dict)
     return ServerArgs.from_cli_args(parsed_args)
+
+
+@contextlib.contextmanager
+def reserve_free_port(host: str = "localhost"):
+    """
+    Find and reserve a free port until context exits.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind((host, 0))
+        _, port = sock.getsockname()
+        yield port
+    finally:
+        sock.close()
 
 
 def _reserve_disaggregation_bootstrap_port():

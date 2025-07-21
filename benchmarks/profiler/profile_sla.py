@@ -122,6 +122,7 @@ async def run_profile(args):
                 model_name=model_name,
                 service_name=args.service_name,
             )
+            deployment_clients.append(client)  # Track for cleanup
             await client.create_deployment(prefill_config_fn)
             logger.info("Waiting for deployment to be ready...")
             try:

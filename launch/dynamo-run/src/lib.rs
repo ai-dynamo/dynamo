@@ -9,6 +9,7 @@ use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::EngineConfig;
 use dynamo_llm::local_model::{LocalModel, LocalModelBuilder};
 use dynamo_runtime::CancellationToken;
+use dynamo_runtime::{DistributedRuntime, Runtime};
 
 mod flags;
 use either::Either;
@@ -21,7 +22,7 @@ mod subprocess;
 const CHILD_STOP_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub async fn run(
-    runtime: dynamo_runtime::Runtime,
+    runtime: Runtime,
     in_opt: Input,
     out_opt: Option<Output>,
     flags: Flags,
@@ -43,8 +44,9 @@ pub async fn run(
         // Only set if user provides. Usually loaded from tokenizer_config.json
         .context_length(flags.context_length)
         .http_port(Some(flags.http_port))
-        .router_config(flags.router_config())
-        .request_template(flags.request_template.clone());
+        .router_config(Some(flags.router_config()))
+        .request_template(flags.request_template.clone())
+        .migration_limit(flags.migration_limit);
 
     // If `in=dyn` we want the trtllm/sglang/vllm subprocess to listen on that endpoint.
     // If not, then the endpoint isn't exposed so we let LocalModel invent one.
@@ -52,8 +54,7 @@ pub async fn run(
     if let Input::Endpoint(path) = &in_opt {
         builder.endpoint_id(Some(path.parse().with_context(|| path.clone())?));
 
-        let distributed_runtime =
-            dynamo_runtime::DistributedRuntime::from_settings(runtime.clone()).await?;
+        let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
         rt = Either::Right(distributed_runtime);
     };
 
@@ -70,8 +71,14 @@ pub async fn run(
     flags.validate(&local_model, &out_opt)?;
 
     // Make an engine from the local_model, flags and output.
-    let (engine_config, extra) =
-        engine_for(runtime.primary_token(), out_opt, flags.clone(), local_model).await?;
+    let (engine_config, extra) = engine_for(
+        runtime.primary_token(),
+        out_opt,
+        flags.clone(),
+        local_model,
+        rt.clone(),
+    )
+    .await?;
 
     //
     // Run in from an input
@@ -96,6 +103,7 @@ async fn engine_for(
     out_opt: Output,
     flags: Flags,
     local_model: LocalModel,
+    rt: Either<Runtime, DistributedRuntime>,
 ) -> anyhow::Result<(EngineConfig, Option<ExtraFuture>)> {
     match out_opt {
         Output::Dynamic => Ok((EngineConfig::Dynamic(Box::new(local_model)), None)),
@@ -160,6 +168,25 @@ async fn engine_for(
                 multi_node_config,
             )
             .await
+        }
+        Output::Mocker => {
+            let Either::Right(drt) = rt else {
+                panic!("Mocker requires a distributed runtime to run.");
+            };
+
+            let args = flags.mocker_config();
+            let endpoint = local_model.endpoint_id().clone();
+
+            let engine =
+                dynamo_llm::mocker::engine::make_mocker_engine(drt, endpoint, args).await?;
+
+            Ok((
+                EngineConfig::StaticCore {
+                    engine,
+                    model: Box::new(local_model),
+                },
+                None,
+            ))
         }
     }
 }
