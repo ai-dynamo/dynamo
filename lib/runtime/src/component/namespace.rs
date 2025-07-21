@@ -43,7 +43,8 @@ impl EventPublisher for Namespace {
         bytes: Vec<u8>,
     ) -> Result<()> {
         let subject = format!("{}.{}", self.subject(), event_name.as_ref());
-        Ok(self.drt()
+        Ok(self
+            .drt()
             .nats_client()
             .client()
             .publish(subject, bytes.into())

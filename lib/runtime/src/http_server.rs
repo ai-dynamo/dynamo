@@ -55,13 +55,10 @@ impl HttpServerState {
     /// Create new HTTP server state with the provided metrics registry
     pub fn new(drt: Arc<crate::DistributedRuntime>) -> anyhow::Result<Self> {
         let http_metrics_registry = Arc::new(HttpMetricsRegistry { drt: drt.clone() });
-        let uptime_gauge = http_metrics_registry.create_metric::<prometheus::Gauge>(
+        let uptime_gauge = http_metrics_registry.as_ref().create_gauge(
             "uptime_seconds",
             "Total uptime of the DistributedRuntime in seconds",
             &[],
-            None,
-            None,
-            true,
         )?;
         let state = Self {
             root_drt: drt,
@@ -186,7 +183,10 @@ async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
         }
         Err(e) => {
             tracing::error!("Failed to get uptime: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to get uptime".to_string())
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Failed to get uptime".to_string(),
+            )
         }
     }
 }
