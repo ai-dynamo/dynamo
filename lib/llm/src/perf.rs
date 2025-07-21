@@ -7,8 +7,14 @@
 //! during collection, then analyze the recorded data for performance insights.
 
 pub mod logprobs;
+pub mod tokens;
 
+use anyhow::Context as ErrorContext;
+use dynamo_runtime::protocols::annotated::Annotated;
 use futures::Stream;
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -20,6 +26,9 @@ use dynamo_runtime::engine::{
     EngineStream, ResponseStream,
 };
 use std::sync::Arc;
+
+pub use crate::protocols::codec::create_message_stream as parse_sse_stream;
+pub use crate::protocols::convert_sse_stream as convert_sse_to_annotated_stream;
 
 /// Type alias for a receiver of recorded stream data
 pub type RecordedStreamReceiver<R> = oneshot::Receiver<RecordedStream<R>>;
@@ -338,6 +347,54 @@ pub fn record_response_stream<R: Data + Clone>(
     mode: RecordingMode,
 ) -> RecordingResult<R> {
     record_stream(response_stream, mode)
+}
+
+/// Record a data stream by consuming it entirely and returning the recorded data.
+///
+/// This is a convenience function that operates only in "sink" mode - it consumes
+/// the entire stream and returns all the recorded responses. Unlike the other recording
+/// functions, this doesn't return a pass-through stream.
+///
+/// # Arguments
+/// * `data_stream` - The data stream to consume and record
+///
+/// # Returns
+/// A `RecordedStream` containing all the responses with timing information
+pub async fn record_data_stream<R: Data + Clone>(
+    data_stream: impl Stream<Item = R>,
+) -> RecordedStream<R> {
+    use futures::StreamExt;
+
+    let start_time = Instant::now();
+    let mut responses = Vec::new();
+    let mut sequence_number = 0;
+
+    // Consume the entire stream
+    tokio::pin!(data_stream);
+    while let Some(item) = data_stream.next().await {
+        responses.push(TimestampedResponse::new(item, sequence_number));
+        sequence_number += 1;
+    }
+
+    let end_time = Instant::now();
+
+    RecordedStream::new(responses, start_time, end_time)
+}
+
+/// Read an annotated stream from a file and collect all items
+pub fn read_annotated_stream_from_file<T: Serialize + DeserializeOwned>(
+    path: &str,
+) -> Result<impl Stream<Item = Annotated<T>>, anyhow::Error> {
+    // Read the entire file as a string
+    let data = std::fs::read_to_string(path)
+        .map_err(|e| anyhow::anyhow!("Failed to read file: {}", e))
+        .with_context(|| format!("Failed to read file: {}", path))?;
+
+    // Create SSE stream from the string data
+    let sse_stream = parse_sse_stream(&data);
+
+    // Convert SSE messages to annotated stream
+    Ok(convert_sse_to_annotated_stream::<T>(sse_stream))
 }
 
 #[cfg(test)]

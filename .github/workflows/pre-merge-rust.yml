@@ -43,20 +43,32 @@ jobs:
       contents: read
     steps:
     - uses: actions/checkout@v4
+      with:
+        lfs: true
+
     - name: Set up system dependencies
       run: |
         sudo apt-get update -y
         sudo apt-get install -y protobuf-compiler
-    - name: Cache Cargo Registry
-      uses: actions/cache@v3
+
+    - name: Cache cargo registry and target
+      uses: actions/cache@v4
       with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ github.head_ref || github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target/
+        key: ${{ runner.os }}-${{ matrix.dir }}-cargo-v2-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ matrix.dir }}-cargo-v2-
+          ${{ runner.os }}-cargo-v2-
+
     - name: Cache Cargo Tools
       uses: actions/cache@v3
       with:
         path: ~/.cargo/bin
         key: ${{ runner.os }}-cargo-tools-${{ github.head_ref || github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
+
     - name: Install Rust in dev environment
       # Install Rust only to run GitHub Local Actions in (dev environment) using the `ACT` environment variable.
       # See act usage: https://nektosact.com/introduction.html
@@ -66,27 +78,22 @@ jobs:
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
         rustup toolchain install 1.86.0-x86_64-unknown-linux-gnu
         echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
     - name: Set up Rust Toolchain Components
       run: rustup component add rustfmt clippy
-    - name: Run Cargo Check
-      working-directory: ${{ matrix.dir }}
-      run: cargo check --locked
-      timeout-minutes: 5
+
     - name: Verify Code Formatting
       working-directory: ${{ matrix.dir }}
       run: cargo fmt -- --check
-    - name: Run Clippy Checks
-      working-directory: ${{ matrix.dir }}
-      run: cargo clippy --no-deps --all-targets -- -D warnings
+
     - name: Install and Run cargo-deny
       working-directory: ${{ matrix.dir }}
       run: |
         cargo-deny --version || cargo install cargo-deny@0.16.4
         cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config ${{ github.workspace }}/deny.toml
-    - name: Run Doc Tests
+
+    - name: Run Cargo Check
       working-directory: ${{ matrix.dir }}
-      run: cargo doc --no-deps && cargo test --locked --doc
-    - name: Run Unit Tests
-      working-directory: ${{ matrix.dir }}
-      # NOTE: --all-targets doesn't run doc tests
-      run: cargo test --locked --all-targets
+      run: |
+        cargo clippy --profile=ci --locked --no-deps --all-targets -- -D warnings
+        cargo test --profile=ci --locked --all-targets

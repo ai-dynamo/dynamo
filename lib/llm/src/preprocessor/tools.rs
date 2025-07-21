@@ -149,14 +149,6 @@ impl ToolCallingMatcher {
 ///
 /// Returns a `Result::Err` only if an inner `serde_json::to_string(...)` fails
 /// (e.g., if the arguments are not serializable).
-///
-/// # Examples
-///
-/// ```ignore
-/// let input = r#"<TOOLCALL>[{ "name": "search", "parameters": { "query": "rust" } }]</TOOLCALL>"#;
-/// let result = try_parse_call_common(input)?;
-/// assert!(result.is_some());
-/// ```
 pub fn try_parse_call_common(message: &str) -> anyhow::Result<Option<ToolCallResponse>> {
     let trimmed = message.trim();
 

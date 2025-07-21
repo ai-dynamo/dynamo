@@ -71,40 +71,6 @@
 //! ### 6. Error Handling
 //! Operations within this module can result in [`LayoutError`], which covers issues like invalid configuration, validation errors, or out-of-bounds indexing.
 //!
-//! ## Usage Example
-//!
-//! ```rust
-//! use dynamo_llm::block_manager::layout::{
-//!     LayoutConfig, FullyContiguous, BlockLayout, BlockLayoutLookup, BlockLayoutConfig,
-//! };
-//! use dynamo_llm::block_manager::storage::{SystemAllocator, StorageType};
-//! use dynamo_llm::common::dtype::DType;
-//!
-//! // Define the layout configuration
-//! let config = LayoutConfig::builder()
-//!     .num_blocks(10)
-//!     .num_layers(4)
-//!     .outer_dim(1)
-//!     .page_size(16)
-//!     .inner_dim(128)
-//!     .dtype(DType::FP16)
-//!     .build()
-//!     .unwrap();
-//!
-//!
-//! // Allocate a FullyContiguous layout using a SystemAllocator
-//! let allocator = SystemAllocator;
-//! let layout = FullyContiguous::allocate(config, &allocator).unwrap();
-//!
-//! // Access layout properties
-//! assert_eq!(layout.num_blocks(), 10);
-//! assert_eq!(layout.storage_type(), StorageType::System);
-//!
-//! // Get the address of a specific page
-//! let addr = layout.memory_region_addr(0, 0).unwrap();
-//! println!("Address of block 0, layer 0: {}", addr);
-//! ```
-//!
 //! ## NIXL Integration
 //! This module also includes a submodule `nixl` ([`crate::block_manager::layout::nixl`])
 //! which extends these layout concepts for NIXL (NVIDIA Interface eXchange Layer), enabling

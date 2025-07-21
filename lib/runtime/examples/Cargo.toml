@@ -32,3 +32,10 @@ repository = "https://github.com/ai-dynamo/dynamo.git"
 [workspace.dependencies]
 # local or crates.io
 dynamo-runtime = { path = "../" }
+
+[profile.ci]
+inherits = "dev"
+debug = 0            # No debug symbols
+opt-level = 1        # Some optimizations
+codegen-units = 4    # Faster compilation
+incremental = false  # Smaller artifacts, slower rebuild

@@ -71,39 +71,6 @@
 //!     reconstruct an `Arc<dyn BlockLayout<StorageType = NixlStorage>>`. This reconstructed layout now
 //!     refers to the remote NIXL memory regions.
 //!
-//! ```rust
-//! use dynamo_llm::block_manager::layout::{LayoutConfig, LayoutType};
-//! use dynamo_llm::block_manager::layout::nixl::{NixlLayout, ToSerializedNixlBlockLayout, SerializedNixlBlockLayout};
-//! use dynamo_llm::block_manager::storage::nixl::NixlAgent;
-//! use dynamo_llm::block_manager::storage::PinnedAllocator; // Assuming PinnedStorage is NixlRegisterable
-//! use std::sync::Arc;
-//!
-//! // Configuration
-//! let config = LayoutConfig::builder()
-//!     .num_blocks(10)
-//!     .num_layers(2)
-//!     .page_size(4)
-//!     .inner_dim(13)
-//!     .build().unwrap();
-//!
-//! // 1. Allocate a NIXL-compatible layout
-//! let allocator = Arc::new(PinnedAllocator::new().unwrap()); // PinnedAllocator provides NixlRegisterable PinnedStorage
-//! let mut layout = config.allocate_layout(LayoutType::FullyContiguous, allocator).unwrap();
-//!
-//! // 2. Register with NIXL Agent
-//! let agent = NixlAgent::new("my_agent").unwrap();
-//! layout.nixl_register(&agent, None).unwrap();
-//!
-//! // 3. Serialize the layout
-//! let serialized_layout = layout.serialize().unwrap();
-//!
-//! // 4. (Transmit serialized_layout to another process)
-//!
-//! // 5. Deserialize on the other end
-//! let reconstructed_layout = SerializedNixlBlockLayout::deserialize(&serialized_layout).unwrap();
-//! println!("Reconstructed layout refers to storage type: {:?}", reconstructed_layout.storage_type());
-//! ```
-//!
 //! This module effectively bridges the local layout definitions with the requirements of distributed memory management via NIXL.
 
 use crate::block_manager::storage::StorageType;

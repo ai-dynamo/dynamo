@@ -38,10 +38,7 @@ use tokenizers::{
     models::{bpe::BpeBuilder, unigram::Unigram},
     normalizers::{self, Prepend, Replace},
     pre_tokenizers,
-    processors::{
-        self,
-        template::{self, TemplateProcessing},
-    },
+    processors::{self, template::TemplateProcessing},
     AddedToken, DecoderWrapper, ModelWrapper, NormalizerWrapper, Tokenizer,
 };
 use tracing::info;
@@ -250,10 +247,14 @@ fn bpe_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind, AddedTokens
         ..
     } = *p;
 
-    let mut bpe = BpeBuilder::new().vocab_and_merges(vocab, merges);
+    let mut bpe = BpeBuilder::new().vocab_and_merges(
+        // Convert HashMap<String, u32> to AHashMap<String, u32> using .into_iter().collect()
+        vocab.into_iter().collect::<ahash::AHashMap<_, _>>(),
+        merges,
+    );
     if let Some(unk) = unk {
         bpe = bpe.unk_token(p.tokens[unk as usize].to_string());
-    };
+    }
 
     let bpe = bpe.build().map_err(anyhow::Error::msg)?;
 
@@ -266,23 +267,13 @@ fn bpe_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind, AddedTokens
         false, true, true,
     )));
     if add_bos_token.is_some_and(|x| x) {
-        let mut special_toks = HashMap::new();
-        special_toks.insert(
-            p.tokens[bos as usize].clone(),
-            template::SpecialToken::new(
-                p.tokens[bos as usize].clone(),
-                vec![bos],
-                vec![p.tokens[bos as usize].clone()],
-            )
-            .unwrap(),
-        );
         tokenizer.with_post_processor(Some(
             TemplateProcessing::builder()
                 .try_single(format!("{}:0 $A:0", p.tokens[bos as usize]))
                 .unwrap()
                 .try_pair(format!("{}:0 $A:0 $B:1", p.tokens[bos as usize]))
                 .unwrap()
-                .special_tokens(special_toks)
+                .special_tokens(vec![(p.tokens[bos as usize].clone(), bos)])
                 .build()
                 .unwrap(),
         ));

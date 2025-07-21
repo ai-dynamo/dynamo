@@ -41,6 +41,7 @@ pub struct InactiveBlockPool<S: Storage, M: BlockMetadata> {
     total_blocks: u64,
 }
 
+#[allow(dead_code)]
 impl<S: Storage, M: BlockMetadata> InactiveBlockPool<S, M> {
     /// Creates a new, empty [`InactiveBlockPool`].
     ///
