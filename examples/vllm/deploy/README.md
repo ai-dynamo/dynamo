@@ -45,7 +45,7 @@ kubectl get jobs -n $NAMESPACE
 kubectl logs job/profile_sla -n $NAMESPACE
 ```
 
-**Step 3: Deploy planner**
+**Step 3: Deploy planner (work in progress)**
 ```bash
 envsubst < disagg_planner.yaml | kubectl apply -f -
 ```
@@ -91,6 +91,5 @@ If you see `ErrImagePull` or `ImagePullBackOff` errors with 401 unauthorized mes
 ## Documentation
 
 For detailed configuration and architecture information, see:
-- [Load Planner Documentation](../../../docs/architecture/load_planner.md)
 - [SLA Planner Documentation](../../../docs/architecture/sla_planner.md)
 - [Planner Benchmark Examples](../../../docs/guides/planner_benchmark/README.md)
