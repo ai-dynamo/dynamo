@@ -1,17 +1,5 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 [package]
 name = "dynamo-runtime"
@@ -27,8 +15,8 @@ description = "Dynamo Runtime Library"
 [features]
 default = []
 integration = []
-# Tests that require an active ETCD server
-testing-etcd = []
+testing-etcd = [] # Tests that require an active ETCD server
+tokio-console = ["dep:console-subscriber", "tokio/tracing"]
 
 [dependencies]
 # Use workspace dependencies where available
@@ -62,7 +50,9 @@ url = { workspace = true }
 validator = { workspace = true }
 xxhash-rust = { workspace = true }
 
+arc-swap = { version = "1" }
 async-once-cell = { version = "0.5.4" }
+console-subscriber = { version = "0.4", optional = true }
 educe = { version = "0.6.0" }
 figment = { version = "0.10.19", features = ["env", "json", "toml", "test"] }
 local-ip-address = { version = "0.6.3" }
@@ -77,5 +67,6 @@ socket2 = { version = "0.5.8" }
 [dev-dependencies]
 assert_matches = { version = "1.5.0" }
 env_logger = { version = "0.11" }
+reqwest = { workspace = true }
 rstest = { version = "0.23.0" }
 temp-env = { version = "0.3.6" }

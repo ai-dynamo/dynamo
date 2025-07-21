@@ -123,13 +123,14 @@ export DYNAMO_IMAGE=<your-registry>/dynamo-base:latest-vllm
 
 ## Running and Interacting with an LLM Locally
 
-To run a model and interact with it locally, call `dynamo run` with a Hugging Face model.
-`dynamo run` supports several backends, including `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
+Dynamo supports several backends, including `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
+Use example commands below tp launch a model.
 
 ### Example Command
 
 ```bash
-dynamo run out=vllm deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+python -m dynamo.frontend [--http-port 8080]
+python -m dynamo.vllm deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 ```
 
 ```bash
@@ -166,31 +167,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ### Start Dynamo LLM Serving Components
 
-Next, serve a minimal configuration with an http server, basic
-round-robin router, and a single worker.
-
-```bash
-cd examples/llm
-dynamo serve graphs.agg:Frontend -f configs/agg.yaml
-```
-
-### Send a Request
-
-```bash
-curl localhost:8000/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    "messages": [
-    {
-        "role": "user",
-        "content": "Hello, how are you?"
-    }
-    ],
-    "stream":false,
-    "max_tokens": 300
-  }' | jq
-```
+[Explore the VLLM Example](../examples/vllm/README.md)
 
 
 ## Local Development
@@ -232,6 +209,6 @@ pip install .[all]
 
 # To test
 docker compose -f deploy/docker-compose.yml up -d
-cd examples/llm
-dynamo serve graphs.agg:Frontend -f configs/agg.yaml
+python -m dynamo.frontend [--http-port 8080]
+python -m dynamo.vllm deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 ```

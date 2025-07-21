@@ -30,7 +30,7 @@ use crate::config::{self, RuntimeConfig};
 
 use futures::Future;
 use once_cell::sync::OnceCell;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::{signal, task::JoinHandle};
 
 pub use tokio_util::sync::CancellationToken;

@@ -62,7 +62,7 @@ pub trait WorkerSelector {
 }
 
 /// KV Router configuration parameters
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct KvRouterConfig {
     pub overlap_score_weight: f64,
 

@@ -23,14 +23,6 @@
 
 **Dynamo Cloud** - A Kubernetes platform providing managed deployment experience for Dynamo inference graphs.
 
-**dynamo build** - The CLI command to containerize inference graphs or parts of graphs into Docker containers.
-
-**dynamo deploy** - The CLI command to deploy inference graphs to Kubernetes with Helm charts or custom operators.
-
-**dynamo run** - The CLI command to quickly experiment and test models with various LLM engines.
-
-**dynamo serve** - The CLI command to compose and serve inference graphs locally.
-
 ## E
 **@endpoint** - A Python decorator used to define service endpoints within a Dynamo component.
 

@@ -1,17 +1,5 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
 //! Dynamo Distributed Logging Module.
 //!
@@ -46,6 +34,7 @@ use figment::{
     Figment,
 };
 use serde::{Deserialize, Serialize};
+use tracing::level_filters::LevelFilter;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::fmt::time::LocalTime;
@@ -57,6 +46,8 @@ use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::{filter::Directive, fmt};
+
+use crate::config::{disable_ansi_logging, jsonl_logging_enabled};
 
 /// ENV used to set the log level
 const FILTER_ENV: &str = "DYN_LOG";
@@ -98,45 +89,75 @@ impl Default for LoggingConfig {
 
 /// Initialize the logger
 pub fn init() {
-    INIT.call_once(|| {
-        let config = load_config();
+    INIT.call_once(setup_logging);
+}
 
-        // Examples to remove noise
-        // .add_directive("rustls=warn".parse()?)
-        // .add_directive("tokio_util::codec=warn".parse()?)
-        let mut filter_layer = EnvFilter::builder()
-            .with_default_directive(config.log_level.parse().unwrap())
-            .with_env_var(FILTER_ENV)
-            .from_env_lossy();
+#[cfg(feature = "tokio-console")]
+fn setup_logging() {
+    // Start tokio-console server. Returns a tracing-subscriber Layer.
+    let tokio_console_layer = console_subscriber::ConsoleLayer::builder()
+        .with_default_env()
+        .server_addr(([0, 0, 0, 0], console_subscriber::Server::DEFAULT_PORT))
+        .spawn();
+    let tokio_console_target = tracing_subscriber::filter::Targets::new()
+        .with_default(LevelFilter::ERROR)
+        .with_target("runtime", LevelFilter::TRACE)
+        .with_target("tokio", LevelFilter::TRACE);
+    let l = fmt::layer()
+        .with_ansi(!disable_ansi_logging())
+        .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
+        .with_writer(std::io::stderr)
+        .with_filter(filters(load_config()));
+    tracing_subscriber::registry()
+        .with(l)
+        .with(tokio_console_layer.with_filter(tokio_console_target))
+        .init();
+}
 
-        // apply the log_filters from the config files
-        for (module, level) in config.log_filters {
-            match format!("{module}={level}").parse::<Directive>() {
-                Ok(d) => {
-                    filter_layer = filter_layer.add_directive(d);
-                }
-                Err(e) => {
-                    eprintln!("Failed parsing filter '{level}' for module '{module}': {e}");
-                }
+#[cfg(not(feature = "tokio-console"))]
+fn setup_logging() {
+    let f = filters(load_config());
+    // The generics mean we have to repeat everything. Each builder method returns a
+    // specialized type.
+    if jsonl_logging_enabled() {
+        // JSON logger for NIM
+
+        let l = fmt::layer()
+            .with_ansi(false)
+            .event_format(CustomJsonFormatter::new())
+            .with_writer(std::io::stderr)
+            .with_filter(f);
+        tracing_subscriber::registry().with(l).init();
+    } else {
+        // Normal logging
+
+        let l = fmt::layer()
+            .with_ansi(!disable_ansi_logging())
+            .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
+            .with_writer(std::io::stderr)
+            .with_filter(f);
+        tracing_subscriber::registry().with(l).init();
+    }
+}
+
+fn filters(config: LoggingConfig) -> EnvFilter {
+    let mut filter_layer = EnvFilter::builder()
+        .with_default_directive(config.log_level.parse().unwrap())
+        .with_env_var(FILTER_ENV)
+        .from_env_lossy();
+
+    // apply the log_filters from the config files
+    for (module, level) in config.log_filters {
+        match format!("{module}={level}").parse::<Directive>() {
+            Ok(d) => {
+                filter_layer = filter_layer.add_directive(d);
+            }
+            Err(e) => {
+                eprintln!("Failed parsing filter '{level}' for module '{module}': {e}");
             }
         }
-
-        if crate::config::jsonl_logging_enabled() {
-            let l = fmt::layer()
-                .with_ansi(false) // ansi terminal escapes and colors always disabled
-                .event_format(CustomJsonFormatter::new())
-                .with_writer(std::io::stderr)
-                .with_filter(filter_layer);
-            tracing_subscriber::registry().with(l).init();
-        } else {
-            let l = fmt::layer()
-                .with_ansi(!crate::config::disable_ansi_logging())
-                .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
-                .with_writer(std::io::stderr)
-                .with_filter(filter_layer);
-            tracing_subscriber::registry().with(l).init();
-        };
-    });
+    }
+    filter_layer
 }
 
 /// Log a message with file and line info

@@ -36,11 +36,11 @@ docker compose -f deploy/metrics/docker-compose.yml up -d
 ### Build and Run docker
 
 ```bash
-./container/build.sh --framework VLLM_V1
+./container/build.sh
 ```
 
 ```bash
-./container/run.sh -it --framework VLLM_V1
+./container/run.sh -it [--mount-workspace]
 ```
 
 This includes the specific commit [vllm-project/vllm#19790](https://github.com/vllm-project/vllm/pull/19790) which enables support for external control of the DP ranks.
@@ -74,7 +74,7 @@ Note: The above architecture illustrates all the components. The final component
 
 ```bash
 # requires one gpu
-cd examples/vllm_v1
+cd examples/vllm
 bash launch/agg.sh
 ```
 
@@ -82,7 +82,7 @@ bash launch/agg.sh
 
 ```bash
 # requires two gpus
-cd examples/vllm_v1
+cd examples/vllm
 bash launch/agg_router.sh
 ```
 
@@ -90,7 +90,7 @@ bash launch/agg_router.sh
 
 ```bash
 # requires two gpus
-cd examples/vllm_v1
+cd examples/vllm
 bash launch/disagg.sh
 ```
 
@@ -98,7 +98,7 @@ bash launch/disagg.sh
 
 ```bash
 # requires three gpus
-cd examples/vllm_v1
+cd examples/vllm
 bash launch/disagg_router.sh
 ```
 
@@ -108,13 +108,47 @@ This example is not meant to be performant but showcases dynamo routing to data 
 
 ```bash
 # requires four gpus
-cd examples/vllm_v1
+cd examples/vllm
 bash launch/dep.sh
 ```
 
 
 > [!TIP]
 > Run a disaggregated example and try adding another prefill worker once the setup is running! The system will automatically discover and utilize the new worker.
+
+### Kubernetes Deployment
+
+For Kubernetes deployment, YAML manifests are provided in the `deploy/` directory. These define DynamoGraphDeployment resources for various configurations:
+
+- `agg.yaml` - Aggregated serving
+- `agg_router.yaml` - Aggregated serving with KV routing
+- `disagg.yaml` - Disaggregated serving
+- `disagg_router.yaml` - Disaggregated serving with KV routing
+
+#### Prerequisites
+
+- **Dynamo Cloud**: Follow the [Quickstart Guide](../../docs/guides/dynamo_deploy/quickstart.md) to deploy Dynamo Cloud first.
+
+- **Container Images**: The deployment files currently require access to `nvcr.io/nvidian/nim-llm-dev/vllm-runtime`. If you don't have access, build and push your own image:
+  ```bash
+  ./container/build.sh --framework VLLM
+  # Tag and push to your container registry
+  # Update the image references in the YAML files
+  ```
+
+- **Port Forwarding**: After deployment, forward the frontend service to access the API:
+  ```bash
+  kubectl port-forward deployment/vllm-v1-disagg-frontend-<pod-uuid-info> 8080:8000
+  ```
+
+#### Deploy to Kubernetes
+
+Example with disagg:
+
+```bash
+cd ~/dynamo/examples/vllm/deploy
+kubectl apply -f disagg.yaml
+```
 
 ### Testing the Deployment
 

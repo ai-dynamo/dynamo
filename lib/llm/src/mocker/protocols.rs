@@ -15,6 +15,8 @@
 
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::path::Path;
 use uuid::Uuid;
 
 use crate::kv_router::protocols::{
@@ -56,7 +58,13 @@ pub struct DirectRequest {
 pub struct PrefillCost {
     pub new_blocks: usize,
     pub new_tokens: usize,
-    pub prefill_compute: f64,
+}
+
+impl PrefillCost {
+    pub fn predict_prefill_compute(&self, new_tokens: Option<usize>) -> f64 {
+        let tokens = new_tokens.unwrap_or(self.new_tokens);
+        1.25e-6 * (tokens as f64).powi(2) + 7.41e-2 * (tokens as f64) + 2.62e1
+    }
 }
 
 /// Signal for output token generation with completion status
@@ -87,6 +95,9 @@ pub struct MockEngineArgs {
     #[builder(default = true)]
     pub enable_prefix_caching: bool,
 
+    #[builder(default = true)]
+    pub enable_chunked_prefill: bool,
+
     #[builder(default = "0.01")]
     pub watermark: f64,
 
@@ -97,9 +108,117 @@ pub struct MockEngineArgs {
     pub dp_size: u32,
 }
 
+impl Default for MockEngineArgs {
+    fn default() -> MockEngineArgs {
+        MockEngineArgsBuilder::default()
+            .build()
+            .expect("Failed to build default MockEngineArgs")
+    }
+}
+
 impl MockEngineArgs {
     pub fn builder() -> MockEngineArgsBuilder {
         MockEngineArgsBuilder::default()
+    }
+
+    /// Create MockEngineArgs from a JSON file containing extra engine arguments
+    pub fn from_json_file(path: &Path) -> anyhow::Result<Self> {
+        let mut builder = Self::builder();
+
+        // Load and parse the JSON file
+        let file_content = std::fs::read_to_string(path)?;
+        let extra_args: HashMap<String, serde_json::Value> = serde_json::from_str(&file_content)?;
+
+        // Define valid field names
+        let valid_fields: HashSet<&str> = [
+            "num_gpu_blocks",
+            "block_size",
+            "max_num_seqs",
+            "max_num_batched_tokens",
+            "enable_prefix_caching",
+            "enable_chunked_prefill",
+            "watermark",
+            "speedup_ratio",
+            "dp_size",
+        ]
+        .iter()
+        .cloned()
+        .collect();
+
+        // Check for invalid arguments
+        let invalid_args: Vec<String> = extra_args
+            .keys()
+            .filter(|key| !valid_fields.contains(key.as_str()))
+            .cloned()
+            .collect();
+
+        if !invalid_args.is_empty() {
+            return Err(anyhow::anyhow!(
+                "Invalid arguments found in JSON file: {}. Valid arguments are: {:?}",
+                invalid_args.join(", "),
+                valid_fields
+            ));
+        }
+
+        // Apply each extra argument to the builder
+        if let Some(value) = extra_args.get("num_gpu_blocks") {
+            if let Some(num) = value.as_u64() {
+                builder = builder.num_gpu_blocks(num as usize);
+            }
+        }
+
+        if let Some(value) = extra_args.get("block_size") {
+            if let Some(num) = value.as_u64() {
+                builder = builder.block_size(num as usize);
+            }
+        }
+
+        if let Some(value) = extra_args.get("max_num_seqs") {
+            if let Some(num) = value.as_u64() {
+                builder = builder.max_num_seqs(Some(num as usize));
+            }
+        }
+
+        if let Some(value) = extra_args.get("max_num_batched_tokens") {
+            if let Some(num) = value.as_u64() {
+                builder = builder.max_num_batched_tokens(Some(num as usize));
+            }
+        }
+
+        if let Some(value) = extra_args.get("enable_prefix_caching") {
+            if let Some(enabled) = value.as_bool() {
+                builder = builder.enable_prefix_caching(enabled);
+            }
+        }
+
+        if let Some(value) = extra_args.get("enable_chunked_prefill") {
+            if let Some(enabled) = value.as_bool() {
+                builder = builder.enable_chunked_prefill(enabled);
+            }
+        }
+
+        if let Some(value) = extra_args.get("watermark") {
+            if let Some(num) = value.as_f64() {
+                builder = builder.watermark(num);
+            }
+        }
+
+        if let Some(value) = extra_args.get("speedup_ratio") {
+            if let Some(num) = value.as_f64() {
+                builder = builder.speedup_ratio(num);
+            }
+        }
+
+        if let Some(value) = extra_args.get("dp_size") {
+            if let Some(num) = value.as_u64() {
+                builder = builder.dp_size(num as u32);
+            }
+        }
+
+        // Build the MockEngineArgs with either defaults or overridden values
+        builder
+            .build()
+            .map_err(|e| anyhow::anyhow!("Failed to build MockEngineArgs: {}", e))
     }
 }
 
