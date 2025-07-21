@@ -45,6 +45,9 @@ async fn app(runtime: Runtime) -> Result<()> {
         println!("{:?}", resp);
     }
 
+    // This is just an illustration to invoke the server's stats_registry(<action>), where
+    // the action currently increments the `service_requests_total` metric. You can validate
+    // the result by running `curl http://localhost:8000/metrics`
     let service_set = component.scrape_stats(Duration::from_millis(100)).await?;
     println!("{:?}", service_set);
 

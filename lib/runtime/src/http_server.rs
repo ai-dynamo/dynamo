@@ -170,7 +170,6 @@ pub async fn spawn_http_server(
             tracing::error!("HTTP server error: {}", e);
         }
     });
-
     Ok((actual_address, handle))
 }
 

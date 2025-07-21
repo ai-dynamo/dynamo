@@ -82,6 +82,7 @@ impl EndpointConfigBuilder {
             .get(&service_name)
             .cloned()
             .expect("no stats handler registry; this is unexpected");
+
         drop(registry);
 
         // insert the stats handler
