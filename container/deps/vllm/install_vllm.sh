@@ -128,9 +128,9 @@ if [ "$ARCH" = "arm64" ]; then
 else
     echo "Installing vllm for AMD64 architecture"
     if [ "$EDITABLE" = "true" ]; then
-        VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=auto
+        VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=cu128
     else
-        VLLM_USE_PRECOMPILED=1 uv pip install . --torch-backend=auto
+        VLLM_USE_PRECOMPILED=1 uv pip install . --torch-backend=cu128
     fi
 fi
 
