@@ -108,7 +108,7 @@ pub async fn spawn_http_server(
     // Create HTTP server state with the provided metrics registry
     let server_state = Arc::new(HttpServerState::new(drt)?);
 
-    // // Initialize the start time
+    // Initialize the start time
     server_state
         .initialize_start_time()
         .map_err(|e| anyhow::anyhow!("Failed to initialize start time: {}", e))?;

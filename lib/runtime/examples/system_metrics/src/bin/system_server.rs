@@ -127,7 +127,6 @@ async fn backend(drt: DistributedRuntime) -> Result<()> {
     endpoint
         .endpoint_builder()
         .stats_handler(|stats| {
-            println!("stats: {:?}", stats);
             let stats = MyStats { val: 10 };
             serde_json::to_value(stats).unwrap()
         })

@@ -445,8 +445,10 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
 
     /// Get metrics in Prometheus text format
     fn prometheus_metrics_fmt(&self) -> anyhow::Result<String> {
-        let mut registry = self.drt().prometheus_registries_by_prefix.lock().unwrap();
-        let prometheus_registry = registry.entry(self.prefix()).or_default().clone();
+        let prometheus_registry = {
+            let mut registry = self.drt().prometheus_registries_by_prefix.lock().unwrap();
+            registry.entry(self.prefix()).or_default().clone()
+        };
         let metric_families = prometheus_registry.gather();
         let encoder = prometheus::TextEncoder::new();
         let mut buffer = Vec::new();
