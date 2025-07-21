@@ -138,7 +138,6 @@ class DynamoDeploymentClient:
             timeout: Maximum time to wait in seconds
         """
         start_time = time.time()
-        consecutive_404s = 0
         # TODO: A little brittle, also should output intermediate status every so often.
         while (time.time() - start_time) < timeout:
             try:
@@ -149,8 +148,6 @@ class DynamoDeploymentClient:
                     plural="dynamographdeployments",
                     name=self.deployment_name,
                 )
-                consecutive_404s = 0  # Reset counter on successful API call
-
                 # Check both conditions:
                 # 1. Ready condition is True
                 # 2. State is successful
@@ -184,25 +181,8 @@ class DynamoDeploymentClient:
                     )
 
             except kubernetes.client.rest.ApiException as e:
-                if e.status == 404:
-                    consecutive_404s += 1
-                    print(f"Deployment not found (404) - attempt {consecutive_404s}")
-                    if consecutive_404s >= 3:
-                        print("ERROR: Deployment has disappeared! This usually means:")
-                        print(
-                            "  1. Resource constraints prevented scheduling (check GPU/CPU/memory availability)"
-                        )
-                        print("  2. Node affinity rules excluded all available nodes")
-                        print("  3. Image pull failures or other pod startup issues")
-                        print(
-                            "Consider reducing resource requirements or checking node capacity"
-                        )
-                        raise RuntimeError(
-                            f"Deployment {self.deployment_name} disappeared - likely scheduling failure"
-                        )
-                else:
-                    print(f"API Exception while checking deployment status: {e}")
-                    print(f"Status code: {e.status}, Reason: {e.reason}")
+                print(f"API Exception while checking deployment status: {e}")
+                print(f"Status code: {e.status}, Reason: {e.reason}")
             except Exception as e:
                 print(f"Unexpected exception while checking deployment status: {e}")
             await asyncio.sleep(20)
@@ -268,6 +248,38 @@ class DynamoDeploymentClient:
         except kubernetes.client.rest.ApiException as e:
             if e.status != 404:  # Ignore if already deleted
                 raise
+
+
+async def cleanup_remaining_deployments(deployment_clients, namespace):
+    """Clean up any remaining tracked deployments, handling errors gracefully."""
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    if not deployment_clients:
+        logger.info("No deployments to clean up")
+        return
+
+    logger.info(f"Cleaning up {len(deployment_clients)} remaining deployments...")
+    for deployment_client in deployment_clients:
+        try:
+            logger.info(
+                f"Attempting to delete deployment {deployment_client.deployment_name}..."
+            )
+            await deployment_client.delete_deployment()
+            logger.info(
+                f"Successfully deleted deployment {deployment_client.deployment_name}"
+            )
+        except Exception as e:
+            # If deployment doesn't exist (404), that's fine - it was already cleaned up
+            if "404" in str(e) or "not found" in str(e).lower():
+                logger.info(
+                    f"Deployment {deployment_client.deployment_name} was already deleted"
+                )
+            else:
+                logger.error(
+                    f"Failed to delete deployment {deployment_client.deployment_name}: {e}"
+                )
 
 
 async def main():

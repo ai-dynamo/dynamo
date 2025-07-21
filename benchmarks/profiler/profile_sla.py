@@ -15,7 +15,6 @@
 
 import argparse
 import asyncio
-import json
 import logging
 import math
 import os
@@ -24,13 +23,22 @@ import numpy as np
 import yaml
 from utils.config import CONFIG_MODIFIERS
 from utils.defaults import DECODE_NUM_REQUESTS_RANGE
-from utils.dynamo_deployment import DynamoDeploymentClient
+from utils.dynamo_deployment import (
+    DynamoDeploymentClient,
+    cleanup_remaining_deployments,
+)
 from utils.genai_perf import benchmark_decode, benchmark_prefill
 from utils.plot import (
     plot_decode_3d_surface,
     plot_decode_performance,
     plot_prefill_interpolation,
     plot_prefill_performance,
+)
+from utils.profile_cache import (
+    check_decode_results_exist,
+    check_prefill_results_exist,
+    load_existing_decode_results,
+    load_existing_prefill_results,
 )
 
 logger = logging.getLogger(__name__)
@@ -42,149 +50,6 @@ formatter = logging.Formatter(
 )
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
-
-
-def check_prefill_results_exist(output_dir: str, tp_size: int, isl: int) -> bool:
-    """Check if prefill results already exist for a given TP size."""
-    work_dir = f"{output_dir}/prefill_tp{tp_size}"
-    result_file = f"{work_dir}/gap_isl{isl}/*/profile_export_genai_perf.json"
-
-    # Check if the work directory exists
-    if not os.path.exists(work_dir):
-        return False
-
-    # Look for the genai-perf result file
-    import glob
-
-    result_files = glob.glob(result_file)
-    if not result_files:
-        return False
-
-    # Verify the result file has valid data
-    try:
-        with open(result_files[0], "r") as f:
-            data = json.load(f)
-            # Check if it has the required metrics
-            if "time_to_first_token" in data and "avg" in data["time_to_first_token"]:
-                logger.info(
-                    f"Found existing prefill results for TP{tp_size} at {result_files[0]}"
-                )
-                return True
-    except (json.JSONDecodeError, KeyError, FileNotFoundError):
-        pass
-
-    return False
-
-
-def check_decode_results_exist(
-    output_dir: str, tp_size: int, isl: int, osl: int
-) -> bool:
-    """Check if decode results already exist for a given TP size."""
-    work_dir = f"{output_dir}/decode_tp{tp_size}"
-
-    # Check if the work directory exists
-    if not os.path.exists(work_dir):
-        return False
-
-    # Look for at least one decode result file
-    import glob
-
-    result_pattern = (
-        f"{work_dir}/gap_request*_isl{isl}_osl{osl}_n*/*/profile_export_genai_perf.json"
-    )
-    result_files = glob.glob(result_pattern)
-
-    if not result_files:
-        return False
-
-    # Verify at least one result file has valid data
-    try:
-        with open(result_files[0], "r") as f:
-            data = json.load(f)
-            # Check if it has the required metrics
-            if "inter_token_latency" in data and "avg" in data["inter_token_latency"]:
-                logger.info(
-                    f"Found existing decode results for TP{tp_size} at {result_files[0]} (and {len(result_files)-1} others)"
-                )
-                return True
-    except (json.JSONDecodeError, KeyError, FileNotFoundError):
-        pass
-
-    return False
-
-
-def load_existing_prefill_results(output_dir: str, tp_size: int, isl: int):
-    """Load existing prefill results from disk."""
-    work_dir = f"{output_dir}/prefill_tp{tp_size}"
-    result_file = f"{work_dir}/gap_isl{isl}/*/profile_export_genai_perf.json"
-
-    import glob
-
-    result_files = glob.glob(result_file)
-    if result_files:
-        try:
-            with open(result_files[0], "r") as f:
-                data = json.load(f)
-                ttft = data["time_to_first_token"]["avg"]
-                thpt_per_gpu = isl / ttft / tp_size * 1000
-                return ttft, thpt_per_gpu
-        except (json.JSONDecodeError, KeyError, FileNotFoundError):
-            pass
-    return None, None
-
-
-def load_existing_decode_results(output_dir: str, tp_size: int, isl: int, osl: int):
-    """Load existing decode results from disk."""
-    work_dir = f"{output_dir}/decode_tp{tp_size}"
-
-    import glob
-
-    result_pattern = (
-        f"{work_dir}/gap_request*_isl{isl}_osl{osl}_n*/*/profile_export_genai_perf.json"
-    )
-    result_files = glob.glob(result_pattern)
-
-    decode_results = []
-    for result_file in result_files:
-        try:
-            with open(result_file, "r") as f:
-                data = json.load(f)
-                itl = data["inter_token_latency"]["avg"]
-                thpt_per_gpu = data["output_token_throughput"]["avg"] / tp_size
-
-                # Extract concurrency from filename
-                import re
-
-                match = re.search(r"gap_request(\d+)_", result_file)
-                if match:
-                    concurrency = int(match.group(1))
-                    decode_results.append((itl, thpt_per_gpu, concurrency))
-        except (json.JSONDecodeError, KeyError, FileNotFoundError):
-            continue
-
-    return decode_results
-
-
-async def cleanup_remaining_deployments(deployment_clients, namespace):
-    """Clean up any remaining tracked deployments, handling errors gracefully."""
-    if not deployment_clients:
-        logger.info("No deployments to clean up")
-        return
-
-    logger.info(f"Cleaning up {len(deployment_clients)} remaining deployments...")
-    for client in deployment_clients:
-        try:
-            logger.info(f"Attempting to delete deployment {client.deployment_name}...")
-            await client.delete_deployment()
-            logger.info(f"Successfully deleted deployment {client.deployment_name}")
-        except Exception as e:
-            # If deployment doesn't exist (404), that's fine - it was already cleaned up
-            if "404" in str(e) or "not found" in str(e).lower():
-                logger.info(f"Deployment {client.deployment_name} was already deleted")
-            else:
-                logger.error(
-                    f"Failed to delete deployment {client.deployment_name}: {e}"
-                )
 
 
 async def run_profile(args):

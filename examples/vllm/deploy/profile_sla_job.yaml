@@ -21,17 +21,6 @@ spec:
   template:
     spec:
       serviceAccountName: profile-sla-sa
-      # Add node affinity to avoid problematic nodes with GPU/NVLink issues
-      affinity:
-        nodeAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            nodeSelectorTerms:
-            - matchExpressions:
-              - key: kubernetes.io/hostname
-                operator: NotIn
-                values:
-                - aks-agentpool-36388387-vmss000003  # NVLink communication failure
-                - aks-agentpool-36388387-vmss000005  # NotReady status
       containers:
       - name: profile-sla
         image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-233.13
@@ -64,8 +53,6 @@ spec:
           - vllm-v1-agg-frontend
           - --skip-existing-results
           - --skip-large-tp-on-failure
-          # - --max-num-gpus-per-engine
-          # - "4"  # Limit to TP4 max if cluster is small
         volumeMounts:
           - name: output-volume
             mountPath: /workspace/profiling_results
