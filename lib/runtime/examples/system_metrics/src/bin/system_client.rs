@@ -14,7 +14,7 @@
 // limitations under the License.
 
 use futures::StreamExt;
-use system_stats_endpoint::DEFAULT_NAMESPACE;
+use system_metrics::DEFAULT_NAMESPACE;
 
 use dynamo_runtime::{
     logging, pipeline::PushRouter, protocols::annotated::Annotated, utils::Duration,

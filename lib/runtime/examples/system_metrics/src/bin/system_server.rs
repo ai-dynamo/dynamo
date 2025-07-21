@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use system_stats_endpoint::{MyStats, DEFAULT_NAMESPACE};
+use system_metrics::{MyStats, DEFAULT_NAMESPACE};
 
 use dynamo_runtime::{
     logging,
@@ -21,7 +21,7 @@ use dynamo_runtime::{
         async_trait, network::Ingress, AsyncEngine, AsyncEngineContextProvider, Error, ManyOut,
         ResponseStream, SingleIn,
     },
-    profiling::MetricsRegistry,
+    metrics::MetricsRegistry,
     protocols::annotated::Annotated,
     stream, DistributedRuntime, Result, Runtime, Worker,
 };
@@ -29,7 +29,7 @@ use dynamo_runtime::{
 use prometheus::{Counter, Histogram};
 use std::sync::Arc;
 
-/// Service metrics struct using the metric classes from profiling.rs
+/// Service metrics struct using the metric classes from metrics.rs
 pub struct MySystemStatsMetrics {
     pub request_counter: Arc<Counter>,
     pub request_duration: Arc<Histogram>,

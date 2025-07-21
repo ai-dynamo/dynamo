@@ -17,7 +17,7 @@ pub use crate::component::Component;
 use crate::{
     component::{self, ComponentBuilder, Endpoint, InstanceSource, Namespace},
     discovery::DiscoveryClient,
-    profiling::MetricsRegistry,
+    metrics::MetricsRegistry,
     service::ServiceClient,
     transports::{etcd, nats, tcp},
     ErrorContext,

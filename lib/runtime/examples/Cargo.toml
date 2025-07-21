@@ -16,8 +16,8 @@
 [workspace]
 members = [
     "hello_world",
-    "system_stats_endpoint",
     "service_metrics",
+    "system_metrics",
 ]
 resolver = "3"
 

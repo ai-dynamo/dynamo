@@ -2561,7 +2561,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "system_stats_endpoint"
+name = "system_metrics"
 version = "0.3.2"
 dependencies = [
  "dynamo-runtime",

@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::profiling::MetricsRegistry;
+use crate::metrics::MetricsRegistry;
 use crate::traits::DistributedRuntimeProvider;
 use axum::{body, http::StatusCode, response::IntoResponse, routing::get, Router};
 use std::sync::Arc;
@@ -222,7 +222,7 @@ async fn make_test_drt() -> Arc<crate::DistributedRuntime> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profiling::MetricsRegistry;
+    use crate::metrics::MetricsRegistry;
     use std::sync::Arc;
     use tokio::time::{sleep, Duration};
 

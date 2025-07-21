@@ -20,10 +20,6 @@ members = [
     "launch/*",
     "lib/llm",
     "lib/runtime",
-    # Uncomment examples during development. Do not add examples for production.
-    "lib/runtime/examples/hello_world",
-    "lib/runtime/examples/system_stats_endpoint",
-    "lib/runtime/examples/service_metrics",
     "lib/tokens",
     "lib/bindings/c",
     "lib/engines/*",

@@ -19,7 +19,7 @@ use futures::stream::StreamExt;
 use futures::{Stream, TryStreamExt};
 
 use super::*;
-use crate::profiling::MetricsRegistry;
+use crate::metrics::MetricsRegistry;
 use crate::traits::events::{EventPublisher, EventSubscriber};
 
 #[async_trait]
