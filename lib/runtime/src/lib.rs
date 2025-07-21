@@ -131,7 +131,7 @@ impl SystemHealth {
                     .is_some_and(|status| *status == HealthStatus::Ready)
             })
         } else {
-           self.system_health == HealthStatus::Ready
+            self.system_health == HealthStatus::Ready
         };
 
         (healthy, endpoints)
