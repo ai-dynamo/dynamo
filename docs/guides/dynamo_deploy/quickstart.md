@@ -1,8 +1,12 @@
 # Quickstart
 
-Before deploying your inference graphs you need to install the Dynamo Inference Platform and the Dynamo Cloud.
+Your onboarding includes 2 steps.
+1. Before deploying your inference graphs you need to install the Dynamo Inference Platform and the Dynamo Cloud.
+Dynamo Cloud acts as an orchestration layer between the end user and Kubernetes, handling the complexity of deploying your graphs for you.
+You could install from [Published Artifacts](#1-installing-dynamo-cloud-from-published-artifacts) or [Source](#2-installing-dynamo-cloud-from-source)
+2. Once you install the Dynamo Cloud, proceed to the [Examples](../../examples/README.md) to deploy an inference graph.
 
-## 1. Installing from Published Artifacts
+## 1. Installing Dynamo Cloud from Published Artifacts
 
 Use this approach when installing from pre-built helm charts and docker images published to NGC.
 
@@ -16,6 +20,8 @@ export RELEASE_VERSION=0.3.2
 Install `envsubst`, `kubectl`, `helm`
 
 ### Authenticate with NGC
+
+Go to  https://ngc.nvidia.com/org to get your NGC_CLI_API_KEY.
 
 ```bash
 helm repo add nvidia https://helm.ngc.nvidia.com/nvidia --username='$oauthtoken' --password=<YOUR_NGC_CLI_API_KEY>
@@ -50,7 +56,7 @@ kubectl create namespace ${NAMESPACE}
 helm install dynamo-platform dynamo-platform-v${RELEASE_VERSION}.tgz --namespace ${NAMESPACE}
 ```
 
-## 2. Installing from Source
+## 2. Installing Dynamo Cloud from Source
 
 Use this approach when developing or customizing Dynamo as a contributor, or using local helm charts from the source repository.
 
@@ -64,12 +70,18 @@ cd deploy/cloud/helm/
 
 ### Set Environment Variables
 
+Our examples use the `nvcr.io` but you can setup your own values if you use another docker registry.
+
 ```bash
-export NAMESPACE=dynamo-cloud
-export DOCKER_USERNAME=your-username
-export DOCKER_PASSWORD=your-password
-export DOCKER_SERVER=your-docker-registry.com
-export IMAGE_TAG=your-image-tag
+export NAMESPACE=dynamo-cloud # or whatever you prefer.
+export DOCKER_SERVER=nvcr.io/nvidia/ai-dynamo/  # your-docker-registry.com
+export DOCKER_USERNAME='$oauthtoken'  # your-username if not using nvcr.io
+export DOCKER_PASSWORD=YOUR_NGC_CLI_API_KEY  # your-password if not using nvcr.io
+```
+
+```bash
+export IMAGE_TAG=RELEASE_VERSION # i.e. 0.3.2 - the release you are using or your-image-tag of you have built your own Dynamo image.
+# The  Nvidia Cloud Operator image will be pulled from the `$DOCKER_SERVER/dynamo-operator:$IMAGE_TAG`.
 ```
 
 The operator image will be pulled from `$DOCKER_SERVER/dynamo-operator:$IMAGE_TAG`.
@@ -107,7 +119,9 @@ if you want guidance during the process, run the deployment script with the `--i
 ./deploy.sh --crds --interactive
 ```
 
-**Step 1: Install Custom Resource Definitions (CRDs)**
+**Installing CRDs manually  (alternative to the script deploy.sh)**
+
+***Step 1: Install Custom Resource Definitions (CRDs)**
 
 ```bash
 helm install dynamo-crds ./crds/ \
@@ -116,7 +130,7 @@ helm install dynamo-crds ./crds/ \
   --atomic
 ```
 
-**Step 2: Build Dependencies and Install Platform**
+***Step 2: Build Dependencies and Install Platform**
 
 ```bash
 helm dep build ./platform/
@@ -150,22 +164,6 @@ We provide a script to uninstall CRDs should you need a clean start.
 
 ## Explore Examples
 
-### Hello World
-
-For a basic example that doesn't require a GPU, see the [Hello World](../../examples/hello_world.md)
-
-### LLM
-
-Create a Kubernetes secret containing your sensitive values if needed:
-
-```bash
-export HF_TOKEN=your_hf_token
-kubectl create secret generic hf-token-secret \
-  --from-literal=HF_TOKEN=${HF_TOKEN} \
-  -n ${NAMESPACE}
-```
-
-
 Pick your deployment destination.
 
 If local
@@ -179,9 +177,13 @@ If kubernetes
 export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com
 ```
 
+If deploying to Kubernetes, create a Kubernetes secret containing your sensitive values if needed:
+
 ```bash
-# Go to your main dynamo directory.
-cd ../../../
-kubectl apply -f examples/llm/deploy/agg.yaml -n $NAMESPACE
+export HF_TOKEN=your_hf_token
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN=${HF_TOKEN} \
+  -n ${NAMESPACE}
 ```
 
+Follow the [Examples](../../examples/README.md)
