@@ -215,20 +215,6 @@ impl DistributedRuntime {
     pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>> {
         self.instance_sources.clone()
     }
-
-    /// Debug function to print out all the keys of prometheus_registries_by_prefix
-    pub fn debug_prometheus_registry_keys(&self) {
-        let registries = self.prometheus_registries_by_prefix.lock().unwrap();
-        println!("=== Prometheus Registry Keys ===");
-        if registries.is_empty() {
-            println!("No registries found");
-        } else {
-            for (key, _registry) in registries.iter() {
-                println!("Registry key: '{}'", key);
-            }
-        }
-        println!("=== End Prometheus Registry Keys ===");
-    }
 }
 
 #[derive(Dissolve)]

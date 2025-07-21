@@ -55,10 +55,12 @@ impl HttpServerState {
     /// Create new HTTP server state with the provided metrics registry
     pub fn new(drt: Arc<crate::DistributedRuntime>) -> anyhow::Result<Self> {
         let http_metrics_registry = Arc::new(HttpMetricsRegistry { drt: drt.clone() });
-        let uptime_gauge = http_metrics_registry.create_gauge(
+        let uptime_gauge = http_metrics_registry.create_metric::<prometheus::Gauge>(
             "uptime_seconds",
             "Total uptime of the DistributedRuntime in seconds",
-            &[("service", "dynamo"), ("subsystem", "runtime")],
+            &[],
+            None,
+            None,
             true,
         )?;
         let state = Self {
@@ -76,11 +78,11 @@ impl HttpServerState {
             .map_err(|_| "Start time already initialized")
     }
 
-    pub fn uptime(&self) -> std::time::Duration {
+    pub fn uptime(&self) -> Result<std::time::Duration, &'static str> {
         self.start_time
             .get()
-            .expect("Start time not initialized")
-            .elapsed()
+            .ok_or("Start time not initialized")
+            .map(|start_time| start_time.elapsed())
     }
 
     /// Get a reference to the distributed runtime
@@ -90,8 +92,12 @@ impl HttpServerState {
 
     /// Update the uptime gauge with current value
     pub fn update_uptime_gauge(&self) {
-        let uptime_seconds = self.uptime().as_secs_f64();
-        self.uptime_gauge.set(uptime_seconds);
+        if let Ok(uptime) = self.uptime() {
+            let uptime_seconds = uptime.as_secs_f64();
+            self.uptime_gauge.set(uptime_seconds);
+        } else {
+            tracing::warn!("Failed to update uptime gauge: start time not initialized");
+        }
     }
 }
 
@@ -173,11 +179,16 @@ pub async fn spawn_http_server(
 
 /// Health handler
 async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
-    tracing::info!("[health_handler] called");
-    let uptime = state.uptime();
-    let response = format!("OK\nUptime: {} seconds\n", uptime.as_secs());
-    //let health = state.DB_errors <= 0;
-    (StatusCode::OK, response)
+    match state.uptime() {
+        Ok(uptime) => {
+            let response = format!("OK\nUptime: {} seconds\n", uptime.as_secs());
+            (StatusCode::OK, response)
+        }
+        Err(e) => {
+            tracing::error!("Failed to get uptime: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to get uptime".to_string())
+        }
+    }
 }
 
 /// Metrics handler with DistributedRuntime uptime
@@ -246,35 +257,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_runtime_metrics_creation() {
-        // Test RuntimeMetrics creation and functionality
-        let drt = make_test_drt().await;
-        let runtime_metrics = HttpServerState::new(drt.clone()).unwrap();
-
-        // Initialize start time
-        runtime_metrics.initialize_start_time().unwrap();
-
-        // Wait a bit to ensure uptime is measurable
-        tokio::time::sleep(Duration::from_millis(10)).await;
-
-        // Test updating uptime
-        let uptime_seconds = 123.456;
-        runtime_metrics.uptime_gauge.set(uptime_seconds);
-
-        // Get metrics from the registry
-        let response = runtime_metrics.drt().prometheus_metrics_fmt().unwrap();
-        println!("Full metrics response:\n{}", response);
-
-        let expected = "\
-# HELP http_server__uptime_seconds Total uptime of the DistributedRuntime in seconds
-# TYPE http_server__uptime_seconds gauge
-http_server__uptime_seconds 123.456
-";
-        assert_eq!(response, expected);
-    }
-
-    #[tokio::test]
-    async fn test_runtime_metrics_namespace() {
+    async fn test_runtime_metrics_initialization_and_namespace() {
         // Test that metrics have correct namespace
         let drt = make_test_drt().await;
         let runtime_metrics = HttpServerState::new(drt).unwrap();
@@ -288,9 +271,9 @@ http_server__uptime_seconds 123.456
         println!("Full metrics response:\n{}", response);
 
         let expected = "\
-# HELP http_server__uptime_seconds Total uptime of the DistributedRuntime in seconds
-# TYPE http_server__uptime_seconds gauge
-http_server__uptime_seconds 42
+# HELP uptime_seconds Total uptime of the DistributedRuntime in seconds
+# TYPE uptime_seconds gauge
+uptime_seconds{namespace=\"http_server\"} 42
 ";
         assert_eq!(response, expected);
     }
@@ -308,19 +291,20 @@ http_server__uptime_seconds 42
         assert!(runtime_metrics.initialize_start_time().is_err());
 
         // Uptime should work after initialization
-        let _uptime = runtime_metrics.uptime();
+        let _uptime = runtime_metrics.uptime().unwrap();
         // If we get here, uptime calculation works correctly
     }
 
     #[tokio::test]
-    #[should_panic(expected = "Start time not initialized")]
     async fn test_uptime_without_initialization() {
-        // Test that uptime panics if start time is not initialized
+        // Test that uptime returns an error if start time is not initialized
         let drt = make_test_drt().await;
         let runtime_metrics = HttpServerState::new(drt).unwrap();
 
-        // This should panic because start time is not initialized
-        let _uptime = runtime_metrics.uptime();
+        // This should return an error because start time is not initialized
+        let result = runtime_metrics.uptime();
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "Start time not initialized");
     }
 
     #[tokio::test]

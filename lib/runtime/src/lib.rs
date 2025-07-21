@@ -100,9 +100,6 @@ pub struct DistributedRuntime {
 
     instance_sources: Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
 
-    // Used by MetricsRegistry, which has a reference to the DistributedRuntime.
+    // This map associates metric prefixes with their corresponding Prometheus registries.
     prometheus_registries_by_prefix: Arc<std::sync::Mutex<HashMap<String, prometheus::Registry>>>,
-    // TODO(nnshah1|keiven): For now we are not using these, but will do that soon.
-    // is_healthy: bool,
-    // is_live: bool,
 }
