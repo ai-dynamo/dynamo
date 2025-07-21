@@ -300,6 +300,10 @@ mod tests {
         // use tokio::io::{AsyncReadExt, AsyncWriteExt};
         // use reqwest for HTTP requests
 
+	// Closure call is needed here to satisfy async_with_vars
+
+	#[allow(clippy::redundant_closure_call)]
+
         temp_env::async_with_vars(
             [(
                 "DYN_SYSTEM_STARTING_HEALTH_STATUS",

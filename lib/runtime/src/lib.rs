@@ -124,16 +124,15 @@ impl SystemHealth {
             );
         }
 
-        let healthy;
-        if !self.use_endpoint_health_status.is_empty() {
-            healthy = self.use_endpoint_health_status.iter().all(|endpoint| {
+        let healthy = if !self.use_endpoint_health_status.is_empty() {
+            self.use_endpoint_health_status.iter().all(|endpoint| {
                 self.endpoint_health
                     .get(endpoint)
-                    .map_or(false, |status| *status == HealthStatus::Ready)
-            });
+                    .is_some_and(|status| *status == HealthStatus::Ready)
+            })
         } else {
-            healthy = self.system_health == HealthStatus::Ready;
-        }
+           self.system_health == HealthStatus::Ready
+        };
 
         (healthy, endpoints)
     }
