@@ -129,6 +129,11 @@ impl fmt::Display for RuntimeConfig {
             "use_endpoint_health_status={:?}",
             self.use_endpoint_health_status
         )?;
+        write!(
+            f,
+            "starting_health_status={:?}",
+            self.starting_health_status
+        )?;
 
         Ok(())
     }
