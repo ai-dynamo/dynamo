@@ -58,7 +58,7 @@ use tracing::span::Record;
 use tracing_subscriber::field::Visit;
 use tracing_subscriber::Registry;
 use tracing_subscriber::registry::SpanData;
-
+use crate::error;
 use crate::config::{disable_ansi_logging, jsonl_logging_enabled};
 
 /// ENV used to set the log level
@@ -112,6 +112,18 @@ fn generate_span_id() -> String {
     bytes[..8].iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// Validate a given trace ID according to W3C Trace Context specifications.
+/// A valid trace ID is a 16-character hexadecimal string (lowercase).
+pub fn is_valid_trace_id(trace_id: &str) -> bool {
+    trace_id.len() == 32 && trace_id.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Validate a given span ID according to W3C Trace Context specifications.
+/// A valid span ID is an 8-character hexadecimal string (lowercase).
+pub fn is_valid_span_id(span_id: &str) -> bool {
+    span_id.len() == 16 && span_id.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 pub struct DistributedTraceIdLayer;
 
 #[derive(Clone)]
@@ -121,92 +133,103 @@ pub struct DistributedTracingContext {
     parent_id: Option<String>
 }
 
+
+#[derive(Debug, Default)]
+pub struct FieldVisitor {
+    pub fields: HashMap<String, String>,
+}
+
+impl Visit for FieldVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+	self.fields.insert(field.name().to_string(),value.to_string());
+    }
+
+    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+	self.fields.insert(field.name().to_string(),format!("{:?}", value).to_string());
+    }
+}
+
 impl<S> Layer<S> for DistributedTraceIdLayer
 where
     S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
+
         if let Some(span) = ctx.span(id) {
-	    let mut trace_id = None;
-	    let mut parent_id = None;
 
-	    if let Some(parent_span_id) = ctx.current_span().id() {
+	    let mut trace_id:Option<String> = None;
+	    let mut parent_id:Option<String> = None;
+	    let mut span_id:Option<String> = None;
+	    let target_fields = ["trace_id", "span_id", "parent_id"];
+	    let mut visitor = FieldVisitor::default();
+	    attrs.record(&mut visitor);
 
-		if let Some(parent_span) = ctx.span(parent_span_id) {
-                    // Access parent span data (e.g., name)
-                    let parent_ext = parent_span.extensions();
-		    if let Some(parent_tracing_context) = parent_ext.get::<DistributedTracingContext>() {
-			trace_id = Some(parent_tracing_context.trace_id.clone());
-			parent_id = Some(parent_tracing_context.span_id.clone());
-		    }
+	    for field in attrs.fields().iter() {
+		if target_fields.contains(&field.name()) {
+		if !visitor.fields.contains_key(field.name()) {
+		    tracing::error!("Field {} has no value any attempts to update will be ignored", field.name());
 
 		}
-            }
+		}
+	    }
+
+	    if let Some(trace_id_input) = visitor.fields.get("trace_id") {
+		if !is_valid_trace_id(trace_id_input) {
+		    tracing::error!("trace id  '{}' is not valid! Ignoring.", trace_id_input);
+		} else {
+		    trace_id = Some(trace_id_input.to_string());
+		}
+	    }
+
+	    if let Some(span_id_input) = visitor.fields.get("span_id") {
+		if !is_valid_span_id(span_id_input) {
+		    tracing::error!("span id  '{}' is not valid! Ignoring.", span_id_input);
+		} else {
+		    span_id = Some(span_id_input.to_string());
+		}
+	    }
+
+	    if let Some(parent_id_input) = visitor.fields.get("parent_id") {
+		if !is_valid_span_id(parent_id_input) {
+		    tracing::error!("parent id  '{}' is not valid! Ignoring.", parent_id_input);
+		} else {
+		    parent_id = Some(parent_id_input.to_string());
+		}
+	    }
+
+	    if parent_id == None {
+		if let Some(parent_span_id) = ctx.current_span().id() {
+		    if let Some(parent_span) = ctx.span(parent_span_id) {
+			// Access parent span data (e.g., name)
+			let parent_ext = parent_span.extensions();
+			if let Some(parent_tracing_context) = parent_ext.get::<DistributedTracingContext>() {
+			    trace_id = Some(parent_tracing_context.trace_id.clone());
+			    parent_id = Some(parent_tracing_context.span_id.clone());
+			}
+
+		    }
+		}
+	    }
+
+	    if (parent_id != None || span_id != None) && trace_id == None {
+		tracing::error!("parent id or span id are set but trace id is not set!")
+	    }
 
 	    if trace_id == None {
 		trace_id = Some(generate_trace_id());
 	    }
 
-	    let span_id = generate_span_id();
+	    if span_id == None {
+		span_id = Some(generate_span_id());
+	    }
+
 	    let mut extensions = span.extensions_mut();
 	    extensions.insert(DistributedTracingContext {trace_id:trace_id.expect("Trace ID must be set"),
-							 span_id:span_id,
+							 span_id:span_id.expect("Span ID must be set"),
 							 parent_id:parent_id});
         }
     }
-
-    fn on_record(&self, id: &Id, record: &Record<'_>, ctx: Context<'_, S>) {
-	println!("on record");
-        if let Some(span) = ctx.span(id) {
-            // Visitor struct for extracting updated trace_id/parent_id/span_id
-            #[derive(Default)]
-            struct UpdateVisitor {
-                trace_id: Option<String>,
-                span_id: Option<String>,
-                parent_id: Option<String>,
-            }
-            impl Visit for UpdateVisitor {
-                fn record_str(&mut self, field: &Field, value: &str) {
-		    println!("filed name{}",field.name());
-                    match field.name() {
-                        "trace_id" => self.trace_id = Some(value.to_string()),
-                        "span_id" => self.span_id = Some(value.to_string()),
-                        "parent_id" => self.parent_id = Some(value.to_string()),
-                        _ => {}
-                    }
-                }
-                fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-                    // Fallback in case they're recorded as Debug, not str:
-                    let s = format!("{value:?}");
-                    match field.name() {
-                        "trace_id" => self.trace_id = Some(s),
-                        "span_id" => self.span_id = Some(s),
-                        "parent_id" => self.parent_id = Some(s),
-                        _ => {}
-                    }
-                }
-            }
-            // Extract updated fields
-            let mut visitor = UpdateVisitor::default();
-            record.record(&mut visitor);
-            let mut exts = span.extensions_mut();
-
-            // Only update fields that changed
-            if let Some(context) = exts.get_mut::<DistributedTracingContext>() {
-                if let Some(new_trace_id) = visitor.trace_id {
-                    context.trace_id = new_trace_id;
-                }
-                if let Some(new_span_id) = visitor.span_id {
-                    context.span_id = new_span_id;
-                }
-                if let Some(new_parent_id) = visitor.parent_id {
-                    context.parent_id = Some(new_parent_id);
-                }
-            }
-        }
-    }
 }
-
 
 pub fn get_distributed_tracing_context() -> Option<DistributedTracingContext> {
     Span::current().with_subscriber(|(id, subscriber)| {
@@ -414,6 +437,7 @@ where
                 .filter_map(|entry| entry.split_once('='))
                 .collect();
             for (name, value) in span_fields {
+		println!("name {}",name);
                 visitor.fields.insert(
                     name.to_string(),
                     serde_json::Value::String(value.trim_matches('"').to_string()),
@@ -424,7 +448,6 @@ where
                 serde_json::Value::String(span.name().to_string()),
             );
 
-
 	    if let Some(tracing_context) = ext.get::<DistributedTracingContext>() {
 		visitor.fields.insert("span_id".to_string(),serde_json::Value::String(tracing_context.span_id.clone()));
 		visitor.fields.insert("trace_id".to_string(),serde_json::Value::String(tracing_context.trace_id.clone()));
@@ -433,6 +456,7 @@ where
 		}
 	    }
 	    else {
+		tracing::error!("Distributed Tracing Context not found, falling back to internal ids");
 		visitor.fields.insert("span_id".to_string(),serde_json::Value::String(span.id().into_u64().to_string()));
 		if let Some(parent) = span.parent() {
 		    visitor.fields.insert("parent_id".to_string(),serde_json::Value::String(parent.id().into_u64().to_string()));
@@ -440,35 +464,6 @@ where
 
 	    }
 
-	    /*
-	    if let Some(span_id) = visitor.fields.get("span_id") {
-	    } else {
-
-	    if let Some(tracing_context) = ext.get::<DistributedTracingContext>() {
-		visitor.fields.insert("trace_id".to_string(),
-				      serde_json::Value::String(tracing_context.trace_id.clone()));
-		visitor.fields.insert(
-		    "span_id".to_string(),
-		    serde_json::Value::String(tracing_context.span_id.clone()),
-		);
-		if let Some(parent_id) = tracing_context.parent_id.clone() {
-		    visitor.fields.insert("parent_id".to_string(), serde_json::Value::String(parent_id));
-		}
-	    } else {
-		if let Some(span_id) = visitor.fields.get("span_id") {
-		} else {
-		    visitor.fields.insert("span_id".to_string(),
-					  serde_json::Value::String(span.id().into_u64().to_string()));
-		}
-		if let Some(parent_id)  = visitor.fields.get("parent_id") {
-		} else {
-		    if let Some(parent) = span.parent() {
-			visitor.fields.insert("parent_id".to_string(),serde_json::Value::String(parent.id().into_u64().to_string()));
-		    }
-		}
-	    }
-
-	    */
             visitor.fields.insert(
                 "span_name".to_string(),
                 serde_json::Value::String(span.name().to_string()),
@@ -514,6 +509,8 @@ impl tracing::field::Visit for JsonVisitor {
     }
 
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+	println!("value {}",field.name());
+
         self.fields.insert(
             field.name().to_string(),
             serde_json::Value::String(value.to_string()),
@@ -541,6 +538,7 @@ impl tracing::field::Visit for JsonVisitor {
 
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
         use serde_json::value::Number;
+	println!("value {}",field.name());
         self.fields.insert(
             field.name().to_string(),
             // Infinite or NaN values are not JSON numbers, replace them with 0.
@@ -554,12 +552,14 @@ impl tracing::field::Visit for JsonVisitor {
 mod tests {
     use super::*;
 
-    #[tracing::instrument(skip_all,fields(trace_id, span_id, request_id))]
+    #[tracing::instrument(skip_all,fields(span_id="abd16e319329445f", trace_id="foo", request_id))]
     async fn foo_3() {
 
 	println!("recording");
 	tracing::Span::current().record("trace_id","goo");
 	tracing::Span::current().record("span_id","goo");
+	tracing::Span::current().record("span_name","olivia");
+
 
 	if let Some (my_ctx) = get_distributed_tracing_context() {
 	    println!("my context {}", my_ctx.trace_id);
