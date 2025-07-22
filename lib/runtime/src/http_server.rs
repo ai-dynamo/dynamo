@@ -316,10 +316,9 @@ mod tests {
                         .unwrap(),
                 );
                 let cancel_token = CancellationToken::new();
-                let (addr, _) =
-                    spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt)
-                        .await
-                        .unwrap();
+                let (addr, _) = spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt)
+                    .await
+                    .unwrap();
                 println!("[test] Waiting for server to start...");
                 sleep(std::time::Duration::from_millis(1000)).await;
                 println!("[test] Server should be up, starting requests...");
