@@ -122,14 +122,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
         sampling_params = SamplingParams(**self.default_sampling_params)
         for key, value in request["sampling_options"].items():
-            if not value:
-                continue
-            if hasattr(sampling_params, key):
+            if value is not None and hasattr(sampling_params, key):
                 setattr(sampling_params, key, value)
 
-        max_tokens = request["stop_conditions"]["max_tokens"]
-        if max_tokens:
-            sampling_params.max_tokens = max_tokens
+        for key, value in request["stop_conditions"].items():
+            if value is not None and hasattr(sampling_params, key):
+                setattr(sampling_params, key, value)
 
         if self.can_prefill:
             # Create a copy for prefill with specific modifications

@@ -38,6 +38,7 @@ pub mod discovery;
 pub mod engine;
 pub mod http_server;
 pub mod logging;
+pub mod metrics;
 pub mod pipeline;
 pub mod prelude;
 pub mod protocols;
@@ -99,6 +100,6 @@ pub struct DistributedRuntime {
 
     instance_sources: Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
 
-    // Start time for tracking uptime
-    start_time: std::time::Instant,
+    // This map associates metric prefixes with their corresponding Prometheus registries.
+    prometheus_registries_by_prefix: Arc<std::sync::Mutex<HashMap<String, prometheus::Registry>>>,
 }

@@ -13,24 +13,21 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-[workspace]
-members = [
-    "hello_world",
-    "service_metrics",
-    "system_metrics",
-]
-resolver = "3"
+[package]
+name = "system_metrics"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
 
-[workspace.package]
-version = "0.3.2"
-edition = "2021"
-authors = ["NVIDIA"]
-license = "Apache-2.0"
-homepage = "https://github.com/ai-dynamo/dynamo"
-repository = "https://github.com/ai-dynamo/dynamo.git"
+[dependencies]
+dynamo-runtime = { workspace = true }
 
-
-[workspace.dependencies]
-# local or crates.io
-dynamo-runtime = { path = "../" }
-prometheus = { workspace = true }
+# third-party
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1" }
+tokio = { version = "1", features = ["full"] }
+prometheus = { version = "0.14" }

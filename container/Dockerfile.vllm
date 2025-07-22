@@ -11,6 +11,7 @@ ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 ARG VLLM_REF="059d4cd"
+ARG TORCH_BACKEND="cu128"
 
 # After this commit deepgemm API changed
 # 1.0.0 -> 2.0.0
@@ -38,9 +39,10 @@ ARG ARCH_ALT=x86_64
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
-# Redeclare ARCH and ARCH_ALT so they're available in this stage
+# Redeclare ARCH, ARCH_ALT, TORCH_BACKEND so they're available in this stage
 ARG ARCH
 ARG ARCH_ALT
+ARG TORCH_BACKEND
 
 USER root
 ARG PYTHON_VERSION=3.12
@@ -192,7 +194,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
     cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
     chmod +x /tmp/install_vllm.sh && \
-    /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt --deepgemm-ref $DEEPGEMM_REF --flashinf-ref $FLASHINF_REF
+    /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt --deepgemm-ref $DEEPGEMM_REF --flashinf-ref $FLASHINF_REF --torch-backend $TORCH_BACKEND
 
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\

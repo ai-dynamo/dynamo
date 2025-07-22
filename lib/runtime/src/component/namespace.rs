@@ -19,7 +19,7 @@ use futures::stream::StreamExt;
 use futures::{Stream, TryStreamExt};
 
 use super::*;
-
+use crate::metrics::MetricsRegistry;
 use crate::traits::events::{EventPublisher, EventSubscriber};
 
 #[async_trait]
@@ -75,6 +75,16 @@ impl EventSubscriber for Namespace {
         });
 
         Ok(stream)
+    }
+}
+
+impl MetricsRegistry for Namespace {
+    fn basename(&self) -> String {
+        self.name.clone()
+    }
+
+    fn parent_hierarchy(&self) -> Vec<String> {
+        vec![self.drt().basename()]
     }
 }
 

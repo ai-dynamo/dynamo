@@ -2568,6 +2568,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "system_metrics"
+version = "0.3.2"
+dependencies = [
+ "dynamo-runtime",
+ "futures",
+ "prometheus",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "target-lexicon"
 version = "0.12.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
