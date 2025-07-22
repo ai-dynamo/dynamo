@@ -1,86 +1,13 @@
-# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
+FROM sgl-blackwell-wideep:latest
 
-# Note this container is built from a local dockerfile
-# Please see instructions in examples/sglang/README.md
-FROM sgl-wideep:latest
-
-# Add NIXL build dependencies
-RUN apt-get update -y && \
-    apt-get install -y \
-    cmake \
-    meson \
-    ninja-build \
-    pybind11-dev \
-    patchelf \
-    net-tools
-
-# Install Python build dependencies
-RUN pip install --break-system-packages meson-python wheel build
-
-# Add architecture args for NIXL build
-ARG ARCH=amd64
-ARG ARCH_ALT=x86_64
+# Define architecture variables for ARM64
+ARG ARCH=arm64
+ARG ARCH_ALT=aarch64
 
 WORKDIR /sgl-workspace
-
-# Install UCX dependencies
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends \
-    --reinstall libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
-    libnuma-dev librdmacm-dev ibverbs-providers \
-    autoconf libtool
-
-# Build UCX from source
-ARG NIXL_UCX_REF=v1.19.x
-RUN rm -rf /opt/hpcx/ucx && \
-    rm -rf /usr/local/ucx && \
-    cd /usr/local/src && \
-    git clone https://github.com/openucx/ucx.git && \
-    cd ucx && \
-    git checkout $NIXL_UCX_REF && \
-    ./autogen.sh && ./configure \
-    --prefix=/usr/local/ucx \
-    --enable-shared \
-    --disable-static \
-    --disable-doxygen-doc \
-    --enable-optimizations \
-    --enable-cma \
-    --enable-devel-headers \
-    --with-cuda=/usr/local/cuda \
-    --with-verbs \
-    --with-efa \
-    --with-dm \
-    --with-gdrcopy=/usr/local \
-    --enable-mt && \
-    make -j && \
-    make -j install-strip && \
-    ldconfig
-
-ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
-
-ARG NIXL_TAG=0.3.1
-RUN git clone https://github.com/ai-dynamo/nixl.git && cd nixl && git checkout ${NIXL_TAG} && pip install --break-system-packages . --config-settings=setup-args="-Ducx_path=/usr/local/ucx"
-
-WORKDIR /sgl-workspace
-
-# Allow forceful shutdown of inflight requests
-ENV SGL_FORCE_SHUTDOWN=1
-
-WORKDIR /sgl-workspace
-RUN git clone https://github.com/ai-dynamo/dynamo.git
+# https://github.com/ai-dynamo/dynamo/pull/1938
+ARG DYNAMO_COMMIT="aba60996f225038b691d9f255da515b27695b179"
+RUN git clone https://github.com/ai-dynamo/dynamo.git && cd dynamo && git checkout ${DYNAMO_COMMIT}
 
 # install dynamo in editable mode
 WORKDIR /sgl-workspace/dynamo
@@ -137,6 +64,14 @@ RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/downlo
     rm /tmp/etcd.tar.gz
 ENV PATH=/usr/local/bin/etcd/:$PATH
 
+COPY examples/sglang/configs/deepseek_r1/wideep/* /sgl-workspace/dynamo/examples/sglang/configs/
+COPY examples/sglang/utils/benchmarking/* /sgl-workspace/dynamo/examples/sglang/utils/
+
+ENV PYTHONPATH=/sgl-workspace/dynamo/deploy/sdk/src:/workspace/dynamo/components/planner/src:/workspace/examples/sglang:$PYTHONPATH
+
+# properly install cmake so that gap can be installed
+RUN cmake --version
+
 ARG CMAKE_VERSION=3.31.8
 RUN mkdir /sgl-workspace/cmake_build
 WORKDIR /sgl-workspace/cmake_build
@@ -166,8 +101,5 @@ RUN git clone --depth=1 https://github.com/triton-inference-server/perf_analyzer
 ENV PATH=/sgl-workspace/perf_analyzer/build/perf_analyzer/src/perf-analyzer-build:$PATH
 
 RUN pip install --break-system-packages genai-perf
-
-COPY examples/sglang/configs/deepseek_r1/wideep/* /sgl-workspace/dynamo/examples/sglang/configs/
-COPY examples/sglang/utils/benchmarking/* /sgl-workspace/dynamo/examples/sglang/utils/
 
 WORKDIR /sgl-workspace/dynamo/examples/sglang
