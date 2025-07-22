@@ -17,16 +17,15 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import signal
+import sys
 import uuid
 from enum import Enum
 from typing import AsyncIterator, Tuple, Union
 
 import uvloop
-from args import Config, base_parse_args, parse_endpoint
 from transformers import AutoTokenizer
-from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
-from utils.protocol import MultiModalRequest, MyRequestOutput, vLLMMultimodalRequest
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
 from vllm.outputs import RequestOutput
@@ -36,6 +35,12 @@ from vllm.utils import FlexibleArgumentParser
 from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+
+# To import example local module
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from args import Config, base_parse_args, parse_endpoint
+from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
+from utils.protocol import MultiModalRequest, MyRequestOutput, vLLMMultimodalRequest
 
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
@@ -99,6 +104,9 @@ class Processor(ProcessMixIn):
             self.tokenizer, self.model_config
         )
 
+    def cleanup(self):
+        pass
+
     def _create_tokenizer(self, engine_args: AsyncEngineArgs) -> AnyTokenizer:
         """Create a TokenizerGroup using engine arguments similar to VLLM's approach"""
         model_path = engine_args.model
@@ -117,7 +125,7 @@ class Processor(ProcessMixIn):
         parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
             self.encode_endpoint
         )
-        self.encoder_worker_client = (
+        self.encode_worker_client = (
             await runtime.namespace(parsed_namespace)
             .component(parsed_component_name)
             .endpoint(parsed_endpoint_name)
@@ -192,6 +200,11 @@ class Processor(ProcessMixIn):
 
     # The generate endpoint will be used by the frontend to handle incoming requests.
     async def generate(self, raw_request: MultiModalRequest):
+        logger.debug(f"Got raw request: {raw_request}")
+        if type(raw_request) is not MultiModalRequest:
+            # If the request is not MultiModalRequest, convert it to MultiModalRequest
+            raw_request = MultiModalRequest.model_validate(raw_request)
+
         # Ensure the configured template includes the placeholder
         template = self.prompt_template
         if "<prompt>" not in template:
