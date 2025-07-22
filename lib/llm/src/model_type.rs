@@ -13,33 +13,51 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use bitflags::bitflags;
 use serde::{Deserialize, Serialize};
 use strum::Display;
+use std::fmt;
 
-#[derive(Copy, Debug, Clone, Display, Serialize, Deserialize, Eq, PartialEq)]
-pub enum ModelType {
-    // Chat Completions API
-    Chat,
-    /// Older completions API
-    Completion,
-    /// Embeddings API
-    Embedding,
-    // Pre-processed requests
-    Backend,
+bitflags! {
+    #[derive(Copy, Debug, Clone, Serialize, Deserialize, Eq, PartialEq)]
+    pub struct ModelType: u8 {
+        const Chat = 1 << 0;
+        const Completion = 1 << 1;
+        const Embedding = 1 << 2;
+        const Backend = 1 << 3;
+    }
 }
 
 impl ModelType {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Chat => "chat",
-            Self::Completion => "completion",
-            Self::Embedding => "embedding",
-            Self::Backend => "backend",
-        }
+    pub fn as_str(&self) -> String {
+        self.as_vec().join(",")
     }
 
-    pub fn all() -> Vec<Self> {
-        vec![Self::Chat, Self::Completion, Self::Embedding, Self::Backend]
+    pub fn supports_chat(&self) -> bool {
+        self.contains(ModelType::Chat)
+    }
+    pub fn supports_completion(&self) -> bool {
+        self.contains(ModelType::Completion)
+    }
+    pub fn supports_embedding(&self) -> bool {
+        self.contains(ModelType::Embedding)
+    }
+    pub fn supports_backend(&self) -> bool {
+        self.contains(ModelType::Backend)
+    }
+
+    pub fn as_vec(&self) -> Vec<&'static str> {
+        let mut result = Vec::new();
+        if self.supports_chat() { result.push("chat"); }
+        if self.supports_completion() { result.push("completion"); }
+        if self.supports_embedding() { result.push("embedding"); }
+        result
+    }
+}
+
+impl fmt::Display for ModelType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.as_str())
     }
 }
 
