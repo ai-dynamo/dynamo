@@ -181,7 +181,15 @@ pub async fn spawn_http_server(
 async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
     //let uptime = state.drt.uptime();
     let system_health = state.drt().system_health.lock().await;
-    let (healthy, endpoints) = system_health.get_health_status();
+    let (mut healthy, endpoints) = system_health.get_health_status();
+    let uptime = match state.uptime() {
+	Ok(uptime_state) => Some(uptime_state),
+	Err(e) => {
+            tracing::error!("Failed to get uptime: {}", e);
+            healthy = false;
+            None
+	}
+    };
 
     let healthy_string = if healthy { "ready" } else { "notready" };
     let status_code = if healthy {
@@ -190,18 +198,21 @@ async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
         StatusCode::SERVICE_UNAVAILABLE
     };
 
+
+
     let response = json!({
         "status": healthy_string,
-        //"uptime": uptime.as_secs(),
+        "uptime": uptime,
         "endpoints": endpoints
     });
 
     tracing::trace!("Response {}", response.to_string());
-    /*
+
     (status_code, response.to_string())
-    match state.uptime() {
+/*
+	match state.uptime() {
         Ok(uptime) => {
-            let response = format!("OK\nUptime: {} seconds\n", uptime.as_secs());
+        let response = format!("OK\nUptime: {} seconds\n", uptime.as_secs());
             (StatusCode::OK, response)
         }
         Err(e) => {
