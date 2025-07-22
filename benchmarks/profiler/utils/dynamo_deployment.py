@@ -45,6 +45,7 @@ class DynamoDeploymentClient:
         namespace: str,
         model_name: str = "Qwen/Qwen3-0.6B",
         deployment_name: str = "vllm-v1-agg",
+        frontend_port: int = 8000,
         base_log_dir: Optional[str] = None,
         service_name: Optional[str] = None,
     ):
@@ -64,6 +65,7 @@ class DynamoDeploymentClient:
         self.components = []  # Will store component names from CR
         self.deployment_spec = None  # Will store the full deployment spec
         self.base_log_dir = Path(base_log_dir) if base_log_dir else Path("logs")
+        self.frontend_port = frontend_port
 
     def _init_kubernetes(self):
         """Initialize kubernetes client"""
@@ -82,9 +84,7 @@ class DynamoDeploymentClient:
         """
         Get the service URL using Kubernetes service DNS.
         """
-        service_url = (
-            f"http://{self.service_name}.{self.namespace}.svc.cluster.local:8000"
-        )
+        service_url = f"http://{self.service_name}.{self.namespace}.svc.cluster.local:{self.frontend_port}"
         print(f"Using service URL: {service_url}")
         return service_url
 
