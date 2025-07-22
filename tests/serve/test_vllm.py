@@ -197,6 +197,19 @@ vllm_configs = {
         model="Qwen/Qwen3-0.6B",
         delayed_start=45,
     ),
+    "agg-router": VLLMConfig(
+        name="agg-router",
+        directory="/workspace/examples/vllm",
+        script_name="agg_router.sh",
+        marks=[pytest.mark.gpu_2, pytest.mark.vllm],
+        endpoints=["v1/chat/completions", "v1/completions"],
+        response_handlers=[
+            chat_completions_response_handler,
+            completions_response_handler,
+        ],
+        model="Qwen/Qwen3-0.6B",
+        delayed_start=45,
+    ),
     "disaggregated": VLLMConfig(
         name="disaggregated",
         directory="/workspace/examples/vllm",
