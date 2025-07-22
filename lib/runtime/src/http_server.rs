@@ -179,7 +179,6 @@ pub async fn spawn_http_server(
 /// Health handler
 #[tracing::instrument(skip_all, level = "trace")]
 async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
-    //let uptime = state.drt.uptime();
     let system_health = state.drt().system_health.lock().await;
     let (mut healthy, endpoints) = system_health.get_health_status();
     let uptime = match state.uptime() {
@@ -207,21 +206,7 @@ async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
     tracing::trace!("Response {}", response.to_string());
 
     (status_code, response.to_string())
-    /*
-    match state.uptime() {
-        Ok(uptime) => {
-        let response = format!("OK\nUptime: {} seconds\n", uptime.as_secs());
-            (StatusCode::OK, response)
-        }
-        Err(e) => {
-            tracing::error!("Failed to get uptime: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to get uptime".to_string(),
-            )
-        }
-    }
-    */
+
 }
 
 /// Metrics handler with DistributedRuntime uptime
@@ -335,6 +320,7 @@ uptime_seconds{namespace=\"http_server\"} 42
     }
 
     #[rstest]
+    #[cfg(feature = "integration")]
     #[case("ready", 200, "ready")]
     #[case("notready", 503, "notready")]
     #[tokio::test]
