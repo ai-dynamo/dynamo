@@ -2,4 +2,4 @@
 # SPDX-License-Identifier: Apache-2.0
 
 uvloop
-vllm @ git+https://github.com/vllm-project/vllm.git@059d4cd
+vllm==0.9.2
