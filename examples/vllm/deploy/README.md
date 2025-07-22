@@ -30,8 +30,19 @@ kubectl create secret docker-registry nvcr-imagepullsecret \
   -n $NAMESPACE
 ```
 
-**Step 1: Run profiling (required)**
+**Step 1: Build your own vLLM image for profiling**
+
 ```bash
+# in the project's root folder
+./container/build.sh --framework VLLM
+# Tag and push to your container registry
+```
+
+Replace the `image` within `profile_sla_job.yaml` with the tag of the image you pushed.
+
+**Step 2: Run profiling (required)**
+```bash
+cd examples/vllm/deploy
 envsubst < profiling_pvc.yaml | kubectl apply -f -
 envsubst < profile_sla_sa.yaml | kubectl apply -f -
 envsubst < profile_sla_rbac.yaml | kubectl apply -f -
@@ -39,13 +50,13 @@ envsubst < profile_sla_binding.yaml | kubectl apply -f -
 envsubst < profile_sla_job.yaml | kubectl apply -f -
 ```
 
-**Step 2: Wait for profiling to complete**
+**Step 3: Wait for profiling to complete**
 ```bash
 kubectl get jobs -n $NAMESPACE
 kubectl logs job/profile_sla -n $NAMESPACE
 ```
 
-**Step 3: Deploy planner (work in progress)**
+**Step 4: Deploy planner (work in progress)**
 ```bash
 envsubst < disagg_planner.yaml | kubectl apply -f -
 ```

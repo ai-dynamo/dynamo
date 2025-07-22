@@ -49,7 +49,7 @@ spec:
           memory: "10Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.14
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.2
           workingDir: /workspace/examples/vllm
           args:
             - dynamo
@@ -93,7 +93,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.14
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.2
           workingDir: /workspace/examples/vllm
           args:
             - "python3 components/main.py --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B --enforce-eager 2>&1 | tee /tmp/vllm.log"
@@ -132,7 +132,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.14
+          image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.2
           workingDir: /workspace/examples/vllm
           args:
             - "python3 components/main.py --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B --enforce-eager --is-prefill-worker 2>&1 | tee /tmp/vllm.log"
