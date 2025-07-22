@@ -1847,6 +1847,7 @@ dependencies = [
  "derive_builder",
  "dialoguer",
  "dynamo-runtime",
+ "dynamo-tokens",
  "either",
  "erased-serde",
  "etcd-client",
@@ -1985,6 +1986,9 @@ dependencies = [
  "bytemuck",
  "derive-getters",
  "rayon",
+ "serde",
+ "thiserror 2.0.12",
+ "uuid 1.17.0",
  "xxhash-rust",
 ]
 
