@@ -255,7 +255,7 @@ fn make_key(bucket_name: &str, key: &str) -> String {
     .join("/")
 }
 
-// #[cfg(feature = "integration")]
+#[cfg(feature = "integration")]
 #[cfg(test)]
 mod concurrent_create_tests {
     use super::*;
