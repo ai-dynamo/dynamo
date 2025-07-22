@@ -17,7 +17,7 @@ accelerate==1.6.0
 av==15.0.0
 fastapi==0.115.6
 ftfy
-genai-perf==0.0.13
+genai-perf==0.0.15
 grpcio-tools==1.66.0
 httpx
 kubernetes==32.0.1

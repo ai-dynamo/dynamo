@@ -17,6 +17,7 @@
 members = [
     "hello_world",
     "service_metrics",
+    "system_metrics",
 ]
 resolver = "3"
 
@@ -32,3 +33,4 @@ repository = "https://github.com/ai-dynamo/dynamo.git"
 [workspace.dependencies]
 # local or crates.io
 dynamo-runtime = { path = "../" }
+prometheus = { workspace = true }

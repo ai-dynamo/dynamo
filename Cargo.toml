@@ -49,7 +49,6 @@ hf-hub = { version = "0.4.2", default-features = false, features = ["tokio", "ru
 humantime = { version = "2.2.0" }
 libc = { version = "0.2" }
 oneshot = { version = "0.1.11", features = ["std", "async"] }
-opentelemetry = { version = "0.30" }
 prometheus = { version = "0.14" }
 rand = { version = "0.9.0" }
 reqwest = { version = "0.12.22", default-features = false, features = ["json", "stream", "rustls-tls"] }
@@ -63,7 +62,7 @@ tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["codec", "net"] }
 axum = { version = "0.8" }
 tracing = { version = "0.1" }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json", "fmt"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.17", features = ["v4", "serde"] }
 url = {version = "2.5", features = ["serde"]}
