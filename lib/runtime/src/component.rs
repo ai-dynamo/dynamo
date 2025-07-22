@@ -30,7 +30,7 @@
 //! TODO: Top-level Overview of Endpoints/Functions
 
 use crate::{
-    config::HealthStatus, discovery::Lease, service::ServiceSet, transports::etcd::EtcdPath,
+      config::HealthStatus,  discovery::Lease, metrics::MetricsRegistry, service::ServiceSet, transports::etcd::EtcdPath,
 };
 
 use super::{
@@ -170,6 +170,20 @@ impl RuntimeProvider for Component {
     }
 }
 
+impl MetricsRegistry for Component {
+    fn basename(&self) -> String {
+        self.name.clone()
+    }
+
+    fn parent_hierarchy(&self) -> Vec<String> {
+        [
+            self.namespace.parent_hierarchy(),
+            vec![self.namespace.basename()],
+        ]
+        .concat()
+    }
+}
+
 impl Component {
     /// The component part of an instance path in etcd.
     pub fn etcd_root(&self) -> String {
@@ -299,6 +313,20 @@ impl DistributedRuntimeProvider for Endpoint {
 impl RuntimeProvider for Endpoint {
     fn rt(&self) -> &Runtime {
         self.component.rt()
+    }
+}
+
+impl MetricsRegistry for Endpoint {
+    fn basename(&self) -> String {
+        self.name.clone()
+    }
+
+    fn parent_hierarchy(&self) -> Vec<String> {
+        [
+            self.component.parent_hierarchy(),
+            vec![self.component.basename()],
+        ]
+        .concat()
     }
 }
 

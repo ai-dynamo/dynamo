@@ -12,14 +12,14 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 # run clear_namespace
-python3 utils/clear_namespace.py --namespace dynamo
+python3 -m dynamo.sglang.utils.clear_namespace --namespace dynamo
 
 # run ingress
 dynamo run in=http out=dyn --http-port=8000 &
 DYNAMO_PID=$!
 
 # run prefill worker
-python3 components/worker.py \
+python3 -m dynamo.sglang.worker \
   --model-path silence09/DeepSeek-R1-Small-2layers \
   --served-model-name silence09/DeepSeek-R1-Small-2layers \
   --tp 2 \
@@ -33,7 +33,7 @@ python3 components/worker.py \
 PREFILL_PID=$!
 
 # run decode worker
-CUDA_VISIBLE_DEVICES=2,3 python3 components/decode_worker.py \
+CUDA_VISIBLE_DEVICES=2,3 python3 dynamo.sglang.decode_worker \
   --model-path silence09/DeepSeek-R1-Small-2layers \
   --served-model-name silence09/DeepSeek-R1-Small-2layers \
   --tp 2 \

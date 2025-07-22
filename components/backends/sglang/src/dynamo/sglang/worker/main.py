@@ -14,8 +14,6 @@ import uvloop
 import zmq
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_ip, get_zmq_socket
-from utils.protocol import DisaggPreprocessedRequest
-from utils.sgl_utils import parse_sglang_args_inc
 
 from dynamo.llm import (
     ForwardPassMetrics,
@@ -29,6 +27,8 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.sglang.utils.protocol import DisaggPreprocessedRequest
+from dynamo.sglang.utils.sgl_utils import parse_sglang_args_inc
 
 configure_dynamo_logging()
 
@@ -361,6 +361,10 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
     await asyncio.gather(*tasks)
 
 
-if __name__ == "__main__":
+def main():
     uvloop.install()
     asyncio.run(worker())
+
+
+if __name__ == "__main__":
+    main()

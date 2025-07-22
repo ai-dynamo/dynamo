@@ -1,23 +1,11 @@
 <!--
 SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
 -->
 
-# LLM Deployment Examples using SGLang
+# LLM Deployment using SGLang
 
-This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations using SGLang. SGLang internally uses ZMQ to communicate between the ingress and the engine processes. For Dynamo, we leverage the runtime to communicate directly with the engine processes and handle ingress and pre/post processing on our end.
+This directory contains an SGLang component for Dynamo and reference implementations for deploying Large Language Models (LLMs) in various configurations using SGLang. SGLang internally uses ZMQ to communicate between the ingress and the engine processes. For Dynamo, we leverage the runtime to communicate directly with the engine processes and handle ingress and pre/post processing on our end.
 
 ## Use the Latest Release
 
@@ -100,20 +88,20 @@ docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.3.2
 ### Aggregated Serving
 
 ```bash
-cd $DYNAMO_ROOT/examples/sglang
+cd $DYNAMO_ROOT/components/backends/sglang
 ./launch/agg.sh
 ```
 
 ### Aggregated Serving with KV Routing
 
 > [!NOTE]
-> The current implementation of `examples/sglang/components/worker.py` publishes _placeholder_ engine metrics to keep the Dynamo KV-router happy. Real-time metrics will be surfaced directly from the SGLang engine once the following pull requests are merged:
+> The current implementation of `components/backends/sglang/src/dynamo/sglang/worker/main.py` publishes _placeholder_ engine metrics to keep the Dynamo KV-router happy. Real-time metrics will be surfaced directly from the SGLang engine once the following pull requests are merged:
 > • Dynamo: [ai-dynamo/dynamo #1465](https://github.com/ai-dynamo/dynamo/pull/1465) – _feat: receive kvmetrics from sglang scheduler_.
 >
-> After these are in, the TODOs in `worker.py` will be resolved and the placeholder logic removed.
+> After these are in, the TODOs in `main.py` will be resolved and the placeholder logic removed.
 
 ```bash
-cd $DYNAMO_ROOT/examples/sglang
+cd $DYNAMO_ROOT/components/backends/sglang
 ./launch/agg_router.sh
 ```
 
@@ -137,7 +125,7 @@ Because Dynamo has a discovery mechanism, we do not use a load balancer. Instead
 > Disaggregated serving in SGLang currently requires each worker to have the same tensor parallel size [unless you are using an MLA based model](https://github.com/sgl-project/sglang/pull/5922)
 
 ```bash
-cd $DYNAMO_ROOT/examples/sglang
+cd $DYNAMO_ROOT/components/backends/sglang
 ./launch/disagg.sh
 ```
 
@@ -147,7 +135,7 @@ You can use this configuration to test out disaggregated serving with dp attenti
 
 ```bash
 # note this will require 4 GPUs
-cd $DYNAMO_ROOT/examples/sglang
+cd $DYNAMO_ROOT/components/backends/sglang
 ./launch/disagg_dp_attn.sh
 ```
 

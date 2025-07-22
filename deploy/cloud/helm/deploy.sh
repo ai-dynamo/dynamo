@@ -139,6 +139,8 @@ retry_command() {
 
 # Update the helm repo and build the dependencies
 retry_command "$HELM_CMD repo add nats https://nats-io.github.io/k8s/helm/charts/" 5 5 && \
+# retry_command "$HELM_CMD repo add bitnami https://charts.bitnami.com/bitnami" 5 5 && \
+# retry_command "$HELM_CMD repo add minio https://charts.min.io/" 5 5 && \
 retry_command "$HELM_CMD repo update" 5 5
 
 
