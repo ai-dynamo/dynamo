@@ -13,26 +13,67 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
+import asyncio
 import json
 import logging
+import signal
 import uuid
 from enum import Enum
 from typing import AsyncIterator, Tuple, Union
 
-from components.encode_worker import VllmEncodeWorker
+import uvloop
+from args import Config, base_parse_args, parse_endpoint
 from transformers import AutoTokenizer
-from utils.args import parse_vllm_args
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
-from utils.logging import check_required_workers
 from utils.protocol import MultiModalRequest, MyRequestOutput, vLLMMultimodalRequest
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.openai.protocol import ChatCompletionRequest, CompletionRequest
 from vllm.outputs import RequestOutput
 from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.utils import FlexibleArgumentParser
 
-from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
+from dynamo.llm import ModelType, register_llm
+from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime.logging import configure_dynamo_logging
 
+configure_dynamo_logging()
 logger = logging.getLogger(__name__)
+
+prompt_template = "USER: <image>\n<prompt> ASSISTANT:"
+
+
+def parse_args() -> Tuple[argparse.Namespace, Config]:
+    parser = FlexibleArgumentParser(description="vLLM based processor for Dynamo LLM.")
+    parser.add_argument(
+        "--prompt-template",
+        type=str,
+        required=True,
+        help=(
+            "Different multi-modal models expect the prompt to contain different special media prompts. "
+            "The processor will use this argument to construct the final prompt. "
+            "User prompt will replace '<prompt>' in the provided template. "
+            "For example, if the user prompt is 'please describe the image' and the prompt template is "
+            "'USER: <image> <prompt> ASSISTANT:', the resulting prompt is "
+            "'USER: <image> please describe the image ASSISTANT:'."
+        ),
+    )
+    parser.add_argument(
+        "--endpoint",
+        type=str,
+        default="dyn://dynamo.processor.generate",
+        help="Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Default: 'dyn://dynamo.processor.generate'",
+    )
+    parser.add_argument(
+        "--encode-endpoint",
+        type=str,
+        default="dyn://dynamo.encoder.generate",
+        help="The endpoint string of the downstream encoder in 'dyn://namespace.component.endpoint' format. Default: 'dyn://dynamo.encoder.generate'",
+    )
+
+    args, config = base_parse_args(parser)
+
+    return args, config
 
 
 class RequestType(Enum):
@@ -40,23 +81,16 @@ class RequestType(Enum):
     COMPLETION = "completion"
 
 
-@service(
-    dynamo={
-        "namespace": "dynamo",
-    },
-    resources={"cpu": "10", "memory": "20Gi"},
-    workers=1,
-)
 class Processor(ProcessMixIn):
     """
     vLLM pre and post processing
     """
 
-    encode_worker = depends(VllmEncodeWorker)
-
-    def __init__(self):
-        class_name = self.__class__.__name__
-        self.engine_args = parse_vllm_args(class_name, "")
+    def __init__(self, args: argparse.Namespace, engine_args: AsyncEngineArgs):
+        self.prompt_template = args.prompt_template
+        self.encode_endpoint = args.encode_endpoint
+        self.encode_worker_client = None
+        self.engine_args = engine_args
         self.model_config = self.engine_args.create_model_config()
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         self.tokenizer = self._create_tokenizer(self.engine_args)
@@ -64,7 +98,6 @@ class Processor(ProcessMixIn):
         self.completions_processor = CompletionsProcessor(
             self.tokenizer, self.model_config
         )
-        self.min_workers = 1
 
     def _create_tokenizer(self, engine_args: AsyncEngineArgs) -> AnyTokenizer:
         """Create a TokenizerGroup using engine arguments similar to VLLM's approach"""
@@ -80,25 +113,16 @@ class Processor(ProcessMixIn):
         )
         return base_tokenizer
 
-    @async_on_start
-    async def async_init(self):
-        runtime = dynamo_context["runtime"]
-
-        comp_ns, comp_name = VllmEncodeWorker.dynamo_address()  # type: ignore
-        self.encode_worker_client = (
-            await runtime.namespace(comp_ns)
-            .component(comp_name)
-            .endpoint("encode")
+    async def async_init(self, runtime: DistributedRuntime):
+        parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
+            self.encode_endpoint
+        )
+        self.encoder_worker_client = (
+            await runtime.namespace(parsed_namespace)
+            .component(parsed_component_name)
+            .endpoint(parsed_endpoint_name)
             .client()
         )
-
-        await check_required_workers(self.encode_worker_client, self.min_workers)
-
-        # self.etcd_kv_cache = await EtcdKvCache.create(
-        #     runtime.etcd_client(),
-        #     "/dynamo/processor/",
-        #     {"router": self.engine_args.router},
-        # )
 
     # Main method to parse the request and send the request to the vllm worker.
     async def _generate(
@@ -167,10 +191,9 @@ class Processor(ProcessMixIn):
                 )
 
     # The generate endpoint will be used by the frontend to handle incoming requests.
-    @endpoint()
     async def generate(self, raw_request: MultiModalRequest):
         # Ensure the configured template includes the placeholder
-        template = self.engine_args.prompt_template
+        template = self.prompt_template
         if "<prompt>" not in template:
             raise ValueError("prompt_template must contain '<prompt>' placeholder")
 
@@ -206,3 +229,72 @@ class Processor(ProcessMixIn):
 
         async for response in self._generate(chat_request, image_url, RequestType.CHAT):
             yield json.dumps(response)
+
+
+async def graceful_shutdown(runtime):
+    """
+    By calling `runtime.shutdown()`, the endpoints will immediately be unavailable.
+    However, in-flight requests will still be processed until they are finished.
+    After all in-flight requests are finished, the `serve_endpoint` functions will return
+    and the engine will be shutdown by Python's garbage collector.
+    """
+    logging.info("Received shutdown signal, shutting down DistributedRuntime")
+    runtime.shutdown()
+    logging.info("DistributedRuntime shutdown complete")
+
+
+@dynamo_worker(static=False)
+async def worker(runtime: DistributedRuntime):
+    # Runtime setup
+    # Set up signal handler for graceful shutdown
+    loop = asyncio.get_running_loop()
+
+    def signal_handler():
+        asyncio.create_task(graceful_shutdown(runtime))
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
+
+    logging.info("Signal handlers set up for graceful shutdown")
+
+    # worker setup
+    args, config = parse_args()
+    await init(runtime, args, config)
+
+
+async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Config):
+    """
+    Instantiate and serve
+    """
+
+    component = runtime.namespace(config.namespace).component(config.component)
+    await component.create_service()
+
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    handler = Processor(args, config.engine_args)
+    await handler.async_init(runtime)
+
+    # Register the endpoint as entrypoint to a model
+    await register_llm(
+        ModelType.Chat,  # Custom processor is used and this type bypasses SDK processor
+        generate_endpoint,
+        config.model,
+        config.served_model_name,
+        kv_cache_block_size=config.engine_args.block_size,
+    )
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(handler.generate),
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+if __name__ == "__main__":
+    uvloop.install()
+    asyncio.run(worker())
