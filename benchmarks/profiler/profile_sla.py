@@ -103,6 +103,7 @@ async def run_profile(args):
         prefill_thpt_per_gpu = []
         logger.info("Profiling prefill...")
         prefill_config = config_modifier.convert_config(config, "prefill")
+        frontend_port = config_modifier.get_port(config)
         for tp_size in profile_tp_size:
             logger.info(f"Profiling prefill with TP size {tp_size}...")
 
@@ -140,6 +141,7 @@ async def run_profile(args):
                 base_log_dir=work_dir,
                 model_name=model_name,
                 service_name=args.service_name,
+                frontend_port=frontend_port,
             )
             logger.info(f"Created client with service_name: {client.service_name}")
             deployment_clients.append(client)  # Track for cleanup
@@ -246,6 +248,7 @@ async def run_profile(args):
                 base_log_dir=work_dir,
                 model_name=model_name,
                 service_name=args.service_name,
+                frontend_port=frontend_port,
             )
             deployment_clients.append(client)  # Track for cleanup
             await client.create_deployment(decode_config_fn)
@@ -394,6 +397,7 @@ async def run_profile(args):
             base_log_dir=work_dir,
             model_name=model_name,
             service_name=args.service_name,
+            frontend_port=frontend_port,
         )
         deployment_clients.append(client)  # Track for cleanup
         await client.create_deployment(prefill_config_fn)
@@ -486,6 +490,7 @@ async def run_profile(args):
             namespace=args.namespace,
             base_log_dir=work_dir,
             service_name=args.service_name,
+            frontend_port=frontend_port,
         )
         deployment_clients.append(client)  # Track for cleanup
         await client.create_deployment(decode_config_fn)
@@ -619,11 +624,6 @@ if __name__ == "__main__":
         help="maximum number of GPUs per engine",
     )
     parser.add_argument(
-        "--skip-large-tp-on-failure",
-        action="store_true",
-        help="Skip TP sizes >= 8 if they fail due to resource constraints",
-    )
-    parser.add_argument(
         "--skip-existing-results",
         action="store_true",
         help="Skip TP sizes that already have results in the output directory",
@@ -667,6 +667,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--service-name",
         type=str,
+        default="",
         help="Service name for port forwarding (default: {deployment_name}-frontend)",
     )
     args = parser.parse_args()

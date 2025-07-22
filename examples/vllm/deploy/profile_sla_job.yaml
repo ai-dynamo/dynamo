@@ -49,10 +49,6 @@ spec:
           - /workspace/profiling_results
           - --namespace
           - ${NAMESPACE}
-          - --service-name
-          - vllm-v1-agg-frontend
-          - --skip-existing-results
-          - --skip-large-tp-on-failure
         volumeMounts:
           - name: output-volume
             mountPath: /workspace/profiling_results
