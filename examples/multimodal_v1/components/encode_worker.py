@@ -13,20 +13,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
+import asyncio
 import logging
-from typing import AsyncIterator
+import os
+import signal
+import sys
+from typing import AsyncIterator, Tuple
 
 import connect
 import torch
-from components.worker import VllmPDWorker
+import uvloop
 from transformers import AutoImageProcessor, LlavaForConditionalGeneration
-from utils.args import parse_vllm_args
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.utils import FlexibleArgumentParser
+
+from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.runtime.logging import configure_dynamo_logging
+
+sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+from args import Config, base_parse_args, parse_endpoint
 from utils.image_loader import ImageLoader
-from utils.logging import check_required_workers
 from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
 
-from dynamo.sdk import async_on_start, depends, dynamo_context, endpoint, service
-
+configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 try:
@@ -45,35 +55,24 @@ except ImportError as e:
 CACHE_SIZE_MAXIMUM = 8
 
 
-@service(
-    dynamo={
-        "enabled": True,
-        "namespace": "dynamo",
-    },
-    resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
-    workers=1,
-)
 class VllmEncodeWorker:
-    decode_worker = depends(VllmPDWorker)
-
-    def __init__(self) -> None:
-        class_name = self.__class__.__name__
-        self.engine_args = parse_vllm_args(class_name, "")
-        self.MODEL_ID = self.engine_args.model
+    def __init__(self, args: argparse.Namespace, engine_args: AsyncEngineArgs) -> None:
+        self.downstream_endpoint = args.downstream_endpoint
+        self.engine_args = engine_args
+        self.model = self.engine_args.model
 
         self.image_loader = ImageLoader(cache_size=CACHE_SIZE_MAXIMUM)
         self.image_processor = AutoImageProcessor.from_pretrained(
-            self.MODEL_ID, trust_remote_code=True
+            self.model, trust_remote_code=True
         )
-        # self.vision_model = load_vision_model(self.MODEL_ID)
+        # self.vision_model = load_vision_model(self.model)
         self.vision_model = LlavaForConditionalGeneration.from_pretrained(
-            self.MODEL_ID, device_map="auto", torch_dtype=torch.float16
+            self.model, device_map="auto", torch_dtype=torch.float16
         ).eval()
 
         self.min_workers = 1
 
-    @endpoint()
-    async def encode(
+    async def generate(
         self, request: vLLMMultimodalRequest
     ) -> AsyncIterator[MyRequestOutput]:
         logger.debug(f"Received encode request: {{ id: {request.request_id} }}.")
@@ -171,23 +170,108 @@ class VllmEncodeWorker:
             logger.error(f"Error processing request {request_id}: {e}")
             raise
 
-    @async_on_start
-    async def async_init(self):
+    async def async_init(self, runtime: DistributedRuntime):
         logger.info("Startup started.")
-        runtime = dynamo_context["runtime"]
-        comp_ns, comp_name = VllmPDWorker.dynamo_address()  # type: ignore
+        parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
+            self.downstream_endpoint
+        )
         self.pd_worker_client = (
-            await runtime.namespace(comp_ns)
-            .component(comp_name)
-            .endpoint("generate")
+            await runtime.namespace(parsed_namespace)
+            .component(parsed_component_name)
+            .endpoint(parsed_endpoint_name)
             .client()
         )
 
-        await check_required_workers(self.pd_worker_client, self.min_workers)
-
         # Create and initialize a dynamo connector for this worker.
         # We'll needs this to move data between this worker and remote workers efficiently.
-        self._connector = connect.Connector(runtime=runtime, namespace=comp_ns)
+        self._connector = connect.Connector(runtime=runtime, namespace=parsed_namespace)
         await self._connector.initialize()
 
         logger.info("Startup completed.")
+
+    @classmethod
+    def parse_args(cls) -> Tuple[argparse.Namespace, Config]:
+        DEFAULT_ENDPOINT = "dyn://dynamo.encoder.generate"
+        DEFAULT_DOWNSTREAM_ENDPOINT = "dyn://dynamo.llm.generate"
+
+        parser = FlexibleArgumentParser(
+            description="vLLM based encoder for Dynamo LLM."
+        )
+        parser.add_argument(
+            "--endpoint",
+            type=str,
+            default=DEFAULT_ENDPOINT,
+            help=f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Default: '{DEFAULT_ENDPOINT}'",
+        )
+        parser.add_argument(
+            "--downstream-endpoint",
+            type=str,
+            default=DEFAULT_DOWNSTREAM_ENDPOINT,
+            help=f"The endpoint string of the downstream LLM in 'dyn://namespace.component.endpoint' format. Default: '{DEFAULT_DOWNSTREAM_ENDPOINT}'",
+        )
+
+        args, config = base_parse_args(parser)
+
+        return args, config
+
+
+async def graceful_shutdown(runtime):
+    """
+    By calling `runtime.shutdown()`, the endpoints will immediately be unavailable.
+    However, in-flight requests will still be processed until they are finished.
+    After all in-flight requests are finished, the `serve_endpoint` functions will return
+    and the engine will be shutdown by Python's garbage collector.
+    """
+    logging.info("Received shutdown signal, shutting down DistributedRuntime")
+    runtime.shutdown()
+    logging.info("DistributedRuntime shutdown complete")
+
+
+@dynamo_worker(static=False)
+async def worker(runtime: DistributedRuntime):
+    # Runtime setup
+    # Set up signal handler for graceful shutdown
+    loop = asyncio.get_running_loop()
+
+    def signal_handler():
+        asyncio.create_task(graceful_shutdown(runtime))
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        loop.add_signal_handler(sig, signal_handler)
+
+    logging.info("Signal handlers set up for graceful shutdown")
+
+    # worker setup
+    args, config = VllmEncodeWorker.parse_args()
+    await init(runtime, args, config)
+
+
+async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Config):
+    """
+    Instantiate and serve
+    """
+
+    component = runtime.namespace(config.namespace).component(config.component)
+    await component.create_service()
+
+    generate_endpoint = component.endpoint(config.endpoint)
+
+    handler = VllmEncodeWorker(args, config.engine_args)
+    await handler.async_init(runtime)
+
+    logger.info("Starting to serve the generate endpoint...")
+
+    try:
+        await asyncio.gather(
+            generate_endpoint.serve_endpoint(handler.generate),
+        )
+    except Exception as e:
+        logger.error(f"Failed to serve endpoints: {e}")
+        raise
+    finally:
+        handler.cleanup()
+
+
+if __name__ == "__main__":
+    uvloop.install()
+    asyncio.run(worker())

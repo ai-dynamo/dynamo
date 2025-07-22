@@ -48,39 +48,6 @@ logger = logging.getLogger(__name__)
 prompt_template = "USER: <image>\n<prompt> ASSISTANT:"
 
 
-def parse_args() -> Tuple[argparse.Namespace, Config]:
-    parser = FlexibleArgumentParser(description="vLLM based processor for Dynamo LLM.")
-    parser.add_argument(
-        "--prompt-template",
-        type=str,
-        required=True,
-        help=(
-            "Different multi-modal models expect the prompt to contain different special media prompts. "
-            "The processor will use this argument to construct the final prompt. "
-            "User prompt will replace '<prompt>' in the provided template. "
-            "For example, if the user prompt is 'please describe the image' and the prompt template is "
-            "'USER: <image> <prompt> ASSISTANT:', the resulting prompt is "
-            "'USER: <image> please describe the image ASSISTANT:'."
-        ),
-    )
-    parser.add_argument(
-        "--endpoint",
-        type=str,
-        default="dyn://dynamo.processor.generate",
-        help="Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Default: 'dyn://dynamo.processor.generate'",
-    )
-    parser.add_argument(
-        "--encode-endpoint",
-        type=str,
-        default="dyn://dynamo.encoder.generate",
-        help="The endpoint string of the downstream encoder in 'dyn://namespace.component.endpoint' format. Default: 'dyn://dynamo.encoder.generate'",
-    )
-
-    args, config = base_parse_args(parser)
-
-    return args, config
-
-
 class RequestType(Enum):
     CHAT = "chat"
     COMPLETION = "completion"
@@ -91,9 +58,47 @@ class Processor(ProcessMixIn):
     vLLM pre and post processing
     """
 
+    @classmethod
+    def parse_args(cls) -> Tuple[argparse.Namespace, Config]:
+        DEFAULT_ENDPOINT = "dyn://dynamo.processor.generate"
+        DEFAULT_DOWNSTREAM_ENDPOINT = "dyn://dynamo.encoder.generate"
+
+        parser = FlexibleArgumentParser(
+            description="vLLM based processor for Dynamo LLM."
+        )
+        parser.add_argument(
+            "--prompt-template",
+            type=str,
+            required=True,
+            help=(
+                "Different multi-modal models expect the prompt to contain different special media prompts. "
+                "The processor will use this argument to construct the final prompt. "
+                "User prompt will replace '<prompt>' in the provided template. "
+                "For example, if the user prompt is 'please describe the image' and the prompt template is "
+                "'USER: <image> <prompt> ASSISTANT:', the resulting prompt is "
+                "'USER: <image> please describe the image ASSISTANT:'."
+            ),
+        )
+        parser.add_argument(
+            "--endpoint",
+            type=str,
+            default=DEFAULT_ENDPOINT,
+            help=f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Default: '{DEFAULT_ENDPOINT}'",
+        )
+        parser.add_argument(
+            "--downstream-endpoint",
+            type=str,
+            default=DEFAULT_DOWNSTREAM_ENDPOINT,
+            help=f"The endpoint string of the downstream encoder in 'dyn://namespace.component.endpoint' format. Default: '{DEFAULT_DOWNSTREAM_ENDPOINT}'",
+        )
+
+        args, config = base_parse_args(parser)
+
+        return args, config
+
     def __init__(self, args: argparse.Namespace, engine_args: AsyncEngineArgs):
         self.prompt_template = args.prompt_template
-        self.encode_endpoint = args.encode_endpoint
+        self.downstream_endpoint = args.downstream_endpoint
         self.encode_worker_client = None
         self.engine_args = engine_args
         self.model_config = self.engine_args.create_model_config()
@@ -123,7 +128,7 @@ class Processor(ProcessMixIn):
 
     async def async_init(self, runtime: DistributedRuntime):
         parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
-            self.encode_endpoint
+            self.downstream_endpoint
         )
         self.encode_worker_client = (
             await runtime.namespace(parsed_namespace)
@@ -271,7 +276,7 @@ async def worker(runtime: DistributedRuntime):
     logging.info("Signal handlers set up for graceful shutdown")
 
     # worker setup
-    args, config = parse_args()
+    args, config = Processor.parse_args()
     await init(runtime, args, config)
 
 
