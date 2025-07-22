@@ -813,8 +813,12 @@ class HttpAsyncEngine:
 
     ...
 
+class ModelInput:
+    """What type of request this model needs: Text or Tokens"""
+    ...
+
 class ModelType:
-    """What type of request this model needs: Chat, Component or Backend (pre-processed)"""
+    """What type of request this model needs: Chat, Component or Embedding"""
     ...
 
 class RouterMode:

@@ -42,3 +42,20 @@ impl ModelType {
         vec![Self::Chat, Self::Completion, Self::Embedding, Self::Backend]
     }
 }
+
+#[derive(Copy, Debug, Clone, Display, Serialize, Deserialize, Eq, PartialEq)]
+pub enum ModelInput {
+    /// Raw text input
+    Text,
+    /// Pre-processed input
+    Tokens,
+}
+
+impl ModelInput {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::Text => "text",
+            Self::Tokens => "tokens",
+        }
+    }
+}
