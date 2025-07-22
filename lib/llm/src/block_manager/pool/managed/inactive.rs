@@ -532,6 +532,13 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
 
         Ok(())
     }
+
+    /// Returns the [`PoolStatus`] of the pool.
+    pub fn status(&self) -> (usize, usize) {
+        let inactive_blocks = self.priority_set.len();
+        let empty_blocks = self.uninitialized_set.len();
+        (inactive_blocks, empty_blocks)
+    }
 }
 
 #[cfg(test)]

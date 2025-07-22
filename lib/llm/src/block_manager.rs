@@ -32,7 +32,7 @@ pub mod pool;
 pub mod storage;
 
 // dynamo rt integration
-pub mod component;
+pub mod controller;
 
 pub use crate::common::dtype::DType;
 pub use block::{
@@ -251,7 +251,11 @@ mod tests {
     // Atomic Counter for Worker ID
     static WORKER_ID: AtomicU64 = AtomicU64::new(1337);
 
-    pub fn create_reference_block_manager_config() -> KvBlockManagerConfig {
+    pub fn create_reference_block_manager_config_with_counts(
+        device: usize,
+        host: usize,
+        disk: usize,
+    ) -> KvBlockManagerConfig {
         let worker_id = WORKER_ID.fetch_add(1, Ordering::SeqCst);
 
         // Check if we're already in a Tokio runtime context
@@ -262,7 +266,7 @@ mod tests {
             Some(Arc::new(tokio::runtime::Runtime::new().unwrap()))
         };
 
-        KvBlockManagerConfig::builder()
+        let builder = KvBlockManagerConfig::builder()
             .runtime(
                 KvManagerRuntimeConfig::builder()
                     .worker_id(worker_id)
@@ -279,36 +283,67 @@ mod tests {
                     .inner_dim(16)
                     .build()
                     .unwrap(),
-            )
-            .disk_layout(
+            );
+
+        let builder = if disk > 0 {
+            builder.disk_layout(
                 KvManagerLayoutConfig::builder()
                     .num_blocks(16)
                     .allocator(storage::DiskAllocator)
                     .build()
                     .unwrap(),
             )
-            .host_layout(
+        } else {
+            builder
+        };
+
+        let builder = if host > 0 {
+            builder.host_layout(
                 KvManagerLayoutConfig::builder()
                     .num_blocks(16)
                     .allocator(storage::PinnedAllocator::default())
                     .build()
                     .unwrap(),
             )
-            .device_layout(
+        } else {
+            builder
+        };
+
+        let builder = if device > 0 {
+            builder.device_layout(
                 KvManagerLayoutConfig::builder()
                     .num_blocks(8)
                     .allocator(storage::DeviceAllocator::new(0).unwrap())
                     .build()
                     .unwrap(),
             )
-            .build()
-            .unwrap()
+        } else {
+            builder
+        };
+
+        builder.build().unwrap()
+    }
+
+    pub fn create_reference_block_manager_config() -> KvBlockManagerConfig {
+        create_reference_block_manager_config_with_counts(8, 16, 16)
     }
 
     pub async fn create_reference_block_manager() -> ReferenceBlockManager {
         ReferenceBlockManager::new(create_reference_block_manager_config())
             .await
             .unwrap()
+    }
+
+    pub async fn create_reference_block_manager_with_counts(
+        device: usize,
+        host: usize,
+        disk: usize,
+    ) -> ReferenceBlockManager {
+        ReferenceBlockManager::new(create_reference_block_manager_config_with_counts(
+            device, host, disk,
+        ))
+        .await
+        .unwrap()
     }
 
     #[tokio::test]

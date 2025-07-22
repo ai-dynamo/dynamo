@@ -105,4 +105,8 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ActiveBlockPool<S, L, M>
             None
         }
     }
+
+    pub fn status(&self) -> usize {
+        self.map.keys().len()
+    }
 }

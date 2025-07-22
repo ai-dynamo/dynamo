@@ -18,6 +18,7 @@ pub use managed::ManagedBlockPool;
 
 use derive_builder::Builder;
 use derive_getters::Dissolve;
+use serde::{Deserialize, Serialize};
 
 pub use super::block::{ImmutableBlock, MutableBlock};
 
@@ -167,7 +168,9 @@ impl<Req, Resp> RequestResponse<Req, Resp> {
 }
 
 #[async_trait]
-pub trait BlockPool<S: Storage, L: LocalityProvider, M: BlockMetadata>: Send + Sync {
+pub trait BlockPool<S: Storage, L: LocalityProvider, M: BlockMetadata>:
+    BlockPoolController + AsyncBlockPoolController + Send + Sync
+{
     /// Add a vector of [`Block`]s to the pool.
     ///
     /// These blocks are typically created from a [`super::block::Blocks`]
@@ -236,14 +239,6 @@ pub trait BlockPool<S: Storage, L: LocalityProvider, M: BlockMetadata>: Send + S
     /// Blocking version of [`BlockPool::touch_blocks`].
     fn touch_blocks_blocking(&self, sequence_hashes: &[SequenceHash]) -> BlockPoolResult<()>;
 
-    /// Resets the pool to its initial state.
-    ///
-    /// On success, all blocks will have been reset to their initial state ([`super::block::BlockState::Reset`]).
-    async fn reset(&self) -> BlockPoolResult<()>;
-
-    /// Blocking version of [`BlockPool::reset`].
-    fn reset_blocking(&self) -> BlockPoolResult<()>;
-
     /// Attempt to return a block to the pool. Blocks will naturally be returned to the pool when they are dropped
     /// and their reference count drops to 0; however, for testing and to synchronize the block returning to the
     /// pool, this function can be used.
@@ -255,4 +250,68 @@ pub trait BlockPool<S: Storage, L: LocalityProvider, M: BlockMetadata>: Send + S
     fn total_blocks(&self) -> u64;
 
     fn available_blocks(&self) -> u64;
+}
+
+/// State of the pool when queried.
+///
+/// Provides a snapshot of the pool's current state including:
+/// - Active blocks currently in use
+/// - Inactive blocks ordered by reuse priority
+/// - Number of empty blocks
+#[derive(Debug, Clone, Serialize, Deserialize, Dissolve)]
+pub struct BlockPoolStatus {
+    /// Active blocks currently in use
+    pub active_blocks: usize,
+
+    /// Inactive blocks ordered by reuse priority
+    /// Blocks at the front of the list are more likely to be reused
+    pub inactive_blocks: usize,
+
+    /// Number of empty blocks
+    pub empty_blocks: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Dissolve)]
+pub struct ResetBlocksResponse {
+    /// Blocks that were reset
+    pub reset_blocks: Vec<SequenceHash>,
+
+    /// Blocks that were not found in the pool
+    pub not_found: Vec<SequenceHash>,
+
+    /// Blocks that were not reset
+    pub not_reset: Vec<SequenceHash>,
+}
+
+pub trait BlockPoolController: Send + Sync {
+    /// Returns the [`BlockPoolStatus`] of the pool.
+    fn status_blocking(&self) -> Result<BlockPoolStatus, BlockPoolError>;
+
+    /// Resets the pool to its initial state.
+    ///
+    /// This function will error unless all blocks have returned to the inactive pool.
+    fn reset_blocking(&self) -> Result<(), BlockPoolError>;
+
+    /// Attempt to reset a set of blocks.
+    fn reset_blocks_blocking(
+        &self,
+        sequence_hashes: &[SequenceHash],
+    ) -> Result<ResetBlocksResponse, BlockPoolError>;
+}
+
+#[async_trait::async_trait]
+pub trait AsyncBlockPoolController: Send + Sync {
+    /// Returns the [`BlockPoolStatus`] of the pool.
+    async fn status(&self) -> Result<BlockPoolStatus, BlockPoolError>;
+
+    /// Resets the pool to its initial state.
+    ///
+    /// This function will error unless all blocks have returned to the inactive pool.
+    async fn reset(&self) -> Result<(), BlockPoolError>;
+
+    /// Attempt to reset a set of blocks.
+    async fn reset_blocks(
+        &self,
+        sequence_hashes: &[SequenceHash],
+    ) -> Result<ResetBlocksResponse, BlockPoolError>;
 }

@@ -105,6 +105,21 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                     tracing::error!("failed to send response to add blocks");
                 }
             }
+            ControlRequest::Status(req) => {
+                let (_, resp_rx) = req.dissolve();
+                if resp_rx.send(Ok(self.status())).is_err() {
+                    tracing::error!("failed to send response to status");
+                }
+            }
+            ControlRequest::ResetBlocks(req) => {
+                let (sequence_hashes, resp_rx) = req.dissolve();
+                if resp_rx
+                    .send(Ok(self.try_reset_blocks(&sequence_hashes)))
+                    .is_err()
+                {
+                    tracing::error!("failed to send response to reset blocks");
+                }
+            }
         }
     }
 
@@ -360,5 +375,42 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
 
     fn publisher(&self) -> Publisher {
         Publisher::new(self.event_manager.clone())
+    }
+
+    fn status(&self) -> BlockPoolStatus {
+        let active = self.active.status();
+        let (inactive, empty) = self.inactive.status();
+        BlockPoolStatus {
+            active_blocks: active,
+            inactive_blocks: inactive,
+            empty_blocks: empty,
+        }
+    }
+
+    fn try_reset_blocks(&mut self, sequence_hashes: &[SequenceHash]) -> ResetBlocksResponse {
+        let mut reset_blocks = Vec::new();
+        let mut not_found = Vec::new();
+        let mut not_reset = Vec::new();
+
+        for sequence_hash in sequence_hashes {
+            if !self.registry.is_registered(*sequence_hash) {
+                not_found.push(*sequence_hash);
+                continue;
+            }
+
+            if let Some(mut block) = self.inactive.match_sequence_hash(*sequence_hash) {
+                reset_blocks.push(*sequence_hash);
+                block.reset();
+                self.inactive.return_block(block);
+            } else {
+                not_reset.push(*sequence_hash);
+            }
+        }
+
+        ResetBlocksResponse {
+            reset_blocks,
+            not_found,
+            not_reset,
+        }
     }
 }

@@ -21,6 +21,7 @@ use dynamo_llm::block_manager::{BasicMetadata, BlockParallelismStrategy};
 use pyo3::PyResult;
 use tokio_util::sync::CancellationToken;
 
+mod controller;
 mod distributed;
 
 pub mod vllm;
@@ -30,6 +31,9 @@ pub fn add_to_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BlockManager>()?;
     m.add_class::<distributed::KvbmWorker>()?;
     m.add_class::<distributed::KvbmLeader>()?;
+    m.add_class::<controller::BlockManagerClient>()?;
+    m.add_class::<controller::BlockPoolStatus>()?;
+    m.add_class::<controller::ResetBlocksResponse>()?;
 
     vllm::add_to_module(m)?;
 
@@ -41,11 +45,19 @@ type VllmBlockManager = dynamo_llm::block_manager::KvBlockManager<
     BasicMetadata,
 >;
 
+type VllmController = Arc<
+    dynamo_llm::block_manager::controller::Controller<
+        Logical<DistributedLeaderWorkerResources>,
+        BasicMetadata,
+    >,
+>;
+
 #[pyclass]
 #[derive(Clone)]
 pub struct BlockManager {
-    inner: Arc<VllmBlockManager>,
+    inner: VllmBlockManager,
     _rt: Arc<tokio::runtime::Runtime>,
+    _controller: Option<VllmController>,
 }
 
 // TODO: This is in desperate need of a massive refactor. We bind and instantiate this in Python, but we never actually use it.
@@ -136,8 +148,8 @@ impl BlockManager {
 
         let config = config.build().map_err(to_pyerr)?;
         Ok(BlockManager {
-            inner: Arc::from(
-                rt.block_on(async {
+            inner: rt
+                .block_on(async {
                     let resources =
                         DistributedLeaderWorkerResources::new(leader, cancel_token.child_token())?;
 
@@ -148,19 +160,53 @@ impl BlockManager {
                     .await
                 })
                 .map_err(to_pyerr)?,
-            ),
             _rt: rt,
+            _controller: None,
         })
     }
 
     fn block_size(&self) -> usize {
         self.inner.block_size()
     }
+
+    fn init_controller(&mut self, component: Component) -> PyResult<()> {
+        if self._controller.is_some() {
+            tracing::warn!("Controller already initialized. Ignoring init_controller call.");
+            return Ok(());
+        }
+
+        let block_manager = self.inner.clone();
+        let controller = self
+            ._rt
+            .block_on(controller::Controller::new(
+                block_manager,
+                component.inner.clone(),
+            ))
+            .map_err(to_pyerr)?;
+
+        self._controller = Some(Arc::new(controller));
+
+        let instance_id = component
+            .inner
+            .drt()
+            .primary_lease()
+            .map(|lease| lease.id())
+            .ok_or_else(|| to_pyerr(anyhow::anyhow!("no instance id")))?;
+
+        tracing::info!(
+            "Dynamo KVBM Controller: {}.{}:{}",
+            component.inner.namespace().name(),
+            component.inner.name(),
+            instance_id
+        );
+
+        Ok(())
+    }
 }
 
 impl BlockManager {
     #[inline(always)]
     pub fn get_block_manager(&self) -> &VllmBlockManager {
-        self.inner.as_ref()
+        &self.inner
     }
 }
