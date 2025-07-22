@@ -1839,7 +1839,7 @@ mod tests {
         }
 
         // Also verify that both trees produce the same match results
-        for test_seq in vec![
+        for test_seq in [
             vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
             vec![LocalBlockHash(1), LocalBlockHash(4), LocalBlockHash(5)],
             vec![LocalBlockHash(6), LocalBlockHash(7)],
