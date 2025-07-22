@@ -29,6 +29,8 @@ use futures::stream::{StreamExt, TryStreamExt};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::time::Duration;
 
+const MAX_TIMEOUT_SERVICE_COLLECTION: u64 = 10;
+
 pub struct ServiceClient {
     nats_client: nats::Client,
 }
@@ -121,7 +123,7 @@ impl ServiceClient {
         if timeout.is_zero() {
             tracing::warn!("collect_services: timeout is zero");
         }
-        if timeout > Duration::from_secs(10) {
+        if timeout > Duration::from_secs(MAX_TIMEOUT_SERVICE_COLLECTION) {
             tracing::warn!("collect_services: timeout is greater than 10 seconds");
         }
         let deadline = tokio::time::Instant::now() + timeout;
@@ -145,6 +147,43 @@ impl ServiceClient {
         }
 
         Ok(ServiceSet { services })
+    }
+
+    pub fn stream_collect_services(
+        &self,
+        service_name: &str,
+        timeout: Duration,
+    ) -> Result<impl futures::stream::Stream<Item = Result<ServiceInfo>>> {
+        let service_name = service_name.to_string();
+        let nats_client = self.nats_client.clone();
+        Ok(try_stream! {
+            let sub = nats_client.scrape_service(&service_name).await?;
+
+            if timeout.is_zero() {
+                tracing::warn!("stream_collect_services: timeout is zero");
+            }
+            if timeout > Duration::from_secs(MAX_TIMEOUT_SERVICE_COLLECTION) {
+                tracing::warn!("stream_collect_services: timeout is greater than 10 seconds");
+            }
+            let deadline = tokio::time::Instant::now() + timeout;
+            let mut s = stream::until_deadline(sub, deadline);
+
+            while let Some(message) = s.next().await {
+                if message.payload.is_empty() {
+                    // Expected while we wait for KV metrics in worker to start
+                    tracing::trace!(service_name, "collect_services: empty payload from nats");
+                    continue;
+                }
+                let info = serde_json::from_slice::<ServiceInfo>(&message.payload);
+                match info {
+                    Ok(info) => yield info,
+                    Err(err) => {
+                        let payload = String::from_utf8_lossy(&message.payload);
+                        tracing::debug!(%err, service_name, %payload, "error decoding service info");
+                    }
+                }
+            }
+        })
     }
 }
 
