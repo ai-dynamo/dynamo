@@ -208,18 +208,17 @@ async fn metrics_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
     }
 }
 
-// Test via: cargo test http_server --lib -- --ignored
+// Regular tests: cargo test http_server --lib
+// Integration tests: cargo test http_server --lib --features integration
 
 #[cfg(test)]
-/// Helper function to create a DRT instance for testing
+/// Helper function to create a DRT instance for async testing
 /// Uses the test-friendly constructor without discovery
-fn create_test_drt() -> crate::DistributedRuntime {
-    let rt = crate::Runtime::single_threaded().unwrap();
-    tokio::runtime::Runtime::new().unwrap().block_on(async {
-        crate::DistributedRuntime::from_settings_without_discovery(rt.clone())
-            .await
-            .unwrap()
-    })
+async fn create_test_drt_async() -> crate::DistributedRuntime {
+    let rt = crate::Runtime::from_current().unwrap();
+    crate::DistributedRuntime::from_settings_without_discovery(rt)
+        .await
+        .unwrap()
 }
 
 #[cfg(test)]
@@ -259,11 +258,11 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "integration")]
     #[tokio::test]
-    #[ignore = "Requires NATS server to be running"]
     async fn test_runtime_metrics_initialization_and_namespace() {
         // Test that metrics have correct namespace
-        let drt = create_test_drt();
+        let drt = create_test_drt_async().await;
         let runtime_metrics = HttpServerState::new(Arc::new(drt)).unwrap();
 
         // Initialize start time
@@ -282,11 +281,11 @@ uptime_seconds{namespace=\"http_server\"} 42
         assert_eq!(response, expected);
     }
 
+    #[cfg(feature = "integration")]
     #[tokio::test]
-    #[ignore = "Requires NATS server to be running"]
     async fn test_start_time_initialization() {
         // Test that start time can only be initialized once
-        let drt = create_test_drt();
+        let drt = create_test_drt_async().await;
         let runtime_metrics = HttpServerState::new(Arc::new(drt)).unwrap();
 
         // First initialization should succeed
@@ -300,11 +299,11 @@ uptime_seconds{namespace=\"http_server\"} 42
         // If we get here, uptime calculation works correctly
     }
 
+    #[cfg(feature = "integration")]
     #[tokio::test]
-    #[ignore = "Requires NATS server to be running"]
     async fn test_uptime_without_initialization() {
         // Test that uptime returns an error if start time is not initialized
-        let drt = create_test_drt();
+        let drt = create_test_drt_async().await;
         let runtime_metrics = HttpServerState::new(Arc::new(drt)).unwrap();
 
         // This should return an error because start time is not initialized
@@ -313,12 +312,12 @@ uptime_seconds{namespace=\"http_server\"} 42
         assert_eq!(result.unwrap_err(), "Start time not initialized");
     }
 
+    #[cfg(feature = "integration")]
     #[tokio::test]
-    #[ignore = "Requires NATS server to be running"]
     async fn test_spawn_http_server_endpoints() {
         // use reqwest for HTTP requests
         let cancel_token = CancellationToken::new();
-        let drt = create_test_drt();
+        let drt = create_test_drt_async().await;
         let (addr, server_handle) =
             spawn_http_server("127.0.0.1", 0, cancel_token.clone(), Arc::new(drt))
                 .await
@@ -364,5 +363,37 @@ uptime_seconds{namespace=\"http_server\"} 42
                 }
             }
         }
+    }
+
+    #[cfg(feature = "integration")]
+    #[tokio::test]
+    async fn test_http_server_basic_functionality() {
+        // Test basic HTTP server functionality without requiring etcd
+        let cancel_token = CancellationToken::new();
+        let cancel_token_for_server = cancel_token.clone();
+
+        // Test basic HTTP server lifecycle
+        let app = Router::new().route("/test", get(|| async { (StatusCode::OK, "test") }));
+
+        // start HTTP server
+        let server_handle = tokio::spawn(async move {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(cancel_token_for_server.cancelled_owned())
+                .await;
+        });
+
+        // wait for a while to let the server start
+        sleep(Duration::from_millis(100)).await;
+
+        // cancel token
+        cancel_token.cancel();
+
+        // wait for the server to shut down
+        let result = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
+        assert!(
+            result.is_ok(),
+            "HTTP server should shut down when cancel token is cancelled"
+        );
     }
 }

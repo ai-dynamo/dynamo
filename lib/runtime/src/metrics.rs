@@ -469,6 +469,7 @@ pub fn create_test_drt() -> crate::DistributedRuntime {
     })
 }
 
+#[cfg(feature = "integration")]
 #[cfg(test)]
 mod test_prefixes {
     use super::create_test_drt;
@@ -628,6 +629,7 @@ mod test_prefixes {
     }
 }
 
+#[cfg(feature = "integration")]
 #[cfg(test)]
 mod test_simple_metricsregistry_trait {
     use super::create_test_drt;
