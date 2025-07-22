@@ -103,8 +103,3 @@ impl ResetBlocksResponse {
         self.inner.not_reset.clone()
     }
 }
-
-// #[pymethods]
-// impl BlockManager {
-
-// }
