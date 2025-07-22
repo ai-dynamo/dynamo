@@ -118,6 +118,117 @@ All three files are necessary:
 2. The ClusterRole defines what operations are allowed
 3. The ClusterRoleBinding connects the permissions to the service account
 
+### Viewing Profiling Results
+
+After the profiling job completes successfully, the results are stored in the persistent volume claim (PVC) created during Step 2. Here's how to access and view your profiling results:
+
+#### Accessing the Profiling Results PVC
+
+The profiling results are stored in a PVC named `profiling-pvc`. To access the results:
+
+1. **Create a temporary pod to access the PVC:**
+   ```bash
+   kubectl run temp-access --image=alpine:latest --rm -it --restart=Never \
+     --overrides='{"spec":{"containers":[{"name":"temp-access","image":"alpine:latest","command":["sh"],"volumeMounts":[{"name":"results","mountPath":"/workspace/profiling_results"}]}],"volumes":[{"name":"results","persistentVolumeClaim":{"claimName":"profiling-pvc"}}]}}' \
+     -n $NAMESPACE
+   ```
+
+2. **Inside the temporary pod, navigate to the results directory:**
+   ```bash
+   cd /workspace/profiling_results
+   ls -la
+   ```
+
+#### File Structure
+
+The profiling results directory contains the following structure:
+```
+/workspace/profiling_results/
+├── prefill_performance.png                    # Main prefill performance plot
+├── decode_performance.png                     # Main decode performance plot
+├── prefill_tp1/                               # Individual TP profiling directories
+...
+├── decode_tp1/
+...
+├── selected_prefill_interpolation/
+│   ├── raw_data.npz                           # Prefill interpolation data
+│   ├── prefill_ttft_interpolation.png         # TTFT vs ISL plot
+│   └── prefill_throughput_interpolation.png   # Throughput vs ISL plot
+└── selected_decode_interpolation/
+    ├── raw_data.npz                           # Decode interpolation data
+    └── decode_tp{best_tp}.png                 # 3D ITL surface plot
+```
+
+#### Downloading Results Locally
+
+To download the profiling results to your local machine:
+
+1. **Download performance plots and data files:**
+   ```bash
+   # Create a local directory for results
+   mkdir -p ./profiling_results
+
+   # Copy main performance plots
+   kubectl cp temp-access:/workspace/profiling_results/prefill_performance.png ./profiling_results/ -n $NAMESPACE
+   kubectl cp temp-access:/workspace/profiling_results/decode_performance.png ./profiling_results/ -n $NAMESPACE
+
+   # Copy interpolation directories (includes additional plots and data)
+   kubectl cp temp-access:/workspace/profiling_results/selected_prefill_interpolation/ ./profiling_results/ -n $NAMESPACE -r
+   kubectl cp temp-access:/workspace/profiling_results/selected_decode_interpolation/ ./profiling_results/ -n $NAMESPACE -r
+   ```
+
+2. **Alternative: Tar and download entire results directory:**
+   ```bash
+   # Inside the temporary pod, create a tar archive
+   tar -czf /workspace/profiling_results/profiling_results.tar.gz -C /workspace/profiling_results .
+
+   # Download the archive to your local machine
+   kubectl cp temp-access:/workspace/profiling_results/profiling_results.tar.gz ./profiling_results.tar.gz -n $NAMESPACE
+
+   # Extract locally
+   tar -xzf profiling_results.tar.gz -C ./profiling_results/
+   ```
+
+#### Viewing Performance Plots
+
+The profiling generates several performance visualization files:
+
+**Main Performance Plots:**
+- **`prefill_performance.png`**: Shows TTFT (Time To First Token) performance across different tensor parallelism (TP) sizes
+- **`decode_performance.png`**: Shows ITL (Inter-Token Latency) performance across different TP sizes and in-flight request counts
+
+**Interpolation Plots:**
+- **`selected_prefill_interpolation/prefill_ttft_interpolation.png`**: TTFT vs Input Sequence Length with quadratic fit
+- **`selected_prefill_interpolation/prefill_throughput_interpolation.png`**: Prefill throughput vs Input Sequence Length
+- **`selected_decode_interpolation/decode_tp{best_tp}.png`**: 3D surface plot showing ITL vs KV usage and context length
+
+#### Understanding the Data Files
+
+The `.npz` files contain raw profiling data that can be loaded and analyzed using Python:
+
+```python
+import numpy as np
+
+# Load prefill data
+prefill_data = np.load('selected_prefill_interpolation/raw_data.npz')
+print("Prefill data keys:", list(prefill_data.keys()))
+
+# Load decode data
+decode_data = np.load('selected_decode_interpolation/raw_data.npz')
+print("Decode data keys:", list(decode_data.keys()))
+```
+
+#### Cleaning Up
+
+Once you've downloaded your results, clean up the temporary pod:
+```bash
+# Exit the temporary pod (if still inside)
+exit
+
+# The pod should auto-delete due to --rm flag, but if needed:
+kubectl delete pod temp-access -n $NAMESPACE
+```
+
 ### Troubleshooting
 
 #### Image Pull Authentication Errors
