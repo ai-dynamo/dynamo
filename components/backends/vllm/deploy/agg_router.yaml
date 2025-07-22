@@ -41,14 +41,7 @@ spec:
           image: nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.2
           workingDir: /workspace/components/backends/vllm
           args:
-            - dynamo
-            - run
-            - in=http
-            - out=dyn
-            - --http-port
-            - "8000"
-            - --router-mode
-            - kv
+            - "python3 -m dynamo.frontend --http-port 8000 --router-mode kv"
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       livenessProbe:
