@@ -94,6 +94,10 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
     await asyncio.gather(*tasks)
 
 
-if __name__ == "__main__":
+def main():
     uvloop.install()
     asyncio.run(worker())
+
+
+if __name__ == "__main__":
+    main()

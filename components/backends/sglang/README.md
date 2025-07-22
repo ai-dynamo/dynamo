@@ -88,17 +88,17 @@ docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.3.2
 ### Aggregated Serving
 
 ```bash
-cd $DYNAMO_ROOT/components/sglang
+cd $DYNAMO_ROOT/components/backends/sglang
 ./launch/agg.sh
 ```
 
 ### Aggregated Serving with KV Routing
 
 > [!NOTE]
-> The current implementation of `components/backends/sglang/src/dynamo/sglang/components/worker.py` publishes _placeholder_ engine metrics to keep the Dynamo KV-router happy. Real-time metrics will be surfaced directly from the SGLang engine once the following pull requests are merged:
+> The current implementation of `components/backends/sglang/src/dynamo/sglang/worker/main.py` publishes _placeholder_ engine metrics to keep the Dynamo KV-router happy. Real-time metrics will be surfaced directly from the SGLang engine once the following pull requests are merged:
 > • Dynamo: [ai-dynamo/dynamo #1465](https://github.com/ai-dynamo/dynamo/pull/1465) – _feat: receive kvmetrics from sglang scheduler_.
 >
-> After these are in, the TODOs in `worker.py` will be resolved and the placeholder logic removed.
+> After these are in, the TODOs in `main.py` will be resolved and the placeholder logic removed.
 
 ```bash
 cd $DYNAMO_ROOT/components/backends/sglang
