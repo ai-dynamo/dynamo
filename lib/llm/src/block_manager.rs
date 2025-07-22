@@ -288,7 +288,7 @@ mod tests {
         let builder = if disk > 0 {
             builder.disk_layout(
                 KvManagerLayoutConfig::builder()
-                    .num_blocks(16)
+                    .num_blocks(disk)
                     .allocator(storage::DiskAllocator)
                     .build()
                     .unwrap(),
@@ -300,7 +300,7 @@ mod tests {
         let builder = if host > 0 {
             builder.host_layout(
                 KvManagerLayoutConfig::builder()
-                    .num_blocks(16)
+                    .num_blocks(host)
                     .allocator(storage::PinnedAllocator::default())
                     .build()
                     .unwrap(),
@@ -312,7 +312,7 @@ mod tests {
         let builder = if device > 0 {
             builder.device_layout(
                 KvManagerLayoutConfig::builder()
-                    .num_blocks(8)
+                    .num_blocks(device)
                     .allocator(storage::DeviceAllocator::new(0).unwrap())
                     .build()
                     .unwrap(),
