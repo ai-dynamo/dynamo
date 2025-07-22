@@ -26,19 +26,8 @@ ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
-FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS nixl_base
-
-# Redeclare ARCH and ARCH_ALT so they're available in this stage
-ARG ARCH
-ARG ARCH_ALT
-
-WORKDIR /opt/nixl
-# Add a cache hint that only changes when the nixl commit changes
-ARG NIXL_COMMIT
-# This line acts as a cache key - it only changes when NIXL_COMMIT changes
-RUN echo "NIXL commit: ${NIXL_COMMIT}" > /opt/nixl/commit.txt
-# Copy the nixl source
-COPY --from=nixl . .
+ARG SGLANG_VERSION="0.4.9.post1"
+ARG SGL_KERNEL_VERSION="0.2.4"
 
 ##################################
 ########## Base Image ############
@@ -49,6 +38,7 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 # Redeclare ARCH and ARCH_ALT so they're available in this stage
 ARG ARCH
 ARG ARCH_ALT
+ARG NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
 
 USER root
 ARG PYTHON_VERSION=3.12
@@ -69,11 +59,37 @@ RUN apt-get update -y && \
     tmux \
     vim \
     autoconf \
-    libtool
+    libtool \
+    net-tools
 
 WORKDIR /workspace
 
-### TODO: Bring back UCX EFA setup once we are confident it works with IB devices
+### UCX EFA Setup ###
+RUN rm -rf /opt/hpcx/ucx
+RUN rm -rf /usr/local/ucx
+RUN cd /usr/local/src && \
+    git clone https://github.com/openucx/ucx.git && \
+    cd ucx &&                   \
+    git checkout v1.19.x &&     \
+    ./autogen.sh && ./configure \
+    --prefix=/usr/local/ucx     \
+    --enable-shared             \
+    --disable-static            \
+    --disable-doxygen-doc       \
+    --enable-optimizations      \
+    --enable-cma                \
+    --enable-devel-headers      \
+    --with-cuda=/usr/local/cuda \
+    --with-verbs                \
+    --with-efa                  \
+    --with-dm                   \
+    --with-gdrcopy=/usr/local   \
+    --enable-mt &&              \
+    make -j &&                  \
+    make -j install-strip &&    \
+    ldconfig
+
+ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
 ENV CPATH=/usr/include:$CPATH
 ENV PATH=/usr/bin:$PATH
 ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
@@ -82,9 +98,10 @@ SHELL ["/bin/bash", "-c"]
 WORKDIR /workspace
 
 ### NIXL SETUP ###
-# Copy nixl source, and use commit hash as cache hint
-COPY --from=nixl_base /opt/nixl /opt/nixl
-COPY --from=nixl_base /opt/nixl/commit.txt /opt/nixl/commit.txt
+# Clone nixl source, and checkout the nixl ref
+RUN git clone "https://github.com/ai-dynamo/nixl.git" /opt/nixl && \
+    cd /opt/nixl && \
+    git checkout ${NIXL_REF}
 RUN if [ "$ARCH" = "arm64" ]; then \
         cd /opt/nixl && \
         mkdir build && \
@@ -103,10 +120,10 @@ RUN if [ "$ARCH" = "arm64" ]; then \
 
 ### NATS & ETCD SETUP ###
 # nats
-RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-${ARCH}.deb && \
-    dpkg -i nats-server-v2.10.24-${ARCH}.deb && rm nats-server-v2.10.24-${ARCH}.deb
+RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-${ARCH}.deb && \
+    dpkg -i nats-server-v2.10.28-${ARCH}.deb && rm nats-server-v2.10.28-${ARCH}.deb
 # etcd
-ENV ETCD_VERSION="v3.5.18"
+ENV ETCD_VERSION="v3.5.21"
 RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
     mkdir -p /usr/local/bin/etcd && \
     tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
@@ -126,20 +143,21 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 # Install NIXL Python module
-# TODO: Move gds_path selection based on arch into NIXL build
-RUN if [ "$ARCH" = "arm64" ]; then \
-        cd /opt/nixl && uv pip install . --config-settings=setup-args="-Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
-    else \
-        cd /opt/nixl && uv pip install . ; \
-    fi
+RUN cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl
+
+# Install the wheel
+# TODO: Move NIXL wheel install to the wheel_builder stage
+RUN uv pip install /workspace/wheels/nixl/*.whl
 
 # Install sglang
-# This commit references a NIXL fix that was releasted after the 0.4.8.post1 release https://github.com/sgl-project/sglang/pull/7330
-ARG SGLANG_COMMIT="bb9b608c86ebad7d9d01e29fe058bc184dc7285f"
+#TODO: Built wheel should become an artifact which can be cached and reused in subsequent builds
+ARG SGLANG_VERSION
 RUN --mount=type=cache,target=/root/.cache/uv \
+    cd /opt && \
     git clone https://github.com/sgl-project/sglang.git && \
     cd sglang && \
-    git checkout ${SGLANG_COMMIT} && \
+    git checkout v${SGLANG_VERSION} && \
+    # Install in editable mode for development
     uv pip install -e "python[all]"
 
 # Set env var that allows for forceful shutdown of inflight requests in SGL's TokenizerManager
@@ -161,7 +179,6 @@ RUN pyright --help > /dev/null 2>&1
 # Enable Git operations in the /workspace directory
 RUN printf "[safe]\n      directory=/workspace\n" > /root/.gitconfig
 
-RUN ln -sf /bin/bash /bin/sh
 
 ### BUILDS ###
 
@@ -227,7 +244,7 @@ COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
 
 USER $USERNAME
 ENV HOME=/home/$USERNAME
-ENV PYTHONPATH=$HOME/dynamo/deploy/sdk/src:$PYTHONPATH:$HOME/dynamo/components/planner/src:$PYTHONPATH
+ENV PYTHONPATH=/workspace/dynamo/deploy/sdk/src:/workspace/dynamo/components/planner/src:/workspace/examples/sglang:$PYTHONPATH
 WORKDIR $HOME
 
 # https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
@@ -339,8 +356,6 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
     cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
     cp -r lib/bindings/c/include /opt/dynamo/bindings/.  && \
     cp target/release/dynamo-run /usr/local/bin && \
-    cp target/release/http /usr/local/bin && \
-    cp target/release/llmctl /usr/local/bin && \
     cp target/release/metrics /usr/local/bin && \
     cp target/release/mock_worker /usr/local/bin
 
@@ -355,6 +370,8 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH=/opt/dynamo/bindings/lib/libdynamo_llm_capi.so
 ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/
+
+ENV PYTHONPATH=/workspace/dynamo/deploy/sdk/src:/workspace/dynamo/components/planner/src:/workspace/examples/sglang/utils:$PYTHONPATH
 
 ########################################
 ########## Development Image ###########
@@ -376,20 +393,41 @@ ENV DYNAMO_HOME=/workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
+### COPY NATS & ETCD ###
+# Copy nats and etcd from base image
+COPY --from=base /usr/bin/nats-server /usr/bin/nats-server
+COPY --from=base /usr/local/bin/etcd/ /usr/local/bin/etcd/
+ENV PATH=/usr/local/bin/etcd/:$PATH
+
+# Copy UCX from base image as plugin for NIXL
+# Copy NIXL source from base image (required for NIXL plugins)
+COPY --from=base /usr/local/ucx /usr/local/ucx
+COPY --from=base /usr/local/nixl /usr/local/nixl
+ARG ARCH_ALT
+ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins
+ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:$LD_LIBRARY_PATH
+
 # Setup the python environment
+# libnuma-dev is a required dependency for sglang integration with NIXL
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3-dev && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential python3-dev libnuma-dev && \
     rm -rf /var/lib/apt/lists/* && \
     uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
+# Install SGLang and related packages (sgl-kernel, einops, sentencepiece) since they are not included in the runtime wheel
+# https://github.com/sgl-project/sglang/blob/v0.4.9.post1/python/pyproject.toml#L18-51
+ARG SGLANG_VERSION
+ARG SGL_KERNEL_VERSION
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install sglang[runtime_common]==${SGLANG_VERSION} einops sgl-kernel==${SGL_KERNEL_VERSION} sentencepiece
+
 # Install the wheels and symlink executables to /usr/local/bin so dynamo components can use them
 # Dynamo components currently do not have the VIRTUAL_ENV in their PATH, so we need to symlink the executables
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
-RUN uv pip install ai-dynamo[vllm] --find-links wheelhouse && \
-    ln -sf $VIRTUAL_ENV/bin/* /usr/local/bin/ && \
-    rm -r wheelhouse
+COPY --from=base /workspace/wheels/nixl/*.whl wheelhouse/
+RUN uv pip install ai-dynamo nixl --find-links wheelhouse
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
@@ -399,8 +437,17 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
-# Copy examples
-COPY ./examples examples/
+# Copy benchmarks, examples, and tests for CI
+# TODO: Remove this once we have a functional CI image built on top of the runtime image
+COPY tests /workspace/tests
+COPY benchmarks /workspace/benchmarks
+COPY examples /workspace/examples
+RUN uv pip install /workspace/benchmarks
 
-ENTRYPOINT [ "/usr/bin/bash" ]
+# Copy attribution files
+COPY ATTRIBUTION* LICENSE /workspace/
+
+ENV PYTHONPATH=/workspace/examples/sglang/utils:$PYTHONPATH
+
+ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 CMD []

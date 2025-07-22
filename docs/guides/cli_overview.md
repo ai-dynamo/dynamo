@@ -37,7 +37,7 @@ Use `run` to start an interactive chat session with a model. This command execut
 
 #### Example
 ```bash
-dynamo run deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
+dynamo-run deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B
 ```
 
 ### `serve`
@@ -68,47 +68,5 @@ dynamo serve hello_world:Frontend
 # Start only the Middle component in the graph that is discoverable from the Frontend service
 dynamo serve --service-name Middle hello_world:Frontend
 ```
-
-### `build`
-
-Use `build` to package your inference graph and its dependencies into an archive. Combine this with the `--containerize` flag to create a single Docker container for your inference graph. As with `serve`, you point toward the first service in your dependency graph. For more details, see [Serving Inference Graphs](dynamo_serve.md).
-
-#### Usage
-```bash
-dynamo build [SERVICE]
-```
-
-#### Arguments
-* `SERVICE`: Specify the service to build using file:Class syntax
-
-#### Flags
-* `--working-dir`: Specify the directory for finding the Service instance
-* `--containerize`: Choose whether to create a container from the dynamo artifact after building
-
-#### Example
-```bash
-cd examples/hello_world
-dynamo build hello_world:Frontend
-```
-
-### `deploy`
-
-Use `deploy` to create a pipeline on Dynamo Cloud using either interactive prompts or a YAML configuration file. For more details, see [Deploying Inference Graphs to Kubernetes](dynamo_deploy/README.md).
-
-#### Usage
-```bash
-dynamo deploy [PIPELINE]
-```
-
-#### Arguments
-* `PIPELINE`: The pipeline to deploy; defaults to *None*; required
-
-#### Flags
-* `--name`/`-n`: Set the deployment name. Defaults to *None*; required
-* `--config-file`/`-f`: Specify the configuration file path. Defaults to *None*; required
-* `--wait`/`--no-wait`: Choose whether to wait for deployment readiness. Defaults to wait
-* `--timeout`: Set maximum deployment time in seconds. Defaults to 3600
-* `--endpoint`/`-e`: Specify the Dynamo Cloud deployment endpoint. Defaults to *None*; required
-* `--help`/`-h`: Display command help
 
 For a detailed deployment example, see [Operator Deployment](dynamo_deploy/operator_deployment.md).

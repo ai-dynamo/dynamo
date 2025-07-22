@@ -2,13 +2,13 @@
 
 This guide explains the `dynamo run` command.
 
-`dynamo-run` is a CLI tool for exploring the Dynamo components. It's also an example of how to use components from Rust. If you use the Python wheel, it's available as `dynamo run` .
+`dynamo-run` is a CLI tool for exploring the Dynamo components. It's also an example of how to use components from Rust. If you use the Python wheel, it's available as `dynamo run`.
 
 It supports these engines: mistralrs, llamacpp, sglang, vllm, and tensorrt-llm. `mistralrs` is the default.
 
 Usage:
 ```
-dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=2.0] [--kv-gpu-cache-usage-weight=1.0] [--kv-waiting-requests-weight=1.0] [--verbosity (-v|-vv)]
+dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=1.0] [--router-temperature=0.0] [--use-kv-events=true] [--verbosity (-v|-vv)]
 ```
 
 Example: `dynamo run Qwen/Qwen3-0.6B`
@@ -30,7 +30,7 @@ The vllm and sglang engines require [etcd](https://etcd.io/) and [nats](https://
 
 ### Use model from Hugging Face
 
-To automatically downloads Qwen3 4B from Hugging Face (16 GiB download) and starts it in interactive text mode:
+To automatically download Qwen3 4B from Hugging Face (16 GiB download) and to start it in interactive text mode:
 ```
 dynamo run out=vllm Qwen/Qwen3-4B
 ```
@@ -53,7 +53,7 @@ To run a model from local file:
 See the following sections for details.
 
 #### Download model from Hugging Face
-One of the models available from HUgging Face should be high quality and fast on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
+One of the models available from Hugging Face should be high quality and fast on almost any machine: https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF
 For example, try https://huggingface.co/bartowski/Llama-3.2-3B-Instruct-GGUF/blob/main/Llama-3.2-3B-Instruct-Q4_K_M.gguf
 
 To download model file:
@@ -139,7 +139,7 @@ The KV metrics publisher in VLLM adds a `load_metrics` endpoint to the current c
 
 Example 4: Multiple component in a pipeline.
 
-In the P/D disaggregated setup you would have `deepseek-distill-llama8b.prefill.generate` (possibly multiple instance of this) and `deepseek-distill-llama8b.decode.generate`.
+In the P/D disaggregated setup you would have `deepseek-distill-llama8b.prefill.generate` (possibly multiple instances of this) and `deepseek-distill-llama8b.decode.generate`.
 
 For output it is always only `out=dyn`. This tells Dynamo to auto-discover the instances, group them by model, and load balance appropriately (depending on `--router-mode` flag). The old syntax of `dyn://...` is still accepted for backwards compatibility.
 
@@ -171,7 +171,7 @@ To set up KV-aware routing on patched vllm:
 1. Build the C bindings:
    ```
    cd $REPO_ROOT/lib/bindings/c
-   cargo build`.
+   cargo build
    ```
 1. Put the library you just built on library path:
    ```
@@ -200,6 +200,14 @@ dynamo-run in=http out=dyn --router-mode kv
 The only difference from the distributed system above is `--router-mode kv`. The patched vllm announces when a KV block is created or removed. The Dynamo router run finds the worker with the best match for those KV blocks and directs the traffic to that node.
 
 For performance testing, compare a typical workload with `--router-mode random|round-robin` to see if it can benefit from KV-aware routing.
+
+The KV-aware routing arguments:
+
+- `--kv-overlap-score-weight`: Sets the amount of weighting on overlaps with prefix caches, which directly contributes to the prefill cost. A large weight is expected to yield a better TTFT (at the expense of worse ITL). When set to 0, prefix caches are not considered at all (falling back to pure load balancing behavior on the active blocks).
+
+- `--router-temperature`: Sets the temperature when randomly selecting workers to route to via softmax sampling on the router cost logits. Setting it to 0 recovers the deterministic behavior where the min logit is picked.
+
+- `--use-kv-events`: Sets whether to listen to KV events for maintaining the global view of cached blocks. If true, then we use the `KvIndexer` to listen to the block creation and deletion events. If false, `ApproxKvIndexer`, which assumes the kv cache of historical prompts exists for fixed time durations (hard-coded to 120s), is used to predict the kv cache hit ratio in each engine. Set false if your backend engine does not emit KV events.
 
 ## Full usage details
 
@@ -257,8 +265,8 @@ cargo build
 Optionally you can run `cargo build` from any location with arguments:
 
 ```
---target-dir /path/to/target_directory` # specify target_directory with write privileges
---manifest-path /path/to/project/Cargo.toml` # if cargo build is run outside of `launch/` directory
+--target-dir /path/to/target_directory # specify target_directory with write privileges
+--manifest-path /path/to/project/Cargo.toml # if cargo build is run outside of `launch/` directory
 ```
 
 The binary is called `dynamo-run` in `target/debug`
@@ -376,7 +384,7 @@ python3 -m sglang.launch_server --model-path /data/models/DeepSeek-R1-Distill-Ll
 
 Using the [vllm](https://github.com/vllm-project/vllm) Python library. Slow startup, fast inference. Supports both safetensors from HF and GGUF files, but is very slow for GGUF - prefer llamacpp.
 
-The vllm engine requires requires [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`) to be running.
+The vllm engine requires [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`) to be running.
 
 We use [uv](https://docs.astral.sh/uv/) but any virtualenv manager should work.
 
@@ -439,7 +447,7 @@ vllm uses [ray](https://docs.vllm.ai/en/latest/serving/distributed_serving.html#
 
 Here is an example on two 8x nodes:
 - Leader node: `ray start --head --port=6379`
-- Each follower node: `ray start --address='<HEAD_NODE_IP>:6379`
+- Each follower node: `ray start --address=<HEAD_NODE_IP>:6379`
 - Leader node: `dynamo-run out=vllm ~/llms/DeepSeek-R1-Distill-Llama-70B/ --tensor-parallel-size 16`
 
 The `--tensor-parallel-size` parameter is the total number of GPUs in the cluster. This is often constrained by a model dimension such as being a divisor of the number of attention heads.
@@ -454,7 +462,7 @@ Using [TensorRT-LLM's LLM API](https://nvidia.github.io/TensorRT-LLM/llm-api/), 
 
 You can use `--extra-engine-args` to pass extra arguments to LLM API engine.
 
-The trtllm engine requires requires [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`) to be running.
+The trtllm engine requires [etcd](https://etcd.io/) and [nats](https://nats.io/) with jetstream (`nats-server -js`) to be running.
 
 ##### Step 1: Build the environment
 
@@ -530,6 +538,30 @@ The output looks like this:
 {"text":"What is the capital of Spain?","response":".The capital of Spain is Madrid.","tokens_in":7,"tokens_out":7,"elapsed_ms":855}
 ```
 
+#### Mocker engine
+
+The mocker engine is a mock vLLM implementation designed for testing and development purposes. It simulates realistic token generation timing without requiring actual model inference, making it useful for:
+
+- Testing distributed system components without GPU resources
+- Benchmarking infrastructure and networking overhead
+- Developing and debugging Dynamo components
+- Load testing and performance analysis
+
+**Basic usage:**
+
+The `--model-path` is required but can point to any valid model path - the mocker doesn't actually load the model weights (but the pre-processor needs the tokenizer). The arguments `block_size`, `num_gpu_blocks`, `max_num_seqs`, `max_num_batched_tokens`, `enable_prefix_caching`, and `enable_chunked_prefill` are common arguments shared with the real VLLM engine.
+
+And below are arguments that are mocker-specific:
+- `speedup_ratio`: Speed multiplier for token generation (default: 1.0). Higher values make the simulation engines run faster.
+- `dp_size`: Number of data parallel workers to simulate (default: 1)
+- `watermark`: KV cache watermark threshold as a fraction (default: 0.01). This argument also exists for the real VLLM engine but cannot be passed as an engine arg.
+
+```bash
+echo '{"speedup_ratio": 10.0}' > mocker_args.json
+dynamo-run in=dyn://dynamo.mocker.generate out=mocker --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 --extra-engine-args mocker_args.json
+dynamo-run in=http out=dyn --router-mode kv
+```
+
 ### Extra engine arguments
 The vllm and sglang backends support passing any argument the engine accepts.
 Put the arguments in a JSON file:
@@ -544,7 +576,7 @@ Pass it like this:
 dynamo-run out=sglang ~/llms/Llama-3.2-3B-Instruct --extra-engine-args sglang_extra.json
 ```
 
-The tensorrtllm backend also support passing any argument the engine accepts. However, in this case config should be a yaml file.
+The tensorrtllm backend also supports passing any argument the engine accepts. However, in this case config should be a yaml file.
 
 ```
 backend: pytorch
@@ -634,4 +666,13 @@ Here are some example engines:
 More fully-featured Backend engines (used by `dynamo-run`):
 - [vllm](https://github.com/ai-dynamo/dynamo/blob/main/launch/dynamo-run/src/subprocess/vllm_inc.py)
 - [sglang](https://github.com/ai-dynamo/dynamo/blob/main/launch/dynamo-run/src/subprocess/sglang_inc.py)
+
+### Debugging
+
+`dynamo-run` and `dynamo-runtime` support [tokio-console](https://github.com/tokio-rs/console). Build with the feature to enable:
+```
+cargo build --features cuda,tokio-console -p dynamo-run
+```
+
+The listener uses the default tokio console port, and all interfaces (0.0.0.0).
 

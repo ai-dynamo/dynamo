@@ -23,6 +23,8 @@ metal = ["dynamo-engine-llamacpp/metal", "dynamo-engine-mistralrs/metal"]
 vulkan = ["dynamo-engine-llamacpp/vulkan"]
 openmp = ["dynamo-engine-llamacpp/openmp"]
 
+tokio-console = ["dynamo-runtime/tokio-console"]
+
 [dependencies]
 dynamo-llm = { workspace = true }
 dynamo-runtime = { workspace = true }
@@ -34,6 +36,7 @@ anyhow = { workspace = true }
 async-openai = { workspace = true }
 async-stream = { workspace = true }
 async-trait = { workspace = true }
+either = { workspace = true }
 futures = { workspace = true }
 libc = { workspace = true }
 serde = { workspace = true }

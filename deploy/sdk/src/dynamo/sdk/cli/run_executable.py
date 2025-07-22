@@ -69,28 +69,6 @@ def dynamo_run(args=None):
     return result.returncode
 
 
-def llmctl(args=None):
-    """
-    Run the llmctl executable with the provided arguments.
-    If no args provided, passes through sys.argv[1:] to the executable.
-    """
-    if args is None:
-        args = sys.argv[1:]
-    result = run_executable("llmctl", args=args, capture_output=False)
-    return result.returncode
-
-
-def http(args=None):
-    """
-    Run the http executable with the provided arguments.
-    If no args provided, passes through sys.argv[1:] to the executable.
-    """
-    if args is None:
-        args = sys.argv[1:]
-    result = run_executable("http", args=args, capture_output=False)
-    return result.returncode
-
-
 def metrics(args=None):
     """
     Run the metrics executable with the provided arguments.

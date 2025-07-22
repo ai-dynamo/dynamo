@@ -19,8 +19,6 @@
 //! both publicly via the HTTP API and internally between Dynamo components.
 //!
 
-use std::pin::Pin;
-
 use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +28,7 @@ pub mod openai;
 
 /// The token ID type
 pub type TokenIdType = u32;
-pub type DataStream<T> = Pin<Box<dyn Stream<Item = T> + Send + Sync>>;
+pub use dynamo_runtime::engine::DataStream;
 
 // TODO: This is an awkward dependency that we need to address
 // Originally, all the Annotated/SSE Codec bits where in the LLM protocol module; however, [Annotated]
@@ -51,12 +49,12 @@ pub trait ContentProvider {
 
 /// Converts of a stream of [codec::Message]s into a stream of [Annotated]s.
 pub fn convert_sse_stream<R>(
-    stream: DataStream<Result<codec::Message, codec::SseCodecError>>,
-) -> DataStream<Annotated<R>>
+    stream: impl Stream<Item = Result<codec::Message, codec::SseCodecError>>,
+) -> impl Stream<Item = Annotated<R>>
 where
     R: for<'de> Deserialize<'de> + Serialize,
 {
-    let stream = stream.map(|message| match message {
+    stream.map(|message| match message {
         Ok(message) => {
             let delta = Annotated::<R>::try_from(message);
             match delta {
@@ -65,6 +63,5 @@ where
             }
         }
         Err(e) => Annotated::from_error(e.to_string()),
-    });
-    Box::pin(stream)
+    })
 }

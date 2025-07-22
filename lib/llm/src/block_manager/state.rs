@@ -66,9 +66,9 @@ pub(crate) struct Resources {
 pub struct KvBlockManagerState<Locality: LocalityProvider, Metadata: BlockMetadata> {
     resources: Arc<Resources>,
 
-    disk_pool: Option<Arc<BlockPool<DiskStorage, Locality, Metadata>>>,
-    host_pool: Option<Arc<BlockPool<PinnedStorage, Locality, Metadata>>>,
-    device_pool: Option<Arc<BlockPool<DeviceStorage, Locality, Metadata>>>,
+    disk_pool: Option<Arc<dyn BlockPool<DiskStorage, Locality, Metadata>>>,
+    host_pool: Option<Arc<dyn BlockPool<PinnedStorage, Locality, Metadata>>>,
+    device_pool: Option<Arc<dyn BlockPool<DeviceStorage, Locality, Metadata>>>,
 
     local_block_set: NixlBlockSet,
     remote_block_sets: RwLock<HashMap<WorkerID, HashMap<usize, RemoteBlocks>>>,
@@ -76,15 +76,15 @@ pub struct KvBlockManagerState<Locality: LocalityProvider, Metadata: BlockMetada
 }
 
 impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManagerState<Locality, Metadata> {
-    pub fn disk(&self) -> Option<&BlockPool<DiskStorage, Locality, Metadata>> {
+    pub fn disk(&self) -> Option<&dyn BlockPool<DiskStorage, Locality, Metadata>> {
         self.disk_pool.as_ref().map(|pool| pool.as_ref())
     }
 
-    pub fn host(&self) -> Option<&BlockPool<PinnedStorage, Locality, Metadata>> {
+    pub fn host(&self) -> Option<&dyn BlockPool<PinnedStorage, Locality, Metadata>> {
         self.host_pool.as_ref().map(|pool| pool.as_ref())
     }
 
-    pub fn device(&self) -> Option<&BlockPool<DeviceStorage, Locality, Metadata>> {
+    pub fn device(&self) -> Option<&dyn BlockPool<DeviceStorage, Locality, Metadata>> {
         self.device_pool.as_ref().map(|pool| pool.as_ref())
     }
 
@@ -125,7 +125,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
             Some(factory) => {
                 let (pool, blocks) =
                     create_block_pool::<_, _, Metadata>(factory, &resources, "disk")?;
-                (Some(Arc::new(pool)), Some(blocks))
+                (Some(pool), Some(blocks))
             }
             None => {
                 tracing::debug!("No disk layout provided; will not allocate disk blocks.");
@@ -137,7 +137,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
             Some(factory) => {
                 let (pool, blocks) =
                     create_block_pool::<_, _, Metadata>(factory, &resources, "host")?;
-                (Some(Arc::new(pool)), Some(blocks))
+                (Some(pool), Some(blocks))
             }
             None => {
                 tracing::debug!("No host layout provided; will not allocate host blocks.");
@@ -149,7 +149,7 @@ impl<R: LogicalResources, Metadata: BlockMetadata>
             Some(factory) => {
                 let (pool, blocks) =
                     create_block_pool::<_, _, Metadata>(factory, &resources, "device")?;
-                (Some(Arc::new(pool)), Some(blocks))
+                (Some(pool), Some(blocks))
             }
             None => {
                 tracing::debug!("No device layout provided; will not allocate device blocks.");
@@ -228,7 +228,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
             Some(factory) => {
                 let (pool, blocks) =
                     create_block_pool::<_, _, Metadata>(factory, &resources, "disk")?;
-                (Some(Arc::new(pool)), Some(blocks))
+                (Some(pool), Some(blocks))
             }
             None => {
                 tracing::debug!("No disk layout provided; will not allocate disk blocks.");
@@ -240,7 +240,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
             Some(factory) => {
                 let (pool, blocks) =
                     create_block_pool::<_, _, Metadata>(factory, &resources, "host")?;
-                (Some(Arc::new(pool)), Some(blocks))
+                (Some(pool), Some(blocks))
             }
             None => {
                 tracing::debug!("No disk layout provided; will not allocate disk blocks.");
@@ -252,7 +252,7 @@ impl<Metadata: BlockMetadata> KvBlockManagerState<locality::Local, Metadata> {
             Some(factory) => {
                 let (pool, blocks) =
                     create_block_pool::<_, _, Metadata>(factory, &resources, "disk")?;
-                (Some(Arc::new(pool)), Some(blocks))
+                (Some(pool), Some(blocks))
             }
             None => {
                 tracing::debug!("No disk layout provided; will not allocate disk blocks.");
@@ -506,8 +506,8 @@ pub(crate) fn create_block_pool<S: Storage, L: LocalityProvider, M: BlockMetadat
     factory: impl IntoBlocks<S, L>,
     resources: &Resources,
     pool_name: &str,
-) -> Result<(BlockPool<S, L, M>, Vec<Block<S, L, M>>)> {
-    let pool = BlockPool::<S, L, M>::builder()
+) -> Result<(Arc<dyn BlockPool<S, L, M>>, Vec<Block<S, L, M>>)> {
+    let pool = ManagedBlockPool::<S, L, M>::builder()
         .cancel_token(resources.cancellation_token.clone())
         .global_registry(resources.global_registry.clone())
         .async_runtime(resources.async_rt_handle.clone())
@@ -516,7 +516,7 @@ pub(crate) fn create_block_pool<S: Storage, L: LocalityProvider, M: BlockMetadat
         .build()?;
 
     let blocks = factory.into_blocks()?;
-    Ok((pool, blocks))
+    Ok((Arc::new(pool), blocks))
 }
 
 // Block state operations moved to block.rs for better organization and private field access

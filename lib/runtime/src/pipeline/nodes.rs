@@ -221,8 +221,8 @@ where
 impl<UpIn, UpOut, DownIn, DownOut> AsyncEngine<UpIn, UpOut, Error>
     for PipelineOperator<UpIn, UpOut, DownIn, DownOut>
 where
-    UpIn: PipelineIO,
-    DownIn: PipelineIO,
+    UpIn: PipelineIO + Sync,
+    DownIn: PipelineIO + Sync,
     DownOut: PipelineIO,
     UpOut: PipelineIO,
 {
@@ -235,8 +235,8 @@ where
 impl<UpIn, UpOut, DownIn, DownOut> Sink<UpIn>
     for PipelineOperatorForwardEdge<UpIn, UpOut, DownIn, DownOut>
 where
-    UpIn: PipelineIO,
-    DownIn: PipelineIO,
+    UpIn: PipelineIO + Sync,
+    DownIn: PipelineIO + Sync,
     DownOut: PipelineIO,
     UpOut: PipelineIO,
 {

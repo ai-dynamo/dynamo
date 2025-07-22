@@ -120,9 +120,7 @@ dynamo-build:
         # Remove existing symlinks
         rm -f /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/* && \
         # Create new symlinks pointing to the correct location
-        ln -sf /workspace/target/release/dynamo-run /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/dynamo-run && \
-        ln -sf /workspace/target/release/http /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/http && \
-        ln -sf /workspace/target/release/llmctl /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/llmctl
+        ln -sf /workspace/target/release/dynamo-run /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/dynamo-run
 
 
     RUN cd /workspace/lib/bindings/python && \
@@ -180,7 +178,6 @@ all-docker:
     ARG DOCKER_SERVER=my-registry
     ARG IMAGE_TAG=latest
     BUILD ./deploy/cloud/operator+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
-    BUILD ./deploy/cloud/api-store+docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 
 all-lint:
     BUILD ./deploy/cloud/operator+lint

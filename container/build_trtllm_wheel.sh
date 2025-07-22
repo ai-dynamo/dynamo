@@ -44,7 +44,7 @@ MAIN_DIR=$(dirname "$(readlink -f "$0")")
 (cd /tmp && \
 # Clone the TensorRT-LLM repository.
 if [ ! -d "TensorRT-LLM" ]; then
-  git clone --single-branch --branch main https://github.com/NVIDIA/TensorRT-LLM.git
+  git clone https://github.com/NVIDIA/TensorRT-LLM.git
 fi
 
 cd TensorRT-LLM

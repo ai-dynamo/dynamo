@@ -34,12 +34,12 @@ impl KvbmRequest {
             lora_name: lora_name.clone(),
         };
 
-        tracing::debug!("salt: {:?}", salt);
+        tracing::trace!("salt: {:?}", salt);
 
         let salt_bytes = serde_json::to_vec(&salt).unwrap();
         let salt_hash = compute_hash_v2(&salt_bytes, 0);
 
-        tracing::debug!("salt_hash: {:?}", salt_hash);
+        tracing::trace!("salt_hash: {:?}", salt_hash);
 
         Self {
             request_id,

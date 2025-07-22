@@ -30,7 +30,9 @@ allow = [
     "OpenSSL",
     "Unicode-3.0",
     "BSL-1.0",
-    "MPL-2.0"
+    "MPL-2.0",
+    "CDLA-Permissive-2.0",
+    "Zlib"
 ]
 
 # TODO exceptions

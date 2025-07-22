@@ -16,7 +16,7 @@
 
 from components.decode_worker import VllmDecodeWorker
 from components.encode_worker import VllmEncodeWorker
-from components.frontend import Frontend
 from components.processor import Processor
+from components.web import Frontend
 
 Frontend.link(Processor).link(VllmDecodeWorker).link(VllmEncodeWorker)

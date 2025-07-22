@@ -49,8 +49,6 @@ ENV CARGO_TARGET_DIR=/workspace/target
 RUN cargo build --release --locked && \
     cargo doc --no-deps && \
     cp target/release/dynamo-run /usr/local/bin && \
-    cp target/release/http /usr/local/bin && \
-    cp target/release/llmctl /usr/local/bin && \
     cp target/release/metrics /usr/local/bin && \
     cp target/release/mock_worker /usr/local/bin
 

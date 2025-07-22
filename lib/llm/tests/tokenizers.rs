@@ -44,10 +44,10 @@ const HF_TOKENIZERS_LOCAL: [&str; 1] = [TINYLLAMA_TOKENIZER_PATH];
 const HASHES: [(&str, [u64; 4]); 1] = [(
     TINYLLAMA_TOKENIZER_PATH,
     [
-        771185775798505393,
-        8538328482215529710,
-        17087868772360018644,
-        1660219240238826577,
+        1209591529327510910,
+        4181375434596349981,
+        6245658446118930933,
+        5097285695902185237,
     ],
 )];
 
@@ -93,7 +93,7 @@ fn test_hf_lifecycle() {
         .expect("Failed to encode prompt");
 
     let decoded = tokenizer
-        .decode(&encoding.token_ids, false)
+        .decode(encoding.token_ids(), false)
         .expect("Failed to decode token_ids");
 
     assert_eq!(decoded, TEST_PROMPTS[0]);
@@ -117,14 +117,14 @@ fn test_sequence() {
         .append_text(TEST_PROMPTS[0])
         .expect("Failed to append prompt");
 
-    assert_eq!(sequence.len(), encoding.token_ids.len());
+    assert_eq!(sequence.len(), encoding.token_ids().len());
 
     let mut decoder = Sequence::new(shared_tokenizer.clone().into());
 
     let mut output = String::new();
-    for token_id in encoding.token_ids.clone() {
+    for token_id in encoding.token_ids() {
         let text = decoder
-            .append_token_id(token_id)
+            .append_token_id(*token_id)
             .expect("Failed to decode token_id");
         output.push_str(text.as_str());
     }
@@ -135,8 +135,8 @@ fn test_sequence() {
 
     let mut decoder = DecodeStream::new(shared_tokenizer.clone(), false);
     let mut output = String::new();
-    for token_id in encoding.token_ids {
-        let text = decoder.step(token_id).expect("Failed to decode token_id");
+    for token_id in encoding.token_ids() {
+        let text = decoder.step(*token_id).expect("Failed to decode token_id");
         if let Some(text) = text {
             output.push_str(text.as_str());
         }

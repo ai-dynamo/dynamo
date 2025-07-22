@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::env::var;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -132,6 +133,23 @@ impl HttpService {
     }
 }
 
+/// Environment variable to set the metrics endpoint path (default: `/metrics`)
+static HTTP_SVC_METRICS_PATH_ENV: &str = "DYN_HTTP_SVC_METRICS_PATH";
+/// Environment variable to set the models endpoint path (default: `/v1/models`)
+static HTTP_SVC_MODELS_PATH_ENV: &str = "DYN_HTTP_SVC_MODELS_PATH";
+/// Environment variable to set the health endpoint path (default: `/health`)
+static HTTP_SVC_HEALTH_PATH_ENV: &str = "DYN_HTTP_SVC_HEALTH_PATH";
+/// Environment variable to set the live endpoint path (default: `/live`)
+static HTTP_SVC_LIVE_PATH_ENV: &str = "DYN_HTTP_SVC_LIVE_PATH";
+/// Environment variable to set the chat completions endpoint path (default: `/v1/chat/completions`)
+static HTTP_SVC_CHAT_PATH_ENV: &str = "DYN_HTTP_SVC_CHAT_PATH";
+/// Environment variable to set the completions endpoint path (default: `/v1/completions`)
+static HTTP_SVC_CMP_PATH_ENV: &str = "DYN_HTTP_SVC_CMP_PATH";
+/// Environment variable to set the embeddings endpoint path (default: `/v1/embeddings`)
+static HTTP_SVC_EMB_PATH_ENV: &str = "DYN_HTTP_SVC_EMB_PATH";
+/// Environment variable to set the responses endpoint path (default: `/v1/responses`)
+static HTTP_SVC_RESPONSES_PATH_ENV: &str = "DYN_HTTP_SVC_RESPONSES_PATH";
+
 impl HttpServiceConfigBuilder {
     pub fn build(self) -> Result<HttpService, anyhow::Error> {
         let config: HttpServiceConfig = self.build_internal()?;
@@ -148,32 +166,39 @@ impl HttpServiceConfigBuilder {
         let mut all_docs = Vec::new();
 
         let mut routes = vec![
-            metrics::router(registry, None),
-            super::openai::list_models_router(state.clone(), None),
-            super::health::health_check_router(state.clone(), None),
+            metrics::router(registry, var(HTTP_SVC_METRICS_PATH_ENV).ok()),
+            super::openai::list_models_router(state.clone(), var(HTTP_SVC_MODELS_PATH_ENV).ok()),
+            super::health::health_check_router(state.clone(), var(HTTP_SVC_HEALTH_PATH_ENV).ok()),
+            super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
         ];
 
         if config.enable_chat_endpoints {
             routes.push(super::openai::chat_completions_router(
                 state.clone(),
                 config.request_template.clone(), // TODO clone()? reference?
-                None,
+                var(HTTP_SVC_CHAT_PATH_ENV).ok(),
             ));
         }
 
         if config.enable_cmpl_endpoints {
-            routes.push(super::openai::completions_router(state.clone(), None));
+            routes.push(super::openai::completions_router(
+                state.clone(),
+                var(HTTP_SVC_CMP_PATH_ENV).ok(),
+            ));
         }
 
         if config.enable_embeddings_endpoints {
-            routes.push(super::openai::embeddings_router(state.clone(), None));
+            routes.push(super::openai::embeddings_router(
+                state.clone(),
+                var(HTTP_SVC_EMB_PATH_ENV).ok(),
+            ));
         }
 
         if config.enable_responses_endpoints {
             routes.push(super::openai::responses_router(
                 state.clone(),
                 config.request_template,
-                None,
+                var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
             ));
         }
 

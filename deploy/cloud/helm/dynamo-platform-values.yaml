@@ -32,26 +32,8 @@ dynamo-operator:
       gateway: ${ISTIO_GATEWAY}
     ingressHostSuffix: ${DYNAMO_INGRESS_SUFFIX}
     dockerRegistry:
+      useKubernetesSecret: true
       server: ${PIPELINES_DOCKER_SERVER}
       username: ${PIPELINES_DOCKER_USERNAME}
       password: ${PIPELINES_DOCKER_PASSWORD}
     virtualServiceSupportsHTTPS: ${VIRTUAL_SERVICE_SUPPORTS_HTTPS}
-
-dynamo-api-store:
-  istio:
-    enabled: ${ISTIO_ENABLED}
-    gateway: ${ISTIO_GATEWAY}
-    host: ${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
-  image:
-    repository: ${DOCKER_SERVER}/dynamo-api-store
-    tag: ${IMAGE_TAG}
-  imagePullSecrets:
-    - name: ${DOCKER_SECRET_NAME}
-  ingress:
-    enabled: ${INGRESS_ENABLED}
-    className: ${INGRESS_CLASS}
-    hosts:
-      - host: ${NAMESPACE}.${DYNAMO_INGRESS_SUFFIX}
-        paths:
-          - path: /
-            pathType: Prefix

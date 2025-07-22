@@ -13,7 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::mocker::protocols::{MoveBlock, UniqueBlock};
+use crate::mocker::protocols::MoveBlock;
+use crate::tokens::blocks::UniqueBlock;
 use crate::tokens::{TokenBlockSequence, Tokens};
 use derive_getters::Getters;
 use rand::random;
@@ -119,6 +120,10 @@ impl ActiveSequence {
         self.tokens.total_tokens() == 0
     }
 
+    pub fn take_creation_signal(&mut self) -> Option<MoveBlock> {
+        self.creation_signal.take()
+    }
+
     /// Create a new ActiveSequence instance and return the creation signal
     pub fn new_with_signal(
         tokens: Vec<u32>,
@@ -127,7 +132,7 @@ impl ActiveSequence {
         enable_prefix_caching: bool,
     ) -> (Self, Option<MoveBlock>) {
         let mut sequence = Self::new(tokens, max_output_tokens, block_size, enable_prefix_caching);
-        let signal = sequence.creation_signal.take();
+        let signal = sequence.take_creation_signal();
         (sequence, signal)
     }
 

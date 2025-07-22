@@ -142,14 +142,14 @@ pub async fn run(
             if let Some(pre) = pre_processor {
                 // Note this does not include the prompt template. Probably TODO
                 entry.tokens_in = match pre.tokenize(&entry.text) {
-                    Ok(encoding) => encoding.token_ids.len(),
+                    Ok(encoding) => encoding.token_ids().len(),
                     Err(err) => {
                         tracing::warn!(%err, entry.text, "Failed tokenizing prompt");
                         0
                     }
                 };
                 entry.tokens_out = match pre.tokenize(&response) {
-                    Ok(encoding) => encoding.token_ids.len(),
+                    Ok(encoding) => encoding.token_ids().len(),
                     Err(err) => {
                         tracing::warn!(%err, response, "Failed tokenizing response");
                         0

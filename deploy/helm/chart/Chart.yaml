@@ -14,8 +14,8 @@
 # limitations under the License.
 
 apiVersion: v2
-name: dynamo-pipeline
-description: A Helm chart to deploy a Dynamo pipeline on Kubernetes
+name: dynamo-graph
+description: A Helm chart to deploy a Dynamo graph on Kubernetes
 type: application
-version: 0.1.0
-appVersion: 1.0.0
+version: 0.3.2
+appVersion: 0.3.2

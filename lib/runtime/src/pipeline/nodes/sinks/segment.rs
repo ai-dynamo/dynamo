@@ -38,7 +38,7 @@ impl<Req: PipelineIO, Resp: PipelineIO> Default for SegmentSink<Req, Resp> {
 }
 
 #[async_trait]
-impl<Req: PipelineIO, Resp: PipelineIO> Sink<Req> for SegmentSink<Req, Resp> {
+impl<Req: PipelineIO + Sync, Resp: PipelineIO> Sink<Req> for SegmentSink<Req, Resp> {
     async fn on_data(&self, data: Req, _: Token) -> Result<(), Error> {
         let stream = self
             .engine

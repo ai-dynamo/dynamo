@@ -11,13 +11,10 @@ use dynamo_runtime::{DistributedRuntime, Runtime};
 
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
-
-const INIT_TIMEOUT_SECS: u64 = 120;
 
 /// Data that is sent to workers over ETCD to establish a ZMQ connection.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -43,6 +40,10 @@ pub struct KvbmLeaderConfig {
     /// The world size.
     #[builder(default = "1")]
     world_size: usize,
+
+    /// The leader-worker init connection timeout seconds.
+    #[builder(default = "120")]
+    leader_init_timeout_secs: u64,
 }
 
 impl KvbmLeaderConfig {
@@ -58,7 +59,7 @@ impl KvbmLeaderConfig {
 /// - Syncing the leader barrier with workers.
 /// - Sending messages to workers.
 pub struct KvbmLeader {
-    _worker_data: Arc<HashMap<String, ()>>, // TODO: Replace with KvbmLeaderData
+    num_device_blocks: usize,
     zmq_leader: ZmqActiveMessageLeader,
     config: KvbmLeaderConfig,
 }
@@ -85,16 +86,24 @@ impl KvbmLeader {
         });
 
         // Build our leader barrier and publish the data.
-        let leader_barrier: LeaderBarrier<KvbmLeaderData, ()> = LeaderBarrier::new(
-            config.barrier_id.clone(),
-            config.world_size,
-            Some(Duration::from_secs(INIT_TIMEOUT_SECS)),
-        );
+        // TODO: Use a separate timeout parameter from the ZMQ connection timeout
+        let leader_barrier: LeaderBarrier<KvbmLeaderData, worker::KvbmWorkerData> =
+            LeaderBarrier::new(
+                config.barrier_id.clone(),
+                config.world_size,
+                Some(Duration::from_secs(config.leader_init_timeout_secs)),
+            );
 
         let worker_data = leader_barrier
             .sync(&drt, zmq_data.as_ref())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to sync leader barrier: {:?}", e))?;
+
+        let num_device_blocks = worker_data
+            .values()
+            .map(|data| data.num_device_blocks)
+            .min()
+            .unwrap();
 
         tracing::info!("Leader barrier synced with {} workers", config.world_size);
         tracing::debug!("Worker data: {:?}", worker_data);
@@ -105,13 +114,13 @@ impl KvbmLeader {
         let zmq_leader = ZmqActiveMessageLeader::new(
             leader_sockets,
             config.world_size,
-            Duration::from_secs(INIT_TIMEOUT_SECS),
+            Duration::from_secs(config.leader_init_timeout_secs),
             cancel_token.clone(),
         )
         .await?;
 
         Ok(Self {
-            _worker_data: Arc::new(worker_data),
+            num_device_blocks,
             zmq_leader,
             config,
         })
@@ -125,6 +134,10 @@ impl KvbmLeader {
         self.zmq_leader
             .broadcast(ZMQ_TRANSFER_BLOCKS_MESSAGE, data)
             .await
+    }
+
+    pub fn num_device_blocks(&self) -> usize {
+        self.num_device_blocks
     }
 
     pub fn num_host_blocks(&self) -> usize {

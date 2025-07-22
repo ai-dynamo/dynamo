@@ -15,7 +15,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.3.1"
+version = "0.3.2"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -25,17 +25,18 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
+    "ai-dynamo-runtime==0.3.2",
     "pytest>=8.3.4",
-    "types-psutil==7.0.0.20250218",
-    "kubernetes==32.0.1",
-    "ai-dynamo-runtime==0.3.1",
-    "fastapi==0.115.6",
+    "types-psutil>=7.0.0.20250218",
+    "kubernetes>=32.0.1,<33.0.0",
+    "fastapi>=0.115.0",
     "distro",
     # filelock: required by planner
     "filelock",
     "typer",
-    "circus==0.19.0",
+    "circus>=0.19.0",
     "click<8.2.0",
+    "setuptools",
 ]
 
 classifiers = [
@@ -70,8 +71,6 @@ vllm = [
 [project.scripts]
 dynamo = "dynamo.sdk.cli.cli:cli"
 dynamo-run = "dynamo.sdk.cli.run_executable:dynamo_run"
-llmctl = "dynamo.sdk.cli.run_executable:llmctl"
-http = "dynamo.sdk.cli.run_executable:http"
 metrics = "dynamo.sdk.cli.run_executable:metrics"
 mock_worker = "dynamo.sdk.cli.run_executable:mock_worker"
 
@@ -80,7 +79,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["deploy/sdk/src/dynamo", "components/planner/src/dynamo"]
+packages = ["deploy/sdk/src/dynamo", "components/planner/src/dynamo", "components/frontend/src/dynamo", "components/backends/llama_cpp/src/dynamo", "components/backends/mocker/src/dynamo", "components/backends/trtllm/src/dynamo"]
 
 # This section is for including the binaries in the wheel package
 # but doesn't make them executable scripts in the venv bin directory
@@ -138,7 +137,6 @@ addopts = [
     "--ignore-glob=*model.py",
     "--ignore-glob=*vllm_integration*",
     "--ignore-glob=*_inc.py",
-    "--ignore-glob=deploy/cloud/api-store/*",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
     # FIXME: Get relative/generic blob paths to work here
@@ -163,6 +161,8 @@ markers = [
     "weekly: marks tests to run weekly",
     "gpu_1: marks tests to run on GPU",
     "gpu_2: marks tests to run on 2GPUs",
+    "gpu_4: marks tests to run on 4GPUs",
+    "gpu_8: marks tests to run on 8GPUs",
     "e2e: marks tests as end-to-end tests",
     "integration: marks tests as integration tests",
     "unit: marks tests as unit tests",

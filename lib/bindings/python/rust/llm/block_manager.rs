@@ -48,15 +48,16 @@ pub struct BlockManager {
     _rt: Arc<tokio::runtime::Runtime>,
 }
 
+// TODO: This is in desperate need of a massive refactor. We bind and instantiate this in Python, but we never actually use it.
 #[pymethods]
 impl BlockManager {
     #[new]
-    #[pyo3(signature = (worker_id, leader = None, page_size = 32, device_num_blocks = 16))]
+    #[pyo3(signature = (worker_id, leader = None, page_size = 32, num_device_blocks = None))]
     fn new(
         worker_id: u64,
         leader: Option<distributed::KvbmLeader>,
         page_size: usize,
-        device_num_blocks: usize,
+        num_device_blocks: Option<usize>,
     ) -> PyResult<Self> {
         let cancel_token = CancellationToken::new();
         let mut config = dynamo_llm::block_manager::KvBlockManagerConfig::builder().runtime(
@@ -67,8 +68,6 @@ impl BlockManager {
                 .map_err(to_pyerr)?,
         );
 
-        tracing::info!("Using {} device blocks", device_num_blocks);
-
         let model_config = dynamo_llm::block_manager::KvManagerModelConfig::builder()
             .num_layers(1)
             .outer_dim(1)
@@ -77,16 +76,17 @@ impl BlockManager {
 
         config = config.model(model_config.build().map_err(to_pyerr)?);
 
-        config = config.device_layout(
-            dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
-                .num_blocks(device_num_blocks)
-                .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
-                .build()
-                .map_err(to_pyerr)?,
-        );
-
         let (leader, rt) = if let Some(leader) = leader {
             let (leader, rt) = leader.dissolve();
+
+            config = config.device_layout(
+                dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
+                    .num_blocks(leader.num_device_blocks())
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                    .build()
+                    .map_err(to_pyerr)?,
+            );
+
             if leader.num_host_blocks() > 0 {
                 tracing::info!("Using {} host blocks", leader.num_host_blocks());
                 config = config.host_layout(
@@ -111,6 +111,18 @@ impl BlockManager {
             (Some(leader), rt)
         } else {
             tracing::info!("Leader not provided. Block transfer functionality will be disabled.");
+
+            let num_device_blocks = num_device_blocks
+                .expect("num_device_blocks must be provided if leader is not provided");
+
+            config = config.device_layout(
+                dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
+                    .num_blocks(num_device_blocks)
+                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                    .build()
+                    .map_err(to_pyerr)?,
+            );
+
             (
                 None,
                 Arc::new(

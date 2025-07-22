@@ -92,8 +92,8 @@ impl<T: Send + Sync + 'static> Data for T {}
 
 /// [`DataStream`] is a type alias for a stream of [`Data`] items. This can be adapted to a [`ResponseStream`]
 /// by associating it with a [`AsyncEngineContext`].
-pub type DataUnary<T> = Pin<Box<dyn Future<Output = T> + Send + Sync>>;
-pub type DataStream<T> = Pin<Box<dyn Stream<Item = T> + Send + Sync>>;
+pub type DataUnary<T> = Pin<Box<dyn Future<Output = T> + Send>>;
+pub type DataStream<T> = Pin<Box<dyn Stream<Item = T> + Send>>;
 
 pub type Engine<Req, Resp, E> = Arc<dyn AsyncEngine<Req, Resp, E>>;
 pub type EngineUnary<Resp> = Pin<Box<dyn AsyncEngineUnary<Resp>>>;
@@ -165,7 +165,7 @@ pub trait AsyncEngineContext: Send + Sync + Debug {
 ///
 /// This trait is implemented by both unary and streaming engine results, allowing
 /// uniform access to context information regardless of the operation type.
-pub trait AsyncEngineContextProvider: Send + Sync + Debug {
+pub trait AsyncEngineContextProvider: Send + Debug {
     fn context(&self) -> Arc<dyn AsyncEngineContext>;
 }
 
@@ -174,7 +174,7 @@ pub trait AsyncEngineContextProvider: Send + Sync + Debug {
 /// This trait combines `Future` semantics with context provider capabilities,
 /// representing a single async operation that produces one result.
 pub trait AsyncEngineUnary<Resp: Data>:
-    Future<Output = Resp> + AsyncEngineContextProvider + Send + Sync
+    Future<Output = Resp> + AsyncEngineContextProvider + Send
 {
 }
 
@@ -183,7 +183,7 @@ pub trait AsyncEngineUnary<Resp: Data>:
 /// This trait combines `Stream` semantics with context provider capabilities,
 /// representing a continuous async operation that produces multiple results over time.
 pub trait AsyncEngineStream<Resp: Data>:
-    Stream<Item = Resp> + AsyncEngineContextProvider + Send + Sync
+    Stream<Item = Resp> + AsyncEngineContextProvider + Send
 {
 }
 
@@ -204,7 +204,7 @@ pub trait AsyncEngineStream<Resp: Data>:
 /// Implementations should ensure proper error handling and resource management.
 /// The `generate` method should be cancellable via the response's context provider.
 #[async_trait]
-pub trait AsyncEngine<Req: Data, Resp: Data + AsyncEngineContextProvider, E: Data>:
+pub trait AsyncEngine<Req: Send + Sync + 'static, Resp: AsyncEngineContextProvider, E: Data>:
     Send + Sync
 {
     /// Generate a stream of completion responses.

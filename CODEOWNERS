@@ -3,9 +3,9 @@
 # For more information about CODEOWNERS files, see:
 # https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 
-# Rust
-*.rs @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @alec-flowers @kkranen @oandreeva-nv @ai-dynamo/Devops @jthomson04 @PeaBrane
-Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @kkranen @oandreeva-nv @ai-dynamo/Devops
+# Rust - Keep these two the same. Or better make an alias like devops have.
+*.rs @ai-dynamo/dynamo-rust-codeowners
+Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 
 # Python Libraries
 *.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen @ai-dynamo/Devops @jthomson04 @ishandhanani @PeaBrane
@@ -17,19 +17,20 @@ Cargo.toml @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo 
 /deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @nnshah1 @mohammedabdulwahhab
 
 # Examples
-/examples/ @ai-dynamo/Devops @nnshah1 @rmccorm4 @whoisj
-/examples/common/ @tedzhouhk
+/examples/*/deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @mohammedabdulwahhab @atchernych
+/examples/ @ai-dynamo/Devops @nnshah1 @whoisj @ai-dynamo/dynamo-rust-codeowners
+/examples/common/ @ai-dynamo/Devops @tedzhouhk
 /examples/hello_world/ @alec-flowers @biswapanda @grahamking @hhzhang16 @ishandhanani @julienmancuso @kkranen @mohammedabdulwahhab @nnshah1 @tedzhouhk
 /examples/llm/ @alec-flowers @biswapanda @grahamking @guanluo @hhzhang16 @ishandhanani @julienmancuso @kkranen @mohammedabdulwahhab @nnshah1 @piotrm-nvidia @ptarasiewiczNV @rmccorm4 @tanmayv25 @tedzhouhk @PeaBrane
-/examples/multimodal/ @indrajit96 @krishung5 @whoisj
-/examples/sglang/ @biswapanda @ishandhanani @tedzhouhk @rmccorm4 @alec-flowers @grahamking
+/examples/multimodal/ @indrajit96 @krishung5 @whoisj @hhzhang16
+/examples/sglang/ @biswapanda @ishandhanani @tedzhouhk @rmccorm4 @alec-flowers @grahamking @PeaBrane
 /examples/tensorrt_llm/ @guanluo @richardhuo-nv @rmccorm4 @tanmayv25
 /examples/vllm_v0/ @alec-flowers @tedzhouhk @PeaBrane
-/examples/vllm_v1/ @biswapanda @ptarasiewiczNV @tedzhouhk @PeaBrane
+/examples/vllm/ @biswapanda @ptarasiewiczNV @tedzhouhk @PeaBrane
 
 # CI/CD
 /.github/ @ai-dynamo/Devops @nnshah1
-/.github/workflows/*.ps1 @whoisj
+/.github/workflows/*.ps1 @ai-dynamo/Devops @whoisj
 CODEOWNERS @ai-dynamo/Devops @nnshah1
 
 # Legal

@@ -44,9 +44,54 @@ help: ## Display this help.
 
 ##@ Development
 
+.PHONY: ensure-yq
+ensure-yq:
+	@if ! command -v yq &> /dev/null; then \
+		echo "Installing yq..."; \
+		ARCH=$$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/'); \
+		OS=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
+		wget https://github.com/mikefarah/yq/releases/latest/download/yq_$${OS}_$${ARCH} -O /usr/local/bin/yq && \
+		chmod +x /usr/local/bin/yq; \
+	else \
+		echo "yq is already installed: $$(yq --version)"; \
+	fi
+
 .PHONY: manifests
-manifests: controller-gen ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
+manifests: controller-gen ensure-yq ## Generate WebhookConfiguration, ClusterRole and CustomResourceDefinition objects.
 	$(CONTROLLER_GEN) rbac:roleName=manager-role crd:maxDescLen=0 webhook paths="./..." output:crd:artifacts:config=config/crd/bases
+	echo "Removing name from mainContainer required fields"
+	for file in config/crd/bases/*.yaml; do \
+		yq eval '(.. | select(has("mainContainer")) | .mainContainer.required) |= (. - ["name"])' -i --indent 2 $$file || exit 1; \
+	done
+	echo "Adding NVIDIA header to CRD files"
+	for file in config/crd/bases/*.yaml; do \
+		if ! head -20 "$$file" | grep -q "NVIDIA CORPORATION"; then \
+			{ printf '%s\n' \
+				'# SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.' \
+				'# SPDX-License-Identifier: Apache-2.0' \
+				'#' \
+				'# Licensed under the Apache License, Version 2.0 (the "License");' \
+				'# you may not use this file except in compliance with the License.' \
+				'# You may obtain a copy of the License at' \
+				'#' \
+				'# http://www.apache.org/licenses/LICENSE-2.0' \
+				'#' \
+				'# Unless required by applicable law or agreed to in writing, software' \
+				'# distributed under the License is distributed on an "AS IS" BASIS,' \
+				'# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.' \
+				'# See the License for the specific language governing permissions and' \
+				'# limitations under the License.' \
+				''; \
+			  cat "$$file"; \
+			} > "$$file.tmp" && mv "$$file.tmp" "$$file"; \
+		fi; \
+	done
+	echo "Adding helm.sh/resource-policy: keep annotation to CRD files"
+	for file in config/crd/bases/*.yaml; do \
+		if ! yq eval '.metadata.annotations."helm.sh/resource-policy"' "$$file" | grep -q "keep"; then \
+			yq eval '.metadata.annotations."helm.sh/resource-policy" = "keep"' -i "$$file"; \
+		fi; \
+	done
 
 .PHONY: generate
 generate: controller-gen ## Generate code containing DeepCopy, DeepCopyInto, and DeepCopyObject method implementations.

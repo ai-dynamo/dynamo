@@ -72,6 +72,7 @@ struct TimerEntry {
 struct TimerManager<K: Clone + Hash + Eq + Ord> {
     /// The source of truth. Maps a key to its current expiration instant.
     timers: HashMap<K, Instant>,
+
     /// A min-heap of (expiration_instant, key) used to efficiently find the
     /// next expiring timer. An entry in this heap is "stale" if the instant
     /// does not match the one in the `timers` map.
@@ -79,16 +80,30 @@ struct TimerManager<K: Clone + Hash + Eq + Ord> {
 
     /// The expiration duration of the timers.
     ttl: Duration,
+
+    /// Threshold for rebuilding the heap.
+    /// The heap will be rebuilt from scratch to remove stale entries.
+    threshold: usize,
 }
 
 impl<K: Clone + Hash + Eq + Ord> TimerManager<K> {
     /// Creates a new, empty TimerManager.
-    pub fn new(ttl: Duration) -> Self {
+    pub fn new(ttl: Duration, threshold: usize) -> Self {
         TimerManager {
             timers: HashMap::new(),
             expirations: BinaryHeap::new(),
             ttl,
+            threshold,
         }
+    }
+
+    /// Rebuilds the expirations heap from the timers map, removing all stale entries.
+    fn rebuild_heap(&mut self) {
+        self.expirations = self
+            .timers
+            .iter()
+            .map(|(key, &expiry)| Reverse((expiry, key.clone())))
+            .collect();
     }
 
     /// Inserts a new timer or updates an existing one for the given key.
@@ -108,6 +123,11 @@ impl<K: Clone + Hash + Eq + Ord> TimerManager<K> {
             // which will be ignored when it's popped.
             self.expirations.push(Reverse((expiry_time, key)));
         }
+
+        // Check if we should rebuild the heap to remove stale entries
+        if self.expirations.len() > self.timers.len() * self.threshold {
+            self.rebuild_heap();
+        }
     }
 
     /// Polls for expired timers and returns a list of keys for all timers
@@ -123,23 +143,12 @@ impl<K: Clone + Hash + Eq + Ord> TimerManager<K> {
             }
 
             // The timer might be expired, so pop it from the heap.
-            // We can safely unwrap because we just peeked.
             let Reverse((expiry_time, key)) = self.expirations.pop().unwrap();
 
-            // CRUCIAL STEP: Check if the popped timer is stale.
-            // A timer is stale if its key is no longer in our authoritative map,
-            // or if the expiration time in the map is different (i.e., it was updated).
-            match self.timers.get(&key) {
-                Some(authoritative_expiry) if *authoritative_expiry == expiry_time => {
-                    // This is a valid, non-stale, expired timer.
-                    // Remove it from the map and add its key to our results.
-                    self.timers.remove(&key);
-                    expired_keys.push(key);
-                }
-                _ => {
-                    // This entry in the heap was stale. It was either removed
-                    // or updated with a new time. We just ignore it and continue.
-                }
+            if self.timers.get(&key) == Some(&expiry_time) {
+                // This is a valid, non-stale, expired timer.
+                self.timers.remove(&key);
+                expired_keys.push(key);
             }
         }
 
@@ -184,7 +193,8 @@ impl ApproxKvIndexer {
 
             runtime.block_on(async move {
                 let mut trie = RadixTree::new();
-                let mut timer_manager: TimerManager<TimerEntry> = TimerManager::new(ttl);
+                // Use a reasonable threshold - can be made configurable if needed
+                let mut timer_manager: TimerManager<TimerEntry> = TimerManager::new(ttl, 50);
                 let mut event_id = 0;
                 loop {
                     // Create a future that sleeps until the next expiration time.
@@ -398,7 +408,7 @@ mod tests {
     #[tokio::test]
     async fn test_timer_manager_expiry() {
         const TTL: Duration = Duration::from_millis(50);
-        let mut tm: TimerManager<u32> = TimerManager::new(TTL);
+        let mut tm: TimerManager<u32> = TimerManager::new(TTL, 50);
 
         tm.insert(vec![1, 2, 3]);
         assert!(tm.get_expiry(&1).is_some());
@@ -419,7 +429,7 @@ mod tests {
     async fn test_timer_manager_update_resets_ttl() {
         // Validate that reinserting an existing key extends its TTL and prevents premature expiry.
         const TTL: Duration = Duration::from_millis(50);
-        let mut tm: TimerManager<u32> = TimerManager::new(TTL);
+        let mut tm: TimerManager<u32> = TimerManager::new(TTL, 50);
 
         // Initial insert and capture the original expiry.
         tm.insert(vec![42]);

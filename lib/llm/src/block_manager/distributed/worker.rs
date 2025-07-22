@@ -19,6 +19,7 @@ use crate::block_manager::{
 
 use derive_builder::Builder;
 use nixl_sys::Agent as NixlAgent;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -29,6 +30,11 @@ use dynamo_runtime::{
     utils::{leader_worker_barrier::WorkerBarrier, task::CriticalTaskExecutionHandle},
     DistributedRuntime, Runtime,
 };
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KvbmWorkerData {
+    pub num_device_blocks: usize,
+}
 
 fn load_and_validate_tensors(
     tensors: &[Arc<dyn TorchTensor>],
@@ -232,16 +238,20 @@ impl KvbmWorker {
             config.barrier_id
         );
 
-        let worker_barrier = WorkerBarrier::<KvbmLeaderData, ()>::new(
+        let worker_barrier = WorkerBarrier::<KvbmLeaderData, KvbmWorkerData>::new(
             config.barrier_id,
             config.worker_id.to_string(),
         );
+
+        let worker_data = KvbmWorkerData {
+            num_device_blocks: config.num_device_blocks,
+        };
 
         let leader_data = tokio::select! {
             _ = cancel_token.cancelled() => {
                 return Ok(())
             }
-            leader_data = worker_barrier.sync(&drt, &()) => {
+            leader_data = worker_barrier.sync(&drt, &worker_data) => {
                 leader_data
             }
         }

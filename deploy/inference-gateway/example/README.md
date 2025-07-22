@@ -13,31 +13,12 @@ This guide provides instructions for setting up the Inference Gateway with Dynam
 
 1. **Install Dynamo Cloud**
 
-Follow the instructions in [deploy/cloud/README.md](../../deploy/cloud/README.md) to deploy Dynamo Cloud on your Kubernetes cluster. This will set up the necessary infrastructure components for managing Dynamo inference graphs.
+[See Quickstart Guide](../../../docs/guides/dynamo_deploy/quickstart.md) to install Dynamo Cloud.
 
-2. **Launch 2 Dynamo Deployments**
 
-Deploy 2 Dynamo aggregated graphs following the instructions in [examples/llm/README.md](../../examples/llm/README.md):
+2. **Launch Dynamo Deployments**
 
-### Build Dynamo Graph
-```bash
-export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
-
-# Build the service
-cd $PROJECT_ROOT/examples/llm
-export DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk '{ print $NF }' | sed 's/\.$//')
-```
-
-### Deploy Dynamo Graphs
-```bash
-# Deploy first graph
-export DEPLOYMENT_NAME=llm-agg1
-dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
-
-# Deploy second graph
-export DEPLOYMENT_NAME=llm-agg2
-dynamo deployment create $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg.yaml
-```
+[See VLLM Example](../../../examples/vllm/README.md)
 
 3. **Deploy Inference Gateway**
 

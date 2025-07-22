@@ -207,23 +207,7 @@ export DYNAMO_CLOUD=http://localhost:8080  # If using port-forward
 # Build the Dynamo base image (see operator_deployment.md for details)
 export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
 
-# Build the service
-cd $PROJECT_ROOT/examples/multimodal
-DYNAMO_TAG=$(dynamo build graphs.agg:Frontend | grep "Successfully built" |  awk '{ print $NF }' | sed 's/\.$//')
-# For disaggregated serving:
-# DYNAMO_TAG=$(dynamo build graphs.disagg:Frontend | grep "Successfully built" |  awk '{ print $NF }' | sed 's/\.$//')
-
-# Deploy to Kubernetes
-export DEPLOYMENT_NAME=multimodal-agg
-# For aggregated serving with LLaVA:
-dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg-llava.yaml
-# For aggregated serving with Qwen2.5-VL:
-# dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg-qwen.yaml
-# For aggregated serving with Phi3V:
-# dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/agg-phi3v.yaml
-# For disaggregated serving:
-# export DEPLOYMENT_NAME=multimodal-disagg
-# dynamo deploy $DYNAMO_TAG -n $DEPLOYMENT_NAME -f ./configs/disagg.yaml
+# TODO: Apply Dynamo graph deployment for the example
 ```
 
 **Note**: To avoid rate limiting from unauthenticated requests to HuggingFace (HF), you can provide your `HF_TOKEN` as a secret in your deployment. See the [operator deployment guide](../../docs/guides/dynamo_deploy/operator_deployment.md#referencing-secrets-in-your-deployment) for instructions on referencing secrets like `HF_TOKEN` in your deployment configuration.
@@ -269,13 +253,6 @@ For more details on managing deployments, testing, and troubleshooting, please r
 ## Multimodal Aggregated Video Serving
 
 This example demonstrates deploying an aggregated multimodal model that can process video inputs.
-
-### Dependency
-
-Video example relies on `av` package for video preprocessing inside the encode_worker.
-Please install `av` inside the dynamo container to enable video example.
-
-`pip install av`
 
 ### Components
 
@@ -443,4 +420,61 @@ You should see a response describing the video's content similar to
     }
   ]
 }
+```
+
+
+## Deploying Multimodal Examples on Kubernetes
+
+This guide will help you quickly deploy and clean up the multimodal example services in Kubernetes.
+
+### Prerequisites
+
+- **Dynamo Cloud** is already deployed in your target Kubernetes namespace.
+- You have `kubectl` access to your cluster and the correct namespace set in `$NAMESPACE`.
+
+
+### Create a secret with huggingface token
+
+```bash
+export HF_TOKEN="huggingfacehub token with read permission to models"
+kubectl create secret generic hf-token-secret --from-literal=HF_TOKEN=$HF_TOKEN -n $KUBE_NS || true
+```
+
+---
+
+Choose the example you want to deploy or delete. The YAML files are located in `examples/multimodal/deploy/k8s/`.
+
+### Deploy the Multimodal Example
+
+```bash
+kubectl apply -f examples/multimodal/deploy/k8s/<Example yaml file> -n $NAMESPACE
+```
+
+### Uninstall the Multimodal Example
+
+
+```bash
+kubectl delete -f examples/multimodal/deploy/k8s/<Example yaml file> -n $NAMESPACE
+```
+
+### Using a different dynamo container
+
+To customize the container image used in your deployment, you will need to update the manifest before applying it.
+
+You can use [`yq`](https://github.com/mikefarah/yq?tab=readme-ov-file#install), a portable command-line YAML processor.
+
+Please follow the [installation instructions](https://github.com/mikefarah/yq?tab=readme-ov-file#install) for your platform if you do not already have `yq` installed. After installing `yq`, you can generate and apply your manifest as follows:
+
+
+```bash
+export DYNAMO_IMAGE=my-registry/my-image:tag
+
+yq '.spec.services.[].extraPodSpec.mainContainer.image = env(DYNAMO_IMAGE)' $EXAMPLE_FILE > my_example_manifest.yaml
+
+# install the dynamo example
+kubectl apply -f my_example_manifest.yaml -n $NAMESPACE
+
+# uninstall the dynamo example
+kubectl delete -f my_example_manifest.yaml -n $NAMESPACE
+
 ```

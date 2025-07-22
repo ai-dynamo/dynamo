@@ -17,72 +17,38 @@ limitations under the License.
 
 # 🚀 Deploy Dynamo Cloud to Kubernetes
 
+Dynamo Cloud acts as an orchestration layer between the end user and Kubernetes, handling the complexity of deploying your graphs for you.
+Before you can deploy your graphs, you need to deploy the Dynamo Runtime and Dynamo Cloud images. This is a one-time action, only necessary the first time you deploy a DynamoGraph.
+
+[See Dynamo Cloud Guide](../../../docs/guides/dynamo_deploy/dynamo_cloud.md) for advanced cases and details on how to install and use Dynamo Cloud. For a quick start follow the steps below.
+
+
 ## 🏗️ Building Docker images for Dynamo Cloud components
 
-You can build and push Docker images for the Dynamo cloud components (API server, API store, and operator) to any container registry of your choice. Here's how to build each component:
+You can build and push Docker images for the Dynamo cloud components to any container registry of your choice.
 
-### 📋 Prerequisites
-- [Earthly](https://earthly.dev/) installed
-- Docker installed and running
-- Access to a container registry of your choice
+**Important** Make sure you're logged in to your container registry before pushing images. For example:
 
-### ⚙️ Building and Pushing Images
-
-First, set the required environment variables:
-```bash
-export DOCKER_SERVER=<CONTAINER_REGISTRY>
-export IMAGE_TAG=<TAG>
-```
-
-As a description of the placeholders:
-- `<CONTAINER_REGISTRY>`: Your container registry (e.g., `nvcr.io`, `docker.io/<your-username>`, etc.)
-- `<TAG>`: The tag you want to use for the image (e.g., `latest`, `0.0.1`, etc.)
-
-Note: Make sure you're logged in to your container registry before pushing images. For example:
 ```bash
 docker login <CONTAINER_REGISTRY>
 ```
 
-You can build each component individually or build all components at once:
+#### 🛠️ Build and push images for the Dynamo Cloud platform components
 
-#### 🛠️ Build and push platform components
+[One-time Action]
+You should build the images for the Dynamo Cloud Platform.
+If you are a **👤 Dynamo User** you would do this step once.
+
 ```bash
+export DOCKER_SERVER=<your-docker-server>
+export IMAGE_TAG=<TAG>
 earthly --push +all-docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 ```
 
-## 🚀 Deploy Dynamo Cloud Platform
+If you are a **🧑‍💻 Dynamo Contributor** you would have to rebuild the dynamo platform images as the code evolves. To do so please look at the [Cloud Guide](../../../docs/guides/dynamo_deploy/dynamo_cloud.md).
 
-### 📋 Prerequisites
-Before deploying Dynamo Cloud, ensure your Kubernetes cluster meets the following requirements:
 
-#### 1. 🛡️ Istio Installation
-Dynamo Cloud requires Istio for service mesh capabilities. Verify Istio is installed and running:
-
-```bash
-# Check if Istio is installed
-kubectl get pods -n istio-system
-
-# Expected output should show running Istio pods
-# istiod-* pods should be in Running state
-```
-
-#### 2. 💾 PVC Support with Default Storage Class
-Dynamo Cloud requires Persistent Volume Claim (PVC) support with a default storage class. Verify your cluster configuration:
-
-```bash
-# Check if default storage class exists
-kubectl get storageclass
-
-# Expected output should show at least one storage class marked as (default)
-# Example:
-# NAME                 PROVISIONER             RECLAIMPOLICY   VOLUMEBINDINGMODE      ALLOWVOLUMEEXPANSION   AGE
-# standard (default)   kubernetes.io/gce-pd    Delete          Immediate              true                   1d
-```
-
-> [!TIP]
-> Don't have a Kubernetes cluster? Check out our [Minikube setup guide](../../../docs/guides/dynamo_deploy/minikube.md) to set up a local environment! 🏠
-
-### 📥 Installation
+### 🚀 Deploying the Dynamo Cloud Platform
 
 1. Set the required environment variables:
 ```bash
@@ -101,16 +67,23 @@ export DYNAMO_INGRESS_SUFFIX=dynamo-cloud.com # change this to whatever you want
 cd $PROJECT_ROOT/deploy/cloud/helm
 kubectl create namespace $NAMESPACE
 kubectl config set-context --current --namespace=$NAMESPACE
-
-kubectl create secret docker-registry docker-imagepullsecret \
-  --docker-server=$DOCKER_SERVER \
-  --docker-username=$DOCKER_USERNAME \
-  --docker-password=$DOCKER_PASSWORD \
-  --namespace=$NAMESPACE
 ```
 
-3. Deploy the helm chart using the deploy script:
+3. Deploy Dynamo Cloud using the Helm chart via the provided deploy script:
+To deploy the Dynamo Cloud Platform on Kubernetes, run:
 
 ```bash
-./deploy.sh
+./deploy.sh --crds
 ```
+
+if you want guidance during the process, run the deployment script with the `--interactive` flag:
+
+```bash
+./deploy.sh --crds --interactive
+```
+
+omitting `--crds` will skip the CRDs installation/upgrade. This is useful when installing on a shared cluster as CRDs are cluster-scoped resources.
+
+
+
+
