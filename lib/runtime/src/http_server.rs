@@ -206,7 +206,6 @@ async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
     tracing::trace!("Response {}", response.to_string());
 
     (status_code, response.to_string())
-
 }
 
 /// Metrics handler with DistributedRuntime uptime
