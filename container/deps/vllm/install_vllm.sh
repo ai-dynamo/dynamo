@@ -164,10 +164,10 @@ python setup.py install
 
 
 # Install Flash Infer
-cd $INSTALLATION_DIR
-git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
-cd flashinfer
-git checkout $FLASHINF_REF
-python -m pip install -v .
+#cd $INSTALLATION_DIR
+#git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
+#cd flashinfer
+#git checkout $FLASHINF_REF
+#python -m pip install -v .
 
 echo "vllm installation completed successfully"
