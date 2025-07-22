@@ -316,7 +316,7 @@ mod tests {
                         .unwrap(),
                 );
                 let cancel_token = CancellationToken::new();
-                let (addr, server_handle) =
+                let (addr, _) =
                     spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt)
                         .await
                         .unwrap();
@@ -349,17 +349,6 @@ mod tests {
                         status,
                         body
                     );
-                }
-                cancel_token.cancel();
-                match server_handle.await {
-                    Ok(_) => println!("[test] Server shut down normally"),
-                    Err(e) => {
-                        if e.is_panic() {
-                            println!("[test] Server panicked: {:?}", e);
-                        } else {
-                            println!("[test] Server cancelled: {:?}", e);
-                        }
-                    }
                 }
             })(),
         )
