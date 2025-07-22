@@ -165,6 +165,10 @@ impl RetryManager {
             Some(output) => output,
             None => return,
         };
+        if let Some(max_tokens) = self.request.stop_conditions.max_tokens {
+            self.request.stop_conditions.max_tokens =
+                Some(max_tokens.saturating_sub(llm_engine_output.token_ids.len() as u32));
+        }
         for token_id in llm_engine_output.token_ids.iter() {
             self.request.token_ids.push(*token_id);
         }
