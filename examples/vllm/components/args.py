@@ -73,6 +73,12 @@ def parse_args() -> Config:
     args = parser.parse_args()
     engine_args = AsyncEngineArgs.from_cli_args(args)
 
+    if engine_args.enable_prefix_caching is None:
+        logger.debug(
+            "--enable-prefix-caching or --no-enable-prefix-caching not specified. Defaulting to True (vLLM v1 default behavior)"
+        )
+        engine_args.enable_prefix_caching = True
+
     config = Config()
     config.model = args.model
     if args.served_model_name:
@@ -214,19 +220,23 @@ def overwrite_args(config):
         "task": "generate",
         "skip_tokenizer_init": True,
         "disable_log_requests": True,
-        "enable_prefix_caching": True,
         # KV routing relies on logging KV metrics
         "disable_log_stats": False,
-        # Always setting up kv transfer for disagg
         "kv_transfer_config": KVTransferConfig(
             kv_connector="NixlConnector", kv_role="kv_both"
         ),
-        "kv_events_config": KVEventsConfig(
-            enable_kv_cache_events=True,
-            publisher="zmq",
-            endpoint=f"tcp://*:{config.kv_port - dp_rank}",  # vLLM will iterate dp_rank for us, so we need to subtract it out TODO: fix in vLLM
-        ),
     }
+
+    if config.engine_args.enable_prefix_caching:
+        # If caching, send events
+        defaults |= {
+            # Always setting up kv events if enable prefix cache.
+            "kv_events_config": KVEventsConfig(
+                enable_kv_cache_events=True,
+                publisher="zmq",
+                endpoint=f"tcp://*:{config.kv_port - dp_rank}",  # vLLM will iterate dp_rank for us, so we need to subtract it out TODO: fix in vLLM
+            )
+        }
 
     set_side_channel_host_and_port(config)
 

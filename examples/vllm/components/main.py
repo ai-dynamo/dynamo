@@ -173,27 +173,31 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     logger.info(f"VllmWorker for {config.model} has been initialized")
 
-    # TODO: We start off with a valid endpoint, then we increment it by dp_rank
-    # May no longer be valid. Lets remove the increment behavior from vLLM and here
-    zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
-        config.engine_args.kv_events_config.endpoint,
-        data_parallel_rank=config.engine_args.data_parallel_rank or 0,
-    ).replace("*", "127.0.0.1")
-
-    zmq_config = ZmqKvEventPublisherConfig(
-        worker_id=generate_endpoint.lease_id(),
-        kv_block_size=vllm_config.cache_config.block_size,
-        zmq_endpoint=zmq_endpoint,
-    )
-    kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
-
-    logger.info(f"Reading Events from {zmq_endpoint}")
-
     handler = DecodeWorkerHandler(
         component, engine_client, default_sampling_params, prefill_worker_client
     )
-    handler.kv_publisher = kv_publisher
 
+    if config.engine_args.enable_prefix_caching:
+        # TODO: We start off with a valid endpoint, then we increment it by dp_rank
+        # May no longer be valid. Lets remove the increment behavior from vLLM and here
+        zmq_endpoint = ZmqEventPublisher.offset_endpoint_port(
+            config.engine_args.kv_events_config.endpoint,
+            data_parallel_rank=config.engine_args.data_parallel_rank or 0,
+        ).replace("*", "127.0.0.1")
+
+        zmq_config = ZmqKvEventPublisherConfig(
+            worker_id=generate_endpoint.lease_id(),
+            kv_block_size=vllm_config.cache_config.block_size,
+            zmq_endpoint=zmq_endpoint,
+        )
+        kv_publisher = ZmqKvEventPublisher(component=component, config=zmq_config)
+
+        logger.info(f"Reading Events from {zmq_endpoint}")
+
+        handler.kv_publisher = kv_publisher
+
+    print(f"FINAL: {engine_client.vllm_config.cache_config.enable_prefix_caching}")
+    print(f"FINAL: {engine_client.vllm_config.kv_events_config}")
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(handler.generate),
