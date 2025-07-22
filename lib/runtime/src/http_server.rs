@@ -13,12 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::collections::HashMap;
 use crate::config::HealthStatus;
-use serde_json::json;
 use crate::metrics::MetricsRegistry;
 use crate::traits::DistributedRuntimeProvider;
 use axum::{body, http::StatusCode, response::IntoResponse, routing::get, Router};
+use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -183,12 +183,12 @@ async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
     let system_health = state.drt().system_health.lock().await;
     let (mut healthy, endpoints) = system_health.get_health_status();
     let uptime = match state.uptime() {
-	Ok(uptime_state) => Some(uptime_state),
-	Err(e) => {
+        Ok(uptime_state) => Some(uptime_state),
+        Err(e) => {
             tracing::error!("Failed to get uptime: {}", e);
             healthy = false;
             None
-	}
+        }
     };
 
     let healthy_string = if healthy { "ready" } else { "notready" };
@@ -197,8 +197,6 @@ async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
     } else {
         StatusCode::SERVICE_UNAVAILABLE
     };
-
-
 
     let response = json!({
         "status": healthy_string,
@@ -209,8 +207,8 @@ async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
     tracing::trace!("Response {}", response.to_string());
 
     (status_code, response.to_string())
-/*
-	match state.uptime() {
+    /*
+    match state.uptime() {
         Ok(uptime) => {
         let response = format!("OK\nUptime: {} seconds\n", uptime.as_secs());
             (StatusCode::OK, response)
@@ -260,8 +258,8 @@ async fn create_test_drt_async() -> crate::DistributedRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rstest::rstest;
     use crate::metrics::MetricsRegistry;
+    use rstest::rstest;
     use std::sync::Arc;
     use tokio::time::{sleep, Duration};
 
@@ -399,10 +397,10 @@ uptime_seconds{namespace=\"http_server\"} 42
                         status,
                         body
                     );
-		}
+                }
             })(),
         )
-            .await;
+        .await;
     }
 
     #[cfg(feature = "integration")]
@@ -466,9 +464,9 @@ uptime_seconds{namespace=\"http_server\"} 42
                     println!("[test] Server panicked: {:?}", e);
                 } else {
                     println!("[test] Server cancelled: {:?}", e);
-		}
-	    }
-	}
+                }
+            }
+        }
     }
 
     #[cfg(feature = "integration")]

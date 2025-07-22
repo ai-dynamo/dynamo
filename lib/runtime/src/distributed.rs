@@ -85,7 +85,7 @@ impl DistributedRuntime {
         } else {
             None
         };
-	let starting_health_status = config.starting_health_status.clone();
+        let starting_health_status = config.starting_health_status.clone();
         let use_endpoint_health_status = config.use_endpoint_health_status.clone();
         let system_health = Arc::new(Mutex::new(SystemHealth::new(
             starting_health_status,
@@ -100,10 +100,10 @@ impl DistributedRuntime {
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
-	    prometheus_registries_by_prefix: Arc::new(std::sync::Mutex::new(HashMap::<
-                    String,
+            prometheus_registries_by_prefix: Arc::new(std::sync::Mutex::new(HashMap::<
+                String,
                 prometheus::Registry,
-		>::new())),
+            >::new())),
             system_health,
         };
 
