@@ -473,6 +473,8 @@ pub fn create_test_drt() -> crate::DistributedRuntime {
 mod test_prefixes {
     use super::create_test_drt;
     use super::*;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
     #[test]
     fn test_hierarchical_prefixes_and_parent_hierarchies() {
@@ -481,11 +483,17 @@ mod test_prefixes {
         // Create a distributed runtime for testing
         let drt = create_test_drt();
 
+        // Generate random namespace name
+        let mut hasher = DefaultHasher::new();
+        "test_namespace".hash(&mut hasher);
+        let random_num = hasher.finish();
+        let namespace_name = format!("mynamespace{}", random_num);
+
         // Create namespace
-        let ns = drt.namespace("mynamespace").unwrap();
+        let namespace = drt.namespace(&namespace_name).unwrap();
 
         // Create component
-        let component = ns.component("mycomponent").unwrap();
+        let component = namespace.component("mycomponent").unwrap();
 
         // Create endpoint
         let endpoint = component.endpoint("myendpoint");
@@ -506,24 +514,24 @@ mod test_prefixes {
 
         // Test Namespace hierarchy
         println!("\n=== Namespace ===");
-        println!("basename: '{}'", ns.basename());
-        println!("parent_hierarchy: {:?}", ns.parent_hierarchy());
-        println!("prefix: '{}'", ns.prefix());
+        println!("basename: '{}'", namespace.basename());
+        println!("parent_hierarchy: {:?}", namespace.parent_hierarchy());
+        println!("prefix: '{}'", namespace.prefix());
 
         assert_eq!(
-            ns.basename(),
-            "mynamespace",
-            "Namespace basename should be 'mynamespace'"
+            namespace.basename(),
+            namespace_name,
+            "Namespace basename should match the generated name"
         );
         assert_eq!(
-            ns.parent_hierarchy(),
+            namespace.parent_hierarchy(),
             vec![""],
             "Namespace parent hierarchy should be [\"\"]"
         );
         assert_eq!(
-            ns.prefix(),
-            "mynamespace",
-            "Namespace prefix should be 'mynamespace', because drt's prefix is empty"
+            namespace.prefix(),
+            namespace_name,
+            "Namespace prefix should match the generated name, because drt's prefix is empty"
         );
 
         // Test Component hierarchy
@@ -539,13 +547,13 @@ mod test_prefixes {
         );
         assert_eq!(
             component.parent_hierarchy(),
-            vec!["", "mynamespace"],
-            "Component parent hierarchy should be [\"\", \"mynamespace\"]"
+            vec!["", &namespace_name],
+            "Component parent hierarchy should contain the generated namespace name"
         );
         assert_eq!(
             component.prefix(),
-            "mynamespace_mycomponent",
-            "Component prefix should be 'mynamespace_mycomponent'"
+            format!("{}_mycomponent", namespace),
+            "Component prefix should be 'namespace_mycomponent'"
         );
 
         // Test Endpoint hierarchy
@@ -559,21 +567,25 @@ mod test_prefixes {
             "myendpoint",
             "Endpoint basename should be 'myendpoint'"
         );
-        assert_eq!(endpoint.parent_hierarchy(), vec!["", "mynamespace", "mycomponent"], "Endpoint parent hierarchy should be [\"\", \"mynamespace\", \"mynamespace_mycomponent\"]");
+        assert_eq!(
+            endpoint.parent_hierarchy(),
+            vec!["", &namespace_name, "mycomponent"],
+            "Endpoint parent hierarchy should contain the generated namespace name"
+        );
         assert_eq!(
             endpoint.prefix(),
-            "mynamespace_mycomponent_myendpoint",
-            "Endpoint prefix should be 'mynamespace_mycomponent_myendpoint'"
+            format!("{}_mycomponent_myendpoint", namespace),
+            "Endpoint prefix should be 'namespace_mycomponent_myendpoint'"
         );
 
         // Test hierarchy relationships
         println!("\n=== Hierarchy Relationships ===");
         assert!(
-            ns.parent_hierarchy().contains(&drt.basename()),
+            namespace.parent_hierarchy().contains(&drt.basename()),
             "Namespace should have DRT prefix in parent hierarchy"
         );
         assert!(
-            component.parent_hierarchy().contains(&ns.basename()),
+            component.parent_hierarchy().contains(&namespace.basename()),
             "Component should have Namespace prefix in parent hierarchy"
         );
         assert!(
@@ -590,7 +602,7 @@ mod test_prefixes {
             "DRT should have 0 parent hierarchy levels"
         );
         assert_eq!(
-            ns.parent_hierarchy().len(),
+            namespace.parent_hierarchy().len(),
             1,
             "Namespace should have 1 parent hierarchy level"
         );
@@ -609,7 +621,7 @@ mod test_prefixes {
         // Summary
         println!("\n=== Summary ===");
         println!("DRT prefix: '{}'", drt.prefix());
-        println!("Namespace prefix: '{}'", ns.prefix());
+        println!("Namespace prefix: '{}'", namespace.prefix());
         println!("Component prefix: '{}'", component.prefix());
         println!("Endpoint prefix: '{}'", endpoint.prefix());
         println!("All hierarchy assertions passed!");
@@ -621,13 +633,22 @@ mod test_simple_metricsregistry_trait {
     use super::create_test_drt;
     use super::*;
     use prometheus::Counter;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
     use std::sync::Arc;
 
     #[test]
     fn test_factory_methods_via_registry_trait() {
         // Setup real DRT and registry using the test-friendly constructor
         let drt = create_test_drt();
-        let namespace = drt.namespace("mynamespace").unwrap();
+
+        // Generate random namespace name
+        let mut hasher = DefaultHasher::new();
+        "test_factory_namespace".hash(&mut hasher);
+        let random_num = hasher.finish();
+        let namespace_name = format!("mynamespace{}", random_num);
+
+        let namespace = drt.namespace(&namespace_name).unwrap();
         let component = namespace.component("mycomponent").unwrap();
         let endpoint = component.endpoint("myendpoint");
 
@@ -643,10 +664,13 @@ mod test_simple_metricsregistry_trait {
         println!("Endpoint output:");
         println!("{}", endpoint_output);
 
-        let expected_endpoint_output = r#"# HELP mycounter A test counter
+        let expected_endpoint_output = format!(
+            r#"# HELP mycounter A test counter
 # TYPE mycounter counter
-mycounter{component="mycomponent",endpoint="myendpoint",namespace="mynamespace"} 123.456789
-"#;
+mycounter{{component="mycomponent",endpoint="myendpoint",namespace="{}"}} 123.456789
+"#,
+            namespace_name
+        );
 
         assert_eq!(
             endpoint_output, expected_endpoint_output,
@@ -669,13 +693,16 @@ mycounter{component="mycomponent",endpoint="myendpoint",namespace="mynamespace"}
         println!("Component output:");
         println!("{}", component_output);
 
-        let expected_component_output = r#"# HELP mycounter A test counter
+        let expected_component_output = format!(
+            r#"# HELP mycounter A test counter
 # TYPE mycounter counter
-mycounter{component="mycomponent",endpoint="myendpoint",namespace="mynamespace"} 123.456789
+mycounter{{component="mycomponent",endpoint="myendpoint",namespace="{}"}} 123.456789
 # HELP mygauge A test gauge
 # TYPE mygauge gauge
-mygauge{component="mycomponent",namespace="mynamespace"} 50000
-"#;
+mygauge{{component="mycomponent",namespace="{}"}} 50000
+"#,
+            namespace_name, namespace_name
+        );
 
         assert_eq!(
             component_output, expected_component_output,
@@ -697,16 +724,19 @@ mygauge{component="mycomponent",namespace="mynamespace"} 50000
         println!("Namespace output:");
         println!("{}", namespace_output);
 
-        let expected_namespace_output = r#"# HELP mycounter A test counter
+        let expected_namespace_output = format!(
+            r#"# HELP mycounter A test counter
 # TYPE mycounter counter
-mycounter{component="mycomponent",endpoint="myendpoint",namespace="mynamespace"} 123.456789
+mycounter{{component="mycomponent",endpoint="myendpoint",namespace="{}"}} 123.456789
 # HELP mygauge A test gauge
 # TYPE mygauge gauge
-mygauge{component="mycomponent",namespace="mynamespace"} 50000
+mygauge{{component="mycomponent",namespace="{}"}} 50000
 # HELP myintcounter A test int counter
 # TYPE myintcounter counter
-myintcounter{namespace="mynamespace"} 12345
-"#;
+myintcounter{{namespace="{}"}} 12345
+"#,
+            namespace_name, namespace_name, namespace_name
+        );
 
         assert_eq!(
             namespace_output, expected_namespace_output,
@@ -771,36 +801,39 @@ myintcounter{namespace="mynamespace"} 12345
         println!("DRT output:");
         println!("{}", drt_output);
 
-        let expected_drt_output = r#"# HELP mycounter A test counter
+        let expected_drt_output = format!(
+            r#"# HELP mycounter A test counter
 # TYPE mycounter counter
-mycounter{component="mycomponent",endpoint="myendpoint",namespace="mynamespace"} 123.456789
+mycounter{{component="mycomponent",endpoint="myendpoint",namespace="{}"}} 123.456789
 # HELP mycountervec A test counter vector
 # TYPE mycountervec counter
-mycountervec{method="GET",service="api",status="200"} 10
-mycountervec{method="POST",service="api",status="201"} 5
+mycountervec{{method="GET",service="api",status="200"}} 10
+mycountervec{{method="POST",service="api",status="201"}} 5
 # HELP mygauge A test gauge
 # TYPE mygauge gauge
-mygauge{component="mycomponent",namespace="mynamespace"} 50000
+mygauge{{component="mycomponent",namespace="{}"}} 50000
 # HELP myhistogram A test histogram
 # TYPE myhistogram histogram
-myhistogram_bucket{le="1"} 0
-myhistogram_bucket{le="2.5"} 2
-myhistogram_bucket{le="5"} 3
-myhistogram_bucket{le="10"} 3
-myhistogram_bucket{le="+Inf"} 3
+myhistogram_bucket{{le="1"}} 0
+myhistogram_bucket{{le="2.5"}} 2
+myhistogram_bucket{{le="5"}} 3
+myhistogram_bucket{{le="10"}} 3
+myhistogram_bucket{{le="+Inf"}} 3
 myhistogram_sum 7.5
 myhistogram_count 3
 # HELP myintcounter A test int counter
 # TYPE myintcounter counter
-myintcounter{namespace="mynamespace"} 12345
+myintcounter{{namespace="{}"}} 12345
 # HELP myintgauge A test int gauge
 # TYPE myintgauge gauge
 myintgauge 42
 # HELP myintgaugevec A test int gauge vector
 # TYPE myintgaugevec gauge
-myintgaugevec{instance="server1",service="api",status="active"} 10
-myintgaugevec{instance="server2",service="api",status="inactive"} 0
-"#;
+myintgaugevec{{instance="server1",service="api",status="active"}} 10
+myintgaugevec{{instance="server2",service="api",status="inactive"}} 0
+"#,
+            namespace_name, namespace_name, namespace_name
+        );
 
         assert_eq!(
             drt_output, expected_drt_output,
