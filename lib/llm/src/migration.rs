@@ -185,11 +185,14 @@ mod tests {
     use tokio::sync::mpsc;
 
     // Helper to create a mock preprocessed request
-    fn create_mock_request() -> PreprocessedRequest {
+    fn create_mock_request(max_tokens: u32) -> PreprocessedRequest {
         PreprocessedRequest {
             token_ids: vec![1, 2, 3],
             batch_token_ids: None,
-            stop_conditions: StopConditions::default(),
+            stop_conditions: StopConditions {
+                max_tokens: Some(max_tokens),
+                ..Default::default()
+            },
             sampling_options: SamplingOptions::default(),
             eos_token_ids: vec![],
             mdc_sum: None,
@@ -268,9 +271,18 @@ mod tests {
                 .token_ids
                 .len()
                 .saturating_sub(initial_tokens);
-            let _responses_remaining = self
-                .num_responses
-                .saturating_sub(responses_already_generated);
+
+            // Assert that max_tokens reflects the expected remaining tokens
+            let expected_max_tokens =
+                self.num_responses
+                    .saturating_sub(responses_already_generated) as u32;
+            assert_eq!(
+                preprocessed_request.stop_conditions.max_tokens,
+                Some(expected_max_tokens),
+                "max_tokens should be {} but got {:?}",
+                expected_max_tokens,
+                preprocessed_request.stop_conditions.max_tokens
+            );
 
             match &self.behavior {
                 MockBehavior::Success => {
@@ -458,7 +470,7 @@ mod tests {
     /// Expected behavior: All 10 responses should be received successfully.
     #[tokio::test]
     async fn test_retry_manager_no_migration() {
-        let request = create_mock_request();
+        let request = create_mock_request(10);
         let mock_engine = Arc::new(MockEngine::new(MockBehavior::Success, 10, 100));
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             mock_engine;
@@ -489,7 +501,7 @@ mod tests {
     /// Expected behavior: All 10 responses should be received successfully after retry.
     #[tokio::test]
     async fn test_retry_manager_new_request_migration() {
-        let request = create_mock_request();
+        let request = create_mock_request(10);
         let mock_engine = Arc::new(MockEngine::new(MockBehavior::FailThenSuccess, 10, 100));
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             mock_engine;
@@ -520,7 +532,7 @@ mod tests {
     /// Expected behavior: 5 responses from first stream + 5 responses from retry stream = 10 total.
     #[tokio::test]
     async fn test_retry_manager_ongoing_request_migration() {
-        let request = create_mock_request();
+        let request = create_mock_request(10);
         let mock_engine = Arc::new(MockEngine::new(
             MockBehavior::MidStreamFail { fail_after: 5 },
             10,
@@ -556,7 +568,7 @@ mod tests {
     /// Expected behavior: Should receive an error after all retries are exhausted, with the original error.
     #[tokio::test]
     async fn test_retry_manager_new_request_migration_indefinite_failure() {
-        let request = create_mock_request();
+        let request = create_mock_request(0);
         let mock_engine = Arc::new(MockEngine::new(MockBehavior::AlwaysFail, 0, 100));
         let next_generate: ServerStreamingEngine<PreprocessedRequest, Annotated<LLMEngineOutput>> =
             mock_engine;
@@ -576,7 +588,7 @@ mod tests {
     /// Expected behavior: Should receive some responses from first stream, then error after retries exhausted.
     #[tokio::test]
     async fn test_retry_manager_ongoing_request_migration_indefinite_failure() {
-        let request = create_mock_request();
+        let request = create_mock_request(10);
         let mock_engine = Arc::new(MockEngine::new(
             MockBehavior::MidStreamFailAlways { fail_after: 3 },
             10,
@@ -623,7 +635,7 @@ mod tests {
     /// Expected behavior: Should receive some responses from first stream, then error after retries exhausted.
     #[tokio::test]
     async fn test_retry_manager_ongoing_request_migration_indefinite_failure_stream_error() {
-        let request = create_mock_request();
+        let request = create_mock_request(10);
         let mock_engine = Arc::new(MockEngine::new(
             MockBehavior::MidStreamFailAlwaysStreamError { fail_after: 3 },
             10,
