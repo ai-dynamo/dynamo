@@ -319,9 +319,10 @@ uptime_seconds{namespace=\"http_server\"} 42
         // use reqwest for HTTP requests
         let cancel_token = CancellationToken::new();
         let drt = create_test_drt();
-        let (addr, server_handle) = spawn_http_server("127.0.0.1", 0, cancel_token.clone(), Arc::new(drt))
-            .await
-            .unwrap();
+        let (addr, server_handle) =
+            spawn_http_server("127.0.0.1", 0, cancel_token.clone(), Arc::new(drt))
+                .await
+                .unwrap();
         println!("[test] Waiting for server to start...");
         sleep(std::time::Duration::from_millis(1000)).await;
         println!("[test] Server should be up, starting requests...");
