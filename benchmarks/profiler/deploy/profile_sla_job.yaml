@@ -23,7 +23,7 @@ spec:
       serviceAccountName: profile-sla-sa
       containers:
       - name: profile-sla
-        image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.15
+        image: ${DOCKER_IMAGE}
         resources:
           requests:
             cpu: "1"
@@ -44,7 +44,7 @@ spec:
         command: ["python", "/workspace/benchmarks/profiler/profile_sla.py"]
         args:
           - --config
-          - /workspace/examples/vllm/deploy/disagg.yaml
+          - ${DGD_CONFIG_FILE}
           - --output-dir
           - /workspace/profiling_results
           - --namespace

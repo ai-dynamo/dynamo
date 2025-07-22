@@ -84,9 +84,7 @@ class DynamoDeploymentClient:
         """
         Get the service URL using Kubernetes service DNS.
         """
-        service_url = (
-            f"http://{self.service_name}.{self.namespace}.svc.cluster.local:{self.frontend_port}"
-        )
+        service_url = f"http://{self.service_name}.{self.namespace}.svc.cluster.local:{self.frontend_port}"
         print(f"Using service URL: {service_url}")
         return service_url
 
