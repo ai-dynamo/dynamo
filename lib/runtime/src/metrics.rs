@@ -458,25 +458,20 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
 }
 
 #[cfg(test)]
-mod test_helpers {
-    use super::*;
-    use std::sync::Arc;
-
-    /// Helper function to create a DRT instance for testing in sync contexts
-    /// Uses the test-friendly constructor without discovery
-    pub fn create_test_drt_sync() -> crate::DistributedRuntime {
-        let rt = crate::Runtime::from_settings().unwrap();
-        tokio::runtime::Runtime::new().unwrap().block_on(async {
-            crate::DistributedRuntime::from_settings(rt.clone())
-                .await
-                .unwrap()
-        })
-    }
+/// Helper function to create a DRT instance for testing
+/// Uses the test-friendly constructor without discovery
+pub fn create_test_drt() -> crate::DistributedRuntime {
+    let rt = crate::Runtime::single_threaded().unwrap();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        crate::DistributedRuntime::from_settings_without_discovery(rt.clone())
+            .await
+            .unwrap()
+    })
 }
 
 #[cfg(test)]
 mod test_prefixes {
-    use super::test_helpers::create_test_drt_sync;
+    use super::create_test_drt;
     use super::*;
 
     #[test]
@@ -484,7 +479,7 @@ mod test_prefixes {
         println!("=== Testing Names, Prefixes, and Parent Hierarchies ===");
 
         // Create a distributed runtime for testing
-        let drt = create_test_drt_sync();
+        let drt = create_test_drt();
 
         // Create namespace
         let ns = drt.namespace("mynamespace").unwrap();
@@ -623,7 +618,7 @@ mod test_prefixes {
 
 #[cfg(test)]
 mod test_simple_metricsregistry_trait {
-    use super::test_helpers::create_test_drt_sync;
+    use super::create_test_drt;
     use super::*;
     use prometheus::Counter;
     use std::sync::Arc;
@@ -631,7 +626,7 @@ mod test_simple_metricsregistry_trait {
     #[test]
     fn test_factory_methods_via_registry_trait() {
         // Setup real DRT and registry using the test-friendly constructor
-        let drt = create_test_drt_sync();
+        let drt = create_test_drt();
         let namespace = drt.namespace("mynamespace").unwrap();
         let component = namespace.component("mycomponent").unwrap();
         let endpoint = component.endpoint("myendpoint");

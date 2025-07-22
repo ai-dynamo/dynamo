@@ -211,15 +211,15 @@ async fn metrics_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
 // Test via: cargo test http_server --lib -- --ignored
 
 #[cfg(test)]
-async fn make_test_drt() -> Arc<crate::DistributedRuntime> {
-    // Since these tests are ignored, this function won't be called in normal test runs
-    // But if someone runs the ignored tests, they need NATS to be available
-    let rt = crate::Runtime::from_current().unwrap();
-    Arc::new(
-        crate::DistributedRuntime::from_settings_without_discovery(rt)
+/// Helper function to create a DRT instance for testing
+/// Uses the test-friendly constructor without discovery
+fn create_test_drt() -> crate::DistributedRuntime {
+    let rt = crate::Runtime::single_threaded().unwrap();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        crate::DistributedRuntime::from_settings_without_discovery(rt.clone())
             .await
-            .expect("NATS server must be running to run these tests"),
-    )
+            .unwrap()
+    })
 }
 
 #[cfg(test)]
@@ -263,8 +263,8 @@ mod tests {
     #[ignore = "Requires NATS server to be running"]
     async fn test_runtime_metrics_initialization_and_namespace() {
         // Test that metrics have correct namespace
-        let drt = make_test_drt().await;
-        let runtime_metrics = HttpServerState::new(drt).unwrap();
+        let drt = create_test_drt();
+        let runtime_metrics = HttpServerState::new(Arc::new(drt)).unwrap();
 
         // Initialize start time
         runtime_metrics.initialize_start_time().unwrap();
@@ -286,8 +286,8 @@ uptime_seconds{namespace=\"http_server\"} 42
     #[ignore = "Requires NATS server to be running"]
     async fn test_start_time_initialization() {
         // Test that start time can only be initialized once
-        let drt = make_test_drt().await;
-        let runtime_metrics = HttpServerState::new(drt).unwrap();
+        let drt = create_test_drt();
+        let runtime_metrics = HttpServerState::new(Arc::new(drt)).unwrap();
 
         // First initialization should succeed
         assert!(runtime_metrics.initialize_start_time().is_ok());
@@ -304,8 +304,8 @@ uptime_seconds{namespace=\"http_server\"} 42
     #[ignore = "Requires NATS server to be running"]
     async fn test_uptime_without_initialization() {
         // Test that uptime returns an error if start time is not initialized
-        let drt = make_test_drt().await;
-        let runtime_metrics = HttpServerState::new(drt).unwrap();
+        let drt = create_test_drt();
+        let runtime_metrics = HttpServerState::new(Arc::new(drt)).unwrap();
 
         // This should return an error because start time is not initialized
         let result = runtime_metrics.uptime();
@@ -318,8 +318,8 @@ uptime_seconds{namespace=\"http_server\"} 42
     async fn test_spawn_http_server_endpoints() {
         // use reqwest for HTTP requests
         let cancel_token = CancellationToken::new();
-        let drt = make_test_drt().await;
-        let (addr, server_handle) = spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt)
+        let drt = create_test_drt();
+        let (addr, server_handle) = spawn_http_server("127.0.0.1", 0, cancel_token.clone(), Arc::new(drt))
             .await
             .unwrap();
         println!("[test] Waiting for server to start...");
