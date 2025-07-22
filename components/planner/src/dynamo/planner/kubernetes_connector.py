@@ -78,10 +78,11 @@ class KubernetesConnector(PlannerConnector):
         """Get the name of the graph deployment"""
         return deployment["metadata"]["name"]
 
+
 if __name__ == "__main__":
     import argparse
     import asyncio
-    
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--namespace", type=str, default="dynamo")
     parser.add_argument("--action", type=str, choices=["add", "remove"])
