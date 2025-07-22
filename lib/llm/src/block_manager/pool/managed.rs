@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0/
+
 //! # KV Cache Block Pool Management
 //!
 //! This module provides the primary [`BlockPool`] structure for managing KV cache blocks.
