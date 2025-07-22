@@ -78,6 +78,8 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::entrypoint::EntrypointArgs>()?;
     m.add_class::<llm::entrypoint::EngineConfig>()?;
     m.add_class::<llm::entrypoint::EngineType>()?;
+    m.add_class::<llm::entrypoint::RouterConfig>()?;
+    m.add_class::<llm::entrypoint::KvRouterConfig>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?;
     m.add_class::<llm::preprocessor::OAIChatPreprocessor>()?;
@@ -129,7 +131,7 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
 }
 
 #[pyfunction]
-#[pyo3(signature = (model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None))]
+#[pyo3(signature = (model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0))]
 #[allow(clippy::too_many_arguments)]
 fn register_llm<'p>(
     py: Python<'p>,
@@ -140,6 +142,7 @@ fn register_llm<'p>(
     context_length: Option<u32>,
     kv_cache_block_size: Option<u32>,
     router_mode: Option<RouterMode>,
+    migration_limit: u32,
 ) -> PyResult<Bound<'p, PyAny>> {
     let model_type_obj = match model_type {
         ModelType::Chat => llm_rs::model_type::ModelType::Chat,
@@ -160,7 +163,8 @@ fn register_llm<'p>(
             .model_name(model_name)
             .context_length(context_length)
             .kv_cache_block_size(kv_cache_block_size)
-            .router_config(router_config);
+            .router_config(Some(router_config))
+            .migration_limit(Some(migration_limit));
         // Download from HF, load the ModelDeploymentCard
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
         // Advertise ourself on etcd so ingress can find us

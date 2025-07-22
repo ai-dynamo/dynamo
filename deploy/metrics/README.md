@@ -25,7 +25,7 @@ graph TD
 
 The dcgm-exporter service in the Docker Compose network is configured to use port 9401 instead of the default port 9400. This adjustment is made to avoid port conflicts with other dcgm-exporter instances that may be running simultaneously. Such a configuration is typical in distributed systems like SLURM.
 
-As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build containers with `--framework VLLM_V1` or `--framework TENSORRTLLM`.
+As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build containers with `--framework VLLM` or `--framework TENSORRTLLM`.
 
 ## Getting Started
 
@@ -57,7 +57,6 @@ As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build container
    - Start the [components/metrics](../../components/metrics/README.md) application to begin monitoring for metric events from dynamo workers and aggregating them on a Prometheus metrics endpoint: `http://localhost:9091/metrics`.
    - Uncomment the appropriate lines in prometheus.yml to poll port 9091.
    - Start worker(s) that publishes KV Cache metrics: [examples/rust/service_metrics/bin/server](../../lib/runtime/examples/service_metrics/README.md)` can populate dummy KV Cache metrics.
-   - For a real workflow with real data, see the KV Routing example in [examples/llm/utils/vllm.py](../../examples/llm/utils/vllm.py).
 
 
 ## Configuration

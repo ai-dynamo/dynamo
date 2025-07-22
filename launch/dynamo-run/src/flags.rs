@@ -20,6 +20,7 @@ use clap::ValueEnum;
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_llm::local_model::LocalModel;
+use dynamo_llm::mocker::protocols::MockEngineArgs;
 use dynamo_runtime::pipeline::RouterMode as RuntimeRouterMode;
 
 use crate::Output;
@@ -161,6 +162,11 @@ pub struct Flags {
     #[arg(long)]
     pub request_template: Option<PathBuf>,
 
+    /// How many times a request can be migrated to another worker if the HTTP server lost
+    /// connection to the current worker.
+    #[arg(long, value_parser = clap::value_parser!(u32).range(0..1024))]
+    pub migration_limit: Option<u32>,
+
     /// Everything after a `--`.
     /// These are the command line arguments to the python engine when using `pystr` or `pytok`.
     #[arg(index = 2, last = true, hide = true, allow_hyphen_values = true)]
@@ -178,6 +184,9 @@ impl Flags {
                 }
                 if self.kv_cache_block_size.is_some() {
                     anyhow::bail!("'--kv-cache-block-size' flag should only be used on the worker node, not on the ingress");
+                }
+                if self.migration_limit.is_some() {
+                    anyhow::bail!("'--migration-limit' flag should only be used on the worker node, not on the ingress");
                 }
             }
             Output::EchoFull => {}
@@ -212,6 +221,9 @@ impl Flags {
                     anyhow::bail!("--model-path should refer to a GGUF file. llama_cpp does not support safetensors.");
                 }
             }
+            Output::Mocker => {
+                // nothing to check here
+            }
         }
         Ok(())
     }
@@ -240,6 +252,15 @@ impl Flags {
         } else {
             Ok(None)
         }
+    }
+
+    pub fn mocker_config(&self) -> MockEngineArgs {
+        let Some(path) = &self.extra_engine_args else {
+            tracing::warn!("Did not specify extra engine args. Using default mocker args.");
+            return MockEngineArgs::default();
+        };
+        MockEngineArgs::from_json_file(path)
+            .unwrap_or_else(|e| panic!("Failed to build mocker engine args from {path:?}: {e}"))
     }
 }
 
