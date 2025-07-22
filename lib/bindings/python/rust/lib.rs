@@ -107,6 +107,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<context::PyContext>()?;
     m.add_class::<EtcdKvCache>()?;
     m.add_class::<ModelType>()?;
+    m.add_class::<ModelInput>()?;
     m.add_class::<llm::kv::ForwardPassMetrics>()?;
     m.add_class::<llm::kv::WorkerStats>()?;
     m.add_class::<llm::kv::KvStats>()?;
@@ -262,6 +263,13 @@ enum ModelType {
     Completion = 2,
     Backend = 3,
     Embedding = 4,
+}
+
+#[pyclass]
+#[derive(Clone)]
+enum ModelInput {
+    Text = 1,
+    Tokens = 2,
 }
 
 #[pymethods]
