@@ -68,12 +68,13 @@ pip install "ai-dynamo[all]"
 
 ### Building the Dynamo Base Image
 
-Although not needed for local development, deploying your Dynamo pipelines to Kubernetes will require you to build and push a Dynamo base image to your container registry. You can use any container registry of your choice, such as:
+Although not needed for local development, deploying your Dynamo pipelines to Kubernetes will require you to use a Dynamo base image to your container registry. You can use any container registry of your choice, such as:
 - Docker Hub (docker.io)
 - NVIDIA NGC Container Registry (nvcr.io)
 - Any private registry
 
-Here's how to build it:
+We publish our images in nvcr.io and you can use them.
+Alternatively you could build and push an image from source:
 
 ```bash
 ./container/build.sh
@@ -197,8 +198,6 @@ pip install .
 cd ../../../
 pip install ".[all]"
 
-# To test
-docker compose -f deploy/metrics/docker-compose.yml up -d
-cd examples/llm
-dynamo serve graphs.agg:Frontend -f configs/agg.yaml
+Follow the [Quickstart Guide](docs/guides/dynamo_deploy/quickstart.md)
+
 ```
