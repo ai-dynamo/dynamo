@@ -47,8 +47,8 @@ jobs:
         filters: |
           vllm:
             - 'container/Dockerfile.vllm'
-            - 'container/Dockerfile.vllm_nixl'
-            - 'examples/python/llm/**'
+            - 'container/Dockerfile.vllm_v1'
+            - 'examples/vllm/**'
             - 'examples/python_rs/llm/**'
             - 'container/deps/requirements.vllm.txt'
             - 'container/deps/vllm/**'
@@ -62,6 +62,11 @@ jobs:
             - 'tests/serve/test_trtllm.py'
           sdk:
             - 'deploy/**'
+          sglang:
+            - 'container/Dockerfile.sglang'
+            - 'container/Dockerfile.sglang-deepep'
+            - 'examples/sglang/**'
+            - 'container/build.sh'
     - name: Check if Validation Workflow has run
       id: check_workflow
       uses: actions/github-script@v6
@@ -102,6 +107,10 @@ jobs:
 
         if [ "${{ steps.src_changes.outputs.trtllm }}" == "true" ]; then
           ci_variables["RUN_TENSORRTLLM"]="true"
+        fi
+
+        if [ "${{ steps.src_changes.outputs.sglang }}" == "true" ]; then
+          ci_variables["RUN_SGLANG"]="true"
         fi
 
         if [ "${{ steps.src_changes.outputs.sdk }}" == "true" ]; then
