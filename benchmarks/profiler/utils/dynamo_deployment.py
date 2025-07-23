@@ -62,8 +62,10 @@ class DynamoDeploymentClient:
         self.deployment_name = deployment_name
         self.model_name = model_name
         self.service_name = service_name or f"{deployment_name}-frontend"
-        self.components = []  # Will store component names from CR
-        self.deployment_spec = None  # Will store the full deployment spec
+        self.components: list[str] = []  # Will store component names from CR
+        self.deployment_spec: Optional[
+            dict
+        ] = None  # Will store the full deployment spec
         self.base_log_dir = Path(base_log_dir) if base_log_dir else Path("logs")
         self.frontend_port = frontend_port
 

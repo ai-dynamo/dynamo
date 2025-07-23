@@ -42,7 +42,7 @@ def break_arguments(args: list[str]) -> list[str]:
     return ans
 
 
-def join_arguments(args: list[str]) -> str:
+def join_arguments(args: list[str]) -> list[str]:
     return [" ".join(args)]
 
 
