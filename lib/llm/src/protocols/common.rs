@@ -45,6 +45,10 @@ pub trait StopConditionsProvider {
     fn extract_stop_conditions(&self) -> Result<StopConditions>;
 }
 
+pub trait OutputOptionsProvider {
+    fn extract_output_options(&self) -> Result<OutputOptions>;
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 pub enum FinishReason {
     #[serde(rename = "eos")]
@@ -178,6 +182,9 @@ pub struct CompletionRequest {
     /// More documentation on how and on the order in which sampling options are applied
     /// are needed.
     pub sampling_options: SamplingOptions,
+
+    #[builder(default)]
+    pub output_options: OutputOptions,
 
     /// The computed checksum of the Model Deployment Card (MDC).
     #[builder(default)]
