@@ -63,17 +63,17 @@ def parse_endpoint(endpoint: str) -> List[str]:
 
 
 def base_parse_args(
-    parser: argparse.ArgumentParser, endpoint_selector: Callable = None
+    parser: argparse.ArgumentParser, endpoint_overwrite: Callable = None
 ) -> Tuple[argparse.Namespace, Config]:
     """
     Basic parsing logic for any dynamo vLLM deployment. The caller will use
-    'parser' and 'endpoint_selector' to apply use case specific customization.
+    'parser' and 'endpoint_overwrite' to apply use case specific customization.
 
     Args:
         parser (argparse.ArgumentParser): The argument parser which has use case
             specific arguments added.
-        endpoint_selector (Callable): A user provided function to return the dynamo
-            endpoint (dyn://namespace.component.endpoint) given the parsed arguments.
+        endpoint_overwrite (Callable): A user provided function to overwrite the endpoints
+            the given the parsed arguments. This function should return the overwritten args.
             A typical selector will check the worker type and return specific endpoints.
 
     Returns:
@@ -102,10 +102,10 @@ def base_parse_args(
         # This becomes an `Option` on the Rust side
         config.served_model_name = None
 
-    if endpoint_selector is not None:
-        endpoint = endpoint_selector(args)
-    else:
-        endpoint = args.endpoint
+    if endpoint_overwrite is not None:
+        args = endpoint_overwrite(args)
+
+    endpoint = args.endpoint
 
     endpoint_str = endpoint.replace("dyn://", "", 1)
     endpoint_parts = endpoint_str.split(".")

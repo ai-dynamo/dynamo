@@ -12,3 +12,5 @@ python3 components/processor.py --model llava-hf/llava-1.5-7b-hf --prompt-templa
 
 # run E/P/D workers
 python3 components/encode_worker.py --model llava-hf/llava-1.5-7b-hf
+
+python3 components/worker.py --model llava-hf/llava-1.5-7b-hf
