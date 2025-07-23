@@ -135,7 +135,10 @@ class HandlerBase:
         ignore_eos = request["stop_conditions"]["ignore_eos"]
         if ignore_eos:
             sampling_params.ignore_eos = ignore_eos
-            sampling_params.min_tokens = max_tokens
+        
+        min_tokens = request["stop_conditions"]["min_tokens"]
+        if min_tokens:
+            sampling_params.min_tokens = min_tokens
 
         # TODO: Instead of True, we should use streaming from the request.
         # However, currently dynamo run does not send streaming in the request.
