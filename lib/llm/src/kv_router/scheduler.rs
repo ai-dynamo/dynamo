@@ -177,7 +177,7 @@ impl KvScheduler {
                             request.respond(response);
                             continue 'outer;
                         }
-                        // NOTE: this is not actually hooked up
+                        // TODO: this is not actually hooked up
                         Err(KvSchedulerError::AllWorkersBusy) => {
                             tracing::trace!("all workers busy; waiting for more capacity");
                             tokio::time::sleep(Duration::from_millis(5)).await;
