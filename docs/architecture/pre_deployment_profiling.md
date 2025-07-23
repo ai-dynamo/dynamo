@@ -95,7 +95,8 @@ envsubst < profile_sla_rbac.yaml | kubectl apply -f -
 envsubst < profile_sla_binding.yaml | kubectl apply -f -
 
 export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.2 # or your own image
-export DGD_CONFIG_FILE=/workspace/components/backends/vllm/deploy/disagg.yaml # or your own disagg config file
+# NOTE: DGD_CONFIG_FILE is pointing to the location of the config file inside DOCKER_IMAGE
+export DGD_CONFIG_FILE=/workspace/components/backends/vllm/deploy/disagg.yaml # or your own disagg config file 
 envsubst < profile_sla_job.yaml | kubectl apply -f -
 ```
 
