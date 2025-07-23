@@ -66,7 +66,14 @@ pub async fn run(
     flags.validate(&local_model, &out_opt)?;
 
     // Make an engine from the local_model, flags and output.
-    let engine_config = engine_for(out_opt, flags.clone(), local_model, rt.clone()).await?;
+    let engine_config = engine_for(
+        runtime.primary_token(),
+        out_opt,
+        flags.clone(),
+        local_model,
+        rt.clone(),
+    )
+    .await?;
 
     //
     // Run in from an input
@@ -81,6 +88,7 @@ pub async fn run(
 async fn engine_for(
     cancel_token: CancellationToken,
     out_opt: Output,
+    flags: Flags,
     local_model: LocalModel,
     rt: Either<Runtime, DistributedRuntime>,
 ) -> anyhow::Result<EngineConfig> {
