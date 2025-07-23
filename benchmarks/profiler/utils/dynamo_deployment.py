@@ -132,12 +132,12 @@ class DynamoDeploymentClient:
                 print(f"Failed to create deployment {self.deployment_name}: {e}")
                 raise
 
-    async def wait_for_deployment_ready(self, timeout: int = 600):
+    async def wait_for_deployment_ready(self, timeout: int = 1800):
         """
         Wait for the custom resource to be ready.
 
         Args:
-            timeout: Maximum time to wait in seconds
+            timeout: Maximum time to wait in seconds, default to 30 mins (image pulling can take a while)
         """
         start_time = time.time()
         # TODO: A little brittle, also should output intermediate status every so often.
