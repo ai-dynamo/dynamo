@@ -1,7 +1,7 @@
 # Creating Kubernetes Deployments
 
-The scripts in the `launch` folder like [agg.sh](../../../examples/vllm/launch/agg.sh) demonstrate how you can serve your models locally.
-The corresponding YAML files like [agg.yaml](../../../examples/vllm/deploy/agg.yaml) show you how you could create a kubernetes deployment for your inference graph.
+The scripts in the `components/<backend>/launch` folder like [agg.sh](../../../components/backends/vllm/launch/agg.sh) demonstrate how you can serve your models locally.
+The corresponding YAML files like [agg.yaml](../../../components/backends/vllm/deploy/agg.yaml) show you how you could create a kubernetes deployment for your inference graph.
 
 
 This guide explains how to create your own deployment files.
@@ -10,16 +10,16 @@ This guide explains how to create your own deployment files.
 
 Select the architecture pattern as your template that best fits your use case.
 
-For example, when using the `vLLM` inference backend:
+For example, when using the `VLLM` inference backend:
 
 - **Development / Testing**
-  Use [`agg.yaml`](../../../examples/vllm/deploy/agg.yaml) as the base configuration.
+  Use [`agg.yaml`](../../../components/backends/vllm/deploy/agg.yaml) as the base configuration.
 
 - **Production with Load Balancing**
-  Use [`agg_router.yaml`](../../../examples/vllm/deploy/agg_router.yaml) to enable scalable, load-balanced inference.
+  Use [`agg_router.yaml`](../../../components/backends/vllm/deploy/agg_router.yaml) to enable scalable, load-balanced inference.
 
 - **High Performance / Disaggregated Deployment**
-  Use [`disagg_router.yaml`](../../../examples/vllm/deploy/disagg_router.yaml) for maximum throughput and modular scalability.
+  Use [`disagg_router.yaml`](../../../components/backends/vllm/deploy/disagg_router.yaml) for maximum throughput and modular scalability.
 
 
 ## Step 2: Customize the Template
@@ -79,15 +79,15 @@ Here's a template structure based on the examples:
         mainContainer:
           image: your-image
           args:
-            - "python3 components/main.py --model YOUR_MODEL --your-flags"
+            - "python -m dynamo.vllm --model YOUR_MODEL --your-flags"
 ```
 
 Consult the corresponding sh file. Each of the python commands to launch a component will go into your yaml spec under the
 `extraPodSpec: -> mainContainer: -> args:`
 
-The front end will launch `dynamo run in=http out=dyn &` or its python counterpart `python -m dynamo.frontend`
-Each worker will launch `dynamo run in=dyn//name out=sglang <model>`command or its python counterparts `"python3 components/*.py`
-See the [dynamo run guide](../dynamo_run.md) for details on how to run this command.
+The front end is launched with "python3 -m dynamo.frontend --http-port 8000 --router-mode kv"
+Each worker will launch `python -m dynamo.YOUR_INFERENCE_BACKEND --model YOUR_MODEL --your-flags `command.
+If you are a Dynamo contributor the [dynamo run guide](../dynamo_run.md) for details on how to run this command.
 
 
 ## Step 3: Key Customization Points
@@ -96,7 +96,7 @@ See the [dynamo run guide](../dynamo_run.md) for details on how to run this comm
 
 ```yaml
    args:
-     - "python3 components/main.py --model YOUR_MODEL_PATH --your-custom-flags"
+     - "python -m dynamo.vllm --model YOUR_MODEL --your-flag"
 ```
 
 ### Resource Allocation
