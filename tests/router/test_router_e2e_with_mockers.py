@@ -9,6 +9,7 @@ import os
 import aiohttp
 import pytest
 
+from tests.conftest import download_models
 from tests.utils.managed_process import ManagedProcess
 
 pytestmark = pytest.mark.pre_merge
@@ -20,39 +21,6 @@ NUM_MOCKERS = 8
 SPEEDUP_RATIO = 10.0
 NUM_REQUESTS = 100
 PORT = 8080  # Starting port for mocker instances
-
-
-# Add this function before the MockerProcess class
-def download_model():
-    """Download the model before starting any processes"""
-    hf_token = os.environ.get("HF_TOKEN")
-    if hf_token:
-        logger.info("HF_TOKEN found in environment")
-    else:
-        logger.warning(
-            "HF_TOKEN not found in environment. "
-            "Some models may fail to download or you may encounter rate limits."
-        )
-
-    try:
-        from huggingface_hub import snapshot_download
-
-        logger.info(f"Pre-downloading model: {MODEL_NAME}")
-        try:
-            snapshot_download(
-                repo_id=MODEL_NAME,
-                token=hf_token,
-            )
-            logger.info(f"Successfully pre-downloaded: {MODEL_NAME}")
-        except Exception as e:
-            logger.error(f"Failed to pre-download {MODEL_NAME}: {e}")
-            # Don't fail - let the test handle missing models
-
-    except ImportError:
-        logger.warning(
-            "huggingface_hub not installed. "
-            "Model will be downloaded during test execution."
-        )
 
 
 class MockerProcess(ManagedProcess):
@@ -123,8 +91,8 @@ def test_mocker_kv_router(request, runtime_services):
     This test doesn't require GPUs and runs quickly for pre-merge validation.
     """
 
-    # Download model before starting any processes
-    download_model()
+    # Download only the Qwen model for this test
+    download_models([MODEL_NAME])
 
     # runtime_services starts etcd and nats
     logger.info("Starting mocker KV router test")
