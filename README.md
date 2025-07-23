@@ -73,7 +73,7 @@ Although not needed for local development, deploying your Dynamo pipelines to Ku
 - NVIDIA NGC Container Registry (nvcr.io)
 - Any private registry
 
-We publish our images in nvcr.io and you can use them.
+We publish our images in [nvcr.io](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime)  and you can use them.
 Alternatively you could build and push an image from source:
 
 ```bash
