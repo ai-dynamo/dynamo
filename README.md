@@ -102,7 +102,7 @@ If the model is not available locally it will be downloaded from HuggingFace and
 
 You can also pass a local path: `python -m dynamo.sglang.worker --model-path ~/llms/Qwen3-0.6B`
 
-### Running and Interacting with an LLM Locally
+### Running an LLM API server
 
 Dynamo provides a simple way to spin up a local set of inference components including:
 
