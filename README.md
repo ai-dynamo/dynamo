@@ -84,8 +84,10 @@ docker push <your-registry>/dynamo-base:latest-vllm
 ```
 
 Notes about builds for specific frameworks:
-- For specific details on the `--framework vllm` build, see [here](examples/vllm/README.md).
-- For specific details on the `--framework tensorrtllm` build, see [here](examples/tensorrt_llm/README.md).
+- For specific details on the `--framework vllm` build [read about the VLLM backend](components/backends/vllm/README.md)
+.
+- For specific details on the `--framework tensorrtllm` build, see [Read about the TensorRT-LLM backend](components/backends/trtllm/README.md)
+.
 
 Note about AWS environments:
 - If deploying Dynamo in AWS, make sure to build the container with EFA support using the `--make-efa` flag.

@@ -187,19 +187,6 @@ We provide a script to uninstall CRDs should you need a clean start.
 
 ## Explore Examples
 
-Pick your deployment destination.
-
-If local
-
-```bash
-export DYNAMO_CLOUD=http://localhost:8080
-```
-
-If kubernetes
-```bash
-export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com
-```
-
 If deploying to Kubernetes, create a Kubernetes secret containing your sensitive values if needed:
 
 ```bash
