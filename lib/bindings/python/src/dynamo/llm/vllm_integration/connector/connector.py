@@ -42,7 +42,9 @@ class DynamoKvbmConnector(KVConnectorBase_V1):
                 self._vllm_config.parallel_config,
             )
 
-            leader = KvbmLeader(bytes_per_block, world_size)
+            total_bytes = bytes_per_block * world_size
+
+            leader = KvbmLeader(total_bytes, world_size)
 
             block_manager = BlockManager(
                 0,
