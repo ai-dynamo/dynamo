@@ -66,15 +66,14 @@ If you launched the frontend in `interactive` mode, simply start typing and hit 
 If you launched the frontend in HTTP mode, you can send requests via `curl`, or any OpenAI compatible client program or library.
 
 ```bash
-curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+curl -X POST http://localhost:8000/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{
     "model": "Qwen/Qwen3-0.6B",
     "messages": [
-    {
-        "role": "user",
-        "content": "Tell me a story about a brave cat"
-    }
+      { "role": "user", "content": "Tell me a story about a brave cat" }
     ],
-    "stream":false,
+    "stream": false,
     "max_tokens": 1028
   }'
 ```
