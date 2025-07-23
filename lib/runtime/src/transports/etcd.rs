@@ -347,8 +347,6 @@ impl Client {
 
         self.runtime.secondary().spawn(async move {
             for kv in kvs {
-                let key_str = kv.key_str();
-                tracing::info!("{key_str:?}");
                 if tx.send(WatchEvent::Put(kv)).await.is_err() {
                     // receiver is already closed
                     return;
@@ -370,9 +368,6 @@ impl Client {
                             let Some(kv) = event.kv() else {
                                 continue; // Skip events with no KV
                             };
-
-                            let key_str = kv.key_str();
-                            tracing::info!("{key_str:?}");
 
                             // Handle based on event type
                             match event.event_type() {
