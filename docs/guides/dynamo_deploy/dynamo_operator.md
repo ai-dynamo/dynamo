@@ -137,7 +137,6 @@ This section describes how to use FluxCD for GitOps-based deployment of Dynamo i
 - A Kubernetes cluster with [Dynamo Cloud](dynamo_cloud.md) installed
 - [FluxCD](https://fluxcd.io/flux/installation/) installed in your cluster
 - A Git repository to store your deployment configurations
-- [Dynamo CLI](../../get_started.md#alternative-setup-manual-installation) installed locally
 
 ### Workflow Overview
 
