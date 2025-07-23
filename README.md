@@ -271,3 +271,7 @@ Set the environment variable `DYN_LOG` to adjust the logging level; for example,
 
 If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions see the [ReadMe](.devcontainer/README.md) for more details.
 
+### Deployment to Kubernetes
+
+Follow the [Quickstart Guide](docs/guides/dynamo_deploy/quickstart.md) to deploy to Kubernetes.
+
