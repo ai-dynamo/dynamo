@@ -1,45 +1,52 @@
-from dataclasses import field
-from pydantic.dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Optional
+
 import torch
-from typing import Any, Optional, TYPE_CHECKING
-
-from dynamo.llm import KvbmLeader, KvbmWorker, BlockManager
-from dynamo._core import _vllm_connector_integration
-KvbmConnectorLeader = _vllm_connector_integration.KvbmConnectorLeader
-
-from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorBase_V1, KVConnectorRole, KVConnectorMetadata
+from pydantic.dataclasses import dataclass
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorBase_V1,
+    KVConnectorMetadata,
+    KVConnectorRole,
+)
 from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.worker.cache_engine import CacheEngine
+
+from dynamo._core import _vllm_connector_integration
+from dynamo.llm import BlockManager, KvbmLeader, KvbmWorker
+
+KvbmConnectorLeader = _vllm_connector_integration.KvbmConnectorLeader
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.config import VllmConfig
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
-    from vllm.v1.request import Request
     from vllm.v1.core.sched.output import SchedulerOutput
+    from vllm.v1.request import Request
 
 
 @dataclass
 class DynamoKvbmConnectorMetadata(KVConnectorMetadata):
     ...
 
-class DynamoKvbmConnector(KVConnectorBase_V1):
 
+class DynamoKvbmConnector(KVConnectorBase_V1):
     def __init__(self, vllm_config: "VllmConfig", role: "KVConnectorRole"):
         super().__init__(vllm_config, role)
-        # We can immediately initialize our leader here. 
+        # We can immediately initialize our leader here.
         if role == KVConnectorRole.SCHEDULER:
             world_size = self._vllm_config.parallel_config.world_size
 
-            # TODO: Don't hardcode this!!!!!! 
-            # This is a temp workaround. Just set the total number of blocks instead.
-            bytes_per_block = 50000000
+            bytes_per_block = CacheEngine.get_cache_block_size(
+                self._vllm_config.cache_config,
+                self._vllm_config.model_config,
+                self._vllm_config.parallel_config,
+            )
 
             leader = KvbmLeader(bytes_per_block, world_size)
 
             block_manager = BlockManager(
                 0,
-                leader, 
+                leader,
                 self._vllm_config.cache_config.block_size,
             )
 
@@ -54,14 +61,18 @@ class DynamoKvbmConnector(KVConnectorBase_V1):
     # ==============================
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        assert self.role == KVConnectorRole.WORKER, "Only worker role can register KV caches"
+        assert (
+            self.role == KVConnectorRole.WORKER
+        ), "Only worker role can register KV caches"
 
         cache_config = self._vllm_config.cache_config
 
         shape = list(kv_caches.values())[0].shape
 
         if not all(t.shape == shape for t in kv_caches.values()):
-            raise NotImplementedError("Hybrid models with different KV cache shapes are not supported yet.")
+            raise NotImplementedError(
+                "Hybrid models with different KV cache shapes are not supported yet."
+            )
 
         # TODO: Assume the block dimension is within the first 2. This will break if you're doing something weird like having 1 or 2 device blocks.
         num_device_blocks = max(shape[0], shape[1])
@@ -77,7 +88,7 @@ class DynamoKvbmConnector(KVConnectorBase_V1):
 
         # TODO: We can actually just initialize our connection to the leader from the kv transfer params port argument.
         self.worker = KvbmWorker(
-            num_device_blocks, 
+            num_device_blocks,
             page_size,
             tensors,
             device_id=device_id,
@@ -85,8 +96,7 @@ class DynamoKvbmConnector(KVConnectorBase_V1):
             dtype_width_bytes=kv_cache_dtype.itemsize,
         )
 
-    def start_load_kv(self, forward_context: "ForwardContext",
-                      **kwargs) -> None:
+    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
         """
         Start loading the KV cache from the connector to vLLM's paged
         KV buffer. This is called from the forward context before the
@@ -95,9 +105,9 @@ class DynamoKvbmConnector(KVConnectorBase_V1):
             forward_context (ForwardContext): the forward context.
             **kwargs: additional arguments for the load operation
         Note:
-            The number of elements in kv_caches and layer_names should be 
+            The number of elements in kv_caches and layer_names should be
             the same.
-            
+
         """
         pass
 
@@ -106,22 +116,27 @@ class DynamoKvbmConnector(KVConnectorBase_V1):
         Block until the KV for a specific layer is loaded into vLLM's
         paged buffer. This is called from within attention layer to ensure
         async copying from start_load_kv is complete.
-        
+
         This interface will be useful for layer-by-layer pipelining.
         Args:
             layer_name: the name of that layer
         """
         pass
 
-    def save_kv_layer(self, layer_name: str, kv_layer: torch.Tensor,
-                      attn_metadata: "AttentionMetadata", **kwargs) -> None: # type: ignore
+    def save_kv_layer(
+        self,
+        layer_name: str,
+        kv_layer: torch.Tensor,
+        attn_metadata: "AttentionMetadata",
+        **kwargs,
+    ) -> None:  # type: ignore
         """
-        Start saving a layer of KV cache from vLLM's paged buffer 
+        Start saving a layer of KV cache from vLLM's paged buffer
         to the connector. This is called from within attention layer to
         enable async copying during execution.
         Args:
             layer_name (str): the name of the layer.
-            kv_layer (torch.Tensor): the paged KV buffer of the current 
+            kv_layer (torch.Tensor): the paged KV buffer of the current
                 layer in vLLM.
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
@@ -167,25 +182,25 @@ class DynamoKvbmConnector(KVConnectorBase_V1):
         """
         Get number of new tokens that can be loaded from the
         external KV cache beyond the num_computed_tokens.
-        
+
         Args:
             request (Request): the request object.
             num_computed_tokens (int): the number of locally
                 computed tokens for this request
         Returns:
             A tuple with the following elements:
-                - The number of tokens that can be loaded from the 
+                - The number of tokens that can be loaded from the
                   external KV cache beyond what is already computed.
                 - `True` if external KV cache tokens will be loaded
                   asynchronously (between scheduler steps). Must be
                   'False' if the first element is 0.
         """
-        tokens = request.all_token_ids
+        _tokens = request.all_token_ids
         return 0, False
 
-    def update_state_after_alloc(self, request: "Request",
-                                 blocks: "KVCacheBlocks",
-                                 num_external_tokens: int):
+    def update_state_after_alloc(
+        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+    ):
         """
         Update KVConnector state after block allocation.
         If get_num_new_matched_tokens previously returned True for a
@@ -202,7 +217,8 @@ class DynamoKvbmConnector(KVConnectorBase_V1):
         pass
 
     def build_connector_meta(
-            self, scheduler_output: "SchedulerOutput") -> "KVConnectorMetadata":
+        self, scheduler_output: "SchedulerOutput"
+    ) -> "KVConnectorMetadata":
         """
         Build the connector metadata for this step.
         This function should NOT modify fields in the scheduler_output.
