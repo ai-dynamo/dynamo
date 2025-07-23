@@ -328,6 +328,7 @@ where
         &self,
         mut pending_transfer: PendingTransfer<Source, Target, Locality, Metadata>,
     ) -> Result<()> {
+        let _span = nvtx::range!("Enqueue Transfer");
         let notify = pending_transfer
             .sources
             .write_to(&mut pending_transfer.targets, self.transfer_ctx.clone())?;

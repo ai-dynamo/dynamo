@@ -48,6 +48,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
     ) {
         match req {
             PriorityRequest::AllocateBlocks(req) => {
+                let _span = nvtx::range!("Allocate Blocks");
                 let (count, resp_tx) = req.dissolve();
                 let blocks = self.allocate_blocks(count);
                 if resp_tx.send(blocks).is_err() {
@@ -55,6 +56,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                 }
             }
             PriorityRequest::RegisterBlocks(req) => {
+                let _span = nvtx::range!("Register Blocks");
                 let ((blocks, duplication_setting), resp_tx) = req.dissolve();
                 let immutable_blocks = self
                     .register_blocks(blocks, duplication_setting, return_rx)
@@ -64,6 +66,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                 }
             }
             PriorityRequest::MatchSequenceHashes(req) => {
+                let _span = nvtx::range!("Match Sequence Hashes");
                 let (sequence_hashes, resp_tx) = req.dissolve();
                 let immutable_blocks = self.match_sequence_hashes(sequence_hashes, return_rx).await;
                 if resp_tx.send(Ok(immutable_blocks)).is_err() {
@@ -71,6 +74,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                 }
             }
             PriorityRequest::TouchBlocks(req) => {
+                let _span = nvtx::range!("Touch Blocks");
                 let (sequence_hashes, resp_tx) = req.dissolve();
                 self.touch_blocks(&sequence_hashes, return_rx).await;
                 if resp_tx.send(Ok(())).is_err() {
@@ -78,6 +82,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                 }
             }
             PriorityRequest::Reset(req) => {
+                let _span = nvtx::range!("Reset");
                 let (_req, resp_tx) = req.dissolve();
                 let result = self.inactive.reset();
                 if resp_tx.send(result).is_err() {
@@ -85,6 +90,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
                 }
             }
             PriorityRequest::ReturnBlock(req) => {
+                let _span = nvtx::range!("Return Block");
                 let (returnable_blocks, resp_tx) = req.dissolve();
                 for block in returnable_blocks {
                     self.return_block(block);

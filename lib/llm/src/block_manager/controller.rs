@@ -95,7 +95,7 @@ pub enum ResetResponse {
     ResetBlocks(ResetBlocksResponse),
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing-full", feature = "testing-etcd"))]
 mod tests {
     use crate::tokens::Tokens;
 

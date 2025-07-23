@@ -154,6 +154,7 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManager<Localit
         blocks: Vec<ImmutableBlock<S, Locality, Metadata>>,
         targets: Option<Vec<MutableBlock<DeviceStorage, Locality, Metadata>>>,
     ) -> oneshot::Receiver<BlockResult<DeviceStorage, Locality, Metadata>> {
+        let _span = nvtx::range!("Onboard Blocks");
         self.state.onboard_blocks(blocks, targets)
     }
 }

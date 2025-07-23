@@ -54,6 +54,8 @@ pub mod state;
 use active::ActiveBlockPool;
 use inactive::InactiveBlockPool;
 
+use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
+
 #[derive(Builder, Dissolve)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
 pub struct ManagedBlockPoolArgs<S: Storage, L: LocalityProvider, M: BlockMetadata> {
@@ -103,7 +105,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPoolArgsBuil
             async_runtime,
             metrics,
             default_duplication_setting,
-        );
+        )?;
 
         Ok(pool)
     }
@@ -185,50 +187,51 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
         async_runtime: Handle,
         metrics: Arc<PoolMetrics>,
         default_duplication_setting: BlockRegistrationDuplicationSetting,
-    ) -> Self {
-        let (pool, progress_engine) = Self::with_progress_engine(
+    ) -> anyhow::Result<Self> {
+        let (pool, mut progress_engine) = Self::with_progress_engine(
             event_manager,
-            cancel_token,
+            cancel_token.clone(),
             blocks,
             global_registry,
-            async_runtime,
+            async_runtime.clone(),
             metrics,
             default_duplication_setting,
         );
 
-        // pool.runtime.handle().spawn(async move {
-        //     let mut progress_engine = progress_engine;
-        //     tracing::debug!("starting progress engine");
-        //     while progress_engine.step().await {
-        //         tracing::trace!("progress engine step");
-        //     }
-        // });
-
-        let thread_name = format!(
+        let task_name = format!(
             "block-pool-{}-{}",
             short_type_name::<S>(),
             short_type_name::<L>()
         );
 
-        std::thread::Builder::new()
-            .name(thread_name)
-            .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("Failed to build Tokio runtime for block pool progress engine");
+        CriticalTaskExecutionHandle::new_with_runtime(
+            move |cancel_token| async move {
+                tracing::debug!("starting progress engine");
+                loop {
+                    tokio::select! {
+                        biased;
 
-                runtime.block_on(async move {
-                    let mut progress_engine = progress_engine;
-                    tracing::debug!("starting progress engine");
-                    while progress_engine.step().await {
-                        tracing::trace!("progress engine step");
+                        _ = cancel_token.cancelled() => {
+                            break;
+                        }
+
+                        res = progress_engine.step() => {
+                            tracing::trace!("progress engine step");
+                            if !res {
+                                break;
+                            }
+                        }
                     }
-                });
-            })
-            .expect("Failed to spawn block pool progress engine thread");
+                }
+                Ok(())
+            },
+            cancel_token,
+            task_name.as_str(),
+            &async_runtime,
+        )?
+        .detach();
 
-        pool
+        Ok(pool)
     }
 
     fn with_progress_engine(
@@ -391,6 +394,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M>
         &self,
         count: usize,
     ) -> Result<Vec<MutableBlock<S, L, M>>, BlockPoolError> {
+        let _span = nvtx::range!("Allocate Blocks Request");
         self._allocate_blocks(count)?
             .await
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
@@ -400,6 +404,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M>
         &self,
         count: usize,
     ) -> Result<Vec<MutableBlock<S, L, M>>, BlockPoolError> {
+        let _span = nvtx::range!("Allocate Blocks Request");
         self._allocate_blocks(count)?
             .blocking_recv()
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
@@ -419,6 +424,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M>
         &self,
         blocks: Vec<MutableBlock<S, L, M>>,
     ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
+        let _span = nvtx::range!("Register Blocks Request");
         self._register_blocks(blocks, self.default_duplication_setting)?
             .await
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
@@ -428,6 +434,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M>
         &self,
         blocks: Vec<MutableBlock<S, L, M>>,
     ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
+        let _span = nvtx::range!("Register Blocks Request");
         self._register_blocks(blocks, self.default_duplication_setting)?
             .blocking_recv()
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
@@ -447,6 +454,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M>
         &self,
         sequence_hashes: &[SequenceHash],
     ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
+        let _span = nvtx::range!("Match Sequence Hashes Request");
         self._match_sequence_hashes(sequence_hashes)?
             .await
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
@@ -456,12 +464,14 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M>
         &self,
         sequence_hashes: &[SequenceHash],
     ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
+        let _span = nvtx::range!("Match Sequence Hashes Request");
         self._match_sequence_hashes(sequence_hashes)?
             .blocking_recv()
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
     }
 
     async fn touch_blocks(&self, sequence_hashes: &[SequenceHash]) -> Result<(), BlockPoolError> {
+        let _span = nvtx::range!("Touch Blocks Request");
         self._touch_blocks(sequence_hashes)?
             .await
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
@@ -471,18 +481,21 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M>
         &self,
         sequence_hashes: &[SequenceHash],
     ) -> Result<(), BlockPoolError> {
+        let _span = nvtx::range!("Touch Blocks Request");
         self._touch_blocks(sequence_hashes)?
             .blocking_recv()
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
     }
 
     async fn try_return_block(&self, block: OwnedBlock<S, L, M>) -> BlockPoolResult<()> {
+        let _span = nvtx::range!("Try Return Block Request");
         self._try_return_block(block)?
             .await
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
     }
 
     fn try_return_block_blocking(&self, block: OwnedBlock<S, L, M>) -> BlockPoolResult<()> {
+        let _span = nvtx::range!("Try Return Block Request");
         self._try_return_block(block)?
             .blocking_recv()
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?

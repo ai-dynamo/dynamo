@@ -383,7 +383,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             tokio::select! {
                 _ = cancellation_token.cancelled() => return Ok::<(), anyhow::Error>(()),
                 Some(request) = onboard_rx.recv() => {
-
+                    let _span = nvtx::range!("Onboard Worker");
                     pool_metrics
                         .gauge("onboard_queue_size")
                         .set(onboard_rx.len() as i64);
@@ -490,6 +490,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         blocks: Vec<ImmutableBlock<S, Locality, Metadata>>,
         targets: Option<Vec<MutableBlock<DeviceStorage, Locality, Metadata>>>,
     ) -> oneshot::Receiver<BlockResult<DeviceStorage, Locality, Metadata>> {
+        let _span = nvtx::range!("Onboard Blocks Manager");
         let (tx, rx) = oneshot::channel();
         for block in &blocks {
             match block.state() {
