@@ -1,4 +1,3 @@
-# tests/serve/test_mocker_kv_router.py
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
@@ -81,25 +80,18 @@ class MockerProcess(ManagedProcess):
             "--extra-engine-args",
             mocker_args_file,
             "--endpoint",
-            endpoint,  # Use dynamo endpoint instead of HTTP port
+            endpoint,
         ]
 
         super().__init__(
             command=command,
             timeout=60,
-            display_output=False,  # Changed from False to True
-            health_check_ports=[],  # No HTTP ports to check
-            health_check_urls=[],  # No HTTP URLs to check
+            display_output=False,
+            health_check_ports=[],
+            health_check_urls=[],
             log_dir=request.node.name,
         )
         self.endpoint = endpoint
-
-    def _check_model(self, response):
-        """Check if the model is loaded correctly"""
-        if response.status_code == 200:
-            data = response.json()
-            return data.get("data", [{}])[0].get("id") == MODEL_NAME
-        return False
 
 
 class KVRouterProcess(ManagedProcess):
@@ -119,7 +111,7 @@ class KVRouterProcess(ManagedProcess):
         super().__init__(
             command=command,
             timeout=60,
-            display_output=False,  # Changed from False to True
+            display_output=False,
             health_check_ports=[frontend_port],
             health_check_urls=[
                 (f"http://localhost:{frontend_port}/v1/models", self._check_ready)
@@ -133,9 +125,6 @@ class KVRouterProcess(ManagedProcess):
         return response.status_code == 200
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        # Clean up config file
-        if hasattr(self, "config_file") and os.path.exists(self.config_file.name):
-            os.unlink(self.config_file.name)
         super().__exit__(exc_type, exc_val, exc_tb)
 
 
