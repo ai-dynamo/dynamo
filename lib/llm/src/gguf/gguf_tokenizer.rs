@@ -266,7 +266,6 @@ fn bpe_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind, AddedTokens
         false, true, true,
     )));
     if add_bos_token.is_some_and(|x| x) {
-        // let mut special_toks = HashMap::new();
         // Use ahash::AHashMap so that we satisfy Into<AHashMap<_>> bounds
         let mut special_toks: AHashMap<String, processors::template::SpecialToken> =
             AHashMap::new();
