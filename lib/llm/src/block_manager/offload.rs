@@ -66,9 +66,11 @@ use std::any::Any;
 
 use std::collections::BTreeSet;
 
+mod filter;
 mod pending;
 pub mod request;
 
+use filter::{FrequencyFilter, OffloadFilter};
 use pending::{LocalTransferManager, PendingTransfer, TransferBatcher, TransferManager};
 use request::{BlockResult, OffloadRequest, OffloadRequestKey, OnboardRequest};
 
@@ -158,6 +160,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 &async_rt_handle,
                 cancellation_token.clone(),
             )),
+            None,
             device_metrics.clone(),
             cancellation_token.clone(),
         );
@@ -174,6 +177,9 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             cuda_ctx.new_stream()?,
             async_rt_handle.clone(),
         ));
+
+        let disk_offload_filter =
+            FrequencyFilter::new(10, cancellation_token.clone(), async_rt_handle.clone())?;
 
         // Host -> Disk offload
         let host_to_disk_task = OffloadManager::offload_worker(
@@ -193,6 +199,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 &async_rt_handle,
                 cancellation_token.clone(),
             )),
+            Some(Arc::new(disk_offload_filter)),
             host_metrics.clone(),
             cancellation_token.clone(),
         );
@@ -270,6 +277,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         target_pool: Option<Arc<dyn BlockPool<Target, Locality, Metadata>>>,
         mut offload_rx: mpsc::UnboundedReceiver<OffloadRequest<Source, Locality, Metadata>>,
         transfer_manager: Arc<dyn TransferManager<Source, Target, Locality, Metadata>>,
+        offload_filter: Option<Arc<dyn OffloadFilter>>,
         pool_metrics: Arc<PoolMetrics>,
         cancellation_token: CancellationToken,
     ) -> Result<()> {
@@ -322,6 +330,12 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                         .await
                     {
                         if !blocks.is_empty() {
+                            continue;
+                        }
+                    }
+
+                    if let Some(offload_filter) = offload_filter.as_ref() {
+                        if !offload_filter.should_offload(request.sequence_hash) {
                             continue;
                         }
                     }
