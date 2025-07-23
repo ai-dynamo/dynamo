@@ -135,7 +135,7 @@ class HandlerBase:
         ignore_eos = request["stop_conditions"]["ignore_eos"]
         if ignore_eos:
             sampling_params.ignore_eos = ignore_eos
-        
+
         min_tokens = request["stop_conditions"]["min_tokens"]
         if min_tokens:
             sampling_params.min_tokens = min_tokens
