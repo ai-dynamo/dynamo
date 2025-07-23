@@ -41,12 +41,7 @@ spec:
           image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.4
           workingDir: /workspace/components/backends/vllm
           args:
-            - dynamo
-            - run
-            - in=http
-            - out=dyn
-            - --http-port
-            - "8000"
+            - "python3 -m dynamo.frontend --http-port 8000"
     VllmDecodeWorker:
       dynamoNamespace: vllm-v1-disagg
       envFromSecret: hf-token-secret

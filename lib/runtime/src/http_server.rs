@@ -13,9 +13,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::config::HealthStatus;
 use crate::metrics::MetricsRegistry;
 use crate::traits::DistributedRuntimeProvider;
 use axum::{body, http::StatusCode, response::IntoResponse, routing::get, Router};
+use serde_json::json;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Instant;
@@ -174,20 +177,35 @@ pub async fn spawn_http_server(
 }
 
 /// Health handler
+#[tracing::instrument(skip_all, level = "trace")]
 async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
-    match state.uptime() {
-        Ok(uptime) => {
-            let response = format!("OK\nUptime: {} seconds\n", uptime.as_secs());
-            (StatusCode::OK, response)
-        }
+    let system_health = state.drt().system_health.lock().await;
+    let (mut healthy, endpoints) = system_health.get_health_status();
+    let uptime = match state.uptime() {
+        Ok(uptime_state) => Some(uptime_state),
         Err(e) => {
             tracing::error!("Failed to get uptime: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to get uptime".to_string(),
-            )
+            healthy = false;
+            None
         }
-    }
+    };
+
+    let healthy_string = if healthy { "ready" } else { "notready" };
+    let status_code = if healthy {
+        StatusCode::OK
+    } else {
+        StatusCode::SERVICE_UNAVAILABLE
+    };
+
+    let response = json!({
+        "status": healthy_string,
+        "uptime": uptime,
+        "endpoints": endpoints
+    });
+
+    tracing::trace!("Response {}", response.to_string());
+
+    (status_code, response.to_string())
 }
 
 /// Metrics handler with DistributedRuntime uptime
@@ -225,6 +243,7 @@ async fn create_test_drt_async() -> crate::DistributedRuntime {
 mod tests {
     use super::*;
     use crate::metrics::MetricsRegistry;
+    use rstest::rstest;
     use std::sync::Arc;
     use tokio::time::{sleep, Duration};
 
@@ -297,6 +316,76 @@ uptime_seconds{namespace=\"http_server\"} 42
         // Uptime should work after initialization
         let _uptime = runtime_metrics.uptime().unwrap();
         // If we get here, uptime calculation works correctly
+    }
+
+    #[rstest]
+    #[cfg(feature = "integration")]
+    #[case("ready", 200, "ready")]
+    #[case("notready", 503, "notready")]
+    #[tokio::test]
+    async fn test_health_endpoints(
+        #[case] starting_health_status: &'static str,
+        #[case] expected_status: u16,
+        #[case] expected_body: &'static str,
+    ) {
+        use std::sync::Arc;
+        use tokio::time::sleep;
+        use tokio_util::sync::CancellationToken;
+        // use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // use reqwest for HTTP requests
+
+        // Closure call is needed here to satisfy async_with_vars
+
+        #[allow(clippy::redundant_closure_call)]
+        temp_env::async_with_vars(
+            [(
+                "DYN_SYSTEM_STARTING_HEALTH_STATUS",
+                Some(starting_health_status),
+            )],
+            (async || {
+                let runtime = crate::Runtime::from_settings().unwrap();
+                let drt = Arc::new(
+                    crate::DistributedRuntime::from_settings_without_discovery(runtime)
+                        .await
+                        .unwrap(),
+                );
+                let cancel_token = CancellationToken::new();
+                let (addr, _) = spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt)
+                    .await
+                    .unwrap();
+                println!("[test] Waiting for server to start...");
+                sleep(std::time::Duration::from_millis(1000)).await;
+                println!("[test] Server should be up, starting requests...");
+                let client = reqwest::Client::new();
+                for (path, expect_status, expect_body) in [
+                    ("/health", expected_status, expected_body),
+                    ("/live", expected_status, expected_body),
+                    ("/someRandomPathNotFoundHere", 404, "Route not found"),
+                ] {
+                    println!("[test] Sending request to {}", path);
+                    let url = format!("http://{}{}", addr, path);
+                    let response = client.get(&url).send().await.unwrap();
+                    let status = response.status();
+                    let body = response.text().await.unwrap();
+                    println!(
+                        "[test] Response for {}: status={}, body={:?}",
+                        path, status, body
+                    );
+                    assert_eq!(
+                        status, expect_status,
+                        "Response: status={}, body={:?}",
+                        status, body
+                    );
+                    assert!(
+                        body.contains(expect_body),
+                        "Response: status={}, body={:?}",
+                        status,
+                        body
+                    );
+                }
+            })(),
+        )
+        .await;
     }
 
     #[cfg(feature = "integration")]
