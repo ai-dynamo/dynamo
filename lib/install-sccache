@@ -1,0 +1,87 @@
+#!/usr/bin/env bash
+
+SCCACHE_VERSION="${SCCACHE_VERSION:-0.5.4}"
+SCCACHE_INSTALL_DIR="${SCCACHE_INSTALL_DIR:-$HOME/.cargo/bin}"
+
+function .log() {
+  echo "[sccache::installer]" "$@" >&2
+}
+
+function .get_platform_triple() {
+  # e.g. "linux"
+  local os
+  os="$(uname | tr '[:upper:]' '[:lower:]')"
+
+  # e.g. "x86_64"
+  local platform
+  platform="$(uname -p)"
+
+  if [[ "$os" == "linux" ]]; then
+    echo "${platform}-unknown-${os}-musl"
+  else
+    .log "ERROR: Unsupported operating system ${os}"
+    return 1
+  fi
+}
+
+function .get_download_url() {
+  local triple
+  triple="$(.get_platform_triple)"
+
+  local version
+  version="${SCCACHE_VERSION}"
+
+  echo "https://github.com/mozilla/sccache/releases/download/v${version}/sccache-v${version}-${triple}.tar.gz"
+}
+
+function .install_sccache() {
+  local triple
+  triple="$(.get_platform_triple)"
+
+  local version
+  version="${SCCACHE_VERSION}"
+
+  local url
+  url="$(.get_download_url)"
+
+  local tmpdir
+  tmpdir="$(mktemp -d)"
+
+  local exec_file
+  exec_file="sccache-v${version}-${triple}/sccache"
+
+  .log "Installing sccache ${version}..."
+
+  (
+    cd "${tmpdir}" && \
+      curl -fsSL "${url}" | tar xzf - --strip-components=1 "${exec_file}" && \
+      install -m 0755 sccache "${SCCACHE_INSTALL_DIR}/sccache"
+  )
+
+  if [ -d "${tmpdir}" ]; then
+    rm -r "${tmpdir}"
+  fi
+}
+
+function .main() {
+  local installed_version
+
+  if ! which sccache &>/dev/null ; then
+    .log "sccache not found on PATH, installing requested version"
+    .install_sccache
+  else
+    installed_version="$(sccache --version | awk '{print $2;}')"
+
+    if [[ "${installed_version}" != "${SCCACHE_VERSION}" ]]; then
+      .log "Currently installed version (${installed_version} does not match requested version ${SCCACHE_VERSION}, reinstalling sccache"
+      .install_sccache
+    else
+      .log "Installed version is up to date with requested version, nothing to do"
+    fi
+  fi
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  set -euo pipefail
+  .main "$@"
+fi
