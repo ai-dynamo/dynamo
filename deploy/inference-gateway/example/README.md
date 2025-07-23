@@ -16,11 +16,7 @@ This guide provides instructions for setting up the Inference Gateway with Dynam
 [See Quickstart Guide](../../../docs/guides/dynamo_deploy/quickstart.md) to install Dynamo Cloud.
 
 
-2. **Launch Dynamo Deployments**
-
-[See VLLM Example](../../../examples/vllm/README.md)
-
-3. **Deploy Inference Gateway**
+2. **Deploy Inference Gateway**
 
 First, deploy an inference gateway service. In this example, we'll install `kgateway` based gateway implementation.
 
@@ -54,7 +50,7 @@ kubectl get gateway inference-gateway
 # inference-gateway   kgateway             True         1m
 ```
 
-4. **Apply Dynamo-specific manifests**
+3. **Apply Dynamo-specific manifests**
 
 The Inference Gateway is configured through the `inference-gateway-resources.yaml` file.
 

@@ -167,7 +167,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ### Start Dynamo LLM Serving Components
 
-[Explore the VLLM Example](../examples/vllm/README.md)
+[Explore the VLLM Example](../components/backends/vllm/README.md)
 
 
 ## Local Development
