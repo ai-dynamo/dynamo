@@ -72,46 +72,15 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 We publish Python wheels specialized for each of our supported engines: vllm, sglang, llama.cpp and trtllm. The examples that follow use sglang, read on for other engines.
 
 ```
-apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0
 uv venv venv
 source venv/bin/activate
 uv pip install pip
 
-uv pip install "ai-dynamo[sglang]" # or [vllm] or [llama_cpp]
+# Choose one
+uv pip install "ai-dynamo[sglang]"
+uv pip install "ai-dynamo[vllm]"
+uv pip install "ai-dynamo[llama_cpp]" # CPU, see later for GPU
 ```
-
-### Building the Dynamo Base Image
-
-Although not needed for local development, deploying your Dynamo pipelines to Kubernetes will require you to use a Dynamo base image to your container registry. You can use any container registry of your choice, such as:
-- Docker Hub (docker.io)
-- NVIDIA NGC Container Registry (nvcr.io)
-- Any private registry
-
-We publish our images in [nvcr.io](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/containers/vllm-runtime)  and you can use them.
-Alternatively you could build and push an image from source:
-
-```bash
-./container/build.sh
-docker tag dynamo:latest-vllm <your-registry>/dynamo-base:latest-vllm
-docker login <your-registry>
-docker push <your-registry>/dynamo-base:latest-vllm
-```
-
-Notes about builds for specific frameworks:
-- For specific details on the `--framework vllm` build [read about the VLLM backend](components/backends/vllm/README.md)
-.
-- For specific details on the `--framework tensorrtllm` build, see [Read about the TensorRT-LLM backend](components/backends/trtllm/README.md)
-.
-
-Note about AWS environments:
-- If deploying Dynamo in AWS, make sure to build the container with EFA support using the `--make-efa` flag.
-
-After building, you can use this image by setting the `DYNAMO_IMAGE` environment variable to point to your built image:
-```bash
-export DYNAMO_IMAGE=<your-registry>/dynamo-base:latest-vllm
-```
-
 
 ### Running and Interacting with an LLM Locally
 
@@ -301,10 +270,4 @@ Remember that nats and etcd must be running (see earlier).
 Set the environment variable `DYN_LOG` to adjust the logging level; for example, `export DYN_LOG=debug`. It has the same syntax as `RUST_LOG`.
 
 If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions see the [ReadMe](.devcontainer/README.md) for more details.
-
-### Next steps
-
-TODO KUBERNETES HERE ?
-
-Wrap the components above (frontend and worker) with Kubernetes, it's (hopefully) a seamless path from local dev to data-center.
 
