@@ -184,168 +184,166 @@ impl ModelWatcher {
             }
         };
 
-        match model_entry.model_type {
-            ModelType::Backend => {
-                // A Backend model expects pre-processed requests meaning it's up to us whether we
-                // handle Chat or Completions requests, so handle both.
+         if model_entry.model_type.supports_backend() {
+            // A Backend model expects pre-processed requests meaning it's up to us whether we
+            // handle Chat or Completions requests, so handle both.
 
-                let Some(mut card) = card else {
-                    anyhow::bail!("Missing model deployment card");
-                };
-                // Download tokenizer.json etc to local disk
-                // This cache_dir is a tempfile::TempDir will be deleted on drop. I _think_
-                // OpenAIPreprocessor::new loads the files, so we can delete them after this
-                // function. Needs checking carefully, possibly we need to store it in state.
-                let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
+            let Some(mut card) = card else {
+                anyhow::bail!("Missing model deployment card");
+            };
+            // Download tokenizer.json etc to local disk
+            // This cache_dir is a tempfile::TempDir will be deleted on drop. I _think_
+            // OpenAIPreprocessor::new loads the files, so we can delete them after this
+            // function. Needs checking carefully, possibly we need to store it in state.
+            let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
 
-                // Chat Completions
-                let frontend = SegmentSource::<
-                    SingleIn<NvCreateChatCompletionRequest>,
-                    ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
-                >::new();
-                let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
-                let backend = Backend::from_mdc(card.clone()).await?.into_operator();
-                let migration = Migration::from_mdc(card.clone()).await?.into_operator();
-                let router =
-                    PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
-                        client.clone(),
-                        self.router_mode,
-                    )
-                    .await?;
-                let service_backend = match self.router_mode {
-                    RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
-                        ServiceBackend::from_engine(Arc::new(router))
-                    }
-                    RouterMode::KV => {
-                        let chooser = self
-                            .manager
-                            .kv_chooser_for(
-                                &model_entry.name,
-                                &component,
-                                card.kv_cache_block_size,
-                                self.kv_router_config,
-                            )
-                            .await?;
-                        let kv_push_router = KvPushRouter::new(router, chooser);
-                        ServiceBackend::from_engine(Arc::new(kv_push_router))
-                    }
-                };
-
-                let chat_engine = frontend
-                    .link(preprocessor.forward_edge())?
-                    .link(backend.forward_edge())?
-                    .link(migration.forward_edge())?
-                    .link(service_backend)?
-                    .link(migration.backward_edge())?
-                    .link(backend.backward_edge())?
-                    .link(preprocessor.backward_edge())?
-                    .link(frontend)?;
-                self.manager
-                    .add_chat_completions_model(&model_entry.name, chat_engine)?;
-
-                // Completions
-                let frontend = SegmentSource::<
-                    SingleIn<NvCreateCompletionRequest>,
-                    ManyOut<Annotated<NvCreateCompletionResponse>>,
-                >::new();
-                let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
-                let backend = Backend::from_mdc(card.clone()).await?.into_operator();
-                let migration = Migration::from_mdc(card.clone()).await?.into_operator();
-                let router =
-                    PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
-                        client,
-                        self.router_mode,
-                    )
-                    .await?;
-                let service_backend = match self.router_mode {
-                    RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
-                        ServiceBackend::from_engine(Arc::new(router))
-                    }
-                    RouterMode::KV => {
-                        let chooser = self
-                            .manager
-                            .kv_chooser_for(
-                                &model_entry.name,
-                                &component,
-                                card.kv_cache_block_size,
-                                self.kv_router_config,
-                            )
-                            .await?;
-                        let kv_push_router = KvPushRouter::new(router, chooser);
-                        ServiceBackend::from_engine(Arc::new(kv_push_router))
-                    }
-                };
-
-                let completions_engine = frontend
-                    .link(preprocessor.forward_edge())?
-                    .link(backend.forward_edge())?
-                    .link(migration.forward_edge())?
-                    .link(service_backend)?
-                    .link(migration.backward_edge())?
-                    .link(backend.backward_edge())?
-                    .link(preprocessor.backward_edge())?
-                    .link(frontend)?;
-                self.manager
-                    .add_completions_model(&model_entry.name, completions_engine)?;
-            }
-            ModelType::Chat => {
-                let push_router = PushRouter::<
-                    NvCreateChatCompletionRequest,
-                    Annotated<NvCreateChatCompletionStreamResponse>,
-                >::from_client(client, Default::default())
+            // Chat Completions
+            let frontend = SegmentSource::<
+                SingleIn<NvCreateChatCompletionRequest>,
+                ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+            >::new();
+            let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
+            let backend = Backend::from_mdc(card.clone()).await?.into_operator();
+            let migration = Migration::from_mdc(card.clone()).await?.into_operator();
+            let router =
+                PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
+                    client.clone(),
+                    self.router_mode,
+                )
                 .await?;
-                let engine = Arc::new(push_router);
-                self.manager
-                    .add_chat_completions_model(&model_entry.name, engine)?;
-            }
-            ModelType::Completion => {
-                let push_router = PushRouter::<
-                    NvCreateCompletionRequest,
-                    Annotated<NvCreateCompletionResponse>,
-                >::from_client(client, Default::default())
+            let service_backend = match self.router_mode {
+                RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
+                    ServiceBackend::from_engine(Arc::new(router))
+                }
+                RouterMode::KV => {
+                    let chooser = self
+                        .manager
+                        .kv_chooser_for(
+                            &model_entry.name,
+                            &component,
+                            card.kv_cache_block_size,
+                            self.kv_router_config,
+                        )
+                        .await?;
+                    let kv_push_router = KvPushRouter::new(router, chooser);
+                    ServiceBackend::from_engine(Arc::new(kv_push_router))
+                }
+            };
+
+            let chat_engine = frontend
+                .link(preprocessor.forward_edge())?
+                .link(backend.forward_edge())?
+                .link(migration.forward_edge())?
+                .link(service_backend)?
+                .link(migration.backward_edge())?
+                .link(backend.backward_edge())?
+                .link(preprocessor.backward_edge())?
+                .link(frontend)?;
+            self.manager
+                .add_chat_completions_model(&model_entry.name, chat_engine)?;
+
+            // Completions
+            let frontend = SegmentSource::<
+                SingleIn<NvCreateCompletionRequest>,
+                ManyOut<Annotated<NvCreateCompletionResponse>>,
+            >::new();
+            let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
+            let backend = Backend::from_mdc(card.clone()).await?.into_operator();
+            let migration = Migration::from_mdc(card.clone()).await?.into_operator();
+            let router =
+                PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
+                    client,
+                    self.router_mode,
+                )
                 .await?;
-                let engine = Arc::new(push_router);
-                self.manager
-                    .add_completions_model(&model_entry.name, engine)?;
-            }
-            ModelType::Embedding => {
-                let Some(mut card) = card else {
-                    anyhow::bail!("Missing model deployment card for embedding model");
-                };
+            let service_backend = match self.router_mode {
+                RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
+                    ServiceBackend::from_engine(Arc::new(router))
+                }
+                RouterMode::KV => {
+                    let chooser = self
+                        .manager
+                        .kv_chooser_for(
+                            &model_entry.name,
+                            &component,
+                            card.kv_cache_block_size,
+                            self.kv_router_config,
+                        )
+                        .await?;
+                    let kv_push_router = KvPushRouter::new(router, chooser);
+                    ServiceBackend::from_engine(Arc::new(kv_push_router))
+                }
+            };
 
-                // Download tokenizer files to local disk
-                let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
+            let completions_engine = frontend
+                .link(preprocessor.forward_edge())?
+                .link(backend.forward_edge())?
+                .link(migration.forward_edge())?
+                .link(service_backend)?
+                .link(migration.backward_edge())?
+                .link(backend.backward_edge())?
+                .link(preprocessor.backward_edge())?
+                .link(frontend)?;
+            self.manager
+                .add_completions_model(&model_entry.name, completions_engine)?;
+        }
+        else if model_entry.model_type.supports_chat() {
+            let push_router = PushRouter::<
+                NvCreateChatCompletionRequest,
+                Annotated<NvCreateChatCompletionStreamResponse>,
+            >::from_client(client, Default::default())
+            .await?;
+            let engine = Arc::new(push_router);
+            self.manager
+                .add_chat_completions_model(&model_entry.name, engine)?;
+        }
+        else if model_entry.model_type.supports_completion() {
+            let push_router = PushRouter::<
+                NvCreateCompletionRequest,
+                Annotated<NvCreateCompletionResponse>,
+            >::from_client(client, Default::default())
+            .await?;
+            let engine = Arc::new(push_router);
+            self.manager
+                .add_completions_model(&model_entry.name, engine)?;
+        }
+        else if model_entry.model_type.supports_embedding() {
+            let Some(mut card) = card else {
+                anyhow::bail!("Missing model deployment card for embedding model");
+            };
 
-                // Create preprocessing pipeline similar to Backend
-                let frontend = SegmentSource::<
-                    SingleIn<NvCreateEmbeddingRequest>,
-                    ManyOut<Annotated<NvCreateEmbeddingResponse>>,
-                >::new();
+            // Download tokenizer files to local disk
+            let _cache_dir = Some(card.move_from_nats(self.drt.nats_client()).await?);
 
-                let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
-                let backend = Backend::from_mdc(card.clone()).await?.into_operator();
+            // Create preprocessing pipeline similar to Backend
+            let frontend = SegmentSource::<
+                SingleIn<NvCreateEmbeddingRequest>,
+                ManyOut<Annotated<NvCreateEmbeddingResponse>>,
+            >::new();
 
-                let router = PushRouter::<
-                    PreprocessedEmbeddingRequest,
-                    Annotated<EmbeddingsEngineOutput>,
-                >::from_client(client, self.router_mode)
-                .await?;
+            let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
+            let backend = Backend::from_mdc(card.clone()).await?.into_operator();
 
-                // Note: Embeddings don't need KV routing complexity
-                let service_backend = ServiceBackend::from_engine(Arc::new(router));
+            let router = PushRouter::<
+                PreprocessedEmbeddingRequest,
+                Annotated<EmbeddingsEngineOutput>,
+            >::from_client(client, self.router_mode)
+            .await?;
 
-                // Link the pipeline: frontend -> preprocessor -> backend -> service_backend -> backend -> preprocessor -> frontend
-                let embedding_engine = frontend
-                    .link(preprocessor.forward_edge())?
-                    .link(backend.forward_edge())?
-                    .link(service_backend)?
-                    .link(backend.backward_edge())?
-                    .link(preprocessor.backward_edge())?
-                    .link(frontend)?;
+            // Note: Embeddings don't need KV routing complexity
+            let service_backend = ServiceBackend::from_engine(Arc::new(router));
 
-                self.manager
-                    .add_embeddings_model(&model_entry.name, embedding_engine)?;
-            }
+            // Link the pipeline: frontend -> preprocessor -> backend -> service_backend -> backend -> preprocessor -> frontend
+            let embedding_engine = frontend
+                .link(preprocessor.forward_edge())?
+                .link(backend.forward_edge())?
+                .link(service_backend)?
+                .link(backend.backward_edge())?
+                .link(preprocessor.backward_edge())?
+                .link(frontend)?;
+
+            self.manager
+                .add_embeddings_model(&model_entry.name, embedding_engine)?;
         }
 
         Ok(())
