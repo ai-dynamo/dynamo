@@ -80,4 +80,4 @@ spec:
           image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.4
           workingDir: /workspace/components/backends/vllm
           args:
-            - "python3 components/main.py --model Qwen/Qwen3-0.6B --enforce-eager 2>&1 | tee /tmp/vllm.log"
+            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager 2>&1 | tee /tmp/vllm.log"
