@@ -51,6 +51,7 @@ impl ModelType {
         if self.supports_chat() { result.push("chat"); }
         if self.supports_completion() { result.push("completion"); }
         if self.supports_embedding() { result.push("embedding"); }
+        if self.supports_backend() { result.push("backend"); }
         result
     }
 }
