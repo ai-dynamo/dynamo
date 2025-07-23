@@ -2,27 +2,23 @@
 
 This is a simple Dynamo example showing how you can quickly get started deploying Large Language Models with Dynamo.
 
+## Prerequisites
+
+Before running this example, ensure you have the following services running:
+
+- **etcd**: A distributed key-value store used for service discovery and metadata storage
+- **NATS with JetStream**: A high-performance message broker for inter-component communication
+
+You can start these services using Docker Compose:
+
+```bash
+docker compose -f deploy/metrics/docker-compose.yml up -d
+```
+
 ## Components
 
 - [Frontend](../../../components/frontend/README) - A built-in component that launches an OpenAI compliant HTTP server, a pre-processor, and a router in a single process
-- [vLLM Engine](../../vllm/components/main.py) - A custom component that runs vLLM within the dynamo runtime
-
-```text
-Request Flow
-==================================================
-
-Users/Clients (HTTP)
-      │
-      ▼
-┌─────────────┐
-│  Frontend   │  HTTP API endpoint (Open-AI Style)
-└─────────────┘
-      │
-      ▼
-┌─────────────┐
-│ vLLM engine │  HTTP API endpoint (/generate)
-└─────────────┘
-```
+- [vLLM Backend](../../../components/backends/vllm/README) - A built-in component that runs vLLM within the Dynamo runtime
 
 ```mermaid
 ---
@@ -30,17 +26,21 @@ title: Request Flow
 ---
 flowchart TD
     A["Users/Clients<br/>(HTTP)"] --> B["Frontend<br/>HTTP API endpoint<br/>(OpenAI Style)"]
-    B --> C["vLLM engine<br/>HTTP API endpoint<br/>(/generate)"]
+    B --> C["NATS Message Broker<br/>(Inter-component communication)"]
+    C --> D["vLLM Backend<br/>(NATS subscriber)"]
+    D --> C
+    C --> B
+    B --> A
 ```
 
 ## Instructions
 
-There are three steps to deploy an llm with dynamo.
+There are three steps to deploy and use LLM with Dynamo.
 
 ### 1. Launch Engine
 
 ```bash
-python3 dynamo/examples/vllm/components/main.py --model Qwen/Qwen3-0.6B
+python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 ```
 
 ### 2. Launch Frontend
@@ -56,51 +56,80 @@ python -m dynamo.frontend --interactive
 B) HTTP Server
 
 ```bash
-python -m dynamo.frontend --http-port 8080
+python -m dynamo.frontend --http-port 8000
+```
+
+### 3. Send Requests
+
+If you launched the frontend in `interactive` mode, simply start typing and hit `Enter` to have an interactive chat with your LLM.
+
+If you launched the frontend in HTTP mode, you can send requests via `curl`, or any OpenAI compatible client program or library.
+
+```bash
+curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+    "model": "Qwen/Qwen3-0.6B",
+    "messages": [
+    {
+        "role": "user",
+        "content": "Tell me a story about a brave cat"
+    }
+    ],
+    "stream":false,
+    "max_tokens": 1028
+  }'
 ```
 
 ## Understand
 
 ### What's Happening Under the Hood
 
-When you run the two commands above, here's what Dynamo does to connect your HTTP requests to the vLLM engine:
+When you run the two commands above, here's what Dynamo does to spin up the necessary processes and connect your HTTP requests to the vLLM Backend:
 
-#### 1. Service Registration and Discovery
+### 1. Service Registration and Discovery
 
-**DistributedRuntime Setup**: Each Dynamo component (vLLM engine, Frontend) creates a `DistributedRuntime` that maintains connections to two critical infrastructure services:
+#### DistributedRuntime Setup
+At startup, each Dynamo component (vLLM Backend, Frontend) connects to the `DistributedRuntime`, which involves creating connections to two critical infrastructure services:
 
 - **etcd**: A distributed key-value store used for service discovery and metadata storage
 - **NATS**: A high-performance message broker for inter-component communication
 
-**Component Registration**: When the vLLM engine starts up, it registers itself in etcd using a hierarchical naming structure:
-```
-/instances/{namespace}/{component}/{endpoint}:{lease_id_hex}
+#### Component Registration
+
+When the vLLM Backend starts up, it registers itself as a `component` in etcd with one or more `endpoints`.
+
+This registration includes each endpoint's [NATS subject](https://docs.nats.io/nats-concepts/subjects) for communication and is tied to a `lease` that automatically expires if the component goes offline.
+
+<details>
+<summary> Inspecting the Component Registry </summary>
+
+If you want to find out more about the internal organization of components in Dynamo, you can inspect the contents of `etcd` using the [`etcdctl` command line tool](https://etcd.io/docs/latest/dev-guide/interacting_v3/). For this example, you can try running
+
+```bash
+etcdctl get "instances" --prefix
 ```
 
-For our quickstart example, this becomes something like:
-```
-/instances/dynamo/VllmWorker/generate:694d967da694ea1e
-```
+which will show you each registered endpoint, along with their associated NATS subject. Note that the specific etcd and NATS info is internal and always subject to change -- in future examples we'll show how to use the `DistributedRuntime` itself to communicate across components.
+</details>
 
-This registration includes the component's NATS subject for communication and is tied to a lease that automatically expires if the component goes offline.
 
-**Frontend Discovery**: When the Frontend starts, it doesn't need to know where the vLLM engine is running. Instead, it creates an etcd watcher that automatically discovers the registered vLLM worker.
+#### Frontend Discovery
+When the Frontend starts, it doesn't receive an explicit pointer to the vLLM Backend component. Instead, it constantly watches etcd for registered models, automatically discovering the vLLM Backend component and its endpoints when it becomes available.
 
-#### 2. Request Flow and NATS Messaging
+### 2. Request Flow and NATS Messaging
 
 When you send an HTTP request to the Frontend:
 
 1. **Request Packaging**: The Frontend wraps your HTTP request in a standardized internal format with routing metadata
-2. **NATS Subject Resolution**: Using the discovered endpoints, it determines the appropriate NATS endpoint (e.g., `dynamo_vllmworker_3f6fafd3.generate-694d967da694ea1e`)
-3. **Message Dispatch**: The request is sent over NATS to the target vLLM worker using the discovered NATS subject
-4. **Response Streaming**: The vLLM worker streams responses back through NATS, which the Frontend converts back to HTTP
+2. **NATS Subject Resolution**: Using the discovered endpoints in etcd, it determines the appropriate NATS endpoint
+3. **Message Dispatch**: The request is published to the discovered NATS subject, where the target vLLM Backend picks it up
+4. **Response Streaming**: The vLLM Backend executes the request, and streams responses back through NATS which the Frontend converts back to HTTP
 
-#### 3. Network-Transparent Operation
+### 3. Network-Transparent Operation
 
 One of Dynamo's key strengths is that this entire system works seamlessly whether components are:
 - Running on the same machine (like in this quickstart)
 - Distributed across multiple nodes in a cluster
 - Deployed in different availability zones
 
-The same two commands work in all scenarios - Dynamo handles the networking complexity automatically.
+The same two commands work in all scenarios, as long as all components can connect with the `DistributedRuntime` - Dynamo handles the networking complexity automatically.
 
