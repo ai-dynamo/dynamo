@@ -110,8 +110,8 @@ sentencepiece = { version = "0.11.2", optional = true }
 
 # backend
 galil-seiferas = { version = "0.1" }
-toktrie = { version = "1.1.0" }
-toktrie_hf_tokenizers =  { version = "1.1.0" }
+toktrie = { version = "1.1" }
+toktrie_hf_tokenizers =  { version = "1.1" }
 
 # preprocessor
 bs62 = { version = "0.1" }
