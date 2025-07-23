@@ -39,13 +39,17 @@ There are three steps to deploy and use LLM with Dynamo.
 
 ### 1. Launch Engine
 
+**Open a new terminal** and run:
+
 ```bash
 python -m dynamo.vllm --model Qwen/Qwen3-0.6B
 ```
 
+Leave this terminal running - it will show vLLM Backend logs.
+
 ### 2. Launch Frontend
 
-To interact with the deployed engine using the built-in frontend component, you have two options:
+**Open another terminal** and interact with the deployed engine using the built-in frontend component. You have two options:
 
 A) Interactive Command Line Interface
 
@@ -58,6 +62,8 @@ B) HTTP Server
 ```bash
 python -m dynamo.frontend --http-port 8000
 ```
+
+Leave this terminal running as well - it will show Frontend logs.
 
 ### 3. Send Requests
 
@@ -77,6 +83,27 @@ curl -X POST http://localhost:8000/v1/chat/completions \
     "max_tokens": 1028
   }'
 ```
+
+## Cleanup
+
+When you're done with the quickstart example, follow these steps to clean up:
+
+### 1. Stop Dynamo Components
+
+In each terminal where you started Dynamo components, press `Ctrl+C` to stop them:
+- Stop the vLLM Backend (terminal from step 1)
+- Stop the Frontend (terminal from step 2)
+
+### 2. Stop Infrastructure Services
+
+If you don't plan to run any more examples, stop the etcd and NATS services that were started with Docker Compose:
+
+```bash
+docker compose -f deploy/metrics/docker-compose.yml down
+```
+
+This will stop and remove the containers for etcd and NATS.
+
 
 ## Understand
 
