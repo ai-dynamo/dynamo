@@ -143,7 +143,13 @@ type Resource interface {
 }
 
 func (r *DynamoGraphDeploymentReconciler) reconcileResources(ctx context.Context, dynamoDeployment *nvidiacomv1alpha1.DynamoGraphDeployment) (State, Reason, Message, error) {
+	logger := log.FromContext(ctx)
 	if r.Config.EnableGrove {
+		// check if explicit opt out of grove
+		if dynamoDeployment.Annotations[consts.KubeAnnotationEnableGrove] == consts.KubeLabelValueFalse {
+			logger.Info("Grove is explicitly disabled for this deployment, skipping grove resources reconciliation")
+			return r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment)
+		}
 		return r.reconcileGroveResources(ctx, dynamoDeployment)
 	}
 	return r.reconcileDynamoComponentsDeployments(ctx, dynamoDeployment)
