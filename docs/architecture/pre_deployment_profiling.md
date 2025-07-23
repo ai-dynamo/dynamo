@@ -103,7 +103,7 @@ envsubst < profile_sla_job.yaml | kubectl apply -f -
 **Step 3: Wait for profiling to complete**
 ```bash
 kubectl get jobs -n $NAMESPACE
-kubectl logs job/profile_sla -n $NAMESPACE
+kubectl logs job/profile-sla -n $NAMESPACE
 ```
 
 ### RBAC Configuration
