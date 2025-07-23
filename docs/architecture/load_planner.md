@@ -28,21 +28,7 @@ See [Pre-Deployment Profiling](pre_deployment_profiling.md) for more details.
 
 ## Usage
 
-`dynamo serve` automatically starts the planner. Configure it through YAML files or command-line arguments:
-
-```bash
-# YAML configuration
-dynamo serve graphs.disagg:Frontend -f disagg.yaml
-
-# disagg.yaml
-Planner:
-  environment: local
-  no-operation: false
-  log-dir: log/planner
-
-# Command-line configuration
-dynamo serve graphs.disagg:Frontend -f disagg.yaml --Planner.environment=local --Planner.no-operation=false --Planner.log-dir=log/planner
-```
+The planner integration with the new frontend + worker architecture is currently a work in progress. This documentation will be updated with the new deployment patterns and code examples once the planner component has been fully adapted to the new workflow.
 
 Configuration options:
 * `namespace` (str, default: "dynamo"): Target namespace for planner operations

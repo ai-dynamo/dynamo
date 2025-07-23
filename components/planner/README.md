@@ -34,7 +34,7 @@ PYTHONPATH=/workspace/examples/llm python components/planner.py --namespace <nam
 
 ## Local Backend (LocalPlanner)
 
-The LocalPlanner is built on top of circus, which is what we use to manage component subprocesses when running dynamo serve. LocalPlanner allows the planner component to scale workers up and down based on system metrics.
+The LocalPlanner is built on top of circus, which is what we use to manage component subprocesses when running with the frontend and workers. LocalPlanner allows the planner component to scale workers up and down based on system metrics.
 
 **Current limitations**
 1. Single node only
@@ -78,7 +78,7 @@ The planner architecture is designed to be simple and extensible:
 
 ### Statefile
 
-The statefile maintains the current state of all running workers and is used by the LocalPlanner to track and modify the deployment. It's stored at `~/.dynamo/state/{namespace}.json` (or in the directory specified by `DYN_LOCAL_STATE_DIR`). The statefile is automatically created when you run dynamo serve and is cleaned up when the arbiter terminates. Each worker is identified as `{namespace}_{component_name}` with an optional numeric suffix for additional instances.
+The statefile maintains the current state of all running workers and is used by the LocalPlanner to track and modify the deployment. It's stored at `~/.dynamo/state/{namespace}.json` (or in the directory specified by `DYN_LOCAL_STATE_DIR`). The statefile is automatically created when you run the frontend with workers and is cleaned up when the arbiter terminates. Each worker is identified as `{namespace}_{component_name}` with an optional numeric suffix for additional instances.
 
 #### Example: Adding and Removing Workers
 

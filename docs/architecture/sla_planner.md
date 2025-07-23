@@ -106,20 +106,11 @@ Finally, SLA planner applies the change by scaling up/down the number of prefill
 
 ## Deploying
 
-To deploy SLA-planner, use the rust frontend (`dynamo-run`) that reports metrics at `/metrics` HTTP endpoint. You can also use your own frontend, but it must report number of requests, ISL, OSL, TTFT, ITL in the same format.
+To deploy SLA-planner, ensure etcd and NATS are running first, then use the frontend that reports metrics at `/metrics` HTTP endpoint. You can also use your own frontend, but it must report number of requests, ISL, OSL, TTFT, ITL in the same format.
 
 SLA-planner and prometheus server are provided as common components that can be directly imported from `dynamo` package. The following changes are needed:
 - Add `Planner` and `Prometheus` components' dependency in `Frontend`.
 - Link `Planner` and `Prometheus` in the graph.
 - Add `Planner` and `Prometheus` configurations in the config file.
 
-We provide examples for `vllm_v0` and `vllm_v1`:
-```bash
-# vllm_v0
-cd $DYNAMO_HOME/examples/vllm_v0
-dynamo serve graphs.disagg_planner:Frontend -f ./configs/disagg_planner.yaml
-
-# vllm_v1
-cd $DYNAMO_HOME/examples/vllm_v1
-dynamo serve graphs.disagg_planner:Frontend -f ./configs/disagg_planner.yaml
-```
+The SLA planner integration with the new frontend + worker architecture is currently a work in progress. This documentation will be updated with the new deployment patterns and code examples once the SLA planner component has been fully adapted to the new workflow.
