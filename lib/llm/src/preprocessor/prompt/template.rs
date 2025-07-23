@@ -26,7 +26,7 @@ mod oai;
 mod tokcfg;
 
 use super::{OAIChatLikeRequest, OAIPromptFormatter, PromptFormatter};
-use tokcfg::ChatTemplate;
+use tokcfg::{ChatTemplate, ChatTemplateValue};
 
 impl PromptFormatter {
     pub async fn from_mdc(mdc: ModelDeploymentCard) -> Result<PromptFormatter> {
@@ -37,13 +37,28 @@ impl PromptFormatter {
             PromptFormatterArtifact::HfTokenizerConfigJson(file) => {
                 let content = std::fs::read_to_string(&file)
                     .with_context(|| format!("fs:read_to_string '{file}'"))?;
-                let config: ChatTemplate = serde_json::from_str(&content)?;
+                let mut config: ChatTemplate = serde_json::from_str(&content)?;
+                // Some HF model (i.e. meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8)
+                // stores the chat template in a separate file, we check if the file exists and
+                // put the chat template into config as normalization.
+                if let Some(PromptFormatterArtifact::HfChatTemplate(chat_template_file)) =
+                    mdc.chat_template_file
+                {
+                    let chat_template = std::fs::read_to_string(&chat_template_file)
+                        .with_context(|| format!("fs:read_to_string '{}'", chat_template_file))?;
+                    // clean up the string to remove newlines
+                    let chat_template = chat_template.replace('\n', "");
+                    config.chat_template = Some(ChatTemplateValue(either::Left(chat_template)));
+                }
                 Self::from_parts(
                     config,
                     mdc.prompt_context
                         .map_or(ContextMixins::default(), |x| ContextMixins::new(&x)),
                 )
             }
+            PromptFormatterArtifact::HfChatTemplate(_) => Err(anyhow::anyhow!(
+                "prompt_formatter should not have type HfChatTemplate"
+            )),
             PromptFormatterArtifact::GGUF(gguf_path) => {
                 let config = ChatTemplate::from_gguf(&gguf_path)?;
                 Self::from_parts(config, ContextMixins::default())

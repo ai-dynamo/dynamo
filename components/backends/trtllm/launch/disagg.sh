@@ -23,12 +23,12 @@ trap cleanup EXIT INT TERM
 # run clear_namespace
 python3 utils/clear_namespace.py --namespace dynamo
 
-# run ingress
-dynamo run in=http out=dyn --http-port=8000 &
+# run frontend
+python3 -m dynamo.frontend --http-port 8000 &
 DYNAMO_PID=$!
 
 # run prefill worker
-CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 components/worker.py \
+CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$PREFILL_ENGINE_ARGS" \
@@ -37,7 +37,7 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 components/worker.py 
 PREFILL_PID=$!
 
 # run decode worker
-CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 components/worker.py \
+CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$DECODE_ENGINE_ARGS" \

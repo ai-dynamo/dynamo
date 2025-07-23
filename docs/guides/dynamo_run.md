@@ -1,8 +1,8 @@
-# Running Dynamo (`dynamo run`)
+# Running Dynamo CLI (`dynamo-run`)
 
-This guide explains the `dynamo run` command.
 
-`dynamo-run` is a CLI tool for exploring the Dynamo components. It's also an example of how to use components from Rust. If you use the Python wheel, it's available as `dynamo run`.
+With the Dynamo CLI, you can chat with models quickly using `dynamo-run`
+`dynamo-run` is a CLI tool for exploring the Dynamo components. It's also an example of how to use components from Rust. If you use the Python wheel, it's available as `dynamo-run`.
 
 It supports these engines: mistralrs, llamacpp, sglang, vllm, and tensorrt-llm. `mistralrs` is the default.
 
@@ -11,7 +11,7 @@ Usage:
 dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=echo_core|echo_full|mistralrs|llamacpp|sglang|vllm|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=1.0] [--router-temperature=0.0] [--use-kv-events=true] [--verbosity (-v|-vv)]
 ```
 
-Example: `dynamo run Qwen/Qwen3-0.6B`
+Example: `dynamo-run Qwen/Qwen3-0.6B`
 
 Set the environment variable `DYN_LOG` to adjust the logging level; for example, `export DYN_LOG=debug`. It has the same syntax as `RUST_LOG`.
 
@@ -32,12 +32,12 @@ The vllm and sglang engines require [etcd](https://etcd.io/) and [nats](https://
 
 To automatically download Qwen3 4B from Hugging Face (16 GiB download) and to start it in interactive text mode:
 ```
-dynamo run out=vllm Qwen/Qwen3-4B
+dynamo-run out=vllm Qwen/Qwen3-4B
 ```
 
 The general format for HF download follows this pattern:
 ```
-dynamo run out=<engine> <HUGGING_FACE_ORGANIZATION/MODEL_NAME>
+dynamo-run out=<engine> <HUGGING_FACE_ORGANIZATION/MODEL_NAME>
 ```
 
 For gated models (such as meta-llama/Llama-3.2-3B-Instruct), you must set an `HF_TOKEN` environment variable.
@@ -65,12 +65,12 @@ To run the model:
 
 *Text interface*
 ```
-dynamo run Llama-3.2-3B-Instruct-Q4_K_M.gguf # or path to a Hugging Face repo checkout instead of the GGUF file
+dynamo-run Llama-3.2-3B-Instruct-Q4_K_M.gguf # or path to a Hugging Face repo checkout instead of the GGUF file
 ```
 
 *HTTP interface*
 ```
-dynamo run in=http out=mistralrs Llama-3.2-3B-Instruct-Q4_K_M.gguf
+dynamo-run in=http out=mistralrs Llama-3.2-3B-Instruct-Q4_K_M.gguf
 ```
 You can also list models or send a request:
 
@@ -211,7 +211,7 @@ The KV-aware routing arguments:
 
 ## Full usage details
 
-`dynamo run` executes `dynamo-run`. `dynamo-run` is also an example of what can be built in Rust with the `dynamo-llm` and `dynamo-runtime` crates. The following guide shows how to build from source with all the features.
+ The `dynamo-run` is also an example of what can be built in Rust with the `dynamo-llm` and `dynamo-runtime` crates. The following guide shows how to build from source with all the features.
 
 ### Getting Started
 
@@ -472,7 +472,7 @@ See instructions [here](https://github.com/ai-dynamo/dynamo/blob/main/examples/t
 
 See instructions [here](https://github.com/ai-dynamo/dynamo/blob/main/examples/tensorrt_llm/README.md#run-container) to run the built environment.
 
-##### Step 3: Execute `dynamo run` command
+##### Step 3: Execute `dynamo-run` command
 
 Execute the following to load the TensorRT-LLM model specified in the configuration.
 ```
@@ -549,15 +549,13 @@ The mocker engine is a mock vLLM implementation designed for testing and develop
 
 **Basic usage:**
 
-The `--model-path` is required but can point to any valid model path - the mocker doesn't actually load the model weights. The arguments `block-size`, `num-gpu-blocks`, `max-num-seqs`, `max-num-batched-tokens`, and `enable-prefix-caching` are common arguments shared with the real VLLM engine.
+The `--model-path` is required but can point to any valid model path - the mocker doesn't actually load the model weights (but the pre-processor needs the tokenizer). The arguments `block_size`, `num_gpu_blocks`, `max_num_seqs`, `max_num_batched_tokens`, `enable_prefix_caching`, and `enable_chunked_prefill` are common arguments shared with the real VLLM engine.
 
 And below are arguments that are mocker-specific:
 - `speedup_ratio`: Speed multiplier for token generation (default: 1.0). Higher values make the simulation engines run faster.
 - `dp_size`: Number of data parallel workers to simulate (default: 1)
 - `watermark`: KV cache watermark threshold as a fraction (default: 0.01). This argument also exists for the real VLLM engine but cannot be passed as an engine arg.
 
->[!NOTE]
->Currently, `enable_chunked_prefill` is always assumed to be false, which mirrors the vllm v0 behavior. This is also the current behavior in `examples/llm`. This will be updated in the near future as we move to support vllm v1 (and deprecate support for vllm v0).
 ```bash
 echo '{"speedup_ratio": 10.0}' > mocker_args.json
 dynamo-run in=dyn://dynamo.mocker.generate out=mocker --model-path TinyLlama/TinyLlama-1.1B-Chat-v1.0 --extra-engine-args mocker_args.json
@@ -668,4 +666,13 @@ Here are some example engines:
 More fully-featured Backend engines (used by `dynamo-run`):
 - [vllm](https://github.com/ai-dynamo/dynamo/blob/main/launch/dynamo-run/src/subprocess/vllm_inc.py)
 - [sglang](https://github.com/ai-dynamo/dynamo/blob/main/launch/dynamo-run/src/subprocess/sglang_inc.py)
+
+### Debugging
+
+`dynamo-run` and `dynamo-runtime` support [tokio-console](https://github.com/tokio-rs/console). Build with the feature to enable:
+```
+cargo build --features cuda,tokio-console -p dynamo-run
+```
+
+The listener uses the default tokio console port, and all interfaces (0.0.0.0).
 
