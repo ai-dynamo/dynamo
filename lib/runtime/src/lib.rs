@@ -59,6 +59,8 @@ pub use worker::Worker;
 
 use component::{Endpoint, InstanceSource};
 
+use config::HealthStatus;
+
 /// Types of Tokio runtimes that can be used to construct a Dynamo [Runtime].
 #[derive(Clone)]
 enum RuntimeType {
@@ -73,6 +75,68 @@ pub struct Runtime {
     primary: RuntimeType,
     secondary: RuntimeType,
     cancellation_token: CancellationToken,
+}
+
+/// Current Health Status
+/// If use_endpoint_health_status is set then
+/// initialize the endpoint_health hashmap to the
+/// starting health status
+#[derive(Clone)]
+pub struct SystemHealth {
+    system_health: HealthStatus,
+    endpoint_health: HashMap<String, HealthStatus>,
+    use_endpoint_health_status: Vec<String>,
+}
+
+impl SystemHealth {
+    pub fn new(
+        starting_health_status: HealthStatus,
+        use_endpoint_health_status: Vec<String>,
+    ) -> Self {
+        let mut endpoint_health = HashMap::new();
+        for endpoint in &use_endpoint_health_status {
+            endpoint_health.insert(endpoint.clone(), starting_health_status.clone());
+        }
+        SystemHealth {
+            system_health: starting_health_status,
+            endpoint_health,
+            use_endpoint_health_status,
+        }
+    }
+    pub fn set_health_status(&mut self, status: HealthStatus) {
+        self.system_health = status;
+    }
+
+    pub fn set_endpoint_health_status(&mut self, endpoint: String, status: HealthStatus) {
+        self.endpoint_health.insert(endpoint, status);
+    }
+
+    /// Returns the overall health status and endpoint health statuses
+    pub fn get_health_status(&self) -> (bool, HashMap<String, String>) {
+        let mut endpoints: HashMap<String, String> = HashMap::new();
+        for (endpoint, ready) in &self.endpoint_health {
+            endpoints.insert(
+                endpoint.clone(),
+                if *ready == HealthStatus::Ready {
+                    "ready".to_string()
+                } else {
+                    "notready".to_string()
+                },
+            );
+        }
+
+        let healthy = if !self.use_endpoint_health_status.is_empty() {
+            self.use_endpoint_health_status.iter().all(|endpoint| {
+                self.endpoint_health
+                    .get(endpoint)
+                    .is_some_and(|status| *status == HealthStatus::Ready)
+            })
+        } else {
+            self.system_health == HealthStatus::Ready
+        };
+
+        (healthy, endpoints)
+    }
 }
 
 /// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
@@ -99,6 +163,9 @@ pub struct DistributedRuntime {
     is_static: bool,
 
     instance_sources: Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
+
+    // Health Status
+    system_health: Arc<Mutex<SystemHealth>>,
 
     // This map associates metric prefixes with their corresponding Prometheus registries.
     prometheus_registries_by_prefix: Arc<std::sync::Mutex<HashMap<String, prometheus::Registry>>>,

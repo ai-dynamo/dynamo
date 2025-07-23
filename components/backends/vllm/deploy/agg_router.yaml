@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-v1-agg-router
+spec:
+  services:
+    Frontend:
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      dynamoNamespace: vllm-v1-agg-router
+      componentType: main
+      replicas: 1
+      resources:
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+        limits:
+          cpu: "1"
+          memory: "2Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.4
+          workingDir: /workspace/components/backends/vllm
+          args:
+            - "python3 -m dynamo.frontend --http-port 8000 --router-mode kv"
+    VllmDecodeWorker:
+      envFromSecret: hf-token-secret
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - 'grep "VllmWorker.*has been initialized" /tmp/vllm.log'
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      dynamoNamespace: vllm-v1-agg-router
+      componentType: worker
+      replicas: 2
+      resources:
+        requests:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+        limits:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.4
+          workingDir: /workspace/components/backends/vllm
+          args:
+            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager 2>&1 | tee /tmp/vllm.log"

@@ -1,23 +1,11 @@
 <!--
 SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
 -->
 
-# LLM Deployment Examples using vLLM
+# LLM Deployment using vLLM
 
-This directory contains examples and reference implementations for deploying Large Language Models (LLMs) in various configurations using vLLM. For Dynamo integration, we leverage vLLM's native KV cache events, NIXL based transfer mechanisms, and metric reporting to enable KV-aware routing and P/D disaggregation.
+This directory contains a Dynamo vllm engine and reference implementations for deploying Large Language Models (LLMs) in various configurations using vLLM. For Dynamo integration, we leverage vLLM's native KV cache events, NIXL based transfer mechanisms, and metric reporting to enable KV-aware routing and P/D disaggregation.
 
 ## Deployment Architectures
 
@@ -36,11 +24,11 @@ docker compose -f deploy/metrics/docker-compose.yml up -d
 ### Build and Run docker
 
 ```bash
-./container/build.sh
+./container/build.sh --framework VLLM
 ```
 
 ```bash
-./container/run.sh -it [--mount-workspace]
+./container/run.sh -it --framework VLLM [--mount-workspace]
 ```
 
 This includes the specific commit [vllm-project/vllm#19790](https://github.com/vllm-project/vllm/pull/19790) which enables support for external control of the DP ranks.
@@ -74,7 +62,7 @@ Note: The above architecture illustrates all the components. The final component
 
 ```bash
 # requires one gpu
-cd examples/vllm
+cd components/backends/vllm
 bash launch/agg.sh
 ```
 
@@ -82,7 +70,7 @@ bash launch/agg.sh
 
 ```bash
 # requires two gpus
-cd examples/vllm
+cd components/backends/vllm
 bash launch/agg_router.sh
 ```
 
@@ -90,7 +78,7 @@ bash launch/agg_router.sh
 
 ```bash
 # requires two gpus
-cd examples/vllm
+cd components/backends/vllm
 bash launch/disagg.sh
 ```
 
@@ -98,7 +86,7 @@ bash launch/disagg.sh
 
 ```bash
 # requires three gpus
-cd examples/vllm
+cd components/backends/vllm
 bash launch/disagg_router.sh
 ```
 
@@ -108,7 +96,7 @@ This example is not meant to be performant but showcases dynamo routing to data 
 
 ```bash
 # requires four gpus
-cd examples/vllm
+cd components/backends/vllm
 bash launch/dep.sh
 ```
 
@@ -146,7 +134,7 @@ For Kubernetes deployment, YAML manifests are provided in the `deploy/` director
 Example with disagg:
 
 ```bash
-cd ~/dynamo/examples/vllm/deploy
+cd ~/dynamo/components/backends/vllm/deploy
 kubectl apply -f disagg.yaml
 ```
 

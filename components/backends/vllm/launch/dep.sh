@@ -5,13 +5,13 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 # run ingress
-dynamo run in=http out=dyn --router-mode kv &
+python -m dynamo.frontend --router-mode kv &
 
 # Data Parallel Attention / Expert Parallelism
 # Routing to DP workers managed by Dynamo
 # Chose Qwen3-30B because its a small MOE that can fit on smaller GPUs (L40S for example)
 for i in {0..3}; do
-    CUDA_VISIBLE_DEVICES=$i python3 components/main.py \
+    CUDA_VISIBLE_DEVICES=$i python3 -m dynamo.vllm \
     --model Qwen/Qwen3-30B-A3B \
     --data-parallel-rank $i \
     --data-parallel-size 4 \

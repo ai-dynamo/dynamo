@@ -5,7 +5,7 @@ set -e
 trap 'echo Cleaning up...; kill 0' EXIT
 
 # run ingress
-dynamo run in=http out=dyn &
+python -m dynamo.frontend &
 
 # run worker
-python3 components/main.py --model Qwen/Qwen3-0.6B --enforce-eager --no-enable-prefix-caching
+python -m dynamo.vllm  --model Qwen/Qwen3-0.6B --enforce-eager --no-enable-prefix-caching

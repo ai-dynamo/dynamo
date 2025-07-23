@@ -1,18 +1,6 @@
 <!--
 SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
 -->
 
 # Multi-node Examples
@@ -63,10 +51,10 @@ Deploy vLLM workers across multiple nodes for horizontal scaling:
 **Node 1 (Head Node)**: Run ingress and first worker
 ```bash
 # Start ingress
-dynamo run in=http out=dyn
+python -m dynamo.frontend --router-mode kv
 
 # Start vLLM worker
-python3 components/main.py \
+python -m dynamo.vllm \
   --model meta-llama/Llama-3.3-70B-Instruct \
   --tensor-parallel-size 8 \
   --enforce-eager
@@ -75,7 +63,7 @@ python3 components/main.py \
 **Node 2**: Run additional worker
 ```bash
 # Start vLLM worker
-python3 components/main.py \
+python -m dynamo.vllm \
   --model meta-llama/Llama-3.3-70B-Instruct \
   --tensor-parallel-size 8 \
   --enforce-eager
@@ -88,10 +76,10 @@ Deploy prefill and decode workers on separate nodes for optimized resource utili
 **Node 1**: Run ingress and prefill workers
 ```bash
 # Start ingress
-dynamo run in=http out=dyn &
+python -m dynamo.frontend --router-mode kv &
 
 # Start prefill worker
-python3 components/main.py \
+python -m dynamo.vllm \
   --model meta-llama/Llama-3.3-70B-Instruct
   --tensor-parallel-size 8 \
   --enforce-eager
@@ -100,7 +88,7 @@ python3 components/main.py \
 **Node 2**: Run decode workers
 ```bash
 # Start decode worker
-python3 components/main.py \
+python -m dynamo.vllm \
   --model meta-llama/Llama-3.3-70B-Instruct
   --tensor-parallel-size 8 \
   --enforce-eager \
@@ -117,6 +105,6 @@ For models requiring more GPUs than available on a single node such as tensor-pa
 **Node 1**: First part of tensor-parallel model
 ```bash
 # Start ingress
-dynamo run in=http out=dyn &
+python -m dynamo.frontend --router-mode kv &
 ```
 
