@@ -53,11 +53,14 @@ use super::pool::{BlockPool, BlockPoolError};
 use super::storage::{Cuda, Storage};
 use super::{DeviceStorage, DiskStorage, PinnedStorage};
 use nixl_sys::Agent as NixlAgent;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
 use tokio::runtime::Handle;
 use tokio::sync::{
     mpsc::{self, error::TryRecvError},
-    oneshot, Mutex,
+    oneshot,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -66,14 +69,16 @@ use std::any::Any;
 
 use std::collections::BTreeSet;
 
-mod filter;
+pub mod filter;
 mod pending;
 pub mod request;
 
-use filter::{FrequencyFilter, OffloadFilter};
+use filter::OffloadFilter;
 use pending::{LocalTransferManager, PendingTransfer, TransferBatcher, TransferManager};
 use request::{BlockResult, OffloadRequest, OffloadRequestKey, OnboardRequest};
 
+use derive_builder::Builder;
+use derive_getters::Getters;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
 const MAX_CONCURRENT_TRANSFERS: usize = 4;
@@ -97,16 +102,18 @@ pub struct OffloadManager<Locality: LocalityProvider, Metadata: BlockMetadata> {
         mpsc::UnboundedSender<OnboardRequest<DiskStorage, DeviceStorage, Locality, Metadata>>,
 
     /// An incrementing counter for offloaded blocks. Within the same priority, blocks with lower tick values are processed first.
-    tick: Arc<Mutex<u64>>,
+    tick: Arc<AtomicU64>,
 }
 
 impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
     OffloadManager<Locality, Metadata>
 {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         disk: Option<Arc<dyn BlockPool<DiskStorage, Locality, Metadata>>>,
         host: Option<Arc<dyn BlockPool<PinnedStorage, Locality, Metadata>>>,
         device: Option<Arc<dyn BlockPool<DeviceStorage, Locality, Metadata>>>,
+        filters: OffloadFilters,
         nixl_agent: Arc<Option<NixlAgent>>,
         async_rt_handle: Handle,
         metrics: Arc<BlockManagerMetrics>,
@@ -126,7 +133,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             host_offload_tx,
             host_onboard_tx,
             disk_onboard_tx,
-            tick: Arc::new(Mutex::new(0)),
+            tick: Arc::new(AtomicU64::new(0)),
         });
 
         let cuda_ctx = Cuda::device_or_create(0)?;
@@ -160,7 +167,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 &async_rt_handle,
                 cancellation_token.clone(),
             )),
-            None,
+            filters.device.clone(),
             device_metrics.clone(),
             cancellation_token.clone(),
         );
@@ -177,9 +184,6 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             cuda_ctx.new_stream()?,
             async_rt_handle.clone(),
         ));
-
-        let disk_offload_filter =
-            FrequencyFilter::new(10, cancellation_token.clone(), async_rt_handle.clone())?;
 
         // Host -> Disk offload
         let host_to_disk_task = OffloadManager::offload_worker(
@@ -199,7 +203,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
                 &async_rt_handle,
                 cancellation_token.clone(),
             )),
-            Some(Arc::new(disk_offload_filter)),
+            filters.host.clone(),
             host_metrics.clone(),
             cancellation_token.clone(),
         );
@@ -450,14 +454,11 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             }
         }
 
-        let mut tick = self.tick.lock().await;
+        let tick = self.tick.fetch_add(1, Ordering::Relaxed);
         let key = OffloadRequestKey {
             priority,
-            timestamp: *tick,
+            timestamp: tick,
         };
-        // Increment a counter for each block. Within the same priority, blocks with lower counter values are processed first.
-        *tick += 1;
-        drop(tick);
 
         // This can get called by all pools, regardless of whether or not they have a place to offload to.
         // Because of this, we need to check the block type here.
@@ -588,6 +589,45 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         }
 
         rx
+    }
+}
+
+#[derive(Debug, Clone, Getters, Builder)]
+#[builder(pattern = "owned", build_fn(validate = "Self::validate"))]
+pub struct OffloadFilters {
+    #[builder(default)]
+    device: Option<Arc<dyn OffloadFilter>>,
+    #[builder(default)]
+    host: Option<Arc<dyn OffloadFilter>>,
+    #[builder(default)]
+    disk: Option<Arc<dyn OffloadFilter>>,
+}
+
+impl OffloadFilters {
+    pub fn builder() -> OffloadFiltersBuilder {
+        OffloadFiltersBuilder::default()
+    }
+}
+
+impl OffloadFiltersBuilder {
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(disk) = self.disk.as_ref() {
+            if disk.is_some() {
+                return Err("Disk offload filter is not supported.".to_string());
+            }
+        }
+
+        let host_is_none = if let Some(host) = self.host.as_ref() {
+            host.is_none()
+        } else {
+            true
+        };
+
+        if host_is_none {
+            tracing::warn!("Host to Disk offload filter is not provided. All blocks in host will be offloaded to disk. This may result in excessive disk offloading and accelerated SSD degradation.");
+        }
+
+        Ok(())
     }
 }
 
@@ -762,6 +802,7 @@ mod tests {
             disk_pool.clone(),
             host_pool.clone(),
             device_pool.clone(),
+            OffloadFilters::builder().build()?,
             agent_arc,
             async_rt_handle,
             BlockManagerMetrics::new(&Arc::new(Registry::new()))?,

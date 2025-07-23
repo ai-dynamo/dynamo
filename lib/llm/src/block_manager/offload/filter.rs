@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::HashMap;
+use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
 
 use tokio::runtime::Handle;
@@ -12,10 +13,11 @@ use crate::tokens::SequenceHash;
 
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 
-pub trait OffloadFilter: Send + Sync {
+pub trait OffloadFilter: Send + Sync + Debug {
     fn should_offload(&self, sequence_hash: SequenceHash) -> bool;
 }
 
+#[derive(Debug, Clone)]
 pub struct FrequencyFilter {
     frequency_threshold: i64,
     frequency_map: Arc<Mutex<HashMap<SequenceHash, i64>>>,
