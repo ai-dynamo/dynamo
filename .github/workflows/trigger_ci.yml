@@ -47,11 +47,9 @@ jobs:
         filters: |
           vllm:
             - 'container/Dockerfile.vllm'
-            - 'container/Dockerfile.vllm_v1'
-            - 'examples/vllm/**'
-            - 'examples/python_rs/llm/**'
             - 'container/deps/requirements.vllm.txt'
             - 'container/deps/vllm/**'
+            - 'components/backends/vllm/**'
             - 'tests/serve/test_vllm.py'
           trtllm:
             - 'container/Dockerfile.tensorrt_llm'
@@ -65,7 +63,7 @@ jobs:
           sglang:
             - 'container/Dockerfile.sglang'
             - 'container/Dockerfile.sglang-deepep'
-            - 'examples/sglang/**'
+            - 'components/backends/sglang/**'
             - 'container/build.sh'
     - name: Check if Validation Workflow has run
       id: check_workflow
