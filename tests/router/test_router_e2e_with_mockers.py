@@ -18,7 +18,6 @@ import asyncio
 import json
 import logging
 import os
-import time
 
 import aiohttp
 import pytest
@@ -88,7 +87,7 @@ class MockerProcess(ManagedProcess):
         super().__init__(
             command=command,
             timeout=60,
-            display_output=False,
+            display_output=False,  # Changed from False to True
             health_check_ports=[],  # No HTTP ports to check
             health_check_urls=[],  # No HTTP URLs to check
             log_dir=request.node.name,
@@ -120,7 +119,7 @@ class KVRouterProcess(ManagedProcess):
         super().__init__(
             command=command,
             timeout=60,
-            display_output=False,
+            display_output=False,  # Changed from False to True
             health_check_ports=[frontend_port],
             health_check_urls=[
                 (f"http://localhost:{frontend_port}/v1/models", self._check_ready)
@@ -166,7 +165,7 @@ def test_mocker_kv_router(request, runtime_services):
     try:
         for i in range(NUM_MOCKERS):
             # Use unique endpoints for each mocker
-            endpoint = f"dyn://test-namespace.mocker-{i}.generate"
+            endpoint = "dyn://test-namespace.mocker.generate"
             logger.info(f"Starting mocker instance {i} on endpoint {endpoint}")
 
             mocker = MockerProcess(request, endpoint, mocker_args_file)
@@ -182,10 +181,6 @@ def test_mocker_kv_router(request, runtime_services):
 
         kv_router = KVRouterProcess(request, frontend_port)
         kv_router.__enter__()
-
-        # Give everything a moment to stabilize
-        # TODO: can this be decreased? Currently, anything below this seems to be flaky (404 errors)
-        time.sleep(10)
 
         # Send test requests
         test_payload = {
@@ -223,8 +218,41 @@ def test_mocker_kv_router(request, runtime_services):
             os.unlink(mocker_args_file)
 
 
+async def send_request_with_retry(url: str, payload: dict, max_retries: int = 4):
+    """Send a single request with exponential backoff retry"""
+    wait_time = 1  # Start with 1 second
+
+    for attempt in range(max_retries + 1):
+        await asyncio.sleep(wait_time)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as response:
+                    if response.status == 200:
+                        # Read the response to ensure it's valid
+                        async for _ in response.content:
+                            pass
+                        logger.info(f"First request succeeded on attempt {attempt + 1}")
+                        return True
+                    else:
+                        logger.warning(
+                            f"Attempt {attempt + 1} failed with status {response.status}"
+                        )
+        except Exception as e:
+            logger.warning(f"Attempt {attempt + 1} failed with error: {e}")
+
+        if attempt < max_retries:
+            wait_time *= 2  # Double the wait time
+
+    return False
+
+
 async def send_concurrent_requests(url: str, payload: dict, num_requests: int):
     """Send multiple requests concurrently and verify responses"""
+
+    # First, send a test request with retry to ensure the system is ready
+    logger.info("Sending initial test request with retry...")
+    if not await send_request_with_retry(url, payload):
+        raise RuntimeError("Failed to connect after multiple retries")
 
     async def send_single_request(session: aiohttp.ClientSession, request_id: int):
         try:
