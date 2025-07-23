@@ -19,6 +19,7 @@ import torch
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from dynamo.runtime import DistributedRuntime
+# [gluo FIXME] this library is still depending on dynamo.sdk in some cases..
 from dynamo.sdk import dynamo_context
 
 logger = logging.getLogger(__name__)

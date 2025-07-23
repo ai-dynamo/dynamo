@@ -250,7 +250,14 @@ class Processor(ProcessMixIn):
             raise ValueError("Image URL is required")
 
         async for response in self._generate(chat_request, image_url, RequestType.CHAT):
-            yield json.dumps(response)
+            logger.debug(
+                f"Generated response type {type(response)}, content: {response}"
+            )
+            # reconstructing back the OpenAI chat response as dynamo egress expects it
+            if response.startswith("data: [DONE]"):
+                break
+            response = json.loads(response.lstrip("data: "))
+            yield response
 
 
 async def graceful_shutdown(runtime):

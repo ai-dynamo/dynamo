@@ -13,36 +13,40 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import argparse
 import asyncio
 import copy
 import logging
 import os
 import signal
 import sys
+from typing import Tuple
 
 import torch
 import uvloop
-from args import Config, configure_ports_with_etcd, overwrite_args, parse_args
-from handlers import PrefillWorkerHandler
 from transformers import AutoImageProcessor
 from vllm.distributed.kv_events import ZmqEventPublisher
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.inputs.data import TokensPrompt
 from vllm.usage.usage_lib import UsageContext
+from vllm.utils import FlexibleArgumentParser
 from vllm.v1.engine.async_llm import AsyncLLM
 
-from dynamo.llm import (
-    ModelType,
-    ZmqKvEventPublisher,
-    ZmqKvEventPublisherConfig,
-    register_llm,
-)
-from dynamo.runtime import DistributedRuntime, dynamo_worker
+from dynamo.llm import ZmqKvEventPublisher, ZmqKvEventPublisherConfig
+from dynamo.runtime import Component, DistributedRuntime, Endpoint, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import connect
+from args import (
+    Config,
+    base_parse_args,
+    configure_ports_with_etcd,
+    overwrite_args,
+    parse_endpoint,
+)
+from publisher import StatLoggerFactory
 from utils.image_loader import ImageLoader
-from utils.logging import check_required_workers
 from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
 
 configure_dynamo_logging()
@@ -100,13 +104,28 @@ class VllmBaseWorker:
 
         return args, config
 
-    def __init__(self, args: argparse.Namespace, engine_args: AsyncEngineArgs):
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        engine_args: AsyncEngineArgs,
+        component: Component,
+        endpoint: Endpoint,
+    ):
         self.enable_disagg = args.enable_disagg
+        self.endpoint = args.endpoint
         self.downstream_endpoint = args.downstream_endpoint
         self.engine_args = engine_args
-        self.setup_vllm_engine()
+        self.setup_vllm_engine(component, endpoint)
 
-    def setup_vllm_engine(self):
+    async def async_init(self, runtime: DistributedRuntime):
+        pass
+
+    def setup_vllm_engine(self, component: Component, endpoint: Endpoint):
+        """Initialize the vLLM engine.
+        This method sets up the vLLM engine client, and configures the dynamo-aware KV
+        event publisher and metrics stats logger based on component and endpoint.
+        """
+
         os.environ["VLLM_NO_USAGE_STATS"] = "1"  # Avoid internal HTTP requests
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
@@ -120,24 +139,25 @@ class VllmBaseWorker:
         vllm_config = self.engine_args.create_engine_config(usage_context=usage_context)
 
         # Create vLLM engine with metrics logger and KV event publisher attached
-        factory = [
-            StatLoggerFactory(component, self.engine_args.data_parallel_rank or 0)
-        ]
-
+        self.stats_logger = StatLoggerFactory(
+            component, self.engine_args.data_parallel_rank or 0
+        )
         self.engine_client = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,
             usage_context=usage_context,
-            stat_loggers=factory,
-            disable_log_requests=engine_args.disable_log_requests,
-            disable_log_stats=engine_args.disable_log_stats,
+            stat_loggers=[self.stats_logger],
+            disable_log_requests=self.engine_args.disable_log_requests,
+            disable_log_stats=self.engine_args.disable_log_stats,
         )
 
         # TODO Hack to get data, move this to registering in ETCD
-        factory[0].set_num_gpu_blocks_all(vllm_config.cache_config.num_gpu_blocks)
-        factory[0].set_request_total_slots_all(
+        self.stats_logger.set_num_gpu_blocks_all(
+            vllm_config.cache_config.num_gpu_blocks
+        )
+        self.stats_logger.set_request_total_slots_all(
             vllm_config.scheduler_config.max_num_seqs
         )
-        factory[0].init_publish()
+        self.stats_logger.init_publish()
 
         # TODO: We start off with a valid endpoint, then we increment it by dp_rank
         # May no longer be valid. Lets remove the increment behavior from vLLM and here
@@ -147,7 +167,7 @@ class VllmBaseWorker:
         ).replace("*", "127.0.0.1")
 
         zmq_config = ZmqKvEventPublisherConfig(
-            worker_id=generate_endpoint.lease_id(),
+            worker_id=endpoint.lease_id(),
             kv_block_size=vllm_config.cache_config.block_size,
             zmq_endpoint=zmq_endpoint,
         )
@@ -156,23 +176,33 @@ class VllmBaseWorker:
         logger.info(f"Reading Events from {zmq_endpoint}")
 
         logger.info(f"VllmWorker for {self.engine_args.model} has been initialized")
-        return vllm_config
 
-    async def async_init(self):
+    async def generate(self, request: vLLMMultimodalRequest):
+        raise NotImplementedError(
+            "This method should be implemented in subclasses to handle the generation logic."
+        )
+
+    async def clear_kv_blocks(self, request=None):
+        try:
+            await self.engine_client.reset_prefix_cache()
+            yield {"status": "success", "message": "KV cache cleared"}
+        except Exception as e:
+            yield {"status": "error", "message": str(e)}
+
+    def cleanup(self):
+        """Override in subclasses if cleanup is needed."""
         pass
 
 
-# [gluo WIP]
 class VllmDecodeWorker(VllmBaseWorker):
-    async def async_init(self):
-        await super().async_init()
-        logger.info("VllmDecodeWorker has been initialized")
-
-    @endpoint()
     async def generate(self, request: vLLMMultimodalRequest):
-        logger.debug(
-            f"Received generate request in DecodeWorker: {{ id: {request.request_id} }}."
-        )
+        logger.debug(f"Got raw request: {request}")
+        if type(request) is not vLLMMultimodalRequest:
+            if type(request) is str:
+                request = vLLMMultimodalRequest.model_validate_json(request)
+            else:
+                request = vLLMMultimodalRequest.model_validate(request)
+        logger.debug(f"Received decode request: {{ id: {request.request_id} }}.")
 
         # Decode worker doesn't process embeddings, so we pass None or empty tensor
         gen = self.engine_client.generate(
@@ -199,37 +229,29 @@ class VllmDecodeWorker(VllmBaseWorker):
             ).model_dump_json()
 
 
-@service(
-    dynamo={
-        "enabled": True,
-        "namespace": "dynamo",
-    },
-    resources={"gpu": 1, "cpu": "10", "memory": "20Gi"},
-    workers=1,
-)
 class VllmPDWorker(VllmBaseWorker):
-    decode_worker = depends(VllmDecodeWorker)
-
-    @async_on_start
-    async def async_init(self):
-        await super().async_init()
+    async def async_init(self, runtime: DistributedRuntime):
+        logger.info("Startup started.")
 
         if self.enable_disagg:
-            runtime = dynamo_context["runtime"]
-            comp_ns, comp_name = VllmDecodeWorker.dynamo_address()  # type: ignore
+            (
+                parsed_namespace,
+                parsed_component_name,
+                parsed_endpoint_name,
+            ) = parse_endpoint(self.downstream_endpoint)
             self.decode_worker_client = (
-                await runtime.namespace(comp_ns)
-                .component(comp_name)
-                .endpoint("generate")
+                await runtime.namespace(parsed_namespace)
+                .component(parsed_component_name)
+                .endpoint(parsed_endpoint_name)
                 .client()
             )
-            await check_required_workers(self.decode_worker_client, self.min_workers)
 
         EMBEDDINGS_DTYPE = torch.float16
         EMBEDDINGS_DEVICE = "cpu"
         # Create and initialize a dynamo connector for this worker.
         # We'll needs this to move data between this worker and remote workers efficiently.
-        self._connector = connect.Connector()
+        parsed_namespace, _, _ = parse_endpoint(self.endpoint)
+        self._connector = connect.Connector(runtime=runtime, namespace=parsed_namespace)
         await self._connector.initialize()
 
         # embeddings_shape, self.embeddings_dtype = get_vision_embeddings_info(
@@ -256,11 +278,14 @@ class VllmPDWorker(VllmBaseWorker):
 
         logger.info("VllmPDWorker has been initialized")
 
-    @endpoint()
     async def generate(self, request: vLLMMultimodalRequest):
-        logger.debug(
-            f"Received generate request in PDWorker: {{ id: {request.request_id} }}."
-        )
+        logger.debug(f"Got raw request: {request}")
+        if type(request) is not vLLMMultimodalRequest:
+            if type(request) is str:
+                request = vLLMMultimodalRequest.model_validate_json(request)
+            else:
+                request = vLLMMultimodalRequest.model_validate(request)
+        logger.debug(f"Received PD request: {{ id: {request.request_id} }}.")
 
         if request.image_url is None:
             # Process embeddings using the connector
@@ -374,12 +399,7 @@ async def graceful_shutdown(runtime):
 
 @dynamo_worker(static=False)
 async def worker(runtime: DistributedRuntime):
-    config = parse_args()
-
-    etcd_client = runtime.etcd_client()
-    await configure_ports_with_etcd(config, etcd_client)
-    overwrite_args(config)
-
+    # Runtime setup
     # Set up signal handler for graceful shutdown
     loop = asyncio.get_running_loop()
 
@@ -391,13 +411,17 @@ async def worker(runtime: DistributedRuntime):
 
     logging.info("Signal handlers set up for graceful shutdown")
 
-    if config.is_prefill_worker:
-        await init_prefill(runtime, config)
-    else:
-        await init(runtime, config)
+    # worker setup
+    args, config = VllmBaseWorker.parse_args()
+
+    # vLLM config overwrites
+    etcd_client = runtime.etcd_client()
+    await configure_ports_with_etcd(config, etcd_client)
+    overwrite_args(config)
+    await init(runtime, args, config)
 
 
-async def init_prefill(runtime: DistributedRuntime, config: Config):
+async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Config):
     """
     Instantiate and serve
     """
@@ -408,11 +432,15 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     generate_endpoint = component.endpoint(config.endpoint)
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
-    engine_client, _, default_sampling_params = setup_vllm_engine(config)
+    if args.worker_type in ["prefill", "encode_prefill"]:
+        handler = VllmPDWorker(args, config.engine_args, component, generate_endpoint)
+    elif args.worker_type == "decode":
+        handler = VllmDecodeWorker(
+            args, config.engine_args, component, generate_endpoint
+        )
+    await handler.async_init(runtime)
 
-    # TODO register_prefill in similar vein to register_llm
-
-    handler = PrefillWorkerHandler(component, engine_client, default_sampling_params)
+    logger.info(f"Starting to serve the {args.endpoint} endpoint...")
 
     try:
         await asyncio.gather(
@@ -423,51 +451,6 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         logger.error(f"Failed to serve endpoints: {e}")
         raise
     finally:
-        handler.cleanup()
-
-
-async def init(runtime: DistributedRuntime, config: Config):
-    """
-    Instantiate and serve
-    """
-
-    component = runtime.namespace(config.namespace).component(config.component)
-    await component.create_service()
-
-    generate_endpoint = component.endpoint(config.endpoint)
-    clear_endpoint = component.endpoint("clear_kv_blocks")
-
-    prefill_worker_client = (
-        await runtime.namespace(config.namespace)
-        .component("prefill")  # TODO don't hardcode
-        .endpoint("generate")
-        .client()
-    )
-
-    if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
-        await register_llm(
-            ModelType.Backend,
-            generate_endpoint,
-            config.model,
-            config.served_model_name,
-            kv_cache_block_size=config.engine_args.block_size,
-        )
-
-    logger.info(f"VllmWorker for {config.model} has been initialized")
-
-    # [gluo WIP]
-    VllmPDWorker()
-
-    try:
-        await asyncio.gather(
-            generate_endpoint.serve_endpoint(handler.generate),
-            clear_endpoint.serve_endpoint(handler.clear_kv_blocks),
-        )
-    except Exception as e:
-        logger.error(f"Failed to serve endpoints: {e}")
-        raise
-    finally:
-        # Cleanup background tasks
         handler.cleanup()
 
 

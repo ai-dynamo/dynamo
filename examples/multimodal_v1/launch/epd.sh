@@ -8,9 +8,9 @@ trap 'echo Cleaning up...; kill 0' EXIT
 dynamo run in=http out=dyn &
 
 # run processor
-python3 components/processor.py --model llava-hf/llava-1.5-7b-hf --prompt-template "USER: <image>\n<prompt> ASSISTANT:"
+python3 components/processor.py --model llava-hf/llava-1.5-7b-hf --prompt-template "USER: <image>\n<prompt> ASSISTANT:" &
 
-# run E/P/D workers
-python3 components/encode_worker.py --model llava-hf/llava-1.5-7b-hf
+# run E/PD workers
+python3 components/encode_worker.py --model llava-hf/llava-1.5-7b-hf &
 
-python3 components/worker.py --model llava-hf/llava-1.5-7b-hf
+python3 components/worker.py --model llava-hf/llava-1.5-7b-hf --worker-type prefill
