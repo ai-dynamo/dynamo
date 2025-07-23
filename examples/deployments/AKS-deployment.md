@@ -1,13 +1,7 @@
 # Dynamo on AKS
 
 
-This document covers the process of deploying Dynamo Cloud and running inference in a vLLM distributed runtime within a Azure Kubernetes environment. The Dynamo Cloud Platform provides a managed deployment experience:
-
-- Contains the infrastructure components required for the Dynamo cloud platform
-- Used when deploying with the `dynamo deploy` CLI commands
-- Provides a managed deployment experience
-
-This overview covers the setup process on a Azure Kubernetes Cluster, all the way from setup to testing inference.
+This document covers the process of deploying Dynamo Cloud and running inference in a vLLM distributed runtime within a Azure Kubernetes environment, covering the setup process on a Azure Kubernetes Cluster, all the way from setup to testing inference.
 
 
 ### Task 1. Infrastructure Deployment
@@ -130,7 +124,7 @@ dynamo-platform-nats-0                                            2/2     Runnin
 dynamo-platform-nats-box-5dbf45c748-kln82                         1/1     Running   0          2m51s
 ```
 
-There are other ways to install Dynamo, you can find them [here] (https://github.com/ai-dynamo/dynamo/blob/main/docs/guides/dynamo_deploy/quickstart.md)
+There are other ways to install Dynamo, you can find them [here](https://github.com/ai-dynamo/dynamo/blob/main/docs/guides/dynamo_deploy/quickstart.md)
 
 ### Task 4. Deploy a model
 
@@ -160,7 +154,7 @@ kubectl get pods -n  ${NAMESPACE} -o wide
 kubectl logs <pod-name> -n  ${NAMESPACE}
 kubectl exec -it <pod-name> -n  ${NAMESPACE} -- nvidia-smi
 
-# Enable Port forwarding
+# Enable Port forwarding to be able to hit a curl request
 kubectl get svc -n ${NAMESPACE}
 
 #Look for one that ends in -frontend and use it for port forward.
