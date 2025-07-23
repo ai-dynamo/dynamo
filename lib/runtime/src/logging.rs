@@ -406,6 +406,26 @@ impl CustomJsonFormatter {
     }
 }
 
+use regex::Regex;
+use once_cell::sync::Lazy;
+fn parse_tracing_duration(s: &str) -> Option<u64> {
+    static RE: Lazy<Regex> = Lazy::new(|| {
+        Regex::new(
+            r#"^["']?\s*([0-9.]+)\s*(µs|us|ns|ms|s)\s*["']?$"#
+        ).unwrap()
+    });
+    let captures = RE.captures(s)?;
+    let value: f64 = captures[1].parse().ok()?;
+    let unit = &captures[2];
+    match unit {
+        "ns"         => Some((value / 1000.0) as u64),
+        "µs" | "us"  => Some(value as u64),
+        "ms"         => Some((value * 1000.0) as u64),
+        "s"          => Some((value * 1_000_000.0) as u64),
+        _            => None,
+    }
+}
+
 impl<S, N> tracing_subscriber::fmt::FormatEvent<S, N> for CustomJsonFormatter
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
@@ -443,6 +463,21 @@ where
                     serde_json::Value::String(value.trim_matches('"').to_string()),
                 );
             }
+
+
+	    // Calculate combined duration
+            let busy = visitor.fields.remove("time.busy").and_then(|v| {
+		let busy_us = parse_tracing_duration(&v.to_string());
+		println!("{:?} {:?}",v,busy_us);
+		v.as_i64().map(|v| v as u128)
+            });
+            let idle = visitor.fields.remove("time.idle").and_then(|v| {
+		println!("{:?}",v);
+		v.as_i64().map(|v| v as u128)
+            });
+
+	    println!("{:?}",busy);
+
             visitor.fields.insert(
                 "span_name".to_string(),
                 serde_json::Value::String(span.name().to_string()),
