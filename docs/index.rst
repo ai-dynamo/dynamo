@@ -27,7 +27,7 @@ The NVIDIA Dynamo Platform is a high-performance, low-latency inference framewor
    - `Dynamo README <https://github.com/ai-dynamo/dynamo/blob/main/README.md>`_
    - `Architecture and features doc <https://github.com/ai-dynamo/dynamo/blob/main/docs/architecture/>`_
    - `Usage guides <https://github.com/ai-dynamo/dynamo/tree/main/docs/guides>`_
-   - `Dynamo examples repo <https://github.com/ai-dynamo/examples>`_
+   - `Dynamo examples <https://github.com/ai-dynamo/dynamo/examples>`_
 
 
 Quick Start
