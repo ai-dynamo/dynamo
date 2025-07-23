@@ -19,8 +19,6 @@ If you are a **🧑‍💻 Dynamo Contributor** first follow the instructions in
 
 You would have to rebuild the dynamo platform images as the code evolves. For more details please look at the [Cloud Guide](../guides/dynamo_deploy/dynamo_cloud.md)
 
-Export the [Dynamo Base Image](../get_started.md#building-the-dynamo-base-image) you want to use (or built during the prerequisites step) as the `DYNAMO_IMAGE` environment variable.
-
 ```bash
 export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
 ```
