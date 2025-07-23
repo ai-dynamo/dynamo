@@ -311,11 +311,23 @@ async def worker(runtime: DistributedRuntime):
 
     logging.info("Signal handlers set up for graceful shutdown")
 
-    server_args = parse_sglang_args_inc(sys.argv[1:])
-    await init(runtime, server_args)
+    # TODO: Better handle non-sglang args
+    sys_argv = sys.argv[1:]
+    migration_limit = 0
+    try:
+        idx = sys_argv.index("--migration-limit")
+        migration_limit = int(sys_argv[idx + 1])
+        del sys_argv[idx : idx + 2]  # Remove the args from sys_argv
+    except Exception:
+        pass
+
+    server_args = parse_sglang_args_inc(sys_argv)
+    await init(runtime, server_args, migration_limit)
 
 
-async def init(runtime: DistributedRuntime, server_args: ServerArgs):
+async def init(
+    runtime: DistributedRuntime, server_args: ServerArgs, migration_limit: int
+):
     """Initialize worker (either prefill or aggregated)"""
 
     engine = sgl.Engine(server_args=server_args)
@@ -330,6 +342,7 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
         server_args.model_path,
         server_args.served_model_name,
         kv_cache_block_size=server_args.page_size,
+        migration_limit=migration_limit,
     )
 
     if server_args.disaggregation_mode != "null":
