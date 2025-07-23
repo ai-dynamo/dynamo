@@ -17,8 +17,11 @@ use super::*;
 use dynamo_llm::block_manager::block::{
     data::logical::distributed_leader_worker::DistributedLeaderWorkerResources, locality::Logical,
 };
+use dynamo_llm::block_manager::offload::filter::FrequencyFilter;
 use dynamo_llm::block_manager::{BasicMetadata, BlockParallelismStrategy};
+
 use pyo3::PyResult;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 mod controller;
@@ -101,13 +104,27 @@ impl BlockManager {
 
             if leader.num_host_blocks() > 0 {
                 tracing::info!("Using {} host blocks", leader.num_host_blocks());
-                config = config.host_layout(
+
+                let mut host_layout_config =
                     dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
                         .num_blocks(leader.num_host_blocks())
-                        .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
-                        .build()
-                        .map_err(to_pyerr)?,
-                );
+                        .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded));
+
+                if leader.num_disk_blocks() > 0 {
+                    // TODO: These values seem plausible for most use cases, but we need to figure out a better way to configure them.
+                    let frequency_filter = FrequencyFilter::new(
+                        2,
+                        Duration::from_secs(600),
+                        1e6 as usize,
+                        cancel_token.child_token(),
+                        rt.handle().clone(),
+                    )
+                    .map_err(to_pyerr)?;
+                    host_layout_config =
+                        host_layout_config.offload_filter(Some(Arc::new(frequency_filter)));
+                }
+
+                config = config.host_layout(host_layout_config.build().map_err(to_pyerr)?);
             }
 
             if leader.num_disk_blocks() > 0 {
