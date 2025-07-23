@@ -78,14 +78,17 @@ Here's a template structure based on the examples:
       extraPodSpec:
         mainContainer:
           image: your-image
+          command:
+            - /bin/sh
+            - -c
           args:
-            - "python -m dynamo.vllm --model YOUR_MODEL --your-flags"
+            - python -m dynamo.YOUR_INFERENCE_ENGINE --model YOUR_MODEL --your-flags
 ```
 
 Consult the corresponding sh file. Each of the python commands to launch a component will go into your yaml spec under the
 `extraPodSpec: -> mainContainer: -> args:`
 
-The front end is launched with "python3 -m dynamo.frontend --http-port 8000 --router-mode kv"
+The front end is launched with "python3 -m dynamo.frontend [--http-port 8000] [--router-mode kv]"
 Each worker will launch `python -m dynamo.YOUR_INFERENCE_BACKEND --model YOUR_MODEL --your-flags `command.
 If you are a Dynamo contributor the [dynamo run guide](../dynamo_run.md) for details on how to run this command.
 
@@ -96,7 +99,7 @@ If you are a Dynamo contributor the [dynamo run guide](../dynamo_run.md) for det
 
 ```yaml
    args:
-     - "python -m dynamo.vllm --model YOUR_MODEL --your-flag"
+     - "python -m dynamo.YOUR_INFERENCE_BACKEND --model YOUR_MODEL --your-flag"
 ```
 
 ### Resource Allocation
