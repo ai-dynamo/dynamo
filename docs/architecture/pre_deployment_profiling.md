@@ -107,16 +107,16 @@ kubectl logs job/profile_sla -n $NAMESPACE
 
 ### RBAC Configuration
 
-The SLA profiling job requires specific Kubernetes permissions to manage DynamoGraphDeployment resources and access cluster information. The RBAC setup consists of:
+The SLA profiling job requires specific Kubernetes permissions to manage DynamoGraphDeployment resources and access namespace information. The RBAC setup consists of:
 
 - **`profile_sla_sa.yaml`** - Service account with image pull secret for NVIDIA Container Registry access
-- **`profile_sla_rbac.yaml`** - ClusterRole defining required permissions for managing deployments and accessing cluster resources
-- **`profile_sla_binding.yaml`** - ClusterRoleBinding that associates the ClusterRole with the service account
+- **`profile_sla_rbac.yaml`** - Role defining required permissions for managing deployments and accessing namespace resources
+- **`profile_sla_binding.yaml`** - RoleBinding that associates the Role with the service account
 
 All three files are necessary:
 1. The service account provides identity and image pull credentials
-2. The ClusterRole defines what operations are allowed
-3. The ClusterRoleBinding connects the permissions to the service account
+2. The Role defines what operations are allowed
+3. The RoleBinding connects the permissions to the service account
 
 ### Viewing Profiling Results
 
