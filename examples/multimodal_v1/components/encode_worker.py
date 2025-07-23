@@ -21,7 +21,6 @@ import signal
 import sys
 from typing import AsyncIterator, Tuple
 
-import connect
 import torch
 import uvloop
 from transformers import AutoImageProcessor, LlavaForConditionalGeneration
@@ -32,6 +31,7 @@ from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+import connect
 from args import Config, base_parse_args, parse_endpoint
 from utils.image_loader import ImageLoader
 from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
@@ -72,9 +72,18 @@ class VllmEncodeWorker:
 
         self.min_workers = 1
 
+    def cleanup(self):
+        pass
+
     async def generate(
         self, request: vLLMMultimodalRequest
     ) -> AsyncIterator[MyRequestOutput]:
+        logger.debug(f"Got raw request: {request}")
+        if type(request) is not vLLMMultimodalRequest:
+            if type(request) is str:
+                request = vLLMMultimodalRequest.model_validate_json(request)
+            else:
+                request = vLLMMultimodalRequest.model_validate(request)
         logger.debug(f"Received encode request: {{ id: {request.request_id} }}.")
 
         request_id = request.request_id
@@ -259,7 +268,7 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
     handler = VllmEncodeWorker(args, config.engine_args)
     await handler.async_init(runtime)
 
-    logger.info("Starting to serve the generate endpoint...")
+    logger.info(f"Starting to serve the {args.endpoint} endpoint...")
 
     try:
         await asyncio.gather(

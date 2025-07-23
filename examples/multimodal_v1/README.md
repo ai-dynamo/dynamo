@@ -73,7 +73,7 @@ dynamo serve graphs.agg:Frontend -f ./configs/agg-llava.yaml
 
 In another terminal:
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
       "model": "llava-hf/llava-1.5-7b-hf",

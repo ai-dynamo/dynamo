@@ -161,6 +161,10 @@ class Processor(ProcessMixIn):
             image_url=image,
         )
 
+        # model_dump_json() serializes the request to JSON string
+        # This API could accept Pydantic class, but SamplingParams
+        # in vLLMMultimodalRequest is not a Pydantic class and will
+        # cause TypeError: unsupported type SamplingParams
         response_generator = await self.encode_worker_client.round_robin(
             worker_request.model_dump_json()
         )
@@ -301,6 +305,8 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
         config.served_model_name,
         kv_cache_block_size=config.engine_args.block_size,
     )
+
+    logger.info(f"Starting to serve the {args.endpoint} endpoint...")
 
     try:
         await asyncio.gather(
