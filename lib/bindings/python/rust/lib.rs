@@ -145,12 +145,7 @@ fn register_llm<'p>(
     router_mode: Option<RouterMode>,
     migration_limit: u32,
 ) -> PyResult<Bound<'p, PyAny>> {
-    let model_type_obj = match model_type {
-        ModelType::Chat => llm_rs::model_type::ModelType::Chat,
-        ModelType::Completion => llm_rs::model_type::ModelType::Completion,
-        ModelType::Backend => llm_rs::model_type::ModelType::Backend,
-        ModelType::Embedding => llm_rs::model_type::ModelType::Embedding,
-    };
+    let model_type_obj = model_type.inner;
 
     let inner_path = model_path.to_string();
     let model_name = model_name.map(|n| n.to_string());
@@ -230,14 +225,30 @@ struct Client {
     router: rs::pipeline::PushRouter<serde_json::Value, RsAnnotated<serde_json::Value>>,
 }
 
-#[pyclass(eq, eq_int)]
+#[pyclass]
 #[derive(Clone, PartialEq)]
-#[repr(i32)]
-enum ModelType {
-    Chat = 1,
-    Completion = 2,
-    Backend = 3,
-    Embedding = 4,
+struct ModelType {
+    inner: llm_rs::model_type::ModelType,
+}
+
+#[pymethods]
+impl ModelType {
+    #[classattr]
+    const Chat: Self = ModelType { inner: llm_rs::model_type::ModelType::Chat };
+    #[classattr]
+    const Completion: Self = ModelType { inner: llm_rs::model_type::ModelType::Completion };
+    #[classattr]
+    const Backend: Self = ModelType { inner: llm_rs::model_type::ModelType::Backend };
+    #[classattr]
+    const Embedding: Self = ModelType { inner: llm_rs::model_type::ModelType::Embedding };
+
+    fn __or__(&self, other: &Self) -> Self {
+        ModelType { inner: self.inner | other.inner }
+    }
+
+    fn __str__(&self) -> String {
+        self.inner.to_string()
+    }
 }
 
 #[pyclass]

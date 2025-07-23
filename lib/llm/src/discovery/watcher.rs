@@ -20,7 +20,6 @@ use crate::{
     backend::Backend,
     kv_router::{KvPushRouter, KvRouterConfig},
     migration::Migration,
-    model_type::ModelType,
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, PreprocessedRequest},
     protocols::common::llm_backend::{EmbeddingsEngineOutput, LLMEngineOutput},
     protocols::openai::chat_completions::{
