@@ -26,6 +26,7 @@ INSTALLATION_DIR=/tmp
 ARCH=$(uname -m)
 DEEPGEMM_REF="6c9558e"
 FLASHINF_REF="1d72ed4"
+TORCH_BACKEND="cu128"
 
 # Convert x86_64 to amd64 for consistency with Docker ARG
 if [ "$ARCH" = "x86_64" ]; then
@@ -68,8 +69,12 @@ while [[ $# -gt 0 ]]; do
             FLASHINF_REF="$2"
             shift 2
             ;;
+        --torch-backend)
+            TORCH_BACKEND="$2"
+            shift 2
+            ;;
         -h|--help)
-            echo "Usage: $0 [--editable|--no-editable] [--vllm-ref REF] [--max-jobs NUM] [--arch ARCH] [--deepgemm-ref REF] [--flashinf-ref REF]"
+            echo "Usage: $0 [--editable|--no-editable] [--vllm-ref REF] [--max-jobs NUM] [--arch ARCH] [--deepgemm-ref REF] [--flashinf-ref REF] [--torch-backend BACKEND]"
             echo "Options:"
             echo "  --editable        Install vllm in editable mode (default)"
             echo "  --no-editable     Install vllm in non-editable mode"
@@ -79,6 +84,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --installation-dir DIR  Directory to install vllm (default: /tmp/vllm)"
             echo "  --deepgemm-ref REF  Git reference for DeepGEMM (default: 6c9558e)"
             echo "  --flashinf-ref REF  Git reference for Flash Infer (default: 1d72ed4)"
+            echo "  --torch-backend BACKEND  Torch backend to use (default: cu128)"
             exit 0
             ;;
         *)
@@ -96,6 +102,7 @@ echo "  EDITABLE: $EDITABLE"
 echo "  VLLM_REF: $VLLM_REF"
 echo "  MAX_JOBS: $MAX_JOBS"
 echo "  ARCH: $ARCH"
+echo "  TORCH_BACKEND: $TORCH_BACKEND"
 
 # Install common dependencies
 uv pip install pip cuda-python
@@ -112,9 +119,10 @@ if [ "$ARCH" = "arm64" ]; then
 
     # Try to install specific PyTorch version first, fallback to latest nightly
     echo "Attempting to install pinned PyTorch nightly versions..."
-    if ! uv pip install torch==2.9.0.dev20250712+cu128 torchvision==0.24.0.dev20250712+cu128 torchaudio==2.8.0.dev20250712+cu128 --index-url https://download.pytorch.org/whl/nightly/cu128; then
-        echo "Pinned versions failed, falling back to latest stable..."
-        uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+    if ! uv pip install torch==2.8.0.dev20250613+cu128 torchaudio==2.8.0.dev20250616 torchvision==0.23.0.dev20250616 --index-url https://download.pytorch.org/whl/nightly/cu128; then
+        echo "Pinned versions failed"
+        exit 1
+        # uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
     fi
 
     python use_existing_torch.py
@@ -128,9 +136,9 @@ if [ "$ARCH" = "arm64" ]; then
 else
     echo "Installing vllm for AMD64 architecture"
     if [ "$EDITABLE" = "true" ]; then
-        VLLM_USE_PRECOMPILED=1 uv pip install -e .
+        VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=$TORCH_BACKEND
     else
-        VLLM_USE_PRECOMPILED=1 uv pip install .
+        VLLM_USE_PRECOMPILED=1 uv pip install . --torch-backend=$TORCH_BACKEND
     fi
 fi
 
@@ -156,10 +164,14 @@ python setup.py install
 
 
 # Install Flash Infer
-cd $INSTALLATION_DIR
-git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
-cd flashinfer
-git checkout $FLASHINF_REF
-python -m pip install -v .
+if [ "$ARCH" = "arm64" ]; then
+    uv pip install flashinfer-python
+else
+    cd $INSTALLATION_DIR
+    git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
+    cd flashinfer
+    git checkout $FLASHINF_REF
+    python -m pip install -v .
+fi
 
 echo "vllm installation completed successfully"

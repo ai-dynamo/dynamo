@@ -11,6 +11,7 @@ ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 ARG VLLM_REF="059d4cd"
+ARG TORCH_BACKEND="cu128"
 
 # After this commit deepgemm API changed
 # 1.0.0 -> 2.0.0
@@ -38,9 +39,10 @@ ARG ARCH_ALT=x86_64
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
-# Redeclare ARCH and ARCH_ALT so they're available in this stage
+# Redeclare ARCH, ARCH_ALT, TORCH_BACKEND so they're available in this stage
 ARG ARCH
 ARG ARCH_ALT
+ARG TORCH_BACKEND
 
 USER root
 ARG PYTHON_VERSION=3.12
@@ -78,6 +80,13 @@ RUN apt-get update -y && \
 
 ARG NIXL_UCX_REF=v1.19.x
 ARG NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
+
+ENV NIXL_SRC_DIR=/opt/nixl
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ARG ARCH_ALT
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+ENV LD_LIBRARY_PATH=$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:$LD_LIBRARY_PATH
 
 WORKDIR /workspace
 
@@ -121,24 +130,19 @@ WORKDIR /workspace
 ### NIXL SETUP ###
 # Clone nixl source
 # TEMP: disable gds backend for arm64
-RUN git clone "https://github.com/ai-dynamo/nixl.git" /opt/nixl && \
-    cd /opt/nixl && \
+RUN git clone "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
+    cd ${NIXL_SRC_DIR} && \
     git checkout ${NIXL_REF} && \
     if [ "$ARCH" = "arm64" ]; then \
-        cd /opt/nixl && \
-        mkdir build && \
-        meson setup build/ --buildtype=release --prefix=/usr/local/nixl -Ddisable_gds_backend=true -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
-        cd build/ && \
-        ninja && \
-        ninja install; \
+        nixl_build_args="-Ddisable_gds_backend=true -Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
     else \
-        cd /opt/nixl && \
-        mkdir build && \
-        meson setup build/ --buildtype=release --prefix=/usr/local/nixl && \
-        cd build/ && \
-        ninja && \
-        ninja install; \
-    fi
+        nixl_build_args=""; \
+    fi && \
+    mkdir build && \
+    meson setup build/ --buildtype=release --prefix=$NIXL_PREFIX $nixl_build_args && \
+    cd build/ && \
+    ninja && \
+    ninja install;
 
 ### NATS & ETCD SETUP ###
 ENV ETCD_VERSION="v3.5.21"
@@ -166,11 +170,11 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # TODO: Move gds_path selection based on arch into NIXL build
 # TEMP: disable gds backend for arm64
 RUN if [ "$ARCH" = "arm64" ]; then \
-        cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl \
+        cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl \
         --config-settings=setup-args="-Ddisable_gds_backend=true" \
         --config-settings=setup-args="-Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
     else \
-        cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl; \
+        cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl; \
     fi && \
     # Install the wheel
     # TODO: Move NIXL wheel install to the wheel_builder stage
@@ -192,7 +196,7 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
     cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
     chmod +x /tmp/install_vllm.sh && \
-    /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt --deepgemm-ref $DEEPGEMM_REF --flashinf-ref $FLASHINF_REF
+    /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt --deepgemm-ref $DEEPGEMM_REF --flashinf-ref $FLASHINF_REF --torch-backend $TORCH_BACKEND
 
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
@@ -313,6 +317,9 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 # Use build arg RELEASE_BUILD = true to generate wheels for Python 3.10, 3.11 and 3.12.
 ARG RELEASE_BUILD
 
+# Keep in sync with the base image.
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+
 WORKDIR /workspace
 
 RUN yum update -y \
@@ -329,8 +336,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
-# NIXL path default is NIXL_PREFIX=/opt/nvidia/nvda_nixl
-COPY --from=base /usr/local/nixl /opt/nvidia/nvda_nixl
+COPY --from=base $NIXL_PREFIX $NIXL_PREFIX
 COPY --from=base /workspace /workspace
 COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
 ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
@@ -378,11 +384,7 @@ ENV CARGO_TARGET_DIR=/workspace/target
 WORKDIR /workspace
 
 COPY --from=wheel_builder /workspace /workspace
-COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
-ARG ARCH_ALT
-ENV LD_LIBRARY_PATH=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu:\
-/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugin:\
-$LD_LIBRARY_PATH
+COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 
 # Copy Cargo cache to avoid re-downloading dependencies
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
@@ -437,6 +439,11 @@ ENV DYNAMO_HOME=/workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
+ARG ARCH_ALT
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+
 # Install build-essential and python3-dev as apt dependencies
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
@@ -460,15 +467,14 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 # Copy UCX from base image as plugin for NIXL
 # Copy NIXL source from wheel_builder image
 COPY --from=base /usr/local/ucx /usr/local/ucx
-COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
+COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 
 # Copies vllm, DeepEP, DeepGEMM, PPLX repos (all editable installs) and nvshmem binaries
 COPY --from=base /opt/vllm /opt/vllm
-ARG ARCH_ALT
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
-/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu:\
-/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugin:\
+$NIXL_LIB_DIR:\
+$NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 $LD_LIBRARY_PATH
