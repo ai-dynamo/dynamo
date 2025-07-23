@@ -10,7 +10,7 @@ dynamo run in=http out=dyn &
 # run processor
 python3 components/processor.py --model llava-hf/llava-1.5-7b-hf --prompt-template "USER: <image>\n<prompt> ASSISTANT:" &
 
-# run E/PD workers
-python3 components/encode_worker.py --model llava-hf/llava-1.5-7b-hf &
-
-python3 components/worker.py --model llava-hf/llava-1.5-7b-hf --worker-type prefill
+# run E/P/D workers
+CUDA_VISIBLE_DEVICES=0 python3 components/encode_worker.py --model llava-hf/llava-1.5-7b-hf &
+CUDA_VISIBLE_DEVICES=1 python3 components/worker.py --model llava-hf/llava-1.5-7b-hf --worker-type prefill --enable-disagg &
+CUDA_VISIBLE_DEVICES=2 python3 components/worker.py --model llava-hf/llava-1.5-7b-hf --worker-type decode --enable-disagg
