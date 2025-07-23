@@ -7,7 +7,7 @@ This is a simple Dynamo example showing how you can quickly get started deployin
 Before running this example, ensure you have the following services running:
 
 - **etcd**: A distributed key-value store used for service discovery and metadata storage
-- **NATS with JetStream**: A high-performance message broker for inter-component communication
+- **NATS**: A high-performance message broker for inter-component communication
 
 You can start these services using Docker Compose:
 
