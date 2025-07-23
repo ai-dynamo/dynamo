@@ -42,7 +42,7 @@ class MockerProcess(ManagedProcess):
         super().__init__(
             command=command,
             timeout=60,
-            display_output=False,
+            display_output=True,
             health_check_ports=[],
             health_check_urls=[],
             log_dir=request.node.name,
@@ -67,7 +67,7 @@ class KVRouterProcess(ManagedProcess):
         super().__init__(
             command=command,
             timeout=60,
-            display_output=False,
+            display_output=True,
             health_check_ports=[frontend_port],
             health_check_urls=[
                 (f"http://localhost:{frontend_port}/v1/models", self._check_ready)
@@ -108,6 +108,13 @@ def test_mocker_kv_router(request, runtime_services):
     mocker_processes = []
 
     try:
+        # Start KV router (frontend)
+        frontend_port = PORT
+        logger.info(f"Starting KV router frontend on port {frontend_port}")
+
+        kv_router = KVRouterProcess(request, frontend_port)
+        kv_router.__enter__()
+
         for i in range(NUM_MOCKERS):
             # Use unique endpoints for each mocker
             endpoint = "dyn://test-namespace.mocker.generate"
@@ -119,13 +126,6 @@ def test_mocker_kv_router(request, runtime_services):
         # Start all mockers
         for mocker in mocker_processes:
             mocker.__enter__()
-
-        # Start KV router (frontend)
-        frontend_port = PORT
-        logger.info(f"Starting KV router frontend on port {frontend_port}")
-
-        kv_router = KVRouterProcess(request, frontend_port)
-        kv_router.__enter__()
 
         # Send test requests
         test_payload = {

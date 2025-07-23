@@ -343,7 +343,10 @@ impl Client {
         let kvs = get_response.take_kvs();
         tracing::trace!("initial kv count: {:?}", kvs.len());
 
-        let (tx, rx) = mpsc::channel(32);
+        // TODO: is 128 enough?
+        // WARNING: If buffer fills when many workers pre-exist in etcd, tx.send() blocks
+        // before returning PrefixWatcher, causing router startup failures occasionally.
+        let (tx, rx) = mpsc::channel(128);
 
         self.runtime.secondary().spawn(async move {
             for kv in kvs {
