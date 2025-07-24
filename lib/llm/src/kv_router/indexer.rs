@@ -1724,50 +1724,75 @@ mod tests {
         assert!(overlap_scores.scores.is_empty());
     }
 
-    #[test]
-    fn test_dump_tree_as_events_round_trip() {
+    #[tokio::test]
+    async fn test_dump_tree_as_events_round_trip() {
         setup();
 
-        // Build a non-trivial radix tree
-        let mut original_tree = RadixTree::new();
+        // Configuration
+        let kv_block_size = 32;
+        let num_shards = 2;
+
+        // Build a non-trivial indexer with events
+        let token1 = CancellationToken::new();
+        let mut original_indexer = KvIndexerSharded::new(token1.clone(), num_shards, kv_block_size);
 
         let worker_0 = 0;
         let worker_1 = 1;
         let worker_2 = 2;
 
-        original_tree.apply_event(create_store_event(worker_0, 0, vec![1, 2, 3], None));
+        // Apply events to the original indexer
+        original_indexer
+            .apply_event(create_store_event(worker_0, 0, vec![1, 2, 3], None))
+            .await;
 
-        original_tree.apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None));
-        original_tree.apply_event(create_store_event(
-            worker_1,
-            2,
-            vec![4, 5],
-            Some(ExternalSequenceBlockHash(100)),
-        ));
+        original_indexer
+            .apply_event(create_store_event(worker_1, 1, vec![1, 2, 3], None))
+            .await;
+        original_indexer
+            .apply_event(create_store_event(
+                worker_1,
+                2,
+                vec![4, 5],
+                Some(ExternalSequenceBlockHash(100)),
+            ))
+            .await;
 
-        original_tree.apply_event(create_store_event(worker_2, 3, vec![6, 7], None));
+        original_indexer
+            .apply_event(create_store_event(worker_2, 3, vec![6, 7], None))
+            .await;
 
-        original_tree.apply_event(create_store_event(
-            worker_0,
-            4,
-            vec![4],
-            Some(ExternalSequenceBlockHash(100)),
-        ));
+        original_indexer
+            .apply_event(create_store_event(
+                worker_0,
+                4,
+                vec![4],
+                Some(ExternalSequenceBlockHash(100)),
+            ))
+            .await;
 
-        // Dump the original tree
-        let dump1 = original_tree.dump_tree_as_events();
-        println!("{dump1:?}");
+        // Allow some time for events to be processed
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Create a new tree and apply all dumped events
-        let mut reconstructed_tree = RadixTree::new();
+        // Dump the original indexer
+        let dump1 = original_indexer.dump_events().await.unwrap();
+        println!("Dumped {} events", dump1.len());
+
+        // Create a new indexer and apply all dumped events
+        let token2 = CancellationToken::new();
+        let mut reconstructed_indexer =
+            KvIndexerSharded::new(token2.clone(), num_shards, kv_block_size);
+
         for event in &dump1 {
-            reconstructed_tree.apply_event(event.clone());
+            reconstructed_indexer.apply_event(event.clone()).await;
         }
 
-        // Dump the reconstructed tree
-        let dump2 = reconstructed_tree.dump_tree_as_events();
+        // Allow some time for events to be processed
+        tokio::time::sleep(Duration::from_millis(50)).await;
 
-        // Sort both dumps for comparison (order might differ due to HashMap iteration)
+        // Dump the reconstructed indexer
+        let dump2 = reconstructed_indexer.dump_events().await.unwrap();
+
+        // Sort both dumps for comparison (order might differ due to HashMap iteration and sharding)
         let mut sorted_dump1 = dump1.clone();
         let mut sorted_dump2 = dump2.clone();
 
@@ -1838,21 +1863,37 @@ mod tests {
             }
         }
 
-        // Also verify that both trees produce the same match results
+        // Also verify that both indexers produce the same match results
         for test_seq in [
             vec![LocalBlockHash(1), LocalBlockHash(2), LocalBlockHash(3)],
             vec![LocalBlockHash(1), LocalBlockHash(4), LocalBlockHash(5)],
             vec![LocalBlockHash(6), LocalBlockHash(7)],
             vec![LocalBlockHash(1)],
         ] {
-            let scores1 = original_tree.find_matches(test_seq.clone(), false);
-            let scores2 = reconstructed_tree.find_matches(test_seq.clone(), false);
+            let scores1 = original_indexer
+                .find_matches(test_seq.clone())
+                .await
+                .unwrap();
+            let scores2 = reconstructed_indexer
+                .find_matches(test_seq.clone())
+                .await
+                .unwrap();
+
+            // Sort the scores to compare
+            let mut scores1_sorted: Vec<_> = scores1.scores.iter().collect();
+            let mut scores2_sorted: Vec<_> = scores2.scores.iter().collect();
+            scores1_sorted.sort_by_key(|(k, _)| *k);
+            scores2_sorted.sort_by_key(|(k, _)| *k);
 
             assert_eq!(
-                scores1.scores, scores2.scores,
+                scores1_sorted, scores2_sorted,
                 "Match scores differ for sequence {:?}",
                 test_seq
             );
         }
+
+        // Clean up
+        original_indexer.shutdown();
+        reconstructed_indexer.shutdown();
     }
 }
