@@ -107,14 +107,6 @@ def base_parse_args(
 
     endpoint = args.endpoint
 
-    endpoint_str = endpoint.replace("dyn://", "", 1)
-    endpoint_parts = endpoint_str.split(".")
-    if len(endpoint_parts) != 3:
-        logger.error(
-            f"Invalid endpoint format: '{endpoint}'. Expected 'dyn://namespace.component.endpoint' or 'namespace.component.endpoint'."
-        )
-        sys.exit(1)
-
     parsed_namespace, parsed_component_name, parsed_endpoint_name = parse_endpoint(
         endpoint
     )
@@ -227,7 +219,7 @@ def overwrite_args(config):
     ), "Must set the kv_port, use configure_ports_with_etcd"
     assert (
         config.side_channel_port is not None
-    ), "Must set the kv_port, use configure_ports_with_etcd"
+    ), "Must set the side_channel_port, use configure_ports_with_etcd"
 
     dp_rank = config.engine_args.data_parallel_rank or 0
 

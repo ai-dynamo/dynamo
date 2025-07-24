@@ -23,7 +23,6 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
-            echo "  --head-node          Run as head node. Head node will run the HTTP server, processor and prefill worker."
             echo "  --model <model_name> Specify the model to use (default: $MODEL_NAME)"
             echo "  --prompt-template <template> Specify the multi-modal prompt template to use. LLaVA 1.5 7B, Qwen2.5-VL, and Phi3V models have predefined templates."
             echo "  -h, --help           Show this help message"
@@ -63,4 +62,7 @@ python3 components/processor.py --model $MODEL_NAME --prompt-template "$PROMPT_T
 # run E/P/D workers
 CUDA_VISIBLE_DEVICES=0 python3 components/encode_worker.py --model $MODEL_NAME &
 CUDA_VISIBLE_DEVICES=1 python3 components/worker.py --model $MODEL_NAME --worker-type prefill --enable-disagg &
-CUDA_VISIBLE_DEVICES=2 python3 components/worker.py --model $MODEL_NAME --worker-type decode --enable-disagg
+CUDA_VISIBLE_DEVICES=2 python3 components/worker.py --model $MODEL_NAME --worker-type decode --enable-disagg &
+
+# Wait for all background processes to complete
+wait

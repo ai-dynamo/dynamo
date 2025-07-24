@@ -49,7 +49,7 @@ Specifically, a read operation must be paired with a readable operation, and a w
 ### Generic Example
 
 In the diagram below, Local creates a [`WritableOperation`](#writableoperation) intended to receive data from Remote.
-Local then sends metadata about the requuested RDMA operation to Remote.
+Local then sends metadata about the requested RDMA operation to Remote.
 Remote then uses the metadata to create a [`WriteOperation`](#writeoperation) which will perform the GPU Direct RDMA memory transfer from Remote's GPU memory to Local's GPU memory.
 
 ```mermaid
@@ -213,7 +213,7 @@ There are four ways to create a descriptor:
 
   1. From a `torch.Tensor` object. Device information will be derived from the provided object.
 
-  2. From a `tuple` containing either a NumPy or CuPy `ndarray` and information desribing where the memory resides (Host/CPU vs GPU).
+  2. From a `tuple` containing either a NumPy or CuPy `ndarray` and information describing where the memory resides (Host/CPU vs GPU).
 
   3. From a Python `bytes` object. Memory is assumed to reside in CPU addressable host memory.
 

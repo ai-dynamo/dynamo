@@ -45,7 +45,6 @@ class ProcessMixInRequired(Protocol):
 class ProcessMixIn(ProcessMixInRequired):
     """
     Mixin for pre and post processing for vLLM
-    Requires engine_args, engine_client, processor, model_config to be initialized
     """
 
     engine_args: AsyncEngineArgs

@@ -74,7 +74,7 @@ class VllmBaseWorker:
             type=str,
             choices=["prefill", "decode", "encode_prefill"],
             required=True,
-            help="Specify the type of worker. Must be one of: 'encode', 'prefill', 'decode', 'encode_prefill'",
+            help="Specify the type of worker. Must be one of: 'prefill', 'decode', 'encode_prefill'",
         )
         parser.add_argument(
             "--enable-disagg",
@@ -197,8 +197,8 @@ class VllmBaseWorker:
 class VllmDecodeWorker(VllmBaseWorker):
     async def generate(self, request: vLLMMultimodalRequest):
         logger.debug(f"Got raw request: {request}")
-        if type(request) is not vLLMMultimodalRequest:
-            if type(request) is str:
+        if not isinstance(request, vLLMMultimodalRequest):
+            if isinstance(request, str):
                 request = vLLMMultimodalRequest.model_validate_json(request)
             else:
                 request = vLLMMultimodalRequest.model_validate(request)
@@ -292,7 +292,9 @@ class VllmPDWorker(VllmBaseWorker):
             embeddings, descriptor = self._embeddings_descriptor
 
             if descriptor is None:
-                logger.error("in PD worker, descriptor is None")
+                raise RuntimeError(
+                    "Descriptor is None in PD worker - cannot process embeddings"
+                )
 
             read_op = await self._connector.begin_read(
                 request.serialized_request, descriptor

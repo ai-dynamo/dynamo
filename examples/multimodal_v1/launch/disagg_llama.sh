@@ -41,8 +41,11 @@ if [[ $HEAD_NODE -eq 1 ]]; then
     # LLama 4 doesn't support image embedding input, so the prefill worker will also
     # handle image encoding.
     # run EP/D workers
-    python3 components/worker.py --model $MODEL_NAME --worker-type encode_prefill --enable-disagg --tensor-parallel-size=8 --max-model-len=208960
+    python3 components/worker.py --model $MODEL_NAME --worker-type encode_prefill --enable-disagg --tensor-parallel-size=8 --max-model-len=208960 &
 else
     # run decode worker on non-head node
-    python3 components/worker.py --model $MODEL_NAME --worker-type decode --enable-disagg --tensor-parallel-size=8 --max-model-len=208960
+    python3 components/worker.py --model $MODEL_NAME --worker-type decode --enable-disagg --tensor-parallel-size=8 --max-model-len=208960 &
 fi
+
+# Wait for all background processes to complete
+wait

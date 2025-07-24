@@ -84,7 +84,7 @@ class AbstractOperation(ABC):
         if len(notification_key) == 0:
             raise ValueError("Argument `notification_key` must not be an empty string.")
 
-        self._notification_key: str = "" if notification_key is None else notification_key
+        self._notification_key: str = notification_key
         self._connector: Connector = connector
         self._operation_kind: OperationKind = operation_kind
         self._local_descriptors: Descriptor | list[Descriptor] = local_descriptors
@@ -321,7 +321,7 @@ class ActiveOperation(AbstractOperation):
         # yielding control to the event loop to allow other operations to run.
         iteration_count = 0
         while True:
-            if iteration_count & 10 == 0:
+            if iteration_count % 10 == 0:
                 logger.debug(f"Waiting for operation {{ kind={self._operation_kind}, remote='{self._remote.name}', duration={iteration_count / 10}s }}.")
             match self.status:
                 # "in progress" or "initialized" means the operation is ongoing.
@@ -332,6 +332,7 @@ class ActiveOperation(AbstractOperation):
                 # Any other state indicates completion or error.
                 case _:
                     return
+            iteration_count += 1
 
     @abstractmethod
     def cancel(self) -> None:

@@ -72,7 +72,6 @@ class vLLMGenerateRequest(BaseModel):
     Serializable class of all the fields vLLM engine requires for inference
     """
 
-    model_config = ConfigDict(arbitrary_types_allowed=True)
     engine_prompt: PatchedTokensPrompt
     sampling_params: SamplingParams
     request_id: str
@@ -88,7 +87,8 @@ class vLLMGenerateRequest(BaseModel):
         return v
 
     model_config = ConfigDict(
-        json_encoders={SamplingParams: lambda v: msgspec.json.encode(v)}
+        arbitrary_types_allowed=True,
+        json_encoders={SamplingParams: lambda v: msgspec.json.encode(v)},
     )
 
 

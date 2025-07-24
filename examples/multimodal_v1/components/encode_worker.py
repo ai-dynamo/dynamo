@@ -79,8 +79,8 @@ class VllmEncodeWorker:
         self, request: vLLMMultimodalRequest
     ) -> AsyncIterator[MyRequestOutput]:
         logger.debug(f"Got raw request: {request}")
-        if type(request) is not vLLMMultimodalRequest:
-            if type(request) is str:
+        if not isinstance(request, vLLMMultimodalRequest):
+            if isinstance(request, str):
                 request = vLLMMultimodalRequest.model_validate_json(request)
             else:
                 request = vLLMMultimodalRequest.model_validate(request)

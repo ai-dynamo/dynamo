@@ -182,7 +182,7 @@ class Processor(ProcessMixIn):
         self,
         response_generator: AsyncIterator[RequestOutput],
         request_type: RequestType,
-    ) -> AsyncIterator[Union[RequestOutput, Tuple[int, RequestOutput]]]:
+    ):
         async for resp in response_generator:
             # Deserialize the response from the engine
             # Creates correct vLLM objects for each field
@@ -210,7 +210,7 @@ class Processor(ProcessMixIn):
     # The generate endpoint will be used by the frontend to handle incoming requests.
     async def generate(self, raw_request: MultiModalRequest):
         logger.debug(f"Got raw request: {raw_request}")
-        if type(raw_request) is not MultiModalRequest:
+        if not isinstance(raw_request, MultiModalRequest):
             # If the request is not MultiModalRequest, convert it to MultiModalRequest
             raw_request = MultiModalRequest.model_validate(raw_request)
 
