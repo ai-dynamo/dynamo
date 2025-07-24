@@ -38,7 +38,15 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 # Redeclare ARCH and ARCH_ALT so they're available in this stage
 ARG ARCH
 ARG ARCH_ALT
+
+ARG NIXL_UCX_REF=v1.19.x
 ARG NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
+
+ENV NIXL_SRC_DIR=/opt/nixl
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+ENV LD_LIBRARY_PATH=$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:$LD_LIBRARY_PATH
 
 USER root
 ARG PYTHON_VERSION=3.12
@@ -65,31 +73,35 @@ RUN apt-get update -y && \
 WORKDIR /workspace
 
 ### UCX EFA Setup ###
-RUN rm -rf /opt/hpcx/ucx
-RUN rm -rf /usr/local/ucx
-RUN cd /usr/local/src && \
+RUN rm -rf /opt/hpcx/ucx && \
+    rm -rf /usr/local/ucx && \
+    echo "Building UCX with reference $NIXL_UCX_REF" && \
+    cd /usr/local/src &&                            \
     git clone https://github.com/openucx/ucx.git && \
-    cd ucx &&                   \
-    git checkout v1.19.x &&     \
-    ./autogen.sh && ./configure \
-    --prefix=/usr/local/ucx     \
-    --enable-shared             \
-    --disable-static            \
-    --disable-doxygen-doc       \
-    --enable-optimizations      \
-    --enable-cma                \
-    --enable-devel-headers      \
-    --with-cuda=/usr/local/cuda \
-    --with-verbs                \
-    --with-efa                  \
-    --with-dm                   \
-    --with-gdrcopy=/usr/local   \
-    --enable-mt &&              \
-    make -j &&                  \
-    make -j install-strip &&    \
+    cd ucx &&                                       \
+    git checkout $NIXL_UCX_REF &&                   \
+    ./autogen.sh && ./configure                     \
+    --prefix=/usr/local/ucx                         \
+    --enable-shared                                 \
+    --disable-static                                \
+    --disable-doxygen-doc                           \
+    --enable-optimizations                          \
+    --enable-cma                                    \
+    --enable-devel-headers                          \
+    --with-cuda=/usr/local/cuda                     \
+    --with-verbs                                    \
+    --with-efa                                      \
+    --with-dm                                       \
+    --with-gdrcopy=/usr/local                       \
+    --enable-mt &&                                  \
+    make -j &&                                      \
+    make -j install-strip &&                        \
     ldconfig
 
-ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=\
+/usr/lib:/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+$LD_LIBRARY_PATH
 ENV CPATH=/usr/include:$CPATH
 ENV PATH=/usr/bin:$PATH
 ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
@@ -98,25 +110,21 @@ SHELL ["/bin/bash", "-c"]
 WORKDIR /workspace
 
 ### NIXL SETUP ###
-# Clone nixl source, and checkout the nixl ref
-RUN git clone "https://github.com/ai-dynamo/nixl.git" /opt/nixl && \
-    cd /opt/nixl && \
-    git checkout ${NIXL_REF}
-RUN if [ "$ARCH" = "arm64" ]; then \
-        cd /opt/nixl && \
-        mkdir build && \
-        meson setup build/ --prefix=/usr/local/nixl -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
-        cd build/ && \
-        ninja && \
-        ninja install; \
+# Clone nixl source
+# TEMP: disable gds backend for arm64
+RUN git clone "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
+    cd ${NIXL_SRC_DIR} && \
+    git checkout ${NIXL_REF} && \
+    if [ "$ARCH" = "arm64" ]; then \
+        nixl_build_args="-Ddisable_gds_backend=true -Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
     else \
-        cd /opt/nixl && \
-        mkdir build && \
-        meson setup build/ --prefix=/usr/local/nixl && \
-        cd build/ && \
-        ninja && \
-        ninja install; \
-    fi
+        nixl_build_args=""; \
+    fi && \
+    mkdir build && \
+    meson setup build/ --buildtype=release --prefix=$NIXL_PREFIX $nixl_build_args && \
+    cd build/ && \
+    ninja && \
+    ninja install;
 
 ### NATS & ETCD SETUP ###
 # nats
@@ -143,11 +151,17 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 # Install NIXL Python module
-RUN cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl
-
-# Install the wheel
-# TODO: Move NIXL wheel install to the wheel_builder stage
-RUN uv pip install /workspace/wheels/nixl/*.whl
+# TODO: Move gds_path selection based on arch into NIXL build
+# TEMP: disable gds backend for arm64
+RUN if [ "$ARCH" = "arm64" ]; then \
+        cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl \
+        --config-settings=setup-args="-Ddisable_gds_backend=true -Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
+    else \
+        cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl; \
+    fi && \
+    # Install the wheel
+    # TODO: Move NIXL wheel install to the wheel_builder stage
+    uv pip install /workspace/wheels/nixl/*.whl
 
 # Install sglang
 #TODO: Built wheel should become an artifact which can be cached and reused in subsequent builds
@@ -276,6 +290,9 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 # Use build arg RELEASE_BUILD = true to generate wheels for Python 3.10, 3.11 and 3.12.
 ARG RELEASE_BUILD
 
+# Keep in sync with the base image.
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+
 WORKDIR /workspace
 
 RUN yum update -y \
@@ -292,7 +309,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
-COPY --from=base /usr/local/nixl /opt/nvidia/nvda_nixl
+COPY --from=base $NIXL_PREFIX $NIXL_PREFIX
 COPY --from=base /workspace /workspace
 COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
 ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
@@ -339,7 +356,8 @@ ENV CARGO_TARGET_DIR=/workspace/target
 WORKDIR /workspace
 
 COPY --from=wheel_builder /workspace /workspace
-COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
+COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
+
 # Copy Cargo cache to avoid re-downloading dependencies
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
@@ -369,7 +387,6 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
 
 # Tell vllm to use the Dynamo LLM C API for KV Cache Routing
 ENV VLLM_KV_CAPI_PATH=/opt/dynamo/bindings/lib/libdynamo_llm_capi.so
-ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/opt/nvidia/nvda_nixl/lib/x86_64-linux-gnu/
 
 ENV PYTHONPATH=/workspace/dynamo/deploy/sdk/src:/workspace/dynamo/components/planner/src:/workspace/examples/sglang/utils:$PYTHONPATH
 
@@ -400,12 +417,21 @@ COPY --from=base /usr/local/bin/etcd/ /usr/local/bin/etcd/
 ENV PATH=/usr/local/bin/etcd/:$PATH
 
 # Copy UCX from base image as plugin for NIXL
-# Copy NIXL source from base image (required for NIXL plugins)
-COPY --from=base /usr/local/ucx /usr/local/ucx
-COPY --from=base /usr/local/nixl /usr/local/nixl
+# Copy NIXL source from wheel_builder image
 ARG ARCH_ALT
-ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins
-ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:$LD_LIBRARY_PATH
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+
+COPY --from=base /usr/local/ucx /usr/local/ucx
+COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
+
+ENV LD_LIBRARY_PATH=\
+$NIXL_LIB_DIR:\
+$NIXL_PLUGIN_DIR:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+$LD_LIBRARY_PATH
 
 # Setup the python environment
 # libnuma-dev is a required dependency for sglang integration with NIXL
@@ -437,6 +463,9 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
+# Once UX refactor is merged, we can remove these files
+# Python components will have been pip installed and packaged in wheel
+COPY components/ /workspace/components/
 # Copy benchmarks, examples, and tests for CI
 # TODO: Remove this once we have a functional CI image built on top of the runtime image
 COPY tests /workspace/tests

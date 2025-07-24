@@ -49,6 +49,7 @@ export ISTIO_GATEWAY="${ISTIO_GATEWAY:=istio-system/istio-ingressgateway}"
 export INGRESS_CLASS="${INGRESS_CLASS:=nginx}"
 export VIRTUAL_SERVICE_SUPPORTS_HTTPS="${VIRTUAL_SERVICE_SUPPORTS_HTTPS:=false}"
 export ENABLE_LWS="${ENABLE_LWS:=false}"
+export ENABLE_GROVE="${ENABLE_GROVE:=false}"
 
 # Add command line options
 INTERACTIVE=false
@@ -164,7 +165,7 @@ echo "DYNAMO_INGRESS_SUFFIX: $DYNAMO_INGRESS_SUFFIX"
 echo "VIRTUAL_SERVICE_SUPPORTS_HTTPS: $VIRTUAL_SERVICE_SUPPORTS_HTTPS"
 echo "INSTALL_CRDS: $INSTALL_CRDS"
 
-envsubst '${NAMESPACE} ${RELEASE_NAME} ${DOCKER_USERNAME} ${DOCKER_PASSWORD} ${DOCKER_SERVER} ${IMAGE_TAG} ${DYNAMO_INGRESS_SUFFIX} ${PIPELINES_DOCKER_SERVER} ${PIPELINES_DOCKER_USERNAME} ${PIPELINES_DOCKER_PASSWORD} ${DOCKER_SECRET_NAME} ${INGRESS_ENABLED} ${ISTIO_ENABLED} ${INGRESS_CLASS} ${ISTIO_GATEWAY} ${VIRTUAL_SERVICE_SUPPORTS_HTTPS} ${ENABLE_LWS}' < dynamo-platform-values.yaml > generated-values.yaml
+envsubst '${NAMESPACE} ${RELEASE_NAME} ${DOCKER_USERNAME} ${DOCKER_PASSWORD} ${DOCKER_SERVER} ${IMAGE_TAG} ${DYNAMO_INGRESS_SUFFIX} ${PIPELINES_DOCKER_SERVER} ${PIPELINES_DOCKER_USERNAME} ${PIPELINES_DOCKER_PASSWORD} ${DOCKER_SECRET_NAME} ${INGRESS_ENABLED} ${ISTIO_ENABLED} ${INGRESS_CLASS} ${ISTIO_GATEWAY} ${VIRTUAL_SERVICE_SUPPORTS_HTTPS} ${ENABLE_LWS} ${ENABLE_GROVE}' < dynamo-platform-values.yaml > generated-values.yaml
 echo "generated file contents:"
 cat generated-values.yaml
 
@@ -197,5 +198,6 @@ helm upgrade --install dynamo-platform ./platform/ \
   --namespace ${NAMESPACE} \
   --set "dynamo-operator.controllerManager.manager.image.repository=${DOCKER_SERVER}/dynamo-operator" \
   --set "dynamo-operator.controllerManager.manager.image.tag=${IMAGE_TAG}" \
-  --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret"
+  --set "dynamo-operator.imagePullSecrets[0].name=docker-imagepullsecret" \
+  -f generated-values.yaml
 echo "Helm chart deployment complete"

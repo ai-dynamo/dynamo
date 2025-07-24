@@ -30,7 +30,8 @@
 //! TODO: Top-level Overview of Endpoints/Functions
 
 use crate::{
-    discovery::Lease, metrics::MetricsRegistry, service::ServiceSet, transports::etcd::EtcdPath,
+    config::HealthStatus, discovery::Lease, metrics::MetricsRegistry, service::ServiceSet,
+    transports::etcd::EtcdPath,
 };
 
 use super::{

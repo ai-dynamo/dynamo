@@ -2,18 +2,6 @@
 SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES.
 All rights reserved.
 SPDX-License-Identifier: Apache-2.0
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
 -->
 
 # Dynamo Support Matrix
@@ -72,7 +60,6 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | :----------------- | :------------ | :----------------------------------- | :----------- |
 | ai-dynamo          | 0.3.2         | >=2.28                               |              |
 | ai-dynamo-runtime  | 0.3.2         | >=2.28 (Python 3.12 has known issues)|              |
-| ai-dynamo-vllm     | 0.8.4.post4¹  | >=2.28 (recommended)                 |              |
 | NIXL               | 0.4.0         | >=2.27                               | >=11.8       |
 
 ### Build Dependency
@@ -80,13 +67,10 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 | **Build Dependency** | **Version**                                                                      |
 | :------------------- | :------------------------------------------------------------------------------- |
 | **Base Container**   | [25.03](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/cuda-dl-base/tags) |
-| **ai-dynamo-vllm**   | 0.8.4.post4¹                                                                     |
 | **TensorRT-LLM**     | 1.0.0rc²                                                                         |
 | **NIXL**             | 0.4.0                                                                            |
 
 > [!Important]
-> ¹ ai-dynamo-vllm `v0.8.4.post4` is a customized patch of `v0.8.4` from vLLM.
->
 > ² Specific versions of TensorRT-LLM supported by Dynamo are subject to change.
 
 ## Build Support

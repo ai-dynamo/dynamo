@@ -29,8 +29,10 @@ This approach allows you to install Dynamo directly using a DynamoGraphDeploymen
 
 ### Basic Installation
 
+Here is how you would install a VLLM inference backend example.
+
 ```bash
-helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud -f ./examples/vllm/deploy/agg.yaml
+helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud -f ./components/backends/vllm/deploy/agg.yaml
 ```
 
 ### Customizable Properties
@@ -39,7 +41,7 @@ You can override the default configuration by setting the following properties:
 
 ```bash
 helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud \
-  -f ./examples/vllm/deploy/agg.yaml \
+  -f ./components/backends/vllm/deploy/agg.yaml \
   --set "imagePullSecrets[0].name=docker-secret-1" \
   --set etcdAddr="my-etcd-service:2379" \
   --set natsAddr="nats://my-nats-service:4222"

@@ -1,18 +1,6 @@
 <!--
 SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
 -->
 
 # Planner Benchmark Example
@@ -50,8 +38,8 @@ For other models and GPU SKUs, adjust the request rate ranges accordingly to mat
 To measure the performance of dynamo with planner, we start from a 1p1d deployment and set planner to make adjustments every 10 seconds:
 
 ```bash
-cd examples/llm
-dynamo serve graphs.disagg_router:Frontend -f disagg_1p1d.yml
+# Start Kubernetes with one frontend node, one prefill and one decode worker
+# TODO
 
 # in terminal 2
 genai-perf profile \
@@ -84,7 +72,8 @@ In this example, we use a fixed 2p2d engine as baseline. Planner provides a `--n
 
 ```bash
 # in terminal 1
-dynamo serve graphs.disagg_router:Frontend -f disagg_2p2d.yml
+# Start Kubernetes with one frontend node, two prefill and two decode workers
+# TODO
 
 # in terminal 2
 genai-perf profile --tokenizer deepseek-ai/DeepSeek-R1-Distill-Llama-8B -m deepseek-ai/DeepSeek-R1-Distill-Llama-8B --service-kind openai --endpoint-type chat --url http://localhost:8000 --streaming --input-file payload:sin_b512_t600_rr5.0-20.0-150.0_io3000150-3000150-0.2-0.8-10.jsonl

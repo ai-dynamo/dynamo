@@ -48,6 +48,7 @@ import (
 	lwsscheme "sigs.k8s.io/lws/client-go/clientset/versioned/scheme"
 	volcanoscheme "volcano.sh/apis/pkg/client/clientset/versioned/scheme"
 
+	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
@@ -70,6 +71,8 @@ func init() {
 	utilruntime.Must(lwsscheme.AddToScheme(scheme))
 
 	utilruntime.Must(volcanoscheme.AddToScheme(scheme))
+
+	utilruntime.Must(grovev1alpha1.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -89,6 +92,7 @@ func main() {
 	var ingressControllerTLSSecretName string
 	var ingressHostSuffix string
 	var enableLWS bool
+	var enableGrove bool
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -116,6 +120,8 @@ func main() {
 		"The suffix to use for the ingress host")
 	flag.BoolVar(&enableLWS, "enable-lws", false,
 		"If set, enable leader worker set")
+	flag.BoolVar(&enableGrove, "enable-grove", false,
+		"If set, enable grove")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -125,9 +131,17 @@ func main() {
 	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
 
 	ctrlConfig := commonController.Config{
-		RestrictedNamespace:         restrictedNamespace,
-		VirtualServiceSupportsHTTPS: virtualServiceSupportsHTTPS,
-		EnableLWS:                   enableLWS,
+		RestrictedNamespace: restrictedNamespace,
+		EnableLWS:           enableLWS,
+		EnableGrove:         enableGrove,
+		EtcdAddress:         etcdAddr,
+		NatsAddress:         natsAddr,
+		IngressConfig: commonController.IngressConfig{
+			VirtualServiceGateway:      istioVirtualServiceGateway,
+			IngressControllerClassName: ingressControllerClassName,
+			IngressControllerTLSSecret: ingressControllerTLSSecretName,
+			IngressHostSuffix:          ingressHostSuffix,
+		},
 	}
 
 	mainCtx := ctrl.SetupSignalHandler()
@@ -289,23 +303,17 @@ func main() {
 		Client:                mgr.GetClient(),
 		Recorder:              mgr.GetEventRecorderFor("dynamocomponentdeployment"),
 		Config:                ctrlConfig,
-		NatsAddr:              natsAddr,
-		EtcdAddr:              etcdAddr,
 		EtcdStorage:           etcd.NewStorage(cli),
-		UseVirtualService:     istioVirtualServiceGateway != "",
 		DockerSecretRetriever: dockerSecretRetriever,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoComponentDeployment")
 		os.Exit(1)
 	}
 	if err = (&controller.DynamoGraphDeploymentReconciler{
-		Client:                     mgr.GetClient(),
-		Recorder:                   mgr.GetEventRecorderFor("dynamographdeployment"),
-		Config:                     ctrlConfig,
-		VirtualServiceGateway:      istioVirtualServiceGateway,
-		IngressControllerClassName: ingressControllerClassName,
-		IngressControllerTLSSecret: ingressControllerTLSSecretName,
-		IngressHostSuffix:          ingressHostSuffix,
+		Client:                mgr.GetClient(),
+		Recorder:              mgr.GetEventRecorderFor("dynamographdeployment"),
+		Config:                ctrlConfig,
+		DockerSecretRetriever: dockerSecretRetriever,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "DynamoGraphDeployment")
 		os.Exit(1)

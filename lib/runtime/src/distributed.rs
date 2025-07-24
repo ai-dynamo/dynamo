@@ -23,7 +23,7 @@ use crate::{
     ErrorContext,
 };
 
-use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, Weak, OK};
+use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, SystemHealth, Weak, OK};
 
 use derive_getters::Dissolve;
 use figment::error;
@@ -85,6 +85,12 @@ impl DistributedRuntime {
         } else {
             None
         };
+        let starting_health_status = config.starting_health_status.clone();
+        let use_endpoint_health_status = config.use_endpoint_health_status.clone();
+        let system_health = Arc::new(Mutex::new(SystemHealth::new(
+            starting_health_status,
+            use_endpoint_health_status,
+        )));
 
         let distributed_runtime = Self {
             runtime,
@@ -98,6 +104,7 @@ impl DistributedRuntime {
                 String,
                 prometheus::Registry,
             >::new())),
+            system_health,
         };
 
         // Start HTTP server if enabled

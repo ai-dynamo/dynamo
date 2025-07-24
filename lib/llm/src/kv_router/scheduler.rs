@@ -142,23 +142,19 @@ impl KvScheduler {
                 request = tokio::select! {
                     biased;
 
-                    new_request = request_rx.recv() => {
-                        match new_request {
-                            Some(new_request) => {
-                                tracing::trace!("received request to be scheduled");
-                                new_request
-                            },
-                            None => {
-                                tracing::trace!("scheduler shutdown");
-                                break 'outer;
-                            }
-                        }
-                    }
-
                     _ = endpoints_rx.changed() => {
                         endpoints = endpoints_rx.borrow_and_update().clone();
                         pending_endpoint_update = Some(endpoints.worker_ids());
                         continue 'outer;
+                    }
+
+                    maybe_new_request = request_rx.recv() => {
+                        let Some(new_request) = maybe_new_request else {
+                            tracing::warn!("scheduler shutdown");
+                            break 'outer;
+                        };
+                        tracing::trace!("received request to be scheduled");
+                        new_request
                     }
                 };
 
@@ -181,6 +177,14 @@ impl KvScheduler {
                             request.respond(response);
                             continue 'outer;
                         }
+                        Err(KvSchedulerError::NoEndpoints) => {
+                            tracing::trace!("no endpoints available; waiting for endpoints update");
+                            endpoints_rx.changed().await.ok();
+                            endpoints = endpoints_rx.borrow_and_update().clone();
+                            pending_endpoint_update = Some(endpoints.worker_ids());
+                            continue;
+                        }
+                        // TODO: this is not actually hooked up
                         Err(KvSchedulerError::AllWorkersBusy) => {
                             tracing::trace!("all workers busy; waiting for more capacity");
                             tokio::time::sleep(Duration::from_millis(5)).await;

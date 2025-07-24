@@ -64,46 +64,6 @@ pub struct Flags {
     #[arg(long)]
     pub model_config: Option<PathBuf>,
 
-    /// sglang, vllm
-    ///
-    /// How many GPUs to use at once, total across all nodes.
-    /// This must divide by num_nodes, and each node must use the same number of GPUs.
-    #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(1..256))]
-    pub tensor_parallel_size: u32,
-
-    /// sglang only
-    /// vllm uses CUDA_VISIBLE_DEVICES env var
-    ///
-    /// Use GPUs from this ID upwards.
-    /// If your machine has four GPUs but the first two (0 and 1) are in use,
-    /// pass --base-gpu-id 2 to use the third GPU (and up, if tensor_parallel_size > 1)
-    #[arg(long, default_value = "0", value_parser = clap::value_parser!(u32).range(0..256))]
-    pub base_gpu_id: u32,
-
-    /// vllm and sglang only
-    ///
-    /// How many nodes/hosts to use
-    #[arg(long, default_value = "1", value_parser = clap::value_parser!(u32).range(1..256))]
-    pub num_nodes: u32,
-
-    /// vllm and sglang only
-    ///
-    /// This nodes' unique ID, running from 0 to num_nodes.
-    #[arg(long, default_value = "0", value_parser = clap::value_parser!(u32).range(0..255))]
-    pub node_rank: u32,
-
-    /// For multi-node / pipeline parallel this is the <host>:<port> of the first node.
-    ///
-    /// - vllm: The address/port of the Ray head node.
-    ///
-    /// - sglang: The Torch Distributed init method address, in format <host>:<port>.
-    ///   It becomes "tcp://<host>:<port>" when given to torch.distributed.init_process_group.
-    ///   This expects to use the nccl backend (transparently to us here).
-    ///   All nodes must use the same address here, which is node_rank == 0's address.
-    ///
-    #[arg(long)]
-    pub leader_addr: Option<String>,
-
     /// If using `out=dyn` with multiple instances, this says how to route the requests.
     ///
     /// Mostly interesting for KV-aware routing.
@@ -199,22 +159,6 @@ impl Flags {
             }
             #[cfg(feature = "mistralrs")]
             Output::MistralRs => {}
-            Output::SgLang => {
-                if !local_model.path().is_dir() {
-                    // TODO GGUF support for sglang: https://github.com/ai-dynamo/dynamo/issues/572
-                    anyhow::bail!("`--model-path should point at a HuggingFace repo checkout");
-                }
-            }
-            Output::Vllm => {
-                if self.base_gpu_id != 0 {
-                    anyhow::bail!("vllm does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
-                }
-            }
-            Output::Trtllm => {
-                if self.base_gpu_id != 0 {
-                    anyhow::bail!("TRTLLM does not support base_gpu_id. Set environment variable CUDA_VISIBLE_DEVICES instead.");
-                }
-            }
             #[cfg(feature = "llamacpp")]
             Output::LlamaCpp => {
                 if !local_model.path().is_file() {

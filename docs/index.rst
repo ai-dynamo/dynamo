@@ -75,7 +75,6 @@ The examples below assume you build the latest image yourself from source. If us
 
    Welcome to Dynamo <self>
    Support Matrix <support_matrix.md>
-   Getting Started <get_started.md>
 
 .. toctree::
    :hidden:
@@ -91,13 +90,10 @@ The examples below assume you build the latest image yourself from source. If us
 
 .. toctree::
    :hidden:
-   :caption: Dynamo Command Line Interface
+   :caption: Using Dynamo
 
-   CLI Overview <guides/cli_overview.md>
-   Running Dynamo (dynamo run) <guides/dynamo_run.md>
-   Serving Inference Graphs (dynamo serve) <guides/dynamo_serve.md>
-   Building Dynamo (dynamo build) <guides/dynamo_build.md>
-   Deploying Inference Graphs (dynamo deploy) <guides/dynamo_deploy/README.md>
+   Running Inference Graphs Locally (dynamo-run) <guides/dynamo_run.md>
+   Deploying Inference Graphs <guides/dynamo_deploy/README.md>
 
 .. toctree::
    :hidden:
@@ -114,7 +110,6 @@ The examples below assume you build the latest image yourself from source. If us
 
    Dynamo Deploy Quickstart <guides/dynamo_deploy/quickstart.md>
    Dynamo Cloud Kubernetes Platform <guides/dynamo_deploy/dynamo_cloud.md>
-   Deploying Dynamo Inference Graphs to Kubernetes using the Dynamo Cloud Platform <guides/dynamo_deploy/operator_deployment.md>
    Manual Helm Deployment <guides/dynamo_deploy/manual_helm_deployment.md>
    GKE Setup Guide <guides/dynamo_deploy/gke_setup.md>
    Minikube Setup Guide <guides/dynamo_deploy/minikube.md>
@@ -131,15 +126,14 @@ The examples below assume you build the latest image yourself from source. If us
    :hidden:
    :caption: API
 
-   SDK Reference <API/sdk.md>
    Python API <API/python_bindings.md>
+   NIXL Connect API <API/nixl_connect/README.md>
 
 .. toctree::
    :hidden:
    :caption: Examples
 
-   Hello World Example: Basic <examples/hello_world.md>
-   Hello World Example: Aggregated and Disaggregated Deployment <examples/disagg_skeleton.md>
+   Aggregated and Disaggregated Deployment <examples/disagg_skeleton.md>
    LLM Deployment Examples <examples/llm_deployment.md>
    Multinode Examples <examples/multinode.md>
    LLM Deployment Examples using TensorRT-LLM <examples/trtllm.md>

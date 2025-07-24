@@ -30,9 +30,22 @@ import (
 type Config struct {
 	// Enable resources filtering, only the resources belonging to the given namespace will be handled.
 	RestrictedNamespace string
-	// If true, assume VirtualService endpoints are HTTPS
-	VirtualServiceSupportsHTTPS bool
-	EnableLWS                   bool
+	EnableLWS           bool
+	EnableGrove         bool
+	EtcdAddress         string
+	NatsAddress         string
+	IngressConfig       IngressConfig
+}
+
+type IngressConfig struct {
+	VirtualServiceGateway      string
+	IngressControllerClassName string
+	IngressControllerTLSSecret string
+	IngressHostSuffix          string
+}
+
+func (i *IngressConfig) UseVirtualService() bool {
+	return i.VirtualServiceGateway != ""
 }
 
 func EphemeralDeploymentEventFilter(config Config) predicate.Predicate {

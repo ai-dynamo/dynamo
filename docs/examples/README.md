@@ -2,7 +2,7 @@
 
 ## Serving examples locally
 
-TODO: Follow individual examples to serve models locally.
+Follow individual examples under components/backends/ to serve models locally.
 
 
 ## Deploying Examples to Kubernetes
@@ -18,8 +18,6 @@ If you are a **🧑‍💻 Dynamo Contributor** first follow the instructions in
 
 
 You would have to rebuild the dynamo platform images as the code evolves. For more details please look at the [Cloud Guide](../guides/dynamo_deploy/dynamo_cloud.md)
-
-Export the [Dynamo Base Image](../get_started.md#building-the-dynamo-base-image) you want to use (or built during the prerequisites step) as the `DYNAMO_IMAGE` environment variable.
 
 ```bash
 export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
@@ -38,7 +36,7 @@ export NAMESPACE=<your-namespace> # the namespace you used to deploy Dynamo clou
 Deploying an example consists of the simple `kubectl apply -f ... -n ${NAMESPACE}` command. For example:
 
 ```bash
-kubectl apply -f  examples/vllm/deploy/agg.yaml -n ${NAMESPACE}
+kubectl apply -f  components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
 ```
 
 You can use `kubectl get dynamoGraphDeployment -n ${NAMESPACE}` to view your deployment.

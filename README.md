@@ -55,93 +55,68 @@ Built in Rust for performance and in Python for extensibility, Dynamo is fully o
 The following examples require a few system level packages.
 Recommended to use Ubuntu 24.04 with a x86_64 CPU. See [docs/support_matrix.md](docs/support_matrix.md)
 
+1. Install etcd and nats
+
+To co-ordinate across the data center Dynamo relies on an etcd and nats cluster. To run locally these need to be available.
+
+- [etcd](https://etcd.io/) can be run directly as `./etcd`.
+- [nats](https://nats.io/) needs jetstream enabled: `nats-server -js`.
+
+The Dynamo team recommend the `uv` Python package manager, although anyway works. Install uv:
 ```
-apt-get update
-DEBIAN_FRONTEND=noninteractive apt-get install -yq python3-dev python3-pip python3-venv libucx0
-python3 -m venv venv
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+2. Select an engine
+
+We publish Python wheels specialized for each of our supported engines: vllm, sglang, llama.cpp and trtllm. The examples that follow use sglang, read on for other engines.
+
+```
+uv venv venv
 source venv/bin/activate
+uv pip install pip
 
-pip install "ai-dynamo[all]"
+# Choose one
+uv pip install "ai-dynamo[sglang]"
+uv pip install "ai-dynamo[vllm]"
+uv pip install "ai-dynamo[llama_cpp]" # CPU, see later for GPU
 ```
-> [!NOTE]
-> To ensure compatibility, please refer to the examples in the release branch or tag that matches the version you installed.
-
-### Building the Dynamo Base Image
-
-Although not needed for local development, deploying your Dynamo pipelines to Kubernetes will require you to build and push a Dynamo base image to your container registry. You can use any container registry of your choice, such as:
-- Docker Hub (docker.io)
-- NVIDIA NGC Container Registry (nvcr.io)
-- Any private registry
-
-Here's how to build it:
-
-```bash
-./container/build.sh
-docker tag dynamo:latest-vllm <your-registry>/dynamo-base:latest-vllm
-docker login <your-registry>
-docker push <your-registry>/dynamo-base:latest-vllm
-```
-
-Notes about builds for specific frameworks:
-- For specific details on the `--framework vllm` build, see [here](examples/vllm/README.md).
-- For specific details on the `--framework tensorrtllm` build, see [here](examples/tensorrt_llm/README.md).
-
-Note about AWS environments:
-- If deploying Dynamo in AWS, make sure to build the container with EFA support using the `--make-efa` flag.
-
-After building, you can use this image by setting the `DYNAMO_IMAGE` environment variable to point to your built image:
-```bash
-export DYNAMO_IMAGE=<your-registry>/dynamo-base:latest-vllm
-```
-
-> [!NOTE]
-> We are working on leaner base images that can be built using the targets in the top-level Earthfile.
 
 ### Running and Interacting with an LLM Locally
 
 You can run a model and interact with it locally using commands below.
-We support several backends including: `mistralrs`, `sglang`, `vllm`, and `tensorrtllm`.
 
 #### Example Commands
 
 ```
-python -m dynamo.frontend [--http-port 8080]
-python -m dynamo.vllm deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+python -m dynamo.frontend --interactive
+python -m dynamo.sglang.worker Qwen/Qwen3-4B
 ```
 
 ```
-? User › Hello, how are you?
 ✔ User · Hello, how are you?
 Okay, so I'm trying to figure out how to respond to the user's greeting. They said, "Hello, how are you?" and then followed it with "Hello! I'm just a program, but thanks for asking." Hmm, I need to come up with a suitable reply. ...
 ```
 
-### LLM Serving
+If the model is not available locally it will be downloaded from HuggingFace and cached.
 
-Dynamo provides a simple way to spin up a local set of inference
-components including:
+You can also pass a local path: `python -m dynamo.sglang.worker --model-path ~/llms/Qwen3-0.6B`
+
+### Running an LLM API server
+
+Dynamo provides a simple way to spin up a local set of inference components including:
 
 - **OpenAI Compatible Frontend** – High performance OpenAI compatible http api server written in Rust.
 - **Basic and Kv Aware Router** – Route and load balance traffic to a set of workers.
 - **Workers** – Set of pre-configured LLM serving engines.
 
-To run a minimal configuration you can use a pre-configured
-example.
-
-#### Start Dynamo Distributed Runtime Services
-
-First start the Dynamo Distributed Runtime services:
-
-```bash
-docker compose -f deploy/metrics/docker-compose.yml up -d
 ```
-#### Start Dynamo LLM Serving Components
+# Start an OpenAI compatible HTTP server, a pre-processor (prompt templating and tokenization) and a router:
+python -m dynamo.frontend [--http-port 8080]
 
-Next serve a minimal configuration with an http server, basic
-round-robin router, and a single worker.
-
-```bash
-cd examples/llm
-dynamo serve graphs.agg:Frontend -f configs/agg.yaml
+# Start the vllm engine, connecting to nats and etcd to receive requests. You can run several of these,
+# both for the same model and for multiple models. The frontend node will discover them.
+python -m dynamo.sglang.worker deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 ```
 
 #### Send a Request
@@ -160,45 +135,143 @@ curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   
   }' | jq
 ```
 
+Rerun with `curl -N` and change `stream` in the request to `true` to get the responses as soon as the engine issues them.
+
+### Engines
+
+In the introduction we installed the `sglang` engine. There are other options.
+
+All of these requires nats and etcd, as well as a frontend (`python -m dynamo.frontend [--interactive]`).
+
+# vllm
+
+```
+uv pip install ai-dynamo[vllm]
+```
+
+Run the backend/worker like this:
+```
+python -m dynamo.vllm --help
+```
+
+vllm attempts to allocate enough KV cache for the full context length at startup. If that does not fit in your available memory pass `--context-length <value>`.
+
+To specify which GPUs to use set environment variable `CUDA_VISIBLE_DEVICES`.
+
+# sglang
+
+```
+uv pip install ai-dynamo[sglang]
+```
+
+Run the backend/worker like this:
+```
+python -m dynamo.sglang.worker --help
+```
+
+You can pass any sglang flags directly to this worker, see https://docs.sglang.ai/backend/server_arguments.html . See there to use multiple GPUs.
+
+# TRT-LLM
+
+This currently requires a container TODO ADD THE DOCS PLZ THANK YOU
+
+# llama.cpp
+
+To install llama.cpp for CPU inference:
+```
+uv pip install ai-dynamo[llama_cpp]
+```
+
+To build llama.cpp for CUDA:
+```
+pip install llama-cpp-python -C cmake.args="-DGGML_CUDA=on"
+uv pip install uvloop ai-dynamo
+```
+
+At time of writing the `uv pip` version does not support that syntax, so use `pip` directly inside the venv.
+
+To build llama.cpp for other accelerators see https://pypi.org/project/llama-cpp-python/ .
+
+Download a GGUF and run the engine like this:
+```
+python -m dynamo.llama_cpp --model-path ~/llms/Qwen3-0.6B-Q8_0.gguf
+```
+
+If you have multiple GPUs, llama.cpp does automatic tensor parallelism. You do not need to pass any extra flags to dynamo-run to enable it.
+
 ### Local Development
+
+1. Install libraries
+
+**Ubuntu:**
+```
+sudo apt install -y build-essential libhwloc-dev libudev-dev pkg-config libclang-dev protobuf-compiler python3-dev cmake
+```
+
+**macOS:**
+- [Homebrew](https://brew.sh/)
+```
+# if brew is not installed on your system, install it
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+```
+- [Xcode](https://developer.apple.com/xcode/)
+
+```
+brew install cmake protobuf
+
+## Check that Metal is accessible
+xcrun -sdk macosx metal
+```
+If Metal is accessible, you should see an error like `metal: error: no input files`, which confirms it is installed correctly.
+
+
+2. Install Rust
+
+```
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source $HOME/.cargo/env
+```
+
+3. Create a Python virtual env:
+
+```
+uv venv dynamo
+source dynamo/bin/activate
+```
+
+4. Install build tools
+
+```
+uv pip install pip maturin
+```
+
+[Maturin](https://github.com/PyO3/maturin) is the Rust<->Python bindings build tool.
+
+5. Build the Rust bindings
+
+```
+cd lib/bindings/python
+maturin develop --uv
+```
+
+6. Install the wheel
+
+```
+cd $PROJECT_ROOT
+uv pip install .
+```
+
+Note editable (`-e`) does not work because the `dynamo` package is split over multiple directories, one per backend.
+
+You should now be able to run `python -m dynamo.frontend`.
+
+Remember that nats and etcd must be running (see earlier).
+
+Set the environment variable `DYN_LOG` to adjust the logging level; for example, `export DYN_LOG=debug`. It has the same syntax as `RUST_LOG`.
 
 If you use vscode or cursor, we have a .devcontainer folder built on [Microsofts Extension](https://code.visualstudio.com/docs/devcontainers/containers). For instructions see the [ReadMe](.devcontainer/README.md) for more details.
 
-Otherwise, to develop locally, we recommend working inside of the container
+### Deployment to Kubernetes
 
-```bash
-./container/build.sh
-./container/run.sh -it --mount-workspace
+Follow the [Quickstart Guide](docs/guides/dynamo_deploy/quickstart.md) to deploy to Kubernetes.
 
-cargo build --release
-mkdir -p /workspace/deploy/sdk/src/dynamo/sdk/cli/bin
-cp /workspace/target/release/dynamo-run /workspace/deploy/sdk/src/dynamo/sdk/cli/bin
-
-uv pip install -e .
-export PYTHONPATH=$PYTHONPATH:/workspace/deploy/sdk/src:/workspace/components/planner/src
-```
-
-
-#### Conda Environment
-
-Alternately, you can use a conda environment
-
-```bash
-conda activate <ENV_NAME>
-
-pip install nixl # Or install https://github.com/ai-dynamo/nixl from source
-
-cargo build --release
-
-# To install ai-dynamo-runtime from source
-cd lib/bindings/python
-pip install .
-
-cd ../../../
-pip install ".[all]"
-
-# To test
-docker compose -f deploy/metrics/docker-compose.yml up -d
-cd examples/llm
-dynamo serve graphs.agg:Frontend -f configs/agg.yaml
-```

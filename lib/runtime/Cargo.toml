@@ -69,4 +69,4 @@ assert_matches = { version = "1.5.0" }
 env_logger = { version = "0.11" }
 reqwest = { workspace = true }
 rstest = { version = "0.23.0" }
-temp-env = { version = "0.3.6" }
+temp-env = { version = "0.3.6" , features=["async_closure"] }

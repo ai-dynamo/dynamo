@@ -25,8 +25,11 @@ import (
 	"reflect"
 	"sort"
 
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -351,4 +354,105 @@ func firstKey(m map[string]interface{}) string {
 	}
 	sort.Strings(keys)
 	return keys[0]
+}
+
+func GetResourcesConfig(resources *common.Resources) (*corev1.ResourceRequirements, error) {
+
+	if resources == nil {
+		return nil, nil
+	}
+
+	currentResources := &corev1.ResourceRequirements{}
+
+	if resources.Limits != nil {
+		if resources.Limits.CPU != "" {
+			q, err := resource.ParseQuantity(resources.Limits.CPU)
+			if err != nil {
+				return nil, fmt.Errorf("parse limits cpu quantity: %w", err)
+			}
+			if currentResources.Limits == nil {
+				currentResources.Limits = make(corev1.ResourceList)
+			}
+			currentResources.Limits[corev1.ResourceCPU] = q
+		}
+		if resources.Limits.Memory != "" {
+			q, err := resource.ParseQuantity(resources.Limits.Memory)
+			if err != nil {
+				return nil, fmt.Errorf("parse limits memory quantity: %w", err)
+			}
+			if currentResources.Limits == nil {
+				currentResources.Limits = make(corev1.ResourceList)
+			}
+			currentResources.Limits[corev1.ResourceMemory] = q
+		}
+		if resources.Limits.GPU != "" {
+			q, err := resource.ParseQuantity(resources.Limits.GPU)
+			if err != nil {
+				return nil, fmt.Errorf("parse limits gpu quantity: %w", err)
+			}
+			if currentResources.Limits == nil {
+				currentResources.Limits = make(corev1.ResourceList)
+			}
+			currentResources.Limits[corev1.ResourceName(consts.KubeResourceGPUNvidia)] = q
+		}
+		for k, v := range resources.Limits.Custom {
+			q, err := resource.ParseQuantity(v)
+			if err != nil {
+				return nil, fmt.Errorf("parse limits %s quantity: %w", k, err)
+			}
+			if currentResources.Limits == nil {
+				currentResources.Limits = make(corev1.ResourceList)
+			}
+			currentResources.Limits[corev1.ResourceName(k)] = q
+		}
+	}
+	if resources.Requests != nil {
+		if resources.Requests.CPU != "" {
+			q, err := resource.ParseQuantity(resources.Requests.CPU)
+			if err != nil {
+				return nil, fmt.Errorf("parse requests cpu quantity: %w", err)
+			}
+			if currentResources.Requests == nil {
+				currentResources.Requests = make(corev1.ResourceList)
+			}
+			currentResources.Requests[corev1.ResourceCPU] = q
+		}
+		if resources.Requests.Memory != "" {
+			q, err := resource.ParseQuantity(resources.Requests.Memory)
+			if err != nil {
+				return nil, fmt.Errorf("parse requests memory quantity: %w", err)
+			}
+			if currentResources.Requests == nil {
+				currentResources.Requests = make(corev1.ResourceList)
+			}
+			currentResources.Requests[corev1.ResourceMemory] = q
+		}
+		for k, v := range resources.Requests.Custom {
+			q, err := resource.ParseQuantity(v)
+			if err != nil {
+				return nil, fmt.Errorf("parse requests %s quantity: %w", k, err)
+			}
+			if currentResources.Requests == nil {
+				currentResources.Requests = make(corev1.ResourceList)
+			}
+			currentResources.Requests[corev1.ResourceName(k)] = q
+		}
+	}
+	return currentResources, nil
+}
+
+type Resource struct {
+	client.Object
+	isReady func() bool
+}
+
+func WrapResource[T client.Object](resource T, isReady func() bool) *Resource {
+	return &Resource{
+		Object:  resource,
+		isReady: isReady,
+	}
+}
+
+func (r *Resource) IsReady() bool {
+	return r.isReady()
 }
