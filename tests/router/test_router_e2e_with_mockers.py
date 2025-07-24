@@ -20,7 +20,7 @@ MODEL_NAME = "Qwen/Qwen3-0.6B"
 NUM_MOCKERS = 8
 SPEEDUP_RATIO = 10.0
 NUM_REQUESTS = 100
-PORT = 8080  # Starting port for mocker instances
+PORT = 8090  # Starting port for mocker instances
 
 
 class MockerProcess(ManagedProcess):
