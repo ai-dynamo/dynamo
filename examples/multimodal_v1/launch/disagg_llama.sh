@@ -37,12 +37,12 @@ if [[ $HEAD_NODE -eq 1 ]]; then
     dynamo run in=http out=dyn &
 
     # run processor
-    python3 components/processor.py --model $MODEL_NAME --prompt-template "USER: <image>\n<prompt> ASSISTANT:" &
+    python3 components/processor.py --model $MODEL_NAME --prompt-template "<|image|>\n<prompt>" &
     # LLama 4 doesn't support image embedding input, so the prefill worker will also
     # handle image encoding.
     # run EP/D workers
-    python3 components/worker.py --model $MODEL_NAME --worker-type encode_prefill --enable-disagg &
+    python3 components/worker.py --model $MODEL_NAME --worker-type encode_prefill --enable-disagg --tensor-parallel-size=8 --max-model-len=208960
 else
     # run decode worker on non-head node
-    python3 components/worker.py --model $MODEL_NAME --worker-type decode --enable-disagg
+    python3 components/worker.py --model $MODEL_NAME --worker-type decode --enable-disagg --tensor-parallel-size=8 --max-model-len=208960
 fi

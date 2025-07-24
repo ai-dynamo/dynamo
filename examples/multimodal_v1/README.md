@@ -62,11 +62,11 @@ flowchart LR
 ```bash
 cd $DYNAMO_HOME/examples/multimodal_v1
 # Serve a LLaVA 1.5 7B model:
-dynamo serve graphs.agg:Frontend -f ./configs/agg-llava.yaml
+bash launch/agg.sh --model llava-hf/llava-1.5-7b-hf
 # Serve a Qwen2.5-VL model:
-# dynamo serve graphs.agg:Frontend -f ./configs/agg-qwen.yaml
+# bash launch/agg.sh --model Qwen/Qwen2.5-VL-7B-Instruct
 # Serve a Phi3V model:
-# dynamo serve graphs.agg:Frontend -f ./configs/agg-phi3v.yaml
+# bash launch/agg.sh --model microsoft/Phi-3.5-vision-instruct
 ```
 
 ### Client
@@ -139,14 +139,14 @@ flowchart LR
 
 ```bash
 cd $DYNAMO_HOME/examples/multimodal_v1
-dynamo serve graphs.disagg:Frontend -f configs/disagg.yaml
+bash launch/disagg.sh --model llava-hf/llava-1.5-7b-hf
 ```
 
 ### Client
 
 In another terminal:
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
       "model": "llava-hf/llava-1.5-7b-hf",
@@ -216,20 +216,14 @@ flowchart LR
 
 ```bash
 cd $DYNAMO_HOME/examples/multimodal_v1
-export CONFIG_FILE=configs/llama.yaml
-# start components individually as the model is too large that addition
-# node will be needed to scale up number of workers. And graph deployment
-# doesn't work well in multi-node case.
-dynamo serve components.web:Frontend --service-name Frontend -f $CONFIG_FILE &
-dynamo serve components.direct_processor:Processor --service-name Processor -f $CONFIG_FILE &
-dynamo serve components.worker:VllmPDWorker --service-name VllmPDWorker -f $CONFIG_FILE &
+bash launch/agg_llama.sh
 ```
 
 #### Client
 
 In another terminal:
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
       "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
@@ -288,23 +282,19 @@ flowchart LR
 
 ```bash
 cd $DYNAMO_HOME/examples/multimodal_v1
-export CONFIG_FILE=configs/llama.yaml
-# start components individually as the model is too large that addition
-# node will be needed to scale up number of workers. And graph deployment
-# doesn't work well in multi-node case.
-dynamo serve components.web:Frontend --service-name Frontend -f $CONFIG_FILE &
-dynamo serve components.direct_processor:Processor --service-name Processor -f $CONFIG_FILE &
-dynamo serve components.worker:VllmPDWorker --service-name VllmPDWorker --VllmPDWorker.enable_disagg true -f $CONFIG_FILE &
-# On a separate node with standard dynamo setup
+bash launch/disagg_llama.sh --head-node
+
+# On a separate node that has finished standard dynamo setup
 # (i.e. nats and etcd environment variables are set)
-dynamo serve components.worker:VllmDecodeWorker --service-name VllmDecodeWorker -f $CONFIG_FILE &
+cd $DYNAMO_HOME/examples/multimodal_v1
+bash launch/disagg_llama.sh
 ```
 
 #### Client
 
 In another terminal:
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
       "model": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
