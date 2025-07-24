@@ -402,7 +402,7 @@ fn filters(config: LoggingConfig) -> EnvFilter {
 }
 
 /// Log a message with file and line info
-/// For use with python modules
+/// Used by Python wrapper
 pub fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) {
     let level = match level {
         "debug" => log::Level::Debug,
