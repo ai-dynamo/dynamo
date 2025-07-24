@@ -77,3 +77,22 @@ class KubernetesConnector(PlannerConnector):
     def _get_graph_deployment_name(self, deployment: dict) -> str:
         """Get the name of the graph deployment"""
         return deployment["metadata"]["name"]
+
+
+if __name__ == "__main__":
+    import argparse
+    import asyncio
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--namespace", type=str, default="dynamo")
+    parser.add_argument("--action", type=str, choices=["add", "remove"])
+    parser.add_argument("--component", type=str, default="planner")
+    parser.add_argument("--blocking", action="store_true")
+    args = parser.parse_args()
+    connector = KubernetesConnector(args.namespace)
+
+    if args.action == "add":
+        task = connector.add_component(args.component, args.blocking)
+    elif args.action == "remove":
+        task = connector.remove_component(args.component, args.blocking)
+    asyncio.run(task)

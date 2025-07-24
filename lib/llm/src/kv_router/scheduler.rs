@@ -177,6 +177,13 @@ impl KvScheduler {
                             request.respond(response);
                             continue 'outer;
                         }
+                        Err(KvSchedulerError::NoEndpoints) => {
+                            tracing::trace!("no endpoints available; waiting for endpoints update");
+                            endpoints_rx.changed().await.ok();
+                            endpoints = endpoints_rx.borrow_and_update().clone();
+                            pending_endpoint_update = Some(endpoints.worker_ids());
+                            continue;
+                        }
                         // TODO: this is not actually hooked up
                         Err(KvSchedulerError::AllWorkersBusy) => {
                             tracing::trace!("all workers busy; waiting for more capacity");
