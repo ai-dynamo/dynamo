@@ -30,17 +30,19 @@ done
 
 trap 'echo Cleaning up...; kill 0' EXIT
 
+MODEL_NAME="meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8"
+
 if [[ $HEAD_NODE -eq 1 ]]; then
     # run ingress
     dynamo run in=http out=dyn &
 
     # run processor
-    python3 components/processor.py --model llava-hf/llava-1.5-7b-hf --prompt-template "USER: <image>\n<prompt> ASSISTANT:" &
+    python3 components/processor.py --model $MODEL_NAME --prompt-template "USER: <image>\n<prompt> ASSISTANT:" &
     # LLama 4 doesn't support image embedding input, so the prefill worker will also
     # handle image encoding.
     # run EP/D workers
-    python3 components/worker.py --model llava-hf/llava-1.5-7b-hf --worker-type encode_prefill --enable-disagg &
+    python3 components/worker.py --model $MODEL_NAME --worker-type encode_prefill --enable-disagg &
 else
     # run decode worker on non-head node
-    python3 components/worker.py --model llava-hf/llava-1.5-7b-hf --worker-type decode --enable-disagg
+    python3 components/worker.py --model $MODEL_NAME --worker-type decode --enable-disagg
 fi
