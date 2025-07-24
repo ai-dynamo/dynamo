@@ -20,7 +20,6 @@ use pyo3_async_runtimes::TaskLocals;
 use pythonize::{depythonize, pythonize};
 use tokio::sync::mpsc;
 use tokio_stream::{wrappers::ReceiverStream, StreamExt};
-use tracing::Instrument;
 
 pub use dynamo_runtime::{
     pipeline::{
@@ -149,7 +148,6 @@ where
     Req: Data + Serialize,
     Resp: Data + for<'de> Deserialize<'de>,
 {
-    #[tracing::instrument(skip_all)]
     async fn generate(&self, request: SingleIn<Req>) -> Result<ManyOut<Annotated<Resp>>, Error> {
         // Create a context
         let (request, context) = request.transfer(());
@@ -184,7 +182,6 @@ where
                 pyo3_async_runtimes::tokio::into_stream_with_locals_v1(locals, gen.into_bound(py))
             })
         })
-	.in_current_span()
         .await??;
 
         let stream = Box::pin(stream);
@@ -263,8 +260,7 @@ where
                 request_id,
                 "finished processing python async generator stream"
             );
-        }.in_current_span(),
-        );
+        });
 
         let stream = ReceiverStream::new(rx);
 

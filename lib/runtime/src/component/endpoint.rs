@@ -106,7 +106,6 @@ impl EndpointConfigBuilder {
         let push_endpoint = PushEndpoint::builder()
             .service_handler(handler)
             .cancellation_token(cancel_token.clone())
-            .instance_id(lease_id)
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to build push endpoint: {e}"))?;
 
