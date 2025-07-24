@@ -116,13 +116,13 @@ fn generate_span_id() -> String {
 }
 
 /// Validate a given trace ID according to W3C Trace Context specifications.
-/// A valid trace ID is a 16-character hexadecimal string (lowercase).
+/// A valid trace ID is a 32-character hexadecimal string (lowercase).
 pub fn is_valid_trace_id(trace_id: &str) -> bool {
     trace_id.len() == 32 && trace_id.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Validate a given span ID according to W3C Trace Context specifications.
-/// A valid span ID is an 8-character hexadecimal string (lowercase).
+/// A valid span ID is a 16-character hexadecimal string (lowercase).
 pub fn is_valid_span_id(span_id: &str) -> bool {
     span_id.len() == 16 && span_id.chars().all(|c| c.is_ascii_hexdigit())
 }
