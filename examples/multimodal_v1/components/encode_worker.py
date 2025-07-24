@@ -32,7 +32,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import connect
-from args import Config, base_parse_args, parse_endpoint
+from utils.args import Config, base_parse_args, parse_endpoint
 from utils.image_loader import ImageLoader
 from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
 

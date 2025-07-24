@@ -38,14 +38,14 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import connect
-from args import (
+from publisher import StatLoggerFactory
+from utils.args import (
     Config,
     base_parse_args,
     configure_ports_with_etcd,
     overwrite_args,
     parse_endpoint,
 )
-from publisher import StatLoggerFactory
 from utils.image_loader import ImageLoader
 from utils.protocol import MyRequestOutput, vLLMMultimodalRequest
 
@@ -89,13 +89,13 @@ class VllmBaseWorker:
             if args.worker_type == "prefill":
                 args.endpoint = args.endpoint or "dyn://dynamo.llm.generate"
             elif args.worker_type == "decode":
-                args.endpoint = args.endpoint or "dyn://dynamo.decode.generate"
+                args.endpoint = args.endpoint or "dyn://dynamo.decoder.generate"
             elif args.worker_type == "encode_prefill":
-                args.endpoint = args.endpoint or "dyn://dynamo.encode.generate"
+                args.endpoint = args.endpoint or "dyn://dynamo.encoder.generate"
             # set downstream endpoint for disaggregated workers
             if args.enable_disagg:
                 args.downstream_endpoint = (
-                    args.downstream_endpoint or "dyn://dynamo.decode.generate"
+                    args.downstream_endpoint or "dyn://dynamo.decoder.generate"
                 )
 
             return args

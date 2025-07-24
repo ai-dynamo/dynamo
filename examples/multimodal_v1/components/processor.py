@@ -38,7 +38,7 @@ from dynamo.runtime.logging import configure_dynamo_logging
 
 # To import example local module
 sys.path.append(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
-from args import Config, base_parse_args, parse_endpoint
+from utils.args import Config, base_parse_args, parse_endpoint
 from utils.chat_processor import ChatProcessor, CompletionsProcessor, ProcessMixIn
 from utils.protocol import MultiModalRequest, MyRequestOutput, vLLMMultimodalRequest
 
