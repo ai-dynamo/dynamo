@@ -66,14 +66,16 @@ async fn app(runtime: Runtime) -> Result<()> {
 
     let selector = Box::new(CustomWorkerSelector::default());
 
-    let router = KvRouter::new(component.clone(), args.block_size, Some(selector), true).await?;
-    let router = Ingress::for_engine(Arc::new(router))?;
-
-    component
+    let endpoint = component
         .service_builder()
         .create()
         .await?
-        .endpoint("generate")
+        .endpoint("generate");
+
+    let router = KvRouter::new(component.clone(), args.block_size, Some(selector), true).await?;
+    let router = Ingress::for_engine_with_metrics(Arc::new(router), &endpoint)?;
+
+    endpoint
         .endpoint_builder()
         .handler(router)
         .start()

@@ -22,6 +22,10 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 
+[features]
+default = []
+integration = [] # Integration tests that require NATS
+
 [dependencies]
 dynamo-runtime = { workspace = true }
 
@@ -31,3 +35,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1" }
 tokio = { version = "1", features = ["full"] }
 prometheus = { version = "0.14" }
+
+[dev-dependencies]
+reqwest = { version = "0.11", features = ["json"] }
+tokio-test = "0.4"
+rand = "0.8"
+

@@ -22,9 +22,46 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Instant;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing;
+
+/// HTTP server information containing socket address and handle
+#[derive(Debug)]
+pub struct HttpServerInfo {
+    pub socket_addr: std::net::SocketAddr,
+    pub handle: Option<Arc<JoinHandle<()>>>,
+}
+
+impl HttpServerInfo {
+    pub fn new(socket_addr: std::net::SocketAddr, handle: Option<JoinHandle<()>>) -> Self {
+        Self {
+            socket_addr,
+            handle: handle.map(Arc::new),
+        }
+    }
+
+    pub fn address(&self) -> String {
+        self.socket_addr.to_string()
+    }
+
+    pub fn hostname(&self) -> String {
+        self.socket_addr.ip().to_string()
+    }
+
+    pub fn port(&self) -> u16 {
+        self.socket_addr.port()
+    }
+}
+
+impl Clone for HttpServerInfo {
+    fn clone(&self) -> Self {
+        Self {
+            socket_addr: self.socket_addr,
+            handle: self.handle.clone(),
+        }
+    }
+}
 
 pub struct HttpMetricsRegistry {
     pub drt: Arc<crate::DistributedRuntime>,

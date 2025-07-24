@@ -23,6 +23,14 @@ where
     U: Data + Serialize + std::fmt::Debug,
 {
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError> {
+        let start_time = std::time::Instant::now();
+
+        if let Some(m) = self.metrics() {
+            m.request_counter.inc();
+            m.concurrent_requests.inc();
+            m.request_bytes.inc_by(payload.len() as u64);
+        }
+
         // decode the control message and the request
         let msg = TwoPartCodec::default()
             .decode_message(payload)?
@@ -41,6 +49,11 @@ where
                     Ok(cm) => cm,
                     Err(err) => {
                         let json_str = String::from_utf8_lossy(&header);
+                        if let Some(m) = self.metrics() {
+                            m.error_counter
+                                .with_label_values(&["deserialization"])
+                                .inc();
+                        }
                         return Err(PipelineError::DeserializationError(
                             format!("Failed deserializing to RequestControlMessage. err={err}, json_str={json_str}"),
                         ));
@@ -50,6 +63,11 @@ where
                 (control_msg, request)
             }
             _ => {
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&["invalid_message"])
+                        .inc();
+                }
                 return Err(PipelineError::Generic(String::from("Unexpected message from work queue; unable extract a TwoPartMessage with a header and data")));
             }
         };
@@ -68,6 +86,11 @@ where
         )
         .await
         .map_err(|e| {
+            if let Some(m) = self.metrics() {
+                m.error_counter
+                    .with_label_values(&["response_stream"])
+                    .inc();
+            }
             PipelineError::Generic(format!("Failed to create response stream: {:?}", e,))
         })?;
 
@@ -78,7 +101,12 @@ where
             .expect("segment not set")
             .generate(request)
             .await
-            .map_err(PipelineError::GenerateError);
+            .map_err(|e| {
+                if let Some(m) = self.metrics() {
+                    m.error_counter.with_label_values(&["generate"]).inc();
+                }
+                PipelineError::GenerateError(e)
+            });
 
         // the prolouge is sent to the client to indicate that the stream is ready to receive data
         // or if the generate call failed, the error is sent to the client
@@ -107,10 +135,18 @@ where
             };
             let resp_bytes = serde_json::to_vec(&resp_wrapper)
                 .expect("fatal error: invalid response object - this should never happen");
+            if let Some(m) = self.metrics() {
+                m.response_bytes.inc_by(resp_bytes.len() as u64);
+            }
             if (publisher.send(resp_bytes.into()).await).is_err() {
                 tracing::error!("Failed to publish response for stream {}", context.id());
                 context.stop_generating();
                 send_complete_final = false;
+                if let Some(m) = self.metrics() {
+                    m.error_counter
+                        .with_label_values(&["publish_response"])
+                        .inc();
+                }
                 break;
             }
         }
@@ -121,12 +157,24 @@ where
             };
             let resp_bytes = serde_json::to_vec(&resp_wrapper)
                 .expect("fatal error: invalid response object - this should never happen");
+            if let Some(m) = self.metrics() {
+                m.response_bytes.inc_by(resp_bytes.len() as u64);
+            }
             if (publisher.send(resp_bytes.into()).await).is_err() {
                 tracing::error!(
                     "Failed to publish complete final for stream {}",
                     context.id()
                 );
+                if let Some(m) = self.metrics() {
+                    m.error_counter.with_label_values(&["publish_final"]).inc();
+                }
             }
+        }
+
+        if let Some(m) = self.metrics() {
+            let duration = start_time.elapsed();
+            m.request_duration.observe(duration.as_secs_f64());
+            m.concurrent_requests.dec();
         }
 
         Ok(())

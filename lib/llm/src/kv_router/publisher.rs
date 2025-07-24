@@ -499,11 +499,11 @@ impl WorkerMetricsPublisher {
 
     pub async fn create_endpoint(&self, component: Component) -> Result<()> {
         let mut metrics_rx = self.rx.clone();
-        let handler = Arc::new(KvLoadEndpoingHander::new(metrics_rx.clone()));
-        let handler = Ingress::for_engine(handler)?;
+        let endpoint = component.endpoint(KV_METRICS_ENDPOINT);
+        let handler = Arc::new(KvLoadEndpoingHander::new(metrics_rx.clone(), endpoint.clone()));
+        let handler = Ingress::for_engine_with_metrics(handler, &endpoint)?;
 
-        component
-            .endpoint(KV_METRICS_ENDPOINT)
+        endpoint
             .endpoint_builder()
             .stats_handler(move |_| {
                 let metrics = metrics_rx.borrow_and_update().clone();
@@ -517,11 +517,16 @@ impl WorkerMetricsPublisher {
 
 struct KvLoadEndpoingHander {
     metrics_rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>,
+    #[allow(dead_code)]
+    endpoint: dynamo_runtime::component::Endpoint,
 }
 
 impl KvLoadEndpoingHander {
-    pub fn new(metrics_rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>) -> Self {
-        Self { metrics_rx }
+    pub fn new(
+        metrics_rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>,
+        endpoint: dynamo_runtime::component::Endpoint,
+    ) -> Self {
+        Self { metrics_rx, endpoint }
     }
 }
 

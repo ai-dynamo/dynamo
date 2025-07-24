@@ -120,6 +120,21 @@ impl PrometheusMetric for prometheus::IntGaugeVec {
     }
 }
 
+impl PrometheusMetric for prometheus::IntCounterVec {
+    fn with_opts(_opts: prometheus::Opts) -> Result<Self, prometheus::Error> {
+        Err(prometheus::Error::Msg(
+            "IntCounterVec requires label names, use with_opts_and_label_names instead".to_string(),
+        ))
+    }
+
+    fn with_opts_and_label_names(
+        opts: prometheus::Opts,
+        label_names: &[&str],
+    ) -> Result<Self, prometheus::Error> {
+        prometheus::IntCounterVec::new(opts, label_names)
+    }
+}
+
 // Implement the trait for Histogram
 impl PrometheusMetric for prometheus::Histogram {
     fn with_opts(opts: prometheus::Opts) -> Result<Self, prometheus::Error> {
@@ -267,6 +282,21 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         let label_names = const_labels
             .ok_or_else(|| anyhow::anyhow!("IntGaugeVec requires const_labels parameter"))?;
         T::with_opts_and_label_names(opts, label_names)?
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::IntCounterVec>() {
+        // Special handling for IntCounterVec with label names
+        // const_labels parameter is required for IntCounterVec
+        if buckets.is_some() {
+            return Err(anyhow::anyhow!(
+                "buckets parameter is not valid for IntCounterVec"
+            ));
+        }
+        let mut opts = prometheus::Opts::new(&metric_name, metric_desc);
+        for (key, value) in &updated_labels {
+            opts = opts.const_label(key.clone(), value.clone());
+        }
+        let label_names = const_labels
+            .ok_or_else(|| anyhow::anyhow!("IntCounterVec requires const_labels parameter"))?;
+        T::with_opts_and_label_names(opts, label_names)?
     } else {
         // Standard handling for Counter, IntCounter, Gauge, IntGauge
         // buckets and const_labels parameters are not valid for these types
@@ -344,17 +374,19 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
     // TODO: Add support for additional Prometheus metric types:
     // - Counter: ✅ IMPLEMENTED - create_counter()
     // - CounterVec: ✅ IMPLEMENTED - create_countervec()
-    // - IntCounter: ✅ IMPLEMENTED - create_intcounter()
     // - Gauge: ✅ IMPLEMENTED - create_gauge()
-    // - IntGauge/IntGaugeVec: ✅ IMPLEMENTED - create_intgauge() and create_intgaugevec()
+    // - GaugeHistogram: create_gauge_histogram() - for gauge histograms
     // - Histogram: ✅ IMPLEMENTED - create_histogram()
-    // - Summary: create_summary() - for quantiles and sum/count metrics
     // - HistogramVec with custom buckets: create_histogram_with_buckets()
+    // - Info: create_info() - for info metrics with labels
+    // - IntCounter: ✅ IMPLEMENTED - create_intcounter()
+    // - IntCounterVec: ✅ IMPLEMENTED - create_intcountervec()
+    // - IntGauge: ✅ IMPLEMENTED - create_intgauge()
+    // - IntGaugeVec: ✅ IMPLEMENTED - create_intgaugevec()
+    // - Stateset: create_stateset() - for state-based metrics
+    // - Summary: create_summary() - for quantiles and sum/count metrics
     // - SummaryVec: create_summary_vec() - for labeled summaries
     // - Untyped: create_untyped() - for untyped metrics
-    // - Info: create_info() - for info metrics with labels
-    // - Stateset: create_stateset() - for state-based metrics
-    // - GaugeHistogram: create_gauge_histogram() - for gauge histograms
 
     /// Create a Counter metric
     fn create_counter(
@@ -366,6 +398,24 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         create_metric(self, name, description, labels, None, None)
     }
 
+    /// Create a CounterVec metric with label names (for dynamic labels)
+    fn create_countervec(
+        &self,
+        name: &str,
+        description: &str,
+        const_labels: &[&str],
+        const_label_values: &[(&str, &str)],
+    ) -> anyhow::Result<Arc<prometheus::CounterVec>> {
+        create_metric(
+            self,
+            name,
+            description,
+            const_label_values,
+            None,
+            Some(const_labels),
+        )
+    }
+
     /// Create a Gauge metric
     fn create_gauge(
         &self,
@@ -373,16 +423,6 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         description: &str,
         labels: &[(&str, &str)],
     ) -> anyhow::Result<Arc<prometheus::Gauge>> {
-        create_metric(self, name, description, labels, None, None)
-    }
-
-    /// Create an IntCounter metric
-    fn create_intcounter(
-        &self,
-        name: &str,
-        description: &str,
-        labels: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::IntCounter>> {
         create_metric(self, name, description, labels, None, None)
     }
 
@@ -397,14 +437,24 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         create_metric(self, name, description, labels, buckets, None)
     }
 
-    /// Create a CounterVec metric with label names (for dynamic labels)
-    fn create_countervec(
+    /// Create an IntCounter metric
+    fn create_intcounter(
+        &self,
+        name: &str,
+        description: &str,
+        labels: &[(&str, &str)],
+    ) -> anyhow::Result<Arc<prometheus::IntCounter>> {
+        create_metric(self, name, description, labels, None, None)
+    }
+
+    /// Create an IntCounterVec metric with label names (for dynamic labels)
+    fn create_intcountervec(
         &self,
         name: &str,
         description: &str,
         const_labels: &[&str],
         const_label_values: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::CounterVec>> {
+    ) -> anyhow::Result<Arc<prometheus::IntCounterVec>> {
         create_metric(
             self,
             name,
