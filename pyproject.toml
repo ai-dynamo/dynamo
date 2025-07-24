@@ -59,6 +59,10 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 Repository = "https://github.com/ai-dynamo/dynamo.git"
 
 [project.optional-dependencies]
+nixl = [
+    "nixl",
+]
+
 vllm = [
     "uvloop",
     "nixl",
@@ -77,6 +81,7 @@ sglang = [
 llama_cpp = [
     "uvloop",
     "llama-cpp-python",
+    # "llama-cpp-python -C cmake.args=\"-DGGML_CUDA=on\"",
 ]
 
 [build-system]
