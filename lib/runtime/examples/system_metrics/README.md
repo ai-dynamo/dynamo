@@ -80,40 +80,40 @@ When the system is running, you'll see metrics from the /metrics HTTP path like 
 ```prometheus
 # HELP concurrent_requests Number of requests currently being processed by work handler
 # TYPE concurrent_requests gauge
-concurrent_requests{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace"} 0
+concurrent_requests{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace"} 0
 
 # HELP my_custom_bytes_processed_total Example of a custom metric. Total number of data bytes processed by system handler
 # TYPE my_custom_bytes_processed_total counter
-my_custom_bytes_processed_total{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace"} 42
+my_custom_bytes_processed_total{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace"} 42
 
 # HELP request_bytes_total Total number of bytes received in requests by work handler
 # TYPE request_bytes_total counter
-request_bytes_total{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace"} 1098
+request_bytes_total{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace"} 1098
 
 # HELP request_duration_seconds Time spent processing requests by work handler
 # TYPE request_duration_seconds histogram
-request_duration_seconds_bucket{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace",le="0.005"} 3
-request_duration_seconds_bucket{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace",le="0.01"} 3
-request_duration_seconds_bucket{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace",le="0.025"} 3
-request_duration_seconds_bucket{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace",le="0.05"} 3
-request_duration_seconds_bucket{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace",le="0.1"} 3
-request_duration_seconds_bucket{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace",le="0.25"} 3
-request_duration_seconds_bucket{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace",le="0.5"} 3
-request_duration_seconds_bucket{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace",le="1"} 3
-request_duration_seconds_bucket{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace",le="2.5"} 3
-request_duration_seconds_bucket{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace",le="5"} 3
-request_duration_seconds_bucket{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace",le="10"} 3
-request_duration_seconds_bucket{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace",le="+Inf"} 3
-request_duration_seconds_sum{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace"} 0.00048793700000000003
-request_duration_seconds_count{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="0.005"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="0.01"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="0.025"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="0.05"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="0.1"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="0.25"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="0.5"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="1"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="2.5"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="5"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="10"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="+Inf"} 3
+request_duration_seconds_sum{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace"} 0.00048793700000000003
+request_duration_seconds_count{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace"} 3
 
 # HELP requests_total Total number of requests processed by work handler
 # TYPE requests_total counter
-requests_total{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace"} 3
+requests_total{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace"} 3
 
 # HELP response_bytes_total Total number of bytes sent in responses by work handler
 # TYPE response_bytes_total counter
-response_bytes_total{component="mycomponent",endpoint="myendpoint4598",namespace="mynamespace"} 1917
+response_bytes_total{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace"} 1917
 
 # HELP uptime_seconds Total uptime of the DistributedRuntime in seconds
 # TYPE uptime_seconds gauge
@@ -200,8 +200,11 @@ The server will start an HTTP server on the specified port (9091 in this example
 Once running, you can query the metrics:
 
 ```bash
-# Get all ingress metrics
-curl http://localhost:9091/metrics | grep ingress_
+# Get all work handler metrics
+curl http://localhost:9091/metrics | grep -E "(requests_total|request_bytes_total|response_bytes_total|errors_total|request_duration_seconds|concurrent_requests)"
+
+# Get request count for specific endpoint
+curl http://localhost:9091/metrics | grep 'requests_total{endpoint="dyn_example_endpoint"}'
 
 # Get request duration histogram
 curl http://localhost:9091/metrics | grep 'ingress_request_duration_seconds'

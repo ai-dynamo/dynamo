@@ -25,9 +25,9 @@ use dynamo_runtime::{
 use prometheus::IntCounter;
 use std::sync::Arc;
 
-pub const DEFAULT_NAMESPACE: &str = "mynamespace";
-pub const DEFAULT_COMPONENT: &str = "mycomponent";
-pub const DEFAULT_ENDPOINT: &str = "myendpoint";
+pub const DEFAULT_NAMESPACE: &str = "dyn_example_namespace";
+pub const DEFAULT_COMPONENT: &str = "dyn_example_component";
+pub const DEFAULT_ENDPOINT: &str = "dyn_example_endpoint";
 
 /// Stats structure returned by the endpoint's stats handler
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
@@ -65,9 +65,7 @@ pub struct RequestHandler {
 
 impl RequestHandler {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            metrics: None,
-        })
+        Arc::new(Self { metrics: None })
     }
 
     pub fn with_metrics(metrics: MySystemStatsMetrics) -> Arc<Self> {
