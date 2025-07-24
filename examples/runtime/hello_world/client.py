@@ -13,13 +13,30 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This is a sample config for TensorRT-LLM engine.
-# The config provides smaller free_gpu_memory_fraction to ensure that the engine
-# does not use all the GPU memory and both prefill and decode workers can fit in
-# the GPU memory when running in disaggregated mode.
-# You might have to tweak this config based on your model size and GPU memory.
+import asyncio
 
-backend: pytorch
-disable_overlap_scheduler: true
-kv_cache_config:
-  free_gpu_memory_fraction: 0.40
+import uvloop
+
+from dynamo.runtime import DistributedRuntime, dynamo_worker
+
+
+@dynamo_worker()
+async def worker(runtime: DistributedRuntime):
+    # Get endpoint
+    endpoint = (
+        runtime.namespace("hello_world").component("backend").endpoint("generate")
+    )
+
+    # Create client and wait for service to be ready
+    client = await endpoint.client()
+    await client.wait_for_instances()
+
+    # Issue request and process the stream
+    stream = await client.generate("world,sun,moon,star")
+    async for response in stream:
+        print(response.data())
+
+
+if __name__ == "__main__":
+    uvloop.install()
+    asyncio.run(worker())

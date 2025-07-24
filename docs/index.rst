@@ -75,7 +75,6 @@ The examples below assume you build the latest image yourself from source. If us
 
    Welcome to Dynamo <self>
    Support Matrix <support_matrix.md>
-   Getting Started <get_started.md>
 
 .. toctree::
    :hidden:
@@ -128,6 +127,7 @@ The examples below assume you build the latest image yourself from source. If us
    :caption: API
 
    Python API <API/python_bindings.md>
+   NIXL Connect API <API/nixl_connect/README.md>
 
 .. toctree::
    :hidden:

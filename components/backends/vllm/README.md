@@ -115,7 +115,7 @@ For Kubernetes deployment, YAML manifests are provided in the `deploy/` director
 
 #### Prerequisites
 
-- **Dynamo Cloud**: Follow the [Quickstart Guide](../../docs/guides/dynamo_deploy/quickstart.md) to deploy Dynamo Cloud first.
+- **Dynamo Cloud**: Follow the [Quickstart Guide](../../../docs/guides/dynamo_deploy/quickstart.md) to deploy Dynamo Cloud first.
 
 - **Container Images**: The deployment files currently require access to `nvcr.io/nvidian/nim-llm-dev/vllm-runtime`. If you don't have access, build and push your own image:
   ```bash
@@ -136,6 +136,17 @@ Example with disagg:
 ```bash
 cd ~/dynamo/components/backends/vllm/deploy
 kubectl apply -f disagg.yaml
+```
+
+To change `DYN_LOG` level, edit the yaml file by adding
+
+```yaml
+...
+spec:
+  envs:
+    - name: DYN_LOG
+      value: "debug" # or other log levels
+  ...
 ```
 
 ### Testing the Deployment

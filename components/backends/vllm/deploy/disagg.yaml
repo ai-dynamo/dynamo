@@ -4,11 +4,11 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-v1-disagg
+  name: vllm-disagg
 spec:
   services:
     Frontend:
-      dynamoNamespace: vllm-v1-disagg
+      dynamoNamespace: vllm-disagg
       componentType: main
       replicas: 1
       livenessProbe:
@@ -31,19 +31,22 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "1"
-          memory: "2Gi"
+          cpu: "32"
+          memory: "10Gi"
         limits:
-          cpu: "1"
-          memory: "2Gi"
+          cpu: "32"
+          memory: "10Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.4
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
+          command:
+            - /bin/sh
+            - -c
           args:
             - "python3 -m dynamo.frontend --http-port 8000"
     VllmDecodeWorker:
-      dynamoNamespace: vllm-v1-disagg
+      dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
@@ -68,21 +71,24 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "10"
-          memory: "20Gi"
+          cpu: "32"
+          memory: "40Gi"
           gpu: "1"
         limits:
-          cpu: "10"
-          memory: "20Gi"
+          cpu: "32"
+          memory: "40Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.4
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
+          command:
+            - /bin/sh
+            - -c
           args:
             - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager 2>&1 | tee /tmp/vllm.log"
     VllmPrefillWorker:
-      dynamoNamespace: vllm-v1-disagg
+      dynamoNamespace: vllm-disagg
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
@@ -107,16 +113,19 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "10"
-          memory: "20Gi"
+          cpu: "32"
+          memory: "40Gi"
           gpu: "1"
         limits:
-          cpu: "10"
-          memory: "20Gi"
+          cpu: "32"
+          memory: "40Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.4
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
+          command:
+            - /bin/sh
+            - -c
           args:
             - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --is-prefill-worker 2>&1 | tee /tmp/vllm.log"

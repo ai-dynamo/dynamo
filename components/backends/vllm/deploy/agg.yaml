@@ -4,7 +4,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: vllm-v1-agg
+  name: vllm-agg
 spec:
   services:
     Frontend:
@@ -26,7 +26,7 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      dynamoNamespace: vllm-v1-agg
+      dynamoNamespace: vllm-agg
       componentType: main
       replicas: 1
       resources:
@@ -38,8 +38,11 @@ spec:
           memory: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.4
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
+          command:
+            - /bin/sh
+            - -c
           args:
             - "python3 -m dynamo.frontend --http-port 8000"
     VllmDecodeWorker:
@@ -63,7 +66,7 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      dynamoNamespace: vllm-v1-agg
+      dynamoNamespace: vllm-agg
       componentType: worker
       replicas: 1
       resources:
@@ -77,7 +80,10 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.4
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
+          command:
+            - /bin/sh
+            - -c
           args:
-            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager 2>&1 | tee /tmp/vllm.log"
+            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager 2>&1 | tee /tmp/vllm.log

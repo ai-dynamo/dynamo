@@ -74,18 +74,14 @@ metrics --component MyComponent --endpoint my_endpoint
 To run a more realistic deployment to gathering metrics from,
 see the examples in [examples/llm](../../examples/llm).
 
-For example, for a VLLM + KV Routing based deployment that
-exposes statistics on an endpoint labeled
-`dynamo/VllmWorker/load_metrics` (note: this does NOT currently work
-with any other example such as examples/vllm_v0, vllm_v1, ...):
 ```bash
-cd deploy/examples/llm
-dynamo serve graphs.agg:Frontend -f configs/agg.yaml
+python -m dynamo.frontend &
+python -m dynamo.vllm --model-path <your-model-checkout>
 ```
 
 Then, to monitor the metrics of these VllmWorkers, run:
 ```bash
-metrics --component VllmWorker --endpoint load_metrics
+metrics --component backend --endpoint load_metrics
 ```
 
 **NOTE**: `load_metrics` is currently a

@@ -22,16 +22,6 @@ pub enum Output {
     /// Run inference using llama.cpp
     LlamaCpp,
 
-    /// Run inference using sglang
-    SgLang,
-
-    /// Run inference using trtllm
-    Trtllm,
-
-    // Start vllm in a sub-process connecting via nats
-    // Sugar for `python vllm_inc.py --endpoint <thing> --model <thing>`
-    Vllm,
-
     Mocker,
 }
 
@@ -46,11 +36,7 @@ impl TryFrom<&str> for Output {
             #[cfg(feature = "llamacpp")]
             "llamacpp" | "llama_cpp" => Ok(Output::LlamaCpp),
 
-            "sglang" => Ok(Output::SgLang),
-            "trtllm" => Ok(Output::Trtllm),
-            "vllm" => Ok(Output::Vllm),
             "mocker" => Ok(Output::Mocker),
-
             "echo_full" => Ok(Output::EchoFull),
             "echo_core" => Ok(Output::EchoCore),
 
@@ -79,11 +65,7 @@ impl fmt::Display for Output {
             #[cfg(feature = "llamacpp")]
             Output::LlamaCpp => "llamacpp",
 
-            Output::SgLang => "sglang",
-            Output::Trtllm => "trtllm",
-            Output::Vllm => "vllm",
             Output::Mocker => "mocker",
-
             Output::EchoFull => "echo_full",
             Output::EchoCore => "echo_core",
 
@@ -96,7 +78,11 @@ impl fmt::Display for Output {
 impl Output {
     #[allow(unused_mut)]
     pub fn available_engines() -> Vec<String> {
-        let mut out = vec!["echo_core".to_string(), "echo_full".to_string()];
+        let mut out = vec![
+            "echo_core".to_string(),
+            "echo_full".to_string(),
+            Output::Mocker.to_string(),
+        ];
         #[cfg(feature = "mistralrs")]
         {
             out.push(Output::MistralRs.to_string());
@@ -106,11 +92,6 @@ impl Output {
         {
             out.push(Output::LlamaCpp.to_string());
         }
-
-        out.push(Output::SgLang.to_string());
-        out.push(Output::Trtllm.to_string());
-        out.push(Output::Vllm.to_string());
-        out.push(Output::Mocker.to_string());
 
         out
     }

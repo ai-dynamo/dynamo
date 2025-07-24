@@ -14,13 +14,16 @@
 # limitations under the License.
 
 accelerate==1.6.0
+aiofiles
 av==15.0.0
 fastapi==0.115.6
 ftfy
 genai-perf==0.0.15
 grpcio-tools==1.66.0
 httpx
+kr8s
 kubernetes==32.0.1
+kubernetes_asyncio
 matplotlib
 msgspec
 mypy
@@ -43,5 +46,6 @@ sentencepiece
 tensorboard==2.19.0
 tensorboardX==2.6.2.2
 transformers
+types-aiofiles
 types-PyYAML
 uvicorn

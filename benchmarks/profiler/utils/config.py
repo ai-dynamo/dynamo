@@ -14,7 +14,10 @@
 # limitations under the License.
 
 import logging
+from copy import deepcopy
 from typing import Literal
+
+from utils.defaults import DEFAULT_MODEL_NAME, DYNAMO_RUN_DEFAULT_PORT
 
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
 
@@ -29,192 +32,184 @@ console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
 
 
-class VllmV0ConfigModifier:
-    @classmethod
-    def convert_config(cls, config: dict, target: Literal["prefill", "decode"]) -> dict:
-        config = config.copy()
+def break_arguments(args: list[str]) -> list[str]:
+    ans = []
+    if isinstance(args, str):
+        ans = args.split(" ")
+    else:
+        for arg in args:
+            ans.extend(arg.split(" "))
+    return ans
 
-        # disable planner
-        if "Planner" in config:
-            config["Planner"]["no-operation"] = True
 
-        if target == "prefill":
-            if WORKER_COMPONENT_NAMES["vllm_v0"].prefill_worker in config:
-                # make PrefillWorker into VllmWorker
-                del config[WORKER_COMPONENT_NAMES["vllm_v0"].decode_worker]
-                config[WORKER_COMPONENT_NAMES["vllm_v0"].decode_worker] = config[
-                    WORKER_COMPONENT_NAMES["vllm_v0"].prefill_worker
-                ]
-                del config[WORKER_COMPONENT_NAMES["vllm_v0"].prefill_worker]
+def join_arguments(args: list[str]) -> list[str]:
+    return [" ".join(args)]
 
-            # to profile prefill, we disable prefix caching
-            config[WORKER_COMPONENT_NAMES["vllm_v0"].decode_worker][
-                "enable-prefix-caching"
-            ] = False
-        elif target == "decode":
-            if WORKER_COMPONENT_NAMES["vllm_v0"].prefill_worker in config:
-                del config[WORKER_COMPONENT_NAMES["vllm_v0"].prefill_worker]
 
-            # to profile prefill, we enable prefix caching to pass the prefill stage
-            config[WORKER_COMPONENT_NAMES["vllm_v0"].decode_worker][
-                "enable-prefix-caching"
-            ] = True
+def append_argument(args: list[str], to_append) -> list[str]:
+    idx = find_arg_index(args)
+    if isinstance(to_append, list):
+        args[idx:idx] = to_append
+    else:
+        args.insert(idx, to_append)
+    return args
 
-        # set num workers to 1
-        config[WORKER_COMPONENT_NAMES["vllm_v0"].decode_worker]["ServiceArgs"][
-            "workers"
-        ] = 1
 
-        # set PP to 1
-        if (
-            "pipeline-parallel-size"
-            in config[WORKER_COMPONENT_NAMES["vllm_v0"].decode_worker]
-            and config[WORKER_COMPONENT_NAMES["vllm_v0"].decode_worker][
-                "pipeline-parallel-size"
-            ]
-            > 1
-        ):
-            logger.warning("Currently we only support TP, setting PP to 1")
-            config[WORKER_COMPONENT_NAMES["vllm_v0"].decode_worker][
-                "pipeline-parallel-size"
-            ] = 1
+def find_arg_index(args: list[str]) -> int:
+    # find the correct index to insert an argument
+    idx = len(args)
 
-        # always local prefill
-        config[WORKER_COMPONENT_NAMES["vllm_v0"].decode_worker][
-            "remote-prefill"
-        ] = False
-        config[WORKER_COMPONENT_NAMES["vllm_v0"].decode_worker][
-            "conditional-disagg"
-        ] = False
+    try:
+        new_idx = args.index("|")
+        idx = min(idx, new_idx)
+    except ValueError:
+        pass
 
-        return config
+    try:
+        new_idx = args.index("2>&1")
+        idx = min(idx, new_idx)
+    except ValueError:
+        pass
 
-    @classmethod
-    def set_config_tp_size(cls, config: dict, tp_size: int):
-        config[WORKER_COMPONENT_NAMES["vllm_v0"].decode_worker][
-            "tensor-parallel-size"
-        ] = tp_size
-        config[WORKER_COMPONENT_NAMES["vllm_v0"].decode_worker]["ServiceArgs"][
-            "resources"
-        ]["gpu"] = tp_size
-        return config
-
-    @classmethod
-    def get_model_name(cls, config: dict) -> str:
-        if "Common" in config and "served_model_name" in config["Common"]:
-            return config["Common"]["served_model_name"]
-        else:
-            return config["Frontend"]["served_model_name"]
-
-    @classmethod
-    def get_port(cls, config: dict) -> int:
-        if "Common" in config and "port" in config["Common"]:
-            return config["Common"]["port"]
-        else:
-            return config["Frontend"]["port"]
-
-    @classmethod
-    def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str) -> int:
-        try:
-            with open(dynamo_log_fn, "r") as f:
-                for line in f:
-                    if "Maximum concurrency for" in line:
-                        line = line.strip().split("Maximum concurrency for ")[1]
-                        token_count = int(line.split(" tokens per request: ")[0])
-                        concurrency = float(line.split(" tokens per request: ")[1][:-1])
-
-                        logger.info(
-                            f"Found KV cache info: {token_count} x {concurrency} = {int(token_count * concurrency)}"
-                        )
-                        return int(token_count * concurrency)
-        except Exception as e:
-            logger.warning(
-                f"Failed to parse KV cache size from line: {line}. Error: {e}"
-            )
-        return 0
+    return idx
 
 
 class VllmV1ConfigModifier:
     @classmethod
     def convert_config(cls, config: dict, target: Literal["prefill", "decode"]) -> dict:
-        config = config.copy()
+        config = deepcopy(config)
+
+        # set metadata name
+        config["metadata"]["name"] = "vllm-v1-agg"
 
         # disable planner
-        if "Planner" in config:
-            config["Planner"]["no-operation"] = True
-
-        # turn-off disagg
-        config["SimpleLoadBalancer"]["enable_disagg"] = False
+        if "Planner" in config["spec"]["services"]:
+            del config["spec"]["services"]["Planner"]
 
         if target == "prefill":
-            if WORKER_COMPONENT_NAMES["vllm_v1"].prefill_worker in config:
-                # make VllmPrefillWorker into VllmDecodeWorker
-                del config[WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker]
-                config[WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker] = config[
-                    WORKER_COMPONENT_NAMES["vllm_v1"].prefill_worker
-                ]
-                del config[WORKER_COMPONENT_NAMES["vllm_v1"].prefill_worker]
+            # convert prefill worker into decode worker
+            config["spec"]["services"][
+                WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker
+            ] = config["spec"]["services"][
+                WORKER_COMPONENT_NAMES["vllm_v1"].prefill_worker
+            ]
+            del config["spec"]["services"][
+                WORKER_COMPONENT_NAMES["vllm_v1"].prefill_worker
+            ]
 
-            # to profile prefill, we disable prefix caching
-            config[WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
-                "enable-prefix-caching"
-            ] = False
+            args = config["spec"]["services"][
+                WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker
+            ]["extraPodSpec"]["mainContainer"]["args"]
+
+            args = break_arguments(args)
+
+            # remove --is-prefill-worker flag
+            args.remove("--is-prefill-worker")
+
+            # disable prefix caching
+            if "--enable-prefix-caching" in args:
+                args.remove("--enable-prefix-caching")
+            if "--no-enable-prefix-caching" not in args:
+                args = append_argument(args, "--no-enable-prefix-caching")
+
+            config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
+                "extraPodSpec"
+            ]["mainContainer"]["args"] = join_arguments(args)
+
         elif target == "decode":
-            if WORKER_COMPONENT_NAMES["vllm_v1"].prefill_worker in config:
-                del config[WORKER_COMPONENT_NAMES["vllm_v1"].prefill_worker]
+            # delete prefill worker
+            del config["spec"]["services"][
+                WORKER_COMPONENT_NAMES["vllm_v1"].prefill_worker
+            ]
 
-            # to profile prefill, we enable prefix caching to pass the prefill stage
-            config[WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
-                "enable-prefix-caching"
-            ] = True
+            args = config["spec"]["services"][
+                WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker
+            ]["extraPodSpec"]["mainContainer"]["args"]
+
+            args = break_arguments(args)
+
+            # enable prefix caching
+            if "--enable-prefix-caching" not in args:
+                args = append_argument(args, "--enable-prefix-caching")
+            if "--no-enable-prefix-caching" in args:
+                args.remove("--no-enable-prefix-caching")
+
+            config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
+                "extraPodSpec"
+            ]["mainContainer"]["args"] = join_arguments(args)
 
         # set num workers to 1
-        config[WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker]["ServiceArgs"][
-            "workers"
-        ] = 1
-
-        # set PP to 1
-        if (
-            "pipeline-parallel-size"
-            in config[WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker]
-            and config[WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
-                "pipeline-parallel-size"
-            ]
-            > 1
-        ):
-            logger.warning("Currently we only support TP, setting PP to 1")
-            config[WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
-                "pipeline-parallel-size"
-            ] = 1
+        decode_worker_config = config["spec"]["services"][
+            WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker
+        ]
+        decode_worker_config["replicas"] = 1
 
         return config
 
     @classmethod
     def set_config_tp_size(cls, config: dict, tp_size: int):
-        config[WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
-            "tensor-parallel-size"
-        ] = tp_size
-        config[WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker]["ServiceArgs"][
+        config = deepcopy(config)
+
+        config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
             "resources"
-        ]["gpu"] = tp_size
+        ]["requests"]["gpu"] = str(tp_size)
+        config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
+            "resources"
+        ]["limits"]["gpu"] = str(tp_size)
+
+        args = config["spec"]["services"][
+            WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker
+        ]["extraPodSpec"]["mainContainer"]["args"]
+
+        args = break_arguments(args)
+
+        try:
+            idx = args.index("--tensor-parallel-size")
+            args[idx + 1] = str(tp_size)
+        except ValueError:
+            args = append_argument(args, ["--tensor-parallel-size", str(tp_size)])
+
+        config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
+            "extraPodSpec"
+        ]["mainContainer"]["args"] = join_arguments(args)
+
         return config
 
     @classmethod
     def get_model_name(cls, config: dict) -> str:
-        if "Common" in config and "served_model_name" in config["Common"]:
-            return config["Common"]["served_model_name"]
-        else:
-            return config["Frontend"]["served_model_name"]
+        worker_name = WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker
+        args = config["spec"]["services"][worker_name]["extraPodSpec"]["mainContainer"][
+            "args"
+        ]
+
+        args = break_arguments(args)
+        for i, arg in enumerate(args):
+            if arg == "--model" and i + 1 < len(args):
+                return args[i + 1]
+
+        logger.warning(
+            f"Model name not found in configuration args, using default model name: {DEFAULT_MODEL_NAME}"
+        )
+        return DEFAULT_MODEL_NAME
 
     @classmethod
     def get_port(cls, config: dict) -> int:
-        if "Common" in config and "port" in config["Common"]:
-            return config["Common"]["port"]
-        else:
-            return config["Frontend"]["port"]
+        args = config["spec"]["services"]["Frontend"]["extraPodSpec"]["mainContainer"][
+            "args"
+        ]
+        args = break_arguments(args)
+        try:
+            idx = args.index("--http-port")
+            return int(args[idx + 1])
+        except ValueError:
+            logger.warning(
+                f"Port not found in configuration args, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
+            )
+            return DYNAMO_RUN_DEFAULT_PORT
 
     @classmethod
     def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str) -> int:
+        # TODO
         try:
             with open(dynamo_log_fn, "r") as f:
                 for line in f:
@@ -237,6 +232,5 @@ class VllmV1ConfigModifier:
 
 
 CONFIG_MODIFIERS = {
-    "vllm_v0": VllmV0ConfigModifier,
     "vllm_v1": VllmV1ConfigModifier,
 }
