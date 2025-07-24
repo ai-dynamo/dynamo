@@ -69,3 +69,10 @@ async def start_prometheus_server(config):
         process.terminate()
         process.wait()
         raise
+
+
+if __name__ == "__main__":
+    # The dynamo_worker decorator handles runtime setup
+    import asyncio
+
+    asyncio.run(worker())

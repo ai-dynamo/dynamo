@@ -6,6 +6,9 @@ kind: DynamoGraphDeployment
 metadata:
   name: vllm-disagg-planner
 spec:
+  envs:
+    - name: DYNAMO_SERVICE_CONFIG
+      value: '{"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:9090"]}]},{"job_name":"frontend","static_configs":[{"targets":["localhost:8000"]}]}]}}'
   services:
     Frontend:
       dynamoNamespace: vllm-disagg-planner
@@ -38,7 +41,7 @@ spec:
           memory: "4Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.2
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.5
           workingDir: /workspace/examples/vllm
           args:
             - dynamo
@@ -73,18 +76,18 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "2"
-          memory: "4Gi"
+          cpu: "1"
+          memory: "2Gi"
         limits:
-          cpu: "2"
-          memory: "4Gi"
+          cpu: "1"
+          memory: "2Gi"
       pvc:
         create: false
         name: profiling-pvc
         mountPoint: /workspace/profiling_results
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.2
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.5
           workingDir: /workspace/components/planner/src/dynamo/planner
           args:
             - python
@@ -95,7 +98,53 @@ spec:
             - --backend=vllm
             - --adjustment-interval=60
             - --profile-results-dir=/workspace/profiling_results
-            - --prometheus-endpoint=http://vllm-disagg-planner-prometheus.sla-planner-1.svc.cluster.local:9090
+            - --prometheus-endpoint=http://vllm-disagg-planner-prometheus.hzhou-dynamo.svc.cluster.local:9090
+    Prometheus:
+      dynamoNamespace: vllm-disagg-planner
+      componentType: main
+      replicas: 1
+      envs:
+        - name: PYTHONPATH
+          value: "/workspace/components/planner/src"
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        initialDelaySeconds: 30
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      resources:
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+        limits:
+          cpu: "1"
+          memory: "2Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.5
+          workingDir: /workspace/components/planner/src
+          # env:
+          #   - name: DYNAMO_SERVICE_CONFIG
+          #     value: '{"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:9090"]}]},{"job_name":"frontend","static_configs":[{"targets":["localhost:8000"]}]}]}}'
+            # - name: PYTHONPATH
+            #   value: "/workspace/components/planner/src"
+          args:
+            - python
+            - -m
+            - dynamo.planner.prometheus
     VllmDecodeWorker:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
@@ -122,67 +171,21 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "32"
+          cpu: "10"
           memory: "40Gi"
           gpu: "1"
         limits:
-          cpu: "32"
+          cpu: "10"
           memory: "40Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.2
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.5
           workingDir: /workspace/examples/vllm
           args:
-            - "python3 -m dynamo.vllm --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B --enforce-eager 2>&1 | tee /tmp/vllm.log"
-    Prometheus:
-      dynamoNamespace: vllm-disagg-planner
-      componentType: worker
-      replicas: 1
-      config:
-        global:
-          scrape_interval: 10s
-          evaluation_interval: 10s
-        scrape_configs:
-          - job_name: 'vllm-frontend'
-            static_configs:
-              - targets: ['vllm-disagg-planner-frontend:8000']
-            metrics_path: /metrics
-            scrape_interval: 5s
-      livenessProbe:
-        exec:
-          command:
             - /bin/sh
             - -c
-            - "exit 0"
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        initialDelaySeconds: 30
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
-      resources:
-        requests:
-          cpu: "200m"
-          memory: "512Mi"
-        limits:
-          cpu: "500m"
-          memory: "1Gi"
-      extraPodSpec:
-        mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.2
-          workingDir: /workspace
-          args:
-            - python
-            - -m
-            - dynamo.planner.prometheus
+            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager 2>&1 | tee /tmp/vllm.log"
     VllmPrefillWorker:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
@@ -209,16 +212,18 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "32"
+          cpu: "10"
           memory: "40Gi"
           gpu: "1"
         limits:
-          cpu: "32"
+          cpu: "10"
           memory: "40Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.2
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.5
           workingDir: /workspace/examples/vllm
           args:
-            - "python3 -m dynamo.vllm --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B --enforce-eager --is-prefill-worker 2>&1 | tee /tmp/vllm.log"
+            - /bin/sh
+            - -c
+            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --is-prefill-worker 2>&1 | tee /tmp/vllm.log"
