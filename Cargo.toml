@@ -45,7 +45,7 @@ derive-getters = { version = "0.5" }
 either = { version = "1.13", features = ["serde"] }
 etcd-client = { version = "0.14", features = ["tls"] }
 futures = { version = "0.3" }
-hf-hub = { version = "0.4.2", default-features = false, features = ["tokio", "rustls-tls"] }
+hf-hub = { version = "0.4.2", default-features = false, features = ["tokio", "rustls-tls", "ureq"] }
 humantime = { version = "2.2.0" }
 libc = { version = "0.2" }
 oneshot = { version = "0.1.11", features = ["std", "async"] }

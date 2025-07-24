@@ -119,9 +119,10 @@ if [ "$ARCH" = "arm64" ]; then
 
     # Try to install specific PyTorch version first, fallback to latest nightly
     echo "Attempting to install pinned PyTorch nightly versions..."
-    if ! uv pip install torch==2.9.0.dev20250712+cu128 torchvision==0.24.0.dev20250712+cu128 torchaudio==2.8.0.dev20250712+cu128 --index-url https://download.pytorch.org/whl/nightly/cu128; then
-        echo "Pinned versions failed, falling back to latest stable..."
-        uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+    if ! uv pip install torch==2.8.0.dev20250613+cu128 torchaudio==2.8.0.dev20250616 torchvision==0.23.0.dev20250616 --index-url https://download.pytorch.org/whl/nightly/cu128; then
+        echo "Pinned versions failed"
+        exit 1
+        # uv pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
     fi
 
     python use_existing_torch.py
@@ -163,10 +164,14 @@ python setup.py install
 
 
 # Install Flash Infer
-cd $INSTALLATION_DIR
-git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
-cd flashinfer
-git checkout $FLASHINF_REF
-python -m pip install -v .
+if [ "$ARCH" = "arm64" ]; then
+    uv pip install flashinfer-python
+else
+    cd $INSTALLATION_DIR
+    git clone https://github.com/flashinfer-ai/flashinfer.git --recursive
+    cd flashinfer
+    git checkout $FLASHINF_REF
+    python -m pip install -v .
+fi
 
 echo "vllm installation completed successfully"

@@ -397,8 +397,8 @@ impl OpenAIPreprocessor {
                         // Only set event if not already set to avoid overriding existing events (like errors)
                         if response.event.is_none() {
                             response.event = metrics_annotated.event;
+                            response.comment = metrics_annotated.comment;
                         }
-                        response.comment = metrics_annotated.comment;
                     }
 
                     tracing::trace!(
