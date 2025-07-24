@@ -46,7 +46,7 @@ Use [VLLM YAML](../../components/backends/vllm/deploy/agg.yaml) for an example.
 
 **Note 1** Example Image
 
-The examples use a prebuilt image from the `nvcr.io` registry`.
+The examples use a prebuilt image from the `nvcr.io` registry.
 You can build your own image and update the image location in your CR file prior to applying.
 You could build your owm image using
 
