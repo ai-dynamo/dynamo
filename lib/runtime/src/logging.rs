@@ -136,6 +136,7 @@ pub struct DistributedTraceContext {
     parent_id: Option<String>,
     start: Instant,
     end: Option<Instant>,
+    x_request_id: Option<String>,
 }
 
 use axum::body::Body;
@@ -170,7 +171,7 @@ where
             }
         }
 
-	// Extract X-Request-ID or x-request-id (case-insensitive)
+        // Extract X-Request-ID or x-request-id (case-insensitive)
         let x_request_id = parts
             .headers
             .get("x-request-id")
@@ -225,24 +226,15 @@ where
             let mut trace_id: Option<String> = None;
             let mut parent_id: Option<String> = None;
             let mut span_id: Option<String> = None;
-            let target_fields = ["trace_id", "span_id", "parent_id"];
+            let mut x_request_id: Option<String> = None;
             let mut visitor = FieldVisitor::default();
             attrs.record(&mut visitor);
 
-            for field in attrs.fields().iter() {
-                if target_fields.contains(&field.name()) {
-                    if !visitor.fields.contains_key(field.name()) {
-                        tracing::error!(
-                            "Field {} has no value any attempts to update will be ignored",
-                            field.name()
-                        );
-                    }
-                }
-            }
-
             if let Some(trace_id_input) = visitor.fields.get("trace_id") {
                 if !is_valid_trace_id(trace_id_input) {
-                    tracing::error!("trace id  '{}' is not valid! Ignoring.", trace_id_input);
+                    if trace_id_input != "None" {
+                        tracing::trace!("trace id  '{}' is not valid! Ignoring.", trace_id_input);
+                    }
                 } else {
                     trace_id = Some(trace_id_input.to_string());
                 }
@@ -250,7 +242,9 @@ where
 
             if let Some(span_id_input) = visitor.fields.get("span_id") {
                 if !is_valid_span_id(span_id_input) {
-                    tracing::error!("span id  '{}' is not valid! Ignoring.", span_id_input);
+                    if span_id_input != "None" {
+                        tracing::trace!("span id  '{}' is not valid! Ignoring.", span_id_input);
+                    }
                 } else {
                     span_id = Some(span_id_input.to_string());
                 }
@@ -258,9 +252,17 @@ where
 
             if let Some(parent_id_input) = visitor.fields.get("parent_id") {
                 if !is_valid_span_id(parent_id_input) {
-                    tracing::error!("parent id  '{}' is not valid! Ignoring.", parent_id_input);
+                    if parent_id_input != "None" {
+                        tracing::trace!("parent id  '{}' is not valid! Ignoring.", parent_id_input);
+                    }
                 } else {
                     parent_id = Some(parent_id_input.to_string());
+                }
+            }
+
+            if let Some(x_request_id_input) = visitor.fields.get("x_request_id") {
+                if x_request_id_input != "None" {
+                    x_request_id = Some(x_request_id_input.to_string());
                 }
             }
 
@@ -295,6 +297,7 @@ where
                 trace_id: trace_id.expect("Trace ID must be set"),
                 span_id: span_id.expect("Span ID must be set"),
                 parent_id,
+                x_request_id,
                 start: Instant::now(),
                 end: None,
             });
@@ -579,6 +582,16 @@ where
                         "parent_id".to_string(),
                         serde_json::Value::String(parent_id),
                     );
+                } else {
+                    visitor.fields.remove("parent_id");
+                }
+                if let Some(x_request_id) = tracing_context.x_request_id.clone() {
+                    visitor.fields.insert(
+                        "x_request_id".to_string(),
+                        serde_json::Value::String(x_request_id),
+                    );
+                } else {
+                    visitor.fields.remove("x_request_id");
                 }
             } else {
                 tracing::error!(
@@ -669,7 +682,7 @@ impl tracing::field::Visit for JsonVisitor {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
     use anyhow::{anyhow, Result};
     use chrono::{DateTime, Utc};

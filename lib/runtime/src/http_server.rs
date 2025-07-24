@@ -137,16 +137,20 @@ pub async fn spawn_http_server(
             "/metrics",
             get({
                 let state = Arc::clone(&server_state);
-                move |tracing_ctx| metrics_handler(state, "metrics",tracing_ctx)
+                move |tracing_ctx| metrics_handler(state, "metrics", tracing_ctx)
             }),
         )
-        .fallback(|tracing_ctx:TraceParent| {
+        .fallback(|tracing_ctx: TraceParent| {
             async {
                 tracing::info!("[fallback handler] called");
                 (StatusCode::NOT_FOUND, "Route not found").into_response()
             }
-            .instrument(tracing::trace_span!("fallback handler",trace_id=tracing_ctx.trace_id,
-	    parent_id=tracing_ctx.parent_id,x_request_id=tracing_ctx.x_request_id))
+            .instrument(tracing::trace_span!(
+                "fallback handler",
+                trace_id = tracing_ctx.trace_id,
+                parent_id = tracing_ctx.parent_id,
+                x_request_id = tracing_ctx.x_request_id
+            ))
         });
 
     let address = format!("{}:{}", host, port);
@@ -220,7 +224,11 @@ async fn health_handler(
 
 /// Metrics handler with DistributedRuntime uptime
 #[tracing::instrument(skip_all, level="trace", fields(route= %route, trace_id = ?trace_parent.trace_id, parent_id = ?trace_parent.parent_id, x_request_id=?trace_parent.x_request_id))]
-async fn metrics_handler(state: Arc<HttpServerState>, route: &'static str, trace_parent:TraceParent) -> impl IntoResponse {
+async fn metrics_handler(
+    state: Arc<HttpServerState>,
+    route: &'static str,
+    trace_parent: TraceParent,
+) -> impl IntoResponse {
     // Update the uptime gauge with current value
     state.update_uptime_gauge();
 
@@ -253,9 +261,17 @@ async fn create_test_drt_async() -> crate::DistributedRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::logging::tests::load_log;
     use crate::metrics::MetricsRegistry;
+    use anyhow::{anyhow, Result};
+    use chrono::{DateTime, Utc};
+    use jsonschema::{Draft, JSONSchema};
     use rstest::rstest;
+    use serde_json::Value;
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
     use std::sync::Arc;
+    use stdio_override::*;
     use tokio::time::{sleep, Duration};
 
     #[tokio::test]
@@ -333,6 +349,7 @@ uptime_seconds{namespace=\"http_server\"} 42
     #[case("ready", 200, "ready")]
     #[case("notready", 503, "notready")]
     #[tokio::test]
+    #[cfg(feature = "integration")]
     async fn test_health_endpoints(
         #[case] starting_health_status: &'static str,
         #[case] expected_status: u16,
@@ -398,6 +415,67 @@ uptime_seconds{namespace=\"http_server\"} 42
             })(),
         )
         .await;
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "integration")]
+    async fn test_health_endpoint_tracing() -> Result<()> {
+        use std::sync::Arc;
+        use tokio::time::sleep;
+        use tokio_util::sync::CancellationToken;
+        // use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // use reqwest for HTTP requests
+
+        // Closure call is needed here to satisfy async_with_vars
+
+        #[allow(clippy::redundant_closure_call)]
+        let _ = temp_env::async_with_vars(
+            [
+                ("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("ready")),
+                ("DYN_LOGGING_JSONL", Some("1")),
+                ("DYN_LOG", Some("trace")),
+            ],
+            (async || {
+                // TODO Add proper testing for
+                // trace id and parent id
+
+                // let file_name = "./test_capture_log.txt";
+                // let guard = StderrOverride::from_file(file_name)?;
+                crate::logging::init();
+
+                let runtime = crate::Runtime::from_settings().unwrap();
+                let drt = Arc::new(
+                    crate::DistributedRuntime::from_settings_without_discovery(runtime)
+                        .await
+                        .unwrap(),
+                );
+                let cancel_token = CancellationToken::new();
+                let (addr, _) = spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt)
+                    .await
+                    .unwrap();
+                sleep(std::time::Duration::from_millis(1000)).await;
+                let client = reqwest::Client::new();
+                for (path, expect_status, expect_body) in [
+                    ("/health", 200, "ready"),
+                    ("/live", 200, "ready"),
+                    ("/someRandomPathNotFoundHere", 404, "Route not found"),
+                ] {
+                    let url = format!("http://{}{}", addr, path);
+                    let response = client.get(&url).send().await.unwrap();
+                    let status = response.status();
+                    let body = response.text().await.unwrap();
+                    tracing::info!(body = body, status = status.to_string());
+                }
+
+                //		drop(guard);
+
+                //		let lines = load_log(file_name)?;
+
+                Ok::<(), anyhow::Error>(())
+            })(),
+        )
+        .await;
+        Ok(())
     }
 
     #[cfg(feature = "integration")]
