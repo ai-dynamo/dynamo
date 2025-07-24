@@ -1106,7 +1106,7 @@ func Test_mergeEnvs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := mergeEnvs(tt.args.common, tt.args.specific)
+			got := MergeEnvs(tt.args.common, tt.args.specific)
 			sort.Slice(got, func(i, j int) bool {
 				return got[i].Name < got[j].Name
 			})

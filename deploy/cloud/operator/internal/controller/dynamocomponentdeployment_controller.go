@@ -1214,45 +1214,13 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	containerPort := commonconsts.DynamoServicePort
 
-	var envs []corev1.EnvVar
-	envsSeen := make(map[string]struct{})
-
 	resourceAnnotations := opt.dynamoComponentDeployment.Spec.Annotations
-	specEnvs := opt.dynamoComponentDeployment.Spec.Envs
 
 	if resourceAnnotations == nil {
 		resourceAnnotations = make(map[string]string)
 	}
 
 	isDebugModeEnabled := checkIfIsDebugModeEnabled(resourceAnnotations)
-
-	if specEnvs != nil {
-		envs = make([]corev1.EnvVar, 0, len(specEnvs)+1)
-
-		for _, env := range specEnvs {
-			if _, ok := envsSeen[env.Name]; ok {
-				continue
-			}
-			if env.Name == commonconsts.EnvDynamoServicePort {
-				// nolint: gosec
-				containerPort, err = strconv.Atoi(env.Value)
-				if err != nil {
-					return nil, errors.Wrapf(err, "invalid port value %s", env.Value)
-				}
-			}
-			envsSeen[env.Name] = struct{}{}
-			envVar := corev1.EnvVar{
-				Name: env.Name,
-			}
-			if env.Value != "" {
-				envVar.Value = env.Value
-			}
-			if env.ValueFrom != nil {
-				envVar.ValueFrom = env.ValueFrom
-			}
-			envs = append(envs, envVar)
-		}
-	}
 
 	defaultEnvs := []corev1.EnvVar{
 		{
@@ -1275,11 +1243,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		})
 	}
 
-	for _, env := range defaultEnvs {
-		if _, ok := envsSeen[env.Name]; !ok {
-			envs = append(envs, env)
-		}
-	}
+	envs := dynamo.MergeEnvs(opt.dynamoComponentDeployment.Spec.Envs, defaultEnvs)
 
 	var livenessProbe *corev1.Probe
 	if opt.dynamoComponentDeployment.Spec.LivenessProbe != nil {
@@ -1470,6 +1434,8 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 				err = errors.Wrapf(err, "failed to merge extraPodSpecMainContainer into container")
 				return nil, err
 			}
+			// finally merge the envs from extraPodSpecMainContainer into container
+			container.Env = dynamo.MergeEnvs(container.Env, extraPodSpecMainContainer.Env)
 		}
 	}
 
