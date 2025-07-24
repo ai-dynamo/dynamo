@@ -29,8 +29,10 @@ pub const DEFAULT_NAMESPACE: &str = "mynamespace";
 pub const DEFAULT_COMPONENT: &str = "mycomponent";
 pub const DEFAULT_ENDPOINT: &str = "myendpoint";
 
+/// Stats structure returned by the endpoint's stats handler
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct MyStats {
+    // Example value for demonstration purposes
     pub val: i32,
 }
 
@@ -117,6 +119,7 @@ pub async fn backend(drt: DistributedRuntime, endpoint_name: Option<&str>) -> Re
         .endpoint_builder()
         .stats_handler(|_stats| {
             println!("Stats handler called with stats: {:?}", _stats);
+            // TODO(keivenc): return a real stats object
             let stats = MyStats { val: 10 };
             serde_json::to_value(stats).unwrap()
         })

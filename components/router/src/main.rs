@@ -75,11 +75,7 @@ async fn app(runtime: Runtime) -> Result<()> {
     let router = KvRouter::new(component.clone(), args.block_size, Some(selector), true).await?;
     let router = Ingress::for_engine_with_metrics(Arc::new(router), &endpoint)?;
 
-    endpoint
-        .endpoint_builder()
-        .handler(router)
-        .start()
-        .await
+    endpoint.endpoint_builder().handler(router).start().await
 }
 
 #[derive(Default)]

@@ -378,7 +378,10 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
 
     pub fn with_metrics(metrics: IngressMetrics) -> Arc<Self> {
         let ingress = Self::new();
-        ingress.metrics.set(Arc::new(metrics)).unwrap();
+        ingress
+            .metrics
+            .set(Arc::new(metrics))
+            .expect("Failed to set metrics: Metrics were already set.");
         ingress
     }
 

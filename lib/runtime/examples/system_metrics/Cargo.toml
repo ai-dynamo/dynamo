@@ -37,7 +37,6 @@ tokio = { version = "1", features = ["full"] }
 prometheus = { version = "0.14" }
 
 [dev-dependencies]
-reqwest = { version = "0.11", features = ["json"] }
-tokio-test = "0.4"
-rand = "0.8"
-
+rand = { version = "0.9.0" }
+reqwest = { version = "0.12.22", default-features = false, features = ["json", "stream", "rustls-tls"] }
+tokio-test = "0.4.4"
