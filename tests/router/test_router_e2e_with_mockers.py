@@ -17,7 +17,7 @@ pytestmark = pytest.mark.pre_merge
 logger = logging.getLogger(__name__)
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-NUM_MOCKERS = 2
+NUM_MOCKERS = 8
 SPEEDUP_RATIO = 10.0
 NUM_REQUESTS = 100
 PORT = 8080  # Starting port for mocker instances

@@ -51,7 +51,7 @@ use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
-use tokio::time::{interval, Duration};
+use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -79,6 +79,10 @@ impl SchedulerState {
             max_num_batched_tokens,
             ..Default::default()
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.requests.is_empty()
     }
 
     /// Create a new UUID for a DirectRequest, add it to requests, and push the UUID to waiting.
@@ -298,6 +302,22 @@ impl Scheduler {
             let mut should_schedule = true;
 
             loop {
+                {
+                    let state_guard = state_clone.lock().await;
+
+                    // Enqueue new request, blocks until at least one is received, so no redundant work is done
+                    // TODO: clean this up? double lock acquisition is ugly, but needed to not hold the lock forever
+                    if state_guard.is_empty() {
+                        drop(state_guard);
+                        let Some(request) = request_rx.recv().await else {
+                            tracing::warn!("request sender is dropped");
+                            break;
+                        };
+                        let mut state_guard = state_clone.lock().await;
+                        state_guard.receive(request);
+                    }
+                }
+
                 tokio::select! {
                     biased;
 
@@ -647,6 +667,7 @@ mod tests {
     use super::*;
     use rstest::rstest;
     use std::time::Duration;
+    use tokio::time::interval;
 
     #[rstest]
     #[case::case_1(false, false, false)]
