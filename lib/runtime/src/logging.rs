@@ -165,8 +165,16 @@ where
             if let Ok(header_str) = header_value.to_str() {
                 let pieces: Vec<_> = header_str.split('-').collect();
                 if pieces.len() == 4 {
-                    trace_id = Some(pieces[1].to_string());
-                    parent_id = Some(pieces[2].to_string());
+
+		    let candidate_trace_id = pieces[1];
+		    let candidate_parent_id = pieces[2];
+
+		    if is_valid_trace_id(candidate_trace_id) && is_valid_span_id(candidate_parent_id) {
+			trace_id = Some(pieces[1].to_string());
+			parent_id = Some(pieces[2].to_string());
+		    } else {
+			tracing::debug!("Invalid traceparent header: {}",header_str);
+		    }
                 }
             }
         }
