@@ -281,13 +281,15 @@ where
             }
 
             if (parent_id.is_some() || span_id.is_some() ) && trace_id.is_none() {
-                tracing::error!("parent id or span id are set but trace id is not set!")
+                tracing::error!("parent id or span id are set but trace id is not set!");
+                // Clear inconsistent IDs to maintain trace integrity
+                parent_id = None;
+                span_id = None;
             }
 
             if trace_id.is_none() {
                 trace_id = Some(generate_trace_id());
             }
-
             if span_id.is_none() {
                 span_id = Some(generate_span_id());
             }
