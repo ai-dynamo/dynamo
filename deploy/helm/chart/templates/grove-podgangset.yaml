@@ -30,6 +30,10 @@ spec:
         roleName: {{ $serviceName | lower }}
         replicas: {{ $serviceSpec.replicas }}
         podSpec:
+          {{- if $.Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{ $.Values.imagePullSecrets | toYaml | nindent 12 }}
+          {{- end }}
           containers:
           - name: main
             image: {{ $serviceSpec.extraPodSpec.mainContainer.image }}
@@ -57,8 +61,14 @@ spec:
                 {{- end }}
             {{- end }}
             workingDir: {{ $serviceSpec.extraPodSpec.mainContainer.workingDir }}
+            {{- if $serviceSpec.extraPodSpec.mainContainer.command }}
+            command:
+            {{- $serviceSpec.extraPodSpec.mainContainer.command | toYaml | nindent 14 }}
+            {{- end }}
+            {{- if $serviceSpec.extraPodSpec.mainContainer.args }}
             args:
             {{- $serviceSpec.extraPodSpec.mainContainer.args | toYaml | nindent 14 }}
+            {{- end }}
             env:
             - name: DYNAMO_PORT
               value: "{{ $.Values.dynamoPort | default 8000 }}"
@@ -79,8 +89,8 @@ spec:
             - name: health
               containerPort: {{ $.Values.healthPort | default 5000 }}
             livenessProbe:
-              {{- if $serviceSpec.extraPodSpec.mainContainer.livenessProbe }}
-              {{ $serviceSpec.extraPodSpec.mainContainer.livenessProbe | toYaml | nindent 10 }}
+              {{- if $serviceSpec.livenessProbe }}
+              {{ $serviceSpec.livenessProbe | toYaml | nindent 14 }}
               {{- else }}
               initialDelaySeconds: 60
               periodSeconds: 60
@@ -93,8 +103,8 @@ spec:
                 scheme: HTTP
               {{- end }}
             readinessProbe:
-              {{- if $serviceSpec.extraPodSpec.mainContainer.readinessProbe }}
-              {{ $serviceSpec.extraPodSpec.mainContainer.readinessProbe | toYaml | nindent 10 }}
+              {{- if $serviceSpec.readinessProbe }}
+              {{ $serviceSpec.readinessProbe | toYaml | nindent 14 }}
               {{- else }}
               initialDelaySeconds: 60
               periodSeconds: 60
