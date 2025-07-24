@@ -128,6 +128,7 @@ The examples below assume you build the latest image yourself from source. If us
    :caption: API
 
    Python API <API/python_bindings.md>
+   NIXL Connect API <API/nixl_connect/README.md>
 
 .. toctree::
    :hidden:
