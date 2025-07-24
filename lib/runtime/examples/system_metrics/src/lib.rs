@@ -47,8 +47,8 @@ impl MySystemStatsMetrics {
         endpoint: &dynamo_runtime::component::Endpoint,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let data_bytes_processed = endpoint.create_intcounter(
-            "system_data_bytes_processed_total",
-            "Total number of data bytes processed by system handler",
+            "my_custom_bytes_processed_total",
+            "Example of a custom metric. Total number of data bytes processed by system handler",
             &[],
         )?;
 
@@ -64,6 +64,12 @@ pub struct RequestHandler {
 }
 
 impl RequestHandler {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            metrics: None,
+        })
+    }
+
     pub fn with_metrics(metrics: MySystemStatsMetrics) -> Arc<Self> {
         Arc::new(Self {
             metrics: Some(Arc::new(metrics)),
@@ -109,11 +115,8 @@ pub async fn backend(drt: DistributedRuntime, endpoint_name: Option<&str>) -> Re
     let system_metrics =
         MySystemStatsMetrics::from_endpoint(&endpoint).expect("Failed to create system metrics");
 
-    // Create handler with custom metrics
-    let handler = RequestHandler::with_metrics(system_metrics);
-
-    // Use the simplified API - endpoint is passed directly for automatic metrics creation
-    let ingress = Ingress::for_engine_with_metrics(handler, &endpoint)?;
+    // Use the factory pattern - single line factory call with metrics
+    let ingress = Ingress::for_engine(RequestHandler::with_metrics(system_metrics))?;
 
     endpoint
         .endpoint_builder()

@@ -443,6 +443,9 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
 #[async_trait]
 pub trait PushWorkHandler: Send + Sync {
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError>;
+
+    /// Add metrics to the handler
+    fn add_metrics(&self, endpoint: &crate::component::Endpoint) -> Result<()>;
 }
 
 /*

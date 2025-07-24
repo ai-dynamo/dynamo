@@ -22,6 +22,12 @@ where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
     U: Data + Serialize + std::fmt::Debug,
 {
+    fn add_metrics(&self, endpoint: &crate::component::Endpoint) -> Result<()> {
+        // Call the Ingress-specific add_metrics implementation
+        use crate::pipeline::network::Ingress;
+        Ingress::add_metrics(self, endpoint)
+    }
+
     async fn handle_payload(&self, payload: Bytes) -> Result<(), PipelineError> {
         let start_time = std::time::Instant::now();
 
