@@ -58,7 +58,7 @@ dynamo run in=http out=dyn &
 
 
 # run processor
-python3 components/processor.py --model $MODEL_NAME --prompt-template $PROMPT_TEMPLATE &
+python3 components/processor.py --model $MODEL_NAME --prompt-template "$PROMPT_TEMPLATE" &
 
 # run E/P/D workers
 CUDA_VISIBLE_DEVICES=0 python3 components/encode_worker.py --model $MODEL_NAME &
