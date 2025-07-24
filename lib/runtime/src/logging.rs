@@ -116,13 +116,13 @@ fn generate_span_id() -> String {
 }
 
 /// Validate a given trace ID according to W3C Trace Context specifications.
-/// A valid trace ID is a 16-character hexadecimal string (lowercase).
+/// A valid trace ID is a 32-character hexadecimal string (lowercase).
 pub fn is_valid_trace_id(trace_id: &str) -> bool {
     trace_id.len() == 32 && trace_id.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 /// Validate a given span ID according to W3C Trace Context specifications.
-/// A valid span ID is an 8-character hexadecimal string (lowercase).
+/// A valid span ID is a 16-character hexadecimal string (lowercase).
 pub fn is_valid_span_id(span_id: &str) -> bool {
     span_id.len() == 16 && span_id.chars().all(|c| c.is_ascii_hexdigit())
 }
@@ -289,13 +289,15 @@ where
             }
 
             if (parent_id.is_some() || span_id.is_some() ) && trace_id.is_none() {
-                tracing::error!("parent id or span id are set but trace id is not set!")
+                tracing::error!("parent id or span id are set but trace id is not set!");
+                // Clear inconsistent IDs to maintain trace integrity
+                parent_id = None;
+                span_id = None;
             }
 
             if trace_id.is_none() {
                 trace_id = Some(generate_trace_id());
             }
-
             if span_id.is_none() {
                 span_id = Some(generate_span_id());
             }
