@@ -46,6 +46,7 @@ class MockerProcess(ManagedProcess):
             health_check_ports=[],
             health_check_urls=[],
             log_dir=request.node.name,
+            terminate_existing=False,
         )
         self.endpoint = endpoint
 
@@ -73,6 +74,7 @@ class KVRouterProcess(ManagedProcess):
                 (f"http://localhost:{frontend_port}/v1/models", self._check_ready)
             ],
             log_dir=request.node.name,
+            terminate_existing=False,
         )
         self.port = frontend_port
 
