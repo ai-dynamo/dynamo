@@ -46,10 +46,10 @@ The examples below assume you build the latest image yourself from source. If us
     :padding: 3 4 0 0
 
     .. grid-item-card:: :doc:`Hello World </examples/hello_world>`
-        :link: /examples/hello_world
+        :link: /examples/hello_world/README
         :link-type: doc
 
-        Demonstrates the basic concepts of Dynamo by creating a simple multi-service pipeline.
+        Demonstrates the basic concepts of Dynamo by creating a simple GPU-unaware graph.
 
     .. grid-item-card:: :doc:`LLM Deployment </examples/llm_deployment>`
         :link: /examples/llm_deployment
