@@ -26,13 +26,12 @@ use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
-use crate::protocols::LeaseId;
 
 #[derive(Builder)]
 pub struct PushEndpoint {
     pub service_handler: Arc<dyn PushWorkHandler>,
     pub cancellation_token: CancellationToken,
-    pub instance_id: LeaseId
+    pub instance_id: LeaseId,
 }
 
 /// version of crate

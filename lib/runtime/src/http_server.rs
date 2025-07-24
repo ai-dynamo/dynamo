@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use crate::config::HealthStatus;
+use crate::logging::TraceParent;
 use crate::metrics::MetricsRegistry;
 use crate::traits::DistributedRuntimeProvider;
 use axum::{body, http::StatusCode, response::IntoResponse, routing::get, Router};
@@ -25,6 +26,7 @@ use std::time::Instant;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 use tracing;
+use tracing::Instrument;
 
 pub struct HttpMetricsRegistry {
     pub drt: Arc<crate::DistributedRuntime>,
@@ -121,26 +123,30 @@ pub async fn spawn_http_server(
             "/health",
             get({
                 let state = Arc::clone(&server_state);
-                move || health_handler(state.clone())
+                move |tracing_ctx| health_handler(state, "health", tracing_ctx)
             }),
         )
         .route(
             "/live",
             get({
                 let state = Arc::clone(&server_state);
-                move || health_handler(state)
+                move |tracing_ctx| health_handler(state, "live", tracing_ctx)
             }),
         )
         .route(
             "/metrics",
             get({
                 let state = Arc::clone(&server_state);
-                move || metrics_handler(state)
+                move |tracing_ctx| metrics_handler(state, "metrics",tracing_ctx)
             }),
         )
-        .fallback(|| async {
-            tracing::info!("[fallback handler] called");
-            (StatusCode::NOT_FOUND, "Route not found").into_response()
+        .fallback(|tracing_ctx:TraceParent| {
+            async {
+                tracing::info!("[fallback handler] called");
+                (StatusCode::NOT_FOUND, "Route not found").into_response()
+            }
+            .instrument(tracing::trace_span!("fallback handler",trace_id=tracing_ctx.trace_id,
+	    parent_id=tracing_ctx.parent_id,x_request_id=tracing_ctx.x_request_id))
         });
 
     let address = format!("{}:{}", host, port);
@@ -177,8 +183,12 @@ pub async fn spawn_http_server(
 }
 
 /// Health handler
-#[tracing::instrument(skip_all, level = "trace")]
-async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
+#[tracing::instrument(skip_all, level="trace", fields(route= %route, trace_id = ?trace_parent.trace_id, parent_id = ?trace_parent.parent_id, x_request_id=?trace_parent.x_request_id))]
+async fn health_handler(
+    state: Arc<HttpServerState>,
+    route: &'static str,
+    trace_parent: TraceParent,
+) -> impl IntoResponse {
     let system_health = state.drt().system_health.lock().await;
     let (mut healthy, endpoints) = system_health.get_health_status();
     let uptime = match state.uptime() {
@@ -209,7 +219,8 @@ async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
 }
 
 /// Metrics handler with DistributedRuntime uptime
-async fn metrics_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
+#[tracing::instrument(skip_all, level="trace", fields(route= %route, trace_id = ?trace_parent.trace_id, parent_id = ?trace_parent.parent_id, x_request_id=?trace_parent.x_request_id))]
+async fn metrics_handler(state: Arc<HttpServerState>, route: &'static str, trace_parent:TraceParent) -> impl IntoResponse {
     // Update the uptime gauge with current value
     state.update_uptime_gauge();
 
@@ -319,7 +330,6 @@ uptime_seconds{namespace=\"http_server\"} 42
     }
 
     #[rstest]
-    #[cfg(feature = "integration")]
     #[case("ready", 200, "ready")]
     #[case("notready", 503, "notready")]
     #[tokio::test]
@@ -335,6 +345,8 @@ uptime_seconds{namespace=\"http_server\"} 42
         // use reqwest for HTTP requests
 
         // Closure call is needed here to satisfy async_with_vars
+
+        crate::logging::init();
 
         #[allow(clippy::redundant_closure_call)]
         temp_env::async_with_vars(

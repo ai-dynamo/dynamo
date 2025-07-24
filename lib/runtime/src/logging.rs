@@ -26,16 +26,30 @@
 //! "test_logging::api" = "trace"
 //! ```
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::Once;
-
+use crate::config::{disable_ansi_logging, jsonl_logging_enabled};
+use crate::error;
+use async_trait::async_trait;
+use axum::extract::FromRequestParts;
+use axum::http::request::Parts;
 use figment::{
     providers::{Format, Serialized, Toml},
     Figment,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Once;
+use std::time::Instant;
+use tracing::field::Field;
 use tracing::level_filters::LevelFilter;
+use tracing::metadata::Kind;
+use tracing::span;
+use tracing::span::Record;
+use tracing::Id;
+use tracing::Span;
 use tracing::{Event, Subscriber};
+use tracing_subscriber::field::Visit;
+use tracing_subscriber::fmt::format::FmtSpan;
 use tracing_subscriber::fmt::time::FormatTime;
 use tracing_subscriber::fmt::time::LocalTime;
 use tracing_subscriber::fmt::time::SystemTime;
@@ -44,23 +58,12 @@ use tracing_subscriber::fmt::{format::Writer, FormattedFields};
 use tracing_subscriber::fmt::{FmtContext, FormatFields};
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::{filter::Directive, fmt};
-use tracing::Span;
-use tracing_subscriber::layer::Context;
-use tracing::Id;
-use tracing::span;
-use tracing_subscriber::Layer;
-use tracing_subscriber::fmt::format::FmtSpan;
-use uuid::Uuid;
-use tracing::field::Field;
-use tracing::span::Record;
-use tracing_subscriber::field::Visit;
-use tracing_subscriber::Registry;
 use tracing_subscriber::registry::SpanData;
-use crate::error;
-use crate::config::{disable_ansi_logging, jsonl_logging_enabled};
-
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::Registry;
+use tracing_subscriber::{filter::Directive, fmt};
+use tracing_subscriber::{layer::Context, Layer};
+use uuid::Uuid;
 /// ENV used to set the log level
 const FILTER_ENV: &str = "DYN_LOG";
 
@@ -127,12 +130,60 @@ pub fn is_valid_span_id(span_id: &str) -> bool {
 pub struct DistributedTraceIdLayer;
 
 #[derive(Clone)]
-pub struct DistributedTracingContext {
+pub struct DistributedTraceContext {
     trace_id: String,
     span_id: String,
-    parent_id: Option<String>
+    parent_id: Option<String>,
+    start: Instant,
+    end: Option<Instant>,
 }
 
+use axum::body::Body;
+use axum::extract::FromRequest;
+use axum::http::{HeaderMap, Request};
+use std::convert::Infallible;
+
+#[derive(Debug, Clone)]
+pub struct TraceParent {
+    pub trace_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub x_request_id: Option<String>,
+}
+
+impl<S> FromRequestParts<S> for TraceParent
+where
+    S: Send + Sync,
+{
+    type Rejection = Infallible;
+
+    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+        let mut trace_id = None;
+        let mut parent_id = None;
+
+        if let Some(header_value) = parts.headers.get("traceparent") {
+            if let Ok(header_str) = header_value.to_str() {
+                let pieces: Vec<_> = header_str.split('-').collect();
+                if pieces.len() == 4 {
+                    trace_id = Some(pieces[1].to_string());
+                    parent_id = Some(pieces[2].to_string());
+                }
+            }
+        }
+
+	// Extract X-Request-ID or x-request-id (case-insensitive)
+        let x_request_id = parts
+            .headers
+            .get("x-request-id")
+            .and_then(|val| val.to_str().ok())
+            .map(|s| s.to_string());
+
+        Ok(TraceParent {
+            trace_id,
+            parent_id,
+            x_request_id,
+        })
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct FieldVisitor {
@@ -141,11 +192,13 @@ pub struct FieldVisitor {
 
 impl Visit for FieldVisitor {
     fn record_str(&mut self, field: &Field, value: &str) {
-	self.fields.insert(field.name().to_string(),value.to_string());
+        self.fields
+            .insert(field.name().to_string(), value.to_string());
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-	self.fields.insert(field.name().to_string(),format!("{:?}", value).to_string());
+        self.fields
+            .insert(field.name().to_string(), format!("{:?}", value).to_string());
     }
 }
 
@@ -153,105 +206,125 @@ impl<S> Layer<S> for DistributedTraceIdLayer
 where
     S: Subscriber + for<'a> tracing_subscriber::registry::LookupSpan<'a>,
 {
+    // Capture close span time
+    // Currently not used but added for future use in timing
+    fn on_close(&self, id: Id, ctx: Context<'_, S>) {
+        if let Some(span) = ctx.span(&id) {
+            let mut extensions = span.extensions_mut();
+            if let Some(distributed_tracing_context) =
+                extensions.get_mut::<DistributedTraceContext>()
+            {
+                distributed_tracing_context.end = Some(Instant::now());
+            }
+        }
+    }
+
+    // Adds W3C compliant span_id, trace_id, and parent_id if not already present
     fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &Id, ctx: Context<'_, S>) {
-
         if let Some(span) = ctx.span(id) {
+            let mut trace_id: Option<String> = None;
+            let mut parent_id: Option<String> = None;
+            let mut span_id: Option<String> = None;
+            let target_fields = ["trace_id", "span_id", "parent_id"];
+            let mut visitor = FieldVisitor::default();
+            attrs.record(&mut visitor);
 
-	    let mut trace_id:Option<String> = None;
-	    let mut parent_id:Option<String> = None;
-	    let mut span_id:Option<String> = None;
-	    let target_fields = ["trace_id", "span_id", "parent_id"];
-	    let mut visitor = FieldVisitor::default();
-	    attrs.record(&mut visitor);
+            for field in attrs.fields().iter() {
+                if target_fields.contains(&field.name()) {
+                    if !visitor.fields.contains_key(field.name()) {
+                        tracing::error!(
+                            "Field {} has no value any attempts to update will be ignored",
+                            field.name()
+                        );
+                    }
+                }
+            }
 
-	    for field in attrs.fields().iter() {
-		if target_fields.contains(&field.name()) {
-		if !visitor.fields.contains_key(field.name()) {
-		    tracing::error!("Field {} has no value any attempts to update will be ignored", field.name());
+            if let Some(trace_id_input) = visitor.fields.get("trace_id") {
+                if !is_valid_trace_id(trace_id_input) {
+                    tracing::error!("trace id  '{}' is not valid! Ignoring.", trace_id_input);
+                } else {
+                    trace_id = Some(trace_id_input.to_string());
+                }
+            }
 
-		}
-		}
-	    }
+            if let Some(span_id_input) = visitor.fields.get("span_id") {
+                if !is_valid_span_id(span_id_input) {
+                    tracing::error!("span id  '{}' is not valid! Ignoring.", span_id_input);
+                } else {
+                    span_id = Some(span_id_input.to_string());
+                }
+            }
 
-	    if let Some(trace_id_input) = visitor.fields.get("trace_id") {
-		if !is_valid_trace_id(trace_id_input) {
-		    tracing::error!("trace id  '{}' is not valid! Ignoring.", trace_id_input);
-		} else {
-		    trace_id = Some(trace_id_input.to_string());
-		}
-	    }
+            if let Some(parent_id_input) = visitor.fields.get("parent_id") {
+                if !is_valid_span_id(parent_id_input) {
+                    tracing::error!("parent id  '{}' is not valid! Ignoring.", parent_id_input);
+                } else {
+                    parent_id = Some(parent_id_input.to_string());
+                }
+            }
 
-	    if let Some(span_id_input) = visitor.fields.get("span_id") {
-		if !is_valid_span_id(span_id_input) {
-		    tracing::error!("span id  '{}' is not valid! Ignoring.", span_id_input);
-		} else {
-		    span_id = Some(span_id_input.to_string());
-		}
-	    }
+            if parent_id == None {
+                if let Some(parent_span_id) = ctx.current_span().id() {
+                    if let Some(parent_span) = ctx.span(parent_span_id) {
+                        let parent_ext = parent_span.extensions();
+                        if let Some(parent_tracing_context) =
+                            parent_ext.get::<DistributedTraceContext>()
+                        {
+                            trace_id = Some(parent_tracing_context.trace_id.clone());
+                            parent_id = Some(parent_tracing_context.span_id.clone());
+                        }
+                    }
+                }
+            }
 
-	    if let Some(parent_id_input) = visitor.fields.get("parent_id") {
-		if !is_valid_span_id(parent_id_input) {
-		    tracing::error!("parent id  '{}' is not valid! Ignoring.", parent_id_input);
-		} else {
-		    parent_id = Some(parent_id_input.to_string());
-		}
-	    }
+            if (parent_id != None || span_id != None) && trace_id == None {
+                tracing::error!("parent id or span id are set but trace id is not set!")
+            }
 
-	    if parent_id == None {
-		if let Some(parent_span_id) = ctx.current_span().id() {
-		    if let Some(parent_span) = ctx.span(parent_span_id) {
-			// Access parent span data (e.g., name)
-			let parent_ext = parent_span.extensions();
-			if let Some(parent_tracing_context) = parent_ext.get::<DistributedTracingContext>() {
-			    trace_id = Some(parent_tracing_context.trace_id.clone());
-			    parent_id = Some(parent_tracing_context.span_id.clone());
-			}
+            if trace_id == None {
+                trace_id = Some(generate_trace_id());
+            }
 
-		    }
-		}
-	    }
+            if span_id == None {
+                span_id = Some(generate_span_id());
+            }
 
-	    if (parent_id != None || span_id != None) && trace_id == None {
-		tracing::error!("parent id or span id are set but trace id is not set!")
-	    }
-
-	    if trace_id == None {
-		trace_id = Some(generate_trace_id());
-	    }
-
-	    if span_id == None {
-		span_id = Some(generate_span_id());
-	    }
-
-	    let mut extensions = span.extensions_mut();
-	    extensions.insert(DistributedTracingContext {trace_id:trace_id.expect("Trace ID must be set"),
-							 span_id:span_id.expect("Span ID must be set"),
-							 parent_id:parent_id});
+            let mut extensions = span.extensions_mut();
+            extensions.insert(DistributedTraceContext {
+                trace_id: trace_id.expect("Trace ID must be set"),
+                span_id: span_id.expect("Span ID must be set"),
+                parent_id,
+                start: Instant::now(),
+                end: None,
+            });
         }
     }
 }
 
-pub fn get_distributed_tracing_context() -> Option<DistributedTracingContext> {
-    Span::current().with_subscriber(|(id, subscriber)| {
-        subscriber
-            .downcast_ref::<Registry>()
-            .and_then(|registry| registry.span_data(&id))
-            .and_then(|span_data| {
-                let extensions = span_data.extensions();
-                extensions.get::<DistributedTracingContext>().cloned()
-            })
-    }).flatten()
+// Enables functions to retreive their current
+// context for adding to distributed headers
+pub fn get_distributed_tracing_context() -> Option<DistributedTraceContext> {
+    Span::current()
+        .with_subscriber(|(id, subscriber)| {
+            subscriber
+                .downcast_ref::<Registry>()
+                .and_then(|registry| registry.span_data(&id))
+                .and_then(|span_data| {
+                    let extensions = span_data.extensions();
+                    extensions.get::<DistributedTraceContext>().cloned()
+                })
+        })
+        .flatten()
 }
 
 /// Initialize the logger
-
 pub fn init() {
     INIT.call_once(setup_logging);
 }
 
 #[cfg(feature = "tokio-console")]
 fn setup_logging() {
-    // Start tokio-console server. Returns a tracing-subscriber Layer.
     let tokio_console_layer = console_subscriber::ConsoleLayer::builder()
         .with_default_env()
         .server_addr(([0, 0, 0, 0], console_subscriber::Server::DEFAULT_PORT))
@@ -274,21 +347,18 @@ fn setup_logging() {
 #[cfg(not(feature = "tokio-console"))]
 fn setup_logging() {
     let filter_layer = filters(load_config());
-    // The generics mean we have to repeat everything. Each builder method returns a
-    // specialized type.
     if jsonl_logging_enabled() {
-        // JSON logger for NIM
-
         let l = fmt::layer()
             .with_ansi(false)
-	    .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
+            .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
             .event_format(CustomJsonFormatter::new())
             .with_writer(std::io::stderr)
             .with_filter(filter_layer);
-        tracing_subscriber::registry().with(DistributedTraceIdLayer).with(l).init();
+        tracing_subscriber::registry()
+            .with(DistributedTraceIdLayer)
+            .with(l)
+            .init();
     } else {
-        // Normal logging
-
         let l = fmt::layer()
             .with_ansi(!disable_ansi_logging())
             .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
@@ -304,7 +374,6 @@ fn filters(config: LoggingConfig) -> EnvFilter {
         .with_env_var(FILTER_ENV)
         .from_env_lossy();
 
-    // apply the log_filters from the config files
     for (module, level) in config.log_filters {
         match format!("{module}={level}").parse::<Directive>() {
             Ok(d) => {
@@ -319,7 +388,7 @@ fn filters(config: LoggingConfig) -> EnvFilter {
 }
 
 /// Log a message with file and line info
-/// Used by Python wrapper
+/// For use with python modules
 pub fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) {
     let level = match level {
         "debug" => log::Level::Debug,
@@ -340,7 +409,6 @@ pub fn log_message(level: &str, message: &str, module: &str, file: &str, line: u
     );
 }
 
-// TODO: This should be merged into the global config (rust/common/src/config.rs) once we have it
 fn load_config() -> LoggingConfig {
     let config_path = std::env::var(CONFIG_PATH_ENV).unwrap_or_else(|_| "".to_string());
     let figment = Figment::new()
@@ -356,9 +424,10 @@ struct JsonLog<'a> {
     time: String,
     level: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    file_path: Option<&'a str>,
+    file: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    line_number: Option<u32>,
+    line: Option<u32>,
+    target: &'a str,
     message: serde_json::Value,
     #[serde(flatten)]
     fields: BTreeMap<String, serde_json::Value>,
@@ -378,11 +447,11 @@ impl TimeFormatter {
     fn format_now(&self) -> String {
         if self.use_local_tz {
             chrono::Local::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3f%:z")
+                .format("%Y-%m-%dT%H:%M:%S%.6f%:z")
                 .to_string()
         } else {
             chrono::Utc::now()
-                .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+                .format("%Y-%m-%dT%H:%M:%S%.6fZ")
                 .to_string()
         }
     }
@@ -406,23 +475,20 @@ impl CustomJsonFormatter {
     }
 }
 
-use regex::Regex;
 use once_cell::sync::Lazy;
+use regex::Regex;
 fn parse_tracing_duration(s: &str) -> Option<u64> {
-    static RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(
-            r#"^["']?\s*([0-9.]+)\s*(µs|us|ns|ms|s)\s*["']?$"#
-        ).unwrap()
-    });
+    static RE: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r#"^["']?\s*([0-9.]+)\s*(µs|us|ns|ms|s)\s*["']?$"#).unwrap());
     let captures = RE.captures(s)?;
     let value: f64 = captures[1].parse().ok()?;
     let unit = &captures[2];
     match unit {
-        "ns"         => Some((value / 1000.0) as u64),
-        "µs" | "us"  => Some(value as u64),
-        "ms"         => Some((value * 1000.0) as u64),
-        "s"          => Some((value * 1_000_000.0) as u64),
-        _            => None,
+        "ns" => Some((value / 1000.0) as u64),
+        "µs" | "us" => Some(value as u64),
+        "ms" => Some((value * 1000.0) as u64),
+        "s" => Some((value * 1_000_000.0) as u64),
+        _ => None,
     }
 }
 
@@ -438,8 +504,9 @@ where
         event: &Event<'_>,
     ) -> std::fmt::Result {
         let mut visitor = JsonVisitor::default();
+        let time = self.time_formatter.format_now();
         event.record(&mut visitor);
-        let message = visitor
+        let mut message = visitor
             .fields
             .remove("message")
             .unwrap_or(serde_json::Value::String("".to_string()));
@@ -457,69 +524,90 @@ where
                 .filter_map(|entry| entry.split_once('='))
                 .collect();
             for (name, value) in span_fields {
-		println!("name {}",name);
                 visitor.fields.insert(
                     name.to_string(),
                     serde_json::Value::String(value.trim_matches('"').to_string()),
                 );
             }
 
+            let busy_us = visitor
+                .fields
+                .remove("time.busy")
+                .and_then(|v| parse_tracing_duration(&v.to_string()));
+            let idle_us = visitor
+                .fields
+                .remove("time.idle")
+                .and_then(|v| parse_tracing_duration(&v.to_string()));
 
-	    // Calculate combined duration
-            let busy = visitor.fields.remove("time.busy").and_then(|v| {
-		let busy_us = parse_tracing_duration(&v.to_string());
-		println!("{:?} {:?}",v,busy_us);
-		v.as_i64().map(|v| v as u128)
-            });
-            let idle = visitor.fields.remove("time.idle").and_then(|v| {
-		println!("{:?}",v);
-		v.as_i64().map(|v| v as u128)
-            });
+            if let (Some(busy_us), Some(idle_us)) = (busy_us, idle_us) {
+                visitor.fields.insert(
+                    "time.busy_us".to_string(),
+                    serde_json::Value::Number(busy_us.into()),
+                );
+                visitor.fields.insert(
+                    "time.idle_us".to_string(),
+                    serde_json::Value::Number(idle_us.into()),
+                );
+                visitor.fields.insert(
+                    "time.duration_us".to_string(),
+                    serde_json::Value::Number((busy_us + idle_us).into()),
+                );
+            }
 
-	    println!("{:?}",busy);
-
-            visitor.fields.insert(
-                "span_name".to_string(),
-                serde_json::Value::String(span.name().to_string()),
-            );
-
-	    if let Some(tracing_context) = ext.get::<DistributedTracingContext>() {
-		visitor.fields.insert("span_id".to_string(),serde_json::Value::String(tracing_context.span_id.clone()));
-		visitor.fields.insert("trace_id".to_string(),serde_json::Value::String(tracing_context.trace_id.clone()));
-		if let Some(parent_id) = tracing_context.parent_id.clone() {
-		    visitor.fields.insert("parent_id".to_string(),serde_json::Value::String(parent_id));
-		}
-	    }
-	    else {
-		tracing::error!("Distributed Tracing Context not found, falling back to internal ids");
-		visitor.fields.insert("span_id".to_string(),serde_json::Value::String(span.id().into_u64().to_string()));
-		if let Some(parent) = span.parent() {
-		    visitor.fields.insert("parent_id".to_string(),serde_json::Value::String(parent.id().into_u64().to_string()));
-		}
-
-	    }
+            message = match message.as_str() {
+                Some("new") => serde_json::Value::String("SPAN_CREATED".to_string()),
+                Some("close") => serde_json::Value::String("SPAN_CLOSED".to_string()),
+                _ => message.clone(),
+            };
 
             visitor.fields.insert(
                 "span_name".to_string(),
                 serde_json::Value::String(span.name().to_string()),
             );
 
+            if let Some(tracing_context) = ext.get::<DistributedTraceContext>() {
+                visitor.fields.insert(
+                    "span_id".to_string(),
+                    serde_json::Value::String(tracing_context.span_id.clone()),
+                );
+                visitor.fields.insert(
+                    "trace_id".to_string(),
+                    serde_json::Value::String(tracing_context.trace_id.clone()),
+                );
+                if let Some(parent_id) = tracing_context.parent_id.clone() {
+                    visitor.fields.insert(
+                        "parent_id".to_string(),
+                        serde_json::Value::String(parent_id),
+                    );
+                }
+            } else {
+                tracing::error!(
+                    "Distributed Trace Context not found, falling back to internal ids"
+                );
+                visitor.fields.insert(
+                    "span_id".to_string(),
+                    serde_json::Value::String(span.id().into_u64().to_string()),
+                );
+                if let Some(parent) = span.parent() {
+                    visitor.fields.insert(
+                        "parent_id".to_string(),
+                        serde_json::Value::String(parent.id().into_u64().to_string()),
+                    );
+                }
+            }
+        } else {
+            let reserved_fields = ["trace_id", "span_id", "parent_id", "span_name"];
+            for reserved_field in reserved_fields {
+                visitor.fields.remove(reserved_field);
+            }
         }
-
         let metadata = event.metadata();
         let log = JsonLog {
             level: metadata.level().to_string(),
-            time: self.time_formatter.format_now(),
-            file_path: if cfg!(debug_assertions) {
-                metadata.file()
-            } else {
-                None
-            },
-            line_number: if cfg!(debug_assertions) {
-                metadata.line()
-            } else {
-                None
-            },
+            time: time,
+            file: metadata.file(),
+            line: metadata.line(),
+            target: metadata.target(),
             message,
             fields: visitor.fields,
         };
@@ -528,10 +616,8 @@ where
     }
 }
 
-// Visitor to collect fields
 #[derive(Default)]
 struct JsonVisitor {
-    // BTreeMap so that it's sorted, and always prints in the same order
     fields: BTreeMap<String, serde_json::Value>,
 }
 
@@ -544,12 +630,14 @@ impl tracing::field::Visit for JsonVisitor {
     }
 
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-	println!("value {}",field.name());
-
-        self.fields.insert(
-            field.name().to_string(),
-            serde_json::Value::String(value.to_string()),
-        );
+        if field.name() != "message" {
+            match serde_json::from_str::<Value>(value) {
+                Ok(json_val) => self.fields.insert(field.name().to_string(), json_val),
+                Err(_) => self.fields.insert(field.name().to_string(), value.into()),
+            };
+        } else {
+            self.fields.insert(field.name().to_string(), value.into());
+        }
     }
 
     fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
@@ -573,11 +661,8 @@ impl tracing::field::Visit for JsonVisitor {
 
     fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
         use serde_json::value::Number;
-	println!("value {}",field.name());
         self.fields.insert(
             field.name().to_string(),
-            // Infinite or NaN values are not JSON numbers, replace them with 0.
-            // It's unlikely that we would log an inf or nan value.
             serde_json::Value::Number(Number::from_f64(value).unwrap_or(0.into())),
         );
     }
@@ -586,55 +671,303 @@ impl tracing::field::Visit for JsonVisitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{anyhow, Result};
+    use chrono::{DateTime, Utc};
+    use jsonschema::{Draft, JSONSchema};
+    use serde_json::Value;
+    use std::fs::File;
+    use std::io::{BufRead, BufReader};
+    use stdio_override::*;
 
-    #[tracing::instrument(skip_all,fields(span_id="abd16e319329445f", trace_id="foo", request_id))]
-    async fn foo_3() {
+    static LOG_LINE_SCHEMA: &str = r#"
+    {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "Runtime Log Line",
+      "type": "object",
+      "required": [
+        "file",
+        "level",
+        "line",
+        "message",
+        "target",
+        "time"
+      ],
+      "properties": {
+        "file":      { "type": "string" },
+        "level":     { "type": "string", "enum": ["ERROR", "WARN", "INFO", "DEBUG", "TRACE"] },
+        "line":      { "type": "integer" },
+        "message":   { "type": "string" },
+        "target":    { "type": "string" },
+        "time":      { "type": "string", "format": "date-time" },
+        "span_id":   { "type": "string", "pattern": "^[a-f0-9]{16}$" },
+        "parent_id": { "type": "string", "pattern": "^[a-f0-9]{16}$" },
+        "trace_id":  { "type": "string", "pattern": "^[a-f0-9]{32}$" },
+        "span_name": { "type": "string" },
+        "time.busy_us":     { "type": "integer" },
+        "time.duration_us": { "type": "integer" },
+        "time.idle_us":     { "type": "integer" }
+      },
+      "additionalProperties": true
+    }
+    "#;
 
-	println!("recording");
-	tracing::Span::current().record("trace_id","goo");
-	tracing::Span::current().record("span_id","goo");
-	tracing::Span::current().record("span_name","olivia");
-
-
-	if let Some (my_ctx) = get_distributed_tracing_context() {
-	    println!("my context {}", my_ctx.trace_id);
-	}
-
-	tracing::trace!(
-	    message="received two parts",
-	    header=5,
-	    data="foo"
-        );
-
-	foo_2().await;
+    #[tracing::instrument(
+        skip_all,
+        fields(
+            span_id = "abd16e319329445f",
+            trace_id = "2adfd24468724599bb9a4990dc342288"
+        )
+    )]
+    async fn parent() {
+        tracing::Span::current().record("trace_id", "invalid");
+        tracing::Span::current().record("span_id", "invalid");
+        tracing::Span::current().record("span_name", "invalid");
+        tracing::trace!(message = "parent!");
+        if let Some(my_ctx) = get_distributed_tracing_context() {
+            tracing::info!(my_trace_id = my_ctx.trace_id);
+        }
+        child().await;
     }
 
     #[tracing::instrument(skip_all)]
-    async fn foo() {
-	tracing::trace!(
-	    message="received two parts",
-	    header=5,
-	    data="foo"
-        );
-
-	foo_2().await;
+    async fn child() {
+        tracing::trace!(message = "child");
+        if let Some(my_ctx) = get_distributed_tracing_context() {
+            tracing::info!(my_trace_id = my_ctx.trace_id);
+        }
+        grandchild().await;
     }
 
     #[tracing::instrument(skip_all)]
-    async fn foo_2() {
-	tracing::trace!(
-	    message="received two parts",
-	    header=5,
-	    data="foo"
-        );
+    async fn grandchild() {
+        tracing::trace!(message = "grandchild");
+        if let Some(my_ctx) = get_distributed_tracing_context() {
+            tracing::info!(my_trace_id = my_ctx.trace_id);
+        }
+    }
 
+    pub fn load_log(file_name: &str) -> Result<Vec<serde_json::Value>> {
+        let schema_json: Value =
+            serde_json::from_str(LOG_LINE_SCHEMA).expect("schema parse failure");
+        let compiled_schema = JSONSchema::options()
+            .with_draft(Draft::Draft7)
+            .compile(&schema_json)
+            .expect("Invalid schema");
+
+        let f = File::open(file_name)?;
+        let reader = BufReader::new(f);
+        let mut result = Vec::new();
+
+        for (line_num, line) in reader.lines().enumerate() {
+            let line = line?;
+            let val: Value = serde_json::from_str(&line)
+                .map_err(|e| anyhow!("Line {}: invalid JSON: {}", line_num + 1, e))?;
+
+            if let Err(errors) = compiled_schema.validate(&val) {
+                let errs = errors.map(|e| e.to_string()).collect::<Vec<_>>().join("; ");
+                return Err(anyhow!(
+                    "Line {}: JSON Schema Validation errors: {}",
+                    line_num + 1,
+                    errs
+                ));
+            }
+            println!("{}", val.to_string());
+            result.push(val);
+        }
+        Ok(result)
     }
 
     #[tokio::test]
-    #[tracing::instrument(skip_all)]
-    async fn test_span() {
-	init();
-//	foo().await;
-	foo_3().await;
+    async fn test_json_log_capture() -> Result<()> {
+        #[allow(clippy::redundant_closure_call)]
+        let _ = temp_env::async_with_vars(
+            [("DYN_LOGGING_JSONL", Some("1"))],
+            (async || {
+                let file_name = "./test_capture_log.txt";
+                let guard = StderrOverride::from_file(file_name)?;
+                init();
+                parent().await;
+                drop(guard);
+
+                let lines = load_log(file_name)?;
+
+                // 1. Validate my_trace_id matches parent's trace ID
+                let parent_trace_id = Uuid::parse_str("2adfd24468724599bb9a4990dc342288")
+                    .unwrap()
+                    .simple()
+                    .to_string();
+                for log_line in &lines {
+                    if let Some(my_trace_id) = log_line.get("my_trace_id") {
+                        assert_eq!(
+                            my_trace_id,
+                            &serde_json::Value::String(parent_trace_id.clone())
+                        );
+                    }
+                }
+
+                // 2. Validate span IDs are unique for SPAN_CREATED and SPAN_CLOSED events
+                let mut created_span_ids: Vec<String> = Vec::new();
+                let mut closed_span_ids: Vec<String> = Vec::new();
+
+                for log_line in &lines {
+                    if let Some(message) = log_line.get("message") {
+                        match message.as_str().unwrap() {
+                            "SPAN_CREATED" => {
+                                if let Some(span_id) = log_line.get("span_id") {
+                                    let span_id_str = span_id.as_str().unwrap();
+                                    assert!(
+                                        created_span_ids.iter().all(|id| id != span_id_str),
+                                        "Duplicate span ID found in SPAN_CREATED: {}",
+                                        span_id_str
+                                    );
+                                    created_span_ids.push(span_id_str.to_string());
+                                }
+                            }
+                            "SPAN_CLOSED" => {
+                                if let Some(span_id) = log_line.get("span_id") {
+                                    let span_id_str = span_id.as_str().unwrap();
+                                    assert!(
+                                        closed_span_ids.iter().all(|id| id != span_id_str),
+                                        "Duplicate span ID found in SPAN_CLOSED: {}",
+                                        span_id_str
+                                    );
+                                    closed_span_ids.push(span_id_str.to_string());
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                // Additionally, ensure that every SPAN_CLOSED has a corresponding SPAN_CREATED
+                for closed_span_id in &closed_span_ids {
+                    assert!(
+                        created_span_ids.contains(closed_span_id),
+                        "SPAN_CLOSED without corresponding SPAN_CREATED: {}",
+                        closed_span_id
+                    );
+                }
+
+                // 3. Validate parent span relationships
+                let parent_span_id = lines
+                    .iter()
+                    .find(|log_line| {
+                        log_line.get("message").unwrap().as_str().unwrap() == "SPAN_CREATED"
+                            && log_line.get("span_name").unwrap().as_str().unwrap() == "parent"
+                    })
+                    .and_then(|log_line| {
+                        log_line
+                            .get("span_id")
+                            .map(|s| s.as_str().unwrap().to_string())
+                    })
+                    .unwrap();
+
+                let child_span_id = lines
+                    .iter()
+                    .find(|log_line| {
+                        log_line.get("message").unwrap().as_str().unwrap() == "SPAN_CREATED"
+                            && log_line.get("span_name").unwrap().as_str().unwrap() == "child"
+                    })
+                    .and_then(|log_line| {
+                        log_line
+                            .get("span_id")
+                            .map(|s| s.as_str().unwrap().to_string())
+                    })
+                    .unwrap();
+
+                let _grandchild_span_id = lines
+                    .iter()
+                    .find(|log_line| {
+                        log_line.get("message").unwrap().as_str().unwrap() == "SPAN_CREATED"
+                            && log_line.get("span_name").unwrap().as_str().unwrap() == "grandchild"
+                    })
+                    .and_then(|log_line| {
+                        log_line
+                            .get("span_id")
+                            .map(|s| s.as_str().unwrap().to_string())
+                    })
+                    .unwrap();
+
+                // Parent span has no parent_id
+                for log_line in &lines {
+                    if log_line.get("span_name").unwrap().as_str().unwrap() == "parent" {
+                        assert!(log_line.get("parent_id").is_none());
+                    }
+                }
+
+                // Child span's parent_id is parent_span_id
+                for log_line in &lines {
+                    if log_line.get("span_name").unwrap().as_str().unwrap() == "child" {
+                        assert_eq!(
+                            log_line.get("parent_id").unwrap().as_str().unwrap(),
+                            &parent_span_id
+                        );
+                    }
+                }
+
+                // Grandchild span's parent_id is child_span_id
+                for log_line in &lines {
+                    if log_line.get("span_name").unwrap().as_str().unwrap() == "grandchild" {
+                        assert_eq!(
+                            log_line.get("parent_id").unwrap().as_str().unwrap(),
+                            &child_span_id
+                        );
+                    }
+                }
+
+                // Validate duration relationships
+                let parent_duration = lines
+                    .iter()
+                    .find(|log_line| {
+                        log_line.get("message").unwrap().as_str().unwrap() == "SPAN_CLOSED"
+                            && log_line.get("span_name").unwrap().as_str().unwrap() == "parent"
+                    })
+                    .and_then(|log_line| {
+                        log_line
+                            .get("time.duration_us")
+                            .map(|d| d.as_u64().unwrap())
+                    })
+                    .unwrap();
+
+                let child_duration = lines
+                    .iter()
+                    .find(|log_line| {
+                        log_line.get("message").unwrap().as_str().unwrap() == "SPAN_CLOSED"
+                            && log_line.get("span_name").unwrap().as_str().unwrap() == "child"
+                    })
+                    .and_then(|log_line| {
+                        log_line
+                            .get("time.duration_us")
+                            .map(|d| d.as_u64().unwrap())
+                    })
+                    .unwrap();
+
+                let grandchild_duration = lines
+                    .iter()
+                    .find(|log_line| {
+                        log_line.get("message").unwrap().as_str().unwrap() == "SPAN_CLOSED"
+                            && log_line.get("span_name").unwrap().as_str().unwrap() == "grandchild"
+                    })
+                    .and_then(|log_line| {
+                        log_line
+                            .get("time.duration_us")
+                            .map(|d| d.as_u64().unwrap())
+                    })
+                    .unwrap();
+
+                assert!(
+                    parent_duration > child_duration + grandchild_duration,
+                    "Parent duration is not greater than the sum of child and grandchild durations"
+                );
+                assert!(
+                    child_duration > grandchild_duration,
+                    "Child duration is not greater than grandchild duration"
+                );
+
+                Ok::<(), anyhow::Error>(())
+            })(),
+        )
+        .await;
+        Ok(())
     }
 }
