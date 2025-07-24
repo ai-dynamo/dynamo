@@ -165,16 +165,17 @@ where
             if let Ok(header_str) = header_value.to_str() {
                 let pieces: Vec<_> = header_str.split('-').collect();
                 if pieces.len() == 4 {
+                    let candidate_trace_id = pieces[1];
+                    let candidate_parent_id = pieces[2];
 
-		    let candidate_trace_id = pieces[1];
-		    let candidate_parent_id = pieces[2];
-
-		    if is_valid_trace_id(candidate_trace_id) && is_valid_span_id(candidate_parent_id) {
-			trace_id = Some(pieces[1].to_string());
-			parent_id = Some(pieces[2].to_string());
-		    } else {
-			tracing::debug!("Invalid traceparent header: {}",header_str);
-		    }
+                    if is_valid_trace_id(candidate_trace_id)
+                        && is_valid_span_id(candidate_parent_id)
+                    {
+                        trace_id = Some(pieces[1].to_string());
+                        parent_id = Some(pieces[2].to_string());
+                    } else {
+                        tracing::debug!("Invalid traceparent header: {}", header_str);
+                    }
                 }
             }
         }
@@ -288,7 +289,7 @@ where
                 }
             }
 
-            if (parent_id.is_some() || span_id.is_some() ) && trace_id.is_none() {
+            if (parent_id.is_some() || span_id.is_some()) && trace_id.is_none() {
                 tracing::error!("parent id or span id are set but trace id is not set!");
                 // Clear inconsistent IDs to maintain trace integrity
                 parent_id = None;
