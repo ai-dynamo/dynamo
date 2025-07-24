@@ -20,7 +20,7 @@ pub trait OffloadFilter: Send + Sync + Debug {
 
 #[derive(Debug, Clone)]
 pub struct FrequencyFilter {
-    frequency_threshold: i64,
+    min_offload_frequency: i64,
     frequency_map: Arc<Mutex<HashMap<SequenceHash, i64>>>,
     max_num_entries: usize,
     oversize_notify: Arc<Notify>,
@@ -28,7 +28,7 @@ pub struct FrequencyFilter {
 
 impl FrequencyFilter {
     pub fn new(
-        frequency_threshold: i64,
+        min_offload_frequency: i64,
         flush_interval: Duration,
         max_num_entries: usize,
         cancel_token: CancellationToken,
@@ -73,7 +73,7 @@ impl FrequencyFilter {
         .detach();
 
         Ok(Self {
-            frequency_threshold,
+            min_offload_frequency,
             frequency_map,
             max_num_entries,
             oversize_notify,
@@ -101,7 +101,7 @@ impl OffloadFilter for FrequencyFilter {
             })
             .or_insert(1);
 
-        let should_offload = *entry >= self.frequency_threshold;
+        let should_offload = *entry >= self.min_offload_frequency;
 
         // Notify the offload manager that the frequency map is too large.
         if frequency_map.len() > self.max_num_entries {
@@ -109,5 +109,116 @@ impl OffloadFilter for FrequencyFilter {
         }
 
         should_offload
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_filter(min_offload_frequency: i64, max_num_entries: usize) -> FrequencyFilter {
+        let cancel_token = CancellationToken::new();
+        let runtime = Handle::current();
+        FrequencyFilter::new(min_offload_frequency, Duration::from_secs(3600), max_num_entries, cancel_token, runtime).unwrap()
+    }
+
+    fn hash(x: u32) -> SequenceHash {
+        SequenceHash::from(x)
+    }
+
+    #[tokio::test]
+    async fn test_basic_frequency_filter() {
+        let filter = make_filter(2, 100);
+
+        assert!(!filter.should_offload(hash(0)));
+        assert!(filter.should_offload(hash(0)));
+        assert!(!filter.should_offload(hash(1)));
+        assert!(!filter.should_offload(hash(2)));
+    }
+
+    #[tokio::test]
+    async fn test_decay() {
+        let filter = make_filter(4, 2);
+
+        // Add the first hashes, and bump it up to 2.
+        assert!(!filter.should_offload(hash(0)));
+        assert!(!filter.should_offload(hash(0)));
+        
+        // Add the second hash
+        assert!(!filter.should_offload(hash(1)));
+        assert!(!filter.should_offload(hash(1)));
+        
+        // Now, the value of the first hash is 4, so we should offload it.
+        assert!(filter.should_offload(hash(0)));
+
+        // This will cause a decay.
+        assert!(!filter.should_offload(hash(2)));
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Now, the priority of 1
+        assert!(!filter.should_offload(hash(1)));
+    }
+
+    #[tokio::test]
+    async fn test_time_based_decay() {
+        let cancel_token = CancellationToken::new();
+        let runtime = Handle::current();
+        let filter = FrequencyFilter::new(
+            4,
+            Duration::from_millis(250),
+            100,
+            cancel_token.clone(),
+            runtime,
+        )
+        .unwrap();
+
+        assert!(!filter.should_offload(hash(0)));
+        assert!(!filter.should_offload(hash(0)));
+        assert!(filter.should_offload(hash(0)));
+
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // The count should have decayed from 4 to 2.
+        {
+            let frequency_map = filter.frequency_map.lock().unwrap();
+            assert_eq!(*frequency_map.get(&hash(0)).unwrap(), 2);
+        }
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // The count should have decayed from 2 to 1, and should be pruned.
+        {
+            let frequency_map = filter.frequency_map.lock().unwrap();
+            assert_eq!(*frequency_map.get(&hash(0)).unwrap(), 1);
+        }
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+
+        // The count should have decayed from 1 to 0, and should be pruned.
+        {
+            let frequency_map = filter.frequency_map.lock().unwrap();
+            assert!(frequency_map.get(&hash(0)).is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multi_prune_decay() {
+        let filter = make_filter(10, 2);
+
+        assert!(!filter.should_offload(hash(0)));
+        assert!(!filter.should_offload(hash(1)));
+
+        assert_eq!(filter.frequency_map.lock().unwrap().len(), 2);
+
+        assert!(!filter.should_offload(hash(2)));
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(filter.frequency_map.lock().unwrap().is_empty());
+
+        assert!(!filter.should_offload(hash(3)));
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(filter.frequency_map.lock().unwrap().len(), 1);
     }
 }
