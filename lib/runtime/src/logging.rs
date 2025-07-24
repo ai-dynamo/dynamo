@@ -266,7 +266,7 @@ where
                 }
             }
 
-            if parent_id == None {
+            if parent_id.is_none() {
                 if let Some(parent_span_id) = ctx.current_span().id() {
                     if let Some(parent_span) = ctx.span(parent_span_id) {
                         let parent_ext = parent_span.extensions();
@@ -280,15 +280,15 @@ where
                 }
             }
 
-            if (parent_id != None || span_id != None) && trace_id == None {
+            if (parent_id.is_some() || span_id.is_some() ) && trace_id.is_none() {
                 tracing::error!("parent id or span id are set but trace id is not set!")
             }
 
-            if trace_id == None {
+            if trace_id.is_none() {
                 trace_id = Some(generate_trace_id());
             }
 
-            if span_id == None {
+            if span_id.is_none() {
                 span_id = Some(generate_span_id());
             }
 
@@ -312,7 +312,7 @@ pub fn get_distributed_tracing_context() -> Option<DistributedTraceContext> {
         .with_subscriber(|(id, subscriber)| {
             subscriber
                 .downcast_ref::<Registry>()
-                .and_then(|registry| registry.span_data(&id))
+                .and_then(|registry| registry.span_data(id))
                 .and_then(|span_data| {
                     let extensions = span_data.extensions();
                     extensions.get::<DistributedTraceContext>().cloned()
@@ -617,7 +617,7 @@ where
         let metadata = event.metadata();
         let log = JsonLog {
             level: metadata.level().to_string(),
-            time: time,
+            time,
             file: metadata.file(),
             line: metadata.line(),
             target: metadata.target(),
@@ -784,7 +784,7 @@ pub mod tests {
                     errs
                 ));
             }
-            println!("{}", val.to_string());
+            println!("{}", val);
             result.push(val);
         }
         Ok(result)
