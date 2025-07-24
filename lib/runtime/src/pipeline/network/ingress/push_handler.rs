@@ -14,7 +14,92 @@
 // limitations under the License.
 
 use super::*;
+use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+
+/// Metrics configuration for profiling work handlers
+#[derive(Clone, Debug)]
+pub struct WorkHandlerMetrics {
+    pub request_counter: Arc<IntCounter>,
+    pub request_duration: Arc<Histogram>,
+    pub concurrent_requests: Arc<IntGauge>,
+    pub request_bytes: Arc<IntCounter>,
+    pub response_bytes: Arc<IntCounter>,
+    pub error_counter: Arc<IntCounterVec>,
+}
+
+impl WorkHandlerMetrics {
+    pub fn new(
+        request_counter: Arc<IntCounter>,
+        request_duration: Arc<Histogram>,
+        concurrent_requests: Arc<IntGauge>,
+        request_bytes: Arc<IntCounter>,
+        response_bytes: Arc<IntCounter>,
+        error_counter: Arc<IntCounterVec>,
+    ) -> Self {
+        Self {
+            request_counter,
+            request_duration,
+            concurrent_requests,
+            request_bytes,
+            response_bytes,
+            error_counter,
+        }
+    }
+
+    /// Create WorkHandlerMetrics from an endpoint using its built-in labeling
+    pub fn from_endpoint(
+        endpoint: &crate::component::Endpoint,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let request_counter = endpoint.create_intcounter(
+            "requests_total",
+            "Total number of requests processed by work handler",
+            &[],
+        )?;
+
+        let request_duration = endpoint.create_histogram(
+            "request_duration_seconds",
+            "Time spent processing requests by work handler",
+            &[],
+            None,
+        )?;
+
+        let concurrent_requests = endpoint.create_intgauge(
+            "concurrent_requests",
+            "Number of requests currently being processed by work handler",
+            &[],
+        )?;
+
+        let request_bytes = endpoint.create_intcounter(
+            "request_bytes_total",
+            "Total number of bytes received in requests by work handler",
+            &[],
+        )?;
+
+        let response_bytes = endpoint.create_intcounter(
+            "response_bytes_total",
+            "Total number of bytes sent in responses by work handler",
+            &[],
+        )?;
+
+        let error_counter = endpoint.create_intcountervec(
+            "errors_total",
+            "Total number of errors in work handler processing",
+            &["error_type"],
+            &[],
+        )?;
+
+        Ok(Self::new(
+            request_counter,
+            request_duration,
+            concurrent_requests,
+            request_bytes,
+            response_bytes,
+            error_counter,
+        ))
+    }
+}
 
 #[async_trait]
 impl<T: Data, U: Data> PushWorkHandler for Ingress<SingleIn<T>, ManyOut<U>>

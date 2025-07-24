@@ -500,11 +500,14 @@ impl WorkerMetricsPublisher {
     pub async fn create_endpoint(&self, component: Component) -> Result<()> {
         let mut metrics_rx = self.rx.clone();
         let endpoint = component.endpoint(KV_METRICS_ENDPOINT);
+
         let handler = Arc::new(KvLoadEndpoingHander::new(
             metrics_rx.clone(),
             endpoint.clone(),
         ));
-        let handler = Ingress::for_engine_with_metrics(handler, &endpoint)?;
+        let handler = Ingress::for_engine(handler)?;
+
+        handler.add_metrics(&endpoint)?;
 
         endpoint
             .endpoint_builder()

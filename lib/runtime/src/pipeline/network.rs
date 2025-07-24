@@ -36,6 +36,7 @@ use super::{
     context, AsyncTransportEngine, Context, Data, Error, ManyOut, PipelineError, PipelineIO,
     SegmentSource, ServiceBackend, ServiceEngine, SingleIn, Source,
 };
+use ingress::push_handler::WorkHandlerMetrics;
 
 // Add Prometheus metrics types
 use crate::metrics::MetricsRegistry;
@@ -43,89 +44,6 @@ use prometheus::{CounterVec, Histogram, IntCounter, IntCounterVec, IntGauge};
 
 pub trait Codable: PipelineIO + Serialize + for<'de> Deserialize<'de> {}
 impl<T: PipelineIO + Serialize + for<'de> Deserialize<'de>> Codable for T {}
-
-/// Metrics configuration for profiling Ingress handlers
-#[derive(Clone, Debug)]
-pub struct IngressMetrics {
-    pub request_counter: Arc<IntCounter>,
-    pub request_duration: Arc<Histogram>,
-    pub concurrent_requests: Arc<IntGauge>,
-    pub request_bytes: Arc<IntCounter>,
-    pub response_bytes: Arc<IntCounter>,
-    pub error_counter: Arc<IntCounterVec>,
-}
-
-impl IngressMetrics {
-    pub fn new(
-        request_counter: Arc<IntCounter>,
-        request_duration: Arc<Histogram>,
-        concurrent_requests: Arc<IntGauge>,
-        request_bytes: Arc<IntCounter>,
-        response_bytes: Arc<IntCounter>,
-        error_counter: Arc<IntCounterVec>,
-    ) -> Self {
-        Self {
-            request_counter,
-            request_duration,
-            concurrent_requests,
-            request_bytes,
-            response_bytes,
-            error_counter,
-        }
-    }
-
-    /// Create IngressMetrics from an endpoint using its built-in labeling
-    pub fn from_endpoint(
-        endpoint: &crate::component::Endpoint,
-    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let request_counter = endpoint.create_intcounter(
-            "ingress_requests_total",
-            "Total number of requests processed by ingress",
-            &[],
-        )?;
-
-        let request_duration = endpoint.create_histogram(
-            "ingress_request_duration_seconds",
-            "Time spent processing requests by ingress",
-            &[],
-            None,
-        )?;
-
-        let concurrent_requests = endpoint.create_intgauge(
-            "ingress_concurrent_requests",
-            "Number of requests currently being processed by ingress",
-            &[],
-        )?;
-
-        let request_bytes = endpoint.create_intcounter(
-            "ingress_request_bytes_total",
-            "Total number of bytes received in requests by ingress",
-            &[],
-        )?;
-
-        let response_bytes = endpoint.create_intcounter(
-            "ingress_response_bytes_total",
-            "Total number of bytes sent in responses by ingress",
-            &[],
-        )?;
-
-        let error_counter = endpoint.create_intcountervec(
-            "ingress_errors_total",
-            "Total number of errors in ingress processing",
-            &["error_type"],
-            &[],
-        )?;
-
-        Ok(Self::new(
-            request_counter,
-            request_duration,
-            concurrent_requests,
-            request_bytes,
-            response_bytes,
-            error_counter,
-        ))
-    }
-}
 
 /// `WorkQueueConsumer` is a generic interface for a work queue that can be used to send and receive
 #[async_trait]
@@ -365,7 +283,7 @@ struct RequestControlMessage {
 
 pub struct Ingress<Req: PipelineIO, Resp: PipelineIO> {
     segment: OnceLock<Arc<SegmentSource<Req, Resp>>>,
-    metrics: OnceLock<Arc<IngressMetrics>>,
+    metrics: OnceLock<Arc<WorkHandlerMetrics>>,
 }
 
 impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
@@ -376,15 +294,6 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
         })
     }
 
-    pub fn with_metrics(metrics: IngressMetrics) -> Arc<Self> {
-        let ingress = Self::new();
-        ingress
-            .metrics
-            .set(Arc::new(metrics))
-            .expect("Failed to set metrics: Metrics were already set.");
-        ingress
-    }
-
     pub fn attach(&self, segment: Arc<SegmentSource<Req, Resp>>) -> Result<()> {
         self.segment
             .set(segment)
@@ -392,8 +301,8 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
     }
 
     pub fn add_metrics(&self, endpoint: &crate::component::Endpoint) -> Result<()> {
-        let metrics = IngressMetrics::from_endpoint(endpoint)
-            .map_err(|e| anyhow::anyhow!("Failed to create ingress metrics: {}", e))?;
+        let metrics = WorkHandlerMetrics::from_endpoint(endpoint)
+            .map_err(|e| anyhow::anyhow!("Failed to create work handler metrics: {}", e))?;
 
         self.metrics
             .set(Arc::new(metrics))
@@ -425,17 +334,8 @@ impl<Req: PipelineIO + Sync, Resp: PipelineIO> Ingress<Req, Resp> {
         Ok(ingress)
     }
 
-    pub fn for_engine_with_metrics(
-        engine: ServiceEngine<Req, Resp>,
-        endpoint: &crate::component::Endpoint,
-    ) -> Result<Arc<Self>> {
-        let ingress = Self::for_engine(engine)?;
-        ingress.add_metrics(endpoint)?;
-        Ok(ingress)
-    }
-
     /// Helper method to access metrics if available
-    fn metrics(&self) -> Option<&Arc<IngressMetrics>> {
+    fn metrics(&self) -> Option<&Arc<WorkHandlerMetrics>> {
         self.metrics.get()
     }
 }
