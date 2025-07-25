@@ -42,7 +42,10 @@ class MetricsPublisher(StatLoggerBase):
         logger.info(f"ZMQ publisher initialized on port {port}")
 
     def record(
-        self, scheduler_stats: SchedulerStats, iteration_stats: Optional[IterationStats]
+        self,
+        scheduler_stats: SchedulerStats,
+        iteration_stats: Optional[IterationStats],
+        engine_idx: int = 0,
     ):
         # Send metrics over ZMQ
         metrics_data = {
