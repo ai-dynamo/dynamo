@@ -132,10 +132,12 @@ For Kubernetes deployment, YAML manifests are provided in the `deploy/` director
 #### Deploy to Kubernetes
 
 Example with disagg:
+Export the NAMESPACE  you used in your Dynamo Cloud Installation.
 
 ```bash
-cd ~/dynamo/components/backends/vllm/deploy
-kubectl apply -f disagg.yaml
+cd dynamo
+cd components/backends/vllm/deploy
+kubectl apply -f disagg.yaml -n $NAMESPACE
 ```
 
 To change `DYN_LOG` level, edit the yaml file by adding

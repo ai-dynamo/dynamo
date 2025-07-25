@@ -19,8 +19,6 @@ from dynamo.sdk.cli.utils import configure_target_environment
 from dynamo.sdk.core.protocol.interface import ServiceInterface
 from dynamo.sdk.core.runner import TargetEnum
 
-pytestmark = pytest.mark.pre_merge
-
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_and_teardown():

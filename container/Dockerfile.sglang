@@ -26,8 +26,8 @@ ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
+# Make sure to update the dependency version in pyproject.toml when updating this
 ARG SGLANG_VERSION="0.4.9.post1"
-ARG SGL_KERNEL_VERSION="0.2.4"
 
 ##################################
 ########## Base Image ############
@@ -116,7 +116,7 @@ RUN git clone "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
     cd ${NIXL_SRC_DIR} && \
     git checkout ${NIXL_REF} && \
     if [ "$ARCH" = "arm64" ]; then \
-        nixl_build_args="-Ddisable_gds_backend=true -Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
+        nixl_build_args="-Ddisable_gds_backend=true"; \
     else \
         nixl_build_args=""; \
     fi && \
@@ -155,7 +155,7 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # TEMP: disable gds backend for arm64
 RUN if [ "$ARCH" = "arm64" ]; then \
         cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl \
-        --config-settings=setup-args="-Ddisable_gds_backend=true -Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
+        --config-settings=setup-args="-Ddisable_gds_backend=true"; \
     else \
         cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl; \
     fi && \
@@ -269,8 +269,6 @@ RUN SNIPPET="export PROMPT_COMMAND='history -a' && export HISTFILE=$HOME/.comman
 
 RUN mkdir -p /home/$USERNAME/.cache/
 
-ENV VLLM_KV_CAPI_PATH=$HOME/dynamo/.build/target/debug/libdynamo_llm_capi.so
-
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
 
 ##################################
@@ -321,7 +319,6 @@ COPY LICENSE /workspace/
 COPY Cargo.toml /workspace/
 COPY Cargo.lock /workspace/
 COPY rust-toolchain.toml /workspace/
-COPY hatch_build.py /workspace/
 
 # Copy source code
 COPY lib/ /workspace/lib/
@@ -364,18 +361,11 @@ COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 # Copy rest of the code
 COPY . /workspace
 
-# Build C bindings, creates lib/bindings/c/include
-RUN cd /workspace/lib/bindings/c && cargo build --release --locked
-
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
     mkdir /opt/dynamo/bindings/lib && \
     cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
-    cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
-    cp -r lib/bindings/c/include /opt/dynamo/bindings/.  && \
-    cp target/release/dynamo-run /usr/local/bin && \
-    cp target/release/metrics /usr/local/bin && \
-    cp target/release/mock_worker /usr/local/bin
+    cp target/release/metrics /usr/local/bin
 
 RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/dist/ai_dynamo*any.whl
@@ -384,9 +374,6 @@ RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
-
-# Tell vllm to use the Dynamo LLM C API for KV Cache Routing
-ENV VLLM_KV_CAPI_PATH=/opt/dynamo/bindings/lib/libdynamo_llm_capi.so
 
 ENV PYTHONPATH=/workspace/dynamo/deploy/sdk/src:/workspace/dynamo/components/planner/src:/workspace/examples/sglang/utils:$PYTHONPATH
 
@@ -442,21 +429,13 @@ RUN apt-get update && \
     uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
 
-# Install SGLang and related packages (sgl-kernel, einops, sentencepiece) since they are not included in the runtime wheel
-# https://github.com/sgl-project/sglang/blob/v0.4.9.post1/python/pyproject.toml#L18-51
-ARG SGLANG_VERSION
-ARG SGL_KERNEL_VERSION
-RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install sglang[runtime_common]==${SGLANG_VERSION} einops sgl-kernel==${SGL_KERNEL_VERSION} sentencepiece
-
 # Install the wheels and symlink executables to /usr/local/bin so dynamo components can use them
+# Copy metrics binary from wheel_builder image, not part of ai-dynamo wheel
 # Dynamo components currently do not have the VIRTUAL_ENV in their PATH, so we need to symlink the executables
+COPY --from=ci_minimum /workspace/target/release/metrics /usr/local/bin/metrics
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 COPY --from=base /workspace/wheels/nixl/*.whl wheelhouse/
-RUN uv pip install ai-dynamo nixl --find-links wheelhouse
-
-# Tell vllm to use the Dynamo LLM C API for KV Cache Routing
-ENV VLLM_KV_CAPI_PATH="/opt/dynamo/bindings/lib/libdynamo_llm_capi.so"
+RUN uv pip install ai-dynamo[sglang] --find-links wheelhouse
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
