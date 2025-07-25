@@ -45,7 +45,7 @@ The examples below assume you build the latest image yourself from source. If us
     :margin: 0
     :padding: 3 4 0 0
 
-    .. grid-item-card:: :doc:`Hello World </examples/hello_world>`
+    .. grid-item-card:: :doc:`Hello World </examples/hello_world/README>`
         :link: /examples/hello_world/README
         :link-type: doc
 
