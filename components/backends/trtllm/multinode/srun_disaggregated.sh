@@ -55,7 +55,7 @@ srun \
   --nodes 1 \
   --jobid "${SLURM_JOB_ID}" \
   /mnt/multinode/start_frontend_services.sh &
-
+sleep 150
 # NOTE: Output streamed to stdout for ease of understanding the example, but
 # in practice you would probably set `srun --output ... --error ...` to pipe
 # the stdout/stderr to files.

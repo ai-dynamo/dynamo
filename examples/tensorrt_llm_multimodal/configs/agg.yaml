@@ -12,18 +12,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-tensor_parallel_size: 8
-moe_expert_parallel_size: 1
-enable_attention_dp: false
-max_num_tokens: 8192
-max_batch_size: 16
-trust_remote_code: true
-backend: pytorch
-enable_chunked_prefill: true
-# Overlap scheduler not currently supported in prefill only workers.
-disable_overlap_scheduler: true
-use_cuda_graph: false
 
-kv_cache_config:
-  free_gpu_memory_fraction: 0.30
-  enable_block_reuse: false
+Frontend:
+  served_model_name: nvidia/Llama-4-Maverick-17B-128E-Instruct-FP8
+  endpoint_completions: dynamo.Processor.completions
+  endpoint_chat: dynamo.Processor.chat/completions
+  port: 8000
+
+Processor:
+  engine_args: "configs/llm_api_config.yaml"
+  router: round-robin
+  ServiceArgs:
+    workers: 1 # to reduce the tokenization bottleneck at a high concurrency
+
+TensorRTLLMWorker:
+  engine_args: "configs/llm_api_config.yaml"
+  router: round-robin
+  ServiceArgs:
+    workers: 1
+    resources:
+      gpu: 8

@@ -10,6 +10,7 @@ import uvloop
 from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
+from transformers import AutoConfig
 
 from dynamo.llm import (
     ModelType,
@@ -19,6 +20,7 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.trtllm.utils.multimodal_processor import MultimodalRequestProcessor
 from dynamo.trtllm.utils.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
@@ -91,7 +93,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         "model": model_path,
         "tensor_parallel_size": config.tensor_parallel_size,
         "backend": "pytorch",
-        "skip_tokenizer_init": True,
+        "skip_tokenizer_init": False,
     }
     if config.extra_engine_args != "":
         # TODO: Support extra engine args from json file as well.
@@ -126,22 +128,24 @@ async def init(runtime: DistributedRuntime, config: Config):
     default_sampling_params._setup(tokenizer)
     default_sampling_params.stop = None
 
-    # We already detokenize inside HandlerBase. No need to also do it in TRTLLM.
-    default_sampling_params.detokenize = False
-
     async with get_tensorrtllm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
 
         if is_first_worker(config):
             # Register the model with the endpoint if only the worker is first in the disaggregation chain.
             await register_llm(
-                ModelType.Backend,
+                ModelType.Chat,
                 endpoint,
                 config.model_path,
                 config.served_model_name,
                 kv_cache_block_size=config.kv_block_size,
             )
-
+        model_config = AutoConfig.from_pretrained(
+            config.model_path, trust_remote_code=True
+        )
+        multimodal_processor = MultimodalRequestProcessor(
+            model_type=model_config.model_type, model_dir=config.model_path
+        )
         # publisher will be set later if publishing is enabled.
         handler_config = RequestHandlerConfig(
             component=component,
@@ -151,6 +155,8 @@ async def init(runtime: DistributedRuntime, config: Config):
             disaggregation_mode=config.disaggregation_mode,
             disaggregation_strategy=config.disaggregation_strategy,
             next_client=next_client,
+            multimodal_processor=multimodal_processor,
+            tokenizer=tokenizer,
         )
 
         if config.publish_events_and_metrics and is_first_worker(config):
