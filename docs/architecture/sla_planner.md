@@ -106,11 +106,13 @@ Finally, SLA planner applies the change by scaling up/down the number of prefill
 
 ## Deploying
 
-To deploy SLA-planner, ensure etcd and NATS are running first, then use the frontend that reports metrics at `/metrics` HTTP endpoint. You can also use your own frontend, but it must report number of requests, ISL, OSL, TTFT, ITL in the same format.
+For detailed deployment instructions including setup, configuration, troubleshooting, and architecture overview, see the [SLA Planner Deployment Guide](../guides/dynamo_deploy/sla_planner_deployment.md).
 
-SLA-planner and prometheus server are provided as common components that can be directly imported from `dynamo` package.
-
+**Quick Start:**
 ```bash
 cd components/backends/vllm/deploy
 kubectl apply -f disagg_planner.yaml -n {$NAMESPACE}
 ```
+
+> [!NOTE]
+> The SLA planner requires a frontend that reports metrics at `/metrics` HTTP endpoint with number of requests, ISL, OSL, TTFT, ITL in the correct format. The VLLM frontend provides these metrics automatically.

@@ -222,7 +222,14 @@ class Planner:
 
             # compute how many replicas are needed for decode
             # 1. apply d_correction_factor to the ITL SLA
-            corrected_itl = self.args.itl / self.d_correction_factor
+            # Prevent divide by zero when d_correction_factor is 0 (no metrics yet)
+            if self.d_correction_factor <= 0:
+                logger.warning(
+                    f"d_correction_factor is {self.d_correction_factor}, using default value of 1.0"
+                )
+                corrected_itl = self.args.itl
+            else:
+                corrected_itl = self.args.itl / self.d_correction_factor
             # 2. reversely find out what is best throughput/gpu that can achieve corrected_itl under the predicted context length
             pred_decode_thpt_per_gpu = (
                 self.decode_interpolator.find_best_throughput_per_gpu(
@@ -274,7 +281,7 @@ class Planner:
                 WORKER_COMPONENT_NAMES[self.args.backend].prefill_worker: next_num_p,
                 WORKER_COMPONENT_NAMES[self.args.backend].decode_worker: next_num_d,
             }
-            self.connector.set_component_replicas(target_replicas, blocking=False)
+            await self.connector.set_component_replicas(target_replicas, blocking=False)
 
     async def run(self):
         """Main loop for the planner"""

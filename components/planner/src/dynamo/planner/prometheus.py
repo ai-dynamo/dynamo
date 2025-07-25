@@ -47,6 +47,7 @@ async def start_prometheus_server(config):
     cmd = [
         "prometheus",
         f"--config.file={config_path}",
+        "--web.listen-address=0.0.0.0:9090",
     ]
 
     logger.info(f"Prometheus cmd: {cmd}")
