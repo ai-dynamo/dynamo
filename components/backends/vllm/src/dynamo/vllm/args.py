@@ -127,7 +127,14 @@ async def allocate_and_reserve_port(
     """
 
     node_name = socket.gethostname()
-    node_ip = socket.gethostbyname(node_name)
+    try:
+        node_ip = socket.gethostbyname(node_name)
+    except socket.gaierror:
+        # If hostname cannot be resolved, fall back to localhost
+        logger.warning(
+            f"Hostname '{node_name}' cannot be resolved, falling back to '127.0.0.1'"
+        )
+        node_ip = "127.0.0.1"
 
     for attempt in range(1, max_attempts + 1):
         # Hold socket open just long enough to reserve in ETCD
