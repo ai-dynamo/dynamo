@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
+import socket
+
 
 # Source of truth for planner defaults
 class BasePlannerDefaults:
@@ -36,8 +39,62 @@ class LoadPlannerDefaults(BasePlannerDefaults):
     prefill_queue_scale_down_threshold = 0.2
 
 
+def _get_dynamo_namespace_from_k8s() -> str:
+    """Get the dynamo namespace from current pod's Kubernetes labels"""
+    try:
+        from kubernetes import client
+
+        from dynamo.planner.kube import KubernetesAPI
+
+        k8s_api = KubernetesAPI()
+        v1 = client.CoreV1Api()
+
+        # Get current pod name from hostname
+        hostname = socket.gethostname()
+
+        # Get current pod to read its labels
+        pod = v1.read_namespaced_pod(name=hostname, namespace=k8s_api.current_namespace)
+        labels = pod.metadata.labels or {}
+
+        # Extract dynamo namespace from labels
+        dynamo_namespace = labels.get("nvidia.com/dynamo-namespace")
+        if not dynamo_namespace:
+            raise RuntimeError(
+                "Failed to determine the dynamo namespace from Kubernetes pod labels"
+            )
+        return dynamo_namespace
+
+    except Exception as e:
+        raise RuntimeError(
+            "Failed to determine the dynamo namespace from Kubernetes pod labels"
+        ) from e
+
+
+def _get_default_prometheus_endpoint(port: str):
+    """Compute default prometheus endpoint using Kubernetes service discovery"""
+
+    # Try to get current namespace and deployment name from Kubernetes
+    try:
+        from dynamo.planner.kube import KubernetesAPI
+
+        k8s_api = KubernetesAPI()
+        k8s_namespace = k8s_api.current_namespace
+
+        if k8s_namespace and k8s_namespace != "default":
+            dynamo_namespace = _get_dynamo_namespace_from_k8s()
+            prometheus_service = f"{dynamo_namespace}-prometheus"
+            return (
+                f"http://{prometheus_service}.{k8s_namespace}.svc.cluster.local:{port}"
+            )
+    except Exception as e:
+        raise RuntimeError(
+            "Failed to determine the prometheus endpoint from Kubernetes service discovery"
+        ) from e
+
+
 class SLAPlannerDefaults(BasePlannerDefaults):
-    prometheus_endpoint = "http://localhost:9090"
+    port = os.environ.get("DYNAMO_PORT", "9090")
+    prometheus_endpoint = _get_default_prometheus_endpoint(port)
     profile_results_dir = "profiling_results"
     isl = 3000  # in number of tokens
     osl = 150  # in number of tokens

@@ -53,6 +53,7 @@ spec:
       envFromSecret: hf-token-secret
       componentType: worker
       replicas: 1
+
       livenessProbe:
         exec:
           command:
@@ -96,7 +97,7 @@ spec:
             - --backend=vllm
             - --adjustment-interval=60
             - --profile-results-dir=/workspace/profiling_results
-            - --prometheus-endpoint=http://vllm-disagg-planner-prometheus.hzhou-dynamo.svc.cluster.local:9090
+
     Prometheus:
       dynamoNamespace: vllm-disagg-planner
       componentType: main
