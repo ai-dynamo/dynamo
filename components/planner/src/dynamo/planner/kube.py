@@ -42,6 +42,16 @@ class KubernetesAPI:
             # Fallback to 'default' if not running in k8s
             return "default"
 
+    def _get_graph_deployment_from_name(self, graph_deployment_name: str) -> Optional[dict]:
+        """Get the graph deployment from the dynamo graph deployment name"""
+        return self.custom_api.get_namespaced_custom_object(
+            group="nvidia.com",
+            version="v1alpha1",
+            namespace=self.current_namespace,
+            plural="dynamographdeployments",
+            name=graph_deployment_name,
+        )
+
     async def get_graph_deployment(
         self, component_name: str, dynamo_namespace: str
     ) -> Optional[dict]:
@@ -102,13 +112,7 @@ class KubernetesAPI:
             if not graph_deployment_name:
                 return None
 
-            graph_deployment = self.custom_api.get_namespaced_custom_object(
-                group="nvidia.com",
-                version="v1alpha1",
-                namespace=self.current_namespace,
-                plural="dynamographdeployments",
-                name=graph_deployment_name,
-            )
+            graph_deployment = self._get_graph_deployment_from_name(graph_deployment_name)
 
             return graph_deployment
 
@@ -166,13 +170,8 @@ class KubernetesAPI:
         for attempt in range(max_attempts):
             await asyncio.sleep(delay_seconds)
 
-            graph_deployment = self.custom_api.get_namespaced_custom_object(
-                group="nvidia.com",
-                version="v1alpha1",
-                namespace=self.current_namespace,
-                plural="dynamographdeployments",
-                name=graph_deployment_name,
-            )
+            graph_deployment = self._get_graph_deployment_from_name(graph_deployment_name)
+
 
             if not graph_deployment:
                 raise ValueError(f"Graph deployment {graph_deployment_name} not found")
