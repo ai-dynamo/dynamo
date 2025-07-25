@@ -87,6 +87,9 @@ def parse_args() -> Config:
 
     if args.is_prefill_worker:
         args.endpoint = f"dyn://{args.namespace}.prefill.generate"
+    else:
+        # For decode workers, also use the provided namespace instead of hardcoded "dynamo"
+        args.endpoint = f"dyn://{args.namespace}.backend.generate"
 
     endpoint_str = args.endpoint.replace("dyn://", "", 1)
     endpoint_parts = endpoint_str.split(".")
