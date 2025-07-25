@@ -77,6 +77,7 @@ def test_get_graph_deployment_from_name(k8s_api, mock_custom_api):
 @pytest.mark.asyncio
 async def test_is_deployment_ready_true(k8s_api, mock_custom_api):
     """Test is_deployment_ready method when deployment is ready"""
+    # Mock the _get_graph_deployment_from_name response
     mock_deployment: Dict[str, Any] = {
         "status": {
             "conditions": [
@@ -84,11 +85,13 @@ async def test_is_deployment_ready_true(k8s_api, mock_custom_api):
             ]
         }
     }
-    mock_custom_api.get_namespaced_custom_object.return_value = mock_deployment
 
-    result = await k8s_api.is_deployment_ready("test-deployment")
-
-    assert result is True
+    # Mock the method on the instance
+    with patch.object(
+        k8s_api, "_get_graph_deployment_from_name", return_value=mock_deployment
+    ):
+        result = await k8s_api.is_deployment_ready("test-deployment")
+        assert result is True
 
 
 @pytest.mark.asyncio
@@ -105,22 +108,24 @@ async def test_is_deployment_ready_false(k8s_api, mock_custom_api):
             ]
         }
     }
-    mock_custom_api.get_namespaced_custom_object.return_value = mock_deployment
 
-    result = await k8s_api.is_deployment_ready("test-deployment")
-
-    assert result is False
+    # Mock the method on the instance
+    with patch.object(
+        k8s_api, "_get_graph_deployment_from_name", return_value=mock_deployment
+    ):
+        result = await k8s_api.is_deployment_ready("test-deployment")
+        assert result is False
 
 
 @pytest.mark.asyncio
 async def test_is_deployment_ready_not_found(k8s_api, mock_custom_api):
     """Test is_deployment_ready method when deployment is not found"""
-    mock_custom_api.get_namespaced_custom_object.return_value = None
+    # Mock the method on the instance
+    with patch.object(k8s_api, "_get_graph_deployment_from_name", return_value=None):
+        with pytest.raises(ValueError) as exc_info:
+            await k8s_api.is_deployment_ready("test-deployment")
 
-    with pytest.raises(ValueError) as exc_info:
-        await k8s_api.is_deployment_ready("test-deployment")
-
-    assert "not found" in str(exc_info.value)
+        assert "not found" in str(exc_info.value)
 
 
 @pytest.mark.asyncio

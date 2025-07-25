@@ -142,13 +142,7 @@ class KubernetesAPI:
     async def is_deployment_ready(self, graph_deployment_name: str) -> bool:
         """Check if a graph deployment is ready"""
 
-        graph_deployment = self.custom_api.get_namespaced_custom_object(
-            group="nvidia.com",
-            version="v1alpha1",
-            namespace=self.current_namespace,
-            plural="dynamographdeployments",
-            name=graph_deployment_name,
-        )
+        graph_deployment = self._get_graph_deployment_from_name(graph_deployment_name)
 
         if not graph_deployment:
             raise ValueError(f"Graph deployment {graph_deployment_name} not found")
@@ -158,7 +152,7 @@ class KubernetesAPI:
             (c for c in conditions if c.get("type") == "Ready"), None
         )
 
-        return ready_condition and ready_condition.get("status") == "True"
+        return ready_condition is not None and ready_condition.get("status") == "True"
 
     async def wait_for_graph_deployment_ready(
         self,
