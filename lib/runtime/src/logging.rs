@@ -40,29 +40,15 @@ use std::collections::{BTreeMap, HashMap};
 use std::convert::Infallible;
 use std::sync::Once;
 use std::time::Instant;
+
 use tracing::field::Field;
-use tracing::level_filters::LevelFilter;
-use tracing::metadata::Kind;
-use tracing::span;
-use tracing::span::Record;
-use tracing::Id;
-use tracing::Span;
-use tracing::{Event, Subscriber};
-use tracing_subscriber::field::Visit;
-use tracing_subscriber::fmt::format::FmtSpan;
-use tracing_subscriber::fmt::time::FormatTime;
-use tracing_subscriber::fmt::time::LocalTime;
-use tracing_subscriber::fmt::time::SystemTime;
-use tracing_subscriber::fmt::time::UtcTime;
-use tracing_subscriber::fmt::{format::Writer, FormattedFields};
-use tracing_subscriber::fmt::{FmtContext, FormatFields};
-use tracing_subscriber::prelude::*;
-use tracing_subscriber::registry::LookupSpan;
-use tracing_subscriber::registry::SpanData;
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::Registry;
-use tracing_subscriber::{filter::Directive, fmt};
-use tracing_subscriber::{layer::Context, Layer};
+use tracing::{level_filters::LevelFilter, span, Event, Id, Span, Subscriber};
+use tracing_subscriber::{
+    field::Visit, filter::Directive, fmt, fmt::format::FmtSpan, fmt::format::Writer,
+    fmt::time::FormatTime, fmt::FmtContext, fmt::FormatFields, fmt::FormattedFields,
+    layer::Context, prelude::*, registry, registry::LookupSpan, registry::SpanData, EnvFilter,
+    Layer, Registry,
+};
 use uuid::Uuid;
 
 /// ENV used to set the log level
