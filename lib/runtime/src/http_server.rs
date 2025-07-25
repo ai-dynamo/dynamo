@@ -467,10 +467,6 @@ uptime_seconds{namespace=\"http_server\"} 42
                     tracing::info!(body = body, status = status.to_string());
                 }
 
-                //		drop(guard);
-
-                //		let lines = load_log(file_name)?;
-
                 Ok::<(), anyhow::Error>(())
             })(),
         )
