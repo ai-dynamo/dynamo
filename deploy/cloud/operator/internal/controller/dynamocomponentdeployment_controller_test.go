@@ -842,6 +842,9 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 									},
 								},
 								ExtraPodSpec: &dynamoCommon.ExtraPodSpec{
+									PodSpec: &corev1.PodSpec{
+										TerminationGracePeriodSeconds: ptr.To(int64(10)),
+									},
 									MainContainer: &corev1.Container{
 										Image: "test-image:latest",
 										Command: []string{
@@ -901,7 +904,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								},
 							},
 							Spec: corev1.PodSpec{
-								SchedulerName: "volcano",
+								SchedulerName:                 "volcano",
+								TerminationGracePeriodSeconds: ptr.To(int64(10)),
 								Containers: []corev1.Container{
 									{
 										Name:    "main",
@@ -953,7 +957,8 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 								},
 							},
 							Spec: corev1.PodSpec{
-								SchedulerName: "volcano",
+								TerminationGracePeriodSeconds: ptr.To(int64(10)),
+								SchedulerName:                 "volcano",
 								Containers: []corev1.Container{
 									{
 										Name:         "main",
