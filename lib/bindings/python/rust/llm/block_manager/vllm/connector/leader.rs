@@ -1,23 +1,33 @@
 use crate::llm::block_manager::vllm::KvbmRequest;
 
 use super::*;
+use pyo3::wrap_pymodule;
+
+use crate::llm::block_manager::BlockManager as PyBlockManager;
 
 #[pyclass]
 pub struct KvConnectorLeader {
     slots: HashMap<String, LeaderSlot>,
+    block_manager: PyBlockManager,
 }
 
 #[pymethods]
 impl KvConnectorLeader {
     #[new]
-    pub fn new(worker_id: String) -> Self {
+    #[pyo3(signature = (worker_id, block_manager))]
+    pub fn new(worker_id: String, block_manager: PyBlockManager) -> Self {
         tracing::info!(
             "KvConnectorLeader initialized with worker_id: {}",
             worker_id
         );
         Self {
             slots: HashMap::new(),
+            block_manager,
         }
+    }
+
+    pub fn get_block_manager(&self) -> PyBlockManager {
+        self.block_manager.clone()
     }
 
     pub fn get_num_new_matched_tokens(

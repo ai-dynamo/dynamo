@@ -14,6 +14,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import Request
+from vllm.worker.cache_engine import CacheEngine
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -28,6 +29,7 @@ if TYPE_CHECKING:
 # )
 # from dynamo.llm.vllm_integration.rust import SchedulerOutput as RustSchedulerOutput
 
+from dynamo.llm import BlockManager, KvbmLeader
 from dynamo.llm.vllm_integration.rust import KvbmRequest
 from dynamo.llm.vllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from dynamo.llm.vllm_integration.rust import SchedulerOutput as RustSchedulerOutput
@@ -50,8 +52,22 @@ class KvConnectorLeader:
 
     def __init__(self, vllm_config: "VllmConfig", engine_id: str):
         self.vllm_config = vllm_config
+        world_size = vllm_config.parallel_config.world_size
+        bytes_per_block = CacheEngine.get_cache_block_size(
+            vllm_config.cache_config,
+            vllm_config.model_config,
+            vllm_config.parallel_config,
+        )
+        total_bytes = bytes_per_block * world_size
+        leader = KvbmLeader(total_bytes, world_size)
+        block_manager = BlockManager(
+            0,
+            leader,
+            vllm_config.cache_config.block_size,
+        )
+
         print(f"KvConnectorLeader initialized with engine_id: {engine_id}")
-        self._connector = RustKvConnectorLeader(engine_id)
+        self._connector = RustKvConnectorLeader(engine_id, block_manager)
 
     # KV Connector
 

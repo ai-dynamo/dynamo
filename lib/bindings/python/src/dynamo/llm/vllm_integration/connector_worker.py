@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
+from vllm.utils import STR_DTYPE_TO_TORCH_DTYPE
 
 if TYPE_CHECKING:
     from vllm.attention.backends.abstract import AttentionMetadata
@@ -26,6 +27,7 @@ if TYPE_CHECKING:
 #     KvConnectorWorker as RustKvConnectorWorker,
 # )
 
+from dynamo.llm import KvbmWorker
 from dynamo.llm.vllm_integration.rust import KvConnectorWorker as RustKvConnectorWorker
 
 
@@ -52,6 +54,36 @@ class KvConnectorWorker:
         """
         print(
             f"KvConnectorWorker.register_kv_caches called with {len(kv_caches)} kv_caches"
+        )
+        cache_config = self.vllm_config.cache_config
+
+        shape = list(kv_caches.values())[0].shape
+
+        if not all(t.shape == shape for t in kv_caches.values()):
+            raise NotImplementedError(
+                "Hybrid models with different KV cache shapes are not supported yet."
+            )
+
+        # TODO: Assume the block dimension is within the first 2. This will break if you're doing something weird like having 1 or 2 device blocks.
+        num_device_blocks = max(shape[0], shape[1])
+        page_size = cache_config.block_size
+        tensors = list(kv_caches.values())
+
+        if cache_config.cache_dtype == "auto":
+            kv_cache_dtype = self.vllm_config.model_config.dtype
+        else:
+            kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
+
+        device_id = tensors[0].device.index
+
+        # TODO: We can actually just initialize our connection to the leader from the kv transfer params port argument.
+        self.worker = KvbmWorker(
+            num_device_blocks,
+            page_size,
+            tensors,
+            device_id=device_id,
+            worker_id=device_id,
+            dtype_width_bytes=kv_cache_dtype.itemsize,
         )
         self._connector.register_kv_caches(kv_caches)
 
