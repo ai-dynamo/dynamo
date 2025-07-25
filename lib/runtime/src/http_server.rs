@@ -437,8 +437,6 @@ uptime_seconds{namespace=\"http_server\"} 42
                 // TODO Add proper testing for
                 // trace id and parent id
 
-                // let file_name = "./test_capture_log.txt";
-                // let guard = StderrOverride::from_file(file_name)?;
                 crate::logging::init();
 
                 let runtime = crate::Runtime::from_settings().unwrap();
