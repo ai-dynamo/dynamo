@@ -24,8 +24,6 @@
 **Dynamo Cloud** - A Kubernetes platform providing managed deployment experience for Dynamo inference graphs.
 
 ## E
-**@endpoint** - A Python decorator used to define service endpoints within a Dynamo component.
-
 **Endpoint** - A specific network-accessible API within a Dynamo component, such as `generate` or `load_metrics`.
 
 ## F
@@ -70,8 +68,6 @@
 **RDMA (Remote Direct Memory Access)** - Technology that allows direct memory access between distributed systems, used for efficient KV cache transfers.
 
 ## S
-**@service** - Python decorator used to define a Dynamo service class.
-
 **SGLang** - Fast LLM inference framework with native embedding support and RadixAttention.
 
 ## T
@@ -83,6 +79,9 @@
 
 ## V
 **vLLM** - High-throughput LLM serving engine with Ray distributed support and PagedAttention.
+
+## W
+**Wide Expert Parallelism (WideEP)** - Mixture-of-Experts deployment strategy that spreads experts across many GPUs (e.g., 64-way EP) so each GPU hosts only a few experts.
 
 ## X
 **xPyD (x Prefill y Decode)** - Dynamo notation describing disaggregated serving configurations where x prefill workers serve y decode workers. Dynamo supports runtime-reconfigurable xPyD.
