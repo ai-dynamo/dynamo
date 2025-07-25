@@ -24,7 +24,7 @@
 //! [log_filters]
 //! "test_logging" = "info"
 //! "test_logging::api" = "trace"
-//!     ```
+//! ```
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Once;
