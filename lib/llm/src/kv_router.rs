@@ -191,7 +191,7 @@ impl KvRouter {
                         }
                     };
                     if let Err(e) = kv_events_tx.send(event).await {
-                        tracing::debug!(
+                        tracing::warn!(
                             "failed to send kv event to indexer; shutting down: {:?}",
                             e
                         );

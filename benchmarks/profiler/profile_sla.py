@@ -23,13 +23,22 @@ import numpy as np
 import yaml
 from utils.config import CONFIG_MODIFIERS
 from utils.defaults import DECODE_NUM_REQUESTS_RANGE
-from utils.dynamo_deployment import DynamoDeploymentClient
+from utils.dynamo_deployment import (
+    DynamoDeploymentClient,
+    cleanup_remaining_deployments,
+)
 from utils.genai_perf import benchmark_decode, benchmark_prefill
 from utils.plot import (
     plot_decode_3d_surface,
     plot_decode_performance,
     plot_prefill_interpolation,
     plot_prefill_performance,
+)
+from utils.profile_cache import (
+    check_decode_results_exist,
+    check_prefill_results_exist,
+    load_existing_decode_results,
+    load_existing_prefill_results,
 )
 
 logger = logging.getLogger(__name__)
@@ -41,28 +50,6 @@ formatter = logging.Formatter(
 )
 console_handler.setFormatter(formatter)
 logger.addHandler(console_handler)
-
-
-async def cleanup_remaining_deployments(deployment_clients, namespace):
-    """Clean up any remaining tracked deployments, handling errors gracefully."""
-    if not deployment_clients:
-        logger.info("No deployments to clean up")
-        return
-
-    logger.info(f"Cleaning up {len(deployment_clients)} remaining deployments...")
-    for client in deployment_clients:
-        try:
-            logger.info(f"Attempting to delete deployment {client.deployment_name}...")
-            await client.delete_deployment()
-            logger.info(f"Successfully deleted deployment {client.deployment_name}")
-        except Exception as e:
-            # If deployment doesn't exist (404), that's fine - it was already cleaned up
-            if "404" in str(e) or "not found" in str(e).lower():
-                logger.info(f"Deployment {client.deployment_name} was already deleted")
-            else:
-                logger.error(
-                    f"Failed to delete deployment {client.deployment_name}: {e}"
-                )
 
 
 async def run_profile(args):
@@ -98,14 +85,47 @@ async def run_profile(args):
 
         model_name = config_modifier.get_model_name(config)
 
+        # Log skip behavior
+        if args.force_rerun:
+            logger.info(
+                "Force rerun enabled - will re-run all tests even if results exist"
+            )
+        elif args.skip_existing_results:
+            logger.info(
+                "Skip existing results enabled - will skip TP sizes with existing results"
+            )
+        else:
+            logger.info("Skip existing results disabled - will re-run all tests")
+
         # first profile prefill
         prefill_tp_size = []
         prefill_ttft = []
         prefill_thpt_per_gpu = []
         logger.info("Profiling prefill...")
         prefill_config = config_modifier.convert_config(config, "prefill")
+        frontend_port = config_modifier.get_port(config)
         for tp_size in profile_tp_size:
             logger.info(f"Profiling prefill with TP size {tp_size}...")
+
+            # Check if results already exist for this TP size
+            if (
+                args.skip_existing_results
+                and not args.force_rerun
+                and check_prefill_results_exist(args.output_dir, tp_size, args.isl)
+            ):
+                logger.info(f"Skipping prefill TP{tp_size} - results already exist")
+                ttft, thpt_per_gpu = load_existing_prefill_results(
+                    args.output_dir, tp_size, args.isl
+                )
+                if ttft is not None and thpt_per_gpu is not None:
+                    prefill_tp_size.append(tp_size)
+                    prefill_ttft.append(ttft)
+                    prefill_thpt_per_gpu.append(thpt_per_gpu)
+                    logger.info(
+                        f"Loaded existing prefill results: TP{tp_size} TTFT={ttft:.2f}ms, throughput={thpt_per_gpu:.2f} tokens/s/GPU"
+                    )
+                continue
+
             prefill_config = config_modifier.set_config_tp_size(prefill_config, tp_size)
             logger.info(f"Dynamo config: {prefill_config}")
 
@@ -121,18 +141,14 @@ async def run_profile(args):
                 base_log_dir=work_dir,
                 model_name=model_name,
                 service_name=args.service_name,
+                frontend_port=frontend_port,
             )
+            logger.info(f"Created client with service_name: {client.service_name}")
             deployment_clients.append(client)  # Track for cleanup
             await client.create_deployment(prefill_config_fn)
             logger.info("Waiting for deployment to be ready...")
-            try:
-                await client.wait_for_deployment_ready()
-                logger.info("Deployment is ready")
-            except TimeoutError:
-                logger.error(
-                    "Deployment failed to become ready within timeout, skipping profiling"
-                )
-                continue
+            await client.wait_for_deployment_ready()
+            logger.info("Deployment is ready")
 
             logger.info("Getting deployment logs...")
             await client.get_deployment_logs()
@@ -154,9 +170,7 @@ async def run_profile(args):
 
             print("Cleaning up deployment...")
             await client.delete_deployment()
-            deployment_clients.remove(
-                client
-            )  # Remove from cleanup list since it's deleted
+            deployment_clients.remove(client)
             print("Deployment deleted")
 
         # Plot the results as a 2D scatter plot
@@ -180,6 +194,45 @@ async def run_profile(args):
         decode_config = config_modifier.convert_config(config, "decode")
         for tp_size in profile_tp_size:
             logger.info(f"Profiling decode with TP size {tp_size}...")
+
+            # Check if results already exist for this TP size
+            if (
+                args.skip_existing_results
+                and not args.force_rerun
+                and check_decode_results_exist(
+                    args.output_dir, tp_size, args.isl, args.osl
+                )
+            ):
+                logger.info(f"Skipping decode TP{tp_size} - results already exist")
+                existing_results = load_existing_decode_results(
+                    args.output_dir, tp_size, args.isl, args.osl
+                )
+                if existing_results:
+                    # Add existing results to our arrays
+                    engine_decode_itl = []
+                    engine_decode_thpt_per_gpu = []
+                    for itl, thpt_per_gpu, concurrency in existing_results:
+                        decode_tp_size.append(tp_size)
+                        decode_itl.append(itl)
+                        decode_thpt_per_gpu.append(thpt_per_gpu)
+                        decode_concurrency.append(concurrency)
+                        # We need to get kv_cache_size from existing logs or estimate it
+                        estimated_kv_cache = max(
+                            100000, concurrency * (args.isl + args.osl) * 2
+                        )  # Conservative estimate
+                        decode_kv_cache_size.append(estimated_kv_cache)
+                        engine_decode_itl.append(itl)
+                        engine_decode_thpt_per_gpu.append(thpt_per_gpu)
+
+                    # Store results for plotting
+                    decode_results.append(
+                        (tp_size, engine_decode_itl, engine_decode_thpt_per_gpu)
+                    )
+                    logger.info(
+                        f"Loaded {len(existing_results)} existing decode results for TP{tp_size}"
+                    )
+                continue
+
             decode_config = config_modifier.set_config_tp_size(decode_config, tp_size)
             logger.info(f"Dynamo config: {decode_config}")
 
@@ -195,18 +248,13 @@ async def run_profile(args):
                 base_log_dir=work_dir,
                 model_name=model_name,
                 service_name=args.service_name,
+                frontend_port=frontend_port,
             )
             deployment_clients.append(client)  # Track for cleanup
             await client.create_deployment(decode_config_fn)
             logger.info("Waiting for deployment to be ready...")
-            try:
-                await client.wait_for_deployment_ready()
-                logger.info("Deployment is ready")
-            except TimeoutError:
-                logger.error(
-                    "Deployment failed to become ready within timeout, skipping profiling"
-                )
-                continue
+            await client.wait_for_deployment_ready()
+            logger.info("Deployment is ready")
 
             logger.info("Getting deployment logs...")
             await client.get_deployment_logs()
@@ -253,9 +301,7 @@ async def run_profile(args):
 
             print("Cleaning up deployment...")
             await client.delete_deployment()
-            deployment_clients.remove(
-                client
-            )  # Remove from cleanup list since it's deleted
+            deployment_clients.remove(client)
             print("Deployment deleted")
 
             # Store partial results for plotting later
@@ -334,7 +380,9 @@ async def run_profile(args):
             f"Profiling prefill under best TP {best_prefill_tp} with different ISL..."
         )
         prefill_config = config_modifier.convert_config(config, "prefill")
-        prefill_config = config_modifier.set_config_tp_size(prefill_config, tp_size)
+        prefill_config = config_modifier.set_config_tp_size(
+            prefill_config, best_prefill_tp
+        )
         logger.info(f"Dynamo config: {prefill_config}")
 
         work_dir = f"{args.output_dir}/selected_prefill_interpolation"
@@ -349,6 +397,7 @@ async def run_profile(args):
             base_log_dir=work_dir,
             model_name=model_name,
             service_name=args.service_name,
+            frontend_port=frontend_port,
         )
         deployment_clients.append(client)  # Track for cleanup
         await client.create_deployment(prefill_config_fn)
@@ -370,27 +419,26 @@ async def run_profile(args):
                 f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
             )
 
-            base_url = client.get_service_url()
-            for isl in range(
-                100,
-                args.max_context_length,
-                (args.max_context_length - 100)
-                // args.prefill_interpolation_granularity,
-            ):
-                # run genai-perf
-                genai_perf_artifact_dir = f"{work_dir}/gap_isl{isl}"
-                gap_result = benchmark_prefill(
-                    isl, genai_perf_artifact_dir, model_name, base_url=base_url
-                )
-                if gap_result is not None:
-                    ttft = gap_result["time_to_first_token"]["avg"]
-                    prefill_isl.append(isl)
-                    prefill_ttft.append(ttft)
-                    prefill_thpt_per_gpu.append(isl / ttft / best_prefill_tp * 1000)
+        base_url = client.get_service_url()
+        for isl in range(
+            100,
+            args.max_context_length,
+            (args.max_context_length - 100) // args.prefill_interpolation_granularity,
+        ):
+            # run genai-perf
+            genai_perf_artifact_dir = f"{work_dir}/gap_isl{isl}"
+            gap_result = benchmark_prefill(
+                isl, genai_perf_artifact_dir, model_name, base_url=base_url
+            )
+            if gap_result is not None:
+                ttft = gap_result["time_to_first_token"]["avg"]
+                prefill_isl.append(isl)
+                prefill_ttft.append(ttft)
+                prefill_thpt_per_gpu.append(isl / ttft / best_prefill_tp * 1000)
 
         print("Cleaning up deployment...")
         await client.delete_deployment()
-        deployment_clients.remove(client)  # Remove from cleanup list since it's deleted
+        deployment_clients.remove(client)
         print("Deployment deleted")
 
         # Interpolate prefill_ttft vs prefill_isl with quadratic function (y=ax^2+bx+c)
@@ -442,71 +490,63 @@ async def run_profile(args):
             namespace=args.namespace,
             base_log_dir=work_dir,
             service_name=args.service_name,
+            frontend_port=frontend_port,
         )
         deployment_clients.append(client)  # Track for cleanup
         await client.create_deployment(decode_config_fn)
         logger.info("Waiting for deployment to be ready...")
-        try:
-            await client.wait_for_deployment_ready()
-            logger.info("Deployment is ready")
-            skip_profile = False
-        except TimeoutError:
-            logger.error(
-                "Deployment failed to become ready within timeout, skipping profiling"
-            )
-            skip_profile = True
+        await client.wait_for_deployment_ready()
+        logger.info("Deployment is ready")
 
-        if not skip_profile:
-            logger.info("Getting deployment logs...")
-            await client.get_deployment_logs()
-            logger.info(
-                f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
-            )
+        logger.info("Getting deployment logs...")
+        await client.get_deployment_logs()
+        logger.info(
+            f"Logs have been saved to {client.base_log_dir / client.deployment_name}"
+        )
 
-            max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-                f"{work_dir}/vllm-v1-agg/vllmdecodeworker/0.log"
-            )
+        max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
+            f"{work_dir}/vllm-v1-agg/vllmdecodeworker/0.log"
+        )
 
-            osl = 500  # not too large to reduce ITL variance, not too small to have stable measurement
-            base_url = client.get_service_url()
-            for isl in range(
-                100,
-                args.max_context_length - osl,
-                (args.max_context_length - osl)
-                // args.decode_interpolation_granularity,
-            ):
-                max_concurrency = max_kv_tokens // (isl + osl)
-                sweep_num_request = list(
-                    range(
-                        1,
-                        max_concurrency,
-                        max_concurrency // args.decode_interpolation_granularity,
-                    )
+        osl = 500  # not too large to reduce ITL variance, not too small to have stable measurement
+        base_url = client.get_service_url()
+        for isl in range(
+            100,
+            args.max_context_length - osl,
+            (args.max_context_length - osl) // args.decode_interpolation_granularity,
+        ):
+            max_concurrency = max_kv_tokens // (isl + osl)
+            sweep_num_request = list(
+                range(
+                    1,
+                    max_concurrency,
+                    max_concurrency // args.decode_interpolation_granularity,
                 )
-                for num_request in sweep_num_request:
-                    genai_perf_artifact_dir = (
-                        f"{work_dir}/gap_isl{isl}_osl{osl}_n{num_request}"
+            )
+            for num_request in sweep_num_request:
+                genai_perf_artifact_dir = (
+                    f"{work_dir}/gap_isl{isl}_osl{osl}_n{num_request}"
+                )
+                gap_result = benchmark_decode(
+                    isl,
+                    osl,
+                    num_request,
+                    genai_perf_artifact_dir,
+                    model_name,
+                    base_url=base_url,
+                )
+                if gap_result is not None:
+                    itl = gap_result["inter_token_latency"]["avg"]
+                    x_kv_usage.append((isl + osl / 2) * num_request / max_kv_tokens)
+                    y_context_length.append(isl + osl / 2)
+                    z_itl.append(itl)
+                    z_thpt_per_gpu.append(
+                        gap_result["output_token_throughput"]["avg"] / best_decode_tp
                     )
-                    gap_result = benchmark_decode(
-                        isl,
-                        osl,
-                        num_request,
-                        genai_perf_artifact_dir,
-                        model_name,
-                        base_url=base_url,
-                    )
-                    if gap_result is not None:
-                        itl = gap_result["inter_token_latency"]["avg"]
-                        x_kv_usage.append((isl + osl / 2) * num_request / max_kv_tokens)
-                        y_context_length.append(isl + osl / 2)
-                        z_itl.append(itl)
-                        z_thpt_per_gpu.append(
-                            gap_result["output_token_throughput"]["avg"] / tp_size
-                        )
 
         print("Cleaning up deployment...")
         await client.delete_deployment()
-        deployment_clients.remove(client)  # Remove from cleanup list since it's deleted
+        deployment_clients.remove(client)
         print("Deployment deleted")
 
         # Save the data points to a .npz file
@@ -526,8 +566,14 @@ async def run_profile(args):
             x_kv_usage, y_context_length, z_itl, best_decode_tp, work_dir
         )
 
+    except Exception as e:
+        logger.error(f"Profile job failed with error: {e}")
+        raise
     finally:
+        # Always clean up any remaining deployments, even if the job failed
+        logger.info("Performing final cleanup of any remaining deployments...")
         await cleanup_remaining_deployments(deployment_clients, args.namespace)
+        logger.info("Final cleanup completed.")
 
 
 if __name__ == "__main__":
@@ -578,6 +624,16 @@ if __name__ == "__main__":
         help="maximum number of GPUs per engine",
     )
     parser.add_argument(
+        "--skip-existing-results",
+        action="store_true",
+        help="Skip TP sizes that already have results in the output directory",
+    )
+    parser.add_argument(
+        "--force-rerun",
+        action="store_true",
+        help="Force re-running all tests even if results already exist (overrides --skip-existing-results)",
+    )
+    parser.add_argument(
         "--isl", type=int, default=3000, help="target input sequence length"
     )
     parser.add_argument(
@@ -611,6 +667,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--service-name",
         type=str,
+        default="",
         help="Service name for port forwarding (default: {deployment_name}-frontend)",
     )
     args = parser.parse_args()

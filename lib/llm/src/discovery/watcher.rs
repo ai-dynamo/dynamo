@@ -178,7 +178,6 @@ impl ModelWatcher {
                 Some(card)
             }
             Err(err) => {
-                // `dynamo serve` isn't using MDC yet so can't be an error
                 tracing::info!(%err, "load_mdc did not complete");
                 None
             }

@@ -45,6 +45,7 @@ class DynamoDeploymentClient:
         namespace: str,
         model_name: str = "Qwen/Qwen3-0.6B",
         deployment_name: str = "vllm-v1-agg",
+        frontend_port: int = 8000,
         base_log_dir: Optional[str] = None,
         service_name: Optional[str] = None,
     ):
@@ -66,6 +67,7 @@ class DynamoDeploymentClient:
             Dict[str, Any]
         ] = None  # Will store the full deployment spec
         self.base_log_dir = Path(base_log_dir) if base_log_dir else Path("logs")
+        self.frontend_port = frontend_port
 
     def _init_kubernetes(self):
         """Initialize kubernetes client"""
@@ -84,9 +86,7 @@ class DynamoDeploymentClient:
         """
         Get the service URL using Kubernetes service DNS.
         """
-        service_url = (
-            f"http://{self.service_name}.{self.namespace}.svc.cluster.local:8000"
-        )
+        service_url = f"http://{self.service_name}.{self.namespace}.svc.cluster.local:{self.frontend_port}"
         print(f"Using service URL: {service_url}")
         return service_url
 
@@ -107,11 +107,6 @@ class DynamoDeploymentClient:
         else:
             self.deployment_spec = deployment
 
-        # Ensure deployment_spec is not None
-        assert (
-            self.deployment_spec is not None
-        ), "deployment_spec should not be None after assignment"
-
         # Extract component names
         self.components = [
             svc.lower() for svc in self.deployment_spec["spec"]["services"].keys()
@@ -129,18 +124,20 @@ class DynamoDeploymentClient:
                 plural="dynamographdeployments",
                 body=self.deployment_spec,
             )
+            print(f"Successfully created deployment {self.deployment_name}")
         except kubernetes.client.rest.ApiException as e:
             if e.status == 409:  # Already exists
                 print(f"Deployment {self.deployment_name} already exists")
             else:
+                print(f"Failed to create deployment {self.deployment_name}: {e}")
                 raise
 
-    async def wait_for_deployment_ready(self, timeout: int = 600):
+    async def wait_for_deployment_ready(self, timeout: int = 1800):
         """
         Wait for the custom resource to be ready.
 
         Args:
-            timeout: Maximum time to wait in seconds
+            timeout: Maximum time to wait in seconds, default to 30 mins (image pulling can take a while)
         """
         start_time = time.time()
         # TODO: A little brittle, also should output intermediate status every so often.
@@ -253,6 +250,38 @@ class DynamoDeploymentClient:
         except kubernetes.client.rest.ApiException as e:
             if e.status != 404:  # Ignore if already deleted
                 raise
+
+
+async def cleanup_remaining_deployments(deployment_clients, namespace):
+    """Clean up any remaining tracked deployments, handling errors gracefully."""
+    import logging
+
+    logger = logging.getLogger(__name__)
+
+    if not deployment_clients:
+        logger.info("No deployments to clean up")
+        return
+
+    logger.info(f"Cleaning up {len(deployment_clients)} remaining deployments...")
+    for deployment_client in deployment_clients:
+        try:
+            logger.info(
+                f"Attempting to delete deployment {deployment_client.deployment_name}..."
+            )
+            await deployment_client.delete_deployment()
+            logger.info(
+                f"Successfully deleted deployment {deployment_client.deployment_name}"
+            )
+        except Exception as e:
+            # If deployment doesn't exist (404), that's fine - it was already cleaned up
+            if "404" in str(e) or "not found" in str(e).lower():
+                logger.info(
+                    f"Deployment {deployment_client.deployment_name} was already deleted"
+                )
+            else:
+                logger.error(
+                    f"Failed to delete deployment {deployment_client.deployment_name}: {e}"
+                )
 
 
 async def main():

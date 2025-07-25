@@ -198,13 +198,14 @@ class VllmV1ConfigModifier:
             "args"
         ]
         args = break_arguments(args)
-        for arg in args:
-            if arg.startswith("port="):
-                return int(arg.split("=")[1])
-        logger.warning(
-            f"Port not found in configuration args, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
-        )
-        return DYNAMO_RUN_DEFAULT_PORT
+        try:
+            idx = args.index("--http-port")
+            return int(args[idx + 1])
+        except ValueError:
+            logger.warning(
+                f"Port not found in configuration args, using default port: {DYNAMO_RUN_DEFAULT_PORT}"
+            )
+            return DYNAMO_RUN_DEFAULT_PORT
 
     @classmethod
     def get_kv_cache_size_from_dynamo_log(cls, dynamo_log_fn: str) -> int:

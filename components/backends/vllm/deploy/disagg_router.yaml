@@ -38,8 +38,11 @@ spec:
           memory: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.4
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
+          command:
+            - /bin/sh
+            - -c
           args:
             - "python3 -m dynamo.frontend --http-port 8000 --router-mode kv"
     VllmDecodeWorker:
@@ -77,10 +80,13 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.4
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
+          command:
+            - /bin/sh
+            - -c
           args:
-            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager 2>&1 | tee /tmp/vllm.log"
+            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager 2>&1 | tee /tmp/vllm.log
     VllmPrefillWorker:
       dynamoNamespace: vllm-v1-disagg-router
       envFromSecret: hf-token-secret
@@ -116,7 +122,10 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm_v1-runtime:dep-216.4
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
+          command:
+            - /bin/sh
+            - -c
           args:
-            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --is-prefill-worker 2>&1 | tee /tmp/vllm.log"
+            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --is-prefill-worker 2>&1 | tee /tmp/vllm.log

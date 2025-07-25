@@ -18,6 +18,9 @@ ARG TORCH_BACKEND="cu128"
 ARG DEEPGEMM_REF="03d0be3"
 ARG FLASHINF_REF="1d72ed4"
 
+# Make sure to update the dependency version in pyproject.toml when updating this
+ARG VLLM_VERSION="0.9.2"
+
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
 #   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
@@ -39,10 +42,11 @@ ARG ARCH_ALT=x86_64
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
-# Redeclare ARCH, ARCH_ALT, TORCH_BACKEND so they're available in this stage
+# Redeclare ARCH, ARCH_ALT, TORCH_BACKEND, VLLM_VERSION so they're available in this stage
 ARG ARCH
 ARG ARCH_ALT
 ARG TORCH_BACKEND
+ARG VLLM_VERSION
 
 USER root
 ARG PYTHON_VERSION=3.12
@@ -134,7 +138,7 @@ RUN git clone "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
     cd ${NIXL_SRC_DIR} && \
     git checkout ${NIXL_REF} && \
     if [ "$ARCH" = "arm64" ]; then \
-        nixl_build_args="-Ddisable_gds_backend=true -Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
+        nixl_build_args="-Ddisable_gds_backend=true"; \
     else \
         nixl_build_args=""; \
     fi && \
@@ -171,8 +175,7 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # TEMP: disable gds backend for arm64
 RUN if [ "$ARCH" = "arm64" ]; then \
         cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl \
-        --config-settings=setup-args="-Ddisable_gds_backend=true" \
-        --config-settings=setup-args="-Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
+        --config-settings=setup-args="-Ddisable_gds_backend=true"; \
     else \
         cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl; \
     fi && \
@@ -190,13 +193,17 @@ ARG MAX_JOBS=16
 ENV MAX_JOBS=$MAX_JOBS
 ENV CUDA_HOME=/usr/local/cuda
 
-# TODO - split vllm, DeepEP, DeepGeMM, PPLX installs
-# Should be able to select how you want your build to go
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
-    cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
-    chmod +x /tmp/install_vllm.sh && \
-    /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt --deepgemm-ref $DEEPGEMM_REF --flashinf-ref $FLASHINF_REF --torch-backend $TORCH_BACKEND
+    if [ "$ARCH" = "arm64" ]; then \
+        # TODO - split vllm, DeepEP, DeepGeMM, PPLX installs
+        # Should be able to select how you want your build to go
+        cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
+        chmod +x /tmp/install_vllm.sh && \
+        /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt --deepgemm-ref $DEEPGEMM_REF --flashinf-ref $FLASHINF_REF --torch-backend $TORCH_BACKEND; \
+    else \
+        uv pip install "vllm==${VLLM_VERSION}"; \
+    fi
 
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
@@ -348,7 +355,6 @@ COPY LICENSE /workspace/
 COPY Cargo.toml /workspace/
 COPY Cargo.lock /workspace/
 COPY rust-toolchain.toml /workspace/
-COPY hatch_build.py /workspace/
 
 # Copy source code
 COPY lib/ /workspace/lib/
@@ -392,22 +398,11 @@ COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 # Copy rest of the code
 COPY . /workspace
 
-# Build C bindings, creates lib/bindings/c/include
-#
-# TODO: In theory the 'cargo build' in earlier stage covers this, we "just" need to copy the
-# `lib/bindings/c/include` folder that build.rs generated across.
-# I couldn't get that to work, hence TODO.
-RUN cd /workspace/lib/bindings/c && cargo build --release --locked
-
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
     mkdir /opt/dynamo/bindings/lib && \
     cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
-    cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
-    cp -r lib/bindings/c/include /opt/dynamo/bindings/.  && \
-    cp target/release/dynamo-run /usr/local/bin && \
-    cp target/release/metrics /usr/local/bin && \
-    cp target/release/mock_worker /usr/local/bin
+    cp target/release/metrics /usr/local/bin
 
 RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/dist/ai_dynamo*any.whl
@@ -455,9 +450,6 @@ RUN apt-get update && \
         cuda-toolkit-12-8 && \
     rm -rf /var/lib/apt/lists/*
 
-### COPY BINDINGS ###
-# Copy all bindings (wheels, lib, include) from ci_minimum
-COPY --from=ci_minimum /opt/dynamo/bindings /opt/dynamo/bindings
 ### COPY NATS & ETCD ###
 # Copy nats and etcd from base image
 COPY --from=base /usr/bin/nats-server /usr/bin/nats-server
@@ -466,11 +458,16 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 
 # Copy UCX from base image as plugin for NIXL
 # Copy NIXL source from wheel_builder image
+# Copy dynamo wheels for gitlab artifacts
 COPY --from=base /usr/local/ucx /usr/local/ucx
 COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
+COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 
 # Copies vllm, DeepEP, DeepGEMM, PPLX repos (all editable installs) and nvshmem binaries
-COPY --from=base /opt/vllm /opt/vllm
+RUN if [ "$ARCH" = "arm64" ]; then \
+        COPY --from=base /opt/vllm /opt/vllm; \
+    fi
+
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
 $NIXL_LIB_DIR:\
@@ -479,10 +476,11 @@ $NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib/ucx:\
 $LD_LIBRARY_PATH
 
-
 # Copy entire venv
-# Theres a lot of stuff we'd have to re-compile
-# Think its better to just copy
+# Theres a lot of stuff we'd have to re-compile (for arm64)
+# TODO: use pip ai-dynamo[vllm] in venv to replicate end user environment
+# Copy metrics binary from wheel_builder image, not part of ai-dynamo wheel
+COPY --from=ci_minimum /workspace/target/release/metrics /usr/local/bin/metrics
 COPY --from=ci_minimum ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
 # Once UX refactor is merged

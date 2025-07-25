@@ -28,52 +28,7 @@ The SLA planner consists of several key components:
 
 ## Pre-Deployment Profiling
 
-Before using the SLA planner, you must profile the performance of the selected model and GPU to generate interpolation data:
-
-```bash
-cd $DYNAMO_HOME/benchmarks/profiler/
-python -m profile_sla \
-  --backend <vllm_v0/vllm_v1> \
-  --config <path-to-dynamo-config-file> \
-  --output-dir <path-to-profile-results-dir> \
-  --isl <target-input-sequence-length> \
-  --osl <target-output-sequence-length> \
-  --ttft <target-ttft-ms> \
-  --itl <target-itl-ms>
-```
-
-This script will:
-- Profile prefill performance across different tensor parallelism (TP) sizes
-- Profile decode performance under various concurrency levels
-- Recommend optimal TP configurations and scaling thresholds
-- Generate interpolation data for the recommended TP configuration
-
-### Prefill Interpolation Data
-
-In prefill engine, prefills are usually done with batch size=1 and only the ISL (excluding prefix cache hit) affects the iteration time. The script profiles the selected prefill TP configuration across different ISLs and record the TTFT and prefill throughput per GPU under those ISLs.
-
-### Decode Interpolation Data
-In decode engine, decode requests are added inflight and iteration time (or ITL) depends on both the context length and the real-time load of the engine. We capture the real-time load of the engine with active kv usage and average context length. The active kv usage determines the complexity of the memory-bounded attention kernel while the active kv usage divided the average context length determines the complexity of the computation bound MLP kernel. For example, the below figure shows the ITL of DS-Distilled Llama 8b model on H100 TP4. The ITL grows near-linearly with active kv usage under a fixed context length. And the slope increases as the context length decreases.
-
-![images](../images/itl_interpolation.png)
-
-The script profiles the selected decode TP configuration across different active kv blocks and average context length.
-
-### Output Format of Interpolation Data
-
-After suggesting the optimal TP configuration, two `.npz` files that describe the performance characteristics of the prefill and decode engines in their suggested parallel configurations will be generated. The two `.npz` files are:
-* `${benchmark_result_dir}/selected_prefill_interpolation/raw_data.npz}`
-  * `prefill_isl`: a 1D Numpy array to store the ISLs used to profile the prefill engine.
-  * `prefill_ttft`: a 1D Numpy array to store the TTFTs under the corresponding ISLs when the prefill engine is exclusively running each prefill request (i.e., with batch size of 1). The unit is in milliseconds.
-  * `prefill_thpt_per_gpu`: a 1D Numpy array to store the prefill throughput per GPU under the corresponding ISLs. The unit is in tokens per second per GPU.
-* `${benchmark_result_dir}/selected_decode_interpolation/raw_data.npz`
-  * `max_kv_tokens`: a 1D Numpy array with only one element to store the total number of KV tokens in the decode engine.
-  * `x_kv_usage`: a 1D Numpy array to store the percentage of the active KV blocks (in the range of [0, 1]) used to profile the decode engine. The active KV blocks can be controlled by varying `(ISL + OSL / 2) * concurrency`.
-  * `y_context_length`: a 1D Numpy array to store the average context length (ISL + OSL / 2) used to profile the decode engine.
-  * `z_itl`: a 1D Numpy array to store the ITLs under the corresponding active KV usage and context length. To skip the prefill stage while maintaining the context length, benchmark can be done by turn on kv reuse and warmup the engine with the prompts first before running the actual profiling. The unit is in milliseconds.
-  * `z_thpt_per_gpu`: a 1D Numpy array to store the decode throughput per GPU under the corresponding active KV usage and context length. The unit is in tokens per second per GPU.
-
-SLA planner can work with any interpolation data that follows the above format. For best results, use fine-grained and high coverage interpolation data for the prefill and decode engines.
+SLA-based planner requires pre-deployment profiling to operate. See [Pre-Deployment Profiling](pre_deployment_profiling.md) for more details.
 
 ## Load Prediction
 
@@ -151,20 +106,11 @@ Finally, SLA planner applies the change by scaling up/down the number of prefill
 
 ## Deploying
 
-To deploy SLA-planner, use the rust frontend (`dynamo-run`) that reports metrics at `/metrics` HTTP endpoint. You can also use your own frontend, but it must report number of requests, ISL, OSL, TTFT, ITL in the same format.
+To deploy SLA-planner, ensure etcd and NATS are running first, then use the frontend that reports metrics at `/metrics` HTTP endpoint. You can also use your own frontend, but it must report number of requests, ISL, OSL, TTFT, ITL in the same format.
 
 SLA-planner and prometheus server are provided as common components that can be directly imported from `dynamo` package. The following changes are needed:
 - Add `Planner` and `Prometheus` components' dependency in `Frontend`.
 - Link `Planner` and `Prometheus` in the graph.
 - Add `Planner` and `Prometheus` configurations in the config file.
 
-We provide examples for `vllm_v0` and `vllm_v1`:
-```bash
-# vllm_v0
-cd $DYNAMO_HOME/examples/vllm_v0
-dynamo serve graphs.disagg_planner:Frontend -f ./configs/disagg_planner.yaml
-
-# vllm_v1
-cd $DYNAMO_HOME/examples/vllm_v1
-dynamo serve graphs.disagg_planner:Frontend -f ./configs/disagg_planner.yaml
-```
+The SLA planner integration with the new frontend + worker architecture is currently a work in progress. This documentation will be updated with the new deployment patterns and code examples once the SLA planner component has been fully adapted to the new workflow.
