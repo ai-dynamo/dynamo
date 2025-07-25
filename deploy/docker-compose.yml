@@ -92,7 +92,7 @@ services:
     image: prom/prometheus:v3.4.1
     container_name: prometheus
     volumes:
-      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./metrics/prometheus.yml:/etc/prometheus/prometheus.yml
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
       - '--storage.tsdb.path=/prometheus'
@@ -123,8 +123,8 @@ services:
     image: grafana/grafana-enterprise:12.0.1
     container_name: grafana
     volumes:
-      - ./grafana_dashboards:/etc/grafana/provisioning/dashboards
-      - ./grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
+      - ./metrics/grafana_dashboards:/etc/grafana/provisioning/dashboards
+      - ./metrics/grafana-datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml
     environment:
       - GF_SERVER_HTTP_PORT=3001
       # do not make it admin/admin, because you will be prompted to change the password every time
