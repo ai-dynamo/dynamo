@@ -36,12 +36,14 @@ As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build container
 2. Start Dynamo dependencies. Assume you're at the root dynamo path:
 
    ```bash
-   docker compose -f deploy/docker-compose.yml up -d  # Minimum components for Dynamo: etcd/nats/dcgm-exporter
-   # or
-   docker compose -f deploy/docker-compose.yml --profile metrics up -d  # In addition to the above, start Prometheus & Grafana
+   # Start the basic services (etcd & natsd), along with Prometheus and Grafana
+   docker compose -f deploy/metrics/docker-compose.yml --profile metrics up -d
+
+   # Minimum components for Dynamo: etcd/nats/dcgm-exporter
+   docker compose -f deploy/metrics/docker-compose.yml up -d
    ```
 
-   To target specific GPU(s), export the variable below before running Docker Compose:
+   Optional: To target specific GPU(s), export the variable below before running Docker Compose
    ```bash
    export CUDA_VISIBLE_DEVICES=0,2
    ```
@@ -90,10 +92,12 @@ The following configuration files should be present in this directory:
 - [grafana-datasources.yml](./grafana-datasources.yml): Contains Grafana datasource configuration
 - [grafana_dashboards/grafana-dashboard-providers.yml](./grafana_dashboards/grafana-dashboard-providers.yml): Contains Grafana dashboard provider configuration
 - [grafana_dashboards/grafana-dynamo-dashboard.json](./grafana_dashboards/grafana-dynamo-dashboard.json): A general Dynamo Dashboard for both SW and HW metrics.
-- [grafana_dashboards/grafana-llm-metrics.json](./grafana_dashboards/grafana-llm-metrics.json): Contains Grafana dashboard configuration for LLM specific metrics.
 - [grafana_dashboards/grafana-dcgm-metrics.json](./grafana_dashboards/grafana-dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
+- [grafana_dashboards/grafana-llm-metrics.json](./grafana_dashboards/grafana-llm-metrics.json): This file, which is being phased out, contains the Grafana dashboard configuration for LLM-specific metrics. It requires an additional `metrics` component to operate concurrently. A new version is under development.
 
 ## Running the example `metrics` component
+
+IMPORTANT: This section is being phased out, and some metrics may not function as expected. A new solution is under development.
 
 When you run the example [components/metrics](../../components/metrics/README.md) component, it exposes a Prometheus /metrics endpoint with the followings (defined in [../../components/metrics/src/lib.rs](../../components/metrics/src/lib.rs)):
 - `llm_requests_active_slots`: Number of currently active request slots per worker
