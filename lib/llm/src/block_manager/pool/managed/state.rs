@@ -13,6 +13,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+pub mod active;
+pub mod inactive;
+pub mod priority_key;
+
 use crate::block_manager::{
     block::{registry::BlockRegistrationError, BlockState, PrivateBlockExt},
     events::{PublishHandle, Publisher},
