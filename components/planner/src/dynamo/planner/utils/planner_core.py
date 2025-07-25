@@ -270,33 +270,11 @@ class Planner:
             return
 
         if not self.args.no_operation:
-            # scale up/down the number of prefill/decode non-blockingly
-            # TODO: add a check to avoid scaling before the previous scaling is completed
-            if next_num_p > len(self.p_endpoints):
-                for _ in range(next_num_p - len(self.p_endpoints)):
-                    self.connector.add_component(
-                        WORKER_COMPONENT_NAMES[self.args.backend].prefill_worker,
-                        blocking=False,
-                    )
-            elif next_num_p < len(self.p_endpoints):
-                for _ in range(len(self.p_endpoints) - next_num_p):
-                    self.connector.remove_component(
-                        WORKER_COMPONENT_NAMES[self.args.backend].prefill_worker,
-                        blocking=False,
-                    )
-
-            if next_num_d > len(self.d_endpoints):
-                for _ in range(next_num_d - len(self.d_endpoints)):
-                    self.connector.add_component(
-                        WORKER_COMPONENT_NAMES[self.args.backend].decode_worker,
-                        blocking=False,
-                    )
-            elif next_num_d < len(self.d_endpoints):
-                for _ in range(len(self.d_endpoints) - next_num_d):
-                    self.connector.remove_component(
-                        WORKER_COMPONENT_NAMES[self.args.backend].decode_worker,
-                        blocking=False,
-                    )
+            target_replicas = {
+                WORKER_COMPONENT_NAMES[self.args.backend].prefill_worker: next_num_p,
+                WORKER_COMPONENT_NAMES[self.args.backend].decode_worker: next_num_d,
+            }
+            self.connector.set_component_replicas(target_replicas, blocking=False)
 
     async def run(self):
         """Main loop for the planner"""

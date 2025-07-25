@@ -17,15 +17,19 @@ import asyncio
 from typing import Optional
 
 from kubernetes import client, config
+from kubernetes.config.config_exception import ConfigException
 
 
 class KubernetesAPI:
-    def __init__(self):
+    def __init__(self, k8s_namespace: Optional[str] = None):
         # Load kubernetes configuration
-        config.load_incluster_config()  # for in-cluster deployment
+        try:
+            config.load_incluster_config()  # for in-cluster deployment
+        except ConfigException:
+            config.load_kube_config()  # for out-of-cluster deployment
 
         self.custom_api = client.CustomObjectsApi()
-        self.current_namespace = self._get_current_namespace()
+        self.current_namespace = k8s_namespace or self._get_current_namespace()
 
     def _get_current_namespace(self) -> str:
         """Get the current namespace if running inside a k8s cluster"""
@@ -37,6 +41,18 @@ class KubernetesAPI:
         except FileNotFoundError:
             # Fallback to 'default' if not running in k8s
             return "default"
+
+    def _get_graph_deployment_from_name(
+        self, graph_deployment_name: str
+    ) -> Optional[dict]:
+        """Get the graph deployment from the dynamo graph deployment name"""
+        return self.custom_api.get_namespaced_custom_object(
+            group="nvidia.com",
+            version="v1alpha1",
+            namespace=self.current_namespace,
+            plural="dynamographdeployments",
+            name=graph_deployment_name,
+        )
 
     async def get_graph_deployment(
         self, component_name: str, dynamo_namespace: str
@@ -98,12 +114,8 @@ class KubernetesAPI:
             if not graph_deployment_name:
                 return None
 
-            graph_deployment = self.custom_api.get_namespaced_custom_object(
-                group="nvidia.com",
-                version="v1alpha1",
-                namespace=self.current_namespace,
-                plural="dynamographdeployments",
-                name=graph_deployment_name,
+            graph_deployment = self._get_graph_deployment_from_name(
+                graph_deployment_name
             )
 
             return graph_deployment
@@ -127,19 +139,36 @@ class KubernetesAPI:
             body=patch,
         )
 
+    async def is_deployment_ready(self, graph_deployment_name: str) -> bool:
+        """Check if a graph deployment is ready"""
+
+        graph_deployment = self._get_graph_deployment_from_name(graph_deployment_name)
+
+        if not graph_deployment:
+            raise ValueError(f"Graph deployment {graph_deployment_name} not found")
+
+        conditions = graph_deployment.get("status", {}).get("conditions", [])
+        ready_condition = next(
+            (c for c in conditions if c.get("type") == "Ready"), None
+        )
+
+        return ready_condition is not None and ready_condition.get("status") == "True"
+
     async def wait_for_graph_deployment_ready(
         self,
         graph_deployment_name: str,
-        max_attempts: int = 60,  # default: 10 minutes total
+        max_attempts: int = 180,  # default: 30 minutes total
         delay_seconds: int = 10,  # default: check every 10 seconds
     ) -> None:
         """Wait for a graph deployment to be ready"""
 
         for attempt in range(max_attempts):
             await asyncio.sleep(delay_seconds)
-            graph_deployment = await self.get_graph_deployment(
-                graph_deployment_name, self.current_namespace
+
+            graph_deployment = self._get_graph_deployment_from_name(
+                graph_deployment_name
             )
+
             if not graph_deployment:
                 raise ValueError(f"Graph deployment {graph_deployment_name} not found")
 
