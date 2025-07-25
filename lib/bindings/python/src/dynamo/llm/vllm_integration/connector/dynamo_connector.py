@@ -46,15 +46,17 @@ class DynamoConnector(KVConnectorBase_V1):
         assert vllm_config.kv_transfer_config is not None
         assert vllm_config.kv_transfer_config.engine_id is not None
         self.engine_id: EngineId = vllm_config.kv_transfer_config.engine_id
+        self._vllm_config = vllm_config
 
         if role == KVConnectorRole.SCHEDULER:
             self._scheduler = KvConnectorLeader(
                 vllm_config=vllm_config, engine_id=self.engine_id
             )
             self._worker = None
+
         elif role == KVConnectorRole.WORKER:
             self._worker = KvConnectorWorker(
-                vllm_config=vllm_config, engine_id=self.engine_id
+                vllm_config=self._vllm_config, engine_id=self.engine_id
             )
             self._scheduler = None
 
