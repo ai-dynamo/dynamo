@@ -45,14 +45,14 @@ The examples below assume you build the latest image yourself from source. If us
     :margin: 0
     :padding: 3 4 0 0
 
-    .. grid-item-card:: :doc:`Hello World </examples/hello_world>`
-        :link: /examples/hello_world
+    .. grid-item-card:: :doc:`Hello World </examples/runtime/hello_world/README.md>`
+        :link: /examples/runtime/hello_world/README.md
         :link-type: doc
 
         Demonstrates the basic concepts of Dynamo by creating a simple GPU-unaware graph
 
-    .. grid-item-card:: :doc:`LLM Serving with VLLM </components/backends/vllm>`
-        :link: /components/backends/vllm
+    .. grid-item-card:: :doc:`LLM Serving with VLLM </components/backends/vllm/README.md>`
+        :link: /components/backends/vllm/README.md
         :link-type: doc
 
         Presents examples and reference implementations for deploying Large Language Models (LLMs) in various configurations with VLLM.
