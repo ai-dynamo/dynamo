@@ -158,10 +158,7 @@ class KubernetesAPI:
             (c for c in conditions if c.get("type") == "Ready"), None
         )
 
-        if ready_condition and ready_condition.get("status") == "True":
-            return True
-        else:
-            return False
+        return ready_condition and ready_condition.get("status") == "True"
 
     async def wait_for_graph_deployment_ready(
         self,
