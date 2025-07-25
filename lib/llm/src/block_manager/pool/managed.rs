@@ -47,19 +47,16 @@ use crate::block_manager::events::Publisher;
 
 use super::*;
 
-pub mod active;
 pub mod controller;
-pub mod inactive;
-pub mod priority_key;
 pub mod state;
 
 mod direct;
 mod engine;
 
-use active::ActiveBlockPool;
 use direct::DirectAccess;
 use engine::Client;
-use inactive::InactiveBlockPool;
+use state::active::ActiveBlockPool;
+use state::inactive::InactiveBlockPool;
 
 use std::sync::Mutex;
 
@@ -288,12 +285,12 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M>
         self.client.touch_blocks(sequence_hashes).await
     }
 
-    fn touch_blocks_blocking(
-        &self,
-        sequence_hashes: &[SequenceHash],
-    ) -> Result<(), BlockPoolError> {
-        self.direct.touch_blocks(sequence_hashes)
-    }
+    // fn touch_blocks_blocking(
+    //     &self,
+    //     sequence_hashes: &[SequenceHash],
+    // ) -> Result<(), BlockPoolError> {
+    //     self.direct.touch_blocks(sequence_hashes)
+    // }
 
     async fn try_return_block(&self, block: OwnedBlock<S, L, M>) -> BlockPoolResult<()> {
         self.client.try_return_block(block).await
@@ -309,6 +306,45 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M>
 
     fn available_blocks(&self) -> u64 {
         self.available_blocks_counter.load(Ordering::Relaxed)
+    }
+}
+
+#[async_trait::async_trait]
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> AsyncBlockPoolController
+    for ManagedBlockPool<S, L, M>
+{
+    async fn status(&self) -> Result<BlockPoolStatus, BlockPoolError> {
+        self.client.status().await
+    }
+
+    async fn reset(&self) -> Result<(), BlockPoolError> {
+        self.client.reset().await
+    }
+
+    async fn reset_blocks(
+        &self,
+        sequence_hashes: &[SequenceHash],
+    ) -> Result<ResetBlocksResponse, BlockPoolError> {
+        self.client.reset_blocks(sequence_hashes).await
+    }
+}
+
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPoolController
+    for ManagedBlockPool<S, L, M>
+{
+    fn status_blocking(&self) -> Result<BlockPoolStatus, BlockPoolError> {
+        self.direct.status()
+    }
+
+    fn reset_blocking(&self) -> Result<(), BlockPoolError> {
+        self.direct.reset()
+    }
+
+    fn reset_blocks_blocking(
+        &self,
+        sequence_hashes: &[SequenceHash],
+    ) -> Result<ResetBlocksResponse, BlockPoolError> {
+        self.direct.reset_blocks(sequence_hashes)
     }
 }
 
@@ -609,7 +645,8 @@ mod tests {
 
         let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)?.into_blocks()?;
 
-        let pool = ManagedBlockPool::builder().blocks(blocks).build()?;
+        let pool = ManagedBlockPool::builder().build()?;
+        pool.add_blocks_blocking(blocks)?;
 
         Ok(pool)
     }
@@ -878,11 +915,12 @@ mod tests {
 
         // Create the ManagedBlockPool and add the blocks
         let pool = ManagedBlockPool::builder()
-            .blocks(blocks)
             .async_runtime(async_runtime.handle().clone())
             .default_duplication_setting(BlockRegistrationDuplicationSetting::Allowed)
             .build()
             .unwrap();
+
+        pool.add_blocks_blocking(blocks).unwrap();
 
         assert_eq!(pool.total_blocks(), count);
         assert_eq!(pool.available_blocks(), count);
@@ -967,11 +1005,12 @@ mod tests {
 
         // Create the ManagedBlockPool and add the blocks
         let pool = ManagedBlockPoolArgsBuilder::default()
-            .blocks(blocks)
             .async_runtime(async_runtime.handle().clone())
             .default_duplication_setting(BlockRegistrationDuplicationSetting::Disabled)
             .build()
             .unwrap();
+
+        pool.add_blocks_blocking(blocks).unwrap();
 
         assert_eq!(pool.total_blocks(), count);
         assert_eq!(pool.available_blocks(), count);

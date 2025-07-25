@@ -637,7 +637,8 @@ mod tests {
 
     use crate::block_manager::{
         block::{
-            locality::Local, BasicMetadata, BlockDataExt, BlockDataProvider, Blocks, MutableBlock,
+            locality::Local, BasicMetadata, Block, BlockDataExt, BlockDataProvider, Blocks,
+            MutableBlock,
         },
         layout::{nixl::NixlLayout, FullyContiguous, LayerSeparate, LayoutType},
         pool::{BlockRegistrationDuplicationSetting, ManagedBlockPool},
@@ -691,26 +692,31 @@ mod tests {
                 let mut pool_layout = FullyContiguous::allocate(config.clone(), allocator)?;
                 pool_layout.nixl_register(agent, None)?;
                 let blocks = Blocks::new(pool_layout, 42, 0)?.into_blocks()?;
-                Ok(Arc::new(
-                    ManagedBlockPool::builder()
-                        .blocks(blocks)
-                        .default_duplication_setting(duplication_setting)
-                        .build()?,
-                ))
+                let pool = ManagedBlockPool::builder()
+                    .default_duplication_setting(duplication_setting)
+                    .build()?;
+                add_blocks(&pool, blocks)?;
+                Ok(Arc::new(pool))
             }
             LayoutType::LayerSeparate { outer_contiguous } => {
                 let mut pool_layout =
                     LayerSeparate::allocate(config.clone(), allocator, outer_contiguous)?;
                 pool_layout.nixl_register(agent, None)?;
                 let blocks = Blocks::new(pool_layout, 42, 0)?.into_blocks()?;
-                Ok(Arc::new(
-                    ManagedBlockPool::builder()
-                        .blocks(blocks)
-                        .default_duplication_setting(duplication_setting)
-                        .build()?,
-                ))
+                let pool = ManagedBlockPool::builder()
+                    .default_duplication_setting(duplication_setting)
+                    .build()?;
+                add_blocks(&pool, blocks)?;
+                Ok(Arc::new(pool))
             }
         }
+    }
+
+    fn add_blocks<S: Storage>(
+        pool: &dyn BlockPool<S, Local, BasicMetadata>,
+        blocks: Vec<Block<S, Local, BasicMetadata>>,
+    ) -> Result<(), BlockPoolError> {
+        pool.add_blocks_blocking(blocks)
     }
 
     #[allow(clippy::type_complexity)]

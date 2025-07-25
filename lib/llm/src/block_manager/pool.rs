@@ -279,10 +279,14 @@ pub trait BlockPool<S: Storage, L: LocalityProvider, M: BlockMetadata>:
     ) -> BlockPoolResult<ImmutableBlocks<S, L, M>>;
 
     /// Touch a set of blocks. Equivalent to registering and then immediately dropping.
-    async fn touch_blocks(&self, sequence_hashes: &[SequenceHash]) -> BlockPoolResult<()>;
+    async fn touch_blocks(&self, sequence_hashes: &[SequenceHash]) -> BlockPoolResult<()> {
+        Ok(())
+    }
 
     /// Blocking version of [`BlockPool::touch_blocks`].
-    fn touch_blocks_blocking(&self, sequence_hashes: &[SequenceHash]) -> BlockPoolResult<()>;
+    fn touch_blocks_blocking(&self, sequence_hashes: &[SequenceHash]) -> BlockPoolResult<()> {
+        Ok(())
+    }
 
     /// Attempt to return a block to the pool. Blocks will naturally be returned to the pool when they are dropped
     /// and their reference count drops to 0; however, for testing and to synchronize the block returning to the
