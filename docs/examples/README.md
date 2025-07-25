@@ -48,7 +48,7 @@ Use [VLLM YAML](../../components/backends/vllm/deploy/agg.yaml) for an example.
 
 The examples use a prebuilt image from the `nvcr.io` registry.
 You can build your own image and update the image location in your CR file prior to applying.
-You could build your owm image using
+You could build your own image using
 
 ```bash
 ./container/build.sh --framework <your-inference-framework>

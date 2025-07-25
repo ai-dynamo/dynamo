@@ -70,13 +70,11 @@ spec:
       replicas: 1
       resources:
         requests:
-          cpu: "10"
-          memory: "20Gi"
-          gpu: "1"
+          cpu: "1"
+          memory: "4Gi"
         limits:
-          cpu: "10"
-          memory: "20Gi"
-          gpu: "1"
+          cpu: "1"
+          memory: "4Gi"
       extraPodSpec:
         mainContainer:
           image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:helloworld
