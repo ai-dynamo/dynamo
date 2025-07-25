@@ -15,19 +15,19 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: dynamo-deepseek-epp
+  name: qwen-epp
   namespace: default
   labels:
-    app: dynamo-deepseek-epp
+    app: qwen-epp
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: dynamo-deepseek-epp
+      app: qwen-epp
   template:
     metadata:
       labels:
-        app: dynamo-deepseek-epp
+        app: qwen-epp
     spec:
       # Conservatively, this timeout should mirror the longest grace period of the pods within the pool
       terminationGracePeriodSeconds: 130
@@ -37,7 +37,7 @@ spec:
         imagePullPolicy: IfNotPresent
         args:
         - -poolName
-        - "dynamo-deepseek"
+        - "qwen-pool"
         - "-poolNamespace"
         - "default"
         - -v

@@ -1,0 +1,140 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: vllm-v1-agg
+spec:
+  services:
+    Frontend:
+      livenessProbe:
+        httpGet:
+          path: /health
+          port: 8000
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      dynamoNamespace: vllm-v1-agg
+      componentType: main
+      replicas: 1
+      resources:
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+        limits:
+          cpu: "1"
+          memory: "2Gi"
+      extraPodSpec:
+        mainContainer:
+          image: gitlab-master.nvidia.com:5005/aire/microservices/compoundai/dynamo:1c03404f2624186523529b8d4ca04731b60aa8b9-31776852-vllm_v1-amd64
+          workingDir: /workspace/examples/vllm
+          args:
+            - dynamo
+            - run
+            - in=http
+            - out=dyn
+            - --http-port
+            - "8000"
+            - --router-mode
+            - kv
+    GemmaDecodeWorker:
+      envFromSecret: hf-token-secret
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      dynamoNamespace: vllm-v1-agg
+      componentType: worker
+      replicas: 1
+      resources:
+        requests:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+        limits:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: gitlab-master.nvidia.com:5005/aire/microservices/compoundai/dynamo:1c03404f2624186523529b8d4ca04731b60aa8b9-31776852-vllm_v1-amd64
+          workingDir: /workspace/examples/vllm
+          args:
+            - "python3 components/main.py --model google/gemma-3-1b-it --enforce-eager --endpoint dyn://dynamo.gemma.generate 2>&1 | tee /tmp/vllm.log"
+    QwenDecodeWorker:
+      envFromSecret: hf-token-secret
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      dynamoNamespace: vllm-v1-agg
+      componentType: worker
+      replicas: 1
+      resources:
+        requests:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+        limits:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: gitlab-master.nvidia.com:5005/aire/microservices/compoundai/dynamo:1c03404f2624186523529b8d4ca04731b60aa8b9-31776852-vllm_v1-amd64
+          workingDir: /workspace/examples/vllm
+          args:
+            - "python3 components/main.py --model Qwen/Qwen3-0.6B --enforce-eager --endpoint dyn://dynamo.qwen.generate 2>&1 | tee /tmp/vllm.log"
