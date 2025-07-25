@@ -13,9 +13,16 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+from typing import Optional
+
 from dynamo.planner.kube import KubernetesAPI
 from dynamo.planner.planner_connector import PlannerConnector
-from typing import Optional
+from dynamo.runtime.logging import configure_dynamo_logging
+
+configure_dynamo_logging()
+logger = logging.getLogger(__name__)
+
 
 class KubernetesConnector(PlannerConnector):
     def __init__(self, dynamo_namespace: str, k8s_namespace: Optional[str] = None):
@@ -69,7 +76,9 @@ class KubernetesConnector(PlannerConnector):
                     self._get_graph_deployment_name(deployment)
                 )
 
-    async def set_component_replicas(self, target_replicas: dict[str, int], blocking: bool = True):
+    async def set_component_replicas(
+        self, target_replicas: dict[str, int], blocking: bool = True
+    ):
         """Set the replicas for multiple components at once"""
 
         deployment = await self.kube_api.get_graph_deployment(
@@ -77,13 +86,17 @@ class KubernetesConnector(PlannerConnector):
         )
         if deployment is None:
             raise ValueError(
-                f"Graph {component_name} not found for namespace {self.dynamo_namespace}"
+                f"Graph {next(iter(target_replicas))} not found for namespace {self.dynamo_namespace}"
             )
-        
-        if not await self.kube_api.is_deployment_ready(self._get_graph_deployment_name(deployment)):
-            logger.warning(f"Deployment {self._get_graph_deployment_name(deployment)} is not ready, ignoring this scaling")
+
+        if not await self.kube_api.is_deployment_ready(
+            self._get_graph_deployment_name(deployment)
+        ):
+            logger.warning(
+                f"Deployment {self._get_graph_deployment_name(deployment)} is not ready, ignoring this scaling"
+            )
             return
-        
+
         for component_name, target_replicas in target_replicas.items():
             await self.kube_api.update_graph_replicas(
                 self._get_graph_deployment_name(deployment),
@@ -95,7 +108,6 @@ class KubernetesConnector(PlannerConnector):
             await self.kube_api.wait_for_graph_deployment_ready(
                 self._get_graph_deployment_name(deployment)
             )
-
 
     def _get_current_replicas(self, deployment: dict, component_name: str) -> int:
         """Get the current replicas for a component in a graph deployment"""
@@ -110,10 +122,11 @@ class KubernetesConnector(PlannerConnector):
         """Get the name of the graph deployment"""
         return deployment["metadata"]["name"]
 
+
 if __name__ == "__main__":
     import argparse
     import asyncio
-    
+
     parser = argparse.ArgumentParser()
     parser.add_argument("--dynamo_namespace", type=str, default="dynamo")
     parser.add_argument("--k8s_namespace", type=str, default="default")

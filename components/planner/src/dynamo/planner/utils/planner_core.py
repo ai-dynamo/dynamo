@@ -270,7 +270,6 @@ class Planner:
             return
 
         if not self.args.no_operation:
-
             target_replicas = {
                 WORKER_COMPONENT_NAMES[self.args.backend].prefill_worker: next_num_p,
                 WORKER_COMPONENT_NAMES[self.args.backend].decode_worker: next_num_d,
