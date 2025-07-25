@@ -20,6 +20,7 @@ import tempfile
 
 import yaml
 
+from dynamo.planner.defaults import SLAPlannerDefaults
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.sdk.lib.config import ServiceConfig
 
@@ -44,10 +45,12 @@ async def start_prometheus_server(config):
     temp_file.close()
     config_path = temp_file.name
 
+    # Use port from SLAPlannerDefaults (which reads DYNAMO_PORT with fallback to 9090)
+    prometheus_port = SLAPlannerDefaults.port
     cmd = [
         "prometheus",
         f"--config.file={config_path}",
-        "--web.listen-address=0.0.0.0:9090",
+        f"--web.listen-address=0.0.0.0:{prometheus_port}",
     ]
 
     logger.info(f"Prometheus cmd: {cmd}")
