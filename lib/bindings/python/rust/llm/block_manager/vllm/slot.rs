@@ -44,6 +44,15 @@ pub struct Slot<S: Storage, L: LocalityProvider> {
     /// Blocks to be onboarded from the disk
     /// We must hold these blocks in the slot state until the scheduler trigger the onboarding.
     onboard_from_disk: Option<Vec<ImmutableBlock<DiskStorage, L, BasicMetadata>>>,
+
+    /// The number of blocks cached from the device
+    blocks_cached_from_device: usize,
+
+    /// The number of blocks cached from the host
+    blocks_cached_from_host: usize,
+
+    /// The number of blocks cached from the disk
+    blocks_cached_from_disk: usize,
 }
 
 impl<S: Storage, L: LocalityProvider> std::fmt::Debug for Slot<S, L> {
@@ -76,6 +85,9 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
             mutable: VecDeque::new(),
             onboard_from_host: None,
             onboard_from_disk: None,
+            blocks_cached_from_device: 0,
+            blocks_cached_from_host: 0,
+            blocks_cached_from_disk: 0,
         }
     }
 
@@ -217,6 +229,7 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
         computed_blocks: Vec<ImmutableBlock<S, L, BasicMetadata>>,
     ) -> Result<(), SlotError> {
         assert!(self.mutable.is_empty());
+        self.blocks_cached_from_device = computed_blocks.len();
         self.immutable.clear();
         self.apply_immutable_blocks(computed_blocks)
     }
@@ -365,6 +378,18 @@ impl<S: Storage, L: LocalityProvider> Slot<S, L> {
                 .collect(),
         }
     }
+
+    pub fn num_blocks_cached_from_device(&self) -> usize {
+        self.blocks_cached_from_device
+    }
+
+    pub fn num_blocks_cached_from_host(&self) -> usize {
+        self.blocks_cached_from_host
+    }
+
+    pub fn num_blocks_cached_from_disk(&self) -> usize {
+        self.blocks_cached_from_disk
+    }
 }
 
 impl<L: LocalityProvider> Slot<DeviceStorage, L> {
@@ -378,10 +403,12 @@ impl<L: LocalityProvider> Slot<DeviceStorage, L> {
         }
 
         if let Some(host_blocks) = self.onboard_from_host.take() {
+            self.blocks_cached_from_host = host_blocks.len();
             self.onboard_blocks_to_slot(host_blocks, block_manager)?;
         }
 
         if let Some(disk_blocks) = self.onboard_from_disk.take() {
+            self.blocks_cached_from_disk = disk_blocks.len();
             self.onboard_blocks_to_slot(disk_blocks, block_manager)?;
         }
 
