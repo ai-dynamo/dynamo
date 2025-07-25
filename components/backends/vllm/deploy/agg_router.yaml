@@ -38,13 +38,13 @@ spec:
           memory: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/dynamo:nnshah1-vllm-latest
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.frontend --http-port 8000"
+            - "python3 -m dynamo.frontend --http-port 8000 --router-mode kv"
     VllmDecodeWorker:
       envFromSecret: hf-token-secret
       livenessProbe:
@@ -86,7 +86,7 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/dynamo:nnshah1-vllm-latest
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
