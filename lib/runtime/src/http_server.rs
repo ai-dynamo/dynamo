@@ -423,8 +423,6 @@ uptime_seconds{namespace=\"http_server\"} 42
         use std::sync::Arc;
         use tokio::time::sleep;
         use tokio_util::sync::CancellationToken;
-        // use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        // use reqwest for HTTP requests
 
         // Closure call is needed here to satisfy async_with_vars
 
