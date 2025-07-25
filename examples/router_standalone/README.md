@@ -103,7 +103,7 @@ While not implemented in this example, the router can also operate in a pure pre
      --base-kv-events-port 5557 \
      --base-metrics-port 5657 \
      --router-port 7000 \
-     --http-port 8080
+     --http-port 8000
     ```
 
 3. **Ping the endpoint (optional)**:
