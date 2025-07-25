@@ -29,33 +29,39 @@ class PrometheusAPIClient:
 
     def get_avg_inter_token_latency(self, interval: str):
         try:
-            return float(
-                self.prom.custom_query(
-                    query=f"increase(nv_llm_http_service_inter_token_latency_seconds_sum[{interval}])/increase(nv_llm_http_service_inter_token_latency_seconds_count[{interval}])",
-                )[0]["value"][1]
+            result = self.prom.custom_query(
+                query=f"increase(nv_llm_http_service_inter_token_latency_seconds_sum[{interval}])/increase(nv_llm_http_service_inter_token_latency_seconds_count[{interval}])",
             )
+            if not result:
+                # No data available yet (no requests made) - return 0 silently
+                return 0
+            return float(result[0]["value"][1])
         except Exception as e:
             logger.error(f"Error getting avg inter token latency: {e}")
             return 0
 
     def get_avg_time_to_first_token(self, interval: str):
         try:
-            return float(
-                self.prom.custom_query(
-                    query=f"increase(nv_llm_http_service_time_to_first_token_seconds_sum[{interval}])/increase(nv_llm_http_service_time_to_first_token_seconds_count[{interval}])",
-                )[0]["value"][1]
+            result = self.prom.custom_query(
+                query=f"increase(nv_llm_http_service_time_to_first_token_seconds_sum[{interval}])/increase(nv_llm_http_service_time_to_first_token_seconds_count[{interval}])",
             )
+            if not result:
+                # No data available yet (no requests made) - return 0 silently
+                return 0
+            return float(result[0]["value"][1])
         except Exception as e:
             logger.error(f"Error getting avg time to first token: {e}")
             return 0
 
     def get_avg_request_duration(self, interval: str):
         try:
-            return float(
-                self.prom.custom_query(
-                    query=f"increase(nv_llm_http_service_request_duration_seconds_sum[{interval}])/increase(nv_llm_http_service_request_duration_seconds_count[{interval}])",
-                )[0]["value"][1]
+            result = self.prom.custom_query(
+                query=f"increase(nv_llm_http_service_request_duration_seconds_sum[{interval}])/increase(nv_llm_http_service_request_duration_seconds_count[{interval}])",
             )
+            if not result:
+                # No data available yet (no requests made) - return 0 silently
+                return 0
+            return float(result[0]["value"][1])
         except Exception as e:
             logger.error(f"Error getting avg request duration: {e}")
             return 0
@@ -76,22 +82,26 @@ class PrometheusAPIClient:
 
     def get_avg_input_sequence_tokens(self, interval: str):
         try:
-            return float(
-                self.prom.custom_query(
-                    query=f"increase(nv_llm_http_service_input_sequence_tokens_sum[{interval}])/increase(nv_llm_http_service_input_sequence_tokens_count[{interval}])",
-                )[0]["value"][1]
+            result = self.prom.custom_query(
+                query=f"increase(nv_llm_http_service_input_sequence_tokens_sum[{interval}])/increase(nv_llm_http_service_input_sequence_tokens_count[{interval}])",
             )
+            if not result:
+                # No data available yet (no requests made) - return 0 silently
+                return 0
+            return float(result[0]["value"][1])
         except Exception as e:
             logger.error(f"Error getting avg input sequence tokens: {e}")
             return 0
 
     def get_avg_output_sequence_tokens(self, interval: str):
         try:
-            return float(
-                self.prom.custom_query(
-                    query=f"increase(nv_llm_http_service_output_sequence_tokens_sum[{interval}])/increase(nv_llm_http_service_output_sequence_tokens_count[{interval}])",
-                )[0]["value"][1]
+            result = self.prom.custom_query(
+                query=f"increase(nv_llm_http_service_output_sequence_tokens_sum[{interval}])/increase(nv_llm_http_service_output_sequence_tokens_count[{interval}])",
             )
+            if not result:
+                # No data available yet (no requests made) - return 0 silently
+                return 0
+            return float(result[0]["value"][1])
         except Exception as e:
             logger.error(f"Error getting avg output sequence tokens: {e}")
             return 0
