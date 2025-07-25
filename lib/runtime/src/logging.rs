@@ -24,31 +24,45 @@
 //! [log_filters]
 //! "test_logging" = "info"
 //! "test_logging::api" = "trace"
-//! ```
+//!     ```
 
-use crate::config::{disable_ansi_logging, jsonl_logging_enabled};
-use crate::error;
-use axum::extract::FromRequestParts;
-use axum::http::request::Parts;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Once;
+
 use figment::{
     providers::{Format, Serialized, Toml},
     Figment,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::{BTreeMap, HashMap};
-use std::convert::Infallible;
-use std::sync::Once;
-use std::time::Instant;
+use tracing::level_filters::LevelFilter;
+use tracing::{Event, Subscriber};
+use tracing_subscriber::fmt::time::FormatTime;
+use tracing_subscriber::fmt::time::LocalTime;
+use tracing_subscriber::fmt::time::SystemTime;
+use tracing_subscriber::fmt::time::UtcTime;
+use tracing_subscriber::fmt::{format::Writer, FormattedFields};
+use tracing_subscriber::fmt::{FmtContext, FormatFields};
+use tracing_subscriber::prelude::*;
+use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{filter::Directive, fmt};
 
+use crate::config::{disable_ansi_logging, jsonl_logging_enabled};
+use axum::extract::FromRequestParts;
+use axum::http::request::Parts;
+use serde_json::Value;
+use std::convert::Infallible;
+use std::time::Instant;
 use tracing::field::Field;
-use tracing::{level_filters::LevelFilter, span, Event, Id, Span, Subscriber};
-use tracing_subscriber::{
-    field::Visit, filter::Directive, fmt, fmt::format::FmtSpan, fmt::format::Writer,
-    fmt::time::FormatTime, fmt::FmtContext, fmt::FormatFields, fmt::FormattedFields,
-    layer::Context, prelude::*, registry, registry::LookupSpan, registry::SpanData, EnvFilter,
-    Layer, Registry,
-};
+use tracing::span;
+use tracing::Id;
+use tracing::Span;
+use tracing_subscriber::field::Visit;
+use tracing_subscriber::fmt::format::FmtSpan;
+use tracing_subscriber::layer::Context;
+use tracing_subscriber::registry::SpanData;
+use tracing_subscriber::Layer;
+use tracing_subscriber::Registry;
 use uuid::Uuid;
 
 /// ENV used to set the log level
