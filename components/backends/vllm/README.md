@@ -15,7 +15,7 @@ See [deployment architectures](../llm/README.md#deployment-architectures) to lea
 
 ### Prerequisites
 
-Start required services (etcd and NATS) using [Docker Compose](../../deploy/docker-compose.yml):
+Start required services (etcd and NATS) using [Docker Compose](../../../deploy/docker-compose.yml):
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d

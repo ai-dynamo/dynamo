@@ -56,7 +56,7 @@ Below we provide a guide that lets you run all of our the common deployment patt
 
 ### Start NATS and ETCD in the background
 
-Start using [Docker Compose](../../deploy/docker-compose.yml)
+Start using [Docker Compose](../../../deploy/docker-compose.yml)
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
