@@ -97,11 +97,11 @@ class KubernetesConnector(PlannerConnector):
             )
             return
 
-        for component_name, replicas in target_replicas.items():
+        for component_name, target_replicas in target_replicas.items():
             await self.kube_api.update_graph_replicas(
                 self._get_graph_deployment_name(deployment),
                 component_name,
-                replicas,
+                target_replicas,
             )
 
         if blocking:

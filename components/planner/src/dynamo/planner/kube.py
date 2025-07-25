@@ -14,14 +14,14 @@
 # limitations under the License.
 
 import asyncio
-from typing import Any, Dict, Optional
+from typing import Optional
 
 from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
 
 
 class KubernetesAPI:
-    def __init__(self, k8s_namespace: Optional[str] = None) -> None:
+    def __init__(self, k8s_namespace: Optional[str] = None):
         # Load kubernetes configuration
         try:
             config.load_incluster_config()  # for in-cluster deployment
@@ -42,24 +42,21 @@ class KubernetesAPI:
             # Fallback to 'default' if not running in k8s
             return "default"
 
-    def _get_graph_deployment(
-        self,
-        graph_deployment_name: Optional[str] = None,
-        label_selector: Optional[str] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """Get the graph deployment from the dynamo graph deployment name or label selector"""
+    def _get_graph_deployment_from_name(
+        self, graph_deployment_name: str
+    ) -> Optional[dict]:
+        """Get the graph deployment from the dynamo graph deployment name"""
         return self.custom_api.get_namespaced_custom_object(
             group="nvidia.com",
             version="v1alpha1",
             namespace=self.current_namespace,
             plural="dynamographdeployments",
             name=graph_deployment_name,
-            label_selector=label_selector,
         )
 
     async def get_graph_deployment(
         self, component_name: str, dynamo_namespace: str
-    ) -> Optional[Dict[str, Any]]:
+    ) -> Optional[dict]:
         """
         Get DynamoGraphDeployment by first finding the associated DynamoComponentDeployment
         and then retrieving its owner reference.
@@ -74,8 +71,13 @@ class KubernetesAPI:
         try:
             # First, find the DynamoComponentDeployment using the component name and namespace labels
             label_selector = f"nvidia.com/dynamo-component={component_name},nvidia.com/dynamo-namespace={dynamo_namespace}"
-            component_deployments = self._get_graph_deployment(
-                label_selector=label_selector
+
+            component_deployments = self.custom_api.list_namespaced_custom_object(
+                group="nvidia.com",
+                version="v1alpha1",
+                namespace=self.current_namespace,
+                plural="dynamocomponentdeployments",
+                label_selector=label_selector,
             )
 
             items = component_deployments.get("items", [])
@@ -112,8 +114,8 @@ class KubernetesAPI:
             if not graph_deployment_name:
                 return None
 
-            graph_deployment = self._get_graph_deployment(
-                graph_deployment_name=graph_deployment_name
+            graph_deployment = self._get_graph_deployment_from_name(
+                graph_deployment_name
             )
 
             return graph_deployment
@@ -156,7 +158,7 @@ class KubernetesAPI:
             (c for c in conditions if c.get("type") == "Ready"), None
         )
 
-        return ready_condition is not None and ready_condition.get("status") == "True"
+        return ready_condition and ready_condition.get("status") == "True"
 
     async def wait_for_graph_deployment_ready(
         self,
@@ -169,8 +171,8 @@ class KubernetesAPI:
         for attempt in range(max_attempts):
             await asyncio.sleep(delay_seconds)
 
-            graph_deployment = self._get_graph_deployment(
-                graph_deployment_name=graph_deployment_name
+            graph_deployment = self._get_graph_deployment_from_name(
+                graph_deployment_name
             )
 
             if not graph_deployment:
