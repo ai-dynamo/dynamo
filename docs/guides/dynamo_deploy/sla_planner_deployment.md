@@ -2,6 +2,9 @@
 
 Quick deployment guide for the vLLM disaggregated planner with automatic scaling.
 
+> [!NOTE]
+> For high-level architecture and concepts, see [SLA-based Planner](../../architecture/sla_planner.md).
+
 ## Architecture Overview
 
 **Components:**
@@ -39,35 +42,14 @@ kubectl get pods -n $NAMESPACE
 
 Expected pods (all should be `1/1 Running`):
 ```
-vllm-disagg-planner-frontend-*        1/1 Running
-vllm-disagg-planner-prometheus-*      1/1 Running
-vllm-disagg-planner-planner-*         1/1 Running
+vllm-disagg-planner-frontend-*            1/1 Running
+vllm-disagg-planner-prometheus-*          1/1 Running
+vllm-disagg-planner-planner-*             1/1 Running
 vllm-disagg-planner-vllmdecodeworker-*    1/1 Running
 vllm-disagg-planner-vllmprefillworker-*   1/1 Running
 ```
 
-## 2. Apply Prometheus Port Fix (Required)
-
-Due to a current operator limitation, manually patch the Prometheus deployment:
-
-```bash
-# Fix container port
-kubectl patch deployment vllm-disagg-planner-prometheus -n $NAMESPACE \
-  --type='json' -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/ports/0/containerPort", "value": 9090}]'
-
-# Fix environment variable
-kubectl patch deployment vllm-disagg-planner-prometheus -n $NAMESPACE \
-  --type='json' -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/env/0/value", "value": "9090"}]'
-
-# Fix port name
-kubectl patch deployment vllm-disagg-planner-prometheus -n $NAMESPACE \
-  --type='json' -p='[{"op": "replace", "path": "/spec/template/spec/containers/0/ports/0/name", "value": "prometheus"}]'
-
-# Wait for rollout
-kubectl rollout status deployment/vllm-disagg-planner-prometheus -n $NAMESPACE
-```
-
-## 3. Test the System
+## 2. Test the System
 
 ```bash
 # Port forward to frontend
@@ -89,7 +71,7 @@ curl http://localhost:8000/v1/chat/completions \
   }' | jq
 ```
 
-## 4. Monitor Scaling
+## 3. Monitor Scaling
 
 ```bash
 # Check planner logs for scaling decisions
@@ -100,27 +82,17 @@ kubectl logs -n $NAMESPACE deployment/vllm-disagg-planner-planner --tail=10
 # "Observed ttft: X.XXXs itl: X.XXXs" (after streaming requests)
 ```
 
-## 5. Key Notes
-
 ### Metrics Requirements
 - **Basic metrics** (request count): Available with any request type
 - **Latency metrics** (TTFT/ITL): Only available with `"stream": true` requests
 - **Scaling decisions**: Require sufficient request volume and streaming requests
 
-### Current Status
-✅ **Working**: All core functionality, worker discovery, Prometheus connectivity
-🔧 **Manual Fix Required**: Prometheus port configuration (until operator fix)
-📊 **Expected**: Some warnings until metrics accumulate from streaming requests
-
-## 6. Troubleshooting
+## 4. Troubleshooting
 
 **Connection Issues:**
 ```bash
-# Verify Prometheus is listening on 9090
-kubectl exec -n $NAMESPACE deployment/vllm-disagg-planner-prometheus -- netstat -tlnp | grep 9090
-
-# Test Prometheus API
-kubectl port-forward -n $NAMESPACE deployment/vllm-disagg-planner-prometheus 9090:9090
+# Verify Prometheus is accessible (default port 8000)
+kubectl port-forward -n $NAMESPACE deployment/vllm-disagg-planner-prometheus 9090:8000
 curl "http://localhost:9090/api/v1/query?query=up"
 ```
 
@@ -134,3 +106,4 @@ curl http://localhost:8000/metrics | grep nv_llm_http_service
 **Worker Issues:**
 - Large models can take 10+ minutes to initialize
 - Check worker logs: `kubectl logs -n $NAMESPACE deployment/vllm-disagg-planner-vllmdecodeworker`
+- Ensure GPU resources are available for workers
