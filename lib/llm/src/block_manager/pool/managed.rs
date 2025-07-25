@@ -43,16 +43,39 @@
 //!     within `ImmutableBlock`) is dropped.
 //! 6.  Dropped [`MutableBlock`]s are automatically returned to the [`InactiveBlockPool`].
 
+use crate::block_manager::events::Publisher;
+
 use super::*;
 
-pub mod active;
-pub mod controller;
-pub mod inactive;
-pub mod priority_key;
-pub mod state;
+mod direct;
+mod engine;
+mod state;
 
-use active::ActiveBlockPool;
-use inactive::InactiveBlockPool;
+use direct::DirectAccess;
+use engine::{Client, ProgressEngine};
+use state::active::ActiveBlockPool;
+use state::inactive::InactiveBlockPool;
+
+use std::sync::Mutex;
+
+/// Manages the blocks in a specific storage backenda
+pub struct ManagedBlockPool<S: Storage, L: LocalityProvider, M: BlockMetadata> {
+    direct: Arc<DirectAccess<S, L, M>>,
+    client: Arc<Client<S, L, M>>,
+    available_blocks_counter: Arc<AtomicU64>,
+    total_blocks_counter: Arc<AtomicU64>,
+    default_duplication_setting: BlockRegistrationDuplicationSetting,
+}
+
+pub(crate) struct State<S: Storage, L: LocalityProvider, M: BlockMetadata> {
+    active: ActiveBlockPool<S, L, M>,
+    inactive: InactiveBlockPool<S, L, M>,
+    registry: BlockRegistry,
+    return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, L, M>>,
+    event_manager: Arc<dyn EventManager>,
+    metrics: Arc<PoolMetrics>,
+    default_duplication_setting: BlockRegistrationDuplicationSetting,
+}
 
 #[derive(Builder, Dissolve)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
@@ -62,9 +85,6 @@ pub struct ManagedBlockPoolArgs<S: Storage, L: LocalityProvider, M: BlockMetadat
 
     #[builder(default = "CancellationToken::new()")]
     cancel_token: CancellationToken,
-
-    #[builder(default)]
-    blocks: Vec<Block<S, L, M>>,
 
     #[builder(default)]
     global_registry: GlobalRegistry,
@@ -79,6 +99,9 @@ pub struct ManagedBlockPoolArgs<S: Storage, L: LocalityProvider, M: BlockMetadat
 
     #[builder(default = "BlockRegistrationDuplicationSetting::Allowed")]
     default_duplication_setting: BlockRegistrationDuplicationSetting,
+
+    #[builder(setter(skip))]
+    blocks: std::marker::PhantomData<(S, L, M)>,
 }
 
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPoolArgsBuilder<S, L, M> {
@@ -87,18 +110,17 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPoolArgsBuil
         let (
             event_manager,
             cancel_token,
-            blocks,
             global_registry,
             async_runtime,
             metrics,
             default_duplication_setting,
+            _blocks,
         ) = args.dissolve();
 
         tracing::info!("building block pool");
         let pool = ManagedBlockPool::new(
             event_manager,
             cancel_token,
-            blocks,
             global_registry,
             async_runtime,
             metrics,
@@ -109,51 +131,11 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPoolArgsBuil
     }
 }
 
-// Specific request type aliases for our use cases
-type AllocateBlocksReq<S, L, M> = RequestResponse<usize, BlockPoolResult<MutableBlocks<S, L, M>>>;
-type RegisterBlocksReq<S, L, M> = RequestResponse<
-    (MutableBlocks<S, L, M>, BlockRegistrationDuplicationSetting),
-    BlockPoolResult<ImmutableBlocks<S, L, M>>,
->;
-type MatchHashesReq<S, L, M> =
-    RequestResponse<Vec<SequenceHash>, BlockPoolResult<ImmutableBlocks<S, L, M>>>;
-type TouchBlocksReq = RequestResponse<Vec<SequenceHash>, BlockPoolResult<()>>;
-type AddBlocksReq<S, L, M> = RequestResponse<Vec<Block<S, L, M>>, ()>;
-type ResetReq = RequestResponse<(), BlockPoolResult<()>>;
-type ReturnBlockReq<S, L, M> = RequestResponse<Vec<Block<S, L, M>>, BlockPoolResult<()>>;
-type StatusReq = RequestResponse<(), BlockPoolResult<BlockPoolStatus>>;
-type ResetBlocksReq = RequestResponse<Vec<SequenceHash>, BlockPoolResult<ResetBlocksResponse>>;
-
-// Update the request enums to use the cleaner types
-pub enum PriorityRequest<S: Storage, L: LocalityProvider, M: BlockMetadata> {
-    AllocateBlocks(AllocateBlocksReq<S, L, M>),
-    RegisterBlocks(RegisterBlocksReq<S, L, M>),
-    MatchSequenceHashes(MatchHashesReq<S, L, M>),
-    TouchBlocks(TouchBlocksReq),
-    Reset(ResetReq),
-    ReturnBlock(ReturnBlockReq<S, L, M>),
-}
-
-pub enum ControlRequest<S: Storage, L: LocalityProvider, M: BlockMetadata> {
-    AddBlocks(AddBlocksReq<S, L, M>),
-    Status(StatusReq),
-    ResetBlocks(ResetBlocksReq),
-}
-
-/// Manages the blocks in a specific storage backenda
-pub struct ManagedBlockPool<S: Storage, L: LocalityProvider, M: BlockMetadata> {
-    priority_tx: tokio::sync::mpsc::UnboundedSender<PriorityRequest<S, L, M>>,
-    ctrl_tx: tokio::sync::mpsc::UnboundedSender<ControlRequest<S, L, M>>,
-    available_blocks_counter: Arc<AtomicU64>,
-    total_blocks_counter: Arc<AtomicU64>,
-    default_duplication_setting: BlockRegistrationDuplicationSetting,
-}
-
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Clone for ManagedBlockPool<S, L, M> {
     fn clone(&self) -> Self {
         Self {
-            priority_tx: self.priority_tx.clone(),
-            ctrl_tx: self.ctrl_tx.clone(),
+            direct: self.direct.clone(),
+            client: self.client.clone(),
             available_blocks_counter: self.available_blocks_counter.clone(),
             total_blocks_counter: self.total_blocks_counter.clone(),
             default_duplication_setting: self.default_duplication_setting,
@@ -180,7 +162,6 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
     pub fn new(
         event_manager: Arc<dyn EventManager>,
         cancel_token: CancellationToken,
-        blocks: Vec<Block<S, L, M>>,
         global_registry: GlobalRegistry,
         async_runtime: Handle,
         metrics: Arc<PoolMetrics>,
@@ -189,20 +170,11 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
         let (pool, progress_engine) = Self::with_progress_engine(
             event_manager,
             cancel_token,
-            blocks,
             global_registry,
             async_runtime,
             metrics,
             default_duplication_setting,
         );
-
-        // pool.runtime.handle().spawn(async move {
-        //     let mut progress_engine = progress_engine;
-        //     tracing::debug!("starting progress engine");
-        //     while progress_engine.step().await {
-        //         tracing::trace!("progress engine step");
-        //     }
-        // });
 
         let thread_name = format!(
             "block-pool-{}-{}",
@@ -231,137 +203,44 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
         pool
     }
 
-    fn with_progress_engine(
+    pub fn with_progress_engine(
         event_manager: Arc<dyn EventManager>,
         cancel_token: CancellationToken,
-        blocks: Vec<Block<S, L, M>>,
         global_registry: GlobalRegistry,
         async_runtime: Handle,
         metrics: Arc<PoolMetrics>,
         default_duplication_setting: BlockRegistrationDuplicationSetting,
     ) -> (Self, ProgressEngine<S, L, M>) {
-        let (priority_tx, priority_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (ctrl_tx, ctrl_rx) = tokio::sync::mpsc::unbounded_channel();
-
-        let progress_engine = ProgressEngine::<S, L, M>::new(
+        let (return_tx, return_rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = State::<S, L, M>::new(
             event_manager,
-            priority_rx,
-            ctrl_rx,
-            cancel_token,
-            blocks,
+            return_tx,
             global_registry,
             async_runtime,
             metrics,
+            default_duplication_setting,
         );
 
-        let available_blocks_counter = progress_engine.available_blocks_counter.clone();
-        let total_blocks_counter = progress_engine.total_blocks_counter.clone();
+        let available_blocks_counter = state.inactive.available_blocks_counter();
+        let total_blocks_counter = state.inactive.total_blocks_counter();
 
-        (
-            Self {
-                priority_tx,
-                ctrl_tx,
-                available_blocks_counter,
-                total_blocks_counter,
-                default_duplication_setting,
-            },
-            progress_engine,
-        )
+        let state = Arc::new(Mutex::new(state));
+        let direct = DirectAccess::new(state.clone());
+        let (client, progress_engine) = engine::create(state.clone(), return_rx, cancel_token);
+
+        let pool = Self {
+            direct: Arc::new(direct),
+            client: Arc::new(client),
+            available_blocks_counter,
+            total_blocks_counter,
+            default_duplication_setting,
+        };
+
+        (pool, progress_engine)
     }
 
     pub fn default_duplication_setting(&self) -> BlockRegistrationDuplicationSetting {
         self.default_duplication_setting
-    }
-
-    fn _add_blocks(&self, blocks: Vec<Block<S, L, M>>) -> AsyncResponse<()> {
-        let (req, resp_rx) = AddBlocksReq::new(blocks);
-
-        self.ctrl_tx
-            .send(ControlRequest::AddBlocks(req))
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
-
-        Ok(resp_rx)
-    }
-
-    fn _allocate_blocks(
-        &self,
-        count: usize,
-    ) -> AsyncResponse<BlockPoolResult<Vec<MutableBlock<S, L, M>>>> {
-        let (req, resp_rx) = AllocateBlocksReq::new(count);
-
-        self.priority_tx
-            .send(PriorityRequest::AllocateBlocks(req))
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
-
-        Ok(resp_rx)
-    }
-
-    fn _register_blocks(
-        &self,
-        blocks: Vec<MutableBlock<S, L, M>>,
-        duplication_setting: BlockRegistrationDuplicationSetting,
-    ) -> AsyncResponse<BlockPoolResult<ImmutableBlocks<S, L, M>>> {
-        if blocks.is_empty() {
-            return Err(BlockPoolError::NoBlocksToRegister);
-        }
-
-        let (req, resp_rx) = RegisterBlocksReq::new((blocks, duplication_setting));
-
-        self.priority_tx
-            .send(PriorityRequest::RegisterBlocks(req))
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
-
-        Ok(resp_rx)
-    }
-
-    fn _match_sequence_hashes(
-        &self,
-        sequence_hashes: &[SequenceHash],
-    ) -> AsyncResponse<BlockPoolResult<ImmutableBlocks<S, L, M>>> {
-        let (req, resp_rx) = MatchHashesReq::new(sequence_hashes.into());
-
-        self.priority_tx
-            .send(PriorityRequest::MatchSequenceHashes(req))
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
-
-        Ok(resp_rx)
-    }
-
-    fn _touch_blocks(
-        &self,
-        sequence_hashes: &[SequenceHash],
-    ) -> AsyncResponse<BlockPoolResult<()>> {
-        let (req, resp_rx) = TouchBlocksReq::new(sequence_hashes.into());
-
-        self.priority_tx
-            .send(PriorityRequest::TouchBlocks(req))
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
-
-        Ok(resp_rx)
-    }
-
-    fn _reset(&self) -> AsyncResponse<BlockPoolResult<()>> {
-        let (req, resp_rx) = ResetReq::new(());
-
-        self.priority_tx
-            .send(PriorityRequest::Reset(req))
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
-
-        Ok(resp_rx)
-    }
-
-    fn _try_return_block(&self, block: OwnedBlock<S, L, M>) -> AsyncResponse<BlockPoolResult<()>> {
-        let raw_blocks = block
-            .try_take_block(private::PrivateToken)
-            .ok_or(BlockPoolError::NotReturnable)?;
-
-        let (req, resp_rx) = ReturnBlockReq::new(raw_blocks);
-
-        self.priority_tx
-            .send(PriorityRequest::ReturnBlock(req))
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
-
-        Ok(resp_rx)
     }
 }
 
@@ -369,123 +248,74 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M>
     for ManagedBlockPool<S, L, M>
 {
-    /// Adds a vector of [`Block`]s to the [`InactiveBlockPool`].
     async fn add_blocks(&self, blocks: Vec<Block<S, L, M>>) -> Result<(), BlockPoolError> {
-        self._add_blocks(blocks)?
-            .await
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)
+        self.client.add_blocks(blocks).await
     }
 
     fn add_blocks_blocking(&self, blocks: Vec<Block<S, L, M>>) -> Result<(), BlockPoolError> {
-        self._add_blocks(blocks)?
-            .blocking_recv()
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)
+        self.direct.add_blocks(blocks)
     }
 
-    /// Attempts to allocate a specified number of free blocks from the [`InactiveBlockPool`].
-    ///
-    /// Blocks acquired this way are returned as [`MutableBlock`]s, granting unique ownership
-    /// and allowing modification. Dropping a [`MutableBlock`] automatically returns it
-    /// to the [`InactiveBlockPool`].
     async fn allocate_blocks(
         &self,
         count: usize,
     ) -> Result<Vec<MutableBlock<S, L, M>>, BlockPoolError> {
-        self._allocate_blocks(count)?
-            .await
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
+        self.client.allocate_blocks(count).await
     }
 
     fn allocate_blocks_blocking(
         &self,
         count: usize,
     ) -> Result<Vec<MutableBlock<S, L, M>>, BlockPoolError> {
-        self._allocate_blocks(count)?
-            .blocking_recv()
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
+        self.direct.allocate_blocks(count)
     }
 
-    /// Registers a vector of [`MutableBlock`]s (presumably after filling them) with the pool,
-    /// making them available for sharing via the [`ActiveBlockPool`].
-    ///
-    /// This function checks if any of the blocks have the same sequence hash as an existing block
-    /// in the active pool. If so, it returns an [`ImmutableBlock`].
-    ///
-    /// Note: Depending on the [`BlockRegistrationDuplicationSetting`], the returned [`ImmutableBlock`] may
-    /// not be the same block that was provided -- that is, it should hold the same content, but was the
-    /// first block registered. If duplication is allowed, we will keep alive both the primary block and
-    /// the duplicate block.
     async fn register_blocks(
         &self,
         blocks: Vec<MutableBlock<S, L, M>>,
     ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
-        self._register_blocks(blocks, self.default_duplication_setting)?
-            .await
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
+        self.client.register_blocks(blocks).await
     }
 
     fn register_blocks_blocking(
         &self,
         blocks: Vec<MutableBlock<S, L, M>>,
-    ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
-        self._register_blocks(blocks, self.default_duplication_setting)?
-            .blocking_recv()
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
+    ) -> Result<Vec<ImmutableBlock<S, L, M>>, BlockPoolError> {
+        self.direct.register_blocks(blocks)
     }
 
-    /// Attempts to match the given [`SequenceHash`] to an existing block, checking
-    /// both the active and inactive pools.
-    ///
-    /// Checks the [`ActiveBlockPool`] first. If a valid strong reference exists, it returns
-    /// an [`ImmutableBlock`] cloned from it. If the weak reference exists but is stale,
-    /// it's removed.
-    ///
-    /// If not found in the active pool, it checks the [`InactiveBlockPool`]. If found there,
-    /// the block is moved to the active pool (tracked by a weak reference) and returned
     /// as a new [`ImmutableBlock`].
     async fn match_sequence_hashes(
         &self,
         sequence_hashes: &[SequenceHash],
     ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
-        self._match_sequence_hashes(sequence_hashes)?
-            .await
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
+        self.client.match_sequence_hashes(sequence_hashes).await
     }
 
     fn match_sequence_hashes_blocking(
         &self,
         sequence_hashes: &[SequenceHash],
     ) -> BlockPoolResult<ImmutableBlocks<S, L, M>> {
-        self._match_sequence_hashes(sequence_hashes)?
-            .blocking_recv()
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
+        self.direct.match_sequence_hashes(sequence_hashes)
     }
 
     async fn touch_blocks(&self, sequence_hashes: &[SequenceHash]) -> Result<(), BlockPoolError> {
-        self._touch_blocks(sequence_hashes)?
-            .await
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
+        self.client.touch_blocks(sequence_hashes).await
     }
 
     fn touch_blocks_blocking(
         &self,
-        sequence_hashes: &[SequenceHash],
+        _sequence_hashes: &[SequenceHash],
     ) -> Result<(), BlockPoolError> {
-        self._touch_blocks(sequence_hashes)?
-            .blocking_recv()
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
+        unimplemented!()
     }
 
     async fn try_return_block(&self, block: OwnedBlock<S, L, M>) -> BlockPoolResult<()> {
-        self._try_return_block(block)?
-            .await
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
+        self.client.try_return_block(block).await
     }
 
     fn try_return_block_blocking(&self, block: OwnedBlock<S, L, M>) -> BlockPoolResult<()> {
-        self._try_return_block(block)?
-            .blocking_recv()
-            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
+        self.direct.try_return_block(block)
     }
 
     fn total_blocks(&self) -> u64 {
@@ -497,92 +327,42 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M>
     }
 }
 
-struct ProgressEngine<S: Storage, L: LocalityProvider, M: BlockMetadata> {
-    priority_rx: tokio::sync::mpsc::UnboundedReceiver<PriorityRequest<S, L, M>>,
-    ctrl_rx: tokio::sync::mpsc::UnboundedReceiver<ControlRequest<S, L, M>>,
-    cancel_token: CancellationToken,
-    state: State<S, L, M>,
-    return_rx: tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
-    metrics: Arc<PoolMetrics>,
-    available_blocks_counter: Arc<AtomicU64>,
-    total_blocks_counter: Arc<AtomicU64>,
-}
-
-pub struct State<S: Storage, L: LocalityProvider, M: BlockMetadata> {
-    active: ActiveBlockPool<S, L, M>,
-    inactive: InactiveBlockPool<S, L, M>,
-    registry: BlockRegistry,
-    return_tx: tokio::sync::mpsc::UnboundedSender<Block<S, L, M>>,
-    event_manager: Arc<dyn EventManager>,
-    metrics: Arc<PoolMetrics>,
-}
-
-impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine<S, L, M> {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        event_manager: Arc<dyn EventManager>,
-        priority_rx: tokio::sync::mpsc::UnboundedReceiver<PriorityRequest<S, L, M>>,
-        ctrl_rx: tokio::sync::mpsc::UnboundedReceiver<ControlRequest<S, L, M>>,
-        cancel_token: CancellationToken,
-        blocks: Vec<Block<S, L, M>>,
-        global_registry: GlobalRegistry,
-        async_runtime: Handle,
-        metrics: Arc<PoolMetrics>,
-    ) -> Self {
-        let (return_tx, return_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut state = State::<S, L, M>::new(
-            event_manager,
-            return_tx,
-            global_registry,
-            async_runtime,
-            metrics.clone(),
-        );
-
-        let count = blocks.len();
-
-        tracing::debug!(count, "adding blocks to inactive pool");
-        state.inactive.add_blocks(blocks);
-
-        let available_blocks_counter = state.inactive.available_blocks_counter();
-        let total_blocks_counter = state.inactive.total_blocks_counter();
-
-        Self {
-            priority_rx,
-            ctrl_rx,
-            cancel_token,
-            state,
-            return_rx,
-            metrics,
-            available_blocks_counter,
-            total_blocks_counter,
-        }
+#[async_trait::async_trait]
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> AsyncBlockPoolController
+    for ManagedBlockPool<S, L, M>
+{
+    async fn status(&self) -> Result<BlockPoolStatus, BlockPoolError> {
+        self.client.status().await
     }
 
-    pub async fn step(&mut self) -> bool {
-        tokio::select! {
-            biased;
+    async fn reset(&self) -> Result<(), BlockPoolError> {
+        self.client.reset().await
+    }
 
-            Some(priority_req) = self.priority_rx.recv(), if !self.priority_rx.is_closed() => {
-                self.metrics.gauge("priority_request_queue_size").set(self.priority_rx.len() as i64);
-                self.state.handle_priority_request(priority_req, &mut self.return_rx).await;
-            }
+    async fn reset_blocks(
+        &self,
+        sequence_hashes: &[SequenceHash],
+    ) -> Result<ResetBlocksResponse, BlockPoolError> {
+        self.client.reset_blocks(sequence_hashes).await
+    }
+}
 
-            Some(req) = self.ctrl_rx.recv(), if !self.ctrl_rx.is_closed() => {
-                self.metrics.gauge("control_request_queue_size").set(self.ctrl_rx.len() as i64);
-                self.state.handle_control_request(req);
-            }
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPoolController
+    for ManagedBlockPool<S, L, M>
+{
+    fn status_blocking(&self) -> Result<BlockPoolStatus, BlockPoolError> {
+        self.direct.status()
+    }
 
-            Some(block) = self.return_rx.recv() => {
-                self.metrics.gauge("return_block_queue_size").set(self.return_rx.len() as i64);
-                self.state.handle_return_block(block);
-            }
+    fn reset_blocking(&self) -> Result<(), BlockPoolError> {
+        self.direct.reset()
+    }
 
-            _ = self.cancel_token.cancelled() => {
-                return false;
-            }
-        }
-
-        true
+    fn reset_blocks_blocking(
+        &self,
+        sequence_hashes: &[SequenceHash],
+    ) -> Result<ResetBlocksResponse, BlockPoolError> {
+        self.direct.reset_blocks(sequence_hashes)
     }
 }
 
@@ -608,17 +388,16 @@ mod tests {
             let (
                 event_manager,
                 cancel_token,
-                blocks,
                 global_registry,
                 async_runtime,
                 metrics,
                 default_duplication_setting,
+                _blocks,
             ) = args.dissolve();
 
             let (pool, progress_engine) = ManagedBlockPool::with_progress_engine(
                 event_manager,
                 cancel_token,
-                blocks,
                 global_registry,
                 async_runtime,
                 metrics,
@@ -630,6 +409,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn test_block_pool_state() {
         let layout = setup_layout(None).unwrap();
         let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)
@@ -637,26 +417,37 @@ mod tests {
             .into_blocks()
             .unwrap();
 
-        let (_pool, mut progress) = ManagedBlockPool::builder()
-            .blocks(blocks)
+        let (pool, mut progress) = ManagedBlockPool::builder()
             .build_with_progress_engine()
             .unwrap();
 
-        assert_eq!(progress.state.inactive.available_blocks(), 7);
+        pool.add_blocks_blocking(blocks).unwrap();
 
-        let blocks = progress.state.allocate_blocks(1).unwrap();
-        assert_eq!(progress.state.inactive.available_blocks(), 6);
+        let shared_state = pool.direct.state();
+
+        let mut state = shared_state.lock().unwrap();
+
+        assert_eq!(state.inactive.available_blocks(), 7);
+
+        let blocks = state.allocate_blocks(1).unwrap();
+        assert_eq!(state.inactive.available_blocks(), 6);
         assert_eq!(blocks.len(), 1);
 
         drop(blocks);
-        progress.step().await;
-        assert_eq!(progress.state.inactive.available_blocks(), 7);
+        drop(state);
 
-        let mut blocks = progress.state.allocate_blocks(1).unwrap();
-        assert_eq!(progress.state.inactive.available_blocks(), 6);
+        progress.step().await;
+
+        let mut state = shared_state.lock().unwrap();
+
+        assert_eq!(state.inactive.available_blocks(), 7);
+
+        let mut blocks = state.allocate_blocks(1).unwrap();
+        assert_eq!(state.inactive.available_blocks(), 6);
         assert_eq!(blocks.len(), 1);
 
         let mut block = blocks.pop().unwrap();
+        let primary_block_id = block.block_id();
 
         block.init_sequence(1337).unwrap();
         block.add_token(1).unwrap();
@@ -665,6 +456,51 @@ mod tests {
         block.add_token(4).unwrap();
 
         assert!(block.add_token(5).is_err());
+
+        block.commit().unwrap();
+
+        drop(state);
+
+        let immutable_blocks = pool.register_blocks_blocking(vec![block]).unwrap();
+
+        let mut state = shared_state.lock().unwrap();
+
+        let mut duplicate_blocks = state.allocate_blocks(1).unwrap();
+        assert_eq!(duplicate_blocks.len(), 1);
+        let mut duplicate_block = duplicate_blocks.pop().unwrap();
+        assert_eq!(state.inactive.available_blocks(), 5);
+        let duplicate_block_id = duplicate_block.block_id();
+        assert_ne!(primary_block_id, duplicate_block_id);
+
+        duplicate_block.init_sequence(1337).unwrap();
+        duplicate_block.add_token(1).unwrap();
+        duplicate_block.add_token(2).unwrap();
+        duplicate_block.add_token(3).unwrap();
+        duplicate_block.add_token(4).unwrap();
+        duplicate_block.commit().unwrap();
+
+        // dropping the block puts it in the return channel
+        // however the state is still locked, so the progress engine can not process it
+        drop(immutable_blocks);
+
+        // now we can register the block
+        let failed_register = state.register_block(duplicate_block).unwrap_err();
+        println!("failed_register: {:?}", failed_register);
+        assert!(failed_register.0.is_right());
+        let duplicate_block = failed_register.0.right().unwrap();
+
+        drop(state);
+        progress.step().await;
+
+        let mut state = shared_state.lock().unwrap();
+        assert_eq!(state.inactive.available_blocks(), 6);
+
+        let (registerd_block, _) = state.register_block(duplicate_block).unwrap();
+
+        // if we allow duplication, we will see the duplicate block id here and the available block count will be 5
+        // if we dedup, then we will see the primary block id here and the available block count will be 6
+        assert_eq!(registerd_block.block_id(), duplicate_block_id);
+        assert_eq!(state.inactive.available_blocks(), 5);
     }
 
     #[tokio::test]
@@ -676,11 +512,14 @@ mod tests {
             .unwrap();
 
         let (pool, mut progress) = ManagedBlockPool::builder()
-            .blocks(blocks)
             .build_with_progress_engine()
             .unwrap();
 
-        assert_eq!(progress.state.inactive.available_blocks(), 7);
+        pool.add_blocks_blocking(blocks).unwrap();
+
+        let shared_state = pool.direct.state();
+
+        assert_eq!(shared_state.lock().unwrap().inactive.available_blocks(), 7);
 
         let pool_clone = pool.clone();
         let allocate_1_block =
@@ -688,16 +527,16 @@ mod tests {
         progress.step().await;
 
         let blocks = allocate_1_block.await.unwrap();
-        assert_eq!(progress.state.inactive.available_blocks(), 6);
+        assert_eq!(shared_state.lock().unwrap().inactive.available_blocks(), 6);
         assert_eq!(blocks.len(), 1);
 
         // drop the single block
         drop(blocks);
 
         // check before and after the progress engine step
-        assert_eq!(progress.state.inactive.available_blocks(), 6);
+        assert_eq!(shared_state.lock().unwrap().inactive.available_blocks(), 6);
         progress.step().await;
-        assert_eq!(progress.state.inactive.available_blocks(), 7);
+        assert_eq!(shared_state.lock().unwrap().inactive.available_blocks(), 7);
     }
 
     #[test]
@@ -717,10 +556,11 @@ mod tests {
 
         // Create the ManagedBlockPool and add the blocks
         let pool = ManagedBlockPool::builder()
-            .blocks(blocks)
             .async_runtime(async_runtime.handle().clone())
             .build()
             .unwrap();
+
+        pool.add_blocks_blocking(blocks).unwrap();
 
         // All blocks should be in the Reset/Empty state
         // No blocks should match the expected sequence hash
@@ -817,7 +657,8 @@ mod tests {
 
         let blocks = Blocks::<_, BasicMetadata>::new(layout, 42, 0)?.into_blocks()?;
 
-        let pool = ManagedBlockPool::builder().blocks(blocks).build()?;
+        let pool = ManagedBlockPool::builder().build()?;
+        pool.add_blocks_blocking(blocks)?;
 
         Ok(pool)
     }
@@ -1058,7 +899,7 @@ mod tests {
         // This will take ownership of the block and return an immutable block
         let mut immutable_blocks = pool.register_blocks_blocking(vec![block]).unwrap();
         let block = immutable_blocks.pop().unwrap();
-        assert!(block.state().is_registered());
+        assert!(block.validate());
         assert_eq!(block.sequence_hash(), sequence_hash);
 
         block
@@ -1083,11 +924,12 @@ mod tests {
 
         // Create the ManagedBlockPool and add the blocks
         let pool = ManagedBlockPool::builder()
-            .blocks(blocks)
             .async_runtime(async_runtime.handle().clone())
             .default_duplication_setting(BlockRegistrationDuplicationSetting::Allowed)
             .build()
             .unwrap();
+
+        pool.add_blocks_blocking(blocks).unwrap();
 
         assert_eq!(pool.total_blocks(), count);
         assert_eq!(pool.available_blocks(), count);
@@ -1172,11 +1014,12 @@ mod tests {
 
         // Create the ManagedBlockPool and add the blocks
         let pool = ManagedBlockPoolArgsBuilder::default()
-            .blocks(blocks)
             .async_runtime(async_runtime.handle().clone())
             .default_duplication_setting(BlockRegistrationDuplicationSetting::Disabled)
             .build()
             .unwrap();
+
+        pool.add_blocks_blocking(blocks).unwrap();
 
         assert_eq!(pool.total_blocks(), count);
         assert_eq!(pool.available_blocks(), count);

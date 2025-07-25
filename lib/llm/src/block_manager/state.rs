@@ -89,12 +89,12 @@ impl<Locality: LocalityProvider, Metadata: BlockMetadata> KvBlockManagerState<Lo
         self.resources.worker_id
     }
 
-    pub(crate) async fn enqueue_offload_block<S: Storage + 'static>(
+    pub(crate) fn enqueue_offload_block<S: Storage + 'static>(
         &self,
         block: &ImmutableBlock<S, Locality, Metadata>,
         priority: u64,
     ) -> Result<()> {
-        self.offload_manager.offload(block, priority).await?;
+        self.offload_manager.offload(block, priority)?;
 
         Ok(())
     }

@@ -151,6 +151,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
                 self.uninitialized_set.push_back(block);
             }
             BlockState::Complete(_) => {
+                debug_assert!(!block.is_duplicate());
                 let mut block = block;
                 block.reset();
                 self.uninitialized_set.push_back(block);
@@ -172,7 +173,13 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
     ///
     /// * `blocks` - A vector of blocks ([`Block<T, M>`]) to add.
     #[instrument(level = "debug", skip(self, blocks))]
-    pub fn add_blocks(&mut self, blocks: Vec<Block<S, L, M>>) {
+    pub fn add_blocks(&mut self, blocks: Vec<Block<S, L, M>>) -> Result<(), BlockPoolError> {
+        if self.total_blocks.load(Ordering::Relaxed) > 0 {
+            return Err(BlockPoolError::FailedToAddBlocks(
+                "blocks have already been initialized".to_string(),
+            ));
+        }
+
         let count = blocks.len();
         tracing::debug!(count, "Adding blocks to pool");
 
@@ -183,6 +190,8 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
         }
 
         self.total_blocks.fetch_add(count as u64, Ordering::Relaxed);
+
+        Ok(())
     }
 
     /// Adds multiple blocks to the pool.
@@ -697,7 +706,7 @@ pub(crate) mod tests {
     ) -> InactiveBlockPool<NullDeviceStorage, Local, TestMetadata> {
         let mut pool = InactiveBlockPool::new();
         let blocks = create_block_collection(num_blocks).into_blocks().unwrap();
-        pool.add_blocks(blocks);
+        pool.add_blocks(blocks).unwrap();
 
         pool
     }

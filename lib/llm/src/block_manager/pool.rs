@@ -49,7 +49,6 @@ use dynamo_runtime::Result;
 
 // Type aliases to reduce complexity across the module
 type BlockPoolResult<T> = Result<T, BlockPoolError>;
-type AsyncResponse<T> = Result<oneshot::Receiver<T>, BlockPoolError>;
 
 // Collection type aliases
 pub type MutableBlocks<S, L, M> = Vec<MutableBlock<S, L, M>>;
@@ -65,6 +64,8 @@ pub enum OwnedBlock<S: Storage, L: LocalityProvider, M: BlockMetadata> {
 impl<S: Storage, L: LocalityProvider, M: BlockMetadata> MaybeReturnableBlock<S, L, M>
     for OwnedBlock<S, L, M>
 {
+    type ResultType = Option<Block<S, L, M>>;
+
     fn is_returnable(&self) -> bool {
         match self {
             OwnedBlock::Mutable(block) => block.is_returnable(),
@@ -72,9 +73,9 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> MaybeReturnableBlock<S, 
         }
     }
 
-    fn try_take_block(self, token: private::PrivateToken) -> Option<Vec<Block<S, L, M>>> {
+    fn try_take_block(&mut self, token: private::PrivateToken) -> Option<Block<S, L, M>> {
         match self {
-            OwnedBlock::Mutable(block) => block.try_take_block(token),
+            OwnedBlock::Mutable(block) => Some(block.try_take_block(token)),
             OwnedBlock::Immutable(block) => block.try_take_block(token),
         }
     }
@@ -127,6 +128,49 @@ pub enum BlockPoolError {
 
     #[error("No blocks to register")]
     NoBlocksToRegister,
+
+    #[error("Registration failed: {0}")]
+    RegistrationFailed(String),
+
+    #[error("Failed to add blocks: {0}")]
+    FailedToAddBlocks(String),
+}
+
+pub type PoolRegisterBlockError<S, L, M> = EitherErrorOrRetry<MutableBlock<S, L, M>>;
+pub type PoolRegisterBlocksError = EitherErrorOrRetry<usize>;
+pub type PoolMatchHashError = EitherErrorOrRetry<SequenceHash>;
+pub type PoolMatchHashesError = EitherErrorOrRetry<usize>;
+
+#[derive(Debug, Dissolve, thiserror::Error)]
+pub struct EitherErrorOrRetry<E>(either::Either<BlockPoolError, E>);
+
+impl<E> EitherErrorOrRetry<E> {
+    pub fn error(error: BlockPoolError) -> Self {
+        Self(either::Either::Left(error))
+    }
+
+    pub fn retry(partial: E) -> Self {
+        Self(either::Either::Right(partial))
+    }
+
+    pub fn retry_or_err(self) -> Result<E, BlockPoolError> {
+        match self {
+            Self(either::Either::Left(error)) => Err(error),
+            Self(either::Either::Right(partial)) => Ok(partial),
+        }
+    }
+}
+
+impl<E> From<BlockPoolError> for EitherErrorOrRetry<E> {
+    fn from(error: BlockPoolError) -> Self {
+        Self::error(error)
+    }
+}
+
+impl<E> From<BlockError> for EitherErrorOrRetry<E> {
+    fn from(error: BlockError) -> Self {
+        Self::error(error.into())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

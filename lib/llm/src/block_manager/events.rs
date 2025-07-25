@@ -61,6 +61,20 @@ pub struct PublishHandle {
     publisher: Option<Arc<dyn EventPublisher>>,
 }
 
+impl std::fmt::Debug for PublishHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "PublishHandle(publisher: {})",
+            if self.publisher.is_some() {
+                "Some"
+            } else {
+                "None"
+            }
+        )
+    }
+}
+
 impl PublishHandle {
     pub fn new(handle: RegistrationHandle, publisher: Arc<dyn EventPublisher>) -> Self {
         let handle = Arc::new(handle);
