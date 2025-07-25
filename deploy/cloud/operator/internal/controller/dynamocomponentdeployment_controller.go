@@ -1477,11 +1477,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName
 
-	podSpec := corev1.PodSpec{
-		Containers: containers,
-		Volumes:    volumes,
-	}
-
 	imagePullSecrets := []corev1.LocalObjectReference{}
 
 	if r.DockerSecretRetriever == nil {
@@ -1500,9 +1495,13 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		})
 	}
 
-	if len(imagePullSecrets) > 0 {
-		podSpec.ImagePullSecrets = imagePullSecrets
+	podSpec := &corev1.PodSpec{}
+	if opt.dynamoComponentDeployment.Spec.ExtraPodSpec != nil && opt.dynamoComponentDeployment.Spec.ExtraPodSpec.PodSpec != nil {
+		podSpec = opt.dynamoComponentDeployment.Spec.ExtraPodSpec.PodSpec.DeepCopy()
 	}
+	podSpec.Containers = append(podSpec.Containers, containers...)
+	podSpec.Volumes = append(podSpec.Volumes, volumes...)
+	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, imagePullSecrets...)
 
 	extraPodMetadata := opt.dynamoComponentDeployment.Spec.ExtraPodMetadata
 
@@ -1514,18 +1513,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		for k, v := range extraPodMetadata.Labels {
 			podLabels[k] = v
 		}
-	}
-
-	extraPodSpec := opt.dynamoComponentDeployment.Spec.ExtraPodSpec
-
-	if extraPodSpec != nil {
-		podSpec.SchedulerName = extraPodSpec.SchedulerName
-		podSpec.NodeSelector = extraPodSpec.NodeSelector
-		podSpec.Affinity = extraPodSpec.Affinity
-		podSpec.Tolerations = extraPodSpec.Tolerations
-		podSpec.TopologySpreadConstraints = extraPodSpec.TopologySpreadConstraints
-		podSpec.Containers = append(podSpec.Containers, extraPodSpec.Containers...)
-		podSpec.ServiceAccountName = extraPodSpec.ServiceAccountName
 	}
 
 	if podSpec.ServiceAccountName == "" {
@@ -1565,7 +1552,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			Labels:      podLabels,
 			Annotations: podAnnotations,
 		},
-		Spec: podSpec,
+		Spec: *podSpec,
 	}
 
 	return
