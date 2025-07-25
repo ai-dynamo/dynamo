@@ -433,7 +433,9 @@ async def init(runtime: DistributedRuntime, args: argparse.Namespace, config: Co
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
     if args.worker_type in ["prefill", "encode_prefill"]:
-        handler = VllmPDWorker(args, config.engine_args, component, generate_endpoint)
+        handler: VllmBaseWorker = VllmPDWorker(
+            args, config.engine_args, component, generate_endpoint
+        )
     elif args.worker_type == "decode":
         handler = VllmDecodeWorker(
             args, config.engine_args, component, generate_endpoint

@@ -99,7 +99,6 @@ class Processor(ProcessMixIn):
     def __init__(self, args: argparse.Namespace, engine_args: AsyncEngineArgs):
         self.prompt_template = args.prompt_template
         self.downstream_endpoint = args.downstream_endpoint
-        self.encode_worker_client = None
         self.engine_args = engine_args
         self.model_config = self.engine_args.create_model_config()
         self.default_sampling_params = self.model_config.get_diff_sampling_param()

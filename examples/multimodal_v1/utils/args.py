@@ -63,7 +63,7 @@ def parse_endpoint(endpoint: str) -> List[str]:
 
 
 def base_parse_args(
-    parser: argparse.ArgumentParser, endpoint_overwrite: Callable = None
+    parser: argparse.ArgumentParser, endpoint_overwrite: Optional[Callable] = None
 ) -> Tuple[argparse.Namespace, Config]:
     """
     Basic parsing logic for any dynamo vLLM deployment. The caller will use
