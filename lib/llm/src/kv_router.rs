@@ -311,12 +311,14 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
         match self.inner.client.instance_source.as_ref() {
             InstanceSource::Static => self.inner.r#static(request).await,
             InstanceSource::Dynamic(_) => {
-                // Extract context ID for request tracking
-                let context_id = request.context().id().to_string();
-                let (instance_id, overlap_amount) = self
-                    .chooser
-                    .find_best_match(&context_id, &request.token_ids)
-                    .await?;
+                let (instance_id, overlap_amount) = if let Some(id) = request.backend_instance_id {
+                    // If instance_id is set, use it
+                    (id, 0)
+                } else {
+                    // Otherwise, find the best match
+                    self.chooser.find_best_match(&request.token_ids).await?
+                };
+
                 let query_instance_id = request.has_annotation("query_instance_id");
                 // Extract context information before moving the request
                 let stream_context = request.context().clone();

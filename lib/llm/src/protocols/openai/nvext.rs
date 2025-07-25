@@ -61,6 +61,13 @@ pub struct NvExt {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub annotations: Option<Vec<String>>,
+
+    /// Targeted backend instance ID for the request
+    /// If set, the request will be routed to backend instance with the given ID.
+    /// If not set, the request will be routed to the best matching instance.
+    #[builder(default, setter(strip_option))]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend_instance_id: Option<i64>,
 }
 
 impl Default for NvExt {
