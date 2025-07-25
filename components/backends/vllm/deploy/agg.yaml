@@ -63,7 +63,7 @@ spec:
         failureThreshold: 60
       dynamoNamespace: vllm-agg
       componentType: worker
-      replicas: 2
+      replicas: 1
       resources:
         requests:
           cpu: "10"
