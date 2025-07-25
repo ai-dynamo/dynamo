@@ -80,7 +80,8 @@ RUN apt-get update -y && \
     libnuma-dev librdmacm-dev ibverbs-providers \
     # For Prometheus
     curl tar ca-certificates && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* \
+    libfontconfig1-dev
 
 ARG NIXL_UCX_REF=v1.19.x
 ARG NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
