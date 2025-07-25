@@ -44,7 +44,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 In this graph, we have two workers, [VllmEncodeWorker](components/encode_worker.py) and [VllmPDWorker](components/worker.py).
 The VllmEncodeWorker is responsible for encoding the image and passing the embeddings to the VllmPDWorker via a combination of NATS and RDMA.
 The work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface.
-Its VllmPDWorker then prefills and decodes the prompt, just like the [LLM aggregated serving](../llm/README.md) example.
+Its VllmPDWorker then prefills and decodes the prompt, just like the [LLM aggregated serving](/components/backends/vllm/README.md) example.
 By separating the encode from the prefill and decode stages, we can have a more flexible deployment and scale the
 VllmEncodeWorker independently from the prefill and decode workers if needed.
 
@@ -122,7 +122,7 @@ For the Llava model, embeddings are only required during the prefill stage. As s
 The VllmEncodeWorker is responsible for encoding the image and passing the embeddings to the prefill worker via a combination of NATS and RDMA.
 Its work complete event is sent via NATS, while the embeddings tensor is transferred via RDMA through the NIXL interface.
 The prefill worker performs the prefilling step and forwards the KV cache to the decode worker for decoding.
-For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](../llm/README.md) example.
+For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](/components/backends/vllm/README.md) example.
 
 This figure shows the flow of the graph:
 ```mermaid
@@ -203,7 +203,7 @@ of the model per node.
 
 #### Graph
 
-In this graph, we have [VllmPDWorker](components/worker.py) which will encode the image, prefill and decode the prompt, just like the [LLM aggregated serving](../llm/README.md) example.
+In this graph, we have [VllmPDWorker](components/worker.py) which will encode the image, prefill and decode the prompt, just like the [LLM aggregated serving](/components/backends/vllm/README.md) example.
 
 This figure shows the flow of the graph:
 ```mermaid
@@ -267,7 +267,7 @@ You should see a response similar to this:
 
 In this graph, we have two workers, [VllmDecodeWorker](components/worker.py), and [VllmPDWorker](components/worker.py).
 The prefill worker performs the encoding and prefilling steps and forwards the KV cache to the decode worker for decoding.
-For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](../llm/README.md) example.
+For more details on the roles of the prefill and decode workers, refer to the [LLM disaggregated serving](/components/backends/vllm/README.md) example.
 
 This figure shows the flow of the graph:
 ```mermaid

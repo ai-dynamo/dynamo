@@ -206,10 +206,8 @@ class VllmDecodeWorker(VllmBaseWorker):
 
         # Decode worker doesn't process embeddings, so we pass None or empty tensor
         gen = self.engine_client.generate(
-            # prompt=request.engine_prompt,
             prompt=TokensPrompt(
                 prompt_token_ids=request.engine_prompt["prompt_token_ids"],
-                # multi_modal_data={"image": None}
             ),
             sampling_params=request.sampling_params,
             request_id=request.request_id,
@@ -257,6 +255,8 @@ class VllmPDWorker(VllmBaseWorker):
         # embeddings_shape, self.embeddings_dtype = get_vision_embeddings_info(
         #     self.engine_args.model, self.engine_args.num_patches
         # )
+        # [gluo NOTE] Hardcoded for now, will use more generic approach once utils/model.py
+        # is fixed, see utils/models.py for details.
         embeddings_shape = (1, 577, 4096)
         logger.debug(f"Embeddings shape: {embeddings_shape}")
         self.embedding_size = embeddings_shape[1]
@@ -345,8 +345,6 @@ class VllmPDWorker(VllmBaseWorker):
                 decode_request.engine_prompt[
                     "prompt_token_ids"
                 ] = prefill_response.prompt_token_ids
-                # logger.debug(f"Prefill response: {prefill_response}")
-                # request_output = MyRequestOutput.model_validate_json(prefill_response.model_dump_json())
                 logger.debug(
                     f"Prefill response kv_transfer_params: {prefill_response.kv_transfer_params}"
                 )

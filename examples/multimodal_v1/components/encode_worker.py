@@ -103,6 +103,9 @@ class VllmEncodeWorker:
 
             logger.debug(f"Processing image for request: {{ id: {request_id} }}")
             image_embeds = self.image_processor(images=image, return_tensors="pt")
+            # [gluo NOTE] The commented section is for VLM generalization support,
+            # will use more generic approach once utils/model.py is fixed,
+            # see utils/models.py for details.
             # # Add a batch dimension to everything
             # for item in image_embeds:
             #     image_embeds[item] = image_embeds[item].unsqueeze(0).to(DEVICE)
@@ -132,12 +135,6 @@ class VllmEncodeWorker:
             #     logger.debug(
             #         f"Embeddings: {{ shape: {embeddings.shape}, dtype: {embeddings.dtype}, device: {embeddings.device}, ptr: {embeddings.data_ptr()}, elements: {{ count: {embeddings.numel()}, size: {embeddings.element_size()} }} }}."
             #     )
-
-            #     yield EncodeResponse(
-            #         request_id=request.request_id,
-            #         image_grid_thw=image_grid_thw,
-            #         image_sizes=image_sizes,
-            #     ).model_dump_json()
 
             with torch.no_grad():
                 logger.debug(f"Vision model device: {self.vision_model.device}")

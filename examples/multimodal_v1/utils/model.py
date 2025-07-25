@@ -30,6 +30,8 @@ from vllm.worker.worker import Worker
 logger = logging.getLogger(__name__)
 
 
+# [gluo NOTE] in vLLM v1, Worker() usage below will results in NotImplementedError,
+# must find another way to properly load the vision model given the model name (model_id).
 def load_vision_model(model_id: str) -> torch.nn.Module:
     """
     Load a vision model from a HuggingFace model ID.
