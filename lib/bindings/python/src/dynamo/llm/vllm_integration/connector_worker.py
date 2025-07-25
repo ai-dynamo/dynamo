@@ -76,7 +76,6 @@ class KvConnectorWorker:
 
         device_id = tensors[0].device.index
 
-        # TODO: We can actually just initialize our connection to the leader from the kv transfer params port argument.
         self.worker = KvbmWorker(
             num_device_blocks,
             page_size,

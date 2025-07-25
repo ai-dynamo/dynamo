@@ -70,7 +70,7 @@ class DynamoConnector(KVConnectorBase_V1):
     def update_state_after_alloc(
         self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
     ):
-        self.connector.update_state_after_alloc(request.request_id)
+        self._scheduler.update_state_after_alloc(request, blocks, num_external_tokens)
 
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
