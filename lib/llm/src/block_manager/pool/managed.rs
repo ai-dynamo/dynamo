@@ -54,6 +54,8 @@ pub mod state;
 use active::ActiveBlockPool;
 use inactive::InactiveBlockPool;
 
+use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
+
 #[derive(Builder, Dissolve)]
 #[builder(pattern = "owned", build_fn(private, name = "build_internal"))]
 pub struct ManagedBlockPoolArgs<S: Storage, L: LocalityProvider, M: BlockMetadata> {
@@ -103,7 +105,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPoolArgsBuil
             async_runtime,
             metrics,
             default_duplication_setting,
-        );
+        )?;
 
         Ok(pool)
     }
@@ -185,24 +187,16 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
         async_runtime: Handle,
         metrics: Arc<PoolMetrics>,
         default_duplication_setting: BlockRegistrationDuplicationSetting,
-    ) -> Self {
-        let (pool, progress_engine) = Self::with_progress_engine(
+    ) -> anyhow::Result<Self> {
+        let (pool, mut progress_engine) = Self::with_progress_engine(
             event_manager,
-            cancel_token,
+            cancel_token.clone(),
             blocks,
             global_registry,
-            async_runtime,
+            async_runtime.clone(),
             metrics,
             default_duplication_setting,
         );
-
-        // pool.runtime.handle().spawn(async move {
-        //     let mut progress_engine = progress_engine;
-        //     tracing::debug!("starting progress engine");
-        //     while progress_engine.step().await {
-        //         tracing::trace!("progress engine step");
-        //     }
-        // });
 
         let thread_name = format!(
             "block-pool-{}-{}",
@@ -210,25 +204,30 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
             short_type_name::<L>()
         );
 
-        std::thread::Builder::new()
-            .name(thread_name)
-            .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .expect("Failed to build Tokio runtime for block pool progress engine");
-
-                runtime.block_on(async move {
-                    let mut progress_engine = progress_engine;
-                    tracing::debug!("starting progress engine");
-                    while progress_engine.step().await {
-                        tracing::trace!("progress engine step");
+        CriticalTaskExecutionHandle::new_with_runtime(
+            move |cancel_token| async move {
+                tracing::debug!("starting progress engine");
+                loop {
+                    tokio::select! {
+                        _ = cancel_token.cancelled() => {
+                            tracing::debug!("progress engine shutting down");
+                            break;
+                        }
+                        _ = progress_engine.step() => {
+                            tracing::trace!("progress engine step");
+                        }
                     }
-                });
-            })
-            .expect("Failed to spawn block pool progress engine thread");
+                }
 
-        pool
+                Ok(())
+            },
+            cancel_token,
+            thread_name.as_str(),
+            &async_runtime,
+        )?
+        .detach();
+
+        Ok(pool)
     }
 
     fn with_progress_engine(

@@ -119,7 +119,14 @@ mod tests {
     fn make_filter(min_offload_frequency: i64, max_num_entries: usize) -> FrequencyFilter {
         let cancel_token = CancellationToken::new();
         let runtime = Handle::current();
-        FrequencyFilter::new(min_offload_frequency, Duration::from_secs(3600), max_num_entries, cancel_token, runtime).unwrap()
+        FrequencyFilter::new(
+            min_offload_frequency,
+            Duration::from_secs(3600),
+            max_num_entries,
+            cancel_token,
+            runtime,
+        )
+        .unwrap()
     }
 
     fn hash(x: u32) -> SequenceHash {
@@ -143,11 +150,11 @@ mod tests {
         // Add the first hashes, and bump it up to 2.
         assert!(!filter.should_offload(hash(0)));
         assert!(!filter.should_offload(hash(0)));
-        
+
         // Add the second hash
         assert!(!filter.should_offload(hash(1)));
         assert!(!filter.should_offload(hash(1)));
-        
+
         // Now, the value of the first hash is 4, so we should offload it.
         assert!(filter.should_offload(hash(0)));
 

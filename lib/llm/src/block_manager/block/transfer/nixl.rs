@@ -150,7 +150,7 @@ where
             loop {
                 match nixl_agent.get_xfer_status(&xfer_req) {
                     Ok(false) => break, // Transfer is complete.
-                    Ok(true) => tokio::time::sleep(std::time::Duration::from_millis(5)).await, // Transfer is still in progress.
+                    Ok(true) => tokio::time::sleep(std::time::Duration::from_millis(1)).await, // Transfer is still in progress.
                     Err(e) => {
                         tracing::error!("Error getting transfer status: {}", e);
                         break;
