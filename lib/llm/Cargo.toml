@@ -37,6 +37,10 @@ block-manager = ["dep:nixl-sys", "dep:cudarc", "dep:ndarray", "dep:nix"]
 sentencepiece = ["dep:sentencepiece"]
 
 [[bench]]
+name = "rate_limiter"
+harness = false
+
+[[bench]]
 name = "tokenizer"
 harness = false
 
@@ -109,6 +113,7 @@ tokenizers = { version = "0.21.2", default-features = false, features = [
 sentencepiece = { version = "0.11.2", optional = true }
 
 # backend
+dashmap = { version = "6.1.0" }
 galil-seiferas = { version = "0.1" }
 toktrie = { version = "1.1" }
 toktrie_hf_tokenizers =  { version = "1.1" }

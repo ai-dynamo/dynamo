@@ -10,6 +10,8 @@ use std::{
 
 pub use prometheus::Registry;
 
+use crate::http::service::rate_limiter::RateLimiter;
+
 use super::RouteDoc;
 
 /// Value for the `status` label in the request counter for successful requests
@@ -18,6 +20,9 @@ pub const REQUEST_STATUS_SUCCESS: &str = "success";
 /// Value for the `status` label in the request counter if the request failed
 pub const REQUEST_STATUS_ERROR: &str = "error";
 
+/// Value for the `status` label in the request counter if the request was rejected by the rate limiter
+pub const REQUEST_STATUS_REJECTED: &str = "rejected";
+
 /// Partial value for the `type` label in the request counter for streaming requests
 pub const REQUEST_TYPE_STREAM: &str = "stream";
 
@@ -25,6 +30,7 @@ pub const REQUEST_TYPE_STREAM: &str = "stream";
 pub const REQUEST_TYPE_UNARY: &str = "unary";
 
 pub struct Metrics {
+    rate_limit_requests_counter: IntCounterVec,
     request_counter: IntCounterVec,
     inflight_gauge: IntGaugeVec,
     request_duration: HistogramVec,
@@ -32,6 +38,8 @@ pub struct Metrics {
     output_sequence_length: HistogramVec,
     time_to_first_token: HistogramVec,
     inter_token_latency: HistogramVec,
+    rate_limit_ema_ttft: HistogramVec,
+    rate_limit_ema_itl: HistogramVec,
 }
 
 /// RAII object for inflight gauge and request counters
@@ -72,15 +80,27 @@ pub enum RequestType {
     Stream,
 }
 
+impl RequestType {
+    pub fn from_streaming_boolean(is_streaming: bool) -> Self {
+        if is_streaming {
+            RequestType::Stream
+        } else {
+            RequestType::Unary
+        }
+    }
+}
+
 /// Status
 pub enum Status {
     Success,
     Error,
+    Rejected,
 }
 
 /// Track response-specific metrics
 pub struct ResponseMetricCollector {
     metrics: Arc<Metrics>,
+    rate_limiter: Arc<RateLimiter>,
     model: String,
     start_time: Instant,
     // we use is_first_token to distinguish TTFT from ITL. It is true by default and
@@ -108,7 +128,19 @@ impl Metrics {
     /// - `{prefix}_http_service_output_sequence_tokens` - HistogramVec for output sequence length in tokens
     /// - `{prefix}_http_service_time_to_first_token_seconds` - HistogramVec for time to first token in seconds
     /// - `{prefix}_http_service_inter_token_latency_seconds` - HistogramVec for inter-token latency in seconds
+    /// - `{prefix}_http_service_rate_limit_requests_total` - IntCounterVec for the total number of requests rejected by the rate limiter
+    /// - `{prefix}_http_service_rate_limit_ema_ttft_seconds` - HistogramVec for time to first token in seconds
+    /// - `{prefix}_http_service_rate_limit_ema_itl_seconds` - HistogramVec for inter-token latency in seconds
     pub fn new(prefix: &str) -> Self {
+        let rate_limit_requests_counter = IntCounterVec::new(
+            Opts::new(
+                format!("{}_http_service_rate_limit_requests_total", prefix),
+                "Total number of requests rejected by the rate limiter",
+            ),
+            &["model", "endpoint", "request_type", "status"],
+        )
+        .unwrap();
+
         let request_counter = IntCounterVec::new(
             Opts::new(
                 format!("{}_http_service_requests_total", prefix),
@@ -189,7 +221,33 @@ impl Metrics {
         )
         .unwrap();
 
+        let rate_limit_ema_ttft = HistogramVec::new(
+            HistogramOpts::new(
+                format!("{}_http_service_rate_limit_ema_ttft_seconds", prefix),
+                "Time to first token in seconds",
+            )
+            .buckets(vec![
+                0.0, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0,
+                60.0, 120.0, 240.0, 480.0,
+            ]),
+            &["model"],
+        )
+        .unwrap();
+
+        let rate_limit_ema_itl = HistogramVec::new(
+            HistogramOpts::new(
+                format!("{}_http_service_rate_limit_ema_itl_seconds", prefix),
+                "Inter-token latency in seconds",
+            )
+            .buckets(vec![
+                0.0, 0.001, 0.005, 0.01, 0.015, 0.02, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.0,
+            ]),
+            &["model"],
+        )
+        .unwrap();
+
         Metrics {
+            rate_limit_requests_counter,
             request_counter,
             inflight_gauge,
             request_duration,
@@ -197,7 +255,31 @@ impl Metrics {
             output_sequence_length,
             time_to_first_token,
             inter_token_latency,
+            rate_limit_ema_ttft,
+            rate_limit_ema_itl,
         }
+    }
+
+    /// Get the number of requests rejected by the rate limiter for the given dimensions:
+    /// - model
+    /// - endpoint (completions/chat_completions)
+    /// - request type (unary/stream)
+    /// - status (success/error)
+    pub fn get_rate_limit_requests_counter(
+        &self,
+        model: &str,
+        endpoint: &Endpoint,
+        request_type: &RequestType,
+        status: &Status,
+    ) -> u64 {
+        self.rate_limit_requests_counter
+            .with_label_values(&[
+                model,
+                endpoint.as_str(),
+                request_type.as_str(),
+                status.as_str(),
+            ])
+            .get()
     }
 
     /// Get the number of successful requests for the given dimensions:
@@ -220,6 +302,28 @@ impl Metrics {
                 status.as_str(),
             ])
             .get()
+    }
+
+    /// Increment the counter for requests rejected by the rate limiter for the given dimensions:
+    /// - model
+    /// - endpoint (completions/chat_completions)
+    /// - request type (unary/stream)
+    /// - status (success/error)
+    pub fn inc_rate_limit_requests_counter(
+        &self,
+        model: &str,
+        endpoint: &Endpoint,
+        request_type: &RequestType,
+        status: &Status,
+    ) {
+        self.rate_limit_requests_counter
+            .with_label_values(&[
+                model,
+                endpoint.as_str(),
+                request_type.as_str(),
+                status.as_str(),
+            ])
+            .inc()
     }
 
     /// Increment the counter for requests for the given dimensions:
@@ -258,6 +362,7 @@ impl Metrics {
     }
 
     pub fn register(&self, registry: &Registry) -> Result<(), prometheus::Error> {
+        registry.register(Box::new(self.rate_limit_requests_counter.clone()))?;
         registry.register(Box::new(self.request_counter.clone()))?;
         registry.register(Box::new(self.inflight_gauge.clone()))?;
         registry.register(Box::new(self.request_duration.clone()))?;
@@ -265,6 +370,8 @@ impl Metrics {
         registry.register(Box::new(self.output_sequence_length.clone()))?;
         registry.register(Box::new(self.time_to_first_token.clone()))?;
         registry.register(Box::new(self.inter_token_latency.clone()))?;
+        registry.register(Box::new(self.rate_limit_ema_ttft.clone()))?;
+        registry.register(Box::new(self.rate_limit_ema_itl.clone()))?;
         Ok(())
     }
 
@@ -294,8 +401,26 @@ impl Metrics {
     }
 
     /// Create a new [`ResponseMetricCollector`] for collecting per-response metrics (i.e., TTFT, ITL)
-    pub fn create_response_collector(self: Arc<Self>, model: &str) -> ResponseMetricCollector {
-        ResponseMetricCollector::new(self, model.to_string().to_lowercase())
+    pub fn create_response_collector(
+        self: Arc<Self>,
+        model: &str,
+        rate_limiter: Arc<RateLimiter>,
+    ) -> ResponseMetricCollector {
+        ResponseMetricCollector::new(self, model.to_string().to_lowercase(), rate_limiter)
+    }
+
+    /// Record the time to first token for the given model, endpoint, and request type
+    pub fn record_rate_limit_ttft(&self, ttft_ema: f64, model: &str) {
+        self.rate_limit_ema_ttft
+            .with_label_values(&[model])
+            .observe(ttft_ema);
+    }
+
+    /// Record the inter-token latency for the given model, endpoint, and request type
+    pub fn record_rate_limit_itl(&self, itl_ema: f64, model: &str) {
+        self.rate_limit_ema_itl
+            .with_label_values(&[model])
+            .observe(itl_ema);
     }
 }
 
@@ -387,14 +512,16 @@ impl Status {
         match self {
             Status::Success => REQUEST_STATUS_SUCCESS,
             Status::Error => REQUEST_STATUS_ERROR,
+            Status::Rejected => REQUEST_STATUS_REJECTED,
         }
     }
 }
 
 impl ResponseMetricCollector {
-    fn new(metrics: Arc<Metrics>, model: String) -> Self {
+    fn new(metrics: Arc<Metrics>, model: String, rate_limiter: Arc<RateLimiter>) -> Self {
         ResponseMetricCollector {
             metrics,
+            rate_limiter,
             model,
             is_first_token: true,
             last_response_time: None,
@@ -425,6 +552,7 @@ impl ResponseMetricCollector {
                 .time_to_first_token
                 .with_label_values(&[&self.model])
                 .observe(ttft);
+            self.rate_limiter.record_ttft(&self.model, ttft);
 
             // Publish ISL
             // TODO: publish ISL as soon as the tokenization process completes
@@ -445,6 +573,7 @@ impl ResponseMetricCollector {
                     .with_label_values(&[&self.model])
                     .observe(itl);
             }
+            self.rate_limiter.record_itl(&self.model, itl);
         }
 
         self.last_response_time = Some(current_duration);
