@@ -11,6 +11,7 @@ members = [
     "lib/tokens",
     "lib/bindings/c",
     "lib/engines/*",
+    "benchmarks/rust"
 ]
 resolver = "3"
 
