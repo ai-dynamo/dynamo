@@ -13,7 +13,7 @@ ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 # [gluo NOTE] currently using a fork of vllm until the fix
 # for multi-modal disaggregated serving is merged upstream.
 # see https://github.com/vllm-project/vllm/pull/21074
-ARG VLLM_REF="eaadf838ebe93e29a38a6fc1bab5a9801abe7d2c"
+ARG VLLM_REF="c9cbab6ed643e6c104373b7953f9637f6631b7f8"
 ARG VLLM_GIT_URL="https://github.com/GuanLuo/vllm.git"
 ARG TORCH_BACKEND="cu128"
 
