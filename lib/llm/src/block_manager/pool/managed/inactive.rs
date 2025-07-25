@@ -172,7 +172,13 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
     ///
     /// * `blocks` - A vector of blocks ([`Block<T, M>`]) to add.
     #[instrument(level = "debug", skip(self, blocks))]
-    pub fn add_blocks(&mut self, blocks: Vec<Block<S, L, M>>) {
+    pub fn add_blocks(&mut self, blocks: Vec<Block<S, L, M>>) -> Result<(), BlockPoolError> {
+        if !blocks.is_empty() {
+            return Err(BlockPoolError::FailedToAddBlocks(
+                "blocks have already been initialized".to_string(),
+            ));
+        }
+
         let count = blocks.len();
         tracing::debug!(count, "Adding blocks to pool");
 
@@ -183,6 +189,8 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> InactiveBlockPool<S, L, 
         }
 
         self.total_blocks.fetch_add(count as u64, Ordering::Relaxed);
+
+        Ok(())
     }
 
     /// Adds multiple blocks to the pool.

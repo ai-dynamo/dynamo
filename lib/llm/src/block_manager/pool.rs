@@ -132,6 +132,9 @@ pub enum BlockPoolError {
 
     #[error("Registration failed: {0}")]
     RegistrationFailed(String),
+
+    #[error("Failed to add blocks: {0}")]
+    FailedToAddBlocks(String),
 }
 
 pub type PoolRegisterBlockError<S, L, M> = EitherErrorOrRetry<MutableBlock<S, L, M>>;

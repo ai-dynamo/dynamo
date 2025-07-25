@@ -43,128 +43,6 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         }
     }
 
-    pub async fn handle_priority_request(
-        &mut self,
-        req: PriorityRequest<S, L, M>,
-        return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
-    ) {
-        match req {
-            PriorityRequest::AllocateBlocks(req) => {
-                let (count, resp_tx) = req.dissolve();
-                let blocks = self.allocate_blocks(count);
-                if resp_tx.send(blocks).is_err() {
-                    tracing::error!("failed to send response to allocate blocks");
-                }
-            }
-            PriorityRequest::RegisterBlocks(req) => {
-                let (blocks, resp_tx) = req.dissolve();
-                let immutable_blocks = self.register_blocks(blocks, return_rx).await;
-                if resp_tx.send(immutable_blocks).is_err() {
-                    tracing::error!("failed to send response to register blocks");
-                }
-            }
-            PriorityRequest::MatchSequenceHashes(req) => {
-                let (sequence_hashes, resp_tx) = req.dissolve();
-                let immutable_blocks = self.match_sequence_hashes(sequence_hashes, return_rx).await;
-                if resp_tx.send(Ok(immutable_blocks)).is_err() {
-                    tracing::error!("failed to send response to match sequence hashes");
-                }
-            }
-            PriorityRequest::TouchBlocks(req) => {
-                let (sequence_hashes, resp_tx) = req.dissolve();
-                self.touch_blocks(&sequence_hashes, return_rx).await;
-                if resp_tx.send(Ok(())).is_err() {
-                    tracing::error!("failed to send response to touch blocks");
-                }
-            }
-            PriorityRequest::Reset(req) => {
-                let (_req, resp_tx) = req.dissolve();
-                let result = self.inactive.reset();
-                if resp_tx.send(result).is_err() {
-                    tracing::error!("failed to send response to reset");
-                }
-            }
-            PriorityRequest::ReturnBlock(req) => {
-                let (returnable_blocks, resp_tx) = req.dissolve();
-                for block in returnable_blocks {
-                    self.return_block(block);
-                }
-                if resp_tx.send(Ok(())).is_err() {
-                    tracing::error!("failed to send response to return block");
-                }
-            }
-        }
-    }
-
-    pub fn handle_control_request(&mut self, req: ControlRequest<S, L, M>) {
-        match req {
-            ControlRequest::AddBlocks(blocks) => {
-                let (blocks, resp_rx) = blocks.dissolve();
-                self.inactive.add_blocks(blocks);
-                if resp_rx.send(()).is_err() {
-                    tracing::error!("failed to send response to add blocks");
-                }
-            }
-            ControlRequest::Status(req) => {
-                let (_, resp_rx) = req.dissolve();
-                if resp_rx.send(Ok(self.status())).is_err() {
-                    tracing::error!("failed to send response to status");
-                }
-            }
-            ControlRequest::ResetBlocks(req) => {
-                let (sequence_hashes, resp_rx) = req.dissolve();
-                if resp_rx
-                    .send(Ok(self.try_reset_blocks(&sequence_hashes)))
-                    .is_err()
-                {
-                    tracing::error!("failed to send response to reset blocks");
-                }
-            }
-        }
-    }
-
-    pub fn handle_return_block(&mut self, block: Block<S, L, M>) {
-        self.return_block(block);
-    }
-
-    /// We have a strong guarantee that the block will be returned to the pool in the near future.
-    /// The caller must take ownership of the block
-    async fn wait_for_returned_block(
-        &mut self,
-        sequence_hash: SequenceHash,
-        return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
-    ) -> Block<S, L, M> {
-        while let Some(block) = return_rx.recv().await {
-            if matches!(block.state(), BlockState::Registered(handle, _) if handle.sequence_hash() == sequence_hash)
-            {
-                return block;
-            }
-            self.handle_return_block(block);
-        }
-
-        unreachable!("this should be unreachable");
-    }
-
-    /// Process return channel until a specific block is returned
-    async fn process_return_channel_until_block_is_returned(
-        &mut self,
-        sequence_hash: SequenceHash,
-        return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
-    ) {
-        let mut done = false;
-        while let Some(block) = return_rx.recv().await {
-            if matches!(block.state(), BlockState::Registered(handle, _) if handle.sequence_hash() == sequence_hash)
-            {
-                done = true;
-            }
-            self.handle_return_block(block);
-
-            if done {
-                break;
-            }
-        }
-    }
-
     pub fn allocate_blocks(
         &mut self,
         count: usize,
@@ -198,7 +76,6 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         Ok(blocks)
     }
 
-    #[tracing::instrument(level = "debug", skip_all, fields(blocks = ?blocks))]
     pub async fn register_blocks(
         &mut self,
         mut blocks: Vec<MutableBlock<S, L, M>>,
@@ -338,7 +215,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         Ok((immutable, publish_handle))
     }
 
-    async fn match_sequence_hashes(
+    pub async fn match_sequence_hashes(
         &mut self,
         sequence_hashes: Vec<SequenceHash>,
         return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
@@ -445,7 +322,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         Err(PoolMatchHashError::retry(sequence_hash))
     }
 
-    async fn touch_blocks(
+    pub async fn touch_blocks(
         &mut self,
         sequence_hashes: &[SequenceHash],
         return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
@@ -488,7 +365,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         Publisher::new(self.event_manager.clone())
     }
 
-    fn status(&self) -> BlockPoolStatus {
+    pub fn status(&self) -> BlockPoolStatus {
         let active = self.active.status();
         let (inactive, empty) = self.inactive.status();
         BlockPoolStatus {
@@ -498,7 +375,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         }
     }
 
-    fn try_reset_blocks(&mut self, sequence_hashes: &[SequenceHash]) -> ResetBlocksResponse {
+    pub fn try_reset_blocks(&mut self, sequence_hashes: &[SequenceHash]) -> ResetBlocksResponse {
         let mut reset_blocks = Vec::new();
         let mut not_found = Vec::new();
         let mut not_reset = Vec::new();
@@ -522,6 +399,44 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
             reset_blocks,
             not_found,
             not_reset,
+        }
+    }
+
+    /// We have a strong guarantee that the block will be returned to the pool in the near future.
+    /// The caller must take ownership of the block
+    async fn wait_for_returned_block(
+        &mut self,
+        sequence_hash: SequenceHash,
+        return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
+    ) -> Block<S, L, M> {
+        while let Some(block) = return_rx.recv().await {
+            if matches!(block.state(), BlockState::Registered(handle, _) if handle.sequence_hash() == sequence_hash)
+            {
+                return block;
+            }
+            self.return_block(block);
+        }
+
+        unreachable!("this should be unreachable");
+    }
+
+    /// Process return channel until a specific block is returned
+    async fn process_return_channel_until_block_is_returned(
+        &mut self,
+        sequence_hash: SequenceHash,
+        return_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
+    ) {
+        let mut done = false;
+        while let Some(block) = return_rx.recv().await {
+            if matches!(block.state(), BlockState::Registered(handle, _) if handle.sequence_hash() == sequence_hash)
+            {
+                done = true;
+            }
+            self.return_block(block);
+
+            if done {
+                break;
+            }
         }
     }
 }
