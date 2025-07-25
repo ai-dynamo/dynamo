@@ -49,22 +49,22 @@ The examples below assume you build the latest image yourself from source. If us
         :link: /examples/hello_world
         :link-type: doc
 
-        Demonstrates the basic concepts of Dynamo by creating a simple multi-service pipeline.
+        Demonstrates the basic concepts of Dynamo by creating a simple GPU-unaware graph
 
-    .. grid-item-card:: :doc:`LLM Deployment </examples/llm_deployment>`
-        :link: /examples/llm_deployment
+    .. grid-item-card:: :doc:`LLM Serving with VLLM </components/backends/vllm>`
+        :link: /components/backends/vllm
         :link-type: doc
 
-        Presents examples and reference implementations for deploying Large Language Models (LLMs) in various configurations.
+        Presents examples and reference implementations for deploying Large Language Models (LLMs) in various configurations with VLLM.
 
-    .. grid-item-card:: :doc:`Multinode </examples/multinode>`
-        :link: /examples/multinode
+    .. grid-item-card:: :doc:`Multinode with SGLang </components/backends/sglang/docs/multinode-examples>`
+        :link: /components/backends/sglang/docs/multinode-examples
         :link-type: doc
 
-        Demonstrates deployment for disaggregated serving on 3 nodes using `nvidia/Llama-3.1-405B-Instruct-FP8`.
+        Demonstrates disaggregated serving on several nodes.
 
-    .. grid-item-card:: :doc:`TensorRT-LLM </examples/trtllm>`
-        :link: /examples/trtllm
+    .. grid-item-card:: :doc:`TensorRT-LLM </components/backends/trtllm>`
+        :link: /components/backends/trtllm
         :link-type: doc
 
         Presents TensorRT-LLM examples and reference implementations for deploying Large Language Models (LLMs) in various configurations.
@@ -110,7 +110,7 @@ The examples below assume you build the latest image yourself from source. If us
 
    Dynamo Deploy Quickstart <guides/dynamo_deploy/quickstart.md>
    Dynamo Cloud Kubernetes Platform <guides/dynamo_deploy/dynamo_cloud.md>
-   Manual Helm Deployment <guides/dynamo_deploy/manual_helm_deployment.md>
+   Manual Helm Deployment <deploy/helm/README.md>
    GKE Setup Guide <guides/dynamo_deploy/gke_setup.md>
    Minikube Setup Guide <guides/dynamo_deploy/minikube.md>
    Model Caching with Fluid <guides/dynamo_deploy/model_caching_with_fluid.md>
@@ -126,17 +126,14 @@ The examples below assume you build the latest image yourself from source. If us
    :hidden:
    :caption: API
 
-   Python API <API/python_bindings.md>
    NIXL Connect API <API/nixl_connect/README.md>
 
 .. toctree::
    :hidden:
    :caption: Examples
 
-   Aggregated and Disaggregated Deployment <examples/disagg_skeleton.md>
-   LLM Deployment Examples <examples/llm_deployment.md>
-   Multinode Examples <examples/multinode.md>
-   LLM Deployment Examples using TensorRT-LLM <examples/trtllm.md>
+   Multinode Examples </components/backends/sglang/docs/multinode-examples.md>
+   LLM Deployment Examples using TensorRT-LLM <components/backends/trtllm/README.md>
 
 .. toctree::
    :hidden:
