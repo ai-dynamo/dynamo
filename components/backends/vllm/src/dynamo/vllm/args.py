@@ -127,6 +127,7 @@ async def allocate_and_reserve_port(
     """
 
     node_name = socket.gethostname()
+    node_ip = socket.gethostbyname(node_name)
 
     for attempt in range(1, max_attempts + 1):
         # Hold socket open just long enough to reserve in ETCD
@@ -136,7 +137,7 @@ async def allocate_and_reserve_port(
             port = sock.getsockname()[1]
 
             # Reserve in ETCD while holding the socket
-            key = f"dyn://{namespace}/ports/{node_name}/{port}"
+            key = f"dyn://{namespace}/ports/{node_ip}/{port}"
             value = {
                 "worker_id": worker_id,
                 "reason": reason,
@@ -238,23 +239,23 @@ def overwrite_args(config):
             raise ValueError(f"{key} not found in AsyncEngineArgs from vLLM.")
 
 
-def set_side_channel_host_and_port(config: Config, hostname: Optional[str] = None):
+def set_side_channel_host_and_port(config: Config):
     """vLLM V1 NixlConnector creates a side channel to exchange metadata with other NIXL connectors.
     This sets the port number for the side channel.
     """
-    if hostname is None:
-        hostname = socket.gethostname()
-        # Test if hostname is usable by attempting to bind to it
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as test_socket:
-                test_socket.bind((hostname, 0))
-        except (socket.error, socket.gaierror):
-            # If hostname is not usable, fall back to localhost
-            logger.warning(
-                f"Hostname '{hostname}' is not usable, falling back to '127.0.0.1'"
-            )
-            hostname = "127.0.0.1"
+    try:
+        host_name = socket.gethostname()
+        # Get the IP address of the hostname - this is needed for the side channel to work in multi-node deployments
+        host_ip = socket.gethostbyname(host_name)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as test_socket:
+            test_socket.bind((host_ip, 0))
+    except (socket.error, socket.gaierror):
+        # If hostname is not usable, fall back to localhost
+        logger.warning(
+            f"Hostname '{host_ip}' is not usable, falling back to '127.0.0.1'"
+        )
+        host_ip = "127.0.0.1"
 
-    os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = hostname
+    os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = host_ip
     os.environ["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(config.side_channel_port)
-    logger.debug(f"Set NIXL side channel to {hostname}:{config.side_channel_port}")
+    logger.debug(f"Set NIXL side channel to {host_ip}:{config.side_channel_port}")
