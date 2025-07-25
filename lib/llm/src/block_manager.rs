@@ -334,6 +334,7 @@ mod tests {
             .unwrap()
     }
 
+    #[allow(dead_code)]
     pub async fn create_reference_block_manager_with_counts(
         device: usize,
         host: usize,

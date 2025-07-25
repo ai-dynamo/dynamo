@@ -53,7 +53,7 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ActiveBlockPool<S, L, M>
         // This is needed to ensure the lifetime of the parent is at least as long as the child.
         if let Ok(Some(parent)) = block.parent_sequence_hash() {
             if let Some(parent_block) = self.match_sequence_hash(parent) {
-                block.set_parent(parent_block.mutable_block().clone());
+                block.set_parent(parent_block.inner().clone());
             }
         }
 

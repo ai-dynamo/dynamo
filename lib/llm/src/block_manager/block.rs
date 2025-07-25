@@ -223,8 +223,35 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Block<S, L, M> {
 
     /// Marking this block as a duplicate means that it can not be registered; however, it can carry with
     /// it a strong reference to the primary block which which it duplicates kv information.
-    pub(crate) fn mark_as_duplicate(&mut self, primary_block: Arc<MutableBlock<S, L, M>>) {
+    fn mark_as_duplicate(
+        &mut self,
+        primary_block: Arc<MutableBlock<S, L, M>>,
+    ) -> Result<(), BlockError> {
+        match self.state() {
+            BlockState::Complete(state) => {
+                let sequence_hash = state.token_block().sequence_hash();
+                if sequence_hash != primary_block.sequence_hash()? {
+                    return Err(BlockError::InvalidState(
+                        "duplicate blocks must have the same sequence hash".to_string(),
+                    ));
+                }
+            }
+            _ => {
+                return Err(BlockError::InvalidState(
+                    "duplicate blocks must be in the complete state on creation".to_string(),
+                ));
+            }
+        }
+
+        if self.is_duplicate() {
+            return Err(BlockError::InvalidState(
+                "duplicate blocks must not be a duplicate".to_string(),
+            ));
+        }
+
         self.registered_block = Some(primary_block);
+
+        Ok(())
     }
 
     pub(crate) fn detach_registered_block(&mut self) -> Option<Arc<MutableBlock<S, L, M>>> {
@@ -830,34 +857,28 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ImmutableBlock<S, L, M> 
         }
     }
 
+    /// Create a duplicate block from a primary block.
+    ///
+    /// If deduplication is disable, i.e. we allow the multiple blocks with the same sequence hash,
+    /// to be active at the same time, we need a mechanism to share the registration handle and ensure
+    /// that only one block of this state is every placed back to the inactive pool.
+    ///
+    /// The first block to be registered in a storage pool with a [`SequenceHash`]` will be considered
+    /// the primary block; it maintains the registration handle.
+    ///
+    /// Any subsequent block that is registered with the same [`SequenceHash`] will be considered a
+    /// duplicate block.
+    ///
+    /// To ensure the primary block is not dropped while a duplicate block is active, we attach a clone
+    /// of the primary block to the duplicate block at the [`Block`] level via the [`Block::mark_as_duplicate`]
+    /// method.
     pub(crate) fn make_duplicate(
         mut block: MutableBlock<S, L, M>,
         primary_block: ImmutableBlock<S, L, M>,
     ) -> Result<Self, BlockError> {
         // validate block state and sequence hash match
-        match block.state() {
-            BlockState::Complete(state) => {
-                let sequence_hash = state.token_block().sequence_hash();
-                if sequence_hash != primary_block.sequence_hash {
-                    return Err(BlockError::InvalidState(
-                        "duplicate blocks must have the same sequence hash".to_string(),
-                    ));
-                }
-            }
-            _ => {
-                return Err(BlockError::InvalidState(
-                    "duplicate blocks must be in the complete state".to_string(),
-                ));
-            }
-        }
 
-        if block.is_duplicate() {
-            return Err(BlockError::InvalidState(
-                "duplicate blocks must not be a duplicate".to_string(),
-            ));
-        }
-
-        block.mark_as_duplicate(primary_block.mutable_block().clone());
+        block.mark_as_duplicate(primary_block.inner().clone())?;
 
         Ok(Self {
             block: Some(Arc::new(block)),
@@ -865,8 +886,16 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ImmutableBlock<S, L, M> 
         })
     }
 
+    pub fn validate(&self) -> bool {
+        if self.block.is_none() {
+            return false;
+        }
+        debug_assert!(self.state().is_registered());
+        true
+    }
+
     #[inline(always)]
-    pub(crate) fn mutable_block(&self) -> &Arc<MutableBlock<S, L, M>> {
+    pub(crate) fn inner(&self) -> &Arc<MutableBlock<S, L, M>> {
         self.block.as_ref().expect("block was dropped")
     }
 
@@ -877,13 +906,23 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ImmutableBlock<S, L, M> 
     /// If the ImmutableBlock is a duplicate, returns the block ID of the duplicate;
     /// otherwise, returns the block ID of the primary block.
     pub fn block_id(&self) -> BlockId {
-        self.mutable_block().block_id()
+        self.inner().block_id()
+    }
+
+    /// Should return a registered state.
+    /// If the ImmutableBlock is a duplicate, returns the state of the primary block.
+    /// If the ImmutableBlock is not a duplicate, returns the state of the block.
+    pub fn state(&self) -> &BlockState {
+        match self.inner().registered_block.as_ref() {
+            Some(registered_block) => registered_block.state(),
+            None => self.inner().state(),
+        }
     }
 
     /// Returns true if the ImmutableBlock holds a duplicate block.
     #[allow(unused)]
     pub(crate) fn is_duplicate(&self) -> bool {
-        self.mutable_block().is_duplicate()
+        self.inner().is_duplicate()
     }
 }
 

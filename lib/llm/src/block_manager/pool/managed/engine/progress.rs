@@ -14,7 +14,7 @@ pub struct ProgressEngine<S: Storage, L: LocalityProvider, M: BlockMetadata> {
 
 impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine<S, L, M> {
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         state: Arc<Mutex<State<S, L, M>>>,
         cancel_token: CancellationToken,
         return_rx: tokio::sync::mpsc::UnboundedReceiver<Block<S, L, M>>,
@@ -145,6 +145,4 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> ProgressEngine
             }
         }
     }
-
-
 }

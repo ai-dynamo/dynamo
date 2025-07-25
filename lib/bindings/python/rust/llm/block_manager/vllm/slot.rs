@@ -502,11 +502,12 @@ mod tests {
             let runtime = tokio::runtime::Runtime::new().unwrap();
             let pool = Arc::new(
                 ManagedBlockPool::builder()
-                    .blocks(blocks)
                     .async_runtime(runtime.handle().clone())
                     .build()
                     .unwrap(),
             );
+
+            pool.add_blocks_blocking(blocks).unwrap();
 
             Self {
                 pool,

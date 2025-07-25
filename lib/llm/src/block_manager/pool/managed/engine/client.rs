@@ -132,16 +132,19 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> Client<S, L, M> {
             .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
     }
 
-    pub async fn try_return_block(&self, block: OwnedBlock<S, L, M>) -> BlockPoolResult<()> {
-        // let (req, resp_rx) = ReturnBlockReq::new(vec![block]);
+    pub async fn try_return_block(&self, mut block: OwnedBlock<S, L, M>) -> BlockPoolResult<()> {
+        let raw_block = block
+            .try_take_block(private::PrivateToken)
+            .ok_or(BlockPoolError::NotReturnable)?;
 
-        // self.ctrl_tx
-        //     .send(PriorityRequest::ReturnBlock(req))
-        //     .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
+        let (req, resp_rx) = ReturnBlockReq::new(vec![raw_block]);
 
-        // resp_rx
-        //     .await
-        //     .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
-        unimplemented!()
+        self.priority_tx
+            .send(PriorityRequest::ReturnBlock(req))
+            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?;
+
+        resp_rx
+            .await
+            .map_err(|_| BlockPoolError::ProgressEngineShutdown)?
     }
 }

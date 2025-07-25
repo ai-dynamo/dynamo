@@ -47,14 +47,12 @@ use crate::block_manager::events::Publisher;
 
 use super::*;
 
-pub mod controller;
-pub mod state;
-
 mod direct;
 mod engine;
+mod state;
 
 use direct::DirectAccess;
-use engine::Client;
+use engine::{Client, ProgressEngine};
 use state::active::ActiveBlockPool;
 use state::inactive::InactiveBlockPool;
 
@@ -169,24 +167,14 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
         metrics: Arc<PoolMetrics>,
         default_duplication_setting: BlockRegistrationDuplicationSetting,
     ) -> Self {
-        let (return_tx, return_rx) = tokio::sync::mpsc::unbounded_channel();
-        let state = State::<S, L, M>::new(
+        let (pool, progress_engine) = Self::with_progress_engine(
             event_manager,
-            return_tx,
+            cancel_token,
             global_registry,
             async_runtime,
             metrics,
             default_duplication_setting,
         );
-
-        let available_blocks_counter = state.inactive.available_blocks_counter();
-        let total_blocks_counter = state.inactive.total_blocks_counter();
-
-        let state = Arc::new(Mutex::new(state));
-
-        let direct = DirectAccess::new(state.clone());
-
-        let (client, progress_engine) = engine::create(state.clone(), return_rx, cancel_token);
 
         let thread_name = format!(
             "block-pool-{}-{}",
@@ -212,13 +200,43 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> ManagedBlockPool<S, L, M
             })
             .expect("Failed to spawn block pool progress engine thread");
 
-        Self {
+        pool
+    }
+
+    pub fn with_progress_engine(
+        event_manager: Arc<dyn EventManager>,
+        cancel_token: CancellationToken,
+        global_registry: GlobalRegistry,
+        async_runtime: Handle,
+        metrics: Arc<PoolMetrics>,
+        default_duplication_setting: BlockRegistrationDuplicationSetting,
+    ) -> (Self, ProgressEngine<S, L, M>) {
+        let (return_tx, return_rx) = tokio::sync::mpsc::unbounded_channel();
+        let state = State::<S, L, M>::new(
+            event_manager,
+            return_tx,
+            global_registry,
+            async_runtime,
+            metrics,
+            default_duplication_setting,
+        );
+
+        let available_blocks_counter = state.inactive.available_blocks_counter();
+        let total_blocks_counter = state.inactive.total_blocks_counter();
+
+        let state = Arc::new(Mutex::new(state));
+        let direct = DirectAccess::new(state.clone());
+        let (client, progress_engine) = engine::create(state.clone(), return_rx, cancel_token);
+
+        let pool = Self {
             direct: Arc::new(direct),
             client: Arc::new(client),
             available_blocks_counter,
             total_blocks_counter,
             default_duplication_setting,
-        }
+        };
+
+        (pool, progress_engine)
     }
 
     pub fn default_duplication_setting(&self) -> BlockRegistrationDuplicationSetting {
@@ -285,12 +303,12 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> BlockPool<S, L, M>
         self.client.touch_blocks(sequence_hashes).await
     }
 
-    // fn touch_blocks_blocking(
-    //     &self,
-    //     sequence_hashes: &[SequenceHash],
-    // ) -> Result<(), BlockPoolError> {
-    //     self.direct.touch_blocks(sequence_hashes)
-    // }
+    fn touch_blocks_blocking(
+        &self,
+        _sequence_hashes: &[SequenceHash],
+    ) -> Result<(), BlockPoolError> {
+        unimplemented!()
+    }
 
     async fn try_return_block(&self, block: OwnedBlock<S, L, M>) -> BlockPoolResult<()> {
         self.client.try_return_block(block).await
@@ -370,17 +388,16 @@ mod tests {
             let (
                 event_manager,
                 cancel_token,
-                blocks,
                 global_registry,
                 async_runtime,
                 metrics,
                 default_duplication_setting,
+                _blocks,
             ) = args.dissolve();
 
             let (pool, progress_engine) = ManagedBlockPool::with_progress_engine(
                 event_manager,
                 cancel_token,
-                blocks,
                 global_registry,
                 async_runtime,
                 metrics,
@@ -401,11 +418,14 @@ mod tests {
             .unwrap();
 
         let (pool, mut progress) = ManagedBlockPool::builder()
-            .blocks(blocks)
             .build_with_progress_engine()
             .unwrap();
 
-        let mut state = progress.state.lock().unwrap();
+        pool.add_blocks_blocking(blocks).unwrap();
+
+        let shared_state = pool.direct.state();
+
+        let mut state = shared_state.lock().unwrap();
 
         assert_eq!(state.inactive.available_blocks(), 7);
 
@@ -418,7 +438,7 @@ mod tests {
 
         progress.step().await;
 
-        let mut state = progress.state.lock().unwrap();
+        let mut state = shared_state.lock().unwrap();
 
         assert_eq!(state.inactive.available_blocks(), 7);
 
@@ -443,7 +463,7 @@ mod tests {
 
         let immutable_blocks = pool.register_blocks_blocking(vec![block]).unwrap();
 
-        let mut state = progress.state.lock().unwrap();
+        let mut state = shared_state.lock().unwrap();
 
         let mut duplicate_blocks = state.allocate_blocks(1).unwrap();
         assert_eq!(duplicate_blocks.len(), 1);
@@ -472,7 +492,7 @@ mod tests {
         drop(state);
         progress.step().await;
 
-        let mut state = progress.state.lock().unwrap();
+        let mut state = shared_state.lock().unwrap();
         assert_eq!(state.inactive.available_blocks(), 6);
 
         let (registerd_block, _) = state.register_block(duplicate_block).unwrap();
@@ -492,14 +512,14 @@ mod tests {
             .unwrap();
 
         let (pool, mut progress) = ManagedBlockPool::builder()
-            .blocks(blocks)
             .build_with_progress_engine()
             .unwrap();
 
-        assert_eq!(
-            progress.state.lock().unwrap().inactive.available_blocks(),
-            7
-        );
+        pool.add_blocks_blocking(blocks).unwrap();
+
+        let shared_state = pool.direct.state();
+
+        assert_eq!(shared_state.lock().unwrap().inactive.available_blocks(), 7);
 
         let pool_clone = pool.clone();
         let allocate_1_block =
@@ -507,25 +527,16 @@ mod tests {
         progress.step().await;
 
         let blocks = allocate_1_block.await.unwrap();
-        assert_eq!(
-            progress.state.lock().unwrap().inactive.available_blocks(),
-            6
-        );
+        assert_eq!(shared_state.lock().unwrap().inactive.available_blocks(), 6);
         assert_eq!(blocks.len(), 1);
 
         // drop the single block
         drop(blocks);
 
         // check before and after the progress engine step
-        assert_eq!(
-            progress.state.lock().unwrap().inactive.available_blocks(),
-            6
-        );
+        assert_eq!(shared_state.lock().unwrap().inactive.available_blocks(), 6);
         progress.step().await;
-        assert_eq!(
-            progress.state.lock().unwrap().inactive.available_blocks(),
-            7
-        );
+        assert_eq!(shared_state.lock().unwrap().inactive.available_blocks(), 7);
     }
 
     #[test]
@@ -545,10 +556,11 @@ mod tests {
 
         // Create the ManagedBlockPool and add the blocks
         let pool = ManagedBlockPool::builder()
-            .blocks(blocks)
             .async_runtime(async_runtime.handle().clone())
             .build()
             .unwrap();
+
+        pool.add_blocks_blocking(blocks).unwrap();
 
         // All blocks should be in the Reset/Empty state
         // No blocks should match the expected sequence hash
@@ -887,10 +899,7 @@ mod tests {
         // This will take ownership of the block and return an immutable block
         let mut immutable_blocks = pool.register_blocks_blocking(vec![block]).unwrap();
         let block = immutable_blocks.pop().unwrap();
-        assert!(
-            (block.is_duplicate() && !block.state().is_registered())
-                || (!block.is_duplicate() && block.state().is_registered())
-        );
+        assert!(block.validate());
         assert_eq!(block.sequence_hash(), sequence_hash);
 
         block

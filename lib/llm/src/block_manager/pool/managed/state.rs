@@ -190,7 +190,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
 
         if let Some(raw_block) = self.inactive.match_sequence_hash(sequence_hash) {
             // We already have a match, so our block is a duplicate.
-            assert!(matches!(raw_block.state(), BlockState::Registered(_, _)));
+            assert!(raw_block.state().is_registered());
             let primary = self
                 .active
                 .register(MutableBlock::new(raw_block, self.return_tx.clone()))?;
@@ -309,7 +309,7 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
         }
 
         if let Some(raw_block) = self.inactive.match_sequence_hash(sequence_hash) {
-            assert!(matches!(raw_block.state(), BlockState::Registered(_, _)));
+            assert!(raw_block.state().is_registered());
 
             let mutable = MutableBlock::new(raw_block, self.return_tx.clone());
 
@@ -351,6 +351,8 @@ impl<S: Storage, L: LocalityProvider + 'static, M: BlockMetadata> State<S, L, M>
 
     /// Returns a block to the inactive pool
     pub fn return_block(&mut self, mut block: Block<S, L, M>) {
+        // If the block is a duplicate, we try to acquire the primary block and return it to the inactive pool.
+        // If the primary block is still active, `detach_registered_block` will return `None`.
         if let Some(registered_block) = block.detach_registered_block() {
             if let Some(mut raw) = Arc::try_unwrap(registered_block)
                 .ok()

@@ -18,6 +18,12 @@ impl<S: Storage, L: LocalityProvider, M: BlockMetadata> DirectAccess<S, L, M> {
         Self { state }
     }
 
+    /// Get a reference to the state - used for testing
+    #[allow(dead_code)]
+    pub(crate) fn state(&self) -> Arc<Mutex<State<S, L, M>>> {
+        self.state.clone()
+    }
+
     /// Allocate a set of blocks from the pool.
     pub fn allocate_blocks(&self, count: usize) -> BlockPoolResult<Vec<MutableBlock<S, L, M>>> {
         let mut state = self.state.lock().unwrap();

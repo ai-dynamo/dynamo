@@ -45,7 +45,7 @@
 //! of the [`OffloadManager::offload_worker`] and [`OffloadManager::onboard_worker`] methods.
 
 use super::block::{
-    locality::LocalityProvider, transfer::TransferContext, BlockError, BlockMetadata, BlockState,
+    locality::LocalityProvider, transfer::TransferContext, BlockError, BlockMetadata,
     ImmutableBlock, MutableBlock,
 };
 use super::metrics::{BlockManagerMetrics, PoolMetrics};
@@ -445,14 +445,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         block: &ImmutableBlock<S, Locality, Metadata>,
         priority: u64,
     ) -> core::result::Result<(), BlockPoolError> {
-        match block.state() {
-            BlockState::Registered(_, _) => {}
-            _ => {
-                return Err(BlockPoolError::BlockError(BlockError::InvalidState(
-                    "Block is not registered.".to_string(),
-                )));
-            }
-        }
+        validate_block(block)?;
 
         let tick = self.tick.fetch_add(1, Ordering::Relaxed);
         let key = OffloadRequestKey {
@@ -474,7 +467,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             }
 
             let request = OffloadRequest {
-                block: Arc::downgrade(device_block.mutable_block()),
+                block: Arc::downgrade(device_block.inner()),
                 sequence_hash: device_block.sequence_hash(),
                 key,
             };
@@ -489,7 +482,7 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
             }
 
             let request = OffloadRequest {
-                block: Arc::downgrade(host_block.mutable_block()),
+                block: Arc::downgrade(host_block.inner()),
                 sequence_hash: host_block.sequence_hash(),
                 key,
             };
@@ -506,21 +499,16 @@ impl<Locality: LocalityProvider + 'static, Metadata: BlockMetadata>
         targets: Option<Vec<MutableBlock<DeviceStorage, Locality, Metadata>>>,
     ) -> oneshot::Receiver<BlockResult<DeviceStorage, Locality, Metadata>> {
         let (tx, rx) = oneshot::channel();
-        for block in &blocks {
-            match block.state() {
-                BlockState::Registered(_, _) => {}
-                _ => {
-                    tx.send(Err(BlockPoolError::BlockError(BlockError::InvalidState(
-                        "Block is not registered.".to_string(),
-                    ))))
-                    .unwrap();
-                    return rx;
-                }
-            }
+
+        if let Err(e) = validate_blocks(&blocks) {
+            // safe to unwrap because we still own the rx
+            tx.send(Err(e)).unwrap();
+            return rx;
         }
 
         if let Some(targets) = targets.as_ref() {
             if targets.len() != blocks.len() {
+                // safe to unwrap because we still own the rx
                 tx.send(Err(BlockPoolError::BlockError(BlockError::Other(
                     anyhow::anyhow!("Number of targets does not match number of blocks."),
                 ))))
@@ -631,14 +619,36 @@ impl OffloadFiltersBuilder {
     }
 }
 
+#[inline(always)]
+fn validate_block<S: Storage, Locality: LocalityProvider, Metadata: BlockMetadata>(
+    block: &ImmutableBlock<S, Locality, Metadata>,
+) -> Result<(), BlockPoolError> {
+    if !block.validate() {
+        Err(BlockError::InvalidState(
+            "ImmutableBlock failed validation.".to_string(),
+        ))?;
+    }
+    Ok(())
+}
+
+#[inline(always)]
+fn validate_blocks<S: Storage, Locality: LocalityProvider, Metadata: BlockMetadata>(
+    blocks: &[ImmutableBlock<S, Locality, Metadata>],
+) -> Result<(), BlockPoolError> {
+    for block in blocks {
+        validate_block(block)?;
+    }
+    Ok(())
+}
+
 #[cfg(all(test, feature = "testing-cuda"))]
 mod tests {
     use super::*;
 
     use crate::block_manager::{
         block::{
-            locality::Local, BasicMetadata, Block, BlockDataExt, BlockDataProvider, Blocks,
-            MutableBlock,
+            locality::Local, BasicMetadata, Block, BlockDataExt, BlockDataProvider,
+            BlockDataProviderMut, Blocks, MutableBlock,
         },
         layout::{nixl::NixlLayout, FullyContiguous, LayerSeparate, LayoutType},
         pool::{BlockRegistrationDuplicationSetting, ManagedBlockPool},
@@ -847,7 +857,7 @@ mod tests {
     }
 
     fn populate_block<S: Storage + NixlDescriptor>(
-        block: &impl BlockDataProvider<StorageType = S>,
+        block: &mut impl BlockDataProviderMut<StorageType = S>,
         start_value: u8,
     ) -> Result<()> {
         let block_data = block.block_data();
@@ -1000,7 +1010,8 @@ mod tests {
         let host_pool = host_pool.as_ref().unwrap();
 
         // Create a block and register it with the offload manager
-        let block = completed_block(device_pool, [0, 1, 2, 3])?;
+        let mut block = completed_block(device_pool, [0, 1, 2, 3])?;
+        populate_block(&mut block, 42)?;
 
         let immutable_device_block = device_pool
             .register_blocks(vec![block])
@@ -1008,8 +1019,6 @@ mod tests {
             .into_iter()
             .next()
             .ok_or(anyhow::anyhow!("Failed to register block"))?;
-
-        populate_block(&immutable_device_block, 42)?;
 
         // Offloads should only go to G2 (for now)
         offload_manager.offload(&immutable_device_block, 0)?;
@@ -1102,15 +1111,15 @@ mod tests {
         let host_pool = host_pool.as_ref().unwrap();
 
         // Allocate and fill a block on the host.
-        let host_block = completed_block(host_pool, [0, 1, 2, 3])?;
+        let mut host_block = completed_block(host_pool, [0, 1, 2, 3])?;
+        populate_block(&mut host_block, 42)?;
+
         let immutable_host_block = host_pool
             .register_blocks(vec![host_block])
             .await?
             .into_iter()
             .next()
             .unwrap();
-
-        populate_block(&immutable_host_block, 42)?;
 
         // Onboard the block.
         let onboarded_blocks = offload_manager
@@ -1124,10 +1133,7 @@ mod tests {
             immutable_host_block.sequence_hash()
         );
         // Check that the block is registered.
-        assert!(matches!(
-            onboarded_blocks[0].state(),
-            BlockState::Registered(_, _)
-        ));
+        assert!(onboarded_blocks[0].validate());
 
         check_block_contents(&immutable_host_block, &onboarded_blocks[0], 42)?;
 
@@ -1166,7 +1172,9 @@ mod tests {
         let device_pool = device_pool.as_ref().unwrap();
         let host_pool = host_pool.as_ref().unwrap();
 
-        let device_block = completed_block(device_pool, [0, 1, 2, 3])?;
+        let mut device_block = completed_block(device_pool, [0, 1, 2, 3])?;
+        populate_block(&mut device_block, 42)?;
+
         let immutable_device_block = device_pool
             .register_blocks(vec![device_block])
             .await?
@@ -1174,7 +1182,6 @@ mod tests {
             .next()
             .unwrap();
 
-        populate_block(&immutable_device_block, 42)?;
         // Offload the block to the host.
         offload_manager.offload(&immutable_device_block, 0)?;
 
@@ -1218,10 +1225,7 @@ mod tests {
             onboarded_blocks[0].sequence_hash(),
             immutable_host_block.sequence_hash()
         );
-        assert!(matches!(
-            onboarded_blocks[0].state(),
-            BlockState::Registered(_, _)
-        ));
+        assert!(onboarded_blocks[0].validate());
 
         check_block_contents(&immutable_host_block, &onboarded_blocks[0], 42)?;
 
@@ -1294,15 +1298,15 @@ mod tests {
         let host_pool = host_pool.as_ref().unwrap();
         let disk_pool = disk_pool.as_ref().unwrap();
 
-        let host_block = completed_block(host_pool, [0, 1, 2, 3])?;
+        let mut host_block = completed_block(host_pool, [0, 1, 2, 3])?;
+        populate_block(&mut host_block, 42)?;
+
         let immutable_host_block = host_pool
             .register_blocks(vec![host_block])
             .await?
             .into_iter()
             .next()
             .unwrap();
-
-        populate_block(&immutable_host_block, 42)?;
 
         offload_manager.offload(&immutable_host_block, 0)?;
 
@@ -1340,15 +1344,15 @@ mod tests {
         let device_pool = device_pool.as_ref().unwrap();
         let disk_pool = disk_pool.as_ref().unwrap();
 
-        let disk_block = completed_block(disk_pool, [0, 1, 2, 3])?;
+        let mut disk_block = completed_block(disk_pool, [0, 1, 2, 3])?;
+        populate_block(&mut disk_block, 42)?;
+
         let immutable_disk_block = disk_pool
             .register_blocks(vec![disk_block])
             .await?
             .into_iter()
             .next()
             .unwrap();
-
-        populate_block(&immutable_disk_block, 42)?;
 
         let device_block = offload_manager
             .onboard(vec![immutable_disk_block.clone()], None)
@@ -1394,8 +1398,8 @@ mod tests {
         let mut host_blocks = Vec::new();
 
         for i in 0..8 {
-            let block = completed_block(host_pool, [i; 4])?;
-            populate_block(&block, i as u8)?;
+            let mut block = completed_block(host_pool, [i; 4])?;
+            populate_block(&mut block, i as u8)?;
             host_blocks.push(block);
         }
 
@@ -1447,8 +1451,8 @@ mod tests {
         let mut disk_blocks = Vec::new();
 
         for i in 0..2 * MAX_TRANSFER_BATCH_SIZE + 1 {
-            let disk_block = completed_block(disk_pool, [i as u32; 4])?;
-            populate_block(&disk_block, i as u8)?;
+            let mut disk_block = completed_block(disk_pool, [i as u32; 4])?;
+            populate_block(&mut disk_block, i as u8)?;
             disk_blocks.push(disk_block);
         }
 
@@ -1504,8 +1508,7 @@ mod tests {
         let host_pool = host_pool.as_ref().unwrap();
 
         let mut device_block = completed_block(device_pool, [0; 4])?;
-
-        populate_block(&device_block, 42)?;
+        populate_block(&mut device_block, 42)?;
 
         let new_metadata = device_block.metadata().update_priority(1);
         device_block.update_metadata(new_metadata);
@@ -1537,7 +1540,8 @@ mod tests {
         let device_pool = device_pool.as_ref().unwrap();
         let host_pool = host_pool.as_ref().unwrap();
 
-        let device_block = completed_block(device_pool, [0; 4])?;
+        let mut device_block = completed_block(device_pool, [0; 4])?;
+        populate_block(&mut device_block, 42)?;
 
         let immutable_device_block = device_pool
             .register_blocks(vec![device_block])
@@ -1545,8 +1549,6 @@ mod tests {
             .into_iter()
             .next()
             .unwrap();
-
-        populate_block(&immutable_device_block, 42)?;
 
         offload_manager.offload(&immutable_device_block, 0)?;
 
@@ -1584,9 +1586,8 @@ mod tests {
         let host_pool = host_pool.as_ref().unwrap();
         let disk_pool = disk_pool.as_ref().unwrap();
 
-        let device_block = completed_block(device_pool, [0; 4])?;
-
-        populate_block(&device_block, 42)?;
+        let mut device_block = completed_block(device_pool, [0; 4])?;
+        populate_block(&mut device_block, 42)?;
 
         let immutable_device_block = device_pool
             .register_blocks(vec![device_block])

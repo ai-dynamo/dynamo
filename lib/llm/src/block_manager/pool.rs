@@ -49,7 +49,6 @@ use dynamo_runtime::Result;
 
 // Type aliases to reduce complexity across the module
 type BlockPoolResult<T> = Result<T, BlockPoolError>;
-type AsyncResponse<T> = Result<oneshot::Receiver<T>, BlockPoolError>;
 
 // Collection type aliases
 pub type MutableBlocks<S, L, M> = Vec<MutableBlock<S, L, M>>;
@@ -279,14 +278,10 @@ pub trait BlockPool<S: Storage, L: LocalityProvider, M: BlockMetadata>:
     ) -> BlockPoolResult<ImmutableBlocks<S, L, M>>;
 
     /// Touch a set of blocks. Equivalent to registering and then immediately dropping.
-    async fn touch_blocks(&self, sequence_hashes: &[SequenceHash]) -> BlockPoolResult<()> {
-        Ok(())
-    }
+    async fn touch_blocks(&self, sequence_hashes: &[SequenceHash]) -> BlockPoolResult<()>;
 
     /// Blocking version of [`BlockPool::touch_blocks`].
-    fn touch_blocks_blocking(&self, sequence_hashes: &[SequenceHash]) -> BlockPoolResult<()> {
-        Ok(())
-    }
+    fn touch_blocks_blocking(&self, sequence_hashes: &[SequenceHash]) -> BlockPoolResult<()>;
 
     /// Attempt to return a block to the pool. Blocks will naturally be returned to the pool when they are dropped
     /// and their reference count drops to 0; however, for testing and to synchronize the block returning to the
