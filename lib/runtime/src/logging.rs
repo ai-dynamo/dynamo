@@ -28,7 +28,6 @@
 
 use crate::config::{disable_ansi_logging, jsonl_logging_enabled};
 use crate::error;
-use async_trait::async_trait;
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
 use figment::{
@@ -38,6 +37,7 @@ use figment::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, HashMap};
+use std::convert::Infallible;
 use std::sync::Once;
 use std::time::Instant;
 use tracing::field::Field;
@@ -64,6 +64,7 @@ use tracing_subscriber::Registry;
 use tracing_subscriber::{filter::Directive, fmt};
 use tracing_subscriber::{layer::Context, Layer};
 use uuid::Uuid;
+
 /// ENV used to set the log level
 const FILTER_ENV: &str = "DYN_LOG";
 
@@ -138,11 +139,6 @@ pub struct DistributedTraceContext {
     end: Option<Instant>,
     x_request_id: Option<String>,
 }
-
-use axum::body::Body;
-use axum::extract::FromRequest;
-use axum::http::{HeaderMap, Request};
-use std::convert::Infallible;
 
 #[derive(Debug, Clone)]
 pub struct TraceParent {
