@@ -44,11 +44,11 @@ cargo test
 
 The simplest way to deploy the pre-requisite services is using
 [docker-compose](https://docs.docker.com/compose/install/linux/),
-defined in [deploy/metrics/docker-compose.yml](../../deploy/metrics/docker-compose.yml).
+defined in [deploy/docker-compose.yml](../../deploy/docker-compose.yml).
 
 ```
 # At the root of the repository:
-docker compose -f deploy/metrics/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 This will deploy a [NATS.io](https://nats.io/) server and an [etcd](https://etcd.io/)
