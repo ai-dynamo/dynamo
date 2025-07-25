@@ -36,7 +36,7 @@ export NAMESPACE=<your-namespace> # the namespace you used to deploy Dynamo clou
 Deploying an example consists of the simple `kubectl apply -f ... -n ${NAMESPACE}` command. For example:
 
 ```bash
-kubectl apply -f  components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
+kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
 ```
 
 You can use `kubectl get dynamoGraphDeployment -n ${NAMESPACE}` to view your deployment.

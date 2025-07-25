@@ -59,7 +59,6 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 Repository = "https://github.com/ai-dynamo/dynamo.git"
 
 [project.optional-dependencies]
-
 trtllm =[
     "uvloop",
     "tensorrt-llm==1.0.0rc4"
@@ -70,6 +69,7 @@ vllm = [
     "nixl",
     "vllm==0.9.2",
 ]
+
 
 sglang = [
     "uvloop",
@@ -162,6 +162,9 @@ filterwarnings = [
     "ignore:.*pkg_resources.*:UserWarning",
     "ignore:.*multipart.*:PendingDeprecationWarning",
     "ignore:.*PyType_Spec.*custom tp_new.*:DeprecationWarning", # Ignore protobuf deprecation warning
+    "ignore:.*unclosed.*socket.*:ResourceWarning", # Ignore unclosed socket warnings
+    "ignore:.*unclosed event loop.*:ResourceWarning", # Ignore unclosed event loop warnings
+    "ignore:.*Exception ignored in.*:pytest.PytestUnraisableExceptionWarning", # Ignore unraisable exception warnings
 ]
 
 
