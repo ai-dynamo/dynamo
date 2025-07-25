@@ -41,6 +41,12 @@ scrape_configs:
     static_configs:
       - targets: ['host.docker.internal:8080']  # on the "monitoring" network
 
+  # Launch via: DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 dynamo.<backend> ...
+  - job_name: 'dynamo-backend'
+    scrape_interval: 6s
+    static_configs:
+      - targets: ['host.docker.internal:8081']
+
   # This is another demo aggregator that needs to be launched manually. See components/metrics/README.md
   # Note that you may need to disable the firewall on your host. On Ubuntu: sudo ufw allow 9091/tcp
   - job_name: 'metrics-aggregation-service'

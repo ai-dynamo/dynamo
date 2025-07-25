@@ -63,9 +63,15 @@ As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build container
 
 ### Prometheus
 
-The Prometheus configuration is defined in [prometheus.yml](./prometheus.yml). It is configured to scrape metrics from the metrics aggregation service endpoint.
+The Prometheus configuration is specified in [prometheus.yml](./prometheus.yml). This file is set up to collect metrics from the metrics aggregation service endpoint.
 
-Note: You may need to adjust the target based on your host configuration and network setup.
+Please be aware that you might need to modify the target settings to align with your specific host configuration and network environment.
+
+After making changes to prometheus.yml, it is necessary to reload the configuration using the command below. Simply sending a kill -HUP signal will not suffice due to the caching of the volume that contains the prometheus.yml file.
+
+```
+docker compose -f deploy/metrics/docker-compose.yml up prometheus -d --force-recreate
+```
 
 ### Grafana
 
