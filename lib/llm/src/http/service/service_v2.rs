@@ -68,7 +68,6 @@ impl State {
         }
     }
 
-
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
     pub fn metrics_clone(&self) -> Arc<Metrics> {
         self.metrics.clone()
