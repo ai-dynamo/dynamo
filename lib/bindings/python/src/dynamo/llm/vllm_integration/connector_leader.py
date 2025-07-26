@@ -64,6 +64,7 @@ class KvConnectorLeader:
             0,
             leader,
             vllm_config.cache_config.block_size,
+            disable_device_pool=True,
         )
 
         print(f"KvConnectorLeader initialized with engine_id: {engine_id}")

@@ -64,12 +64,13 @@ pub struct BlockManager {
 #[pymethods]
 impl BlockManager {
     #[new]
-    #[pyo3(signature = (worker_id, leader = None, page_size = 32, num_device_blocks = None))]
+    #[pyo3(signature = (worker_id, leader = None, page_size = 32, num_device_blocks = None, disable_device_pool = false))]
     fn new(
         worker_id: u64,
         leader: Option<distributed::KvbmLeader>,
         page_size: usize,
         num_device_blocks: Option<usize>,
+        disable_device_pool: bool,
     ) -> PyResult<Self> {
         let cancel_token = CancellationToken::new();
         let mut config = dynamo_llm::block_manager::KvBlockManagerConfig::builder().runtime(
@@ -91,13 +92,15 @@ impl BlockManager {
         let (leader, rt) = if let Some(leader) = leader {
             let (leader, rt) = leader.dissolve();
 
-            config = config.device_layout(
-                dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
-                    .num_blocks(leader.num_device_blocks())
-                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
-                    .build()
-                    .map_err(to_pyerr)?,
-            );
+            if !disable_device_pool {
+                config = config.device_layout(
+                    dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
+                        .num_blocks(leader.num_device_blocks())
+                        .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                            .build()
+                            .map_err(to_pyerr)?,
+                    );
+            }
 
             if leader.num_host_blocks() > 0 {
                 tracing::info!("Using {} host blocks", leader.num_host_blocks());
