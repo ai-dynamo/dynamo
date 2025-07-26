@@ -205,15 +205,85 @@ def overwrite_args(config):
 
     dp_rank = config.engine_args.data_parallel_rank or 0
 
+    # Check if LMCache should be enabled
+    enable_lmcache = os.getenv("ENABLE_LMCACHE", "0").lower() in ("1", "true", "yes")
+
+    # Set kv_transfer_config based on LMCache setting
+    if enable_lmcache:
+        # Check if disaggregated mode is enabled
+        enable_lmcache_disag = os.getenv("ENABLE_LMCACHE_DISAG", "0").lower() in ("1", "true", "yes")
+        enable_lmcache_connector = os.getenv("ENABLE_LMCACHE_CONNECTOR", "0").lower() in ("1", "true", "yes")
+
+        # If enable lmcache, in default, we use single connector serving
+        kv_transfer_config = KVTransferConfig(
+            kv_connector="LMCacheConnectorV1", kv_role="kv_both"
+        )
+        logger.info("Using LMCache with connector serving (SingleConnector)")
+
+        # If enable lmcache disaggregated serving,and not enable lmcache connector, we use multi connector serving
+        if enable_lmcache_disag:
+            if enable_lmcache_connector:
+                if config.is_prefill_worker:
+                    # '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_producer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "producer1"}}'
+                    kv_transfer_config = KVTransferConfig(
+                        kv_connector="LMCacheConnectorV1", 
+                        kv_role="kv_producer",
+                        kv_connector_extra_config={
+                            "discard_partial_chunks": False,
+                            "lmcache_rpc_port": "producer1"
+                        }
+                    )
+                else:
+                    # '{"kv_connector":"LMCacheConnectorV1","kv_role":"kv_consumer","kv_connector_extra_config": {"discard_partial_chunks": false, "lmcache_rpc_port": "consumer1", "skip_last_n_tokens": 1}}'
+                    kv_transfer_config = KVTransferConfig(
+                        kv_connector="LMCacheConnectorV1", 
+                        kv_role="kv_consumer",
+                        kv_connector_extra_config={
+                            "discard_partial_chunks": False,
+                            "lmcache_rpc_port": "consumer1",
+                            "skip_last_n_tokens": 1
+                        }
+                    )
+            else:
+                if config.is_prefill_worker:
+                    # Decode worker use LMCache with disaggregated serving (MultiConnector)
+                    kv_transfer_config = KVTransferConfig(
+                        kv_connector="MultiConnector",
+                        kv_role="kv_both",
+                        kv_connector_extra_config={
+                            "connectors": [
+                                {
+                                    "kv_connector": "LMCacheConnectorV1",
+                                    "kv_role": "kv_both"
+                                },
+                                {
+                                    "kv_connector": "NixlConnector",
+                                    "kv_role": "kv_both",
+                                }
+                            ]
+                        }
+                    )
+                    logger.info("Using LMCache with disaggregated serving (MultiConnector)")
+                else:
+                    # Decode worker with LMCache use NixlConnector only (SingleConnector)
+                    kv_transfer_config = KVTransferConfig(
+                        kv_connector="NixlConnector", kv_role="kv_both"
+                    )
+                    logger.info("Using NixlConnector configuration")
+
+    else:
+        kv_transfer_config = KVTransferConfig(
+            kv_connector="NixlConnector", kv_role="kv_both"
+        )
+        logger.info("Using NixlConnector configuration")
+
     defaults = {
         "task": "generate",
         "skip_tokenizer_init": True,
         "disable_log_requests": True,
         # KV routing relies on logging KV metrics
         "disable_log_stats": False,
-        "kv_transfer_config": KVTransferConfig(
-            kv_connector="NixlConnector", kv_role="kv_both"
-        ),
+        "kv_transfer_config": kv_transfer_config,
     }
 
     if config.engine_args.enable_prefix_caching:

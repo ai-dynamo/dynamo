@@ -27,6 +27,25 @@ from .publisher import StatLoggerFactory
 configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
+def setup_lmcache_environment():
+    """Setup LMCache environment variables for KV cache offloading
+    
+    When ENABLE_LMCACHE is enabled, LMCache will be used with MultiConnector:
+    - LMCacheConnector: Handles get_num_new_matched_tokens (cache matching logic)
+    - NixlConnector: Handles actual KV cache transfer between workers
+    """
+    # LMCache configuration for matching logic
+    lmcache_config = {
+        "LMCACHE_CHUNK_SIZE": "256",  # Token chunk size
+        "LMCACHE_LOCAL_CPU": "True",  # Enable CPU memory backend
+        "LMCACHE_MAX_LOCAL_CPU_SIZE": "20",  # CPU memory limit in GB
+    }
+
+    # Set environment variables
+    for key, value in lmcache_config.items():
+        if key not in os.environ:  # Only set if not already configured
+            os.environ[key] = value
+            logger.info(f"Set LMCache environment variable: {key}={value}")
 
 async def graceful_shutdown(runtime):
     """
@@ -70,6 +89,17 @@ def setup_vllm_engine(config, stat_logger=None):
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
     engine_args = config.engine_args
+
+    # KV transfer config is now handled by args.py based on ENABLE_LMCACHE env var
+    # Check if LMCache is enabled
+    enable_lmcache = os.getenv("ENABLE_LMCACHE", "0").lower() in ("1", "true", "yes")
+
+    if enable_lmcache:
+        setup_lmcache_environment()
+        logger.info("LMCache enabled for VllmWorker")
+    else:
+        logger.info("LMCache is disabled")
+
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (
         engine_args.create_model_config().get_diff_sampling_param()
@@ -90,7 +120,10 @@ def setup_vllm_engine(config, stat_logger=None):
         disable_log_requests=engine_args.disable_log_requests,
         disable_log_stats=engine_args.disable_log_stats,
     )
-    logger.info(f"VllmWorker for {config.model} has been initialized")
+    if enable_lmcache:
+        logger.info(f"VllmWorker for {config.model} has been initialized with LMCache")
+    else:
+        logger.info(f"VllmWorker for {config.model} has been initialized")
     return engine_client, vllm_config, default_sampling_params
 
 
@@ -98,7 +131,38 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     """
     Instantiate and serve
     """
+# Check if LMCache is enabled
+    enable_lmcache = os.getenv("ENABLE_LMCACHE", "0").lower() in ("1", "true", "yes")
+    enable_lmcache_disag = os.getenv("ENABLE_LMCACHE_DISAG", "0").lower() in ("1", "true", "yes")
+    enable_lmcache_connector = os.getenv("ENABLE_LMCACHE_CONNECTOR", "0").lower() in ("1", "true", "yes")
+    if enable_lmcache and enable_lmcache_disag and enable_lmcache_connector:
+        # NIXL configuration for KV cache transfer
+        # enable_nixl: True
+        # enable_xpyd: True
+        # nixl_role: "sender"
+        # nixl_proxy_host: "localhost"
+        # nixl_proxy_port: 7500
+        # nixl_buffer_size: 1073741824 # 1GB
+        # nixl_buffer_device: "cuda"
+        lmcache_prefill_config = {
+            "enable_nixl": "True",
+            "enable_xpyd": "True",
+            "nixl_role": "sender",
+            "nixl_proxy_host": "localhost",
+            "nixl_proxy_port": "7500",
+            "nixl_buffer_size": "1073741824",
+            "nixl_buffer_device": "cuda",
+        }
+        # set the environment variables
+        for key, value in lmcache_prefill_config.items():
+            if key not in os.environ:  # Only set if not already configured
+                os.environ[key] = value
+                logging.info(f"Set LMCache environment variable: {key}={value}")
 
+        # Force local cpu is true
+        os.environ["LMCACHE_CHUNK_SIZE"] = "256"
+        os.environ["LMCACHE_LOCAL_CPU"] = "True"
+        os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "30"
     component = runtime.namespace(config.namespace).component(config.component)
     await component.create_service()
 
@@ -127,6 +191,37 @@ async def init(runtime: DistributedRuntime, config: Config):
     """
     Instantiate and serve
     """
+    # Check if LMCache is enabled
+    enable_lmcache = os.getenv("ENABLE_LMCACHE", "0").lower() in ("1", "true", "yes")
+    enable_lmcache_disag = os.getenv("ENABLE_LMCACHE_DISAG", "0").lower() in ("1", "true", "yes")
+    enable_lmcache_connector = os.getenv("ENABLE_LMCACHE_CONNECTOR", "0").lower() in ("1", "true", "yes")
+    if enable_lmcache and enable_lmcache_disag and enable_lmcache_connector:
+        # NIXL configuration for KV cache transfer
+        # enable_nixl: True
+        # enable_xpyd: True
+        # nixl_role: "receiver"
+        # nixl_peer_host: "localhost"
+        # nixl_peer_init_port: 7300
+        # nixl_peer_alloc_port: 7400
+        # nixl_buffer_size: 2147483648 # 2GB
+        # nixl_buffer_device: "cuda"
+        lmcache_decode_config = {
+            "enable_xpyd": "True",
+            "nixl_role": "receiver",
+            "nixl_peer_host": "localhost",
+            "nixl_peer_init_port": "7300",
+            "nixl_peer_alloc_port": "7400",
+            "nixl_buffer_size": "2147483648",
+            "nixl_buffer_device": "cuda",
+        }
+        # set the environment variables
+        for key, value in lmcache_decode_config.items():
+            if key not in os.environ:  # Only set if not already configured
+                os.environ[key] = value
+                logging.info(f"Set LMCache environment variable: {key}={value}")
+        # Force local cpu is false
+        os.environ["LMCACHE_LOCAL_CPU"] = "False"
+        os.environ["LMCACHE_MAX_LOCAL_CPU_SIZE"] = "0"
 
     component = runtime.namespace(config.namespace).component(config.component)
     await component.create_service()
