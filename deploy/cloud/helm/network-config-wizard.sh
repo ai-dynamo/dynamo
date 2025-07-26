@@ -97,10 +97,20 @@ if kubectl get crd gateways.networking.istio.io &>/dev/null; then
   fi
 
   # Get host patterns from virtual services
-  echo -e "${YELLOW}Discovering host patterns from VirtualServices...${NC}"
-  HOST_PATTERNS=($(kubectl get virtualservices --all-namespaces -o json 2>/dev/null | \
-    jq -r '.items[].spec.hosts[]?' | grep -v null | grep -v '\*' | \
-    while read host; do extract_domain_suffix "$host"; done | sort | uniq))
+  HOST_PATTERNS_RAW=$(echo "$VIRTUALSVC_JSON" | jq -r '.items[].spec.hosts[]?' 2>/dev/null | grep -v null | grep -v '\*' || true)
+
+  HOST_PATTERNS=()
+  if [[ -n "$HOST_PATTERNS_RAW" ]]; then
+    while read -r host; do
+      suffix=$(extract_domain_suffix "$host")
+      HOST_PATTERNS+=("$suffix")
+    done <<< "$HOST_PATTERNS_RAW"
+
+    HOST_PATTERNS=($(printf "%s\n" "${HOST_PATTERNS[@]}" | sort | uniq))
+  else
+    echo "No valid host patterns found in VirtualServices. Skipping host discovery."
+  fi
+
 
   if [ ${#HOST_PATTERNS[@]} -eq 0 ]; then
     echo -e "${YELLOW}No host patterns found in VirtualServices.${NC}"
