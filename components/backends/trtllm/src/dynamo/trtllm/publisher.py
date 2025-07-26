@@ -9,7 +9,7 @@ import traceback
 import weakref
 from contextlib import asynccontextmanager
 from queue import Queue
-from typing import Callable, Optional, Union
+from typing import Awaitable, Callable, Optional, Union
 
 from dynamo.llm import (
     ForwardPassMetrics,
@@ -41,7 +41,7 @@ class ManagedThread(threading.Thread):
 
     def __init__(
         self,
-        task: Optional[Union[Callable[..., bool], weakref.WeakMethod]],
+        task: Optional[Union[Callable[..., Awaitable[bool]], weakref.WeakMethod]],
         error_queue: Optional[Queue] = None,
         name: Optional[str] = None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
@@ -62,7 +62,9 @@ class ManagedThread(threading.Thread):
 
     def run(self):
         while not self._stop_event.is_set():
-            task: Optional[Union[Callable[..., bool], weakref.WeakMethod]] = self.task
+            task: Optional[
+                Union[Callable[..., Awaitable[bool]], weakref.WeakMethod]
+            ] = self.task
             if isinstance(task, weakref.WeakMethod):
                 task = task()
                 if task is None:
@@ -77,9 +79,14 @@ class ManagedThread(threading.Thread):
                 if self.loop is None:
                     logging.error("[ManagedThread] Loop not initialized!")
                     break
-                self._current_future = asyncio.run_coroutine_threadsafe(
-                    task(**self.kwargs), self.loop
-                )
+
+                # Call the task function to get the coroutine
+                coro = task(**self.kwargs)
+                if not asyncio.iscoroutine(coro):
+                    logging.error(f"Task {task} did not return a coroutine")
+                    break
+
+                self._current_future = asyncio.run_coroutine_threadsafe(coro, self.loop)
                 _ = self._current_future.result()
             except (asyncio.CancelledError, concurrent.futures.CancelledError):
                 logging.debug(f"Thread {self.name} was cancelled")
