@@ -27,9 +27,9 @@ use clap::Parser;
 use dynamo_llm::kv_router::{
     protocols::WorkerSelectionResult,
     scheduler::{DefaultWorkerSelector, KvSchedulerError, SchedulingRequest},
-    scoring::ProcessedEndpoints,
     KvRouter, WorkerSelector,
 };
+use dynamo_runtime::component::Instance;
 use dynamo_runtime::{
     logging, pipeline::network::Ingress, DistributedRuntime, Result, Runtime, Worker,
 };
@@ -86,7 +86,7 @@ pub struct CustomWorkerSelector(DefaultWorkerSelector);
 impl WorkerSelector for CustomWorkerSelector {
     fn select_worker(
         &self,
-        workers: &ProcessedEndpoints,
+        workers: &[Instance],
         request: &SchedulingRequest,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {

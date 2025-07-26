@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 NUM_MOCKERS = 2
+BLOCK_SIZE = 16
 SPEEDUP_RATIO = 10.0
 NUM_REQUESTS = 100
 PORT = 8090  # Starting port for mocker instances
@@ -59,6 +60,8 @@ class KVRouterProcess(ManagedProcess):
             "python",
             "-m",
             "dynamo.frontend",
+            "--kv-cache-block-size",
+            str(BLOCK_SIZE),
             "--router-mode",
             "kv",
             "--http-port",
@@ -100,7 +103,7 @@ def test_mocker_kv_router(request, runtime_services):
     logger.info("Starting mocker KV router test")
 
     # Create mocker args file
-    mocker_args = {"speedup_ratio": SPEEDUP_RATIO}
+    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 
     mocker_args_file = os.path.join(request.node.name, "mocker_args.json")
     with open(mocker_args_file, "w") as f:
