@@ -63,7 +63,7 @@ async def test_add_component_increases_replicas(kubernetes_connector, mock_kube_
 
     # Assert
     mock_kube_api.get_graph_deployment.assert_called_once_with(
-        component_name, kubernetes_connector.namespace
+        component_name, kubernetes_connector.dynamo_namespace
     )
     mock_kube_api.update_graph_replicas.assert_called_once_with(
         "test-graph", component_name, 2

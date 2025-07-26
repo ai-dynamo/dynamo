@@ -8,7 +8,7 @@ The SLA (Service Level Agreement)-based planner is an intelligent autoscaling sy
 > Currently, SLA-based planner only supports disaggregated setup.
 
 > [!WARNING]
-> Bare metal deployment with local connector is deprecated. The only option to deploy SLA-based planner is via k8s. We will update the examples in this document soon.
+> Bare metal deployment with local connector is deprecated. Please deploy the SLA planner in k8s.
 
 ## Features
 
@@ -106,11 +106,13 @@ Finally, SLA planner applies the change by scaling up/down the number of prefill
 
 ## Deploying
 
-To deploy SLA-planner, ensure etcd and NATS are running first, then use the frontend that reports metrics at `/metrics` HTTP endpoint. You can also use your own frontend, but it must report number of requests, ISL, OSL, TTFT, ITL in the same format.
+For detailed deployment instructions including setup, configuration, troubleshooting, and architecture overview, see the [SLA Planner Deployment Guide](../guides/dynamo_deploy/sla_planner_deployment.md).
 
-SLA-planner and prometheus server are provided as common components that can be directly imported from `dynamo` package. The following changes are needed:
-- Add `Planner` and `Prometheus` components' dependency in `Frontend`.
-- Link `Planner` and `Prometheus` in the graph.
-- Add `Planner` and `Prometheus` configurations in the config file.
+**Quick Start:**
+```bash
+cd components/backends/vllm/deploy
+kubectl apply -f disagg_planner.yaml -n {$NAMESPACE}
+```
 
-The SLA planner integration with the new frontend + worker architecture is currently a work in progress. This documentation will be updated with the new deployment patterns and code examples once the SLA planner component has been fully adapted to the new workflow.
+> [!NOTE]
+> The SLA planner requires a frontend that reports metrics at `/metrics` HTTP endpoint with number of requests, ISL, OSL, TTFT, ITL in the correct format. The dynamo frontend provides these metrics automatically.

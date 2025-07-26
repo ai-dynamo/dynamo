@@ -589,9 +589,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--backend",
         type=str,
-        default="vllm_v1",
-        choices=["vllm_v1"],
-        help="backend type, currently support [vllm_v1]",
+        default="vllm",
+        choices=["vllm"],
+        help="backend type, currently support [vllm]",
     )
     parser.add_argument(
         "--config",
