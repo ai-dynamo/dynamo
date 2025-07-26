@@ -61,7 +61,7 @@ The example demonstrates:
  # clone the dynamo repository if necessary
  # git clone https://github.com/ai-dynamo/dynamo.git
  cd dynamo
- docker compose -f deploy/metrics/docker-compose.yml up -d
+ docker compose -f deploy/docker-compose.yml up -d
  ```
 
 ### Running the Example

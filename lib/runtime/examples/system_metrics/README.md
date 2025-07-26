@@ -18,7 +18,7 @@ cargo build
 
 ### Run Server
 ```bash
-export DYN_LOG=1 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8000
+export DYN_LOG=1 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081
 cargo run --bin system_server
 ```
 
@@ -31,7 +31,7 @@ Note: Running the client will increment `service_requests_total`.
 
 ### View Metrics
 ```bash
-curl http://localhost:8000/metrics
+curl http://localhost:8081/metrics
 ```
 
 Example output:
@@ -66,7 +66,7 @@ uptime_seconds{namespace="http_server"} 725.997013676
 |----------|-------------|---------|
 | `DYN_LOG` | Enable logging | `0` |
 | `DYN_SYSTEM_ENABLED` | Enable system metrics | `false` |
-| `DYN_SYSTEM_PORT` | HTTP server port | `8000` |
+| `DYN_SYSTEM_PORT` | HTTP server port | `8081` |
 
 ## Metrics
 

@@ -59,6 +59,11 @@ keywords = ["llm", "genai", "inference", "nvidia", "distributed", "dynamo"]
 Repository = "https://github.com/ai-dynamo/dynamo.git"
 
 [project.optional-dependencies]
+trtllm =[
+    "uvloop",
+    "tensorrt-llm==1.0.0rc4"
+]
+
 vllm = [
     "uvloop",
     "nixl",

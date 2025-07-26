@@ -199,7 +199,7 @@ vllm_configs = {
     ),
     "agg-router": VLLMConfig(
         name="agg-router",
-        directory="/workspace/examples/vllm",
+        directory="/workspace/components/backends/vllm",
         script_name="agg_router.sh",
         marks=[pytest.mark.gpu_2, pytest.mark.vllm],
         endpoints=["v1/chat/completions", "v1/completions"],

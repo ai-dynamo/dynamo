@@ -35,7 +35,7 @@ scrape_configs:
 
   # This is a demo service that needs to be launched manually. See components/metrics/README.md
   # Note that you may need to disable the firewall on your host. On Ubuntu: sudo ufw allow 8000/tcp
-  - job_name: 'llm-demo'
+  - job_name: 'dynamo-backend'
     scrape_interval: 10s
     static_configs:
       - targets: ['host.docker.internal:8000']  # on the "monitoring" network
