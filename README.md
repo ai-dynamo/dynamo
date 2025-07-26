@@ -123,7 +123,7 @@ python -m dynamo.sglang.worker deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 #### Send a Request
 
 ```bash
-curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+curl localhost:8080/v1/chat/completions   -H "Content-Type: application/json"   -d '{
     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "messages": [
     {

@@ -67,7 +67,7 @@ Look for one that ends in `-frontend` and use it for port forward.
 
 ```bash
 SERVICE_NAME=$(kubectl get svc -n ${NAMESPACE} -o name | grep frontend | sed 's|.*/||' | sed 's|-frontend||' | head -n1)
-kubectl port-forward svc/${SERVICE_NAME}-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/${SERVICE_NAME}-frontend 8080:8080 -n ${NAMESPACE}
 ```
 
 Consult the [Port Forward Documentation](https://kubernetes.io/docs/tasks/access-application-cluster/port-forward-access-application-cluster/)
