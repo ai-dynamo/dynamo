@@ -17,7 +17,7 @@ backend: pytorch
 tensor_parallel_size: 8
 moe_expert_parallel_size: 8
 max_batch_size: 256
-max_num_tokens: 2048
+max_num_tokens: 1024
 # 8704 = 8192 ISL + 512 OSL
 max_seq_len: 8704
 disable_overlap_scheduler: true

@@ -35,9 +35,10 @@ For advanced control over how requests are routed between prefill and decode wor
 * If you need to download model weights off huggingface, make sure you run the command `huggingface-cli login` and have access to the necessary gated models.
 
 ## Eagle3-one-model
-* Eagle3-one-model (`use_one_model=True`) config is added in `engine_configs/llama4/eagle_one_model`. Build dynamo with the latest commit `66f299a` in TRTLLM 1.0.0.rc2 [Link](https://github.com/NVIDIA/TensorRT-LLM/commits/v1.0.0rc2/).
-* The congis in `engine_configs/llama4/eagle_one_model` are tested with 8xH100 cluster. Be sure to change the `NUM_GPUS_PER_NODE` accordingly or change TP/EP size in config. 1 8xH100 node for aggregated .yml file, 2 8xH100 for prefill/decode .yml file.
+* Eagle3-one-model (`eagle3_one_model=True`) config is added in `engine_configs/llama4/eagle_one_model`. Build dynamo with the latest commit `66f299a` in TRTLLM 1.0.0.rc2 [Link](https://github.com/NVIDIA/TensorRT-LLM/commits/v1.0.0rc2/).
+* The configs in `engine_configs/llama4/eagle_one_model` are tested with 8xH100 cluster. Be sure to change the `NUM_GPUS_PER_NODE` accordingly or change TP/EP size in config. 1 8xH100 node for aggregated .yml file, 2 8xH100 for prefill/decode .yml file.
 * The current `./multinode/start_frontend_services.sh` may got ran `NUM_GPUS_PER_NODE` times depending on how srun/mpi is launched, beware that the frontend service only needs to be ran once.
+* Eagle3-one-model appends the eagle3 layer at the end of the TRTLLM engine, instead of sending base/draft requests between 2 engines. Visit TRTLLM for more information.
 
 
 ## Setup
