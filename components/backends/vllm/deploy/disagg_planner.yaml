@@ -38,11 +38,11 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "4"
-          memory: "16Gi"
+          cpu: "32"
+          memory: "10Gi"
         limits:
-          cpu: "4"
-          memory: "16Gi"
+          cpu: "32"
+          memory: "10Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
@@ -78,11 +78,11 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "1"
-          memory: "2Gi"
+          cpu: "10"
+          memory: "10Gi"
         limits:
-          cpu: "1"
-          memory: "2Gi"
+          cpu: "10"
+          memory: "10Gi"
       pvc:
         create: false
         name: profiling-pvc
@@ -127,11 +127,11 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "1"
-          memory: "2Gi"
+          cpu: "10"
+          memory: "10Gi"
         limits:
-          cpu: "1"
-          memory: "2Gi"
+          cpu: "10"
+          memory: "10Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
@@ -141,7 +141,7 @@ spec:
             - -c
           args:
             - "python3 -m dynamo.planner.prometheus"
-    backend:
+    VllmDecodeWorker:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
@@ -167,11 +167,11 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "10"
+          cpu: "32"
           memory: "40Gi"
           gpu: "1"
         limits:
-          cpu: "10"
+          cpu: "32"
           memory: "40Gi"
           gpu: "1"
       extraPodSpec:
@@ -183,7 +183,7 @@ spec:
             - -c
           args:
             - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B 2>&1 | tee /tmp/vllm.log"
-    prefill:
+    VllmPrefillWorker:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
@@ -209,11 +209,11 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "10"
+          cpu: "32"
           memory: "40Gi"
           gpu: "1"
         limits:
-          cpu: "10"
+          cpu: "32"
           memory: "40Gi"
           gpu: "1"
       extraPodSpec:
