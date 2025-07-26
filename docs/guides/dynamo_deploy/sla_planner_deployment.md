@@ -11,14 +11,14 @@ Quick deployment guide for the vLLM disaggregated planner with automatic scaling
 - **Frontend**: Serves requests and exposes `/metrics`
 - **Prometheus**: Scrapes frontend metrics every 5 seconds
 - **Planner**: Queries Prometheus and adjusts worker scaling every 60 seconds
-- **Workers**: VllmDecodeWorker and VllmPrefillWorker handle inference
+- **Workers**: prefill and backend workers handle inference
 
 ```mermaid
 flowchart LR
   Frontend --"/metrics"--> Prometheus
-  Prometheus --"scrape (5s)"--> Prometheus
+  Prometheus --"scrape"--> Prometheus
   Planner --"query API"--> Prometheus
-  Planner --"scaling decisions"--> Workers["VllmPrefillWorker<br/>VllmDecodeWorker"]
+  Planner --"scaling decisions"--> Workers["prefill<br/>backend"]
   Frontend -.->|"requests"| Workers
 ```
 
@@ -45,11 +45,13 @@ Expected pods (all should be `1/1 Running`):
 vllm-disagg-planner-frontend-*            1/1 Running
 vllm-disagg-planner-prometheus-*          1/1 Running
 vllm-disagg-planner-planner-*             1/1 Running
-vllm-disagg-planner-vllmdecodeworker-*    1/1 Running
-vllm-disagg-planner-vllmprefillworker-*   1/1 Running
+vllm-disagg-planner-backend-*             1/1 Running
+vllm-disagg-planner-prefill-*             1/1 Running
 ```
 
 ## 2. Test the System
+
+**Important:** Streaming requests (`"stream": true`) are required for the planner to collect latency metrics and make scaling decisions. Non-streaming requests will produce successful inference outputs but won't provide the necessary telemetry for automatic scaling.
 
 ```bash
 # Port forward to frontend
@@ -68,7 +70,7 @@ curl http://localhost:8000/v1/chat/completions \
     ],
     "stream":true,
     "max_tokens": 30
-  }' | jq
+  }'
 ```
 
 ## 3. Monitor Scaling
@@ -77,9 +79,11 @@ curl http://localhost:8000/v1/chat/completions \
 # Check planner logs for scaling decisions
 kubectl logs -n $NAMESPACE deployment/vllm-disagg-planner-planner --tail=10
 
-# Expected successful output:
+# Expected successful output (after streaming requests):
+# New adjustment interval started!
+# Observed num_req: X.XXX isl: X.XXX osl: X.XXX
+# "Observed ttft: X.XXXs itl: X.XXXs"
 # "Number of prefill workers: 1, number of decode workers: 1"
-# "Observed ttft: X.XXXs itl: X.XXXs" (after streaming requests)
 ```
 
 ### Metrics Requirements
@@ -91,9 +95,9 @@ kubectl logs -n $NAMESPACE deployment/vllm-disagg-planner-planner --tail=10
 
 **Connection Issues:**
 ```bash
-# Verify Prometheus is accessible (default port 8000)
-kubectl port-forward -n $NAMESPACE deployment/vllm-disagg-planner-prometheus 9090:8000
-curl "http://localhost:9090/api/v1/query?query=up"
+# Verify Prometheus is accessible (runs on port 8000)
+kubectl port-forward -n $NAMESPACE deployment/vllm-disagg-planner-prometheus 8000:8000
+curl "http://localhost:8000/api/v1/query?query=up"
 ```
 
 **Missing Metrics:**
@@ -105,5 +109,5 @@ curl http://localhost:8000/metrics | grep nv_llm_http_service
 
 **Worker Issues:**
 - Large models can take 10+ minutes to initialize
-- Check worker logs: `kubectl logs -n $NAMESPACE deployment/vllm-disagg-planner-vllmdecodeworker`
+- Check worker logs: `kubectl logs -n $NAMESPACE deployment/vllm-disagg-planner-backend`
 - Ensure GPU resources are available for workers
