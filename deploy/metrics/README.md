@@ -37,10 +37,10 @@ As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build container
 
    ```bash
    # Start the basic services (etcd & natsd), along with Prometheus and Grafana
-   docker compose -f deploy/metrics/docker-compose.yml --profile metrics up -d
+   docker compose -f deploy/docker-compose.yml --profile metrics up -d
 
    # Minimum components for Dynamo: etcd/nats/dcgm-exporter
-   docker compose -f deploy/metrics/docker-compose.yml up -d
+   docker compose -f deploy/docker-compose.yml up -d
    ```
 
    Optional: To target specific GPU(s), export the variable below before running Docker Compose
@@ -74,7 +74,7 @@ Please be aware that you might need to modify the target settings to align with 
 After making changes to prometheus.yml, it is necessary to reload the configuration using the command below. Simply sending a kill -HUP signal will not suffice due to the caching of the volume that contains the prometheus.yml file.
 
 ```
-docker compose -f deploy/metrics/docker-compose.yml up prometheus -d --force-recreate
+docker compose -f deploy/docker-compose.yml up prometheus -d --force-recreate
 ```
 
 ### Grafana
