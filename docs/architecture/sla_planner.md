@@ -8,7 +8,7 @@ The SLA (Service Level Agreement)-based planner is an intelligent autoscaling sy
 > Currently, SLA-based planner only supports disaggregated setup.
 
 > [!WARNING]
-> Bare metal deployment with local connector is deprecated. The only option to deploy SLA-based planner is via k8s. We will update the examples in this document soon.
+> Bare metal deployment with local connector is deprecated. Please deploy the SLA planner in k8s.
 
 ## Features
 
@@ -115,4 +115,4 @@ kubectl apply -f disagg_planner.yaml -n {$NAMESPACE}
 ```
 
 > [!NOTE]
-> The SLA planner requires a frontend that reports metrics at `/metrics` HTTP endpoint with number of requests, ISL, OSL, TTFT, ITL in the correct format. The VLLM frontend provides these metrics automatically.
+> The SLA planner requires a frontend that reports metrics at `/metrics` HTTP endpoint with number of requests, ISL, OSL, TTFT, ITL in the correct format. The dynamo frontend provides these metrics automatically.
