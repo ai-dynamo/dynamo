@@ -176,15 +176,17 @@ fi
 
 # Install genai-perf and perf_analyzer
 
-apt-get update -y && \
-    apt-get install -y --no-install-recommends \
-    rapidjson-dev \
-    zlib1g-dev \
-    rapidjson-dev
+if [ "$ARCH" = "arm64" ]; then
+    apt-get update -y && \
+        apt-get install -y --no-install-recommends \
+        rapidjson-dev \
+        zlib1g-dev \
+        rapidjson-dev
 
-git clone --depth=1 https://github.com/triton-inference-server/perf_analyzer.git && \
-    mkdir perf_analyzer/build && \
-    cmake -B perf_analyzer/build -S perf_analyzer && \
-    cmake --build perf_analyzer/build -- -j8
+    git clone --depth=1 https://github.com/triton-inference-server/perf_analyzer.git && \
+        mkdir perf_analyzer/build && \
+        cmake -B perf_analyzer/build -S perf_analyzer && \
+        cmake --build perf_analyzer/build -- -j8
+fi
 
 echo "vllm installation completed successfully"
