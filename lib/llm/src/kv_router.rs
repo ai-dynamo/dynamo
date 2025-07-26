@@ -34,7 +34,7 @@ use crate::{
             compute_block_hash_for_seq, KvIndexer, KvIndexerInterface, KvRouterError,
             OverlapScores, RouterEvent,
         },
-        metrics_aggregator::EndpointCollector,
+        // metrics_aggregator::EndpointCollector,
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
         scoring::ProcessedEndpoints,
@@ -43,6 +43,7 @@ use crate::{
     protocols::common::llm_backend::LLMEngineOutput,
 };
 
+use dynamo_runtime::component::Instance;
 use dynamo_runtime::traits::events::EventSubscriber;
 
 // [gluo TODO] shouldn't need to be public
@@ -55,7 +56,7 @@ pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 pub trait WorkerSelector {
     fn select_worker(
         &self,
-        workers: &ProcessedEndpoints,
+        workers: &[Instance],
         request: &SchedulingRequest,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
@@ -151,8 +152,16 @@ impl KvRouter {
             .primary_lease()
             .expect("Cannot KV route static workers")
             .primary_token();
-        let metrics_aggregator =
-            EndpointCollector::new(component.clone(), cancellation_token.clone()).await;
+
+        let generate_endpoint = component.endpoint("generate");
+        let client = generate_endpoint.client().await?;
+
+        let instances_rx = match client.instance_source.as_ref() {
+            InstanceSource::Dynamic(rx) => rx.clone(),
+            InstanceSource::Static => {
+                panic!("Expected dynamic instance source for KV routing");
+            }
+        };
 
         let indexer = if use_kv_events {
             Indexer::KvIndexer(KvIndexer::new(cancellation_token.clone(), block_size))
@@ -168,7 +177,7 @@ impl KvRouter {
         let scheduler = KvScheduler::start(
             component.namespace().clone(),
             block_size,
-            metrics_aggregator.endpoints_watcher(),
+            instances_rx,
             selector,
         )
         .await?;
