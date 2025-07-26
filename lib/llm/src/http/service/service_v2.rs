@@ -1,14 +1,17 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::env::var;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 
 use super::metrics;
 use super::Metrics;
 use super::RouteDoc;
 use crate::discovery::ModelManager;
+use crate::endpoint_type::EndpointType;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
@@ -16,9 +19,39 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 /// HTTP service shared state
+#[derive(Default)]
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
+    flags: RwLock<StateFlags>,
+}
+
+#[derive(Default, Debug, Clone)]
+struct StateFlags {
+    chat_endpoints_enabled: bool,
+    cmpl_endpoints_enabled: bool,
+    embeddings_endpoints_enabled: bool,
+    responses_endpoints_enabled: bool,
+}
+
+impl StateFlags {
+    pub fn get(&self, endpoint_type: &EndpointType) -> bool {
+        match endpoint_type {
+            EndpointType::Chat => self.chat_endpoints_enabled,
+            EndpointType::Completion => self.cmpl_endpoints_enabled,
+            EndpointType::Embedding => self.embeddings_endpoints_enabled,
+            EndpointType::Responses => self.responses_endpoints_enabled,
+        }
+    }
+
+    pub fn set(&mut self, endpoint_type: &EndpointType, enabled: bool) {
+        match endpoint_type {
+            EndpointType::Chat => self.chat_endpoints_enabled = enabled,
+            EndpointType::Completion => self.cmpl_endpoints_enabled = enabled,
+            EndpointType::Embedding => self.embeddings_endpoints_enabled = enabled,
+            EndpointType::Responses => self.responses_endpoints_enabled = enabled,
+        }
+    }
 }
 
 impl State {
@@ -26,6 +59,12 @@ impl State {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
+            flags: RwLock::new(StateFlags {
+                chat_endpoints_enabled: false,
+                cmpl_endpoints_enabled: false,
+                embeddings_endpoints_enabled: false,
+                responses_endpoints_enabled: false,
+            }),
         }
     }
 
@@ -70,10 +109,10 @@ pub struct HttpServiceConfig {
 
     // #[builder(default)]
     // custom: Vec<axum::Router>
-    #[builder(default = "true")]
+    #[builder(default = "false")]
     enable_chat_endpoints: bool,
 
-    #[builder(default = "true")]
+    #[builder(default = "false")]
     enable_cmpl_endpoints: bool,
 
     #[builder(default = "true")]
@@ -131,6 +170,17 @@ impl HttpService {
     pub fn route_docs(&self) -> &[RouteDoc] {
         &self.route_docs
     }
+
+    pub async fn enable_model_endpoint(&self, endpoint_type: EndpointType, enable: bool) {
+        let mut state_flags: tokio::sync::RwLockWriteGuard<'_, StateFlags> =
+            self.state.flags.write().await;
+        state_flags.set(&endpoint_type, enable);
+        tracing::info!(
+            "{} endpoints {}",
+            endpoint_type.as_str(),
+            if enable { "enabled" } else { "disabled" }
+        );
+    }
 }
 
 /// Environment variable to set the metrics endpoint path (default: `/metrics`)
@@ -157,6 +207,17 @@ impl HttpServiceConfigBuilder {
         let model_manager = Arc::new(ModelManager::new());
         let state = Arc::new(State::new(model_manager));
 
+        // Set initial state flags based on config
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                let mut state_flags = state.flags.write().await;
+                state_flags.chat_endpoints_enabled = config.enable_chat_endpoints;
+                state_flags.cmpl_endpoints_enabled = config.enable_cmpl_endpoints;
+                state_flags.embeddings_endpoints_enabled = config.enable_embeddings_endpoints;
+                state_flags.responses_endpoints_enabled = config.enable_responses_endpoints;
+            });
+        });
+
         // enable prometheus metrics
         let registry = metrics::Registry::new();
         state.metrics_clone().register(&registry)?;
@@ -172,42 +233,10 @@ impl HttpServiceConfigBuilder {
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
         ];
 
-        if config.enable_chat_endpoints {
-            routes.push(super::openai::chat_completions_router(
-                state.clone(),
-                config.request_template.clone(), // TODO clone()? reference?
-                var(HTTP_SVC_CHAT_PATH_ENV).ok(),
-            ));
-        }
-
-        if config.enable_cmpl_endpoints {
-            routes.push(super::openai::completions_router(
-                state.clone(),
-                var(HTTP_SVC_CMP_PATH_ENV).ok(),
-            ));
-        }
-
-        if config.enable_embeddings_endpoints {
-            routes.push(super::openai::embeddings_router(
-                state.clone(),
-                var(HTTP_SVC_EMB_PATH_ENV).ok(),
-            ));
-        }
-
-        if config.enable_responses_endpoints {
-            routes.push(super::openai::responses_router(
-                state.clone(),
-                config.request_template,
-                var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
-            ));
-        }
-
-        // for (route_docs, route) in routes.into_iter().chain(self.routes.into_iter()) {
-        //     router = router.merge(route);
-        //     all_docs.extend(route_docs);
-        // }
-
-        for (route_docs, route) in routes.into_iter() {
+        let endpoint_routes =
+            HttpServiceConfigBuilder::get_endpoints_router(state.clone(), &config);
+        routes.extend(endpoint_routes);
+        for (route_docs, route) in routes {
             router = router.merge(route);
             all_docs.extend(route_docs);
         }
@@ -224,5 +253,62 @@ impl HttpServiceConfigBuilder {
     pub fn with_request_template(mut self, request_template: Option<RequestTemplate>) -> Self {
         self.request_template = Some(request_template);
         self
+    }
+
+    fn get_endpoints_router(
+        state: Arc<State>,
+        config: &HttpServiceConfig,
+    ) -> Vec<(Vec<RouteDoc>, axum::Router)> {
+        let mut routes = Vec::new();
+
+        // Add chat completions route with conditional middleware
+        let (chat_docs, chat_route) = super::openai::chat_completions_router(
+            state.clone(),
+            config.request_template.clone(),
+            var(HTTP_SVC_CHAT_PATH_ENV).ok(),
+        );
+        let (cmpl_docs, cmpl_route) =
+            super::openai::completions_router(state.clone(), var(HTTP_SVC_CMP_PATH_ENV).ok());
+        let (embed_docs, embed_route) =
+            super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
+        let (responses_docs, responses_route) = super::openai::responses_router(
+            state.clone(),
+            config.request_template.clone(),
+            var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
+        );
+
+        let mut endpoint_routes = HashMap::new();
+        endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
+        endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
+        endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
+        endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
+
+        for endpoint_type in EndpointType::all() {
+            let state_route = state.clone();
+            if !endpoint_routes.contains_key(&endpoint_type) {
+                tracing::debug!("{} endpoints are disabled", endpoint_type.as_str());
+                continue;
+            }
+            let (docs, route) = endpoint_routes.get(&endpoint_type).cloned().unwrap();
+            let route = route.route_layer(axum::middleware::from_fn(
+                move |req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
+                    let state: Arc<State> = state_route.clone();
+                    async move {
+                        // Read the flag value and drop the lock before async operations
+                        let guard = state.flags.read().await;
+                        let enabled = guard.get(&endpoint_type);
+
+                        if enabled {
+                            Ok(next.run(req).await)
+                        } else {
+                            tracing::debug!("{} endpoints are disabled", endpoint_type.as_str());
+                            Err(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+                        }
+                    }
+                },
+            ));
+            routes.push((docs, route));
+        }
+        routes
     }
 }

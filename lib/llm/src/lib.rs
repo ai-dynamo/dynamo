@@ -14,6 +14,7 @@ pub mod backend;
 pub mod common;
 pub mod disagg_router;
 pub mod discovery;
+pub mod endpoint_type;
 pub mod engines;
 pub mod entrypoint;
 pub mod gguf;
