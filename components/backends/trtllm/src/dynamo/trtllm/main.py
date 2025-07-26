@@ -11,19 +11,15 @@ from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
-from dynamo.llm import (
-    ModelType,
-    register_llm,
-)
+from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+from dynamo.trtllm.engine import get_llm_engine
+from dynamo.trtllm.publisher import get_publisher
 from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
-from dynamo.trtllm.engine import get_llm_engine
-from dynamo.trtllm.publisher import get_publisher
-
 from dynamo.trtllm.utils.trtllm_utils import (
     Config,
     cmd_line_args,
