@@ -45,7 +45,7 @@ spec:
           memory: "16Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.16
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -55,7 +55,7 @@ spec:
     Planner:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
-      componentType: worker
+      componentType: planner
       replicas: 1
       livenessProbe:
         exec:
@@ -89,7 +89,7 @@ spec:
         mountPoint: /workspace/profiling_results
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.16
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
           workingDir: /workspace/components/planner/src/dynamo/planner
           args:
             - python
@@ -134,7 +134,7 @@ spec:
           memory: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.16
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -176,7 +176,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.16
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
@@ -218,7 +218,7 @@ spec:
           gpu: "1"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.16
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh

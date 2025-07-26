@@ -80,10 +80,11 @@ curl http://localhost:8000/v1/chat/completions \
 kubectl logs -n $NAMESPACE deployment/vllm-disagg-planner-planner --tail=10
 
 # Expected successful output (after streaming requests):
+
 # New adjustment interval started!
 # Observed num_req: X.XXX isl: X.XXX osl: X.XXX
-# "Observed ttft: X.XXXs itl: X.XXXs"
-# "Number of prefill workers: 1, number of decode workers: 1"
+# Observed ttft: X.XXXs itl: X.XXXs
+# Number of prefill workers: 1, number of decode workers: 1
 ```
 
 ### Metrics Requirements
