@@ -52,15 +52,17 @@ class Planner:
     def __init__(self, runtime: DistributedRuntime, args: argparse.Namespace):
         self.runtime = runtime
         self.args = args
-        self.namespace = args.namespace
+        self.namespace = SLAPlannerDefaults.namespace
 
         if not args.no_operation:
             if args.environment == "kubernetes":
-                self.connector = KubernetesConnector(args.namespace)
+                self.connector = KubernetesConnector(self.namespace)
             else:
                 raise ValueError(f"Invalid environment: {args.environment}")
 
-        self.prometheus_api_client = PrometheusAPIClient(args.prometheus_endpoint)
+        self.prometheus_api_client = PrometheusAPIClient(
+            SLAPlannerDefaults.prometheus_endpoint
+        )
 
         self.num_req_predictor = LOAD_PREDICTORS[args.load_predictor](
             window_size=args.load_prediction_window_size,
@@ -312,12 +314,6 @@ async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespac
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # Common planner arguments
-    parser.add_argument(
-        "--namespace",
-        type=str,
-        default=SLAPlannerDefaults.namespace,
-        help="Namespace planner will look at",
-    )
     parser.add_argument(
         "--environment",
         type=str,

@@ -45,7 +45,6 @@ async def start_prometheus_server(config):
     temp_file.close()
     config_path = temp_file.name
 
-    # Use port from SLAPlannerDefaults (which reads DYNAMO_PORT with fallback to 9090)
     prometheus_port = SLAPlannerDefaults.port
     cmd = [
         "prometheus",
