@@ -19,6 +19,9 @@ pub struct BlockTransferRequest {
     from_pool: BlockTransferPool,
     to_pool: BlockTransferPool,
     blocks: Vec<(usize, usize)>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    trigger_id: Option<u64>,
 }
 
 impl BlockTransferRequest {
@@ -32,6 +35,21 @@ impl BlockTransferRequest {
             from_pool,
             to_pool,
             blocks,
+            trigger_id: None,
+        }
+    }
+
+    pub fn new_with_trigger_id(
+        from_pool: BlockTransferPool,
+        to_pool: BlockTransferPool,
+        blocks: Vec<(usize, usize)>,
+        trigger_id: u64,
+    ) -> Self {
+        Self {
+            from_pool,
+            to_pool,
+            blocks,
+            trigger_id: Some(trigger_id),
         }
     }
 }

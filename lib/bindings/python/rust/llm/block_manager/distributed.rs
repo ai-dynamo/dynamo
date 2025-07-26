@@ -8,4 +8,4 @@ mod utils;
 mod worker;
 
 pub use leader::KvbmLeader;
-pub use worker::KvbmWorker;
+pub use worker::{KvbmWorker, VllmTensor};

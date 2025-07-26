@@ -22,7 +22,8 @@ use crate::block_manager::{
 
 use anyhow::Result;
 use async_trait::async_trait;
-use std::{any::Any, sync::Arc};
+use std::{any::Any, collections::HashMap, sync::Arc};
+use tokio::sync::Mutex as TokioMutex;
 
 type LocalBlock<S, M> = Block<S, locality::Local, M>;
 type LocalBlockDataList<S> = Vec<LocalBlockData<S>>;
@@ -33,6 +34,7 @@ pub struct BlockTransferHandler {
     host: Option<LocalBlockDataList<PinnedStorage>>,
     disk: Option<LocalBlockDataList<DiskStorage>>,
     context: Arc<TransferContext>,
+    pending_requests: Arc<TokioMutex<HashMap<u64, oneshot::Sender<()>>>>,
 }
 
 impl BlockTransferHandler {
@@ -41,12 +43,14 @@ impl BlockTransferHandler {
         host_blocks: Option<Vec<LocalBlock<PinnedStorage, BasicMetadata>>>,
         disk_blocks: Option<Vec<LocalBlock<DiskStorage, BasicMetadata>>>,
         context: Arc<TransferContext>,
+        pending_requests: Arc<TokioMutex<HashMap<u64, oneshot::Sender<()>>>>,
     ) -> Result<Self> {
         Ok(Self {
             device: Self::get_local_data(device_blocks),
             host: Self::get_local_data(host_blocks),
             disk: Self::get_local_data(disk_blocks),
             context,
+            pending_requests,
         })
     }
 
@@ -92,6 +96,12 @@ impl BlockTransferHandler {
         let Some(target_pool_list) = target_pool_list else {
             return Err(anyhow::anyhow!("Target pool manager not initialized"));
         };
+
+        if let Some(trigger_id) = request.trigger_id() {
+            let (tx, rx) = oneshot::channel();
+            self.pending_requests.lock().await.insert(*trigger_id, tx);
+            rx.await?;
+        }
 
         // Extract the `from` and `to` indices from the request.
         let source_idxs = request.blocks().iter().map(|(from, _)| *from);

@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::runtime::Handle;
+use tokio::sync::Mutex as TokioMutex;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
@@ -36,7 +37,7 @@ pub struct KvbmWorkerData {
     pub num_device_blocks: usize,
 }
 
-fn load_and_validate_tensors(
+pub fn load_and_validate_tensors(
     tensors: &[Arc<dyn TorchTensor>],
     device_id: usize,
 ) -> anyhow::Result<(Vec<DeviceStorage>, Vec<usize>)> {
@@ -103,6 +104,9 @@ pub struct KvbmWorkerConfig {
 
     #[builder(default = "String::from(\"kvbm\")")]
     barrier_id: String,
+
+    #[builder(default = "CancellationToken::new()")]
+    cancel_token: CancellationToken,
 }
 
 impl KvbmWorkerConfig {
@@ -125,6 +129,8 @@ fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
 
 pub struct KvbmWorker {
     task: Option<CriticalTaskExecutionHandle>,
+    trigger_task: Option<CriticalTaskExecutionHandle>,
+    trigger_tx: tokio::sync::mpsc::UnboundedSender<u64>,
 }
 
 impl KvbmWorker {
@@ -187,7 +193,11 @@ impl KvbmWorker {
 
         let layout_builder_clone = layout_builder.clone();
 
-        let cancel_token = CancellationToken::new();
+        let enqueued_tasks = Arc::new(TokioMutex::new(HashMap::new()));
+        let enqueued_tasks_clone = enqueued_tasks.clone();
+
+        let cancel_token = config.cancel_token.clone();
+
         let task = CriticalTaskExecutionHandle::new(
             move |cancel_token| {
                 KvbmWorker::worker_task(
@@ -196,13 +206,31 @@ impl KvbmWorker {
                     layout_type,
                     config,
                     cancel_token,
+                    enqueued_tasks_clone,
                 )
             },
-            cancel_token,
+            cancel_token.clone(),
             "kvbm-worker-task",
         )?;
 
-        Ok(Self { task: Some(task) })
+        let (trigger_tx, trigger_rx) = tokio::sync::mpsc::unbounded_channel();
+        let trigger_task = CriticalTaskExecutionHandle::new(
+            move |cancel_token| KvbmWorker::trigger_task(enqueued_tasks, cancel_token, trigger_rx),
+            cancel_token,
+            "kvbm-trigger-task",
+        )?;
+
+        Ok(Self {
+            task: Some(task),
+            trigger_task: Some(trigger_task),
+            trigger_tx,
+        })
+    }
+
+    pub fn trigger_transfer(&self, trigger_id: u64) {
+        if let Err(_) = self.trigger_tx.send(trigger_id) {
+            tracing::warn!(trigger_id, "failed to send trigger - channel closed");
+        }
     }
 
     fn make_layout<S: Storage, M: BlockMetadata>(
@@ -228,6 +256,7 @@ impl KvbmWorker {
         layout_type: LayoutType,
         config: KvbmWorkerConfig,
         cancel_token: CancellationToken,
+        enqueued_tasks: Arc<TokioMutex<HashMap<u64, oneshot::Sender<()>>>>,
     ) -> anyhow::Result<()> {
         let runtime = Runtime::from_current()?;
         let drt = DistributedRuntime::from_settings(runtime).await?;
@@ -318,8 +347,13 @@ impl KvbmWorker {
         };
 
         // Create the handler for our active message worker.
-        let block_transfer_handler =
-            BlockTransferHandler::new(device_blocks, host_blocks, disk_blocks, transfer_context)?;
+        let block_transfer_handler = BlockTransferHandler::new(
+            device_blocks,
+            host_blocks,
+            disk_blocks,
+            transfer_context,
+            enqueued_tasks,
+        )?;
 
         let handlers = HashMap::from([(
             ZMQ_TRANSFER_BLOCKS_MESSAGE.to_string(),
@@ -339,6 +373,28 @@ impl KvbmWorker {
 
         Ok(())
     }
+
+    async fn trigger_task(
+        enqueued_tasks: Arc<TokioMutex<HashMap<u64, oneshot::Sender<()>>>>,
+        _cancel_token: CancellationToken,
+        mut trigger_rx: tokio::sync::mpsc::UnboundedReceiver<u64>,
+    ) -> anyhow::Result<()> {
+        while let Some(trigger_id) = trigger_rx.recv().await {
+            match enqueued_tasks.lock().await.remove(&trigger_id) {
+                Some(tx) => {
+                    tracing::debug!(trigger_id, "starting transfer");
+                    if let Err(_) = tx.send(()) {
+                        tracing::warn!(trigger_id, "failed to send trigger - channel closed");
+                    }
+                }
+                None => {
+                    tracing::warn!(trigger_id, "transfer not found");
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 impl Drop for KvbmWorker {
@@ -346,6 +402,11 @@ impl Drop for KvbmWorker {
         if let Some(task) = self.task.take() {
             task.cancel();
             task.detach();
+        }
+
+        if let Some(trigger_task) = self.trigger_task.take() {
+            trigger_task.cancel();
+            trigger_task.detach();
         }
     }
 }

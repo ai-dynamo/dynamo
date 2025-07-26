@@ -10,7 +10,7 @@ mod worker;
 
 pub use leader::{KvbmLeader, KvbmLeaderConfig};
 pub use utils::{BlockTransferPool, BlockTransferRequest};
-pub use worker::{KvbmWorker, KvbmWorkerConfig};
+pub use worker::{load_and_validate_tensors, KvbmWorker, KvbmWorkerConfig};
 
 #[cfg(all(test, feature = "testing-cuda", feature = "testing-etcd"))]
 mod tests {
