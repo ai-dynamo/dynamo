@@ -167,6 +167,18 @@ class Planner:
 
     async def make_adjustments(self):
         try:
+            # Check if metrics are valid (not NaN) - skip adjustment if no traffic
+            if (
+                math.isnan(self.last_metrics.ttft)
+                or math.isnan(self.last_metrics.itl)
+                or math.isnan(self.last_metrics.isl)
+                or math.isnan(self.last_metrics.osl)
+            ):
+                logger.info(
+                    "Metrics contain NaN values (no active requests), skipping adjustment"
+                )
+                return
+
             self.p_endpoints, self.d_endpoints = await self.get_workers_info()
             logger.info(
                 f"Number of prefill workers: {len(self.p_endpoints)}, number of decode workers: {len(self.d_endpoints)}"
