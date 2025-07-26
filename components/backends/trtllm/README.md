@@ -29,6 +29,7 @@ This directory contains examples and reference implementations for deploying Lar
   - [Run deployment](#run-deployment)
     - [Single Node deployment](#single-node-deployments)
     - [Multinode deployment](#multinode-deployment)
+    - [Kubernetes deployment](#kubernetes-deployment)
   - [Client](#client)
   - [Benchmarking](#benchmarking)
 - [Disaggregation Strategy](#disaggregation-strategy)
@@ -175,6 +176,53 @@ Notes:
 ### Multinode Deployment
 
 For comprehensive instructions on multinode serving, see the [multinode-examples.md](./multinode/multinode-examples.md) guide. It provides step-by-step deployment examples and configuration tips for running Dynamo with TensorRT-LLM across multiple nodes. While the walkthrough uses DeepSeek-R1 as the model, you can easily adapt the process for any supported model by updating the relevant configuration files. You can see [Llama4+eagle](./llama4_plus_eagle.md) guide to learn how to use these scripts when a single worker fits on the single node.
+
+### Kubernetes Deployment
+
+For Kubernetes deployment, YAML manifests are provided in the `deploy/` directory. These define DynamoGraphDeployment resources for various configurations:
+
+- `agg.yaml` - Aggregated serving
+- `agg_router.yaml` - Aggregated serving with KV routing
+- `disagg.yaml` - Disaggregated serving
+- `disagg_router.yaml` - Disaggregated serving with KV routing
+
+#### Prerequisites
+
+- **Dynamo Cloud**: Follow the [Quickstart Guide](../../../docs/guides/dynamo_deploy/quickstart.md) to deploy Dynamo Cloud first.
+
+- **Container Images**: The deployment files currently require access to `nvcr.io/nvidian/nim-llm-dev/trtllm-runtime`. If you don't have access, build and push your own image:
+  ```bash
+  ./container/build.sh --framework tensorrtllm
+  # Tag and push to your container registry
+  # Update the image references in the YAML files
+  ```
+
+- **Port Forwarding**: After deployment, forward the frontend service to access the API:
+  ```bash
+  kubectl port-forward deployment/trtllm-v1-disagg-frontend-<pod-uuid-info> 8080:8000
+  ```
+
+#### Deploy to Kubernetes
+
+Example with disagg:
+Export the NAMESPACE  you used in your Dynamo Cloud Installation.
+
+```bash
+cd dynamo
+cd components/backends/trtllm/deploy
+kubectl apply -f disagg.yaml -n $NAMESPACE
+```
+
+To change `DYN_LOG` level, edit the yaml file by adding
+
+```yaml
+...
+spec:
+  envs:
+    - name: DYN_LOG
+      value: "debug" # or other log levels
+  ...
+```
 
 ### Client
 
