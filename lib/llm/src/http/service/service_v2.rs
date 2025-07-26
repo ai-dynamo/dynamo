@@ -15,7 +15,6 @@ use crate::endpoint_type::EndpointType;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
-use dynamo_runtime::DistributedRuntime;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -24,7 +23,6 @@ use tokio_util::sync::CancellationToken;
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
-    runtime: Option<Arc<DistributedRuntime>>,
     flags: RwLock<StateFlags>,
 }
 
@@ -61,7 +59,6 @@ impl State {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            runtime: None,
             flags: RwLock::new(StateFlags {
                 chat_endpoints_enabled: false,
                 cmpl_endpoints_enabled: false,
@@ -71,19 +68,6 @@ impl State {
         }
     }
 
-    pub fn with_runtime(manager: Arc<ModelManager>, runtime: Arc<DistributedRuntime>) -> Self {
-        Self {
-            manager,
-            metrics: Arc::new(Metrics::default()),
-            runtime: Some(runtime),
-            flags: RwLock::new(StateFlags {
-                chat_endpoints_enabled: false,
-                cmpl_endpoints_enabled: false,
-                embeddings_endpoints_enabled: false,
-                responses_endpoints_enabled: false,
-            }),
-        }
-    }
 
     /// Get the Prometheus [`Metrics`] object which tracks request counts and inflight requests
     pub fn metrics_clone(&self) -> Arc<Metrics> {
@@ -326,6 +310,6 @@ impl HttpServiceConfigBuilder {
             ));
             routes.push((docs, route));
         }
-        return routes;
+        routes
     }
 }
