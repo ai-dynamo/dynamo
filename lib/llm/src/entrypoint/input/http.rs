@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::{
     discovery::{ModelManager, ModelUpdate, ModelWatcher, MODEL_ROOT_PATH},
+    endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
     entrypoint::{input::common, EngineConfig, RouterMode},
     http::service::service_v2::{self, HttpService},
@@ -53,10 +54,12 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             manager.add_completions_model(model.service_name(), engine.clone())?;
             manager.add_chat_completions_model(model.service_name(), engine)?;
 
-            // Enable relevant endpoints
-            http_service.enable_chat_endpoints(true).await;
-            http_service.enable_cmpl_endpoints(true).await;
-            http_service.enable_embeddings_endpoints(true).await;
+            // Enable all endpoints
+            for endpoint_type in EndpointType::all() {
+                http_service
+                    .enable_model_endpoint(endpoint_type, true)
+                    .await;
+            }
         }
         EngineConfig::StaticCore {
             engine: inner_engine,
@@ -78,10 +81,12 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
             .await?;
             manager.add_completions_model(model.service_name(), cmpl_pipeline)?;
 
-            // Enable relevant endpoints
-            http_service.enable_chat_endpoints(true).await;
-            http_service.enable_cmpl_endpoints(true).await;
-            http_service.enable_embeddings_endpoints(true).await;
+            // Enable all endpoints
+            for endpoint_type in EndpointType::all() {
+                http_service
+                    .enable_model_endpoint(endpoint_type, true)
+                    .await;
+            }
         }
     }
     tracing::debug!(
@@ -142,21 +147,33 @@ async fn update_http_endpoints(service: Arc<HttpService>, model_type: ModelUpdat
     );
     match model_type {
         ModelUpdate::Added(model_type) => match model_type {
-            ModelType::Chat => service.enable_chat_endpoints(true).await,
-            ModelType::Completion => service.enable_cmpl_endpoints(true).await,
-            ModelType::Embedding => service.enable_embeddings_endpoints(true).await,
             ModelType::Backend => {
-                service.enable_chat_endpoints(true).await;
-                service.enable_cmpl_endpoints(true).await;
+                service
+                    .enable_model_endpoint(EndpointType::Chat, true)
+                    .await;
+                service
+                    .enable_model_endpoint(EndpointType::Completion, true)
+                    .await;
+            }
+            _ => {
+                service
+                    .enable_model_endpoint(model_type.as_endpoint_type(), true)
+                    .await;
             }
         },
         ModelUpdate::Removed(model_type) => match model_type {
-            ModelType::Chat => service.enable_chat_endpoints(false).await,
-            ModelType::Completion => service.enable_cmpl_endpoints(false).await,
-            ModelType::Embedding => service.enable_embeddings_endpoints(false).await,
             ModelType::Backend => {
-                service.enable_chat_endpoints(false).await;
-                service.enable_cmpl_endpoints(false).await;
+                service
+                    .enable_model_endpoint(EndpointType::Chat, false)
+                    .await;
+                service
+                    .enable_model_endpoint(EndpointType::Completion, false)
+                    .await;
+            }
+            _ => {
+                service
+                    .enable_model_endpoint(model_type.as_endpoint_type(), false)
+                    .await;
             }
         },
     }

@@ -1,6 +1,7 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+use std::collections::HashMap;
 use std::env::var;
 use std::sync::Arc;
 use std::time::Duration;
@@ -10,6 +11,7 @@ use super::metrics;
 use super::Metrics;
 use super::RouteDoc;
 use crate::discovery::ModelManager;
+use crate::endpoint_type::EndpointType;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
@@ -31,6 +33,27 @@ struct StateFlags {
     chat_endpoints_enabled: bool,
     cmpl_endpoints_enabled: bool,
     embeddings_endpoints_enabled: bool,
+    responses_endpoints_enabled: bool,
+}
+
+impl StateFlags {
+    pub fn get(&self, endpoint_type: &EndpointType) -> bool {
+        match endpoint_type {
+            EndpointType::Chat => self.chat_endpoints_enabled,
+            EndpointType::Completion => self.cmpl_endpoints_enabled,
+            EndpointType::Embedding => self.embeddings_endpoints_enabled,
+            EndpointType::Responses => self.responses_endpoints_enabled,
+        }
+    }
+
+    pub fn set(&mut self, endpoint_type: &EndpointType, enabled: bool) {
+        match endpoint_type {
+            EndpointType::Chat => self.chat_endpoints_enabled = enabled,
+            EndpointType::Completion => self.cmpl_endpoints_enabled = enabled,
+            EndpointType::Embedding => self.embeddings_endpoints_enabled = enabled,
+            EndpointType::Responses => self.responses_endpoints_enabled = enabled,
+        }
+    }
 }
 
 impl State {
@@ -43,6 +66,7 @@ impl State {
                 chat_endpoints_enabled: false,
                 cmpl_endpoints_enabled: false,
                 embeddings_endpoints_enabled: false,
+                responses_endpoints_enabled: false,
             }),
         }
     }
@@ -56,6 +80,7 @@ impl State {
                 chat_endpoints_enabled: false,
                 cmpl_endpoints_enabled: false,
                 embeddings_endpoints_enabled: false,
+                responses_endpoints_enabled: false,
             }),
         }
     }
@@ -163,32 +188,13 @@ impl HttpService {
         &self.route_docs
     }
 
-    /// Enable or disable chat completion endpoints
-    pub async fn enable_chat_endpoints(&self, enable: bool) {
-        let mut state_flags = self.state.flags.write().await;
-        state_flags.chat_endpoints_enabled = enable;
+    pub async fn enable_model_endpoint(&self, endpoint_type: EndpointType, enable: bool) {
+        let mut state_flags: tokio::sync::RwLockWriteGuard<'_, StateFlags> =
+            self.state.flags.write().await;
+        state_flags.set(&endpoint_type, enable);
         tracing::info!(
-            "Chat completion endpoints {}",
-            if enable { "enabled" } else { "disabled" }
-        );
-    }
-
-    /// Enable or disable completion endpoints
-    pub async fn enable_cmpl_endpoints(&self, enable: bool) {
-        let mut state_flags = self.state.flags.write().await;
-        state_flags.cmpl_endpoints_enabled = enable;
-        tracing::info!(
-            "Completion endpoints {}",
-            if enable { "enabled" } else { "disabled" }
-        );
-    }
-
-    /// Enable or disable embeddings endpoints
-    pub async fn enable_embeddings_endpoints(&self, enable: bool) {
-        let mut state_flags = self.state.flags.write().await;
-        state_flags.embeddings_endpoints_enabled = enable;
-        tracing::info!(
-            "Embeddings endpoints {}",
+            "{} endpoints {}",
+            endpoint_type.as_str(),
             if enable { "enabled" } else { "disabled" }
         );
     }
@@ -225,6 +231,7 @@ impl HttpServiceConfigBuilder {
                 state_flags.chat_endpoints_enabled = config.enable_chat_endpoints;
                 state_flags.cmpl_endpoints_enabled = config.enable_cmpl_endpoints;
                 state_flags.embeddings_endpoints_enabled = config.enable_embeddings_endpoints;
+                state_flags.responses_endpoints_enabled = config.enable_responses_endpoints;
             });
         });
 
@@ -243,76 +250,9 @@ impl HttpServiceConfigBuilder {
             super::health::live_check_router(state.clone(), var(HTTP_SVC_LIVE_PATH_ENV).ok()),
         ];
 
-        // Add chat completions route with conditional middleware
-        let (chat_docs, chat_route) = super::openai::chat_completions_router(
-            state.clone(),
-            config.request_template,
-            var(HTTP_SVC_CHAT_PATH_ENV).ok(),
-        );
-        let state_chat_route = state.clone();
-        let chat_route = chat_route.route_layer(axum::middleware::from_fn(
-            move |req, next: axum::middleware::Next| {
-                let state = state_chat_route.clone();
-                async move {
-                    // Read the flag value and drop the lock before async operations
-                    let guard = state.flags.read().await;
-                    let enabled = guard.chat_endpoints_enabled;
-
-                    if enabled {
-                        Ok(next.run(req).await)
-                    } else {
-                        tracing::debug!("Chat endpoints are disabled");
-                        Err(axum::http::StatusCode::SERVICE_UNAVAILABLE)
-                    }
-                }
-            },
-        ));
-        routes.push((chat_docs, chat_route));
-
-        // Add completions route with conditional middleware
-        let state_cmpl = state.clone();
-        let (cmpl_docs, cmpl_route) =
-            super::openai::completions_router(state_cmpl, var(HTTP_SVC_CMP_PATH_ENV).ok());
-
-        let state_cmpl_route = state.clone();
-        let cmpl_route = cmpl_route.route_layer(axum::middleware::from_fn(
-            move |req, next: axum::middleware::Next| {
-                let state_api = state_cmpl_route.clone();
-                async move {
-                    let guard = state_api.flags.read().await;
-                    let enabled = guard.cmpl_endpoints_enabled;
-
-                    if enabled {
-                        Ok(next.run(req).await)
-                    } else {
-                        Err(axum::http::StatusCode::NOT_FOUND)
-                    }
-                }
-            },
-        ));
-        routes.push((cmpl_docs, cmpl_route));
-
-        // Add embeddings route with conditional middleware
-        let (embed_docs, embed_route) =
-            super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
-        let state_embed_route = state.clone();
-        let embed_route = embed_route.route_layer(axum::middleware::from_fn(
-            move |req, next: axum::middleware::Next| {
-                let state_api = state_embed_route.clone();
-                async move {
-                    let guard = state_api.flags.read().await;
-                    let enabled = guard.embeddings_endpoints_enabled;
-
-                    if enabled {
-                        Ok(next.run(req).await)
-                    } else {
-                        Err(axum::http::StatusCode::NOT_FOUND)
-                    }
-                }
-            },
-        ));
-        routes.push((embed_docs, embed_route));
-
+        let endpoint_routes =
+            HttpServiceConfigBuilder::get_endpoints_router(state.clone(), &config);
+        routes.extend(endpoint_routes);
         for (route_docs, route) in routes {
             router = router.merge(route);
             all_docs.extend(route_docs);
@@ -330,5 +270,62 @@ impl HttpServiceConfigBuilder {
     pub fn with_request_template(mut self, request_template: Option<RequestTemplate>) -> Self {
         self.request_template = Some(request_template);
         self
+    }
+
+    fn get_endpoints_router(
+        state: Arc<State>,
+        config: &HttpServiceConfig,
+    ) -> Vec<(Vec<RouteDoc>, axum::Router)> {
+        let mut routes = Vec::new();
+
+        // Add chat completions route with conditional middleware
+        let (chat_docs, chat_route) = super::openai::chat_completions_router(
+            state.clone(),
+            config.request_template.clone(),
+            var(HTTP_SVC_CHAT_PATH_ENV).ok(),
+        );
+        let (cmpl_docs, cmpl_route) =
+            super::openai::completions_router(state.clone(), var(HTTP_SVC_CMP_PATH_ENV).ok());
+        let (embed_docs, embed_route) =
+            super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
+        let (responses_docs, responses_route) = super::openai::responses_router(
+            state.clone(),
+            config.request_template.clone(),
+            var(HTTP_SVC_RESPONSES_PATH_ENV).ok(),
+        );
+
+        let mut endpoint_routes = HashMap::new();
+        endpoint_routes.insert(EndpointType::Chat, (chat_docs, chat_route));
+        endpoint_routes.insert(EndpointType::Completion, (cmpl_docs, cmpl_route));
+        endpoint_routes.insert(EndpointType::Embedding, (embed_docs, embed_route));
+        endpoint_routes.insert(EndpointType::Responses, (responses_docs, responses_route));
+
+        for endpoint_type in EndpointType::all() {
+            let state_route = state.clone();
+            if endpoint_routes.get(&endpoint_type).is_none() {
+                tracing::debug!("{} endpoints are disabled", endpoint_type.as_str());
+                continue;
+            }
+            let (docs, route) = endpoint_routes.get(&endpoint_type).cloned().unwrap();
+            let route = route.route_layer(axum::middleware::from_fn(
+                move |req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
+                    let state: Arc<State> = state_route.clone();
+                    async move {
+                        // Read the flag value and drop the lock before async operations
+                        let guard = state.flags.read().await;
+                        let enabled = guard.get(&endpoint_type);
+
+                        if enabled {
+                            Ok(next.run(req).await)
+                        } else {
+                            tracing::debug!("{} endpoints are disabled", endpoint_type.as_str());
+                            Err(axum::http::StatusCode::SERVICE_UNAVAILABLE)
+                        }
+                    }
+                },
+            ));
+            routes.push((docs, route));
+        }
+        return routes;
     }
 }
