@@ -18,6 +18,8 @@
 //! This module provides registry classes for Prometheus metrics
 //! that auto populates the labels with the namespace-component-endpoint hierarchy.
 
+use once_cell::sync::Lazy;
+use regex::Regex;
 use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -34,6 +36,35 @@ fn build_metric_name(namespace: &str, metric_name: &str) -> String {
     } else {
         metric_name.to_string()
     }
+}
+
+/// Lints a metric name component by stripping off invalid characters and validating Prometheus naming pattern
+/// Prometheus doesn't provide a built-in function to validate metric names, but the specification requires
+/// names to follow the pattern [a-zA-Z_:][a-zA-Z0-9_:]*. This function implements that validation.
+/// Returns error if sanitized name doesn't follow the required pattern.
+fn lint_prometheus_name(name: &str) -> anyhow::Result<String> {
+    if name.is_empty() {
+        return Ok("".to_string());
+    }
+
+    static INVALID_CHARS_PATTERN: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"[^a-zA-Z0-9_:]").unwrap());
+
+    static PROMETHEUS_NAME_PATTERN: Lazy<Regex> =
+        Lazy::new(|| Regex::new(r"^[a-zA-Z_:][a-zA-Z0-9_:]*$").unwrap());
+
+    // Remove all invalid characters (everything except alphanumeric, colons, and underscores)
+    let sanitized = INVALID_CHARS_PATTERN.replace_all(name, "").to_string();
+
+    // Check if the sanitized name follows Prometheus naming pattern
+    if !sanitized.is_empty() && !PROMETHEUS_NAME_PATTERN.is_match(&sanitized) {
+        return Err(anyhow::anyhow!(
+            "Sanitized name '{}' does not follow Prometheus naming pattern [a-zA-Z_:][a-zA-Z0-9_:]*",
+            sanitized
+        ));
+    }
+
+    Ok(sanitized)
 }
 
 /// Trait that defines common behavior for Prometheus metric types
@@ -172,14 +203,18 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     let basename = registry.basename();
     let parent_hierarchy = registry.parent_hierarchy();
 
-    // Get the namespace from the second top-most parent (index 1 in parent_hierarchy)
     let namespace = if parent_hierarchy.len() > 1 {
-        &parent_hierarchy[1]
+        let potential_namespace = &parent_hierarchy[1];
+        if !potential_namespace.is_empty() {
+            lint_prometheus_name(potential_namespace)?
+        } else {
+            "".to_string()
+        }
     } else {
-        ""
+        "".to_string()
     };
 
-    let metric_name = build_metric_name(namespace, metric_name);
+    let metric_name = build_metric_name(&namespace, metric_name);
 
     // Validate that user-provided labels don't have duplicate keys
     for (key, _) in labels {
@@ -191,7 +226,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         }
     }
 
-    let hierarchy = [parent_hierarchy, vec![basename]].concat();
+    let hierarchy = [parent_hierarchy.clone(), vec![basename]].concat();
     // Build updated_labels: auto-labels first, then user labels
     let mut updated_labels: Vec<(String, String)> = Vec::new();
 
@@ -206,23 +241,26 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
             }
         }
 
-        // Add auto-generated labels
-        if hierarchy.len() > 1 {
-            let namespace = &hierarchy[1];
-            if !namespace.is_empty() {
-                updated_labels.push(("namespace".to_string(), namespace.clone()));
-            }
+        // Add auto-generated labels with sanitized values
+        if !namespace.is_empty() {
+            updated_labels.push(("namespace".to_string(), namespace.to_string()));
         }
         if hierarchy.len() > 2 {
             let component = &hierarchy[2];
             if !component.is_empty() {
-                updated_labels.push(("component".to_string(), component.clone()));
+                let valid_component = lint_prometheus_name(component)?;
+                if !valid_component.is_empty() {
+                    updated_labels.push(("component".to_string(), valid_component));
+                }
             }
         }
         if hierarchy.len() > 3 {
             let endpoint = &hierarchy[3];
             if !endpoint.is_empty() {
-                updated_labels.push(("endpoint".to_string(), endpoint.clone()));
+                let valid_endpoint = lint_prometheus_name(endpoint)?;
+                if !valid_endpoint.is_empty() {
+                    updated_labels.push(("endpoint".to_string(), valid_endpoint));
+                }
             }
         }
     }
@@ -527,6 +565,77 @@ mod tests {
 
         let result = build_metric_name("dynamo", "requests");
         assert_eq!(result, "dynamo_requests");
+    }
+
+    #[test]
+    fn test_lint_prometheus_name() {
+        // Test that valid components remain unchanged
+        assert_eq!(
+            lint_prometheus_name("testnamespace").unwrap(),
+            "testnamespace"
+        );
+        assert_eq!(
+            lint_prometheus_name("test_namespace").unwrap(),
+            "test_namespace"
+        );
+        assert_eq!(lint_prometheus_name("test123").unwrap(), "test123");
+        assert_eq!(
+            lint_prometheus_name("test:namespace").unwrap(),
+            "test:namespace"
+        );
+        assert_eq!(
+            lint_prometheus_name("_testnamespace").unwrap(),
+            "_testnamespace"
+        );
+        assert_eq!(
+            lint_prometheus_name("testnamespace_123").unwrap(),
+            "testnamespace_123"
+        );
+
+        // Test that invalid characters are stripped
+        assert_eq!(lint_prometheus_name("").unwrap(), ""); // Empty
+        assert_eq!(
+            lint_prometheus_name("test namespace").unwrap(),
+            "testnamespace"
+        ); // Space removed
+        assert_eq!(
+            lint_prometheus_name("test.namespace").unwrap(),
+            "testnamespace"
+        ); // Dot removed
+        assert_eq!(
+            lint_prometheus_name("test@namespace").unwrap(),
+            "testnamespace"
+        ); // @ removed
+        assert_eq!(
+            lint_prometheus_name("test#namespace").unwrap(),
+            "testnamespace"
+        ); // # removed
+        assert_eq!(
+            lint_prometheus_name("test$namespace").unwrap(),
+            "testnamespace"
+        ); // $ removed
+        assert_eq!(
+            lint_prometheus_name("test!@#$%^&*()namespace").unwrap(),
+            "testnamespace"
+        ); // Multiple special chars removed
+        assert_eq!(
+            lint_prometheus_name("testnamespace_123!").unwrap(),
+            "testnamespace_123"
+        ); // Trailing special char removed
+
+        // Test that hyphens are stripped (not allowed in Prometheus names)
+        assert_eq!(
+            lint_prometheus_name("test-namespace").unwrap(),
+            "testnamespace"
+        ); // Hyphen removed
+        assert_eq!(
+            lint_prometheus_name("test-namespace_123").unwrap(),
+            "testnamespace_123"
+        ); // Hyphen removed
+
+        // Test validation errors for invalid patterns
+        assert!(lint_prometheus_name("123test").is_err()); // Starts with digit
+        assert!(lint_prometheus_name("").is_ok()); // Empty is allowed
     }
 }
 
