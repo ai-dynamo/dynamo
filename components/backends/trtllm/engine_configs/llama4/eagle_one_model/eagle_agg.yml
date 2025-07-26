@@ -17,10 +17,8 @@ backend: pytorch
 tensor_parallel_size: 8
 moe_expert_parallel_size: 8
 max_batch_size: 8
-# When max_num_tokens set to higher values, can cause OOM issues.
-# Will be investigated in the future with TRTLLM team.
 max_num_tokens: 4096
-disable_overlap_scheduler: true # disable_overlap_scheduler is having acc issue on dis-agg
+disable_overlap_scheduler: true # disable_overlap_scheduler is having acc issue on both aggregated and disaggregated serving
 
 # Enable Speculative Decoding in the model engine
 speculative_config:
