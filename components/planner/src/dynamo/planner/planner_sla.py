@@ -40,7 +40,7 @@ async def init_planner(runtime: DistributedRuntime, args):
 
     await start_sla_planner(runtime, args)
 
-    component = runtime.namespace(args.namespace).component("Planner")
+    component = runtime.namespace(SLAPlannerDefaults.namespace).component("Planner")
     await component.create_service()
 
     async def generate(self, request: RequestType):
@@ -53,11 +53,6 @@ async def init_planner(runtime: DistributedRuntime, args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SLA Planner")
-    parser.add_argument(
-        "--namespace",
-        default=SLAPlannerDefaults.namespace,
-        help="Namespace for the planner",
-    )
     parser.add_argument(
         "--environment",
         default=SLAPlannerDefaults.environment,
@@ -108,11 +103,6 @@ if __name__ == "__main__":
         type=int,
         default=SLAPlannerDefaults.prefill_engine_num_gpu,
         help="Number of GPUs for prefill engine",
-    )
-    parser.add_argument(
-        "--prometheus-endpoint",
-        default=SLAPlannerDefaults.prometheus_endpoint,
-        help="Prometheus endpoint URL",
     )
     parser.add_argument(
         "--profile-results-dir",

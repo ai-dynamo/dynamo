@@ -53,12 +53,6 @@ def parse_args() -> Config:
         help=f"Dynamo endpoint string in 'dyn://namespace.component.endpoint' format. Default: {DEFAULT_ENDPOINT}",
     )
     parser.add_argument(
-        "--namespace",
-        type=str,
-        default="dynamo",
-        help="Dynamo namespace for this worker. Default: dynamo",
-    )
-    parser.add_argument(
         "--is-prefill-worker",
         action="store_true",
         help="Enable prefill functionality for this worker. Uses the provided namespace to construct dyn://namespace.prefill.generate",
@@ -85,11 +79,13 @@ def parse_args() -> Config:
         # This becomes an `Option` on the Rust side
         config.served_model_name = None
 
+    namespace = os.environ.get("DYNAMO_NAMESPACE", "dynamo")
+
     if args.is_prefill_worker:
-        args.endpoint = f"dyn://{args.namespace}.prefill.generate"
+        args.endpoint = f"dyn://{namespace}.prefill.generate"
     else:
         # For decode workers, also use the provided namespace instead of hardcoded "dynamo"
-        args.endpoint = f"dyn://{args.namespace}.backend.generate"
+        args.endpoint = f"dyn://{namespace}.backend.generate"
 
     endpoint_str = args.endpoint.replace("dyn://", "", 1)
     endpoint_parts = endpoint_str.split(".")
