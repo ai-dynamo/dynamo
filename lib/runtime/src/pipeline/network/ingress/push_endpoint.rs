@@ -16,9 +16,14 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
+use crate::config::HealthStatus;
+use crate::protocols::LeaseId;
+use crate::SystemHealth;
 use anyhow::Result;
 use async_nats::service::endpoint::Endpoint;
 use derive_builder::Builder;
+use std::collections::HashMap;
+use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -36,11 +41,21 @@ impl PushEndpoint {
         PushEndpointBuilder::default()
     }
 
-    pub async fn start(self, endpoint: Endpoint) -> Result<()> {
+    pub async fn start(
+        self,
+        endpoint: Endpoint,
+        endpoint_name: String,
+        system_health: Arc<Mutex<SystemHealth>>,
+    ) -> Result<()> {
         let mut endpoint = endpoint;
 
         let inflight = Arc::new(AtomicU64::new(0));
         let notify = Arc::new(Notify::new());
+
+        system_health
+            .lock()
+            .await
+            .set_endpoint_health_status(endpoint_name.clone(), HealthStatus::Ready);
 
         loop {
             let req = tokio::select! {
@@ -95,6 +110,11 @@ impl PushEndpoint {
                 break;
             }
         }
+
+        system_health
+            .lock()
+            .await
+            .set_endpoint_health_status(endpoint_name.clone(), HealthStatus::NotReady);
 
         // await for all inflight requests to complete
         tracing::info!(

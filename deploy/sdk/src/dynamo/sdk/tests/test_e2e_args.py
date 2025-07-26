@@ -22,7 +22,6 @@ from typer.testing import CliRunner
 
 from dynamo.sdk.cli.cli import cli
 
-pytestmark = pytest.mark.pre_merge
 runner = CliRunner()
 
 

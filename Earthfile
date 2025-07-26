@@ -105,7 +105,7 @@ dynamo-build:
     FROM +rust-base
     WORKDIR /workspace
     COPY Cargo.toml Cargo.lock ./
-    COPY pyproject.toml README.md hatch_build.py ./
+    COPY pyproject.toml README.md ./
     COPY components/ components/
     COPY lib/ lib/
     COPY launch/ launch/

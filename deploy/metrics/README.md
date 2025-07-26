@@ -18,7 +18,7 @@ graph TD
         PROMETHEUS[Prometheus server :9090] -->|:2379/metrics| ETCD_SERVER[etcd-server :2379, :2380]
         PROMETHEUS -->|:9401/metrics| DCGM_EXPORTER[dcgm-exporter :9401]
         PROMETHEUS -->|:7777/metrics| NATS_PROM_EXP
-        PROMETHEUS -->|:8000/metrics| DYNAMOFE[Dynamo HTTP FE :8000]
+        PROMETHEUS -->|:8080/metrics| DYNAMOFE[Dynamo HTTP FE :8080]
         GRAFANA -->|:9090/query API| PROMETHEUS
     end
 ```
@@ -34,9 +34,9 @@ As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build container
 2. Start Dynamo dependencies. Assume you're at the root dynamo path:
 
    ```bash
-   docker compose -f deploy/metrics/docker-compose.yml up -d  # Minimum components for Dynamo: etcd/nats/dcgm-exporter
+   docker compose -f deploy/docker-compose.yml up -d  # Minimum components for Dynamo: etcd/nats/dcgm-exporter
    # or
-   docker compose -f deploy/metrics/docker-compose.yml --profile metrics up -d  # In addition to the above, start Prometheus & Grafana
+   docker compose -f deploy/docker-compose.yml --profile metrics up -d  # In addition to the above, start Prometheus & Grafana
    ```
 
    To target specific GPU(s), export the variable below before running Docker Compose:
@@ -57,7 +57,6 @@ As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build container
    - Start the [components/metrics](../../components/metrics/README.md) application to begin monitoring for metric events from dynamo workers and aggregating them on a Prometheus metrics endpoint: `http://localhost:9091/metrics`.
    - Uncomment the appropriate lines in prometheus.yml to poll port 9091.
    - Start worker(s) that publishes KV Cache metrics: [examples/rust/service_metrics/bin/server](../../lib/runtime/examples/service_metrics/README.md)` can populate dummy KV Cache metrics.
-   - For a real workflow with real data, see the KV Routing example in [examples/llm/utils/vllm.py](../../examples/llm/utils/vllm.py).
 
 
 ## Configuration

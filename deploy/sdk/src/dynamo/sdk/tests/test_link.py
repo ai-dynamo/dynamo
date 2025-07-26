@@ -13,11 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import pytest
 
 from dynamo.sdk.core.protocol.interface import LinkedServices
-
-pytestmark = pytest.mark.pre_merge
 
 
 def test_remove_backend2():
