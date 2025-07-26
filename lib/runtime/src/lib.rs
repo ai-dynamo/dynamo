@@ -37,6 +37,7 @@ pub mod component;
 pub mod discovery;
 pub mod engine;
 pub mod http_server;
+pub mod instances;
 pub mod logging;
 pub mod metrics;
 pub mod pipeline;
