@@ -302,7 +302,7 @@ impl HttpServiceConfigBuilder {
 
         for endpoint_type in EndpointType::all() {
             let state_route = state.clone();
-            if endpoint_routes.get(&endpoint_type).is_none() {
+            if !endpoint_routes.contains_key(&endpoint_type) {
                 tracing::debug!("{} endpoints are disabled", endpoint_type.as_str());
                 continue;
             }
