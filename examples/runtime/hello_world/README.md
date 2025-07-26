@@ -101,3 +101,19 @@ Hello star!
 
 - **`worker`**: A dynamo worker that connects to the backend service and processes the streaming response
 
+## Deployment to Kubernetes
+
+Follow the [Quickstart Guide](../../../docs/guides/dynamo_deploy/quickstart.md) to install Dynamo Cloud.
+Then deploy to kubernetes using
+
+```bash
+export NAMESPACE=<your-namespace>
+cd dynamo
+kubectl apply -f examples/runtime/hello_world/deploy/hello_world.yaml -n ${NAMESPACE}
+```
+
+to delete your deployment:
+
+```bash
+kubectl delete dynamographdeployment hello-world -n ${NAMESPACE}
+```
