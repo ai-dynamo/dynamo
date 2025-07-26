@@ -22,9 +22,46 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Instant;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing;
+
+/// HTTP server information containing socket address and handle
+#[derive(Debug)]
+pub struct HttpServerInfo {
+    pub socket_addr: std::net::SocketAddr,
+    pub handle: Option<Arc<JoinHandle<()>>>,
+}
+
+impl HttpServerInfo {
+    pub fn new(socket_addr: std::net::SocketAddr, handle: Option<JoinHandle<()>>) -> Self {
+        Self {
+            socket_addr,
+            handle: handle.map(Arc::new),
+        }
+    }
+
+    pub fn address(&self) -> String {
+        self.socket_addr.to_string()
+    }
+
+    pub fn hostname(&self) -> String {
+        self.socket_addr.ip().to_string()
+    }
+
+    pub fn port(&self) -> u16 {
+        self.socket_addr.port()
+    }
+}
+
+impl Clone for HttpServerInfo {
+    fn clone(&self) -> Self {
+        Self {
+            socket_addr: self.socket_addr,
+            handle: self.handle.clone(),
+        }
+    }
+}
 
 pub struct HttpMetricsRegistry {
     pub drt: Arc<crate::DistributedRuntime>,
@@ -58,8 +95,10 @@ impl HttpServerState {
     /// Create new HTTP server state with the provided metrics registry
     pub fn new(drt: Arc<crate::DistributedRuntime>) -> anyhow::Result<Self> {
         let http_metrics_registry = Arc::new(HttpMetricsRegistry { drt: drt.clone() });
+        // Note: This metric is created at the DRT level (no namespace), so we manually add "dynamo_" prefix
+        // to maintain consistency with the project's metric naming convention
         let uptime_gauge = http_metrics_registry.as_ref().create_gauge(
-            "uptime_seconds",
+            "dynamo_uptime_seconds",
             "Total uptime of the DistributedRuntime in seconds",
             &[],
         )?;
@@ -293,9 +332,9 @@ mod tests {
         println!("Full metrics response:\n{}", response);
 
         let expected = "\
-# HELP uptime_seconds Total uptime of the DistributedRuntime in seconds
-# TYPE uptime_seconds gauge
-uptime_seconds{namespace=\"http_server\"} 42
+# HELP dynamo_uptime_seconds Total uptime of the DistributedRuntime in seconds
+# TYPE dynamo_uptime_seconds gauge
+dynamo_uptime_seconds{namespace=\"http_server\"} 42
 ";
         assert_eq!(response, expected);
     }
@@ -405,53 +444,59 @@ uptime_seconds{namespace=\"http_server\"} 42
     #[tokio::test]
     async fn test_spawn_http_server_endpoints() {
         // use reqwest for HTTP requests
-        let cancel_token = CancellationToken::new();
-        let drt = create_test_drt_async().await;
-        let (addr, server_handle) =
-            spawn_http_server("127.0.0.1", 0, cancel_token.clone(), Arc::new(drt))
-                .await
-                .unwrap();
-        println!("[test] Waiting for server to start...");
-        sleep(std::time::Duration::from_millis(1000)).await;
-        println!("[test] Server should be up, starting requests...");
-        let client = reqwest::Client::new();
-        for (path, expect_200, expect_body) in [
-            ("/health", true, "OK"),
-            ("/live", true, "OK"),
-            ("/someRandomPathNotFoundHere", false, "Route not found"),
-        ] {
-            println!("[test] Sending request to {}", path);
-            let url = format!("http://{}{}", addr, path);
-            let response = client.get(&url).send().await.unwrap();
-            let status = response.status();
-            let body = response.text().await.unwrap();
-            println!(
-                "[test] Response for {}: status={}, body={:?}",
-                path, status, body
-            );
-            if expect_200 {
-                assert_eq!(status, 200, "Response: status={}, body={:?}", status, body);
-            } else {
-                assert_eq!(status, 404, "Response: status={}, body={:?}", status, body);
-            }
-            assert!(
-                body.contains(expect_body),
-                "Response: status={}, body={:?}",
-                status,
-                body
-            );
-        }
-        cancel_token.cancel();
-        match server_handle.await {
-            Ok(_) => println!("[test] Server shut down normally"),
-            Err(e) => {
-                if e.is_panic() {
-                    println!("[test] Server panicked: {:?}", e);
-                } else {
-                    println!("[test] Server cancelled: {:?}", e);
+        temp_env::async_with_vars(
+            [("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("ready"))],
+            async {
+                let cancel_token = CancellationToken::new();
+                let drt = create_test_drt_async().await;
+                let (addr, server_handle) =
+                    spawn_http_server("127.0.0.1", 0, cancel_token.clone(), Arc::new(drt))
+                        .await
+                        .unwrap();
+                println!("[test] Waiting for server to start...");
+                sleep(std::time::Duration::from_millis(1000)).await;
+                println!("[test] Server should be up, starting requests...");
+                let client = reqwest::Client::new();
+                for (path, expect_200, expect_body) in [
+                    ("/health", true, "ready"),
+                    ("/live", true, "ready"),
+                    ("/someRandomPathNotFoundHere", false, "Route not found"),
+                ] {
+                    println!("[test] Sending request to {}", path);
+                    let url = format!("http://{}{}", addr, path);
+                    let response = client.get(&url).send().await.unwrap();
+                    let status = response.status();
+                    let body = response.text().await.unwrap();
+                    println!(
+                        "[test] Response for {}: status={}, body={:?}",
+                        path, status, body
+                    );
+                    if expect_200 {
+                        assert_eq!(status, 200, "Response: status={}, body={:?}", status, body);
+                    } else {
+                        assert_eq!(status, 404, "Response: status={}, body={:?}", status, body);
+                    }
+                    assert!(
+                        body.contains(expect_body),
+                        "Response: status={}, body={:?}",
+                        status,
+                        body
+                    );
                 }
-            }
-        }
+                cancel_token.cancel();
+                match server_handle.await {
+                    Ok(_) => println!("[test] Server shut down normally"),
+                    Err(e) => {
+                        if e.is_panic() {
+                            println!("[test] Server panicked: {:?}", e);
+                        } else {
+                            println!("[test] Server cancelled: {:?}", e);
+                        }
+                    }
+                }
+            },
+        )
+        .await;
     }
 
     #[cfg(feature = "integration")]

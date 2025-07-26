@@ -22,29 +22,17 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-// This constant determines whether metric names should include the full hierarchy as a prefix.
-// If set to true, a hierarchy like ["", "mynamespace", "mycomponent", "myendpoint"]
-// results in a metric name of "mynamespace_mycomponent_myendpoint__myendpoint".
-// If false, the metric name will be just "myendpoint".
-// This setting is applied *universally* to ensure consistent naming conventions.
-pub const USE_PREFIXED_METRIC_NAMES: bool = false;
-
 // If set to true, then metrics will be labeled with the namespace, component, and endpoint.
 pub const USE_AUTO_LABELS: bool = true;
 
 // Prometheus imports
 use prometheus::Encoder;
 
-fn build_metric_name(prefix: &str, metric_name: &str) -> String {
-    if !USE_PREFIXED_METRIC_NAMES {
-        return metric_name.to_string();
-    }
-
-    if prefix.is_empty() {
-        metric_name.to_string()
+fn build_metric_name(namespace: &str, metric_name: &str) -> String {
+    if !namespace.is_empty() {
+        format!("{}_{}", namespace, metric_name)
     } else {
-        // Double underscore to separate between prefix and actual metric name
-        format!("{}__{}", prefix, metric_name)
+        metric_name.to_string()
     }
 }
 
@@ -120,6 +108,21 @@ impl PrometheusMetric for prometheus::IntGaugeVec {
     }
 }
 
+impl PrometheusMetric for prometheus::IntCounterVec {
+    fn with_opts(_opts: prometheus::Opts) -> Result<Self, prometheus::Error> {
+        Err(prometheus::Error::Msg(
+            "IntCounterVec requires label names, use with_opts_and_label_names instead".to_string(),
+        ))
+    }
+
+    fn with_opts_and_label_names(
+        opts: prometheus::Opts,
+        label_names: &[&str],
+    ) -> Result<Self, prometheus::Error> {
+        prometheus::IntCounterVec::new(opts, label_names)
+    }
+}
+
 // Implement the trait for Histogram
 impl PrometheusMetric for prometheus::Histogram {
     fn with_opts(opts: prometheus::Opts) -> Result<Self, prometheus::Error> {
@@ -167,8 +170,16 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     let mut seen_keys = std::collections::HashSet::new();
 
     let basename = registry.basename();
-    let metric_name = build_metric_name(&registry.prefix(), metric_name);
     let parent_hierarchy = registry.parent_hierarchy();
+
+    // Get the namespace from the second top-most parent (index 1 in parent_hierarchy)
+    let namespace = if parent_hierarchy.len() > 1 {
+        &parent_hierarchy[1]
+    } else {
+        ""
+    };
+
+    let metric_name = build_metric_name(namespace, metric_name);
 
     // Validate that user-provided labels don't have duplicate keys
     for (key, _) in labels {
@@ -267,6 +278,21 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         let label_names = const_labels
             .ok_or_else(|| anyhow::anyhow!("IntGaugeVec requires const_labels parameter"))?;
         T::with_opts_and_label_names(opts, label_names)?
+    } else if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::IntCounterVec>() {
+        // Special handling for IntCounterVec with label names
+        // const_labels parameter is required for IntCounterVec
+        if buckets.is_some() {
+            return Err(anyhow::anyhow!(
+                "buckets parameter is not valid for IntCounterVec"
+            ));
+        }
+        let mut opts = prometheus::Opts::new(&metric_name, metric_desc);
+        for (key, value) in &updated_labels {
+            opts = opts.const_label(key.clone(), value.clone());
+        }
+        let label_names = const_labels
+            .ok_or_else(|| anyhow::anyhow!("IntCounterVec requires const_labels parameter"))?;
+        T::with_opts_and_label_names(opts, label_names)?
     } else {
         // Standard handling for Counter, IntCounter, Gauge, IntGauge
         // buckets and const_labels parameters are not valid for these types
@@ -288,7 +314,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     };
 
     // Iterate over the DRT's registry and register this metric across all hierarchical levels.
-    // The prefixed_hierarchy is structured as: ["", "mynamespace", "mynamespace_mycomponent", "mynamespace_mycomponent_myendpoint"]
+    // The prefixed_hierarchy is structured as: ["", "testnamespace", "testnamespace_testcomponent", "testnamespace_testcomponent_testendpoint"]
     // This prefixing is essential to differentiate between the names of children and grandchildren.
     let mut prometheus_registry = registry
         .drt()
@@ -298,10 +324,10 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
 
     // Build prefixed hierarchy and register metrics in a single loop
     // current_prefix accumulates the hierarchical path as we iterate through hierarchy
-    // For example, if hierarchy = ["", "mynamespace", "mycomponent"], then:
+    // For example, if hierarchy = ["", "testnamespace", "testcomponent"], then:
     // - Iteration 1: current_prefix = "" (empty string from DRT)
-    // - Iteration 2: current_prefix = "mynamespace"
-    // - Iteration 3: current_prefix = "mynamespace_mycomponent"
+    // - Iteration 2: current_prefix = "testnamespace"
+    // - Iteration 3: current_prefix = "testnamespace_testcomponent"
     let mut current_prefix = String::new();
     for name in &hierarchy {
         if !current_prefix.is_empty() && !name.is_empty() {
@@ -344,17 +370,19 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
     // TODO: Add support for additional Prometheus metric types:
     // - Counter: ✅ IMPLEMENTED - create_counter()
     // - CounterVec: ✅ IMPLEMENTED - create_countervec()
-    // - IntCounter: ✅ IMPLEMENTED - create_intcounter()
     // - Gauge: ✅ IMPLEMENTED - create_gauge()
-    // - IntGauge/IntGaugeVec: ✅ IMPLEMENTED - create_intgauge() and create_intgaugevec()
+    // - GaugeHistogram: create_gauge_histogram() - for gauge histograms
     // - Histogram: ✅ IMPLEMENTED - create_histogram()
-    // - Summary: create_summary() - for quantiles and sum/count metrics
     // - HistogramVec with custom buckets: create_histogram_with_buckets()
+    // - Info: create_info() - for info metrics with labels
+    // - IntCounter: ✅ IMPLEMENTED - create_intcounter()
+    // - IntCounterVec: ✅ IMPLEMENTED - create_intcountervec()
+    // - IntGauge: ✅ IMPLEMENTED - create_intgauge()
+    // - IntGaugeVec: ✅ IMPLEMENTED - create_intgaugevec()
+    // - Stateset: create_stateset() - for state-based metrics
+    // - Summary: create_summary() - for quantiles and sum/count metrics
     // - SummaryVec: create_summary_vec() - for labeled summaries
     // - Untyped: create_untyped() - for untyped metrics
-    // - Info: create_info() - for info metrics with labels
-    // - Stateset: create_stateset() - for state-based metrics
-    // - GaugeHistogram: create_gauge_histogram() - for gauge histograms
 
     /// Create a Counter metric
     fn create_counter(
@@ -366,6 +394,24 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         create_metric(self, name, description, labels, None, None)
     }
 
+    /// Create a CounterVec metric with label names (for dynamic labels)
+    fn create_countervec(
+        &self,
+        name: &str,
+        description: &str,
+        const_labels: &[&str],
+        const_label_values: &[(&str, &str)],
+    ) -> anyhow::Result<Arc<prometheus::CounterVec>> {
+        create_metric(
+            self,
+            name,
+            description,
+            const_label_values,
+            None,
+            Some(const_labels),
+        )
+    }
+
     /// Create a Gauge metric
     fn create_gauge(
         &self,
@@ -373,16 +419,6 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         description: &str,
         labels: &[(&str, &str)],
     ) -> anyhow::Result<Arc<prometheus::Gauge>> {
-        create_metric(self, name, description, labels, None, None)
-    }
-
-    /// Create an IntCounter metric
-    fn create_intcounter(
-        &self,
-        name: &str,
-        description: &str,
-        labels: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::IntCounter>> {
         create_metric(self, name, description, labels, None, None)
     }
 
@@ -397,14 +433,24 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         create_metric(self, name, description, labels, buckets, None)
     }
 
-    /// Create a CounterVec metric with label names (for dynamic labels)
-    fn create_countervec(
+    /// Create an IntCounter metric
+    fn create_intcounter(
+        &self,
+        name: &str,
+        description: &str,
+        labels: &[(&str, &str)],
+    ) -> anyhow::Result<Arc<prometheus::IntCounter>> {
+        create_metric(self, name, description, labels, None, None)
+    }
+
+    /// Create an IntCounterVec metric with label names (for dynamic labels)
+    fn create_intcountervec(
         &self,
         name: &str,
         description: &str,
         const_labels: &[&str],
         const_label_values: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::CounterVec>> {
+    ) -> anyhow::Result<Arc<prometheus::IntCounterVec>> {
         create_metric(
             self,
             name,
@@ -469,13 +515,26 @@ pub fn create_test_drt() -> crate::DistributedRuntime {
     })
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_build_metric_name_with_prefix() {
+        // Test that build_metric_name correctly prepends the namespace
+        let result = build_metric_name("", "requests");
+        assert_eq!(result, "requests");
+
+        let result = build_metric_name("dynamo", "requests");
+        assert_eq!(result, "dynamo_requests");
+    }
+}
+
 #[cfg(feature = "integration")]
 #[cfg(test)]
 mod test_prefixes {
     use super::create_test_drt;
     use super::*;
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
 
     #[test]
     fn test_hierarchical_prefixes_and_parent_hierarchies() {
@@ -484,20 +543,17 @@ mod test_prefixes {
         // Create a distributed runtime for testing
         let drt = create_test_drt();
 
-        // Generate random namespace name
-        let mut hasher = DefaultHasher::new();
-        "test_namespace".hash(&mut hasher);
-        let random_num = hasher.finish();
-        let namespace_name = format!("mynamespace{}", random_num);
+        // Use a simple constant namespace name
+        let namespace_name = "testnamespace";
 
         // Create namespace
-        let namespace = drt.namespace(&namespace_name).unwrap();
+        let namespace = drt.namespace(namespace_name).unwrap();
 
         // Create component
-        let component = namespace.component("mycomponent").unwrap();
+        let component = namespace.component("testcomponent").unwrap();
 
         // Create endpoint
-        let endpoint = component.endpoint("myendpoint");
+        let endpoint = component.endpoint("testendpoint");
 
         // Test DistributedRuntime hierarchy
         println!("\n=== DistributedRuntime ===");
@@ -543,8 +599,8 @@ mod test_prefixes {
 
         assert_eq!(
             component.basename(),
-            "mycomponent",
-            "Component basename should be 'mycomponent'"
+            "testcomponent",
+            "Component basename should be 'testcomponent'"
         );
         assert_eq!(
             component.parent_hierarchy(),
@@ -553,8 +609,8 @@ mod test_prefixes {
         );
         assert_eq!(
             component.prefix(),
-            format!("{}_mycomponent", namespace),
-            "Component prefix should be 'namespace_mycomponent'"
+            format!("{}_testcomponent", namespace),
+            "Component prefix should be 'namespace_testcomponent'"
         );
 
         // Test Endpoint hierarchy
@@ -565,18 +621,18 @@ mod test_prefixes {
 
         assert_eq!(
             endpoint.basename(),
-            "myendpoint",
-            "Endpoint basename should be 'myendpoint'"
+            "testendpoint",
+            "Endpoint basename should be 'testendpoint'"
         );
         assert_eq!(
             endpoint.parent_hierarchy(),
-            vec!["", &namespace_name, "mycomponent"],
+            vec!["", &namespace_name, "testcomponent"],
             "Endpoint parent hierarchy should contain the generated namespace name"
         );
         assert_eq!(
             endpoint.prefix(),
-            format!("{}_mycomponent_myendpoint", namespace),
-            "Endpoint prefix should be 'namespace_mycomponent_myendpoint'"
+            format!("{}_testcomponent_testendpoint", namespace),
+            "Endpoint prefix should be 'namespace_testcomponent_testendpoint'"
         );
 
         // Test hierarchy relationships
@@ -635,8 +691,6 @@ mod test_simple_metricsregistry_trait {
     use super::create_test_drt;
     use super::*;
     use prometheus::Counter;
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
     use std::sync::Arc;
 
     #[test]
@@ -644,19 +698,16 @@ mod test_simple_metricsregistry_trait {
         // Setup real DRT and registry using the test-friendly constructor
         let drt = create_test_drt();
 
-        // Generate random namespace name
-        let mut hasher = DefaultHasher::new();
-        "test_factory_namespace".hash(&mut hasher);
-        let random_num = hasher.finish();
-        let namespace_name = format!("mynamespace{}", random_num);
+        // Use a simple constant namespace name
+        let namespace_name = "testnamespace";
 
-        let namespace = drt.namespace(&namespace_name).unwrap();
-        let component = namespace.component("mycomponent").unwrap();
-        let endpoint = component.endpoint("myendpoint");
+        let namespace = drt.namespace(namespace_name).unwrap();
+        let component = namespace.component("testcomponent").unwrap();
+        let endpoint = component.endpoint("testendpoint");
 
         // Test Counter creation
         let counter = endpoint
-            .create_counter("mycounter", "A test counter", &[])
+            .create_counter("testcounter", "A test counter", &[])
             .unwrap();
         counter.inc_by(123.456789);
         let epsilon = 0.01;
@@ -667,11 +718,10 @@ mod test_simple_metricsregistry_trait {
         println!("{}", endpoint_output);
 
         let expected_endpoint_output = format!(
-            r#"# HELP mycounter A test counter
-# TYPE mycounter counter
-mycounter{{component="mycomponent",endpoint="myendpoint",namespace="{}"}} 123.456789
-"#,
-            namespace_name
+            r#"# HELP testnamespace_testcounter A test counter
+# TYPE testnamespace_testcounter counter
+testnamespace_testcounter{{component="testcomponent",endpoint="testendpoint",namespace="testnamespace"}} 123.456789
+"#
         );
 
         assert_eq!(
@@ -685,7 +735,7 @@ mycounter{{component="mycomponent",endpoint="myendpoint",namespace="{}"}} 123.45
 
         // Test Gauge creation
         let gauge = component
-            .create_gauge("mygauge", "A test gauge", &[])
+            .create_gauge("testgauge", "A test gauge", &[])
             .unwrap();
         gauge.set(50000.0);
         assert_eq!(gauge.get(), 50000.0);
@@ -696,14 +746,13 @@ mycounter{{component="mycomponent",endpoint="myendpoint",namespace="{}"}} 123.45
         println!("{}", component_output);
 
         let expected_component_output = format!(
-            r#"# HELP mycounter A test counter
-# TYPE mycounter counter
-mycounter{{component="mycomponent",endpoint="myendpoint",namespace="{}"}} 123.456789
-# HELP mygauge A test gauge
-# TYPE mygauge gauge
-mygauge{{component="mycomponent",namespace="{}"}} 50000
-"#,
-            namespace_name, namespace_name
+            r#"# HELP testnamespace_testcounter A test counter
+# TYPE testnamespace_testcounter counter
+testnamespace_testcounter{{component="testcomponent",endpoint="testendpoint",namespace="testnamespace"}} 123.456789
+# HELP testnamespace_testgauge A test gauge
+# TYPE testnamespace_testgauge gauge
+testnamespace_testgauge{{component="testcomponent",namespace="testnamespace"}} 50000
+"#
         );
 
         assert_eq!(
@@ -716,7 +765,7 @@ mygauge{{component="mycomponent",namespace="{}"}} 50000
         );
 
         let intcounter = namespace
-            .create_intcounter("myintcounter", "A test int counter", &[])
+            .create_intcounter("testintcounter", "A test int counter", &[])
             .unwrap();
         intcounter.inc_by(12345);
         assert_eq!(intcounter.get(), 12345);
@@ -727,17 +776,16 @@ mygauge{{component="mycomponent",namespace="{}"}} 50000
         println!("{}", namespace_output);
 
         let expected_namespace_output = format!(
-            r#"# HELP mycounter A test counter
-# TYPE mycounter counter
-mycounter{{component="mycomponent",endpoint="myendpoint",namespace="{}"}} 123.456789
-# HELP mygauge A test gauge
-# TYPE mygauge gauge
-mygauge{{component="mycomponent",namespace="{}"}} 50000
-# HELP myintcounter A test int counter
-# TYPE myintcounter counter
-myintcounter{{namespace="{}"}} 12345
-"#,
-            namespace_name, namespace_name, namespace_name
+            r#"# HELP testintcounter A test int counter
+# TYPE testintcounter counter
+testintcounter{{namespace="testnamespace"}} 12345
+# HELP testnamespace_testcounter A test counter
+# TYPE testnamespace_testcounter counter
+testnamespace_testcounter{{component="testcomponent",endpoint="testendpoint",namespace="testnamespace"}} 123.456789
+# HELP testnamespace_testgauge A test gauge
+# TYPE testnamespace_testgauge gauge
+testnamespace_testgauge{{component="testcomponent",namespace="testnamespace"}} 50000
+"#
         );
 
         assert_eq!(
@@ -753,7 +801,7 @@ myintcounter{{namespace="{}"}} 12345
         // lack labels since the DistributedRuntime is unnamed.
         let histogram = drt
             .create_histogram(
-                "myhistogram",
+                "testhistogram",
                 "A test histogram",
                 &[],
                 Some(vec![1.0, 2.5, 5.0, 10.0]),
@@ -766,7 +814,7 @@ myintcounter{{namespace="{}"}} 12345
         // Test CounterVec creation
         let countervec = drt
             .create_countervec(
-                "mycountervec",
+                "testcountervec",
                 "A test counter vector",
                 &["method", "status"],
                 &[("service", "api")],
@@ -777,7 +825,7 @@ myintcounter{{namespace="{}"}} 12345
 
         // Test IntGauge creation
         let intgauge = drt
-            .create_intgauge("myintgauge", "A test int gauge", &[])
+            .create_intgauge("testintgauge", "A test int gauge", &[])
             .unwrap();
         intgauge.set(42);
         assert_eq!(intgauge.get(), 42);
@@ -785,7 +833,7 @@ myintcounter{{namespace="{}"}} 12345
         // Test IntGaugeVec creation
         let intgaugevec = drt
             .create_intgaugevec(
-                "myintgaugevec",
+                "testintgaugevec",
                 "A test int gauge vector",
                 &["instance", "status"],
                 &[("service", "api")],
@@ -804,37 +852,36 @@ myintcounter{{namespace="{}"}} 12345
         println!("{}", drt_output);
 
         let expected_drt_output = format!(
-            r#"# HELP mycounter A test counter
-# TYPE mycounter counter
-mycounter{{component="mycomponent",endpoint="myendpoint",namespace="{}"}} 123.456789
-# HELP mycountervec A test counter vector
-# TYPE mycountervec counter
-mycountervec{{method="GET",service="api",status="200"}} 10
-mycountervec{{method="POST",service="api",status="201"}} 5
-# HELP mygauge A test gauge
-# TYPE mygauge gauge
-mygauge{{component="mycomponent",namespace="{}"}} 50000
-# HELP myhistogram A test histogram
-# TYPE myhistogram histogram
-myhistogram_bucket{{le="1"}} 0
-myhistogram_bucket{{le="2.5"}} 2
-myhistogram_bucket{{le="5"}} 3
-myhistogram_bucket{{le="10"}} 3
-myhistogram_bucket{{le="+Inf"}} 3
-myhistogram_sum 7.5
-myhistogram_count 3
-# HELP myintcounter A test int counter
-# TYPE myintcounter counter
-myintcounter{{namespace="{}"}} 12345
-# HELP myintgauge A test int gauge
-# TYPE myintgauge gauge
-myintgauge 42
-# HELP myintgaugevec A test int gauge vector
-# TYPE myintgaugevec gauge
-myintgaugevec{{instance="server1",service="api",status="active"}} 10
-myintgaugevec{{instance="server2",service="api",status="inactive"}} 0
-"#,
-            namespace_name, namespace_name, namespace_name
+            r#"# HELP testcountervec A test counter vector
+# TYPE testcountervec counter
+testcountervec{{method="GET",service="api",status="200"}} 10
+testcountervec{{method="POST",service="api",status="201"}} 5
+# HELP testhistogram A test histogram
+# TYPE testhistogram histogram
+testhistogram_bucket{{le="1"}} 0
+testhistogram_bucket{{le="2.5"}} 2
+testhistogram_bucket{{le="5"}} 3
+testhistogram_bucket{{le="10"}} 3
+testhistogram_bucket{{le="+Inf"}} 3
+testhistogram_sum 7.5
+testhistogram_count 3
+# HELP testintcounter A test int counter
+# TYPE testintcounter counter
+testintcounter{{namespace="testnamespace"}} 12345
+# HELP testintgauge A test int gauge
+# TYPE testintgauge gauge
+testintgauge 42
+# HELP testintgaugevec A test int gauge vector
+# TYPE testintgaugevec gauge
+testintgaugevec{{instance="server1",service="api",status="active"}} 10
+testintgaugevec{{instance="server2",service="api",status="inactive"}} 0
+# HELP testnamespace_testcounter A test counter
+# TYPE testnamespace_testcounter counter
+testnamespace_testcounter{{component="testcomponent",endpoint="testendpoint",namespace="testnamespace"}} 123.456789
+# HELP testnamespace_testgauge A test gauge
+# TYPE testnamespace_testgauge gauge
+testnamespace_testgauge{{component="testcomponent",namespace="testnamespace"}} 50000
+"#
         );
 
         assert_eq!(
