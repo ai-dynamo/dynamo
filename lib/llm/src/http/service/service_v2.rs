@@ -9,11 +9,11 @@ use tokio::sync::RwLock;
 use super::metrics;
 use super::Metrics;
 use super::RouteDoc;
-use crate::request_template::RequestTemplate;
 use crate::discovery::ModelManager;
-use dynamo_runtime::DistributedRuntime;
+use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
+use dynamo_runtime::DistributedRuntime;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -244,8 +244,11 @@ impl HttpServiceConfigBuilder {
         ];
 
         // Add chat completions route with conditional middleware
-        let (chat_docs, chat_route) =
-            super::openai::chat_completions_router(state.clone(), config.request_template, var(HTTP_SVC_CHAT_PATH_ENV).ok(),);
+        let (chat_docs, chat_route) = super::openai::chat_completions_router(
+            state.clone(),
+            config.request_template,
+            var(HTTP_SVC_CHAT_PATH_ENV).ok(),
+        );
         let state_chat_route = state.clone();
         let chat_route = chat_route.route_layer(axum::middleware::from_fn(
             move |req, next: axum::middleware::Next| {
@@ -268,7 +271,8 @@ impl HttpServiceConfigBuilder {
 
         // Add completions route with conditional middleware
         let state_cmpl = state.clone();
-        let (cmpl_docs, cmpl_route) = super::openai::completions_router(state_cmpl, var(HTTP_SVC_CMP_PATH_ENV).ok());
+        let (cmpl_docs, cmpl_route) =
+            super::openai::completions_router(state_cmpl, var(HTTP_SVC_CMP_PATH_ENV).ok());
 
         let state_cmpl_route = state.clone();
         let cmpl_route = cmpl_route.route_layer(axum::middleware::from_fn(
@@ -289,7 +293,8 @@ impl HttpServiceConfigBuilder {
         routes.push((cmpl_docs, cmpl_route));
 
         // Add embeddings route with conditional middleware
-        let (embed_docs, embed_route) = super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
+        let (embed_docs, embed_route) =
+            super::openai::embeddings_router(state.clone(), var(HTTP_SVC_EMB_PATH_ENV).ok());
         let state_embed_route = state.clone();
         let embed_route = embed_route.route_layer(axum::middleware::from_fn(
             move |req, next: axum::middleware::Next| {

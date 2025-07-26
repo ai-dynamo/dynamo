@@ -4,13 +4,15 @@
 use std::sync::Arc;
 
 use crate::{
-    discovery::{ModelManager, ModelWatcher, MODEL_ROOT_PATH, ModelUpdate},
+    discovery::{ModelManager, ModelUpdate, ModelWatcher, MODEL_ROOT_PATH},
     engines::StreamingEngineAdapter,
     entrypoint::{input::common, EngineConfig, RouterMode},
-    http::service::{service_v2::{self, HttpService}},
+    http::service::service_v2::{self, HttpService},
     kv_router::KvRouterConfig,
     model_type::ModelType,
-    types::openai::chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
+    types::openai::chat_completions::{
+        NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
+    },
     types::openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
 };
 use dynamo_runtime::transports::etcd;
