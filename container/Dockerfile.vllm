@@ -195,8 +195,8 @@ ENV CUDA_HOME=/usr/local/cuda
 RUN cmake --version
 
 ARG CMAKE_VERSION=3.31.8
-RUN mkdir /sgl-workspace/cmake_build
-WORKDIR /sgl-workspace/cmake_build
+RUN mkdir /workspace/cmake_build
+WORKDIR /workspace/cmake_build
 
 # uninstall CMake
 RUN apt-get purge -y cmake
@@ -204,7 +204,7 @@ RUN apt-get purge -y cmake
 RUN wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
     tar -xvzf cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
     mv cmake-${CMAKE_VERSION}-linux-$(uname -m) custom_cmake
-ENV PATH=/sgl-workspace/cmake_build/custom_cmake/bin:$PATH
+ENV PATH=/workspace/cmake_build/custom_cmake/bin:$PATH
 
 # should be 3.31.8
 RUN cmake --version
