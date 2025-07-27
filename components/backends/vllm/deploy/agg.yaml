@@ -88,7 +88,7 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/dynamo:nnshah1-vllm-latest
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
