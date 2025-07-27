@@ -49,7 +49,7 @@ spec:
       envFromSecret: hf-token-secret
       livenessProbe:
         httpGet:
-          path: /health
+          path: /live
           port: 9090
         periodSeconds: 5
         timeoutSeconds: 30

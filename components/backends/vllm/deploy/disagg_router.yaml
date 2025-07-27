@@ -52,7 +52,7 @@ spec:
       replicas: 2
       livenessProbe:
         httpGet:
-          path: /health
+          path: /live
           port: 9090
         periodSeconds: 5
         timeoutSeconds: 30
@@ -100,7 +100,7 @@ spec:
       replicas: 1
       livenessProbe:
         httpGet:
-          path: /health
+          path: /live
           port: 9090
         periodSeconds: 5
         timeoutSeconds: 30
