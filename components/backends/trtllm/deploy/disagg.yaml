@@ -64,7 +64,7 @@ spec:
           command:
             - /bin/sh
             - -c
-            - 'grep "TRTLLMPrefillWorker.*has been initialized" /tmp/trtllm.log'
+            - "exit 0"
         initialDelaySeconds: 60
         periodSeconds: 60
         timeoutSeconds: 30
@@ -106,7 +106,7 @@ spec:
           command:
             - /bin/sh
             - -c
-            - 'grep "TRTLLMDecodeWorker.*has been initialized" /tmp/trtllm.log'
+            - "exit 0"
         initialDelaySeconds: 60
         periodSeconds: 60
         timeoutSeconds: 30

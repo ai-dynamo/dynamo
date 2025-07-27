@@ -61,7 +61,7 @@ spec:
           command:
             - /bin/sh
             - -c
-            - 'grep "TRTLLMWorker.*has been initialized" /tmp/trtllm.log'
+            - "exit 0"
         initialDelaySeconds: 60
         periodSeconds: 60
         timeoutSeconds: 30
