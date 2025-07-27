@@ -187,9 +187,27 @@ ARG VLLM_REF
 ARG DEEPGEMM_REF
 ARG FLASHINF_REF
 
-ARG MAX_JOBS=16
+ARG MAX_JOBS=72
 ENV MAX_JOBS=$MAX_JOBS
 ENV CUDA_HOME=/usr/local/cuda
+
+# properly install cmake so that gap can be installed
+RUN cmake --version
+
+ARG CMAKE_VERSION=3.31.8
+RUN mkdir /sgl-workspace/cmake_build
+WORKDIR /sgl-workspace/cmake_build
+
+# uninstall CMake
+RUN apt-get purge -y cmake
+# download newer version of CMake
+RUN wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
+    tar -xvzf cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
+    mv cmake-${CMAKE_VERSION}-linux-$(uname -m) custom_cmake
+ENV PATH=/sgl-workspace/cmake_build/custom_cmake/bin:$PATH
+
+# should be 3.31.8
+RUN cmake --version
 
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
@@ -202,6 +220,19 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
 $LD_LIBRARY_PATH
+
+# Install perf_analyzer and genai-perf
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    rapidjson-dev \
+    zlib1g-dev
+
+RUN git clone --depth=1 https://github.com/triton-inference-server/perf_analyzer.git && \
+    mkdir perf_analyzer/build && \
+    cmake -B perf_analyzer/build -S perf_analyzer && \
+    cmake --build perf_analyzer/build -- -j8
+
+
 
 # Common dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
