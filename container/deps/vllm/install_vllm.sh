@@ -21,7 +21,7 @@ set -euo pipefail
 # Parse arguments
 EDITABLE=true
 VLLM_REF="v0.10.0"
-MAX_JOBS=16
+MAX_JOBS=72
 INSTALLATION_DIR=/tmp
 ARCH=$(uname -m)
 DEEPGEMM_REF="1876566"
