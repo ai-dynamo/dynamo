@@ -78,6 +78,8 @@ spec:
           value: "true"
         - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
           value: "[\"generate\"]"
+        - name: DYN_SYSTEM_PORT
+          value: "9090"
       extraPodSpec:
         mainContainer:
           startupProbe:
@@ -86,7 +88,7 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
+          image: gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/dynamo:nnshah1-vllm-latest
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
