@@ -135,6 +135,7 @@ pub struct DistributedTraceContext {
     trace_id: String,
     span_id: String,
     parent_id: Option<String>,
+    tracestate: Option<String>,
     start: Instant,
     end: Option<Instant>,
     x_request_id: Option<String>,
@@ -144,6 +145,7 @@ pub struct DistributedTraceContext {
 pub struct TraceParent {
     pub trace_id: Option<String>,
     pub parent_id: Option<String>,
+    pub tracestate: Option<String>,
     pub x_request_id: Option<String>,
 }
 
@@ -156,7 +158,7 @@ where
     async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
         let mut trace_id = None;
         let mut parent_id = None;
-
+        let mut tracestate = None;
         if let Some(header_value) = parts.headers.get("traceparent") {
             if let Ok(header_str) = header_value.to_str() {
                 let pieces: Vec<_> = header_str.split('-').collect();
@@ -167,12 +169,18 @@ where
                     if is_valid_trace_id(candidate_trace_id)
                         && is_valid_span_id(candidate_parent_id)
                     {
-                        trace_id = Some(pieces[1].to_string());
-                        parent_id = Some(pieces[2].to_string());
+                        trace_id = Some(candidate_trace_id.to_string());
+                        parent_id = Some(candidate_parent_id.to_string());
                     } else {
                         tracing::debug!("Invalid traceparent header: {}", header_str);
                     }
                 }
+            }
+        }
+
+        if let Some(header_value) = parts.headers.get("tracestate") {
+            if let Ok(header_str) = header_value.to_str() {
+                tracestate = Some(header_str.to_string());
             }
         }
 
@@ -186,6 +194,7 @@ where
         Ok(TraceParent {
             trace_id,
             parent_id,
+            tracestate,
             x_request_id,
         })
     }
@@ -232,14 +241,13 @@ where
             let mut parent_id: Option<String> = None;
             let mut span_id: Option<String> = None;
             let mut x_request_id: Option<String> = None;
+            let mut tracestate: Option<String> = None;
             let mut visitor = FieldVisitor::default();
             attrs.record(&mut visitor);
 
             if let Some(trace_id_input) = visitor.fields.get("trace_id") {
                 if !is_valid_trace_id(trace_id_input) {
-                    if trace_id_input != "None" {
-                        tracing::trace!("trace id  '{}' is not valid! Ignoring.", trace_id_input);
-                    }
+                    tracing::trace!("trace id  '{}' is not valid! Ignoring.", trace_id_input);
                 } else {
                     trace_id = Some(trace_id_input.to_string());
                 }
@@ -247,9 +255,7 @@ where
 
             if let Some(span_id_input) = visitor.fields.get("span_id") {
                 if !is_valid_span_id(span_id_input) {
-                    if span_id_input != "None" {
-                        tracing::trace!("span id  '{}' is not valid! Ignoring.", span_id_input);
-                    }
+                    tracing::trace!("span id  '{}' is not valid! Ignoring.", span_id_input);
                 } else {
                     span_id = Some(span_id_input.to_string());
                 }
@@ -257,18 +263,18 @@ where
 
             if let Some(parent_id_input) = visitor.fields.get("parent_id") {
                 if !is_valid_span_id(parent_id_input) {
-                    if parent_id_input != "None" {
-                        tracing::trace!("parent id  '{}' is not valid! Ignoring.", parent_id_input);
-                    }
+                    tracing::trace!("parent id  '{}' is not valid! Ignoring.", parent_id_input);
                 } else {
                     parent_id = Some(parent_id_input.to_string());
                 }
             }
 
+            if let Some(tracestate_input) = visitor.fields.get("tracestate") {
+                tracestate = Some(tracestate_input.to_string());
+            }
+
             if let Some(x_request_id_input) = visitor.fields.get("x_request_id") {
-                if x_request_id_input != "None" {
-                    x_request_id = Some(x_request_id_input.to_string());
-                }
+                x_request_id = Some(x_request_id_input.to_string());
             }
 
             if parent_id.is_none() {
@@ -280,6 +286,7 @@ where
                         {
                             trace_id = Some(parent_tracing_context.trace_id.clone());
                             parent_id = Some(parent_tracing_context.span_id.clone());
+                            tracestate = parent_tracing_context.tracestate.clone();
                         }
                     }
                 }
@@ -304,9 +311,10 @@ where
                 trace_id: trace_id.expect("Trace ID must be set"),
                 span_id: span_id.expect("Span ID must be set"),
                 parent_id,
-                x_request_id,
+                tracestate,
                 start: Instant::now(),
                 end: None,
+                x_request_id,
             });
         }
     }
@@ -592,6 +600,14 @@ where
                 } else {
                     visitor.fields.remove("parent_id");
                 }
+                if let Some(tracestate) = tracing_context.tracestate.clone() {
+                    visitor.fields.insert(
+                        "tracestate".to_string(),
+                        serde_json::Value::String(tracestate),
+                    );
+                } else {
+                    visitor.fields.remove("tracestate");
+                }
                 if let Some(x_request_id) = tracing_context.x_request_id.clone() {
                     visitor.fields.insert(
                         "x_request_id".to_string(),
@@ -616,7 +632,7 @@ where
                 }
             }
         } else {
-            let reserved_fields = ["trace_id", "span_id", "parent_id", "span_name"];
+            let reserved_fields = ["trace_id", "span_id", "parent_id", "span_name", "tracestate"];
             for reserved_field in reserved_fields {
                 visitor.fields.remove(reserved_field);
             }
@@ -725,7 +741,8 @@ pub mod tests {
         "span_name": { "type": "string" },
         "time.busy_us":     { "type": "integer" },
         "time.duration_us": { "type": "integer" },
-        "time.idle_us":     { "type": "integer" }
+        "time.idle_us":     { "type": "integer" },
+        "tracestate": { "type": "string" }
       },
       "additionalProperties": true
     }

@@ -149,7 +149,8 @@ pub async fn spawn_http_server(
                 "fallback handler",
                 trace_id = tracing_ctx.trace_id,
                 parent_id = tracing_ctx.parent_id,
-                x_request_id = tracing_ctx.x_request_id
+                x_request_id = tracing_ctx.x_request_id,
+		tracestate = tracing_ctx.tracestate
             ))
         });
 
@@ -187,11 +188,15 @@ pub async fn spawn_http_server(
 }
 
 /// Health handler
-#[tracing::instrument(skip_all, level="trace", fields(route= %route, trace_id = ?trace_parent.trace_id, parent_id = ?trace_parent.parent_id, x_request_id=?trace_parent.x_request_id))]
+#[tracing::instrument(skip_all, level="trace", fields(route= %route,
+						      trace_id = trace_parent.trace_id,
+						      parent_id = trace_parent.parent_id,
+						      x_request_id= trace_parent.x_request_id,
+						      tracestate= trace_parent.tracestate))]
 async fn health_handler(
     state: Arc<HttpServerState>,
-    route: &'static str,
-    trace_parent: TraceParent,
+    route: &'static str,       // Used for tracing only
+    trace_parent: TraceParent, // Used for tracing only
 ) -> impl IntoResponse {
     let system_health = state.drt().system_health.lock().await;
     let (mut healthy, endpoints) = system_health.get_health_status();
@@ -223,11 +228,15 @@ async fn health_handler(
 }
 
 /// Metrics handler with DistributedRuntime uptime
-#[tracing::instrument(skip_all, level="trace", fields(route= %route, trace_id = ?trace_parent.trace_id, parent_id = ?trace_parent.parent_id, x_request_id=?trace_parent.x_request_id))]
+#[tracing::instrument(skip_all, level="trace", fields(route= %route,
+						      trace_id = trace_parent.trace_id,
+						      parent_id = trace_parent.parent_id,
+						      x_request_id = trace_parent.x_request_id,
+                                                      tracestate = trace_parent.tracestate))]
 async fn metrics_handler(
     state: Arc<HttpServerState>,
-    route: &'static str,
-    trace_parent: TraceParent,
+    route: &'static str,         // Used for tracing only
+    trace_parent: TraceParent,   // Used for tracing only
 ) -> impl IntoResponse {
     // Update the uptime gauge with current value
     state.update_uptime_gauge();
@@ -392,6 +401,13 @@ uptime_seconds{namespace=\"http_server\"} 42
                     ("/someRandomPathNotFoundHere", 404, "Route not found"),
                 ] {
                     println!("[test] Sending request to {}", path);
+		    let traceparent_value = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+		    let tracestate_value = "vendor1=opaqueValue1,vendor2=opaqueValue2";
+		    let mut headers = reqwest::header::HeaderMap::new();
+		    headers.insert(
+			reqwest::header::HeaderName.from_static("traceparent"),
+			reqwest::header::HeaderValue.from_str(traceparent_value)?
+		    );
                     let url = format!("http://{}{}", addr, path);
                     let response = client.get(&url).send().await.unwrap();
                     let status = response.status();
@@ -418,7 +434,7 @@ uptime_seconds{namespace=\"http_server\"} 42
     }
 
     #[tokio::test]
-    #[cfg(feature = "integration")]
+//    #[cfg(feature = "integration")]
     async fn test_health_endpoint_tracing() -> Result<()> {
         use std::sync::Arc;
         use tokio::time::sleep;
@@ -460,8 +476,15 @@ uptime_seconds{namespace=\"http_server\"} 42
                     ("/live", 200, "ready"),
                     ("/someRandomPathNotFoundHere", 404, "Route not found"),
                 ] {
+		    let traceparent_value = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+		    let tracestate_value = "vendor1=opaqueValue1,vendor2=opaqueValue2";
+		    let mut headers = reqwest::header::HeaderMap::new();
+		    headers.insert(
+			reqwest::header::HeaderName::from_static("traceparent"),
+			reqwest::header::HeaderValue::from_str(traceparent_value)?
+		    );
                     let url = format!("http://{}{}", addr, path);
-                    let response = client.get(&url).send().await.unwrap();
+                    let response = client.get(&url).headers(headers).send().await.unwrap();
                     let status = response.status();
                     let body = response.text().await.unwrap();
                     tracing::info!(body = body, status = status.to_string());
