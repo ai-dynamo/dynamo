@@ -203,8 +203,11 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     let basename = registry.basename();
     let parent_hierarchy = registry.parent_hierarchy();
 
-    let namespace = if parent_hierarchy.len() > 1 {
-        let potential_namespace = &parent_hierarchy[1];
+    // Build hierarchy: parent_hierarchy + [basename]
+    let hierarchy = [parent_hierarchy.clone(), vec![basename.clone()]].concat();
+
+    let namespace = if hierarchy.len() >= 2 {
+        let potential_namespace = &hierarchy[1];
         if !potential_namespace.is_empty() {
             lint_prometheus_name(potential_namespace)?
         } else {
@@ -225,8 +228,6 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
             ));
         }
     }
-
-    let hierarchy = [parent_hierarchy.clone(), vec![basename]].concat();
     // Build updated_labels: auto-labels first, then user labels
     let mut updated_labels: Vec<(String, String)> = Vec::new();
 
@@ -791,6 +792,46 @@ mod test_prefixes {
         println!("Component prefix: '{}'", component.prefix());
         println!("Endpoint prefix: '{}'", endpoint.prefix());
         println!("All hierarchy assertions passed!");
+
+        // Test invalid namespace behavior
+        println!("\n=== Testing Invalid Namespace Behavior ===");
+
+        // Create a namespace with invalid name (contains hyphen)
+        let invalid_namespace = drt.namespace("test-namespace").unwrap();
+
+        // Debug: Let's see what the hierarchy looks like
+        println!(
+            "Invalid namespace basename: '{}'",
+            invalid_namespace.basename()
+        );
+        println!(
+            "Invalid namespace parent_hierarchy: {:?}",
+            invalid_namespace.parent_hierarchy()
+        );
+        println!("Invalid namespace prefix: '{}'", invalid_namespace.prefix());
+
+        // Try to create a metric - this should fail because the namespace name will be used in the metric name
+        let result = invalid_namespace.create_counter("test_counter", "A test counter", &[]);
+        println!("Result with invalid namespace 'test-namespace':");
+        println!("{:?}", result);
+
+        // The result should be an error from Prometheus
+        assert!(
+            result.is_err(),
+            "Creating metric with invalid namespace should fail"
+        );
+
+        // For comparison, show a valid namespace works
+        let valid_namespace = drt.namespace("test_namespace").unwrap();
+        let valid_result = valid_namespace.create_counter("test_counter", "A test counter", &[]);
+        println!("Result with valid namespace 'test_namespace':");
+        println!("{:?}", valid_result);
+        assert!(
+            valid_result.is_ok(),
+            "Creating metric with valid namespace should succeed"
+        );
+
+        println!("✓ Invalid namespace behavior verified!");
     }
 }
 
