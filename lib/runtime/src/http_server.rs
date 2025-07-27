@@ -439,8 +439,6 @@ uptime_seconds{namespace=\"http_server\"} 42
         use std::sync::Arc;
         use tokio::time::sleep;
         use tokio_util::sync::CancellationToken;
-        // use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        // use reqwest for HTTP requests
 
         // Closure call is needed here to satisfy async_with_vars
 
@@ -455,8 +453,6 @@ uptime_seconds{namespace=\"http_server\"} 42
                 // TODO Add proper testing for
                 // trace id and parent id
 
-                // let file_name = "./test_capture_log.txt";
-                // let guard = StderrOverride::from_file(file_name)?;
                 crate::logging::init();
 
                 let runtime = crate::Runtime::from_settings().unwrap();
@@ -489,10 +485,6 @@ uptime_seconds{namespace=\"http_server\"} 42
                     let body = response.text().await.unwrap();
                     tracing::info!(body = body, status = status.to_string());
                 }
-
-                //		drop(guard);
-
-                //		let lines = load_log(file_name)?;
 
                 Ok::<(), anyhow::Error>(())
             })(),
