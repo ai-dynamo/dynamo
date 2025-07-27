@@ -4,7 +4,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: sglang-agg
+  name: sglang-disagg
 spec:
   services:
     Frontend:
@@ -42,7 +42,7 @@ spec:
           workingDir: /workspace/components/backends/sglang
           command: ["sh", "-c"]
           args:
-            - "python3 -m dynamo.sglang.utils.clear_namespace --namespace dynamo && python3 -m dynamo.frontend --http-port=8000"
+            - "python3 -m dynamo.sglang.utils.clear_namespace --namespace sglang-disagg && python3 -m dynamo.frontend --http-port=8000"
     SGLangDecodeWorker:
       envFromSecret: hf-token-secret
       livenessProbe:
