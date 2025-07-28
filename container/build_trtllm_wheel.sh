@@ -44,17 +44,14 @@ MAIN_DIR=$(dirname "$(readlink -f "$0")")
 (cd /tmp && \
 # Clone the TensorRT-LLM repository.
 if [ ! -d "TensorRT-LLM" ]; then
-  git clone https://github.com/NVIDIA/TensorRT-LLM.git
+  git clone https://github.com/indrajit96/TensorRT-LLM
 fi
 
 cd TensorRT-LLM
 
 # Checkout the specified commit.
 # Switch to the main branch to pull the latest changes.
-git checkout main
-git pull
-git checkout $TRTLLM_COMMIT
-
+git checkout ibhosale_v1.0.0rc0
 # Update the submodules.
 git submodule update --init --recursive
 git lfs pull
