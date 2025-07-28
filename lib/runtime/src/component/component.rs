@@ -89,9 +89,9 @@ mod tests {
     async fn test_publish() {
         let rt = Runtime::from_current().unwrap();
         let dtr = DistributedRuntime::from_settings(rt.clone()).await.unwrap();
-        let ns = dtr.namespace("test".to_string()).unwrap();
-        let cp = ns.component("component".to_string()).unwrap();
-        cp.publish("test", &"test".to_string()).await.unwrap();
+        let ns = dtr.namespace("test_component_publish".to_string()).unwrap();
+        let cp = ns.component("test_component".to_string()).unwrap();
+        cp.publish("test_event", &"test".to_string()).await.unwrap();
         rt.shutdown();
     }
 
@@ -99,14 +99,16 @@ mod tests {
     async fn test_subscribe() {
         let rt = Runtime::from_current().unwrap();
         let dtr = DistributedRuntime::from_settings(rt.clone()).await.unwrap();
-        let ns = dtr.namespace("test".to_string()).unwrap();
-        let cp = ns.component("component".to_string()).unwrap();
+        let ns = dtr
+            .namespace("test_component_subscribe".to_string())
+            .unwrap();
+        let cp = ns.component("test_component".to_string()).unwrap();
 
-        // Create a subscriber
-        let mut subscriber = ns.subscribe("test").await.unwrap();
+        // Create a subscriber on the component (not namespace)
+        let mut subscriber = cp.subscribe("test_event").await.unwrap();
 
-        // Publish a message
-        cp.publish("test", &"test_message".to_string())
+        // Publish a message from the component
+        cp.publish("test_event", &"test_message".to_string())
             .await
             .unwrap();
 

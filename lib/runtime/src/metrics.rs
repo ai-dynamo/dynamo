@@ -797,7 +797,7 @@ mod test_prefixes {
         println!("\n=== Testing Invalid Namespace Behavior ===");
 
         // Create a namespace with invalid name (contains hyphen)
-        let invalid_namespace = drt.namespace("test-namespace").unwrap();
+        let invalid_namespace = drt.namespace("@@123").unwrap();
 
         // Debug: Let's see what the hierarchy looks like
         println!(
@@ -810,15 +810,15 @@ mod test_prefixes {
         );
         println!("Invalid namespace prefix: '{}'", invalid_namespace.prefix());
 
-        // Try to create a metric - this should fail because the namespace name will be used in the metric name
+        // Try to create a metric - this should fail because "@@123" gets stripped to "" which is invalid
         let result = invalid_namespace.create_counter("test_counter", "A test counter", &[]);
-        println!("Result with invalid namespace 'test-namespace':");
+        println!("Result with invalid namespace '@@123':");
         println!("{:?}", result);
 
-        // The result should be an error from Prometheus
+        // The result should be an error because empty metric names are invalid
         assert!(
             result.is_err(),
-            "Creating metric with invalid namespace should fail"
+            "Creating metric with namespace '@@123' should fail because it gets stripped to empty string"
         );
 
         // For comparison, show a valid namespace works
@@ -926,15 +926,15 @@ testnamespace_testgauge{{component="testcomponent",namespace="testnamespace"}} 5
         println!("{}", namespace_output);
 
         let expected_namespace_output = format!(
-            r#"# HELP testintcounter A test int counter
-# TYPE testintcounter counter
-testintcounter{{namespace="testnamespace"}} 12345
-# HELP testnamespace_testcounter A test counter
+            r#"# HELP testnamespace_testcounter A test counter
 # TYPE testnamespace_testcounter counter
 testnamespace_testcounter{{component="testcomponent",endpoint="testendpoint",namespace="testnamespace"}} 123.456789
 # HELP testnamespace_testgauge A test gauge
 # TYPE testnamespace_testgauge gauge
 testnamespace_testgauge{{component="testcomponent",namespace="testnamespace"}} 50000
+# HELP testnamespace_testintcounter A test int counter
+# TYPE testnamespace_testintcounter counter
+testnamespace_testintcounter{{namespace="testnamespace"}} 12345
 "#
         );
 
@@ -1015,9 +1015,6 @@ testhistogram_bucket{{le="10"}} 3
 testhistogram_bucket{{le="+Inf"}} 3
 testhistogram_sum 7.5
 testhistogram_count 3
-# HELP testintcounter A test int counter
-# TYPE testintcounter counter
-testintcounter{{namespace="testnamespace"}} 12345
 # HELP testintgauge A test int gauge
 # TYPE testintgauge gauge
 testintgauge 42
@@ -1031,6 +1028,9 @@ testnamespace_testcounter{{component="testcomponent",endpoint="testendpoint",nam
 # HELP testnamespace_testgauge A test gauge
 # TYPE testnamespace_testgauge gauge
 testnamespace_testgauge{{component="testcomponent",namespace="testnamespace"}} 50000
+# HELP testnamespace_testintcounter A test int counter
+# TYPE testnamespace_testintcounter counter
+testnamespace_testintcounter{{namespace="testnamespace"}} 12345
 "#
         );
 
