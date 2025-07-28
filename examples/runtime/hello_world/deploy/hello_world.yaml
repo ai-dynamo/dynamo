@@ -12,10 +12,10 @@ spec:
         httpGet:
           path: /health
           port: 8000
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
+        initialDelaySeconds: 10
+        periodSeconds: 10
+        timeoutSeconds: 2
+        failureThreshold: 3
       readinessProbe:
         exec:
           command:
@@ -25,7 +25,7 @@ spec:
         initialDelaySeconds: 10
         periodSeconds: 10
         timeoutSeconds: 2
-        failureThreshold: 10
+        failureThreshold: 3
       dynamoNamespace: hello-world
       componentType: main
       replicas: 1
