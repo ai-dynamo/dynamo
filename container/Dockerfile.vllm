@@ -199,12 +199,12 @@ RUN mkdir /workspace/cmake_build
 WORKDIR /workspace/cmake_build
 
 # uninstall CMake
-RUN apt-get purge -y cmake
-# download newer version of CMake
-RUN wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
+export CMAKE_VERSION=3.31.8
+apt-get purge -y cmake && \
+    wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
     tar -xvzf cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
-    mv cmake-${CMAKE_VERSION}-linux-$(uname -m) custom_cmake
-ENV PATH=/workspace/cmake_build/custom_cmake/bin:$PATH
+    mv cmake-${CMAKE_VERSION}-linux-$(uname -m) custom_cmake && \
+ENV PATH=/custom_cmake/bin:$PATH
 
 # should be 3.31.8
 RUN cmake --version
@@ -220,6 +220,17 @@ RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
 $LD_LIBRARY_PATH
+
+# uninstall CMake
+export CMAKE_VERSION=3.31.8
+apt-get purge -y cmake && \
+    wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
+    tar -xvzf cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
+    mv cmake-${CMAKE_VERSION}-linux-$(uname -m) custom_cmake && \
+ENV PATH=/custom_cmake/bin:$PATH
+
+# should be 3.31.8
+RUN cmake --version
 
 # Install perf_analyzer and genai-perf
 RUN apt-get update -y && \
