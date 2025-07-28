@@ -435,7 +435,7 @@ uptime_seconds{namespace=\"http_server\"} 42
     }
 
     #[tokio::test]
-    //    #[cfg(feature = "integration")]
+    #[cfg(feature = "integration")]
     async fn test_health_endpoint_tracing() -> Result<()> {
         use std::sync::Arc;
         use tokio::time::sleep;
