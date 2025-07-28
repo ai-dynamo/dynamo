@@ -24,8 +24,6 @@
 **Dynamo Cloud** - A Kubernetes platform providing managed deployment experience for Dynamo inference graphs.
 
 ## E
-**@endpoint** - A Python decorator used to define service endpoints within a Dynamo component.
-
 **Endpoint** - A specific network-accessible API within a Dynamo component, such as `generate` or `load_metrics`.
 
 ## F
@@ -70,8 +68,6 @@
 **RDMA (Remote Direct Memory Access)** - Technology that allows direct memory access between distributed systems, used for efficient KV cache transfers.
 
 ## S
-**@service** - Python decorator used to define a Dynamo service class.
-
 **SGLang** - Fast LLM inference framework with native embedding support and RadixAttention.
 
 ## T
