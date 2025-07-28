@@ -82,7 +82,8 @@ To coordinate across a data center, Dynamo relies on etcd and NATS. To run Dynam
 
 To quickly setup etcd & NATS, you can also run:
 ```
-docker compose -f ./deploy/metrics/docker-compose.yml up
+# At the root of the repository:
+docker compose -f deploy/docker-compose.yml up -d
 ```
   
 ## 2. Select an engine
