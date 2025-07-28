@@ -33,7 +33,7 @@ For example, a typical deployment configuration (like `components/backends/vllm/
 - `Frontend`: Starts an HTTP server and handles incoming requests. The HTTP server routes all requests to the `Processor`.
 - `Processor`: When a new request arrives, `Processor` applies the chat template and performs the tokenization. 
 Then, it route the request to the `Worker`.
-- `Worker` components (e.g., `VllmDecodeWorker`, `SGLangDecodeWorker`, `TrtllmWorker`): Perform the actual computation using their respective engines (vLLM, SGLang, TensorRT-LLM).
+- `Worker` components: Perform the actual computation using their respective engines (vLLM, SGLang, TensorRT-LLM).
 
 Since the workers are deployed in different processes, each of them has its own `DistributedRuntime`. Within their own `DistributedRuntime`, they all share the same `Namespace` (e.g., `vllm-v1-agg`, `sglang-agg`). Then, under their namespace, they have their own `Component`s: `Frontend` uses the `make_engine` function which handles HTTP serving and routing automatically, while worker components create components with names like `worker`, `decode`, or `prefill` and register endpoints like `generate`, `flush_cache`, or `clear_kv_blocks`. The `Frontend` component doesn't explicitly create endpoints - instead, the `make_engine` function handles the HTTP server and worker discovery. Worker components create their endpoints programmatically using the `component.endpoint()` method. Their `DistributedRuntime`s are initialized in their respective main functions, their `Namespace`s are configured in the deployment YAML, their `Component`s are created programmatically (e.g., `runtime.namespace("dynamo").component("worker")`), and their `Endpoint`s are created using the `component.endpoint()` method.
 
@@ -75,6 +75,6 @@ After selecting which endpoint to hit, the `Client` sends the serialized request
 We provide native rust and python (through binding) examples for basic usage of `DistributedRuntime`:
 
 - Rust: `/lib/runtime/examples/`
-- Python: We also provide complete examples of using `DistributedRuntime` for communication and Dynamo's LLM library for prompt templates and (de)tokenization to deploy Dynamo graphs. Please refer to the directories in `/components/backends`. ` for full implementation details.
+- Python: We also provide complete examples of using `DistributedRuntime`. Please refer to the engines in `/components/backends` for full implementation details.
 
 
