@@ -78,14 +78,14 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "10"
-          memory: "10Gi"
+          cpu: "2"
+          memory: "2Gi"
         limits:
-          cpu: "10"
-          memory: "10Gi"
+          cpu: "2"
+          memory: "2Gi"
       pvc:
         create: false
-        name: profiling-pvc
+        name: profiling-pvc # Must be pre-created before deployment and SLA profiler must have been run
         mountPoint: /workspace/profiling_results
       extraPodSpec:
         mainContainer:
@@ -127,11 +127,11 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "10"
-          memory: "10Gi"
+          cpu: "2"
+          memory: "2Gi"
         limits:
-          cpu: "10"
-          memory: "10Gi"
+          cpu: "2"
+          memory: "2Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
@@ -141,7 +141,7 @@ spec:
             - -c
           args:
             - "python3 -m dynamo.planner.prometheus"
-    VllmDecodeWorker:
+    backend:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
@@ -167,12 +167,12 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "32"
-          memory: "40Gi"
+          cpu: "8"
+          memory: "16Gi"
           gpu: "1"
         limits:
-          cpu: "32"
-          memory: "40Gi"
+          cpu: "8"
+          memory: "16Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:
@@ -183,7 +183,7 @@ spec:
             - -c
           args:
             - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B 2>&1 | tee /tmp/vllm.log"
-    VllmPrefillWorker:
+    prefill:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
@@ -209,12 +209,12 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "32"
-          memory: "40Gi"
+          cpu: "8"
+          memory: "16Gi"
           gpu: "1"
         limits:
-          cpu: "32"
-          memory: "40Gi"
+          cpu: "8"
+          memory: "16Gi"
           gpu: "1"
       extraPodSpec:
         mainContainer:

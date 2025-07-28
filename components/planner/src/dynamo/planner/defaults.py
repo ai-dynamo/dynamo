@@ -15,7 +15,7 @@
 
 import os
 
-from dynamo.planner.kube import KubernetesAPI
+from dynamo.planner.kube import get_current_k8s_namespace
 
 
 # Source of truth for planner defaults
@@ -43,14 +43,15 @@ class LoadPlannerDefaults(BasePlannerDefaults):
 def _get_default_prometheus_endpoint(port: str, namespace: str):
     """Compute default prometheus endpoint using environment variables and Kubernetes service discovery"""
 
-    k8s_api = KubernetesAPI()
-    k8s_namespace = k8s_api.current_namespace
-
+    k8s_namespace = get_current_k8s_namespace()
     if k8s_namespace and k8s_namespace != "default":
         prometheus_service = f"{namespace}-prometheus"
         return f"http://{prometheus_service}.{k8s_namespace}.svc.cluster.local:{port}"
     else:
-        raise RuntimeError("Can't find a prometheus endpoint for the planner!")
+        raise RuntimeError(
+            f"Cannot determine Prometheus endpoint. Running in namespace '{k8s_namespace}'. "
+            "Ensure the planner is deployed in a Kubernetes cluster with proper namespace configuration."
+        )
 
 
 class SLAPlannerDefaults(BasePlannerDefaults):

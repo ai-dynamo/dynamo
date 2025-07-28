@@ -154,17 +154,6 @@ spec:
   ...
 ```
 
-To change `DYN_LOG` level, edit the yaml file by adding
-
-```yaml
-...
-spec:
-  envs:
-    - name: DYN_LOG
-      value: "debug" # or other log levels
-  ...
-```
-
 ### Testing the Deployment
 
 Send a test request to verify your deployment:

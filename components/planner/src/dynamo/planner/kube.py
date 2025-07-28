@@ -20,6 +20,16 @@ from kubernetes import client, config
 from kubernetes.config.config_exception import ConfigException
 
 
+def get_current_k8s_namespace() -> str:
+    """Get the current namespace if running inside a k8s cluster"""
+    try:
+        with open("/var/run/secrets/kubernetes.io/serviceaccount/namespace", "r") as f:
+            return f.read().strip()
+    except FileNotFoundError:
+        # Fallback to 'default' if not running in k8s
+        return "default"
+
+
 class KubernetesAPI:
     def __init__(self, k8s_namespace: Optional[str] = None):
         # Load kubernetes configuration
@@ -29,18 +39,7 @@ class KubernetesAPI:
             config.load_kube_config()  # for out-of-cluster deployment
 
         self.custom_api = client.CustomObjectsApi()
-        self.current_namespace = k8s_namespace or self._get_current_namespace()
-
-    def _get_current_namespace(self) -> str:
-        """Get the current namespace if running inside a k8s cluster"""
-        try:
-            with open(
-                "/var/run/secrets/kubernetes.io/serviceaccount/namespace", "r"
-            ) as f:
-                return f.read().strip()
-        except FileNotFoundError:
-            # Fallback to 'default' if not running in k8s
-            return "default"
+        self.current_namespace = k8s_namespace or get_current_k8s_namespace()
 
     def _get_graph_deployment_from_name(
         self, graph_deployment_name: str

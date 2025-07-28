@@ -43,7 +43,7 @@ async def init_planner(runtime: DistributedRuntime, args):
     component = runtime.namespace(SLAPlannerDefaults.namespace).component("Planner")
     await component.create_service()
 
-    async def generate(self, request: RequestType):
+    async def generate(request: RequestType):
         """Dummy endpoint to satisfy that each component has an endpoint"""
         yield "mock endpoint"
 
