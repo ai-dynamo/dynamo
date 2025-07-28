@@ -16,7 +16,7 @@ backend: pytorch
 
 # WideEP related settings
 moe_config:
-  backend: WideEP
+  backend: WIDEEP
   load_balancer: /mnt/engine_configs/deepseek_r1/wide_ep/eplb.yaml
 
 # TP/EP/PP/DP
@@ -31,6 +31,7 @@ max_seq_len: 8192
 
 kv_cache_config:
   free_gpu_memory_fraction: 0.75
+  dtype: fp8 # NOTE: This dtype must match in both prefill/decode configs
 
 # NOTE: pytorch_backend_config section flattened since: https://github.com/NVIDIA/TensorRT-LLM/pull/4603
 # NOTE: overlap_scheduler enabled by default since this commit and changed
@@ -38,5 +39,3 @@ kv_cache_config:
 # https://github.com/NVIDIA/TensorRT-LLM/commit/b4e5df0ee0024eda3eeb83a6ba822245a30ab428
 disable_overlap_scheduler: true
 print_iter_log: true
-# NOTE: This dtype must match in both prefill/decode configs
-kv_cache_dtype: fp8
