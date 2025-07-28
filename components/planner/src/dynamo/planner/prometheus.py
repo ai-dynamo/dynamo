@@ -20,9 +20,9 @@ import tempfile
 
 import yaml
 
+from dynamo.planner.config import ServiceConfig
 from dynamo.planner.defaults import SLAPlannerDefaults
 from dynamo.runtime import DistributedRuntime, dynamo_worker
-from dynamo.sdk.lib.config import ServiceConfig
 
 logger = logging.getLogger(__name__)
 
