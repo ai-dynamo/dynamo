@@ -39,6 +39,8 @@ use crate::protocols::openai::{
 };
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
+use dynamo_runtime::logging::TraceParent;
+use tracing::Instrument;
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 
@@ -163,10 +165,15 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
 ///
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
+#[tracing::instrument(skip_all, fields(trace_id = trace_parent.trace_id,
+				       parent_id = trace_parent.parent_id,
+				       x_request_id= trace_parent.x_request_id,
+				       tracestate= trace_parent.tracestate))]
 async fn handler_completions(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
     Json(request): Json<NvCreateCompletionRequest>,
+    trace_parent:TraceParent, // Used for tracing only
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -181,7 +188,7 @@ async fn handler_completions(
 
     // possibly long running task
     // if this returns a streaming response, the stream handle will be armed and captured by the response stream
-    let response = tokio::spawn(completions(state, request, stream_handle))
+    let response = tokio::spawn(completions(state, request, stream_handle)).in_current_span()
         .await
         .map_err(|e| {
             ErrorMessage::internal_server_error(&format!(
