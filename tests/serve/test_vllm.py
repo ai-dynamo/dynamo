@@ -59,7 +59,7 @@ class VLLMConfig:
     endpoints: List[str]
     response_handlers: List[Callable[[Any], str]]
     model: str
-    timeout: int = 60
+    timeout: int = 120
     delayed_start: int = 0
 
 
