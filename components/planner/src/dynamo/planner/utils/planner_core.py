@@ -167,15 +167,19 @@ class Planner:
 
     async def make_adjustments(self):
         try:
-            # Check if metrics are valid (not NaN) - skip adjustment if no traffic
+            # Check if metrics are valid (not None and not NaN) - skip adjustment if no traffic
             if (
-                math.isnan(self.last_metrics.ttft)
+                self.last_metrics.ttft is None
+                or self.last_metrics.itl is None
+                or self.last_metrics.isl is None
+                or self.last_metrics.osl is None
+                or math.isnan(self.last_metrics.ttft)
                 or math.isnan(self.last_metrics.itl)
                 or math.isnan(self.last_metrics.isl)
                 or math.isnan(self.last_metrics.osl)
             ):
                 logger.info(
-                    "Metrics contain NaN values (no active requests), skipping adjustment"
+                    "Metrics contain None or NaN values (no active requests), skipping adjustment"
                 )
                 return
 
