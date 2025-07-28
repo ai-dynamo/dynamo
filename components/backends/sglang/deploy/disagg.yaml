@@ -4,7 +4,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: sglang-agg
+  name: sglang-disagg
 spec:
   services:
     Frontend:
@@ -26,7 +26,7 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      dynamoNamespace: sglang-agg
+      dynamoNamespace: sglang-disagg
       componentType: main
       replicas: 1
       resources:
@@ -42,7 +42,7 @@ spec:
           workingDir: /workspace/components/backends/sglang
           command: ["sh", "-c"]
           args:
-            - "python3 -m dynamo.sglang.utils.clear_namespace --namespace sglang-agg && python3 -m dynamo.frontend --http-port=8000"
+            - "python3 -m dynamo.sglang.utils.clear_namespace --namespace sglang-disagg && python3 -m dynamo.frontend --http-port=8000"
     SGLangDecodeWorker:
       envFromSecret: hf-token-secret
       livenessProbe:
@@ -64,7 +64,7 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      dynamoNamespace: sglang-agg
+      dynamoNamespace: sglang-disagg
       componentType: worker
       replicas: 1
       resources:
@@ -94,3 +94,62 @@ spec:
             - "1"
             - "--trust-remote-code"
             - "--skip-tokenizer-init"
+            - "--disaggregation-mode"
+            - "decode"
+            - "--disaggregation-transfer-backend"
+            - "nixl"
+    SGLangPrefillWorker:
+      envFromSecret: hf-token-secret
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      dynamoNamespace: sglang-disagg
+      componentType: worker
+      replicas: 1
+      resources:
+        requests:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+        limits:
+          cpu: "10"
+          memory: "20Gi"
+          gpu: "1"
+      extraPodSpec:
+        mainContainer:
+          image: my-registry/sglang-runtime:my-tag
+          workingDir: /workspace/components/backends/sglang
+          args:
+            - "python3"
+            - "-m"
+            - "dynamo.sglang.worker"
+            - "--model-path"
+            - "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+            - "--served-model-name"
+            - "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+            - "--page-size"
+            - "16"
+            - "--tp"
+            - "1"
+            - "--trust-remote-code"
+            - "--skip-tokenizer-init"
+            - "--disaggregation-mode"
+            - "prefill"
+            - "--disaggregation-transfer-backend"
+            - "nixl"

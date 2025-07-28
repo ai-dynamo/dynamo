@@ -4,7 +4,7 @@
 apiVersion: nvidia.com/v1alpha1
 kind: DynamoGraphDeployment
 metadata:
-  name: sglang-agg
+  name: sglang-agg-router
 spec:
   services:
     Frontend:
@@ -26,7 +26,7 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      dynamoNamespace: sglang-agg
+      dynamoNamespace: sglang-agg-router
       componentType: main
       replicas: 1
       resources:
@@ -42,7 +42,7 @@ spec:
           workingDir: /workspace/components/backends/sglang
           command: ["sh", "-c"]
           args:
-            - "python3 -m dynamo.sglang.utils.clear_namespace --namespace sglang-agg && python3 -m dynamo.frontend --http-port=8000"
+            - "python3 -m dynamo.sglang.utils.clear_namespace --namespace sglang-agg-router && python3 -m dynamo.frontend --http-port=8000  --router-mode kv"
     SGLangDecodeWorker:
       envFromSecret: hf-token-secret
       livenessProbe:
@@ -64,7 +64,7 @@ spec:
         periodSeconds: 60
         timeoutSeconds: 30
         failureThreshold: 10
-      dynamoNamespace: sglang-agg
+      dynamoNamespace: sglang-agg-router
       componentType: worker
       replicas: 1
       resources:
