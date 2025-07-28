@@ -60,9 +60,9 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature            | TensorRT-LLM | Notes                                                                 |
 |--------------------|--------------|-----------------------------------------------------------------------|
-| **WideEP**         | 🚧           | Not supported                                                                 |
-| **DP Rank Routing**| 🚧           | Not supported                                                                 |
-| **GB200 Support**  | ✅           | Not supported |
+| **WideEP**         | ✅           |                                                                 |
+| **DP Rank Routing**| ✅           |                                                                 |
+| **GB200 Support**  | ✅           |                                                                 |
 
 ## Quick Start
 
