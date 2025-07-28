@@ -51,24 +51,19 @@ spec:
       componentType: worker
       replicas: 2
       livenessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        periodSeconds: 60
+        httpGet:
+          path: /live
+          port: 9090
+        periodSeconds: 5
         timeoutSeconds: 30
-        failureThreshold: 10
+        failureThreshold: 1
       readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - 'grep "VllmWorker.*has been initialized" /tmp/vllm.log'
-        initialDelaySeconds: 60
-        periodSeconds: 60
+        httpGet:
+          path: /health
+          port: 9090
+        periodSeconds: 10
         timeoutSeconds: 30
-        failureThreshold: 10
+        failureThreshold: 60
       resources:
         requests:
           cpu: "10"
@@ -78,8 +73,19 @@ spec:
           cpu: "10"
           memory: "20Gi"
           gpu: "1"
+      envs:
+        - name: DYN_SYSTEM_ENABLED
+          value: "true"
+        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+          value: "[\"generate\"]"
       extraPodSpec:
         mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 60
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
           command:
@@ -93,24 +99,19 @@ spec:
       componentType: worker
       replicas: 1
       livenessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - "exit 0"
-        periodSeconds: 60
+        httpGet:
+          path: /live
+          port: 9090
+        periodSeconds: 5
         timeoutSeconds: 30
-        failureThreshold: 10
+        failureThreshold: 1
       readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - 'grep "VllmWorker.*has been initialized" /tmp/vllm.log'
-        initialDelaySeconds: 60
-        periodSeconds: 60
+        httpGet:
+          path: /health
+          port: 9090
+        periodSeconds: 10
         timeoutSeconds: 30
-        failureThreshold: 10
+        failureThreshold: 60
       resources:
         requests:
           cpu: "10"
@@ -120,8 +121,21 @@ spec:
           cpu: "10"
           memory: "20Gi"
           gpu: "1"
+      envs:
+        - name: DYN_SYSTEM_ENABLED
+          value: "true"
+        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+          value: "[\"generate\"]"
+        - name: DYN_SYSTEM_PORT
+          value: "9090"
       extraPodSpec:
         mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 60
           image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/vllm
           command:
