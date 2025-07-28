@@ -20,9 +20,6 @@ ARG TORCH_BACKEND="cu128"
 ARG DEEPGEMM_REF="1876566"
 ARG FLASHINF_REF="v0.2.8rc1"
 
-# Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_VERSION="0.9.2"
-
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
 #   ARCH_ALT: Used for Rust targets, manylinux suffix (e.g., x86_64, aarch64)
@@ -44,11 +41,10 @@ ARG ARCH_ALT=x86_64
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
-# Redeclare ARCH, ARCH_ALT, TORCH_BACKEND, VLLM_VERSION so they're available in this stage
+# Redeclare ARCH, ARCH_ALT, TORCH_BACKEND so they're available in this stage
 ARG ARCH
 ARG ARCH_ALT
 ARG TORCH_BACKEND
-ARG VLLM_VERSION
 
 USER root
 ARG PYTHON_VERSION=3.12
