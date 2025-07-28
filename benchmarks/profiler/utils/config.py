@@ -80,7 +80,7 @@ class VllmV1ConfigModifier:
         config = deepcopy(config)
 
         # set metadata name
-        config["metadata"]["name"] = "vllm-v1-agg"
+        config["metadata"]["name"] = "vllm-agg"
 
         # disable planner
         if "Planner" in config["spec"]["services"]:
@@ -89,16 +89,16 @@ class VllmV1ConfigModifier:
         if target == "prefill":
             # convert prefill worker into decode worker
             config["spec"]["services"][
-                WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker
+                WORKER_COMPONENT_NAMES["vllm"].decode_worker
             ] = config["spec"]["services"][
-                WORKER_COMPONENT_NAMES["vllm_v1"].prefill_worker
+                WORKER_COMPONENT_NAMES["vllm"].prefill_worker
             ]
             del config["spec"]["services"][
-                WORKER_COMPONENT_NAMES["vllm_v1"].prefill_worker
+                WORKER_COMPONENT_NAMES["vllm"].prefill_worker
             ]
 
             args = config["spec"]["services"][
-                WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker
+                WORKER_COMPONENT_NAMES["vllm"].decode_worker
             ]["extraPodSpec"]["mainContainer"]["args"]
 
             args = break_arguments(args)
@@ -112,18 +112,18 @@ class VllmV1ConfigModifier:
             if "--no-enable-prefix-caching" not in args:
                 args = append_argument(args, "--no-enable-prefix-caching")
 
-            config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
+            config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm"].decode_worker][
                 "extraPodSpec"
             ]["mainContainer"]["args"] = join_arguments(args)
 
         elif target == "decode":
             # delete prefill worker
             del config["spec"]["services"][
-                WORKER_COMPONENT_NAMES["vllm_v1"].prefill_worker
+                WORKER_COMPONENT_NAMES["vllm"].prefill_worker
             ]
 
             args = config["spec"]["services"][
-                WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker
+                WORKER_COMPONENT_NAMES["vllm"].decode_worker
             ]["extraPodSpec"]["mainContainer"]["args"]
 
             args = break_arguments(args)
@@ -134,13 +134,13 @@ class VllmV1ConfigModifier:
             if "--no-enable-prefix-caching" in args:
                 args.remove("--no-enable-prefix-caching")
 
-            config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
+            config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm"].decode_worker][
                 "extraPodSpec"
             ]["mainContainer"]["args"] = join_arguments(args)
 
         # set num workers to 1
         decode_worker_config = config["spec"]["services"][
-            WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker
+            WORKER_COMPONENT_NAMES["vllm"].decode_worker
         ]
         decode_worker_config["replicas"] = 1
 
@@ -150,16 +150,16 @@ class VllmV1ConfigModifier:
     def set_config_tp_size(cls, config: dict, tp_size: int):
         config = deepcopy(config)
 
-        config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
+        config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm"].decode_worker][
             "resources"
         ]["requests"]["gpu"] = str(tp_size)
-        config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
+        config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm"].decode_worker][
             "resources"
         ]["limits"]["gpu"] = str(tp_size)
 
-        args = config["spec"]["services"][
-            WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker
-        ]["extraPodSpec"]["mainContainer"]["args"]
+        args = config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm"].decode_worker][
+            "extraPodSpec"
+        ]["mainContainer"]["args"]
 
         args = break_arguments(args)
 
@@ -169,7 +169,7 @@ class VllmV1ConfigModifier:
         except ValueError:
             args = append_argument(args, ["--tensor-parallel-size", str(tp_size)])
 
-        config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker][
+        config["spec"]["services"][WORKER_COMPONENT_NAMES["vllm"].decode_worker][
             "extraPodSpec"
         ]["mainContainer"]["args"] = join_arguments(args)
 
@@ -177,7 +177,7 @@ class VllmV1ConfigModifier:
 
     @classmethod
     def get_model_name(cls, config: dict) -> str:
-        worker_name = WORKER_COMPONENT_NAMES["vllm_v1"].decode_worker
+        worker_name = WORKER_COMPONENT_NAMES["vllm"].decode_worker
         args = config["spec"]["services"][worker_name]["extraPodSpec"]["mainContainer"][
             "args"
         ]
@@ -232,5 +232,5 @@ class VllmV1ConfigModifier:
 
 
 CONFIG_MODIFIERS = {
-    "vllm_v1": VllmV1ConfigModifier,
+    "vllm": VllmV1ConfigModifier,
 }

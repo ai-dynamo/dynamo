@@ -13,16 +13,26 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-__all__ = [
-    "CircusController",
-    "PlannerConnector",
-    "KubernetesConnector",
-    "LoadPlannerDefaults",
-    "SLAPlannerDefaults",
-]
+backend: pytorch
+tensor_parallel_size: 8
+moe_expert_parallel_size: 8
+max_batch_size: 8
+max_num_tokens: 4096
+disable_overlap_scheduler: true # disable_overlap_scheduler is having acc issue on both aggregated and disaggregated serving
 
-# Import the classes
-from dynamo.planner.circusd import CircusController
-from dynamo.planner.defaults import LoadPlannerDefaults, SLAPlannerDefaults
-from dynamo.planner.kubernetes_connector import KubernetesConnector
-from dynamo.planner.planner_connector import PlannerConnector
+# Enable Speculative Decoding in the model engine
+speculative_config:
+  decoding_type: Eagle
+  max_draft_len: 3
+  pytorch_weights_path: nvidia/Llama-4-Maverick-17B-128E-Eagle3
+  eagle3_one_model: true
+
+kv_cache_config:
+  free_gpu_memory_fraction: 0.5
+  enable_block_reuse: false # true when target and draft are same kv dtype
+
+cuda_graph_config:
+  padding_enabled: true
+  max_batch_size: 8
+
+print_iter_log: true

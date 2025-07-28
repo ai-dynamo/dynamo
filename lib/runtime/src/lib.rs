@@ -20,7 +20,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Weak},
+    sync::{Arc, OnceLock, Weak},
 };
 use tokio::sync::Mutex;
 
@@ -37,6 +37,7 @@ pub mod component;
 pub mod discovery;
 pub mod engine;
 pub mod http_server;
+pub use http_server::HttpServerInfo;
 pub mod logging;
 pub mod metrics;
 pub mod pipeline;
@@ -150,6 +151,7 @@ pub struct DistributedRuntime {
     etcd_client: Option<transports::etcd::Client>,
     nats_client: transports::nats::Client,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
+    http_server: Arc<OnceLock<Arc<http_server::HttpServerInfo>>>,
 
     // local registry for components
     // the registry allows us to use share runtime resources across instances of the same component object.

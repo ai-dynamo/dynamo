@@ -112,6 +112,7 @@ For Kubernetes deployment, YAML manifests are provided in the `deploy/` director
 - `agg_router.yaml` - Aggregated serving with KV routing
 - `disagg.yaml` - Disaggregated serving
 - `disagg_router.yaml` - Disaggregated serving with KV routing
+- `disagg_planner.yaml` - Disaggregated serving with [SLA Planner](../../../docs/architecture/sla_planner.md). See [SLA Planner Deployment Guide](../../../docs/guides/dynamo_deploy/sla_planner_deployment.md) for more details.
 
 #### Prerequisites
 
@@ -123,6 +124,8 @@ For Kubernetes deployment, YAML manifests are provided in the `deploy/` director
   # Tag and push to your container registry
   # Update the image references in the YAML files
   ```
+
+- **Pre-Deployment Profiling (if Using SLA Planner)**: Follow the [pre-deployment profiling guide](../../../docs/architecture/pre_deployment_profiling.md) to run pre-deployment profiling. The results will be saved to the `profiling-pvc` PVC and queried by the SLA Planner.
 
 - **Port Forwarding**: After deployment, forward the frontend service to access the API:
   ```bash

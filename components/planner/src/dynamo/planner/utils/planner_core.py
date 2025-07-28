@@ -21,7 +21,7 @@ import time
 from dataclasses import dataclass
 from typing import Optional
 
-from dynamo.planner import KubernetesConnector, LocalConnector
+from dynamo.planner import KubernetesConnector
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES, SLAPlannerDefaults
 from dynamo.planner.utils.load_predictor import LOAD_PREDICTORS
 from dynamo.planner.utils.perf_interpolation import (
@@ -47,22 +47,35 @@ class Metrics:
     p_load: Optional[float] = None
     d_load: Optional[float] = None
 
+    def is_valid(self) -> bool:
+        """Check if all metrics are valid (not None and not NaN)."""
+        return (
+            self.ttft is not None
+            and self.itl is not None
+            and self.isl is not None
+            and self.osl is not None
+            and not math.isnan(self.ttft)
+            and not math.isnan(self.itl)
+            and not math.isnan(self.isl)
+            and not math.isnan(self.osl)
+        )
+
 
 class Planner:
     def __init__(self, runtime: DistributedRuntime, args: argparse.Namespace):
         self.runtime = runtime
         self.args = args
-        self.namespace = args.namespace
+        self.namespace = SLAPlannerDefaults.namespace
 
         if not args.no_operation:
-            if args.environment == "local":
-                self.connector = LocalConnector(args.namespace, runtime)
-            elif args.environment == "kubernetes":
-                self.connector = KubernetesConnector(args.namespace)
+            if args.environment == "kubernetes":
+                self.connector = KubernetesConnector(self.namespace)
             else:
                 raise ValueError(f"Invalid environment: {args.environment}")
 
-        self.prometheus_api_client = PrometheusAPIClient(args.prometheus_endpoint)
+        self.prometheus_api_client = PrometheusAPIClient(
+            SLAPlannerDefaults.prometheus_endpoint
+        )
 
         self.num_req_predictor = LOAD_PREDICTORS[args.load_predictor](
             window_size=args.load_prediction_window_size,
@@ -167,6 +180,13 @@ class Planner:
 
     async def make_adjustments(self):
         try:
+            # Skip adjustment if no traffic
+            if not self.last_metrics.is_valid():
+                logger.info(
+                    "Metrics contain None or NaN values (no active requests), skipping adjustment"
+                )
+                return
+
             self.p_endpoints, self.d_endpoints = await self.get_workers_info()
             logger.info(
                 f"Number of prefill workers: {len(self.p_endpoints)}, number of decode workers: {len(self.d_endpoints)}"
@@ -224,7 +244,14 @@ class Planner:
 
             # compute how many replicas are needed for decode
             # 1. apply d_correction_factor to the ITL SLA
-            corrected_itl = self.args.itl / self.d_correction_factor
+            # Prevent divide by zero when d_correction_factor is 0 (no metrics yet)
+            if self.d_correction_factor <= 0:
+                logger.warning(
+                    f"d_correction_factor is {self.d_correction_factor}, using default value of 1.0"
+                )
+                corrected_itl = self.args.itl
+            else:
+                corrected_itl = self.args.itl / self.d_correction_factor
             # 2. reversely find out what is best throughput/gpu that can achieve corrected_itl under the predicted context length
             pred_decode_thpt_per_gpu = (
                 self.decode_interpolator.find_best_throughput_per_gpu(
@@ -272,33 +299,11 @@ class Planner:
             return
 
         if not self.args.no_operation:
-            # scale up/down the number of prefill/decode non-blockingly
-            # TODO: add a check to avoid scaling before the previous scaling is completed
-            if next_num_p > len(self.p_endpoints):
-                for _ in range(next_num_p - len(self.p_endpoints)):
-                    self.connector.add_component(
-                        WORKER_COMPONENT_NAMES[self.args.backend].prefill_worker,
-                        blocking=False,
-                    )
-            elif next_num_p < len(self.p_endpoints):
-                for _ in range(len(self.p_endpoints) - next_num_p):
-                    self.connector.remove_component(
-                        WORKER_COMPONENT_NAMES[self.args.backend].prefill_worker,
-                        blocking=False,
-                    )
-
-            if next_num_d > len(self.d_endpoints):
-                for _ in range(next_num_d - len(self.d_endpoints)):
-                    self.connector.add_component(
-                        WORKER_COMPONENT_NAMES[self.args.backend].decode_worker,
-                        blocking=False,
-                    )
-            elif next_num_d < len(self.d_endpoints):
-                for _ in range(len(self.d_endpoints) - next_num_d):
-                    self.connector.remove_component(
-                        WORKER_COMPONENT_NAMES[self.args.backend].decode_worker,
-                        blocking=False,
-                    )
+            target_replicas = {
+                WORKER_COMPONENT_NAMES[self.args.backend].prefill_worker: next_num_p,
+                WORKER_COMPONENT_NAMES[self.args.backend].decode_worker: next_num_d,
+            }
+            await self.connector.set_component_replicas(target_replicas, blocking=False)
 
     async def run(self):
         """Main loop for the planner"""
@@ -329,12 +334,6 @@ async def start_sla_planner(runtime: DistributedRuntime, args: argparse.Namespac
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     # Common planner arguments
-    parser.add_argument(
-        "--namespace",
-        type=str,
-        default=SLAPlannerDefaults.namespace,
-        help="Namespace planner will look at",
-    )
     parser.add_argument(
         "--environment",
         type=str,

@@ -6,6 +6,13 @@ kind: DynamoGraphDeployment
 metadata:
   name: vllm-disagg-planner
 spec:
+  envs:
+    - name: DYNAMO_SERVICE_CONFIG
+      value: '{"Prometheus":{"global":{"scrape_interval":"5s"},"scrape_configs":[{"job_name":"prometheus","static_configs":[{"targets":["localhost:9090"]}]},{"job_name":"frontend","static_configs":[{"targets":["vllm-disagg-planner-frontend:8000"]}]}]}}'
+    - name: DYNAMO_PORT
+      value: "8000"
+    - name: DYNAMO_NAMESPACE
+      value: "vllm-disagg-planner"
   services:
     Frontend:
       dynamoNamespace: vllm-disagg-planner
@@ -31,25 +38,114 @@ spec:
         failureThreshold: 10
       resources:
         requests:
-          cpu: "1"
-          memory: "2Gi"
+          cpu: "32"
+          memory: "10Gi"
         limits:
-          cpu: "1"
-          memory: "2Gi"
+          cpu: "32"
+          memory: "10Gi"
       extraPodSpec:
         mainContainer:
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
             - "python3 -m dynamo.frontend --http-port 8000"
-    VllmDecodeWorker:
+    Planner:
+      dynamoNamespace: vllm-disagg-planner
+      envFromSecret: hf-token-secret
+      componentType: planner
+      replicas: 1
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      resources:
+        requests:
+          cpu: "2"
+          memory: "2Gi"
+        limits:
+          cpu: "2"
+          memory: "2Gi"
+      pvc:
+        create: false
+        name: profiling-pvc # Must be pre-created before deployment and SLA profiler must have been run
+        mountPoint: /workspace/profiling_results
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
+          workingDir: /workspace/components/planner/src/dynamo/planner
+          args:
+            - python
+            - -m
+            - planner_sla
+            - --environment=kubernetes
+            - --backend=vllm
+            - --adjustment-interval=60
+            - --profile-results-dir=/workspace/profiling_results
+    Prometheus:
+      dynamoNamespace: vllm-disagg-planner
+      componentType: main
+      replicas: 1
+      envs:
+        - name: PYTHONPATH
+          value: "/workspace/components/planner/src"
+      livenessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - "exit 0"
+        initialDelaySeconds: 30
+        periodSeconds: 60
+        timeoutSeconds: 30
+        failureThreshold: 10
+      resources:
+        requests:
+          cpu: "2"
+          memory: "2Gi"
+        limits:
+          cpu: "2"
+          memory: "2Gi"
+      extraPodSpec:
+        mainContainer:
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
+          workingDir: /workspace/components/backends/vllm
+          command:
+            - /bin/sh
+            - -c
+          args:
+            - "python3 -m dynamo.planner.prometheus"
+    backend:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
-      replicas: 1
+      replicas: 2
       livenessProbe:
         httpGet:
           path: /live
@@ -66,12 +162,12 @@ spec:
         failureThreshold: 60
       resources:
         requests:
-          cpu: "10"
-          memory: "20Gi"
+          cpu: "8"
+          memory: "16Gi"
           gpu: "1"
         limits:
-          cpu: "10"
-          memory: "20Gi"
+          cpu: "8"
+          memory: "16Gi"
           gpu: "1"
       envs:
         - name: DYN_SYSTEM_ENABLED
@@ -88,18 +184,18 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B  2>&1 | tee /tmp/vllm.log"
-    VllmPrefillWorker:
+            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B 2>&1 | tee /tmp/vllm.log"
+    prefill:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
-      replicas: 1
+      replicas: 2
       livenessProbe:
         httpGet:
           path: /health
@@ -116,12 +212,12 @@ spec:
         failureThreshold: 60
       resources:
         requests:
-          cpu: "10"
-          memory: "20Gi"
+          cpu: "8"
+          memory: "16Gi"
           gpu: "1"
         limits:
-          cpu: "10"
-          memory: "20Gi"
+          cpu: "8"
+          memory: "16Gi"
           gpu: "1"
       envs:
         - name: DYN_SYSTEM_ENABLED
@@ -138,10 +234,10 @@ spec:
               port: 9090
             periodSeconds: 10
             failureThreshold: 60
-          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-233.17
+          image: nvcr.io/nvidian/nim-llm-dev/vllm-runtime:dep-253.17
           workingDir: /workspace/components/backends/vllm
           command:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B  --is-prefill-worker 2>&1 | tee /tmp/vllm.log
+            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker 2>&1 | tee /tmp/vllm.log
