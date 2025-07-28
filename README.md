@@ -79,6 +79,11 @@ To coordinate across a data center, Dynamo relies on etcd and NATS. To run Dynam
 
 - [etcd](https://etcd.io/) can be run directly as `./etcd`.
 - [nats](https://nats.io/) needs jetstream enabled: `nats-server -js`.
+
+To quickly setup etcd & NATS, you can also run:
+```
+docker compose -f ./deploy/metrics/docker-compose.yml up
+```
   
 ## 2. Select an engine
 
@@ -198,7 +203,7 @@ It is recommended to use [NGC PyTorch Container](https://catalog.ngc.nvidia.com/
 > [!Important]
 > Launch container with the following additional settings `--shm-size=1g --ulimit memlock=-1`
 
-### Install prerequites
+### Install prerequisites
 ```
 # Optional step: Only required for Blackwell and Grace Hopper
 pip3 install torch==2.7.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
