@@ -29,9 +29,9 @@ High-throughput, low-latency inference framework designed for serving generative
 
 ## The Era of Multi-GPU, Multi-Node
 
-![GPU Evolution](./docs/images/frontpage-gpu-evolution.png)
-
-![Multi Node Multi-GPU topology](./docs/images/frontpage-gpu-vertical.png)
+<p align="center">
+  <img src="./docs/images/frontpage-gpu-vertical.png" alt="Multi Node Multi-GPU topology" width="600" />
+</p>
 
 Large language models are quickly outgrowing the memory and compute budget of any single GPU. Tensor-parallelism solves the capacity problem by spreading each layer across many GPUs—and sometimes many servers—but it creates a new one: how do you coordinate those shards, route requests, and share KV cache fast enough to feel like one accelerator? This orchestration gap is exactly what NVIDIA Dynamo is built to close.
 
@@ -43,6 +43,10 @@ Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLa
 - **Accelerated data transfer** – Reduces inference response time using NIXL.
 - **KV cache offloading** – Leverages multiple memory hierarchies for higher system throughput
 
+<p align="center">
+  <img src="./docs/images/frontpage-architecture.png" alt="Dynamo architecture" width="600" />
+</p>
+
 ## Framework Support Matrix
 
 | Feature | vLLM | SGLang | TensorRT-LLM |
@@ -50,9 +54,9 @@ Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLa
 | [**Disaggregated Serving**](../../docs/architecture/disagg_serving.md) | ✅ | ✅ | ✅ |
 | [**Conditional Disaggregation**](../../docs/architecture/disagg_serving.md#conditional-disaggregation) | ✅ | 🚧 | 🚧 |
 | [**KV-Aware Routing**](../../docs/architecture/kv_cache_routing.md) | ✅ | ✅ | ✅ |
-| [**SLA-Based Planner**](../../docs/architecture/sla_planner.md) | ✅ | ❌ | ❌ |
-| [**Load Based Planner**](../../docs/architecture/load_planner.md) | ✅ | ❌ | ❌ |
-| [**KVBM**](../../docs/architecture/kvbm_architecture.md) | 🚧 | ❌ | ❌ |
+| [**SLA-Based Planner**](../../docs/architecture/sla_planner.md) | ✅ | 🚧 | 🚧 |
+| [**Load Based Planner**](../../docs/architecture/load_planner.md) | ✅ | 🚧 | 🚧 |
+| [**KVBM**](../../docs/architecture/kvbm_architecture.md) | 🚧 | 🚧 | 🚧 |
 
 To learn more about each framework and their capabilities, check out each framework's README!
 - **[vLLM](components/backends/vllm/README.md)**
@@ -101,26 +105,6 @@ uv pip install "ai-dynamo[sglang]"  #replace with [vllm], [trtllm], etc.
 
 ## 3. Run Dynamo
 
-### Running and Interacting with a LLM Locally
-
-You can run a model and interact with it locally using commands below.
-
-#### Example Commands
-
-```
-python -m dynamo.frontend --interactive
-python -m dynamo.sglang.worker Qwen/Qwen3-4B
-```
-
-```
-✔ User · Hello, how are you?
-Okay, so I'm trying to figure out how to respond to the user's greeting. They said, "Hello, how are you?" and then followed it with "Hello! I'm just a program, but thanks for asking." Hmm, I need to come up with a suitable reply. ...
-```
-
-If the model is not available locally, it will be downloaded from HuggingFace and cached.
-
-You can also pass a local path: `python -m dynamo.sglang.worker --model-path ~/llms/Qwen3-0.6B`
-
 ### Running an LLM API server
 
 Dynamo provides a simple way to spin up a local set of inference components including:
@@ -133,7 +117,7 @@ Dynamo provides a simple way to spin up a local set of inference components incl
 # Start an OpenAI compatible HTTP server, a pre-processor (prompt templating and tokenization) and a router:
 python -m dynamo.frontend [--http-port 8080]
 
-# Start the vllm engine, connecting to nats and etcd to receive requests. You can run several of these,
+# Start the SGLang engine, connecting to NATS and etcd to receive requests. You can run several of these,
 # both for the same model and for multiple models. The frontend node will discover them.
 python -m dynamo.sglang.worker deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 ```
@@ -158,9 +142,9 @@ Rerun with `curl -N` and change `stream` in the request to `true` to get the res
 
 ### Deploying Dynamo
 
-Follow the [Quickstart Guide](docs/guides/dynamo_deploy/README.md) to deploy on Kubernetes.
-Check out [Backends](components/backends) to deploy various workflow configurations (e.g. SGLang with router, vLLM with disaggregated serving, etc.)
-Run some [Examples](examples) to learn about building components in Dynamo and exploring various integrations.
+- Follow the [Quickstart Guide](docs/guides/dynamo_deploy/README.md) to deploy on Kubernetes.
+- Check out [Backends](components/backends) to deploy various workflow configurations (e.g. SGLang with router, vLLM with disaggregated serving, etc.)
+- Run some [Examples](examples) to learn about building components in Dynamo and exploring various integrations.
 
 # Engines
 
@@ -189,7 +173,7 @@ uv pip install ai-dynamo[sglang]
 
 Run the backend/worker like this:
 ```
-python -m dynamo.sglang.worker --help
+python -m dynamo.sglang.worker --help    #Note the '.worker' in the module path for SGLang
 ```
 
 You can pass any sglang flags directly to this worker, see https://docs.sglang.ai/backend/server_arguments.html . See there to use multiple GPUs.
@@ -229,33 +213,9 @@ python -m dynamo.trtllm --help
 
 To specify which GPUs to use set environment variable `CUDA_VISIBLE_DEVICES`.
 
-## llama.cpp
-
-To install llama.cpp for CPU inference:
-```
-uv pip install ai-dynamo[llama_cpp]
-```
-
-To build llama.cpp for CUDA:
-```
-pip install llama-cpp-python -C cmake.args="-DGGML_CUDA=on"
-uv pip install uvloop ai-dynamo
-```
-
-At time of writing the `uv pip` version does not support that syntax, so use `pip` directly inside the venv.
-
-To build llama.cpp for other accelerators see https://pypi.org/project/llama-cpp-python/ .
-
-Download a GGUF and run the engine like this:
-```
-python -m dynamo.llama_cpp --model-path ~/llms/Qwen3-0.6B-Q8_0.gguf
-```
-
-If you have multiple GPUs, llama.cpp does automatic tensor parallelism. You do not need to pass any extra flags to enable it.
-
 # Developing Locally
 
-1. Install libraries
+## 1. Install libraries
 
 **Ubuntu:**
 ```
@@ -279,21 +239,21 @@ xcrun -sdk macosx metal
 If Metal is accessible, you should see an error like `metal: error: no input files`, which confirms it is installed correctly.
 
 
-2. Install Rust
+## 2. Install Rust
 
 ```
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source $HOME/.cargo/env
 ```
 
-3. Create a Python virtual env:
+## 3. Create a Python virtual env:
 
 ```
 uv venv dynamo
 source dynamo/bin/activate
 ```
 
-4. Install build tools
+## 4. Install build tools
 
 ```
 uv pip install pip maturin
@@ -301,14 +261,14 @@ uv pip install pip maturin
 
 [Maturin](https://github.com/PyO3/maturin) is the Rust<->Python bindings build tool.
 
-5. Build the Rust bindings
+## 5. Build the Rust bindings
 
 ```
 cd lib/bindings/python
 maturin develop --uv
 ```
 
-6. Install the wheel
+## 6. Install the wheel
 
 ```
 cd $PROJECT_ROOT
