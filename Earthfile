@@ -13,6 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+#######################################################################
+# 🚨 DEPRECATION NOTICE 🚨
+#
+# This Earthfile is being replaced by the new build system:
+# - Use `make` commands for core builds (see Makefile)
+# - See BUILD_SYSTEM_MIGRATION.md for migration guide
+# - Use `container/build.sh` for framework containers
+#
+# This file is kept temporarily for backward compatibility but will
+# be removed in a future release. Please migrate to the new system.
+#######################################################################
+
 VERSION 0.8
 
 ############### ARTIFACTS TARGETS ##############################
