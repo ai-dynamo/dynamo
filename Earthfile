@@ -115,14 +115,6 @@ dynamo-build:
     RUN cargo build --release --locked --features llamacpp,cuda && \
         cargo doc --no-deps
 
-    # Create symlinks for wheel building
-    RUN mkdir -p /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/ && \
-        # Remove existing symlinks
-        rm -f /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/* && \
-        # Create new symlinks pointing to the correct location
-        ln -sf /workspace/target/release/dynamo-run /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/dynamo-run
-
-
     RUN cd /workspace/lib/bindings/python && \
         uv build --wheel --out-dir /workspace/dist --python 3.12
     RUN cd /workspace && \
