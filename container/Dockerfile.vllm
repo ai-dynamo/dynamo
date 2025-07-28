@@ -221,18 +221,6 @@ ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
 $LD_LIBRARY_PATH
 
-# Install perf_analyzer and genai-perf
-RUN apt-get update -y && \
-    apt-get install -y --no-install-recommends \
-    rapidjson-dev \
-    zlib1g-dev
-
-RUN git clone --depth=1 https://github.com/triton-inference-server/perf_analyzer.git && \
-    mkdir perf_analyzer/build && \
-    cmake -B perf_analyzer/build -S perf_analyzer && \
-    cmake --build perf_analyzer/build -- -j8
-
-
 
 # Common dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
@@ -473,6 +461,19 @@ RUN apt-get update && \
         g++ \
         cuda-toolkit-12-8 && \
     rm -rf /var/lib/apt/lists/*
+
+# Install perf_analyzer and genai-perf
+RUN apt-get update -y && \
+    apt-get install -y --no-install-recommends \
+    rapidjson-dev \
+    zlib1g-dev
+
+RUN git clone --depth=1 https://github.com/triton-inference-server/perf_analyzer.git && \
+    mkdir perf_analyzer/build && \
+    cmake -B perf_analyzer/build -S perf_analyzer && \
+    cmake --build perf_analyzer/build -- -j8
+
+ENV PATH=/workspace/perf_analyzer/build/perf_analyzer/src/perf-analyzer-build:$PATH
 
 ### COPY NATS & ETCD ###
 # Copy nats and etcd from base image
