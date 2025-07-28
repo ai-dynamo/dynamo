@@ -155,9 +155,11 @@ curl localhost:8080/v1/chat/completions   -H "Content-Type: application/json"   
 
 Rerun with `curl -N` and change `stream` in the request to `true` to get the responses as soon as the engine issues them.
 
-### Deploying Dynamo on Kubernetes
+### Deploying Dynamo
 
-Follow the [Quickstart Guide](docs/guides/dynamo_deploy/README.md) to deploy to Kubernetes.
+Follow the [Quickstart Guide](docs/guides/dynamo_deploy/README.md) to deploy on Kubernetes.
+Check out [Backends](components/backends) to deploy various workflow configurations (e.g. SGLang with router, vLLM with disaggregated serving, etc.)
+Run some [Examples](examples) to learn about building components in Dynamo and exploring various integrations.
 
 # Engines
 
@@ -248,7 +250,7 @@ Download a GGUF and run the engine like this:
 python -m dynamo.llama_cpp --model-path ~/llms/Qwen3-0.6B-Q8_0.gguf
 ```
 
-If you have multiple GPUs, llama.cpp does automatic tensor parallelism. You do not need to pass any extra flags to dynamo-run to enable it.
+If you have multiple GPUs, llama.cpp does automatic tensor parallelism. You do not need to pass any extra flags to enable it.
 
 # Developing Locally
 
