@@ -42,7 +42,7 @@ cuda_graph_config:
   enable_graph_padding: true
 # NOTE: For larger max batch size, you may want to add larger cuda graph
 # batch sizes below to match.
-  cuda_graph_batch_sizes:
+  batch_sizes:
   - 1
   - 2
   - 4
