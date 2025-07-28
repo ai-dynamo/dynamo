@@ -20,12 +20,12 @@ set -euo pipefail
 
 # Parse arguments
 EDITABLE=true
-VLLM_REF="059d4cd"
+VLLM_REF="v0.10.0"
 MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 ARCH=$(uname -m)
-DEEPGEMM_REF="6c9558e"
-FLASHINF_REF="1d72ed4"
+DEEPGEMM_REF="1876566"
+FLASHINF_REF="v0.2.8rc1"
 TORCH_BACKEND="cu128"
 
 # Convert x86_64 to amd64 for consistency with Docker ARG

@@ -110,7 +110,7 @@ RUN git clone "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
     cd ${NIXL_SRC_DIR} && \
     git checkout ${NIXL_REF} && \
     if [ "$ARCH" = "arm64" ]; then \
-        nixl_build_args="-Ddisable_gds_backend=true -Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
+        nixl_build_args="-Ddisable_gds_backend=true"; \
     else \
         nixl_build_args=""; \
     fi && \
@@ -220,7 +220,7 @@ ENV VIRTUAL_ENV=/opt/dynamo/venv
 # TEMP: disable gds backend for arm64
 RUN if [ "$ARCH" = "arm64" ]; then \
         cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl \
-        --config-settings=setup-args="-Ddisable_gds_backend=true -Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
+        --config-settings=setup-args="-Ddisable_gds_backend=true"; \
     else \
         cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl; \
     fi && \
@@ -273,7 +273,6 @@ COPY LICENSE /workspace/
 COPY Cargo.toml /workspace/
 COPY Cargo.lock /workspace/
 COPY rust-toolchain.toml /workspace/
-COPY hatch_build.py /workspace/
 
 # Copy source code
 COPY lib/ /workspace/lib/
@@ -311,18 +310,11 @@ COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 # Copy rest of the code
 COPY . /workspace
 
-# Build C bindings, creates lib/bindings/c/include
-RUN cd /workspace/lib/bindings/c && cargo build --release --locked
-
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
     mkdir /opt/dynamo/bindings/lib && \
     cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
-    cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
-    cp -r lib/bindings/c/include /opt/dynamo/bindings/.  && \
-    cp target/release/dynamo-run /usr/local/bin && \
-    cp target/release/metrics /usr/local/bin && \
-    cp target/release/mock_worker /usr/local/bin
+    cp target/release/metrics /usr/local/bin
 
 # Install wheels
 RUN . /opt/dynamo/venv/bin/activate && \
@@ -484,8 +476,10 @@ ARG TENSORRTLLM_PIP_WHEEL="tensorrt-llm"
 ARG TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
 
 # Copy Dynamo wheels into wheelhouse
+# Copy metrics binary from wheel_builder image, not part of ai-dynamo wheel
 COPY --from=dev /workspace/wheels/nixl/*.whl wheelhouse/
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
+COPY --from=dev /workspace/target/release/metrics /usr/local/bin/metrics
 
 # NOTE: If a package (tensorrt_llm) exists on both --index-url and --extra-index-url,
 # uv will prioritize the --extra-index-url, unless --index-strategy unsafe-best-match

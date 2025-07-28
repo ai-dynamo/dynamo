@@ -36,7 +36,7 @@ export NAMESPACE=<your-namespace> # the namespace you used to deploy Dynamo clou
 Deploying an example consists of the simple `kubectl apply -f ... -n ${NAMESPACE}` command. For example:
 
 ```bash
-kubectl apply -f  components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
+kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
 ```
 
 You can use `kubectl get dynamoGraphDeployment -n ${NAMESPACE}` to view your deployment.
@@ -67,7 +67,7 @@ Look for one that ends in `-frontend` and use it for port forward.
 
 ```bash
 SERVICE_NAME=$(kubectl get svc -n ${NAMESPACE} -o name | grep frontend | sed 's|.*/||' | sed 's|-frontend||' | head -n1)
-kubectl port-forward svc/${SERVICE_NAME}-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/${SERVICE_NAME}-frontend 8080:8080 -n ${NAMESPACE}
 ```
 
 Consult the [Port Forward Documentation](https://kubernetes.io/docs/tasks/access-application-cluster/port-forward-access-application-cluster/)

@@ -15,10 +15,10 @@ See [deployment architectures](../llm/README.md#deployment-architectures) to lea
 
 ### Prerequisites
 
-Start required services (etcd and NATS) using [Docker Compose](../../deploy/metrics/docker-compose.yml):
+Start required services (etcd and NATS) using [Docker Compose](../../../deploy/docker-compose.yml):
 
 ```bash
-docker compose -f deploy/metrics/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 ### Build and Run docker
@@ -112,10 +112,11 @@ For Kubernetes deployment, YAML manifests are provided in the `deploy/` director
 - `agg_router.yaml` - Aggregated serving with KV routing
 - `disagg.yaml` - Disaggregated serving
 - `disagg_router.yaml` - Disaggregated serving with KV routing
+- `disagg_planner.yaml` - Disaggregated serving with [SLA Planner](../../../docs/architecture/sla_planner.md). See [SLA Planner Deployment Guide](../../../docs/guides/dynamo_deploy/sla_planner_deployment.md) for more details.
 
 #### Prerequisites
 
-- **Dynamo Cloud**: Follow the [Quickstart Guide](../../docs/guides/dynamo_deploy/quickstart.md) to deploy Dynamo Cloud first.
+- **Dynamo Cloud**: Follow the [Quickstart Guide](../../../docs/guides/dynamo_deploy/quickstart.md) to deploy Dynamo Cloud first.
 
 - **Container Images**: The deployment files currently require access to `nvcr.io/nvidian/nim-llm-dev/vllm-runtime`. If you don't have access, build and push your own image:
   ```bash
@@ -123,6 +124,8 @@ For Kubernetes deployment, YAML manifests are provided in the `deploy/` director
   # Tag and push to your container registry
   # Update the image references in the YAML files
   ```
+
+- **Pre-Deployment Profiling (if Using SLA Planner)**: Follow the [pre-deployment profiling guide](../../../docs/architecture/pre_deployment_profiling.md) to run pre-deployment profiling. The results will be saved to the `profiling-pvc` PVC and queried by the SLA Planner.
 
 - **Port Forwarding**: After deployment, forward the frontend service to access the API:
   ```bash
@@ -132,10 +135,23 @@ For Kubernetes deployment, YAML manifests are provided in the `deploy/` director
 #### Deploy to Kubernetes
 
 Example with disagg:
+Export the NAMESPACE  you used in your Dynamo Cloud Installation.
 
 ```bash
-cd ~/dynamo/components/backends/vllm/deploy
-kubectl apply -f disagg.yaml
+cd dynamo
+cd components/backends/vllm/deploy
+kubectl apply -f disagg.yaml -n $NAMESPACE
+```
+
+To change `DYN_LOG` level, edit the yaml file by adding
+
+```yaml
+...
+spec:
+  envs:
+    - name: DYN_LOG
+      value: "debug" # or other log levels
+  ...
 ```
 
 ### Testing the Deployment

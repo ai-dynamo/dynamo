@@ -97,7 +97,7 @@ You can run this pipeline locally by spinning up ETCD and NATS and then running 
 
 ```bash
 # Spin up ETCD and NATS
-docker compose -f deploy/metrics/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 then
@@ -110,7 +110,7 @@ dynamo serve pipeline:Frontend
 Once it's up and running, you can make a request to the pipeline using
 
 ```bash
-curl -X POST http://localhost:8000/generate \
+curl -X POST http://localhost:8080/generate \
     -H "Content-Type: application/json" \
     -d '{"text": "federer"}'
 ```

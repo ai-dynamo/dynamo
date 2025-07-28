@@ -21,11 +21,7 @@ from pydantic import BaseModel
 
 from dynamo.planner.defaults import SLAPlannerDefaults
 from dynamo.planner.utils.planner_core import start_sla_planner
-from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sdk import async_on_start, dynamo_context, endpoint, service
-from dynamo.sdk.core.protocol.interface import ComponentType
-from dynamo.sdk.lib.config import ServiceConfig
-from dynamo.sdk.lib.image import DYNAMO_IMAGE
+from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 logger = logging.getLogger(__name__)
 
@@ -38,79 +34,107 @@ class RequestType(BaseModel):
     text: str
 
 
-@service(
-    dynamo={
-        "namespace": "dynamo",
-        "component_type": ComponentType.PLANNER,
-    },
-    resources={"cpu": "10", "memory": "20Gi"},
-    workers=1,
-    image=DYNAMO_IMAGE,
-)
-class Planner:
-    def __init__(self):
-        configure_dynamo_logging(service_name="Planner")
-        logger.info("Starting planner")
-        self.runtime = dynamo_context["runtime"]
+@dynamo_worker(static=False)
+async def init_planner(runtime: DistributedRuntime, args):
+    await asyncio.sleep(INIT_PLANNER_START_DELAY)
 
-        config = ServiceConfig.get_instance()
+    await start_sla_planner(runtime, args)
 
-        # Get namespace directly from dynamo_context as it contains the active namespace
-        self.namespace = dynamo_context["namespace"]
-        config_instance = config.get("Planner", {})
+    component = runtime.namespace(SLAPlannerDefaults.namespace).component("Planner")
+    await component.create_service()
 
-        self.args = argparse.Namespace(
-            namespace=self.namespace,
-            environment=config_instance.get(
-                "environment", SLAPlannerDefaults.environment
-            ),
-            backend=config_instance.get("backend", SLAPlannerDefaults.backend),
-            no_operation=config_instance.get(
-                "no-operation", SLAPlannerDefaults.no_operation
-            ),
-            log_dir=config_instance.get("log-dir", SLAPlannerDefaults.log_dir),
-            adjustment_interval=config_instance.get(
-                "adjustment-interval", SLAPlannerDefaults.adjustment_interval
-            ),
-            max_gpu_budget=config_instance.get(
-                "max-gpu-budget", SLAPlannerDefaults.max_gpu_budget
-            ),
-            min_endpoint=config_instance.get(
-                "min-endpoint", SLAPlannerDefaults.min_endpoint
-            ),
-            decode_engine_num_gpu=config_instance.get(
-                "decode-engine-num-gpu", SLAPlannerDefaults.decode_engine_num_gpu
-            ),
-            prefill_engine_num_gpu=config_instance.get(
-                "prefill-engine-num-gpu", SLAPlannerDefaults.prefill_engine_num_gpu
-            ),
-            prometheus_endpoint=config_instance.get(
-                "prometheus-endpoint", SLAPlannerDefaults.prometheus_endpoint
-            ),
-            profile_results_dir=config_instance.get(
-                "profile-results-dir", SLAPlannerDefaults.profile_results_dir
-            ),
-            isl=config_instance.get("isl", SLAPlannerDefaults.isl),
-            osl=config_instance.get("osl", SLAPlannerDefaults.osl),
-            ttft=config_instance.get("ttft", SLAPlannerDefaults.ttft),
-            itl=config_instance.get("itl", SLAPlannerDefaults.itl),
-            load_predictor=config_instance.get(
-                "load-predictor", SLAPlannerDefaults.load_predictor
-            ),
-            load_prediction_window_size=config_instance.get(
-                "load-prediction-window-size",
-                SLAPlannerDefaults.load_prediction_window_size,
-            ),
-        )
-
-    @async_on_start
-    async def async_init(self):
-        await asyncio.sleep(INIT_PLANNER_START_DELAY)
-        logger.info("Calling start_planner")
-        await start_sla_planner(self.runtime, self.args)
-        logger.info("Planner started")
-
-    @endpoint()
-    async def generate(self, request: RequestType):
+    async def generate(request: RequestType):
         """Dummy endpoint to satisfy that each component has an endpoint"""
         yield "mock endpoint"
+
+    generate_endpoint = component.endpoint("generate")
+    await generate_endpoint.serve_endpoint(generate)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="SLA Planner")
+    parser.add_argument(
+        "--environment",
+        default=SLAPlannerDefaults.environment,
+        choices=["kubernetes"],
+        help="Environment type",
+    )
+    parser.add_argument(
+        "--backend",
+        default=SLAPlannerDefaults.backend,
+        choices=["vllm"],
+        help="Backend type",
+    )
+    parser.add_argument(
+        "--no-operation",
+        action="store_true",
+        default=SLAPlannerDefaults.no_operation,
+        help="Enable no-operation mode",
+    )
+    parser.add_argument(
+        "--log-dir", default=SLAPlannerDefaults.log_dir, help="Log directory path"
+    )
+    parser.add_argument(
+        "--adjustment-interval",
+        type=int,
+        default=SLAPlannerDefaults.adjustment_interval,
+        help="Adjustment interval in seconds",
+    )
+    parser.add_argument(
+        "--max-gpu-budget",
+        type=int,
+        default=SLAPlannerDefaults.max_gpu_budget,
+        help="Maximum GPU budget",
+    )
+    parser.add_argument(
+        "--min-endpoint",
+        type=int,
+        default=SLAPlannerDefaults.min_endpoint,
+        help="Minimum number of endpoints",
+    )
+    parser.add_argument(
+        "--decode-engine-num-gpu",
+        type=int,
+        default=SLAPlannerDefaults.decode_engine_num_gpu,
+        help="Number of GPUs for decode engine",
+    )
+    parser.add_argument(
+        "--prefill-engine-num-gpu",
+        type=int,
+        default=SLAPlannerDefaults.prefill_engine_num_gpu,
+        help="Number of GPUs for prefill engine",
+    )
+    parser.add_argument(
+        "--profile-results-dir",
+        default=SLAPlannerDefaults.profile_results_dir,
+        help="Profile results directory",
+    )
+    parser.add_argument(
+        "--isl", type=int, default=SLAPlannerDefaults.isl, help="Input sequence length"
+    )
+    parser.add_argument(
+        "--osl", type=int, default=SLAPlannerDefaults.osl, help="Output sequence length"
+    )
+    parser.add_argument(
+        "--ttft",
+        type=float,
+        default=SLAPlannerDefaults.ttft,
+        help="Time to first token",
+    )
+    parser.add_argument(
+        "--itl", type=float, default=SLAPlannerDefaults.itl, help="Inter-token latency"
+    )
+    parser.add_argument(
+        "--load-predictor",
+        default=SLAPlannerDefaults.load_predictor,
+        help="Load predictor type",
+    )
+    parser.add_argument(
+        "--load-prediction-window-size",
+        type=int,
+        default=SLAPlannerDefaults.load_prediction_window_size,
+        help="Load prediction window size",
+    )
+
+    args = parser.parse_args()
+    asyncio.run(init_planner(args))

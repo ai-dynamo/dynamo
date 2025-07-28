@@ -73,7 +73,7 @@ dynamo serve graphs.agg:Frontend -f ./configs/agg-llava.yaml
 
 In another terminal:
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
       "model": "llava-hf/llava-1.5-7b-hf",
@@ -146,7 +146,7 @@ dynamo serve graphs.disagg:Frontend -f configs/disagg.yaml
 
 In another terminal:
 ```bash
-curl http://localhost:8000/v1/chat/completions \
+curl http://localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
       "model": "llava-hf/llava-1.5-7b-hf",
@@ -224,10 +224,10 @@ in `dynamo deployment get ${DEPLOYMENT_NAME}` and skip the steps to find and for
 export FRONTEND_POD=$(kubectl get pods -n ${KUBE_NS} | grep "${DEPLOYMENT_NAME}-frontend" | sort -k1 | tail -n1 | awk '{print $1}')
 
 # Forward the pod's port to localhost
-kubectl port-forward pod/$FRONTEND_POD 8000:8000 -n ${KUBE_NS}
+kubectl port-forward pod/$FRONTEND_POD 8080:8080 -n ${KUBE_NS}
 
 # Test the API endpoint
-curl localhost:8000/v1/chat/completions \
+curl localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
     "model": "llava-hf/llava-1.5-7b-hf",
@@ -287,7 +287,7 @@ dynamo serve graphs.agg_video:Frontend -f ./configs/agg_video.yaml
 
 In another terminal:
 ```bash
-curl -X 'POST'   'http://localhost:8000/v1/chat/completions'   -H 'Content-Type: application/json'   -d '{
+curl -X 'POST'   'http://localhost:8080/v1/chat/completions'   -H 'Content-Type: application/json'   -d '{
     "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
     "messages": [
       {
@@ -378,7 +378,7 @@ dynamo serve graphs.disagg_video:Frontend -f ./configs/disagg_video.yaml
 
 In another terminal:
 ```bash
-curl -X 'POST'   'http://localhost:8000/v1/chat/completions'   -H 'Content-Type: application/json'   -d '{
+curl -X 'POST'   'http://localhost:8080/v1/chat/completions'   -H 'Content-Type: application/json'   -d '{
     "model": "llava-hf/LLaVA-NeXT-Video-7B-hf",
     "messages": [
       {

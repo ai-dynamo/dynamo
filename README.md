@@ -79,6 +79,7 @@ uv pip install pip
 # Choose one
 uv pip install "ai-dynamo[sglang]"
 uv pip install "ai-dynamo[vllm]"
+uv pip install "ai-dynamo[trtllm]"
 uv pip install "ai-dynamo[llama_cpp]" # CPU, see later for GPU
 ```
 
@@ -122,7 +123,7 @@ python -m dynamo.sglang.worker deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 #### Send a Request
 
 ```bash
-curl localhost:8000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
+curl localhost:8080/v1/chat/completions   -H "Content-Type: application/json"   -d '{
     "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     "messages": [
     {
@@ -173,7 +174,38 @@ You can pass any sglang flags directly to this worker, see https://docs.sglang.a
 
 # TRT-LLM
 
-This currently requires a container TODO ADD THE DOCS PLZ THANK YOU
+It is recommended to use [NGC PyTorch Container](https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch) for running TensorRT-LLM engine.
+
+> [!Note]
+> Ensure that you select a PyTorch container image version that matches the version of TensorRT-LLM you are using.
+> For example, if you are using `tensorrt-llm==1.0.0rc4`, use the PyTorch container image version `25.05`.
+> To find the correct PyTorch container version for your desired `tensorrt-llm` release, visit the [TensorRT-LLM Dockerfile.multi](https://github.com/NVIDIA/TensorRT-LLM/blob/main/docker/Dockerfile.multi) on GitHub. Switch to the branch that matches your `tensorrt-llm` version, and look for the `BASE_TAG` line to identify the recommended PyTorch container tag.
+
+> [!Important]
+> Launch container with the following additional settings `--shm-size=1g --ulimit memlock=-1`
+
+## Install prerequites
+```
+# Optional step: Only required for Blackwell and Grace Hopper
+pip3 install torch==2.7.1 torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128
+
+sudo apt-get -y install libopenmpi-dev
+```
+
+> [!Tip]
+> You can learn more about these prequisites and known issues with TensorRT-LLM pip based installation [here](https://nvidia.github.io/TensorRT-LLM/installation/linux.html).
+
+## Install dynamo
+```
+uv pip install --upgrade pip setuptools && uv pip install ai-dynamo[trtllm]
+```
+
+Run the backend/worker like this:
+```
+python -m dynamo.trtllm --help
+```
+
+To specify which GPUs to use set environment variable `CUDA_VISIBLE_DEVICES`.
 
 # llama.cpp
 

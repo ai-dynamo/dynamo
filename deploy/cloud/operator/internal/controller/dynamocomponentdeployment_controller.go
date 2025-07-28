@@ -1214,45 +1214,13 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	containerPort := commonconsts.DynamoServicePort
 
-	var envs []corev1.EnvVar
-	envsSeen := make(map[string]struct{})
-
 	resourceAnnotations := opt.dynamoComponentDeployment.Spec.Annotations
-	specEnvs := opt.dynamoComponentDeployment.Spec.Envs
 
 	if resourceAnnotations == nil {
 		resourceAnnotations = make(map[string]string)
 	}
 
 	isDebugModeEnabled := checkIfIsDebugModeEnabled(resourceAnnotations)
-
-	if specEnvs != nil {
-		envs = make([]corev1.EnvVar, 0, len(specEnvs)+1)
-
-		for _, env := range specEnvs {
-			if _, ok := envsSeen[env.Name]; ok {
-				continue
-			}
-			if env.Name == commonconsts.EnvDynamoServicePort {
-				// nolint: gosec
-				containerPort, err = strconv.Atoi(env.Value)
-				if err != nil {
-					return nil, errors.Wrapf(err, "invalid port value %s", env.Value)
-				}
-			}
-			envsSeen[env.Name] = struct{}{}
-			envVar := corev1.EnvVar{
-				Name: env.Name,
-			}
-			if env.Value != "" {
-				envVar.Value = env.Value
-			}
-			if env.ValueFrom != nil {
-				envVar.ValueFrom = env.ValueFrom
-			}
-			envs = append(envs, envVar)
-		}
-	}
 
 	defaultEnvs := []corev1.EnvVar{
 		{
@@ -1275,11 +1243,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		})
 	}
 
-	for _, env := range defaultEnvs {
-		if _, ok := envsSeen[env.Name]; !ok {
-			envs = append(envs, env)
-		}
-	}
+	envs := dynamo.MergeEnvs(opt.dynamoComponentDeployment.Spec.Envs, defaultEnvs)
 
 	var livenessProbe *corev1.Probe
 	if opt.dynamoComponentDeployment.Spec.LivenessProbe != nil {
@@ -1470,6 +1434,8 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 				err = errors.Wrapf(err, "failed to merge extraPodSpecMainContainer into container")
 				return nil, err
 			}
+			// finally merge the envs from extraPodSpecMainContainer into container
+			container.Env = dynamo.MergeEnvs(container.Env, extraPodSpecMainContainer.Env)
 		}
 	}
 
@@ -1511,11 +1477,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 
 	podLabels[commonconsts.KubeLabelDynamoSelector] = kubeName
 
-	podSpec := corev1.PodSpec{
-		Containers: containers,
-		Volumes:    volumes,
-	}
-
 	imagePullSecrets := []corev1.LocalObjectReference{}
 
 	if r.DockerSecretRetriever == nil {
@@ -1534,9 +1495,13 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		})
 	}
 
-	if len(imagePullSecrets) > 0 {
-		podSpec.ImagePullSecrets = imagePullSecrets
+	podSpec := &corev1.PodSpec{}
+	if opt.dynamoComponentDeployment.Spec.ExtraPodSpec != nil && opt.dynamoComponentDeployment.Spec.ExtraPodSpec.PodSpec != nil {
+		podSpec = opt.dynamoComponentDeployment.Spec.ExtraPodSpec.PodSpec.DeepCopy()
 	}
+	podSpec.Containers = append(podSpec.Containers, containers...)
+	podSpec.Volumes = append(podSpec.Volumes, volumes...)
+	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, imagePullSecrets...)
 
 	extraPodMetadata := opt.dynamoComponentDeployment.Spec.ExtraPodMetadata
 
@@ -1548,18 +1513,6 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 		for k, v := range extraPodMetadata.Labels {
 			podLabels[k] = v
 		}
-	}
-
-	extraPodSpec := opt.dynamoComponentDeployment.Spec.ExtraPodSpec
-
-	if extraPodSpec != nil {
-		podSpec.SchedulerName = extraPodSpec.SchedulerName
-		podSpec.NodeSelector = extraPodSpec.NodeSelector
-		podSpec.Affinity = extraPodSpec.Affinity
-		podSpec.Tolerations = extraPodSpec.Tolerations
-		podSpec.TopologySpreadConstraints = extraPodSpec.TopologySpreadConstraints
-		podSpec.Containers = append(podSpec.Containers, extraPodSpec.Containers...)
-		podSpec.ServiceAccountName = extraPodSpec.ServiceAccountName
 	}
 
 	if podSpec.ServiceAccountName == "" {
@@ -1599,7 +1552,7 @@ func (r *DynamoComponentDeploymentReconciler) generatePodTemplateSpec(ctx contex
 			Labels:      podLabels,
 			Annotations: podAnnotations,
 		},
-		Spec: podSpec,
+		Spec: *podSpec,
 	}
 
 	return

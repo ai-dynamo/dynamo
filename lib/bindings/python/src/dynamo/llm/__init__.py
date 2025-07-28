@@ -41,17 +41,3 @@ from dynamo._core import compute_block_hash_for_seq_py as compute_block_hash_for
 from dynamo._core import make_engine
 from dynamo._core import register_llm as register_llm
 from dynamo._core import run_input
-
-try:
-    from dynamo.llm.tensorrtllm import (  # noqa: F401
-        get_llm_engine as get_tensorrtllm_engine,
-    )
-    from dynamo.llm.tensorrtllm import (  # noqa: F401
-        get_publisher as get_tensorrtllm_publisher,
-    )
-except ImportError:
-    pass  # TensorRTLLM is not enabled by default
-except Exception as e:
-    # Don't let TensorRTLLM break other engines
-    logger = logging.getLogger(__name__)
-    logger.exception(f"Error importing TensorRT-LLM components: {e}")

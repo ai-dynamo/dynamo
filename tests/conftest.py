@@ -33,6 +33,66 @@ logging.basicConfig(
     datefmt=DATE_FORMAT,  # ISO 8601 UTC format
 )
 
+# List of models used in tests
+TEST_MODELS = [
+    "Qwen/Qwen3-0.6B",
+    "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "llava-hf/llava-1.5-7b-hf",
+]
+
+
+def download_models(model_list=None):
+    """Download models - can be called directly or via fixture
+
+    Args:
+        model_list: List of model IDs to download. If None, downloads TEST_MODELS.
+    """
+    if model_list is None:
+        model_list = TEST_MODELS
+
+    # Check for HF_TOKEN in environment
+    hf_token = os.environ.get("HF_TOKEN")
+    if hf_token:
+        logging.info("HF_TOKEN found in environment")
+    else:
+        logging.warning(
+            "HF_TOKEN not found in environment. "
+            "Some models may fail to download or you may encounter rate limits. "
+            "Get a token from https://huggingface.co/settings/tokens"
+        )
+
+    try:
+        from huggingface_hub import snapshot_download
+
+        for model_id in model_list:
+            logging.info(f"Pre-downloading model: {model_id}")
+
+            try:
+                # Download the full model snapshot (includes all files)
+                # HuggingFace will handle caching automatically
+                snapshot_download(
+                    repo_id=model_id,
+                    token=hf_token,
+                )
+                logging.info(f"Successfully pre-downloaded: {model_id}")
+
+            except Exception as e:
+                logging.error(f"Failed to pre-download {model_id}: {e}")
+                # Don't fail the fixture - let individual tests handle missing models
+
+    except ImportError:
+        logging.warning(
+            "huggingface_hub not installed. "
+            "Models will be downloaded during test execution."
+        )
+
+
+@pytest.fixture(scope="session")
+def predownload_models():
+    """Fixture wrapper around download_models for all TEST_MODELS"""
+    download_models()
+    yield
+
 
 @pytest.fixture(autouse=True)
 def logger(request):
@@ -63,6 +123,18 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "tensorrtllm" in item.keywords:
             item.add_marker(skip_tensorrtllm)
+
+        # Auto-inject predownload_models fixture for serve tests only (not router tests)
+        # Skip items that don't have fixturenames (like MypyFileItem)
+        if hasattr(item, "fixturenames"):
+            # Only apply to tests in the serve directory
+            if (
+                ("serve" in str(item.path))
+                and ("predownload_models" not in item.fixturenames)
+                and (not item.get_closest_marker("skip_model_download"))
+            ):
+                item.fixturenames = list(item.fixturenames)
+                item.fixturenames.append("predownload_models")
 
 
 class EtcdServer(ManagedProcess):
