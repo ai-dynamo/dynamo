@@ -76,27 +76,6 @@ The metrics component collects, aggregates, and exposes system metrics:
 - **Visualization support** - Integrates with Grafana for dashboard creation
 - **Push/Pull modes** - Supports both push and pull-based metric collection
 
-## Component Architecture
-
-```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Frontend      │    │    Router       │    │   Backends      │
-│                 │    │                 │    │                 │
-│ • HTTP Server   │◄──►│ • KV Routing    │◄──►│ • vLLM          │
-│ • Pre-processor │    │ • Load Balance  │    │ • SGLang        │
-│ • Auto-discovery│    │ • Cache Aware   │    │ • TensorRT-LLM  │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-         │                       │                       │
-         ▼                       ▼                       ▼
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Planner       │    │   Metrics       │    │   Workers       │
-│                 │    │                 │    │                 │
-│ • Auto-scaling  │    │ • Collection    │    │ • Prefill       │
-│ • SLA Planning  │    │ • Aggregation   │    │ • Decode        │
-│ • Load Planning │    │ • Visualization │    │ • KV Cache      │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-```
-
 ## Getting Started
 
 To get started with Dynamo components:
