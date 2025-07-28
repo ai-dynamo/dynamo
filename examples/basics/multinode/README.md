@@ -79,16 +79,13 @@ Note the IP address of this node - you'll need it for worker configuration.
 
 ### 2. Software Requirements
 
-Install [SGLang](https://docs.sglang.ai/) and dependencies:
+Install Dynamo with [SGLang](https://docs.sglang.ai/) support:
 
 ```bash
-pip install sglang[all]
-# or follow SGLang installation guide for latest version
+pip install ai-dynamo[sglang]
 ```
 
 For more information about the SGLang backend and its integration with Dynamo, see the [SGLang Backend Documentation](../../components/backends/sglang/README.md).
-
-**Note**: This example assumes you have Dynamo installed in your Python environment. If not, ensure you're in the Dynamo development environment or have installed it according to the main project documentation.
 
 ### 3. Network Requirements
 
