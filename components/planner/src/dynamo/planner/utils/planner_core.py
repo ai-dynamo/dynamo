@@ -48,12 +48,7 @@ class Metrics:
     d_load: Optional[float] = None
 
     def is_valid(self) -> bool:
-        """
-        Check if all metrics are valid (not None and not NaN).
-
-        Returns:
-            True if all metrics are valid, False otherwise
-        """
+        """Check if all metrics are valid (not None and not NaN)."""
         return (
             self.ttft is not None
             and self.itl is not None
@@ -185,7 +180,7 @@ class Planner:
 
     async def make_adjustments(self):
         try:
-            # Check if metrics are valid (not None and not NaN) - skip adjustment if no traffic
+            # Skip adjustment if no traffic
             if not self.last_metrics.is_valid():
                 logger.info(
                     "Metrics contain None or NaN values (no active requests), skipping adjustment"
