@@ -47,6 +47,24 @@ class Metrics:
     p_load: Optional[float] = None
     d_load: Optional[float] = None
 
+    def is_valid(self) -> bool:
+        """
+        Check if all metrics are valid (not None and not NaN).
+
+        Returns:
+            True if all metrics are valid, False otherwise
+        """
+        return (
+            self.ttft is not None
+            and self.itl is not None
+            and self.isl is not None
+            and self.osl is not None
+            and not math.isnan(self.ttft)
+            and not math.isnan(self.itl)
+            and not math.isnan(self.isl)
+            and not math.isnan(self.osl)
+        )
+
 
 class Planner:
     def __init__(self, runtime: DistributedRuntime, args: argparse.Namespace):
@@ -168,16 +186,7 @@ class Planner:
     async def make_adjustments(self):
         try:
             # Check if metrics are valid (not None and not NaN) - skip adjustment if no traffic
-            if (
-                self.last_metrics.ttft is None
-                or self.last_metrics.itl is None
-                or self.last_metrics.isl is None
-                or self.last_metrics.osl is None
-                or math.isnan(self.last_metrics.ttft)
-                or math.isnan(self.last_metrics.itl)
-                or math.isnan(self.last_metrics.isl)
-                or math.isnan(self.last_metrics.osl)
-            ):
+            if not self.last_metrics.is_valid():
                 logger.info(
                     "Metrics contain None or NaN values (no active requests), skipping adjustment"
                 )
