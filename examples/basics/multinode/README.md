@@ -2,6 +2,10 @@
 
 This example demonstrates running Dynamo across multiple nodes with **KV-aware routing** to distribute requests between two replicas of a disaggregated model. Each replica consists of dedicated prefill and decode workers, providing high availability and load distribution.
 
+For more information about the core concepts, see:
+- [Dynamo Disaggregated Serving](../../docs/architecture/disagg_serving.md)
+- [KV Cache Routing Architecture](../../docs/architecture/kv_cache_routing.md)
+
 ## Architecture Overview
 
 The multi-node setup consists of:
@@ -16,19 +20,19 @@ title: Multi-Node Architecture with Full KV Routing (SGLang)
 flowchart TD
     Client["Users/Clients<br/>(HTTP)"] --> Frontend["Frontend<br/>KV-Aware Router<br/>(Any Node)"]
 
-    Frontend --> Router{KV Routing<br/>Decision<br/>(All Workers)}
+    Frontend --> Router{KV Routing<br/>Decision}
 
-    Router -->|KV-aware route| Decode1["Decode Worker 1<br/>(Node 1)<br/>✓ Emits KV Events"]
-    Router -->|KV-aware route| Decode2["Decode Worker 2<br/>(Node 2)<br/>✓ Emits KV Events"]
-
-    Router -->|KV-aware route| Prefill1["Prefill Worker 1<br/>(Node 1)<br/>✓ Emits KV Events"]
-    Router -->|KV-aware route| Prefill2["Prefill Worker 2<br/>(Node 2)<br/>✓ Emits KV Events"]
+    Router --> Prefill1["Prefill Worker 1"]
+    Router --> Prefill2["Prefill Worker 2"]
 
     Prefill1 -->|NIXL Transfer| Decode1
     Prefill2 -->|NIXL Transfer| Decode2
 
-    Decode1 --> Frontend
-    Decode2 --> Frontend
+    Prefill1 -.->|KV Events| Frontend
+    Prefill2 -.->|KV Events| Frontend
+
+    Decode1 --> |Response| Frontend
+    Decode2 --> |Response| Frontend
 
     Frontend --> Client
 
@@ -42,11 +46,6 @@ flowchart TD
         Prefill2
     end
 
-    etcd["etcd<br/>Service Discovery"] -.-> Frontend
-    etcd -.-> Decode1
-    etcd -.-> Decode2
-    etcd -.-> Prefill1
-    etcd -.-> Prefill2
 ```
 
 ## What is KV-Aware Routing?
@@ -80,12 +79,16 @@ Note the IP address of this node - you'll need it for worker configuration.
 
 ### 2. Software Requirements
 
-Install SGLang and dependencies:
+Install [SGLang](https://docs.sglang.ai/) and dependencies:
 
 ```bash
 pip install sglang[all]
 # or follow SGLang installation guide for latest version
 ```
+
+For more information about the SGLang backend and its integration with Dynamo, see the [SGLang Backend Documentation](../../components/backends/sglang/README.md).
+
+**Note**: This example assumes you have Dynamo installed in your Python environment. If not, ensure you're in the Dynamo development environment or have installed it according to the main project documentation.
 
 ### 3. Network Requirements
 
@@ -110,6 +113,7 @@ On all nodes, set the etcd and NATS endpoints:
 
 ```bash
 # Replace with your infrastructure node's IP
+# To find your IP address, use: hostname -I | awk '{print $1}'
 export ETCD_ENDPOINTS=http://<INFRA_NODE_IP>:2379
 export NATS_SERVER=nats://<INFRA_NODE_IP>:4222
 export DYN_LOG=debug  # Enable debug logging to see routing decisions
@@ -187,11 +191,13 @@ The frontend will:
 - Enable KV-aware routing for intelligent request distribution
 - Monitor worker health and adjust routing accordingly
 
+For more details about frontend configuration options, see the [Frontend Component Documentation](../../components/frontend/README).
+
 ## Testing the Setup
 
 ### Prerequisites
 
-Install the OpenAI Python client library:
+Install the [OpenAI Python client](https://github.com/openai/openai-python) library:
 
 ```bash
 pip install openai
@@ -335,7 +341,7 @@ python -m dynamo.frontend \
 
 However, for maximum performance with shared prefixes and multi-turn conversations, KV routing provides significant advantages by minimizing redundant computation.
 
-
+For detailed router configuration and tuning options, see the [KV Router Documentation](../../docs/components/router/README.md).
 
 ## Monitoring and Debugging
 
@@ -403,8 +409,8 @@ For production deployments, you can fine-tune KV routing behavior:
 python -m dynamo.frontend \
     --http-port 8000 \
     --router-mode kv \
-    --kv-overlap-weight 1.0  # Weight for cache overlap scoring \
-    --kv-temperature 0.0     # Temperature for probabilistic routing (0 = deterministic)
+    --kv-overlap-score-weight 1.0  # Weight for cache overlap scoring \
+    --router-temperature 0.0     # Temperature for probabilistic routing (0 = deterministic)
 ```
 
 For more advanced configuration options including custom worker selection, block size tuning, and alternative indexing strategies, see the [KV Cache Routing documentation](../../docs/architecture/kv_cache_routing.md).
