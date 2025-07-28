@@ -27,11 +27,7 @@ Dynamo supports multiple inference engines (with a focus on SGLang, vLLM, and Te
 - **[SGLang](backends/sglang/README.md)** - Structured generation language framework with ZMQ-based communication
 - **[TensorRT-LLM](backends/trtllm/README.md)** - NVIDIA's optimized LLM inference engine with TensorRT acceleration
 
-Each engine provides launch scripts for different deployment patterns in their respective `/launch` & `/deploy` directories:
-- Aggregated serving
-- Aggregated serving with KV routing
-- Disaggregated serving
-- Disaggregated serving with KV routing
+Each engine provides launch scripts for different deployment patterns in their respective `/launch` & `/deploy` directories.
 
 ## Core Components
 
