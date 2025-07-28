@@ -13,9 +13,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
 import os
 
 from dynamo.planner.kube import get_current_k8s_namespace
+from dynamo.runtime.logging import configure_dynamo_logging
+
+configure_dynamo_logging()
+logger = logging.getLogger(__name__)
 
 
 # Source of truth for planner defaults
@@ -48,10 +53,11 @@ def _get_default_prometheus_endpoint(port: str, namespace: str):
         prometheus_service = f"{namespace}-prometheus"
         return f"http://{prometheus_service}.{k8s_namespace}.svc.cluster.local:{port}"
     else:
-        raise RuntimeError(
+        logger.warning(
             f"Cannot determine Prometheus endpoint. Running in namespace '{k8s_namespace}'. "
             "Ensure the planner is deployed in a Kubernetes cluster with proper namespace configuration."
         )
+        return f"{namespace}-prometheus"
 
 
 class SLAPlannerDefaults(BasePlannerDefaults):
