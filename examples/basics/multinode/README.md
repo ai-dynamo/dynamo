@@ -126,16 +126,15 @@ Open a terminal on Node 1 and launch both workers:
 ```bash
 # Launch prefill worker in background
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang.worker \
-    --model-path Qwen/Qwen3-0.6B \
-    --served-model-name Qwen/Qwen3-0.6B \
-    --page-size 16 \
-    --tp 1 \
-    --trust-remote-code \
-    --skip-tokenizer-init \
-    --disaggregation-mode prefill \
-    --disaggregation-transfer-backend nixl &
+    --model-path Qwen/Qwen3-0.6B \           # Model to load from HuggingFace
+    --served-model-name Qwen/Qwen3-0.6B \    # Name clients will use in API calls
+    --page-size 16 \                         # KV cache block size (tokens per block)
+    --tp 1 \                                 # Tensor parallelism
+    --trust-remote-code \                    # Allow custom model code execution
+    --skip-tokenizer-init \                  # Skip tokenizer loading (handled by frontend)
+    --disaggregation-mode prefill \          # Run as prefill-only worker
+    --disaggregation-transfer-backend nixl & # Use NIXL for GPU-to-GPU transfers
 
-# Launch decode worker in foreground
 CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang.decode_worker \
     --model-path Qwen/Qwen3-0.6B \
     --served-model-name Qwen/Qwen3-0.6B \
@@ -143,9 +142,16 @@ CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang.decode_worker \
     --tp 1 \
     --trust-remote-code \
     --skip-tokenizer-init \
-    --disaggregation-mode decode \
+    --disaggregation-mode decode \           # Run as decode-only worker
     --disaggregation-transfer-backend nixl
 ```
+
+> [!INFO]
+> - `CUDA_VISIBLE_DEVICES`: Controls which GPU each worker uses (0 and 1 for different > GPUs)
+> - `--page-size 16`: Sets the KV cache block size - must be identical across all workers
+> - `--disaggregation-mode`: Separates prefill (prompt processing) from decode (token > generation)
+> - `--disaggregation-transfer-backend nixl`: Enables high-speed GPU-to-GPU transfers
+> - `--skip-tokenizer-init`: Avoids duplicate tokenizer loading since the frontend > handles tokenization
 
 ### Step 3: Launch Replica 2 (Node 2)
 
