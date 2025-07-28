@@ -3,8 +3,8 @@
 This example demonstrates running Dynamo across multiple nodes with **KV-aware routing** to distribute requests between two replicas of a disaggregated model. Each replica consists of dedicated prefill and decode workers, providing high availability and load distribution.
 
 For more information about the core concepts, see:
-- [Dynamo Disaggregated Serving](../../docs/architecture/disagg_serving.md)
-- [KV Cache Routing Architecture](../../docs/architecture/kv_cache_routing.md)
+- [Dynamo Disaggregated Serving](../../../docs/architecture/disagg_serving.md)
+- [KV Cache Routing Architecture](../../../docs/architecture/kv_cache_routing.md)
 
 ## Architecture Overview
 
@@ -197,7 +197,7 @@ The frontend will:
 - Enable KV-aware routing for intelligent request distribution
 - Monitor worker health and adjust routing accordingly
 
-For more details about frontend configuration options, see the [Frontend Component Documentation](../../components/frontend/README).
+For more details about frontend configuration options, see the [Frontend Component Documentation](../../../components/frontend/README).
 
 ## Testing the Setup
 
@@ -347,7 +347,7 @@ python -m dynamo.frontend \
 
 However, for maximum performance with shared prefixes and multi-turn conversations, KV routing provides significant advantages by minimizing redundant computation.
 
-For detailed router configuration and tuning options, see the [KV Router Documentation](../../docs/components/router/README.md).
+For detailed router configuration and tuning options, see the [KV Router Documentation](../../../docs/components/router/README.md).
 
 ## Monitoring and Debugging
 
@@ -419,7 +419,7 @@ python -m dynamo.frontend \
     --router-temperature 0.0     # Temperature for probabilistic routing (0 = deterministic)
 ```
 
-For more advanced configuration options including custom worker selection, block size tuning, and alternative indexing strategies, see the [KV Cache Routing documentation](../../docs/architecture/kv_cache_routing.md).
+For more advanced configuration options including custom worker selection, block size tuning, and alternative indexing strategies, see the [KV Cache Routing documentation](../../../docs/architecture/kv_cache_routing.md).
 
 ## Cleanup
 
