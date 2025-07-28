@@ -458,9 +458,7 @@ COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 
 # Copies vllm, DeepEP, DeepGEMM, PPLX repos (all editable installs) and nvshmem binaries
-RUN if [ "$ARCH" = "arm64" ]; then \
-        COPY --from=base /opt/vllm /opt/vllm; \
-    fi
+COPY --from=base /opt/vllm /opt/vllm
 
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
