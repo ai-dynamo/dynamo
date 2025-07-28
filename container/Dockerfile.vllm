@@ -483,14 +483,9 @@ $LD_LIBRARY_PATH
 COPY --from=ci_minimum /workspace/target/release/metrics /usr/local/bin/metrics
 COPY --from=ci_minimum ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
-# Once UX refactor is merged
-# Python components will have been pip installed and packaged in wheel
-# Can remove these files
-COPY components/ /workspace/components/
-COPY tests/ /workspace/tests/
-COPY examples/ /workspace/examples/
-COPY deploy/ /workspace/deploy/
-COPY benchmarks/ /workspace/benchmarks/
+# Keep everything from ci_minimum for mypy and other pre-merge tests
+# TODO: Remove this once we have a functional CI image built on top of the runtime image
+COPY --from=ci_minimum /workspace/ /workspace/
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
