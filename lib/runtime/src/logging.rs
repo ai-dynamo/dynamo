@@ -632,7 +632,13 @@ where
                 }
             }
         } else {
-            let reserved_fields = ["trace_id", "span_id", "parent_id", "span_name", "tracestate"];
+            let reserved_fields = [
+                "trace_id",
+                "span_id",
+                "parent_id",
+                "span_name",
+                "tracestate",
+            ];
             for reserved_field in reserved_fields {
                 visitor.fields.remove(reserved_field);
             }
@@ -714,6 +720,7 @@ pub mod tests {
     use std::fs::File;
     use std::io::{BufRead, BufReader};
     use stdio_override::*;
+    use tempfile::NamedTempFile;
 
     static LOG_LINE_SCHEMA: &str = r#"
     {
@@ -820,7 +827,8 @@ pub mod tests {
         let _ = temp_env::async_with_vars(
             [("DYN_LOGGING_JSONL", Some("1"))],
             (async || {
-                let file_name = "./test_capture_log.txt";
+                let tmp_file = NamedTempFile::new().unwrap();
+                let file_name = tmp_file.path().to_str().unwrap();
                 let guard = StderrOverride::from_file(file_name)?;
                 init();
                 parent().await;
