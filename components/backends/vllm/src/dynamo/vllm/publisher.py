@@ -25,6 +25,7 @@ class NullStatLogger(StatLoggerBase):
         self,
         scheduler_stats: Optional[SchedulerStats],
         iteration_stats: Optional[IterationStats],
+        engine_idx: int = 0,
     ):
         pass
 
@@ -51,7 +52,10 @@ class DynamoStatLoggerPublisher(StatLoggerBase):
         self.request_total_slots = request_total_slots
 
     def record(
-        self, scheduler_stats: SchedulerStats, iteration_stats: Optional[IterationStats]
+        self,
+        scheduler_stats: SchedulerStats,
+        iteration_stats: Optional[IterationStats],
+        engine_idx: int = 0,
     ):
         # request_total_slots and kv_total_blocks are properties of model + gpu
         # we should only publish them once, not every metric update

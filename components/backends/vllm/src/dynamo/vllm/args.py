@@ -207,7 +207,11 @@ def overwrite_args(config):
 
     defaults = {
         "task": "generate",
-        "skip_tokenizer_init": True,
+        # As of vLLM >=0.10.0 the engine unconditionally calls
+        # `sampling_params.update_from_tokenizer(...)`, so we can no longer
+        # skip tokenizer initialisation.  Setting this to **False** avoids
+        # a NoneType error when the processor accesses the tokenizer.
+        "skip_tokenizer_init": False,
         "disable_log_requests": True,
         # KV routing relies on logging KV metrics
         "disable_log_stats": False,

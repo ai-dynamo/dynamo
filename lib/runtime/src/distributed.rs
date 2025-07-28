@@ -24,6 +24,7 @@ use crate::{
 };
 
 use super::{error, Arc, DistributedRuntime, OnceCell, Result, Runtime, SystemHealth, Weak, OK};
+use std::sync::OnceLock;
 
 use derive_getters::Dissolve;
 use figment::error;
@@ -97,6 +98,7 @@ impl DistributedRuntime {
             etcd_client,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
+            http_server: Arc::new(OnceLock::new()),
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
@@ -121,8 +123,18 @@ impl DistributedRuntime {
             )
             .await
             {
-                Ok((addr, _)) => {
+                Ok((addr, handle)) => {
                     tracing::info!("HTTP server started successfully on {}", addr);
+
+                    // Store HTTP server information
+                    let http_server_info =
+                        crate::http_server::HttpServerInfo::new(addr, Some(handle));
+
+                    // Initialize the http_server field
+                    distributed_runtime
+                        .http_server
+                        .set(Arc::new(http_server_info))
+                        .expect("HTTP server info should only be set once");
                 }
                 Err(e) => {
                     tracing::error!("HTTP server startup failed: {}", e);
@@ -208,6 +220,11 @@ impl DistributedRuntime {
 
     pub fn nats_client(&self) -> nats::Client {
         self.nats_client.clone()
+    }
+
+    /// Get HTTP server information if available
+    pub fn http_server_info(&self) -> Option<Arc<crate::http_server::HttpServerInfo>> {
+        self.http_server.get().cloned()
     }
 
     // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers
