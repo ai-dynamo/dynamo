@@ -46,7 +46,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature            | vLLM | Notes                                                                 |
 |--------------------|------|-----------------------------------------------------------------------|
-| **WideEP**         | ✅   | Support for PPLX / DeepEP                                           |
+| **WideEP**         | ✅   | Support for PPLX / DeepEP not verified                                           |
 | **DP Rank Routing**| ✅   | Supported via external control of DP ranks |
 | **GB200 Support**  | 🚧   | Container functional on main |
 
