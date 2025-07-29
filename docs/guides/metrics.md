@@ -41,7 +41,7 @@ This hierarchical structure allows you to create metrics at the appropriate leve
 - `dynamo_response_bytes_total`: Total number of bytes sent in responses by work handler (counter)
 - `dynamo_system_uptime_seconds`: Total uptime of the DistributedRuntime in seconds (gauge)
 
-These metrics provide comprehensive observability into backend worker performance, request processing, and system health.
+These metrics include labels for `namespace`, `component`, and `endpoint` to provide detailed observability into backend worker performance, request processing, and system health. Example label values include `namespace="dynamo"`, `component="backend"`, and `endpoint="generate"`.
 
 **Frontend Metrics**: Frontend labels and metrics are implemented separately from the core Dynamo metrics system. When using Dynamo HTTP Frontend (available with `--framework VLLM` or `--framework TENSORRTLLM`), the following metrics are automatically exposed:
 
@@ -53,7 +53,7 @@ These metrics provide comprehensive observability into backend worker performanc
 - `nv_llm_http_service_requests_total`: Total number of LLM requests processed (counter)
 - `nv_llm_http_service_time_to_first_token_seconds`: Time to first token in seconds (histogram)
 
-These metrics include labels such as `model`, `endpoint`, `request_type`, and `status` to provide detailed observability into the HTTP frontend performance.
+These metrics include labels for `model` to provide detailed observability into the HTTP frontend performance. Some metrics also include additional labels such as `endpoint`, `request_type`, and `status`. Histogram metrics also include `le` (less than or equal) labels for bucket boundaries. Example label values include `model="qwen/qwen3-0.6b"`, `endpoint="chat_completions"`, `request_type="stream"`, and `status="success"`.
 
 ### Automatic Metrics
 
