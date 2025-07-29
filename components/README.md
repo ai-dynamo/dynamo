@@ -64,17 +64,8 @@ The planner component monitors system state and dynamically adjusts worker alloc
 
 - **Dynamic scaling** - Scales prefill/decode workers up and down based on metrics
 - **Multiple backends** - Supports local (circus-based) and Kubernetes scaling
-- **SLA-based planning** - Ensures performance targets are met
+- **SLA-based planning** - Ensures inference performance targets are met
 - **Load-based planning** - Optimizes resource utilization based on demand
-
-### [Metrics](metrics/)
-
-The metrics component collects, aggregates, and exposes system metrics:
-
-- **Prometheus-compatible endpoint** - Exposes metrics in standard Prometheus format
-- **Real-time monitoring** - Collects statistics from workers and components
-- **Visualization support** - Integrates with Grafana for dashboard creation
-- **Push/Pull modes** - Supports both push and pull-based metric collection
 
 ## Getting Started
 
