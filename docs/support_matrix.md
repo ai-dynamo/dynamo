@@ -73,6 +73,16 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 > [!Important]
 > ² Specific versions of TensorRT-LLM supported by Dynamo are subject to change.
 
+## Cloud Service Provider Compatibility
+
+### AWS
+
+| **Host Operating System** | **Version** | **Architecture** | **Status**   |
+| :------------------------ | :---------- | :--------------- | :----------- |
+| **Amazon Linux**          | 2023        | x86_64           | Supported    |
+
+
+
 ## Build Support
 
 **Dynamo** currently provides build support in the following ways:
