@@ -258,7 +258,7 @@ COPY --from=base --chown=$USERNAME:$USERNAME /usr/local/bin /usr/local/bin
 
 USER $USERNAME
 ENV HOME=/home/$USERNAME
-ENV PYTHONPATH=/workspace/dynamo/deploy/sdk/src:/workspace/dynamo/components/planner/src:/workspace/examples/sglang:$PYTHONPATH
+ENV PYTHONPATH=/workspace/dynamo/components/planner/src:/workspace/examples/sglang:$PYTHONPATH
 WORKDIR $HOME
 
 # https://code.visualstudio.com/remote/advancedcontainers/persist-bash-history
@@ -324,7 +324,6 @@ COPY rust-toolchain.toml /workspace/
 COPY lib/ /workspace/lib/
 COPY components /workspace/components
 COPY launch /workspace/launch
-COPY deploy/sdk /workspace/deploy/sdk
 
 RUN cargo build \
 	--release \
@@ -375,7 +374,7 @@ RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/la
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
-ENV PYTHONPATH=/workspace/dynamo/deploy/sdk/src:/workspace/dynamo/components/planner/src:/workspace/examples/sglang/utils:$PYTHONPATH
+ENV PYTHONPATH=/workspace/dynamo/components/planner/src:/workspace/examples/sglang/utils:$PYTHONPATH
 
 ########################################
 ########## Development Image ###########

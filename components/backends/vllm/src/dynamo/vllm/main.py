@@ -148,6 +148,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             config.model,
             config.served_model_name,
             kv_cache_block_size=config.engine_args.block_size,
+            migration_limit=config.migration_limit,
         )
 
     factory = StatLoggerFactory(component, config.engine_args.data_parallel_rank or 0)

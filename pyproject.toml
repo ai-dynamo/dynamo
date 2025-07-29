@@ -90,7 +90,6 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = [
-    "deploy/sdk/src/dynamo",
     "components/frontend/src/dynamo",
     "components/planner/src/dynamo",
     "components/backends/llama_cpp/src/dynamo",

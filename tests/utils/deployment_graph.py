@@ -13,24 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional
-
-
-@dataclass
-class DeploymentGraph:
-    """
-    Represents a deployment graph configuration for testing.
-    """
-
-    module: str
-    config: str
-    directory: str
-    endpoints: List[str]
-    response_handlers: List[Callable[[Any], str]]
-    timeout: int = 900
-    delayed_start: int = 0
-    marks: Optional[List[Any]] = field(default_factory=list)
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
 
 
 @dataclass

@@ -52,10 +52,6 @@ export CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 cargo build --locked --profile dev --features mistralrs
 cargo doc --no-deps
 
-# create symlinks for the binaries in the deploy directory
-mkdir -p $HOME/dynamo/deploy/sdk/src/dynamo/sdk/cli/bin
-ln -sf $HOME/dynamo/.build/target/debug/dynamo-run $HOME/dynamo/deploy/sdk/src/dynamo/sdk/cli/bin/dynamo-run
-
 # install the python bindings
 cd $HOME/dynamo/lib/bindings/python && retry maturin develop
 
