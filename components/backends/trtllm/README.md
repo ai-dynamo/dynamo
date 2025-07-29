@@ -36,7 +36,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 ## Table of Contents
 - [Feature Support Matrix](#feature-support-matrix)
 - [Quick Start](#quick-start)
-- [Single Node Examples](#single-node-deployments)
+- [Single Node Examples](#single-node-examples)
 - [Advanced Examples](#advanced-examples)
 - [Disaggregation Strategy](#disaggregation-strategy)
 - [KV Cache Transfer](#kv-cache-transfer-in-disaggregated-serving)
