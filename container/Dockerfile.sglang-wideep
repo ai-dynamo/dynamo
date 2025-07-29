@@ -161,4 +161,7 @@ ENV PATH=/sgl-workspace/perf_analyzer/build/perf_analyzer/src/perf-analyzer-buil
 
 RUN pip install --break-system-packages genai-perf
 
+# https://pypi.org/project/sglang-router/0.1.5 is latest
+RUN pip install sglang-router==0.1.5
+
 WORKDIR /sgl-workspace/dynamo/components/backends/sglang
