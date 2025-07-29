@@ -201,7 +201,7 @@ sudo apt-get -y install libopenmpi-dev
 > [!Tip]
 > You can learn more about these prequisites and known issues with TensorRT-LLM pip based installation [here](https://nvidia.github.io/TensorRT-LLM/installation/linux.html).
 
-### Now install Dynamo
+### After installing the pre-requisites above, install Dynamo
 ```
 uv pip install --upgrade pip setuptools && uv pip install ai-dynamo[trtllm]
 ```
