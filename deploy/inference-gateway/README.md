@@ -32,6 +32,7 @@ Script:
 ```
 
 Manual steps:
+
 a. Deploy the Gateway API CRDs:
 ```bash
 GATEWAY_API_VERSION=v1.3.0
@@ -77,7 +78,7 @@ Deploy the Inference Gateway resources to your Kubernetes cluster:
 
 ```bash
 cd deploy/inference-gateway
-helm install dynamo-gaie ./helm/dynamo-gaie -n my-model
+helm install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml
 ```
 
 Key configurations include:
