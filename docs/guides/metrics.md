@@ -15,175 +15,236 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Dynamo MetricsRegistry Guide
-
-This guide covers the MetricsRegistry in Dynamo, which provides hierarchical Prometheus metrics with automatic labeling and namespace organization. The MetricsRegistry enables observability across distributed inference workloads.
-
-**MetricsRegistry is a common universal Dynamo built-in** that provides standardized observability capabilities across all Dynamo components and services. It's automatically available whenever you use the DistributedRuntime framework.
+# Dynamo `MetricsRegistry`
 
 ## Overview
 
-Dynamo's MetricsRegistry is built around a hierarchical registry framework that automatically organizes metrics by namespace, component, and endpoint. This provides structured observability across the distributed runtime system.
+Dynamo provides built-in metrics capabilities through the `MetricsRegistry` trait, which is automatically available whenever you use the `DistributedRuntime` framework. This guide explains how to use metrics for observability and monitoring across all Dynamo components and services.
 
-**MetricsRegistry is a trait** that is implemented by the core distributed runtime components:
-- **DistributedRuntime**: Root level metrics registry
-- **Namespace**: Namespace-level metrics registry
-- **Component**: Component-level metrics registry
-- **Endpoint**: Endpoint-level metrics registry
+The `MetricsRegistry` trait is implemented by `DistributedRuntime`, `Namespace`, `Component`, and `Endpoint`, providing a hierarchical approach to metric collection that matches Dynamo's distributed architecture:
 
-Each level in the hierarchy implements the MetricsRegistry trait, allowing you to create and manage metrics at the appropriate level while maintaining automatic namespace prefixing and labeling.
+- `DistributedRuntime`: Global metrics across the entire runtime
+- `Namespace`: Metrics scoped to a specific namespace
+- `Component`: Metrics for a specific component within a namespace
+- `Endpoint`: Metrics for individual endpoints within a component
 
-## Transitioning from Raw Prometheus
+This hierarchical structure allows you to create metrics at the appropriate level of granularity for your monitoring needs.
 
-One of the key benefits of Dynamo's MetricsRegistry is how easy it is to transition from raw Prometheus metrics to the distributed runtime's Prometheus constructors. The transition is seamless and requires minimal code changes.
+### Automatic Metrics
 
-### Before: Raw Prometheus
+When you enable the metrics HTTP endpoint with `DYN_SYSTEM_ENABLED=true`, Dynamo automatically adds:
 
-```rust
-use prometheus::{Counter, Opts};
+- `dynamo_system_uptime_seconds`: System uptime counter
+- HTTP server metrics for the metrics endpoint itself
 
-let opts = Opts::new("my_counter", "A simple counter");
-let counter = Counter::with_opts(opts).unwrap();  // Prometheus counter
-```
+## Environment Configuration
 
-### After: Dynamo MetricsRegistry
-
-```rust
-use dynamo_runtime::MetricsRegistry;
-
-let counter = endpoint.create_intcounter("my_counter", "A simple counter", &[])?;  // Prometheus counter
-```
-
-**All the rest of your code can remain the same!** The counter still has the same API for incrementing, but now it's automatically:
-
-- Exposed on the HTTP metrics endpoint
-- Prefixed with the namespace (`dynamo_`)
-- Labeled with namespace, component, and endpoint information
-- Integrated into the distributed runtime's metrics collection
-
-### Enabling the HTTP Metrics Endpoint
-
-To expose your metrics via HTTP, simply enable the system endpoint with environment variables:
+Enable the metrics HTTP endpoint:
 
 ```bash
-$ DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 python -m dynamo.vllm ... ... &
+export DYN_SYSTEM_ENABLED=true
+export DYN_SYSTEM_PORT=8081  # Use 0 for random port assignment
 ```
 
-Then access your metrics:
+The `DYN_SYSTEM_PORT=0` assigns a random port, which is useful for integration testing to avoid port conflicts.
 
-```bash
-$ curl http://localhost:8081/metrics
-# HELP dynamo_my_counter A simple counter
-# TYPE dynamo_my_counter counter
-dynamo_my_counter{component="example_component",endpoint="example_endpoint",namespace="dynamo"} 123
-```
+## Creating Metrics at Different Hierarchy Levels
 
-The metrics endpoint port can be configured using the `DYN_SYSTEM_PORT` environment variable. If set to 0, the system will assign a random available port, which is useful for integration testing to avoid port conflicts.
-
-## Architecture
-
-### Hierarchical Metrics Registry
-
-The MetricsRegistry follows a hierarchical structure:
-
-```
-DistributedRuntime (DRT)
-├── Namespace1
-│   ├── Component1
-│   │   └── Endpoint1
-│   └── Component2
-│       └── Endpoint2
-└── Namespace2
-    └── Component3
-        └── Endpoint3
-        ...
-        └── EndpointN
-```
-
-### Automatic Labeling
-
-The MetricsRegistry automatically adds labels based on the hierarchy, such as namespace, component, and endpoint. In addition, the `dynamo_system_uptime_seconds` metric is also automatically added to track system uptime.
-
-## Code Examples
-
-### Creating Metrics at Different Hierarchy Levels
+### Runtime-Level Metrics
 
 ```rust
-use dynamo_runtime::{DistributedRuntime, Runtime, Result};
+use dynamo_runtime::DistributedRuntime;
 
-// Create a distributed runtime
-let rt = Runtime::from_current().unwrap();
-let drt = DistributedRuntime::from_settings(rt).await.unwrap();
+let runtime = DistributedRuntime::new()?;
+let namespace = runtime.namespace("my_namespace")?;
+let component = namespace.component("my_component")?;
+let endpoint = component.endpoint("my_endpoint")?;
 
-let namespace = drt.namespace("dynamo").unwrap();
-let component = namespace.component("auth_service").unwrap();
-let endpoint = component.endpoint("login");
-// Create two endpoint-level metrics:
-let login_attempts = endpoint.create_counter("login_attempts", "Login attempts", &[])?;
-let login_success_rate = endpoint.create_gauge("login_success_rate", "Login success rate", &[])?;
-```
-
-### Creating Vector Metrics with Dynamic Labels
-
-```rust
-// Create a CounterVec with dynamic labels
-let http_requests = component.create_countervec(
-    "http_requests_total",
-    "Total HTTP requests",
-    &["method", "status_code"],
+// Create endpoint-level counters (this is a Prometheus Counter type)
+let total_requests = endpoint.create_counter(
+    "total_requests",
+    "Total requests across all namespaces",
     &[]
 )?;
 
-// Use the vector with specific label values
-http_requests.with_label_values(&["GET", "200"]).inc();
-http_requests.with_label_values(&["POST", "404"]).inc();
+let active_connections = endpoint.create_gauge(
+    "active_connections",
+    "Number of active client connections",
+    &[]
+)?;
 ```
 
-### Creating Histograms
+### Namespace-Level Metrics
 
 ```rust
-// Create a histogram for request duration
-let request_duration = endpoint.create_histogram(
-    "request_duration_seconds",
-    "Request duration in seconds",
-    &[],
-    &[0.1, 0.5, 1.0, 2.0, 5.0]
+let namespace = runtime.namespace("my_model")?;
+
+// Namespace-scoped metrics
+let model_requests = namespace.create_counter(
+    "model_requests",
+    "Requests for this specific model",
+    &[]
 )?;
 
-// Record observations
-request_duration.observe(0.25);
+let model_latency = namespace.create_histogram(
+    "model_latency_seconds",
+    "Model inference latency",
+    &[],
+    &[0.001, 0.01, 0.1, 1.0, 10.0]
+)?;
 ```
 
-## Base Metrics
+### Component-Level Metrics
 
-Dynamo automatically provides base metrics for all endpoints:
+```rust
+let component = namespace.component("backend")?;
 
-- `dynamo_requests_total`: Total number of requests
-- `dynamo_request_duration_seconds`: Request duration histogram
-- `dynamo_errors_total`: Total number of errors by type
-- `dynamo_system_uptime_seconds`: System uptime
+// Component-specific metrics
+let backend_requests = component.create_counter(
+    "backend_requests",
+    "Requests handled by this backend component",
+    &[]
+)?;
 
-These base metrics are automatically created when using the Distributedruntime code that have request handlers. When an endpoint calls the request handler function, these metrics are automatically measured and updated. Additional base metrics are being added to the system to expand the default observability coverage.
+let gpu_memory_usage = component.create_gauge(
+    "gpu_memory_bytes",
+    "GPU memory usage in bytes",
+    &[]
+)?;
+```
+
+### Endpoint-Level Metrics
+
+```rust
+let endpoint = component.endpoint("generate")?;
+
+// Endpoint-specific metrics
+let generate_requests = endpoint.create_counter(
+    "generate_requests",
+    "Generate endpoint requests",
+    &[]
+)?;
+
+let generate_latency = endpoint.create_histogram(
+    "generate_latency_seconds",
+    "Generate endpoint latency",
+    &[],
+    &[0.001, 0.01, 0.1, 1.0, 10.0]
+)?;
+```
+
+## Creating Vector Metrics with Dynamic Labels
+
+Use vector metrics when you need to track metrics with different label values:
+
+```rust
+// Counter with labels
+let requests_by_model = endpoint.create_counter_vec(
+    "requests_by_model",
+    "Requests by model type",
+    &["model_type", "model_size"]
+)?;
+
+// Increment with specific labels
+requests_by_model.with_label_values(&["llama", "7b"]).inc();
+requests_by_model.with_label_values(&["gpt", "13b"]).inc();
+
+// Gauge with labels
+let memory_by_gpu = component.create_gauge_vec(
+    "gpu_memory_bytes",
+    "GPU memory usage by device",
+    &["gpu_id", "memory_type"]
+)?;
+
+memory_by_gpu.with_label_values(&["0", "allocated"]).set(8192.0);
+memory_by_gpu.with_label_values(&["0", "cached"]).set(4096.0);
+```
+
+## Creating Histograms
+
+Histograms are useful for measuring distributions of values like latency:
+
+```rust
+let latency_histogram = endpoint.create_histogram(
+    "request_latency_seconds",
+    "Request latency distribution",
+    &[],
+    &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0]
+)?;
+
+// Record latency values
+latency_histogram.observe(0.023); // 23ms
+latency_histogram.observe(0.156); // 156ms
+```
+
+## Transitioning from Plain Prometheus
+
+If you're currently using plain Prometheus metrics, transitioning to Dynamo's `MetricsRegistry` is straightforward:
+
+### Before (Plain Prometheus)
+
+```rust
+use prometheus::{Counter, Opts, Registry};
+
+// Create a registry to hold metrics
+let registry = Registry::new();
+let counter_opts = Opts::new("my_counter", "My custom counter");
+let counter = Counter::with_opts(counter_opts).unwrap();
+registry.register(Box::new(counter.clone())).unwrap();
+
+// Use the counter
+counter.inc();
+
+// To expose metrics, you'd need to set up an HTTP server manually
+// and implement the /metrics endpoint yourself
+```
+
+### After (Dynamo MetricsRegistry)
+
+```rust
+let counter = endpoint.create_counter(
+    "my_counter",
+    "My custom counter",
+    &[]
+)?;
+
+counter.inc();
+```
+
+**Note:** The metric is automatically registered when created via the endpoint's `create_counter` factory method.
+
+**Benefits of Dynamo's approach:**
+- **Automatic registration**: Metrics created via endpoint's `create_*` factory methods are automatically registered with the system
+- Automatic labeling with namespace, component, and endpoint information
+- Consistent metric naming with `dynamo_` prefix
+- Built-in HTTP metrics endpoint when enabled with `DYN_SYSTEM_ENABLED=true`
+- Hierarchical metric organization
 
 ## Prometheus Output Example
 
-```prometheus
-# HELP dynamo_requests_total Total requests
-# TYPE dynamo_requests_total counter
-dynamo_requests_total{component="backend",endpoint="generate",namespace="dynamo"} 1000
+To enable metrics, launch your Dynamo service with the required environment variables:
 
-# HELP dynamo_request_duration_seconds Request duration
-# TYPE dynamo_request_duration_seconds histogram
-dynamo_request_duration_seconds_bucket{component="backend",endpoint="generate",namespace="dynamo",le="0.1"} 800
-dynamo_request_duration_seconds_bucket{component="backend",endpoint="generate",namespace="dynamo",le="0.5"} 950
-dynamo_request_duration_seconds_bucket{component="backend",endpoint="generate",namespace="dynamo",le="1.0"} 1000
+```bash
+# Launch dynamo.vllm with metrics enabled (example):
+DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model-path /path/to/model
+```
 
-# HELP dynamo_errors_total Total errors by type
-# TYPE dynamo_errors_total counter
-dynamo_errors_total{component="backend",endpoint="generate",error_type="generate",namespace="dynamo"} 2
+Then when you make the curl call to the metrics endpoint:
 
-# HTTP server uptime metric
-dynamo_system_server_uptime_seconds{namespace="dynamo"} 3600
+```bash
+curl http://localhost:8081/metrics
+```
+
+You'll see output like this:
+
+```
+# HELP dynamo_my_counter My custom counter
+# TYPE dynamo_my_counter counter
+dynamo_my_counter{namespace="dynamo",component="backend",endpoint="generate"} 42
+
+# HELP dynamo_system_uptime_seconds System uptime
+# TYPE dynamo_system_uptime_seconds counter
+dynamo_system_uptime_seconds{namespace="dynamo"} 42
 ```
 
 ## Monitoring and Visualization
@@ -252,7 +313,7 @@ println!("Metrics: {}", metrics);
 
 3. **Test metrics endpoint:**
    ```bash
-   curl http://localhost:8080/metrics
+   curl http://localhost:8081/metrics
    ```
 
 ## Advanced Features
@@ -283,6 +344,9 @@ let total_requests = namespace.create_counter(
 
 ## Related Documentation
 
-- [Distributed Runtime Guide](../distributed.md)
-- [HTTP Service Guide](../http.md)
-- [Component Architecture](../components.md)
+- [Distributed Runtime Architecture](../architecture/distributed_runtime.md)
+- [Dynamo Architecture Overview](../architecture/architecture.md)
+- [Dynamo Flow](../architecture/dynamo_flow.md)
+- [Backend Guide](backend.md)
+- [Dynamo Run Guide](dynamo_run.md)
+- [Performance Tuning Guides](kv_router_perf_tuning.md)
