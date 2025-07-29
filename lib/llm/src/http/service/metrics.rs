@@ -94,25 +94,24 @@ pub struct ResponseMetricCollector {
 
 impl Default for Metrics {
     fn default() -> Self {
-        // do not make this dynamic, because it'll be difficult to update on Grafana
-        Self::new("dynamo")
+        Self::new()
     }
 }
 
 impl Metrics {
-    /// Create Metrics with the given prefix
+    /// Create Metrics with hardcoded "dynamo" prefix
     /// The following metrics will be created:
-    /// - `{prefix}_http_service_requests_total` - IntCounterVec for the total number of requests processed
-    /// - `{prefix}_http_service_inflight_requests` - IntGaugeVec for the number of inflight requests
-    /// - `{prefix}_http_service_request_duration_seconds` - HistogramVec for the duration of requests
-    /// - `{prefix}_http_service_input_sequence_tokens` - HistogramVec for input sequence length in tokens
-    /// - `{prefix}_http_service_output_sequence_tokens` - HistogramVec for output sequence length in tokens
-    /// - `{prefix}_http_service_time_to_first_token_seconds` - HistogramVec for time to first token in seconds
-    /// - `{prefix}_http_service_inter_token_latency_seconds` - HistogramVec for inter-token latency in seconds
-    pub fn new(prefix: &str) -> Self {
+    /// - `dynamo_frontend_requests_total` - IntCounterVec for the total number of requests processed
+    /// - `dynamo_frontend_inflight_requests` - IntGaugeVec for the number of inflight requests
+    /// - `dynamo_frontend_request_duration_seconds` - HistogramVec for the duration of requests
+    /// - `dynamo_frontend_input_sequence_tokens` - HistogramVec for input sequence length in tokens
+    /// - `dynamo_frontend_output_sequence_tokens` - HistogramVec for output sequence length in tokens
+    /// - `dynamo_frontend_time_to_first_token_seconds` - HistogramVec for time to first token in seconds
+    /// - `dynamo_frontend_inter_token_latency_seconds` - HistogramVec for inter-token latency in seconds
+    pub fn new() -> Self {
         let request_counter = IntCounterVec::new(
             Opts::new(
-                format!("{}_http_service_requests_total", prefix),
+                "dynamo_frontend_requests_total",
                 "Total number of LLM requests processed",
             ),
             &["model", "endpoint", "request_type", "status"],
@@ -121,7 +120,7 @@ impl Metrics {
 
         let inflight_gauge = IntGaugeVec::new(
             Opts::new(
-                format!("{}_http_service_inflight_requests", prefix),
+                "dynamo_frontend_inflight_requests",
                 "Number of inflight requests",
             ),
             &["model"],
@@ -132,7 +131,7 @@ impl Metrics {
 
         let request_duration = HistogramVec::new(
             HistogramOpts::new(
-                format!("{}_http_service_request_duration_seconds", prefix),
+                "dynamo_frontend_request_duration_seconds",
                 "Duration of LLM requests",
             )
             .buckets(buckets),
@@ -142,7 +141,7 @@ impl Metrics {
 
         let input_sequence_length = HistogramVec::new(
             HistogramOpts::new(
-                format!("{}_http_service_input_sequence_tokens", prefix),
+                "dynamo_frontend_input_sequence_tokens",
                 "Input sequence length in tokens",
             )
             .buckets(vec![
@@ -155,7 +154,7 @@ impl Metrics {
 
         let output_sequence_length = HistogramVec::new(
             HistogramOpts::new(
-                format!("{}_http_service_output_sequence_tokens", prefix),
+                "dynamo_frontend_output_sequence_tokens",
                 "Output sequence length in tokens",
             )
             .buckets(vec![
@@ -167,7 +166,7 @@ impl Metrics {
 
         let time_to_first_token = HistogramVec::new(
             HistogramOpts::new(
-                format!("{}_http_service_time_to_first_token_seconds", prefix),
+                "dynamo_frontend_time_to_first_token_seconds",
                 "Time to first token in seconds",
             )
             .buckets(vec![
@@ -180,7 +179,7 @@ impl Metrics {
 
         let inter_token_latency = HistogramVec::new(
             HistogramOpts::new(
-                format!("{}_http_service_inter_token_latency_seconds", prefix),
+                "dynamo_frontend_inter_token_latency_seconds",
                 "Inter-token latency in seconds",
             )
             .buckets(vec![
