@@ -30,12 +30,11 @@ While theoretically each `DistributedRuntime` can have multiple `Namespace`s as 
 
 For example, a typical deployment configuration (like `components/backends/vllm/deploy/agg.yaml` or `components/backends/sglang/deploy/agg.yaml`) has multiple workers:
 
-- `Frontend`: Starts an HTTP server and handles incoming requests. The HTTP server routes all requests to the `Processor`.
-- `Processor`: When a new request arrives, `Processor` applies the chat template and performs the tokenization.
-Then, it route the request to the `Worker`.
-- `Worker` components: Perform the actual computation using their respective engines (vLLM, SGLang, TensorRT-LLM).
+- `Frontend`: Starts an HTTP server and handles incoming requests. The HTTP server routes all requests to the worker components.
+- `VllmDecodeWorker`: Performs the actual decode computation using the vLLM engine through the `DecodeWorkerHandler`.
+- `VllmPrefillWorker` (in disaggregated deployments): Performs prefill computation using the vLLM engine through the `PrefillWorkerHandler`.
 
-Since the workers are deployed in different processes, each of them has its own `DistributedRuntime`. Within their own `DistributedRuntime`, they all share the same `Namespace` (e.g., `vllm-v1-agg`, `sglang-agg`). Then, under their namespace, they have their own `Component`s: `Frontend` uses the `make_engine` function which handles HTTP serving and routing automatically, while worker components create components with names like `worker`, `decode`, or `prefill` and register endpoints like `generate`, `flush_cache`, or `clear_kv_blocks`. The `Frontend` component doesn't explicitly create endpoints - instead, the `make_engine` function handles the HTTP server and worker discovery. Worker components create their endpoints programmatically using the `component.endpoint()` method. Their `DistributedRuntime`s are initialized in their respective main functions, their `Namespace`s are configured in the deployment YAML, their `Component`s are created programmatically (e.g., `runtime.namespace("dynamo").component("worker")`), and their `Endpoint`s are created using the `component.endpoint()` method.
+Since the workers are deployed in different processes, each of them has its own `DistributedRuntime`. Within their own `DistributedRuntime`, they all share the same `Namespace` (e.g., `vllm-agg`, `vllm-disagg`, `sglang-agg`). Then, under their namespace, they have their own `Component`s: `Frontend` uses the `make_engine` function which handles HTTP serving and routing automatically, while worker components like `VllmDecodeWorker` and `VllmPrefillWorker` create components with names like `worker`, `decode`, or `prefill` and register endpoints like `generate` and `clear_kv_blocks`. The `Frontend` component doesn't explicitly create endpoints - instead, the `make_engine` function handles the HTTP server and worker discovery. Worker components create their endpoints programmatically using the `component.endpoint()` method and use their respective handler classes (`DecodeWorkerHandler` or `PrefillWorkerHandler`) to process requests. Their `DistributedRuntime`s are initialized in their respective main functions, their `Namespace`s are configured in the deployment YAML, their `Component`s are created programmatically (e.g., `runtime.namespace("vllm-agg").component("worker")`), and their `Endpoint`s are created using the `component.endpoint()` method.
 
 ## Initialization
 
@@ -56,7 +55,7 @@ The hierarchy and naming in etcd and NATS may change over time, and this documen
 - `Component`: When a `Component` object is created, similar to `Namespace`, it isn't be registered in etcd. When `create_service` is called, it creates a NATS service group using `{namespace_name}.{service_name}` and registers a service in the registry of the `Component`, where the registry is an internal data structure that tracks all services and endpoints within the `DistributedRuntime`.
 - `Endpoint`: When an Endpoint object is created and started, it performs two key registrations:
   - NATS Registration: The endpoint is registered with the NATS service group created during service creation. The endpoint is assigned a unique subject following the naming: `{namespace_name}.{service_name}.{endpoint_name}-{lease_id_hex}`.
-  - etcd Registration: The endpoint information is stored in etcd at a path following the naming: `/services/{namespace}/{component}/{endpoint}-{lease_id}`. Note that the endpoints of different workers of the same type (i.e., two `PrefillWorker`s in one deployment) share the same `Namespace`, `Componenet`, and `Endpoint` name. They are distinguished by their different primary `lease_id` of their `DistributedRuntime`.
+  - etcd Registration: The endpoint information is stored in etcd at a path following the naming: `/services/{namespace}/{component}/{endpoint}-{lease_id}`. Note that the endpoints of different workers of the same type (i.e., two `VllmPrefillWorker`s in one deployment) share the same `Namespace`, `Component`, and `Endpoint` name. They are distinguished by their different primary `lease_id` of their `DistributedRuntime`.
 
 ## Calling Endpoints
 
