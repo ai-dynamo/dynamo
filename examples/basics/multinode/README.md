@@ -102,6 +102,11 @@ This example assumes:
 - **Node 2**: At least 2 GPUs (for Replica 2's decode and prefill workers)
 - **Frontend Node**: Can be on Node 1, Node 2, or a separate node (no GPU required)
 
+> [!NOTE]
+> You can run this example with minimal modifications on a single node with at least 4 GPUs.
+> In step 3, modify the `CUDA_VISIBLE_DEVICES` flags to `CUDA_VISIBLE_DEVICES=2`
+> for the prefill component and `CUDA_VISIBLE_DEVICES=3` for the decode component.
+
 ## Setup Instructions
 
 ### Step 1: Set Environment Variables
