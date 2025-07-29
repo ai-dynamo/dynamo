@@ -81,11 +81,7 @@ This includes the specific commit [vllm-project/vllm#19790](https://github.com/v
 ## Run Single Node Examples
 
 > [!IMPORTANT]
-<<<<<<< HEAD
-> Below we provide simple shell scripts that run the components for each configuration. Each shell script runs `python3 dynamo.frontend` to start the ingress and uses `python3 dynamo.vllm` to start the vLLM workers. You can also run each command in separate terminals for better log visibility.
-=======
 > Below we provide simple shell scripts that run the components for each configuration. Each shell script runs `python3 -m dynamo.frontend` to start the ingress and uses `python3 -m dynamo.vllm` to start the vLLM workers. You can also run each command in separate terminals for better log visibility.
->>>>>>> origin/main
 
 This figure shows an overview of the major components to deploy:
 
