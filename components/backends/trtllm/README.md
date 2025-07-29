@@ -60,9 +60,9 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature            | TensorRT-LLM | Notes                                                                 |
 |--------------------|--------------|-----------------------------------------------------------------------|
-| **WideEP**         | 🚧           | Not supported                                                                 |
-| **DP Rank Routing**| 🚧           | Not supported                                                                 |
-| **GB200 Support**  | ✅           | Not supported |
+| **WideEP**         | ✅           |                                                                  |
+| **DP Rank Routing**| ✅           |                                                               |
+| **GB200 Support**  | ✅           | |
 
 ## Quick Start
 
@@ -103,7 +103,7 @@ apt-get update && apt-get -y install git git-lfs
 ## Single Node Examples
 
 > [!IMPORTANT]
-> Below we provide some simple shell scripts that run the components for each configuration. Each shell script is simply running the `dynamo-run` to start up the ingress and using `python3` to start up the workers. You can easily take each command and run them in separate terminals.
+> Below we provide some simple shell scripts that run the components for each configuration. Each shell script is simply running the `python3 -m dynamo.frontend <args>` to start up the ingress and using `python3 -m dynamo.trtllm <args>` to start up the workers. You can easily take each command and run them in separate terminals.
 
 This figure shows an overview of the major components to deploy:
 
