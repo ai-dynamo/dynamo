@@ -1,6 +1,6 @@
 # Quickstart
 
-This is a simple Dynamo example showing how you can quickly get started deploying Large Language Models with Dynamo.
+This is a simple example showing how you can quickly get started deploying Large Language Models with Dynamo.
 
 ## Prerequisites
 
@@ -51,17 +51,17 @@ Leave this terminal running - it will show vLLM Backend logs.
 
 **Open another terminal** and interact with the deployed engine using the built-in frontend component. You have two options:
 
-A) Interactive Command Line Interface
+1. Interactive Command Line Interface
 
-```bash
-python -m dynamo.frontend --interactive
-```
+  ```bash
+  python -m dynamo.frontend --interactive
+  ```
 
-B) HTTP Server
+2. HTTP Server
 
-```bash
-python -m dynamo.frontend --http-port 8000
-```
+  ```bash
+  python -m dynamo.frontend --http-port 8000
+  ```
 
 Leave this terminal running as well - it will show Frontend logs.
 
