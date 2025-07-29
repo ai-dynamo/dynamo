@@ -15,12 +15,12 @@
 apiVersion: inference.networking.x-k8s.io/v1alpha2
 kind: InferenceModel
 metadata:
-  name: deep-seek-model
-  namespace: default
+  name: qwen-model
+  namespace: my-model
 spec:
   criticality: Critical
-  modelName: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+  modelName: Qwen/Qwen3-0.6B
   poolRef:
     group: inference.networking.x-k8s.io
     kind: InferencePool
-    name: dynamo-deepseek
+    name: qwen-pool
