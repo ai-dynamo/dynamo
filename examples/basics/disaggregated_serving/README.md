@@ -20,6 +20,9 @@ This separation allows for:
 
 ## Prerequisites
 
+> [!NOTE]
+> This example requires having at least 2 GPUs -- one for Prefill and one for Decode
+
 Before running this example, ensure you have the following services running:
 
 - **etcd**: A distributed key-value store used for service discovery and metadata storage
