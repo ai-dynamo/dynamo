@@ -137,6 +137,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 config.model_path,
                 config.served_model_name,
                 kv_cache_block_size=config.kv_block_size,
+                migration_limit=config.migration_limit,
             )
 
         # publisher will be set later if publishing is enabled.
