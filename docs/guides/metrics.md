@@ -30,6 +30,31 @@ The `MetricsRegistry` trait is implemented by `DistributedRuntime`, `Namespace`,
 
 This hierarchical structure allows you to create metrics at the appropriate level of granularity for your monitoring needs.
 
+**Worker Metrics**: Backend metrics automatically include labels for `namespace`, `component`, and `endpoint` based on the hierarchy level where they're created. Additional custom labels can be added at the implementor's discretion and will appear in the Prometheus output alongside the automatic labels.
+
+**Worker Metrics**: The core Dynamo backend system automatically exposes the following worker metrics with automatic `namespace`, `component`, and `endpoint` labeling:
+
+- `dynamo_concurrent_requests`: Number of requests currently being processed by work handler (gauge)
+- `dynamo_request_bytes_total`: Total number of bytes received in requests by work handler (counter)
+- `dynamo_request_duration_seconds`: Time spent processing requests by work handler (histogram)
+- `dynamo_requests_total`: Total number of requests processed by work handler (counter)
+- `dynamo_response_bytes_total`: Total number of bytes sent in responses by work handler (counter)
+- `dynamo_system_uptime_seconds`: Total uptime of the DistributedRuntime in seconds (gauge)
+
+These metrics provide comprehensive observability into backend worker performance, request processing, and system health.
+
+**Frontend Metrics**: Frontend labels and metrics are implemented separately from the core Dynamo metrics system. When using Dynamo HTTP Frontend (available with `--framework VLLM` or `--framework TENSORRTLLM`), the following metrics are automatically exposed:
+
+- `nv_llm_http_service_inflight_requests`: Number of inflight requests (gauge)
+- `nv_llm_http_service_input_sequence_tokens`: Input sequence length in tokens (histogram)
+- `nv_llm_http_service_inter_token_latency_seconds`: Inter-token latency in seconds (histogram)
+- `nv_llm_http_service_output_sequence_tokens`: Output sequence length in tokens (histogram)
+- `nv_llm_http_service_request_duration_seconds`: Duration of LLM requests (histogram)
+- `nv_llm_http_service_requests_total`: Total number of LLM requests processed (counter)
+- `nv_llm_http_service_time_to_first_token_seconds`: Time to first token in seconds (histogram)
+
+These metrics include labels such as `model`, `endpoint`, `request_type`, and `status` to provide detailed observability into the HTTP frontend performance.
+
 ### Automatic Metrics
 
 When you enable the metrics HTTP endpoint with `DYN_SYSTEM_ENABLED=true`, Dynamo automatically adds:
@@ -48,177 +73,9 @@ export DYN_SYSTEM_PORT=8081  # Use 0 for random port assignment
 
 The `DYN_SYSTEM_PORT=0` assigns a random port, which is useful for integration testing to avoid port conflicts.
 
-## Creating Metrics at Different Hierarchy Levels
+## Implementation Examples
 
-### Runtime-Level Metrics
-
-```rust
-use dynamo_runtime::DistributedRuntime;
-
-let runtime = DistributedRuntime::new()?;
-let namespace = runtime.namespace("my_namespace")?;
-let component = namespace.component("my_component")?;
-let endpoint = component.endpoint("my_endpoint")?;
-
-// Create endpoint-level counters (this is a Prometheus Counter type)
-let total_requests = endpoint.create_counter(
-    "total_requests",
-    "Total requests across all namespaces",
-    &[]
-)?;
-
-let active_connections = endpoint.create_gauge(
-    "active_connections",
-    "Number of active client connections",
-    &[]
-)?;
-```
-
-### Namespace-Level Metrics
-
-```rust
-let namespace = runtime.namespace("my_model")?;
-
-// Namespace-scoped metrics
-let model_requests = namespace.create_counter(
-    "model_requests",
-    "Requests for this specific model",
-    &[]
-)?;
-
-let model_latency = namespace.create_histogram(
-    "model_latency_seconds",
-    "Model inference latency",
-    &[],
-    &[0.001, 0.01, 0.1, 1.0, 10.0]
-)?;
-```
-
-### Component-Level Metrics
-
-```rust
-let component = namespace.component("backend")?;
-
-// Component-specific metrics
-let backend_requests = component.create_counter(
-    "backend_requests",
-    "Requests handled by this backend component",
-    &[]
-)?;
-
-let gpu_memory_usage = component.create_gauge(
-    "gpu_memory_bytes",
-    "GPU memory usage in bytes",
-    &[]
-)?;
-```
-
-### Endpoint-Level Metrics
-
-```rust
-let endpoint = component.endpoint("generate")?;
-
-// Endpoint-specific metrics
-let generate_requests = endpoint.create_counter(
-    "generate_requests",
-    "Generate endpoint requests",
-    &[]
-)?;
-
-let generate_latency = endpoint.create_histogram(
-    "generate_latency_seconds",
-    "Generate endpoint latency",
-    &[],
-    &[0.001, 0.01, 0.1, 1.0, 10.0]
-)?;
-```
-
-## Creating Vector Metrics with Dynamic Labels
-
-Use vector metrics when you need to track metrics with different label values:
-
-```rust
-// Counter with labels
-let requests_by_model = endpoint.create_counter_vec(
-    "requests_by_model",
-    "Requests by model type",
-    &["model_type", "model_size"]
-)?;
-
-// Increment with specific labels
-requests_by_model.with_label_values(&["llama", "7b"]).inc();
-requests_by_model.with_label_values(&["gpt", "13b"]).inc();
-
-// Gauge with labels
-let memory_by_gpu = component.create_gauge_vec(
-    "gpu_memory_bytes",
-    "GPU memory usage by device",
-    &["gpu_id", "memory_type"]
-)?;
-
-memory_by_gpu.with_label_values(&["0", "allocated"]).set(8192.0);
-memory_by_gpu.with_label_values(&["0", "cached"]).set(4096.0);
-```
-
-## Creating Histograms
-
-Histograms are useful for measuring distributions of values like latency:
-
-```rust
-let latency_histogram = endpoint.create_histogram(
-    "request_latency_seconds",
-    "Request latency distribution",
-    &[],
-    &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0]
-)?;
-
-// Record latency values
-latency_histogram.observe(0.023); // 23ms
-latency_histogram.observe(0.156); // 156ms
-```
-
-## Transitioning from Plain Prometheus
-
-If you're currently using plain Prometheus metrics, transitioning to Dynamo's `MetricsRegistry` is straightforward:
-
-### Before (Plain Prometheus)
-
-```rust
-use prometheus::{Counter, Opts, Registry};
-
-// Create a registry to hold metrics
-let registry = Registry::new();
-let counter_opts = Opts::new("my_counter", "My custom counter");
-let counter = Counter::with_opts(counter_opts).unwrap();
-registry.register(Box::new(counter.clone())).unwrap();
-
-// Use the counter
-counter.inc();
-
-// To expose metrics, you'd need to set up an HTTP server manually
-// and implement the /metrics endpoint yourself
-```
-
-### After (Dynamo MetricsRegistry)
-
-```rust
-let counter = endpoint.create_counter(
-    "my_counter",
-    "My custom counter",
-    &[]
-)?;
-
-counter.inc();
-```
-
-**Note:** The metric is automatically registered when created via the endpoint's `create_counter` factory method.
-
-**Benefits of Dynamo's approach:**
-- **Automatic registration**: Metrics created via endpoint's `create_*` factory methods are automatically registered with the system
-- Automatic labeling with namespace, component, and endpoint information
-- Consistent metric naming with `dynamo_` prefix
-- Built-in HTTP metrics endpoint when enabled with `DYN_SYSTEM_ENABLED=true`
-- Hierarchical metric organization
+For detailed implementation examples showing how to create metrics at different hierarchy levels, create vector metrics with dynamic labels, and transition from plain Prometheus, see the [Implementation Examples section](../../deploy/metrics/README.md#implementation-examples) in the deploy metrics README.
 
 ## Prometheus Output Example
 
@@ -316,32 +173,6 @@ println!("Metrics: {}", metrics);
    curl http://localhost:8081/metrics
    ```
 
-## Advanced Features
-
-### Custom Buckets for Histograms
-
-```rust
-// Define custom buckets for your use case
-let custom_buckets = vec![0.001, 0.01, 0.1, 1.0, 10.0];
-let latency = endpoint.create_histogram(
-    "api_latency_seconds",
-    "API latency in seconds",
-    &[],
-    &custom_buckets
-)?;
-```
-
-### Metric Aggregation
-
-```rust
-// Aggregate metrics across multiple endpoints
-let total_requests = namespace.create_counter(
-    "total_requests",
-    "Total requests across all endpoints",
-    &[]
-)?;
-```
-
 ## Related Documentation
 
 - [Distributed Runtime Architecture](../architecture/distributed_runtime.md)
@@ -350,3 +181,4 @@ let total_requests = namespace.create_counter(
 - [Backend Guide](backend.md)
 - [Dynamo Run Guide](dynamo_run.md)
 - [Performance Tuning Guides](kv_router_perf_tuning.md)
+- [Metrics Implementation Examples](../../deploy/metrics/README.md#implementation-examples)

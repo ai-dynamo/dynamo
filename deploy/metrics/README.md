@@ -59,12 +59,11 @@ As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build container
    - etcd Server: `http://localhost:2379/metrics`
    - DCGM Exporter: `http://localhost:9401/metrics`
 
-4. Optionally, if you want to experiment further, look through components/metrics/README.md for more details on launching a metrics server (subscribes to nats), mock_worker (publishes to nats), and real workers.
+4. Optionally, if you want to experiment further, look through [components/metrics/README.md](../../components/metrics/README.md) for more details on launching a metrics server (subscribes to nats), mock_worker (publishes to nats), and real workers.
 
    - Start the [components/metrics](../../components/metrics/README.md) application to begin monitoring for metric events from dynamo workers and aggregating them on a Prometheus metrics endpoint: `http://localhost:9091/metrics`.
    - Uncomment the appropriate lines in prometheus.yml to poll port 9091.
    - Start worker(s) that publishes KV Cache metrics: [lib/runtime/examples/service_metrics/README.md](../../lib/runtime/examples/service_metrics/README.md) can populate dummy KV Cache metrics.
-
 
 ## Configuration
 
@@ -98,11 +97,211 @@ The following configuration files should be present in this directory:
 - [grafana_dashboards/grafana-dcgm-metrics.json](./grafana_dashboards/grafana-dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
 - [grafana_dashboards/grafana-llm-metrics.json](./grafana_dashboards/grafana-llm-metrics.json): This file, which is being phased out, contains the Grafana dashboard configuration for LLM-specific metrics. It requires an additional `metrics` component to operate concurrently. A new version is under development.
 
-## Running the deprecated `metrics` component
+## Implementation Examples
+
+### Creating Metrics at Different Hierarchy Levels
+
+#### Runtime-Level Metrics
+
+```rust
+use dynamo_runtime::DistributedRuntime;
+
+let runtime = DistributedRuntime::new()?;
+let namespace = runtime.namespace("my_namespace")?;
+let component = namespace.component("my_component")?;
+let endpoint = component.endpoint("my_endpoint")?;
+
+// Create endpoint-level counters (this is a Prometheus Counter type)
+let total_requests = endpoint.create_counter(
+    "total_requests",
+    "Total requests across all namespaces",
+    &[]
+)?;
+
+let active_connections = endpoint.create_gauge(
+    "active_connections",
+    "Number of active client connections",
+    &[]
+)?;
+```
+
+#### Namespace-Level Metrics
+
+```rust
+let namespace = runtime.namespace("my_model")?;
+
+// Namespace-scoped metrics
+let model_requests = namespace.create_counter(
+    "model_requests",
+    "Requests for this specific model",
+    &[]
+)?;
+
+let model_latency = namespace.create_histogram(
+    "model_latency_seconds",
+    "Model inference latency",
+    &[],
+    &[0.001, 0.01, 0.1, 1.0, 10.0]
+)?;
+```
+
+#### Component-Level Metrics
+
+```rust
+let component = namespace.component("backend")?;
+
+// Component-specific metrics
+let backend_requests = component.create_counter(
+    "backend_requests",
+    "Requests handled by this backend component",
+    &[]
+)?;
+
+let gpu_memory_usage = component.create_gauge(
+    "gpu_memory_bytes",
+    "GPU memory usage in bytes",
+    &[]
+)?;
+```
+
+#### Endpoint-Level Metrics
+
+```rust
+let endpoint = component.endpoint("generate")?;
+
+// Endpoint-specific metrics
+let generate_requests = endpoint.create_counter(
+    "generate_requests",
+    "Generate endpoint requests",
+    &[]
+)?;
+
+let generate_latency = endpoint.create_histogram(
+    "generate_latency_seconds",
+    "Generate endpoint latency",
+    &[],
+    &[0.001, 0.01, 0.1, 1.0, 10.0]
+)?;
+```
+
+### Creating Vector Metrics with Dynamic Labels
+
+Use vector metrics when you need to track metrics with different label values:
+
+```rust
+// Counter with labels
+let requests_by_model = endpoint.create_counter_vec(
+    "requests_by_model",
+    "Requests by model type",
+    &["model_type", "model_size"]
+)?;
+
+// Increment with specific labels
+requests_by_model.with_label_values(&["llama", "7b"]).inc();
+requests_by_model.with_label_values(&["gpt", "13b"]).inc();
+
+// Gauge with labels
+let memory_by_gpu = component.create_gauge_vec(
+    "gpu_memory_bytes",
+    "GPU memory usage by device",
+    &["gpu_id", "memory_type"]
+)?;
+
+memory_by_gpu.with_label_values(&["0", "allocated"]).set(8192.0);
+memory_by_gpu.with_label_values(&["0", "cached"]).set(4096.0);
+```
+
+### Creating Histograms
+
+Histograms are useful for measuring distributions of values like latency:
+
+```rust
+let latency_histogram = endpoint.create_histogram(
+    "request_latency_seconds",
+    "Request latency distribution",
+    &[],
+    &[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0]
+)?;
+
+// Record latency values
+latency_histogram.observe(0.023); // 23ms
+latency_histogram.observe(0.156); // 156ms
+```
+
+### Transitioning from Plain Prometheus
+
+If you're currently using plain Prometheus metrics, transitioning to Dynamo's `MetricsRegistry` is straightforward:
+
+#### Before (Plain Prometheus)
+
+```rust
+use prometheus::{Counter, Opts, Registry};
+
+// Create a registry to hold metrics
+let registry = Registry::new();
+let counter_opts = Opts::new("my_counter", "My custom counter");
+let counter = Counter::with_opts(counter_opts).unwrap();
+registry.register(Box::new(counter.clone())).unwrap();
+
+// Use the counter
+counter.inc();
+
+// To expose metrics, you'd need to set up an HTTP server manually
+// and implement the /metrics endpoint yourself
+```
+
+#### After (Dynamo MetricsRegistry)
+
+```rust
+let counter = endpoint.create_counter(
+    "my_counter",
+    "My custom counter",
+    &[]
+)?;
+
+counter.inc();
+```
+
+**Note:** The metric is automatically registered when created via the endpoint's `create_counter` factory method.
+
+**Benefits of Dynamo's approach:**
+- **Automatic registration**: Metrics created via endpoint's `create_*` factory methods are automatically registered with the system
+- Automatic labeling with namespace, component, and endpoint information
+- Consistent metric naming with `dynamo_` prefix
+- Built-in HTTP metrics endpoint when enabled with `DYN_SYSTEM_ENABLED=true`
+- Hierarchical metric organization
+
+### Advanced Features
+
+#### Custom Buckets for Histograms
+
+```rust
+// Define custom buckets for your use case
+let custom_buckets = vec![0.001, 0.01, 0.1, 1.0, 10.0];
+let latency = endpoint.create_histogram(
+    "api_latency_seconds",
+    "API latency in seconds",
+    &[],
+    &custom_buckets
+)?;
+```
+
+#### Metric Aggregation
+
+```rust
+// Aggregate metrics across multiple endpoints
+let total_requests = namespace.create_counter(
+    "total_requests",
+    "Total requests across all endpoints",
+    &[]
+)?;
+```
+
+## Running the deprecated `components/metrics` program
 
 ⚠️ **DEPRECATION NOTICE** ⚠️
 
-When you run the example [components/metrics](../../components/metrics/README.md) component, it exposes a Prometheus /metrics endpoint with the following metrics (defined in [components/metrics/src/lib.rs](../../components/metrics/src/lib.rs)):
+When you run the example [components/metrics](../../components/metrics/README.md) program, it exposes a Prometheus /metrics endpoint with the following metrics (defined in [components/metrics/src/lib.rs](../../components/metrics/src/lib.rs)):
 
 **⚠️ The following `llm_kv_*` metrics are deprecated:**
 
@@ -126,3 +325,5 @@ When you run the example [components/metrics](../../components/metrics/README.md
   docker compose logs prometheus
   docker compose logs grafana
   ```
+
+3. For issues with the legacy metrics component (being phased out), see [components/metrics/README.md](../../components/metrics/README.md) for details on the exposed metrics and troubleshooting steps.
