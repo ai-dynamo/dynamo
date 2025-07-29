@@ -36,7 +36,7 @@ class DynamoAPIDrafter(APIDrafter):
         self.client = None
         self.max_draft_len = spec_config.max_draft_len
         # TODO: allow custom etcd connection info to be set in the spec_config
-        self.connection_info = {}
+        self.connection_info: dict[str, str] = {}
 
     async def _create_client(self):
         try:
@@ -88,8 +88,13 @@ class DynamoAPIDrafter(APIDrafter):
             if self.client is None:
                 await self._create_client()
 
-            draft_tokens = []
+            draft_tokens: list[int] = []
             try:
+                if self.client is None:
+                    logging.error(
+                        f"Failed to create client for Dynamo endpoint: {self.endpoint}"
+                    )
+                    return []
                 response = await self.client.round_robin(request_data)
                 async for chunk in response:
                     chunk_data = chunk.data()
