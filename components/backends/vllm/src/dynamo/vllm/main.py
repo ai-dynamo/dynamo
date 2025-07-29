@@ -12,6 +12,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo.llm import (
+    ModelInput,
     ModelRuntimeConfig,
     ModelType,
     ZmqKvEventPublisher,
@@ -238,6 +239,7 @@ async def init(runtime: DistributedRuntime, config: Config):
         runtime_config.reasoning_parser = config.reasoning_parser
 
         await register_llm(
+            ModelInput.Tokens,
             ModelType.Backend,
             generate_endpoint,
             config.model,
