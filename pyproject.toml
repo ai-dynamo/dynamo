@@ -74,8 +74,6 @@ sglang = [
     "uvloop",
     "nixl",
     "sglang[all]==0.4.9.post6",
-    "einops",
-    "sentencepiece",
 ]
 
 llama_cpp = [
