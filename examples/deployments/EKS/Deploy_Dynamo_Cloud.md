@@ -24,7 +24,7 @@ Push Image
 
 ```
 docker tag dynamo:latest-vllm <ECR_REGISTRY>/<ECR_REPOSITORY>:$IMAGE_TAG
-aws ecr get-login-password | docker login --username AWS --password-stdin <ECR_REGISTRY>/
+aws ecr get-login-password | docker login --username AWS --password-stdin <ECR_REGISTRY>
 docker push <ECR_REGISTRY>/<ECR_REPOSITORY>:$IMAGE_TAG
 ```
 

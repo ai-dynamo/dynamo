@@ -60,9 +60,9 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature            | TensorRT-LLM | Notes                                                                 |
 |--------------------|--------------|-----------------------------------------------------------------------|
-| **WideEP**         | ✅           |                                                                  |
-| **DP Rank Routing**| ✅           |                                                               |
-| **GB200 Support**  | ✅           | |
+| **WideEP**         | ✅           |                                                                 |
+| **DP Rank Routing**| ✅           |                                                                 |
+| **GB200 Support**  | ✅           |                                                                 |
 
 ## Quick Start
 
@@ -222,9 +222,17 @@ The migrated request will continue responding to the original request, allowing 
 
 See [client](../llm/README.md#client) section to learn how to send request to the deployment.
 
+<<<<<<< HEAD
 NOTE: To send a request to a multi-node deployment, target the node which is running `dynamo-run in=http`.
+=======
+NOTE: To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
+>>>>>>> origin/main
 
 ## Benchmarking
 
 To benchmark your deployment with GenAI-Perf, see this utility script, configuring the
+<<<<<<< HEAD
 `model` name and `host` based on your deployment: [perf.sh](../../benchmarks/llm/perf.sh)
+=======
+`model` name and `host` based on your deployment: [perf.sh](../../../benchmarks/llm/perf.sh)
+>>>>>>> origin/main
