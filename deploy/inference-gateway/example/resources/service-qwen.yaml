@@ -12,15 +12,17 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-apiVersion: inference.networking.x-k8s.io/v1alpha2
-kind: InferenceModel
+apiVersion: v1
+kind: Service
 metadata:
-  name: deep-seek-model
+  name: qwen-epp
   namespace: default
 spec:
-  criticality: Critical
-  modelName: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  poolRef:
-    group: inference.networking.x-k8s.io
-    kind: InferencePool
-    name: dynamo-deepseek
+  selector:
+    app: qwen-epp
+  ports:
+    - protocol: TCP
+      port: 9002
+      targetPort: 9002
+      appProtocol: http2
+  type: ClusterIP

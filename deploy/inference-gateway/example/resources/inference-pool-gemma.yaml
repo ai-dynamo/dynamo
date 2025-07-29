@@ -12,17 +12,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-apiVersion: v1
-kind: Service
+
+## Maps to a Dynamo graph deployment for a model
+apiVersion: inference.networking.x-k8s.io/v1alpha2
+kind: InferencePool
 metadata:
-  name: dynamo-deepseek-epp
+  name: gemma-pool
   namespace: default
 spec:
+  targetPortNumber: 8000
   selector:
-    app: dynamo-deepseek-epp
-  ports:
-    - protocol: TCP
-      port: 9002
-      targetPort: 9002
-      appProtocol: http2
-  type: ClusterIP
+    nvidia.com/dynamo-component: Frontend
+    nvidia.com/dynamo-namespace: gemma-dns
+  extensionRef:
+    failureMode: FailOpen
+    group: ""
+    kind: Service
+    name: gemma-epp

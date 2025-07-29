@@ -22,13 +22,32 @@ spec:
     kind: Gateway
     name: inference-gateway
   rules:
+  # - backendRefs:
+  #   - group: inference.networking.x-k8s.io
+  #     kind: InferencePool
+  #     name: qwen-pool
+  #   matches:
+  #   - path:
+  #       type: PathPrefix
+  #       value: /
+  #   timeouts:
+  #     request: 300s
   - backendRefs:
     - group: inference.networking.x-k8s.io
       kind: InferencePool
-      name: dynamo-deepseek
+      name: gemma-pool
     matches:
     - path:
         type: PathPrefix
         value: /
     timeouts:
       request: 300s
+
+
+    - headers:
+      - name: model
+        type: Exact
+        value: deepseek-r1-tp16
+    path:
+      type: PathPrefix
+      value: /v1/completions
