@@ -36,7 +36,9 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
         EngineConfig::Dynamic(_) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
             let rate_limiter = http_service.rate_limiter_clone();
-            if let Err(e) = start_rate_limiter_monitoring(&distributed_runtime, &engine_config, &rate_limiter) {
+            if let Err(e) =
+                start_rate_limiter_monitoring(&distributed_runtime, &engine_config, &rate_limiter)
+            {
                 tracing::error!(%e, "failed to start rate limiter monitoring");
             }
             match distributed_runtime.etcd_client() {
@@ -127,6 +129,10 @@ fn start_rate_limiter_monitoring(
 ) -> anyhow::Result<()> {
     let namespace = engine_config.local_model().endpoint_id().namespace.clone();
     let namespace = runtime.namespace(namespace)?;
+    tracing::info!(
+        "Starting rate limit monitoring for namespace={}",
+        namespace.name()
+    );
     rate_limiter.start_monitoring(namespace)?;
     Ok(())
 }

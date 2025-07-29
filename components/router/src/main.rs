@@ -70,7 +70,14 @@ async fn app(runtime: Runtime) -> Result<()> {
 
     let selector = Box::new(CustomWorkerSelector::default());
 
-    let router = KvRouter::new(component.clone(), args.block_size, Some(selector), true, args.max_workers_busy_queue_depth).await?;
+    let router = KvRouter::new(
+        component.clone(),
+        args.block_size,
+        Some(selector),
+        true,
+        args.max_workers_busy_queue_depth,
+    )
+    .await?;
     let router = Ingress::for_engine(Arc::new(router))?;
 
     component

@@ -224,7 +224,7 @@ impl KvScheduler {
                     }
                     Err(KvSchedulerError::AllWorkersBusy) => {
                         tracing::trace!("all workers busy; waiting for more capacity");
-                        // Check if the waiting queue is att capacity
+                        // Check if the waiting queue is at capacity
                         if waiting_requests_queue.len() >= max_workers_busy_queue_depth {
                             tracing::warn!(
                                 "waiting queue is at capacity, broadcasting all workers busy event"
