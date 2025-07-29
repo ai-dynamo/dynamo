@@ -72,6 +72,12 @@ def parse_args():
         help=" KV Router: Whether to use KV events to maintain the view of cached blocks. If false, would use ApproxKvRouter for predicting block creation / deletion based only on incoming requests at a timer.",
     )
     parser.add_argument(
+        "--all-workers-busy-rejection-time-window",
+        type=int,
+        default=10,
+        help="All workers busy rejection time window in seconds.",
+    )
+    parser.add_argument(
         "--no-kv-events",
         action="store_false",
         dest="use_kv_events",
@@ -105,6 +111,7 @@ async def async_main():
         "http_port": flags.http_port,
         "kv_cache_block_size": flags.kv_cache_block_size,
         "router_config": RouterConfig(router_mode, kv_router_config),
+        "all_workers_busy_rejection_time_window": flags.all_workers_busy_rejection_time_window,
     }
 
     # out=dyn

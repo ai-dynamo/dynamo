@@ -95,13 +95,27 @@ pub(crate) struct EntrypointArgs {
     kv_cache_block_size: Option<u32>,
     http_port: Option<u16>,
     extra_engine_args: Option<PathBuf>,
+    all_workers_busy_rejection_time_window: Option<u64>,
 }
 
 #[pymethods]
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, model_config=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_port=None, extra_engine_args=None))]
+    #[pyo3(signature = (
+        engine_type,
+        model_path=None,
+        model_name=None,
+        model_config=None,
+        endpoint_id=None,
+        context_length=None,
+        template_file=None,
+        router_config=None,
+        kv_cache_block_size=None,
+        http_port=None,
+        extra_engine_args=None,
+        all_workers_busy_rejection_time_window=None
+    ))]
     pub fn new(
         engine_type: EngineType,
         model_path: Option<PathBuf>,
@@ -114,6 +128,7 @@ impl EntrypointArgs {
         kv_cache_block_size: Option<u32>,
         http_port: Option<u16>,
         extra_engine_args: Option<PathBuf>,
+        all_workers_busy_rejection_time_window: Option<u64>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = match endpoint_id {
             Some(eid) => Some(eid.parse().map_err(|_| {
@@ -135,6 +150,7 @@ impl EntrypointArgs {
             kv_cache_block_size,
             http_port,
             extra_engine_args,
+            all_workers_busy_rejection_time_window,
         })
     }
 }
@@ -162,7 +178,8 @@ pub fn make_engine<'p>(
         .request_template(args.template_file.clone())
         .kv_cache_block_size(args.kv_cache_block_size)
         .router_config(args.router_config.clone().map(|rc| rc.into()))
-        .http_port(args.http_port);
+        .http_port(args.http_port)
+        .all_workers_busy_rejection_time_window(args.all_workers_busy_rejection_time_window);
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let local_model = builder.build().await.map_err(to_pyerr)?;
         let inner = select_engine(distributed_runtime, args, local_model)
