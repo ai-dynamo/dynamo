@@ -110,9 +110,13 @@ On all nodes, set the etcd and NATS endpoints:
 
 ```bash
 # Replace with your infrastructure node's IP
-# To find your IP address, use: hostname -I | awk '{print $1}'
-export ETCD_ENDPOINTS=http://<INFRA_NODE_IP>:2379
-export NATS_SERVER=nats://<INFRA_NODE_IP>:4222
+# To find your IP address, run the follwing on your infrastructure node:
+# hostname -I | awk '{print $1}'
+
+export INFRA_NODE_IP=<INFRA_NODE_IP>
+
+export ETCD_ENDPOINTS=http://${INFRA_NODE_IP}:2379
+export NATS_SERVER=nats://${INFRA_NODE_IP}:4222
 export DYN_LOG=debug  # Enable debug logging to see routing decisions
 ```
 
@@ -189,6 +193,13 @@ python -m dynamo.frontend \
     --router-mode kv
 ```
 
+Take note of the frontend IP address:
+
+```bash
+# On the same node you launched dynamo.frontend
+hostname -I | awk '{print $1}'
+```
+
 The frontend will:
 - Discover all available decode workers via etcd
 - Enable KV-aware routing for intelligent request distribution
@@ -206,16 +217,27 @@ Install the [OpenAI Python client](https://github.com/openai/openai-python) libr
 pip install openai
 ```
 
+Paste in the Dynamo Frontend IP from step 4 (or use localhost if on the same node):
+
+```bash
+export DYN_FRONTEND_IP=<PASTE_FRONTEND_IP_HERE>
+```
+
 ### 1. Simple Request (New Conversation)
 
 Send a request to see it routed to one of the replicas:
 
 ```python
 from openai import OpenAI
+import os
 
-# Replace <FRONTEND_IP> with your frontend node's IP address
+if os.environ.get("DYN_FRONTEND_IP"):
+    frontend_ip=os.environ.get("DYN_FRONTEND_IP")
+else:
+    raise Exception("DYN_FRONTEND_IP is not set")
+
 client = OpenAI(
-    base_url="http://<FRONTEND_IP>:8000/v1",
+    base_url=f"http://{frontend_ip}:8000/v1",
     api_key="dummy"  # Not used by Dynamo, but required by OpenAI client
 )
 
@@ -237,10 +259,16 @@ Create a conversation to observe how KV routing naturally benefits multi-turn in
 
 ```python
 from openai import OpenAI
+import os
+
+if os.environ.get("DYN_FRONTEND_IP"):
+    frontend_ip=os.environ.get("DYN_FRONTEND_IP")
+else:
+    raise Exception("DYN_FRONTEND_IP is not set")
 
 client = OpenAI(
-    base_url="http://<FRONTEND_IP>:8000/v1",
-    api_key="dummy"
+    base_url=f"http://{frontend_ip}:8000/v1",
+    api_key="dummy"  # Not used by Dynamo, but required by OpenAI client
 )
 
 # First turn - establishes context
@@ -283,6 +311,11 @@ Send multiple new conversations to see them distributed across replicas:
 import asyncio
 from openai import AsyncOpenAI
 
+if os.environ.get("DYN_FRONTEND_IP"):
+    frontend_ip=os.environ.get("DYN_FRONTEND_IP")
+else:
+    raise Exception("DYN_FRONTEND_IP is not set")
+
 async def send_request(client, i):
     """Send a single request and return the response"""
     try:
@@ -301,7 +334,7 @@ async def send_request(client, i):
 async def load_test():
     """Send 10 requests in parallel to test load distribution"""
     client = AsyncOpenAI(
-        base_url="http://<FRONTEND_IP>:8000/v1",
+        base_url=f"http://{frontend_ip}:8000/v1",
         api_key="dummy"
     )
 
@@ -373,7 +406,7 @@ With `DYN_LOG=debug`, the frontend logs show routing decisions:
 Check worker health status:
 
 ```bash
-curl http://<FRONTEND_IP>:8000/health
+curl http://${DYN_FRONTEND_IP}:8000/health
 ```
 
 ## Troubleshooting
