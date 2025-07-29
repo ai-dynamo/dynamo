@@ -1,5 +1,24 @@
 # Metrics Visualization with Prometheus and Grafana
 
+⚠️ **DEPRECATION NOTICE** ⚠️
+
+**The `metrics-aggregation-service` (port 9091) is being deprecated and will be removed in a future release.**
+
+The metrics aggregation service is being replaced by the **`MetricsRegistry`** built-in functionality that is now available directly in the `DistributedRuntime` framework. The new system provides:
+
+- **Built-in Prometheus HTTP endpoint** accessible via `DYN_SYSTEM_ENABLED=true` and `DYN_SYSTEM_PORT=<port>` (default: 8081)
+- **Automatic metric registration** when creating metrics via endpoint factory methods
+- **Automatic labeling** with namespace, component, and endpoint information
+- **Simplified deployment** - no separate metrics component required
+
+**For new projects and existing deployments, please migrate to using `MetricsRegistry` instead of the metrics aggregation service.**
+
+The Prometheus configuration in this directory has been updated to scrape from the new `dynamo-backend` job (port 8081) instead of the deprecated `metrics-aggregation-service` (port 9091).
+
+See the [Dynamo MetricsRegistry Guide](../../docs/guides/metrics.md) for detailed information on using the new metrics system.
+
+---
+
 This directory contains configuration for visualizing metrics from the metrics aggregation service using Prometheus and Grafana.
 
 ## Components
@@ -99,14 +118,20 @@ The following configuration files should be present in this directory:
 
 IMPORTANT: This section is being phased out, and some metrics may not function as expected. A new solution is under development.
 
+⚠️ **DEPRECATED METRICS NOTICE** ⚠️
+
+**The following `llm_kv_*` metrics are deprecated and will be removed in a future release:**
+
 When you run the example [components/metrics](../../components/metrics/README.md) component, it exposes a Prometheus /metrics endpoint with the followings (defined in [../../components/metrics/src/lib.rs](../../components/metrics/src/lib.rs)):
 - `llm_requests_active_slots`: Number of currently active request slots per worker
 - `llm_requests_total_slots`: Total available request slots per worker
-- `llm_kv_blocks_active`: Number of active KV blocks per worker
-- `llm_kv_blocks_total`: Total KV blocks available per worker
-- `llm_kv_hit_rate_percent`: Cumulative KV Cache hit percent per worker
+- `llm_kv_blocks_active`: Number of active KV blocks per worker ⚠️ **DEPRECATED**
+- `llm_kv_blocks_total`: Total KV blocks available per worker ⚠️ **DEPRECATED**
+- `llm_kv_hit_rate_percent`: Cumulative KV Cache hit percent per worker ⚠️ **DEPRECATED**
 - `llm_load_avg`: Average load across workers
 - `llm_load_std`: Load standard deviation across workers
+
+**These `llm_kv_*` metrics are being replaced by the new `dynamo_*` metrics from the MetricsRegistry system. Please migrate to the new system.**
 
 ## Troubleshooting
 

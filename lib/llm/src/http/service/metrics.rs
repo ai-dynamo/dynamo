@@ -94,7 +94,8 @@ pub struct ResponseMetricCollector {
 
 impl Default for Metrics {
     fn default() -> Self {
-        Self::new("nv_llm")
+        // do not make this dynamic, because it'll be difficult to update on Grafana
+        Self::new("dynamo")
     }
 }
 

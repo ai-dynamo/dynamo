@@ -1,13 +1,26 @@
 # Metrics
 
-The `metrics` component is a utility that can collect, aggregate, and publish
-metrics from a Dynamo deployment. After collecting and aggregating metrics from
-workers, it exposes them via an HTTP `/metrics` endpoint in Prometheus format
-that other applications or visualization tools like Prometheus server and Grafana can
-pull from.
+⚠️ **DEPRECATION NOTICE** ⚠️
+
+**This `metrics` component is being deprecated and will be removed in a future release.**
+
+The `metrics` component is being replaced by the **`MetricsRegistry`** built-in functionality that is now available directly in the `DistributedRuntime` framework. The `MetricsRegistry` provides:
+
+- **Automatic metric registration** when creating metrics via endpoint factory methods
+- **Built-in Prometheus HTTP endpoint** accessible via `DYN_SYSTEM_ENABLED=true` and `DYN_SYSTEM_PORT=<port>`
+- **Automatic labeling** with namespace, component, and endpoint information
+- **Simplified API** that eliminates the need for manual Prometheus setup
+
+**For new projects and existing deployments, please migrate to using `MetricsRegistry` instead of this component.**
+
+See the [Dynamo MetricsRegistry Guide](../../docs/guides/metrics.md) for detailed information on using the new metrics system.
+
+---
+
+The `metrics` component is a utility for collecting, aggregating, and publishing metrics from a Dynamo deployment, but it is being deprecated and replaced by `MetricsRegistry`.
 
 **Note**: This is a demo implementation. The metrics component is currently under active development and this documentation will change as the implementation evolves.
-- In this demo the metrics names use the prefix "llm", but in production they will be prefixed with "nv_llm" (e.g., the HTTP `/metrics` endpoint will serve metrics with "nv_llm" prefixes)
+- In this demo the metrics names use the prefix "llm", but in production they will be prefixed with "dynamo" (e.g., the HTTP `/metrics` endpoint will serve metrics with "dynamo" prefixes)
 - This demo will only work when using examples/llm/configs/agg.yml-- other configurations will not work
 
 <div align="center">

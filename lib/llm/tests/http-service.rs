@@ -357,7 +357,7 @@ async fn test_http_service() {
     let families = registry.gather();
     let histogram_metric_family = families
         .into_iter()
-        .find(|m| m.get_name() == "nv_llm_http_service_request_duration_seconds")
+        .find(|m| m.get_name() == "dynamo_http_service_request_duration_seconds")
         .expect("Histogram metric not found");
 
     assert_eq!(
