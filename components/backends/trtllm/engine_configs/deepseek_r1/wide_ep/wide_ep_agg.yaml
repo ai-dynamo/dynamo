@@ -22,7 +22,7 @@ max_num_tokens: 256
 max_seq_len: 8448
 
 kv_cache_config:
-  free_gpu_memory_fraction: 0.7
+  free_gpu_memory_fraction: 0.3
   dtype: fp8
 
 cuda_graph_config:

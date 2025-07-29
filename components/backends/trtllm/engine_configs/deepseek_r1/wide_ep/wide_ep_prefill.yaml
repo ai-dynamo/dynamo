@@ -30,7 +30,7 @@ max_num_tokens: 8192
 max_seq_len: 8192
 
 kv_cache_config:
-  free_gpu_memory_fraction: 0.75
+  free_gpu_memory_fraction: 0.3
   dtype: fp8 # NOTE: This dtype must match in both prefill/decode configs
 
 # NOTE: pytorch_backend_config section flattened since: https://github.com/NVIDIA/TensorRT-LLM/pull/4603
