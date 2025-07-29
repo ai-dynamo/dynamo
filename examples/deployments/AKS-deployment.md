@@ -26,7 +26,7 @@ ssh-keygen -t rsa -b 4096 -C "<email@id.com>"
   export ZONE=<zone>
   export CLUSTER_NAME=<aks_cluster_name>
   export CPU_COUNT=1
- 
+
 az aks create -g  $RESOURCE_GROUP -n $CLUSTER_NAME --location $REGION --zones $ZONE --node-count $CPU_COUNT --enable-node-public-ip --ssh-key-value /home/user/.ssh/id_rsa.pub
 ```
 
@@ -39,7 +39,7 @@ kubectl config get-contexts
 
 #You should see output like this:
 CURRENT   NAME         CLUSTER      AUTHINFO                                   NAMESPACE
-*         dynamo-aks   dynamo-aks   clusterUser_<rg_name>_<aks_cluster_name>   
+*         dynamo-aks   dynamo-aks   clusterUser_<rg_name>_<aks_cluster_name>
 ```
 
 4. Create GPU node pool: You can use as many computes of whatever SKU you want, here we have used 4 nodes of standard_nc24ads_a100_v4, which have 1 A100 each.
@@ -52,12 +52,12 @@ az aks nodepool add --resource-group $RESOURCE_GROUP --cluster-name $CLUSTER_NAM
 Once your AKS cluster is configured with a GPU-enabled node pool, we can proceed with setting up the NVIDIA GPU Operator. This operator automates the deployment and lifecycle of all NVIDIA software components required to provision GPUs in the Kubernetes cluster. The NVIDIA GPU operator enables the infrastructure to support GPU workloads like LLM inference and embedding generation.
 
 1. Add the NVIDIA Helm repository:
-``` 
+```
 helm repo add nvidia https://helm.ngc.nvidia.com/nvidia --pass-credentials && helm repo update
-``` 
+```
 
 2. Install the GPU Operator:
-``` 
+```
 helm install --create-namespace --namespace gpu-operator nvidia/gpu-operator --wait --generate-name
 ```
 
@@ -162,7 +162,7 @@ SERVICE_NAME=$(kubectl get svc -n ${NAMESPACE} -o name | grep frontend | sed 's|
 kubectl port-forward svc/${SERVICE_NAME}-frontend 8000:8000 -n ${NAMESPACE} &
 ```
 
-#### Task 5. Testing 
+#### Task 5. Testing
 
 ```
 curl localhost:8000/v1/chat/completions \
@@ -190,11 +190,11 @@ curl localhost:8000/v1/chat/completions \
 In order to clean up any Dynamo related resources, from the container shell you launched the deployment from, simply run the following command:
 
 ```bash
-# Delete deployment 
+# Delete deployment
 kubectl delete dynamoGraphDeployment <your-dep-name> -n ${NAMESPACE}
 
 # Delete the AKS Cluster
 az aks delete --name $CLUSTER_NAME --resource-group $RESOURCE_GROUP --yes
 ```
 
-This will spin down the Dynamo deployment we configured and spin down all the resources that were leveraged for the deployment. 
+This will spin down the Dynamo deployment we configured and spin down all the resources that were leveraged for the deployment.
