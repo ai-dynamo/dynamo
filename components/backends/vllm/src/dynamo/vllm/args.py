@@ -31,6 +31,7 @@ class Config:
     component: str
     endpoint: str
     is_prefill_worker: bool
+    migration_limit: int = 0
     kv_port: Optional[int] = None
     side_channel_port: Optional[int] = None
 
@@ -55,7 +56,13 @@ def parse_args() -> Config:
     parser.add_argument(
         "--is-prefill-worker",
         action="store_true",
-        help="Enable prefill functionality for this worker. Currently overwrites the --endpoint to be a specially chosen dyn://dynamo.prefill.generate",
+        help="Enable prefill functionality for this worker. Uses the provided namespace to construct dyn://namespace.prefill.generate",
+    )
+    parser.add_argument(
+        "--migration-limit",
+        type=int,
+        default=0,
+        help="Maximum number of times a request may be migrated to a different engine worker. The number may be overridden by the engine.",
     )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -79,8 +86,13 @@ def parse_args() -> Config:
         # This becomes an `Option` on the Rust side
         config.served_model_name = None
 
+    namespace = os.environ.get("DYNAMO_NAMESPACE", "dynamo")
+
     if args.is_prefill_worker:
-        args.endpoint = "dyn://dynamo.prefill.generate"
+        args.endpoint = f"dyn://{namespace}.prefill.generate"
+    else:
+        # For decode workers, also use the provided namespace instead of hardcoded "dynamo"
+        args.endpoint = f"dyn://{namespace}.backend.generate"
 
     endpoint_str = args.endpoint.replace("dyn://", "", 1)
     endpoint_parts = endpoint_str.split(".")
@@ -97,6 +109,7 @@ def parse_args() -> Config:
     config.endpoint = parsed_endpoint_name
     config.engine_args = engine_args
     config.is_prefill_worker = args.is_prefill_worker
+    config.migration_limit = args.migration_limit
 
     if config.engine_args.block_size is None:
         config.engine_args.block_size = 16
@@ -127,6 +140,14 @@ async def allocate_and_reserve_port(
     """
 
     node_name = socket.gethostname()
+    try:
+        node_ip = socket.gethostbyname(node_name)
+    except socket.gaierror:
+        # If hostname cannot be resolved, fall back to localhost
+        logger.warning(
+            f"Hostname '{node_name}' cannot be resolved, falling back to '127.0.0.1'"
+        )
+        node_ip = "127.0.0.1"
 
     for attempt in range(1, max_attempts + 1):
         # Hold socket open just long enough to reserve in ETCD
@@ -136,7 +157,7 @@ async def allocate_and_reserve_port(
             port = sock.getsockname()[1]
 
             # Reserve in ETCD while holding the socket
-            key = f"dyn://{namespace}/ports/{node_name}/{port}"
+            key = f"dyn://{namespace}/ports/{node_ip}/{port}"
             value = {
                 "worker_id": worker_id,
                 "reason": reason,
@@ -207,7 +228,11 @@ def overwrite_args(config):
 
     defaults = {
         "task": "generate",
-        "skip_tokenizer_init": True,
+        # As of vLLM >=0.10.0 the engine unconditionally calls
+        # `sampling_params.update_from_tokenizer(...)`, so we can no longer
+        # skip tokenizer initialisation.  Setting this to **False** avoids
+        # a NoneType error when the processor accesses the tokenizer.
+        "skip_tokenizer_init": False,
         "disable_log_requests": True,
         # KV routing relies on logging KV metrics
         "disable_log_stats": False,
@@ -238,23 +263,41 @@ def overwrite_args(config):
             raise ValueError(f"{key} not found in AsyncEngineArgs from vLLM.")
 
 
-def set_side_channel_host_and_port(config: Config, hostname: Optional[str] = None):
+def get_host_ip() -> str:
+    """Get the IP address of the host.
+    This is needed for the side channel to work in multi-node deployments.
+    """
+    try:
+        host_name = socket.gethostname()
+    except socket.error as e:
+        logger.warning(f"Failed to get hostname: {e}, falling back to '127.0.0.1'")
+        return "127.0.0.1"
+    else:
+        try:
+            # Get the IP address of the hostname - this is needed for the side channel to work in multi-node deployments
+            host_ip = socket.gethostbyname(host_name)
+            # Test if the IP is actually usable by binding to it
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as test_socket:
+                test_socket.bind((host_ip, 0))
+            return host_ip
+        except socket.gaierror as e:
+            logger.warning(
+                f"Hostname '{host_name}' cannot be resolved: {e}, falling back to '127.0.0.1'"
+            )
+            return "127.0.0.1"
+        except socket.error as e:
+            # If hostname is not usable for binding, fall back to localhost
+            logger.warning(
+                f"Hostname '{host_name}' is not usable for binding: {e}, falling back to '127.0.0.1'"
+            )
+            return "127.0.0.1"
+
+
+def set_side_channel_host_and_port(config: Config):
     """vLLM V1 NixlConnector creates a side channel to exchange metadata with other NIXL connectors.
     This sets the port number for the side channel.
     """
-    if hostname is None:
-        hostname = socket.gethostname()
-        # Test if hostname is usable by attempting to bind to it
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as test_socket:
-                test_socket.bind((hostname, 0))
-        except (socket.error, socket.gaierror):
-            # If hostname is not usable, fall back to localhost
-            logger.warning(
-                f"Hostname '{hostname}' is not usable, falling back to '127.0.0.1'"
-            )
-            hostname = "127.0.0.1"
-
-    os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = hostname
+    host_ip = get_host_ip()
+    os.environ["VLLM_NIXL_SIDE_CHANNEL_HOST"] = host_ip
     os.environ["VLLM_NIXL_SIDE_CHANNEL_PORT"] = str(config.side_channel_port)
-    logger.debug(f"Set NIXL side channel to {hostname}:{config.side_channel_port}")
+    logger.debug(f"Set NIXL side channel to {host_ip}:{config.side_channel_port}")

@@ -122,8 +122,6 @@ ARG CARGO_BUILD_JOBS
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 
 RUN cargo build --release
-RUN mkdir -p deploy/sdk/src/dynamo/sdk/cli/bin
-RUN cp target/release/dynamo-run deploy/sdk/src/dynamo/sdk/cli/bin
 
 RUN cd lib/bindings/python && pip install --break-system-packages -e . && cd ../../..
 RUN pip install --break-system-packages -e .

@@ -27,40 +27,55 @@ class PrometheusAPIClient:
     def __init__(self, url: str):
         self.prom = PrometheusConnect(url=url, disable_ssl=True)
 
-    def get_avg_inter_token_latency(self, interval: str):
+    def _get_average_metric(
+        self, metric_name: str, interval: str, operation_name: str
+    ) -> float:
+        """
+        Helper method to get average metrics using the pattern:
+        increase(metric_sum[interval])/increase(metric_count[interval])
+
+        Args:
+            metric_name: Base metric name (e.g., 'nv_llm_http_service_inter_token_latency_seconds')
+            interval: Time interval for the query (e.g., '60s')
+            operation_name: Human-readable name for error logging
+
+        Returns:
+            Average metric value or 0 if no data/error
+        """
         try:
-            return float(
-                self.prom.custom_query(
-                    query=f"increase(nv_llm_http_service_inter_token_latency_seconds_sum[{interval}])/increase(nv_llm_http_service_inter_token_latency_seconds_count[{interval}])",
-                )[0]["value"][1]
-            )
+            query = f"increase({metric_name}_sum[{interval}])/increase({metric_name}_count[{interval}])"
+            result = self.prom.custom_query(query=query)
+            if not result:
+                # No data available yet (no requests made) - return 0 silently
+                return 0
+            return float(result[0]["value"][1])
         except Exception as e:
-            logger.error(f"Error getting avg inter token latency: {e}")
+            logger.error(f"Error getting {operation_name}: {e}")
             return 0
+
+    def get_avg_inter_token_latency(self, interval: str):
+        return self._get_average_metric(
+            "nv_llm_http_service_inter_token_latency_seconds",
+            interval,
+            "avg inter token latency",
+        )
 
     def get_avg_time_to_first_token(self, interval: str):
-        try:
-            return float(
-                self.prom.custom_query(
-                    query=f"increase(nv_llm_http_service_time_to_first_token_seconds_sum[{interval}])/increase(nv_llm_http_service_time_to_first_token_seconds_count[{interval}])",
-                )[0]["value"][1]
-            )
-        except Exception as e:
-            logger.error(f"Error getting avg time to first token: {e}")
-            return 0
+        return self._get_average_metric(
+            "nv_llm_http_service_time_to_first_token_seconds",
+            interval,
+            "avg time to first token",
+        )
 
     def get_avg_request_duration(self, interval: str):
-        try:
-            return float(
-                self.prom.custom_query(
-                    query=f"increase(nv_llm_http_service_request_duration_seconds_sum[{interval}])/increase(nv_llm_http_service_request_duration_seconds_count[{interval}])",
-                )[0]["value"][1]
-            )
-        except Exception as e:
-            logger.error(f"Error getting avg request duration: {e}")
-            return 0
+        return self._get_average_metric(
+            "nv_llm_http_service_request_duration_seconds",
+            interval,
+            "avg request duration",
+        )
 
     def get_avg_request_count(self, interval: str):
+        # This function follows a different query pattern than the other metrics
         try:
             raw_res = self.prom.custom_query(
                 query=f"increase(nv_llm_http_service_requests_total[{interval}])"
@@ -75,23 +90,15 @@ class PrometheusAPIClient:
             return 0
 
     def get_avg_input_sequence_tokens(self, interval: str):
-        try:
-            return float(
-                self.prom.custom_query(
-                    query=f"increase(nv_llm_http_service_input_sequence_tokens_sum[{interval}])/increase(nv_llm_http_service_input_sequence_tokens_count[{interval}])",
-                )[0]["value"][1]
-            )
-        except Exception as e:
-            logger.error(f"Error getting avg input sequence tokens: {e}")
-            return 0
+        return self._get_average_metric(
+            "nv_llm_http_service_input_sequence_tokens",
+            interval,
+            "avg input sequence tokens",
+        )
 
     def get_avg_output_sequence_tokens(self, interval: str):
-        try:
-            return float(
-                self.prom.custom_query(
-                    query=f"increase(nv_llm_http_service_output_sequence_tokens_sum[{interval}])/increase(nv_llm_http_service_output_sequence_tokens_count[{interval}])",
-                )[0]["value"][1]
-            )
-        except Exception as e:
-            logger.error(f"Error getting avg output sequence tokens: {e}")
-            return 0
+        return self._get_average_metric(
+            "nv_llm_http_service_output_sequence_tokens",
+            interval,
+            "avg output sequence tokens",
+        )

@@ -70,3 +70,6 @@ env_logger = { version = "0.11" }
 reqwest = { workspace = true }
 rstest = { version = "0.23.0" }
 temp-env = { version = "0.3.6" , features=["async_closure"] }
+stdio-override = {version= "0.2.0"}
+jsonschema = {version = "0.17"}
+tempfile = { workspace = true }
