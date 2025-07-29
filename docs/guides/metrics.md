@@ -15,19 +15,29 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Dynamo Metrics Guide
+# Dynamo MetricsRegistry Guide
 
-This guide covers the metrics system in Dynamo, which provides hierarchical Prometheus metrics with automatic labeling and namespace organization. The metrics system enables observability across distributed inference workloads.
+Dynamo MetricsRegistry is a common universal Dynamo built-in feature that provides standardized observability capabilities across all Dynamo components and services. It's automatically available whenever you use the DistributedRuntime framework.
+
+This guide covers the MetricsRegistry in Dynamo, which provides hierarchical Prometheus metrics with automatic labeling and namespace organization.
 
 ## Overview
 
-Dynamo's metrics system is built around a hierarchical registry framework that automatically organizes metrics by namespace, component, and endpoint. This provides structured observability across the distributed runtime system.
+Dynamo's MetricsRegistry is built around a hierarchical registry framework that automatically organizes metrics by namespace, component, and endpoint. This provides structured observability across the distributed runtime system.
+
+**MetricsRegistry is a trait** that is implemented by the core distributed runtime components:
+- **DistributedRuntime**: Root level metrics registry
+- **Namespace**: Namespace-level metrics registry
+- **Component**: Component-level metrics registry
+- **Endpoint**: Endpoint-level metrics registry
+
+Each level in the hierarchy implements the MetricsRegistry trait, allowing you to create and manage metrics at the appropriate level while maintaining automatic namespace prefixing and labeling.
 
 ## Architecture
 
 ### Hierarchical Metrics Registry
 
-The metrics system follows a hierarchical structure:
+The MetricsRegistry follows a hierarchical structure:
 
 ```
 DistributedRuntime (DRT)
@@ -110,7 +120,7 @@ dynamo_concurrent_requests{component="backend",endpoint="generate",namespace="dy
 dynamo_errors_total{component="backend",endpoint="generate",error_type="generate",namespace="dynamo"} 2
 ```
 
-The metrics system automatically adds labels based on the hierarchy:
+The MetricsRegistry automatically adds labels based on the hierarchy:
 - **namespace**: The namespace name
 - **component**: The component name (if applicable)
 - **endpoint**: The endpoint name (if applicable)
@@ -371,7 +381,7 @@ let endpoint_counter = endpoint.create_counter("requests", "Endpoint requests", 
 let all_metrics = drt.prometheus_metrics_fmt()?;
 ```
 
-This metrics system provides observability capabilities for monitoring and debugging Dynamo applications at scale.
+This MetricsRegistry provides observability capabilities for monitoring and debugging Dynamo applications at scale.
 
 ## Related Documentation
 
