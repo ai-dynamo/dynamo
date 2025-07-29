@@ -4,7 +4,12 @@
 
 **This `metrics` component is being deprecated and will be removed in a future release.**
 
-The deprecated `metrics` component is being replaced by the **`MetricsRegistry`** built-in functionality that is now available directly in the `DistributedRuntime` framework. The `MetricsRegistry` provides:
+The `metrics` component is being replaced by the **`MetricsRegistry`** built-in functionality that is now available directly in the `DistributedRuntime` framework. The `MetricsRegistry` provides:
+
+- **Automatic metric registration** when creating metrics via endpoint factory methods
+- **Built-in Prometheus HTTP endpoint** accessible via `DYN_SYSTEM_ENABLED=true` and `DYN_SYSTEM_PORT=<port>`
+- **Automatic labeling** with namespace, component, and endpoint information
+- **Simplified API** that eliminates the need for manual Prometheus setup
 
 **For new projects and existing deployments, please migrate to using `MetricsRegistry` instead of this component.**
 
@@ -12,9 +17,9 @@ See the [Dynamo MetricsRegistry Guide](../../docs/guides/metrics.md) for detaile
 
 ---
 
-The deprecated `metrics` component is a utility for collecting, aggregating, and publishing metrics from a Dynamo deployment, but it is being deprecated and replaced by `MetricsRegistry`.
+The `metrics` component is a utility for collecting, aggregating, and publishing metrics from a Dynamo deployment, but it is being deprecated and replaced by `MetricsRegistry`.
 
-**Note**: This is a demo implementation. The deprecated `metrics` component is currently under active development and this documentation will change as the implementation evolves.
+**Note**: This is a demo implementation. The metrics component is currently under active development and this documentation will change as the implementation evolves.
 - In this demo the metrics names use the prefix "llm", but in production they will be prefixed with "dynamo" (e.g., the HTTP `/metrics` endpoint will serve metrics with "dynamo" prefixes)
 - This demo will only work when using examples/llm/configs/agg.yml-- other configurations will not work
 
@@ -24,7 +29,7 @@ The deprecated `metrics` component is a utility for collecting, aggregating, and
 
 ## Quickstart
 
-To start the deprecated `metrics` component, simply point it at the `namespace/component/endpoint`
+To start the `metrics` component, simply point it at the `namespace/component/endpoint`
 trio for the Dynamo workers that you're interested in monitoring metrics on.
 
 This will:
@@ -53,14 +58,14 @@ will get automatically discovered and the warnings will stop.
 
 ## Workers
 
-The deprecated `metrics` component needs running workers to gather metrics from,
+The `metrics` component needs running workers to gather metrics from,
 so below are some examples of workers and how they can be monitored.
 
 ### Mock Worker
 
-To try out how the deprecated `metrics` component works, there is a demo Rust-based
+To try out how `metrics` works, there is a demo Rust-based
 [mock worker](src/bin/mock_worker.rs) that provides sample data through two mechanisms:
-1. Exposes a stats handler at `dynamo/MyComponent/my_endpoint` that responds to polling requests (from the deprecated `metrics` component) with randomly generated `ForwardPassMetrics` data
+1. Exposes a stats handler at `dynamo/MyComponent/my_endpoint` that responds to polling requests (from `metrics`) with randomly generated `ForwardPassMetrics` data
 2. Publishes mock `KVHitRateEvent` data every second to demonstrate event-based metrics
 
 Step 1: Launch a mock workers via the following command (if already built):
@@ -107,11 +112,11 @@ docker compose -f deploy/docker-compose.yml --profile metrics up -d
 
 ## Metrics Collection Modes
 
-The deprecated `metrics` component supports two modes for exposing metrics in a Prometheus format:
+The metrics component supports two modes for exposing metrics in a Prometheus format:
 
 ### Pull Mode (Default)
 
-When running in pull mode (the default), the deprecated `metrics` component will expose a
+When running in pull mode (the default), the metrics component will expose a
 Prometheus metrics endpoint on the specified host and port that a
 Prometheus server or curl client can pull from:
 
@@ -144,7 +149,7 @@ curl localhost:9091/metrics
 ### Push Mode
 
 For ephemeral or batch jobs, or when metrics need to be pushed through a firewall,
-you can use Push mode. In this mode, the deprecated `metrics` component will periodically push
+you can use Push mode. In this mode, the metrics component will periodically push
 metrics to an externally hosted
 [Prometheus PushGateway](https://prometheus.io/docs/instrumenting/pushing/):
 
@@ -153,7 +158,7 @@ Start a prometheus push gateway service via docker:
 docker run --rm -d -p 9091:9091 --name pushgateway prom/pushgateway
 ```
 
-Start the deprecated `metrics` component in `--push` mode, specifying the host and port of your PushGateway:
+Start the metrics component in `--push` mode, specifying the host and port of your PushGateway:
 ```bash
 # Push metrics to a Prometheus PushGateway every --push-interval seconds
 metrics \
@@ -181,7 +186,7 @@ curl 127.0.0.1:9091/metrics
 ```
 ## Building/Running from Source
 
-For easy iteration while making edits to the deprecated `metrics` component, you can use `cargo run`
+For easy iteration while making edits to the metrics component, you can use `cargo run`
 to build and run with your local changes:
 
 ```bash

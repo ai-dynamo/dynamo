@@ -8,7 +8,7 @@ The metrics aggregation service is being replaced by the **`MetricsRegistry`** b
 
 - **Built-in Prometheus HTTP endpoint** accessible via `DYN_SYSTEM_ENABLED=true` and `DYN_SYSTEM_PORT=<port>` (default: 8081)
 - **Automatic metric registration** when creating metrics via endpoint factory methods
-- **Automatic prefix and labeling** with `dynamo_component_` name prefix, as well as auto labels: dynamo_namespace, dynamo_component, and dynamo_endpoint information. These labels are prefixed to avoid Kubernetes label collisions.
+- **Automatic labeling** with namespace, component, and endpoint information
 - **Simplified deployment** - no separate metrics component required
 
 **For new projects and existing deployments, please migrate to using `MetricsRegistry` instead of the metrics aggregation service.**

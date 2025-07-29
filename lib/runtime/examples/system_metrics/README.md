@@ -29,7 +29,7 @@ let ingress = Ingress::for_engine(my_handler)?;
 ingress.add_metrics(&endpoint)?;
 ```
 
-The endpoint automatically provides prefix of `dynamo_component_*` in the name, and automatic labeling (dynamo_namespace, dynamo_component, dynamo_endpoint) for all metrics. These labels are prefixed with "dynamo_" to avoid collisions with Kubernetes and other monitoring system labels.
+The endpoint automatically provides proper labeling (namespace, component, endpoint) for all metrics.
 
 ## Available Methods
 
@@ -44,13 +44,13 @@ The `Ingress` struct provides methods for metrics:
 The following Prometheus metrics are automatically created for all work handlers:
 
 ### Counters
-- `dynamo_component_requests_total` - Total requests processed
-- `dynamo_component_request_bytes_total` - Total bytes received in requests
-- `dynamo_component_response_bytes_total` - Total bytes sent in responses
-- `dynamo_component_errors_total` - Total errors encountered (with error_type labels)
+- `requests_total` - Total requests processed
+- `request_bytes_total` - Total bytes received in requests
+- `response_bytes_total` - Total bytes sent in responses
+- `errors_total` - Total errors encountered (with error_type labels)
 
 ### Error Types
-The `dynamo_component_errors_total` metric includes the following error types:
+The `errors_total` metric includes the following error types:
 - `deserialization` - Errors parsing request messages
 - `invalid_message` - Unexpected message format
 - `response_stream` - Errors creating response streams
@@ -59,65 +59,65 @@ The `dynamo_component_errors_total` metric includes the following error types:
 - `publish_final` - Errors publishing final response
 
 ### Histograms
-- `dynamo_component_request_duration_seconds` - Request processing time
+- `request_duration_seconds` - Request processing time
 
 ### Gauges
-- `dynamo_component_concurrent_requests` - Number of requests currently being processed
+- `concurrent_requests` - Number of requests currently being processed
 
 ### Custom Metrics (Optional)
-- `dynamo_component_my_custom_bytes_processed_total` - Total data bytes processed by system handler (example)
+- `my_custom_bytes_processed_total` - Total data bytes processed by system handler (example)
 
 ### Labels
 All metrics automatically include these labels from the endpoint:
-- `dynamo_namespace` - The namespace name
-- `dynamo_component` - The component name
-- `dynamo_endpoint` - The endpoint name
+- `namespace` - The namespace name
+- `component` - The component name
+- `endpoint` - The endpoint name
 
 ## Example Metrics Output
 
 When the system is running, you'll see metrics from the /metrics HTTP path like this:
 
 ```prometheus
-# HELP dynamo_component_concurrent_requests Number of requests currently being processed by work handler
-# TYPE dynamo_component_concurrent_requests gauge
-dynamo_component_concurrent_requests{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 0
+# HELP concurrent_requests Number of requests currently being processed by work handler
+# TYPE concurrent_requests gauge
+concurrent_requests{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace"} 0
 
-# HELP dynamo_component_my_custom_bytes_processed_total Example of a custom metric. Total number of data bytes processed by system handler
-# TYPE dynamo_component_my_custom_bytes_processed_total counter
-dynamo_component_my_custom_bytes_processed_total{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 42
+# HELP my_custom_bytes_processed_total Example of a custom metric. Total number of data bytes processed by system handler
+# TYPE my_custom_bytes_processed_total counter
+my_custom_bytes_processed_total{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace"} 42
 
-# HELP dynamo_component_request_bytes_total Total number of bytes received in requests by work handler
-# TYPE dynamo_component_request_bytes_total counter
-dynamo_component_request_bytes_total{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 1098
+# HELP request_bytes_total Total number of bytes received in requests by work handler
+# TYPE request_bytes_total counter
+request_bytes_total{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace"} 1098
 
-# HELP dynamo_component_request_duration_seconds Time spent processing requests by work handler
-# TYPE dynamo_component_request_duration_seconds histogram
-dynamo_component_request_duration_seconds_bucket{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace",le="0.005"} 3
-dynamo_component_request_duration_seconds_bucket{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace",le="0.01"} 3
-dynamo_component_request_duration_seconds_bucket{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace",le="0.025"} 3
-dynamo_component_request_duration_seconds_bucket{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace",le="0.05"} 3
-dynamo_component_request_duration_seconds_bucket{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace",le="0.1"} 3
-dynamo_component_request_duration_seconds_bucket{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace",le="0.25"} 3
-dynamo_component_request_duration_seconds_bucket{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace",le="0.5"} 3
-dynamo_component_request_duration_seconds_bucket{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace",le="1"} 3
-dynamo_component_request_duration_seconds_bucket{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace",le="2.5"} 3
-dynamo_component_request_duration_seconds_bucket{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace",le="5"} 3
-dynamo_component_request_duration_seconds_bucket{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace",le="10"} 3
-dynamo_component_request_duration_seconds_bucket{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace",le="+Inf"} 3
-dynamo_component_request_duration_seconds_sum{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 0.00048793700000000003
-dynamo_component_request_duration_seconds_count{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 3
+# HELP request_duration_seconds Time spent processing requests by work handler
+# TYPE request_duration_seconds histogram
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="0.005"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="0.01"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="0.025"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="0.05"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="0.1"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="0.25"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="0.5"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="1"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="2.5"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="5"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="10"} 3
+request_duration_seconds_bucket{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace",le="+Inf"} 3
+request_duration_seconds_sum{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace"} 0.00048793700000000003
+request_duration_seconds_count{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace"} 3
 
-# HELP dynamo_component_requests_total Total number of requests processed by work handler
-# TYPE dynamo_component_requests_total counter
-dynamo_component_requests_total{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 3
+# HELP requests_total Total number of requests processed by work handler
+# TYPE requests_total counter
+requests_total{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace"} 3
 
-# HELP dynamo_component_response_bytes_total Total number of bytes sent in responses by work handler
-# TYPE dynamo_component_response_bytes_total counter
-dynamo_component_response_bytes_total{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 1917
+# HELP response_bytes_total Total number of bytes sent in responses by work handler
+# TYPE response_bytes_total counter
+response_bytes_total{component="dyn_example_component",endpoint="dyn_example_endpoint9881",namespace="dyn_example_namespace"} 1917
 
-# HELP dynamo_component_uptime_seconds Total uptime of the DistributedRuntime in seconds
-# TYPE dynamo_component_uptime_seconds gauge
-dynamo_component_uptime_seconds{dynamo_namespace="http_server"} 1.8226759879999999
+# HELP uptime_seconds Total uptime of the DistributedRuntime in seconds
+# TYPE uptime_seconds gauge
+uptime_seconds{namespace="http_server"} 1.8226759879999999
 ```
 
 ## Examples
@@ -211,7 +211,7 @@ Once running, you can query the metrics:
 curl http://localhost:8081/metrics | grep -E "(requests_total|request_bytes_total|response_bytes_total|errors_total|request_duration_seconds|concurrent_requests)"
 
 # Get request count for specific endpoint
-curl http://localhost:8081/metrics | grep 'requests_total{endpoint="example_endpoint"}'
+curl http://localhost:8081/metrics | grep 'requests_total{endpoint="dyn_example_endpoint"}'
 
 # Get request duration histogram
 curl http://localhost:8081/metrics | grep 'request_duration_seconds'
