@@ -131,6 +131,14 @@ pub struct Flags {
     /// These are the command line arguments to the python engine when using `pystr` or `pytok`.
     #[arg(index = 2, last = true, hide = true, allow_hyphen_values = true)]
     pub last: Vec<String>,
+
+    /// KV Router: Maximum number of waiting requests to be queued up before broadcasting all workers busy event
+    #[arg(long, default_value_t = 5)]
+    pub max_workers_busy_queue_depth: usize,
+
+    /// All workers busy rejection time window in seconds
+    #[arg(long)]
+    pub all_workers_busy_rejection_time_window: Option<u64>,
 }
 
 impl Flags {
@@ -180,6 +188,7 @@ impl Flags {
                 self.router_temperature,
                 self.use_kv_events,
                 self.max_num_batched_tokens,
+                self.max_workers_busy_queue_depth,
             ),
         )
     }

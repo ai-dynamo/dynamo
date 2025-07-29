@@ -30,7 +30,6 @@ use super::{
     metrics::{Endpoint, ResponseMetricCollector},
     service_v2, RouteDoc,
 };
-use crate::preprocessor::LLMMetricAnnotation;
 use crate::protocols::openai::{
     chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionResponse},
     completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
@@ -39,6 +38,7 @@ use crate::protocols::openai::{
 };
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
+use crate::{http::service::metrics::RequestType, preprocessor::LLMMetricAnnotation};
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 
@@ -82,6 +82,18 @@ impl ErrorMessage {
         tracing::error!("Internal server error: {msg}");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorMessage {
+                error: msg.to_string(),
+            }),
+        )
+    }
+
+    /// Too many requests error
+    /// Return this error when the service is overloaded.
+    /// The client should retry after a short delay.
+    pub fn too_many_requests_error(msg: &str) -> ErrorResponse {
+        (
+            StatusCode::TOO_MANY_REQUESTS,
             Json(ErrorMessage {
                 error: msg.to_string(),
             }),
@@ -155,6 +167,31 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
     uuid.to_string()
 }
 
+/// Check if the service is rate limited and return appropriate error response
+fn check_rate_limited(
+    state: &Arc<service_v2::State>,
+    model: &str,
+    endpoint: &Endpoint,
+    request_type: &RequestType,
+) -> Result<(), ErrorResponse> {
+    if state.rate_limiter().is_rate_limited() {
+        tracing::warn!("Service is rate limited, rejecting current request");
+        state
+            .metrics_clone()
+            .inc_rate_limited_requests_count(model, endpoint, request_type);
+        return Err(ErrorMessage::too_many_requests_error("Rate limit exceeded"));
+    }
+    Ok(())
+}
+
+fn extract_request_type(streaming: bool) -> RequestType {
+    if streaming {
+        RequestType::Stream
+    } else {
+        RequestType::Unary
+    }
+}
+
 /// OpenAI Completions Request Handler
 ///
 /// This method will handle the incoming request for the `/v1/completions endpoint`. The endpoint is a "source"
@@ -170,6 +207,15 @@ async fn handler_completions(
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
+
+    // check if the service is rate limited
+    let request_type = extract_request_type(request.inner.stream.unwrap_or(false));
+    check_rate_limited(
+        &state,
+        &request.inner.model,
+        &Endpoint::Completions,
+        &request_type,
+    )?;
 
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
@@ -203,9 +249,6 @@ async fn completions(
     request: Context<NvCreateCompletionRequest>,
     stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service is not ready
-    check_ready(&state)?;
-
     // todo - extract distributed tracing id and context id from headers
     let request_id = uuid::Uuid::new_v4().to_string();
 
@@ -306,6 +349,14 @@ async fn embeddings(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
+    // check if the service is rate limited
+    check_rate_limited(
+        &state,
+        &request.inner.model,
+        &Endpoint::Embeddings,
+        &RequestType::Unary,
+    )?;
+
     // todo - extract distributed tracing id and context id from headers
     let request_id = uuid::Uuid::new_v4().to_string();
 
@@ -363,6 +414,15 @@ async fn handler_chat_completions(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
+    let request_type = extract_request_type(request.inner.stream.unwrap_or(false));
+    // check if the service is rate limited
+    check_rate_limited(
+        &state,
+        &request.inner.model,
+        &Endpoint::ChatCompletions,
+        &request_type,
+    )?;
+
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);
     let request = Context::with_id(request, request_id);
@@ -402,9 +462,6 @@ async fn chat_completions(
     mut request: Context<NvCreateChatCompletionRequest>,
     mut stream_handle: ConnectionHandle,
 ) -> Result<Response, ErrorResponse> {
-    // return a 503 if the service is not ready
-    check_ready(&state)?;
-
     let request_id = request.id().to_string();
 
     // Handle unsupported fields - if Some(resp) is returned by
@@ -588,6 +645,15 @@ async fn handler_responses(
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
+
+    let request_type = extract_request_type(request.inner.stream.unwrap_or(false));
+    // check if the service is rate limited
+    check_rate_limited(
+        &state,
+        &request.inner.model,
+        &Endpoint::Responses,
+        &request_type,
+    )?;
 
     // create the context for the request
     let request_id = get_or_create_request_id(request.inner.user.as_deref(), &headers);

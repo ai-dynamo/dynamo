@@ -34,13 +34,19 @@ pub struct KvRouterConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true))]
-    fn new(overlap_score_weight: f64, router_temperature: f64, use_kv_events: bool) -> Self {
+    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, max_workers_busy_queue_depth=5))]
+    fn new(
+        overlap_score_weight: f64,
+        router_temperature: f64,
+        use_kv_events: bool,
+        max_workers_busy_queue_depth: usize,
+    ) -> Self {
         KvRouterConfig {
             inner: RsKvRouterConfig {
                 overlap_score_weight,
                 router_temperature,
                 use_kv_events,
+                max_workers_busy_queue_depth,
                 ..Default::default()
             },
         }

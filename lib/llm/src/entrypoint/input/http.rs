@@ -7,13 +7,11 @@ use crate::{
     discovery::{ModelManager, ModelWatcher, MODEL_ROOT_PATH},
     engines::StreamingEngineAdapter,
     entrypoint::{input::common, EngineConfig},
-    http::service::service_v2,
+    http::service::{rate_limiter::HttpServiceRateLimiter, service_v2},
     kv_router::KvRouterConfig,
-    types::{
-        openai::chat_completions::{
-            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-        },
-        openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+    types::openai::{
+        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
+        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
 use dynamo_runtime::pipeline::RouterMode;
@@ -28,10 +26,19 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
         .enable_cmpl_endpoints(true)
         .enable_embeddings_endpoints(true)
         .with_request_template(engine_config.local_model().request_template())
+        .with_all_workers_busy_rejection_time_window(
+            engine_config
+                .local_model()
+                .all_workers_busy_rejection_time_window(),
+        )
         .build()?;
     match engine_config {
         EngineConfig::Dynamic(_) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
+            let rate_limiter = http_service.rate_limiter_clone();
+            if let Err(e) = start_rate_limiter_monitoring(&distributed_runtime, &engine_config, &rate_limiter) {
+                tracing::error!(%e, "failed to start rate limiter monitoring");
+            }
             match distributed_runtime.etcd_client() {
                 Some(etcd_client) => {
                     let router_config = engine_config.local_model().router_config();
@@ -108,5 +115,18 @@ async fn run_watcher(
     let _watcher_task = tokio::spawn(async move {
         watch_obj.watch(receiver).await;
     });
+    Ok(())
+}
+
+/// Starts the rate limiter monitoring for the given namespace.
+/// This is used to monitor the rate limiter for the given namespace and start the rate limiting if the all workers busy event is received.
+fn start_rate_limiter_monitoring(
+    runtime: &DistributedRuntime,
+    engine_config: &EngineConfig,
+    rate_limiter: &HttpServiceRateLimiter,
+) -> anyhow::Result<()> {
+    let namespace = engine_config.local_model().endpoint_id().namespace.clone();
+    let namespace = runtime.namespace(namespace)?;
+    rate_limiter.start_monitoring(namespace)?;
     Ok(())
 }

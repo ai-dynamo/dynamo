@@ -60,6 +60,12 @@ def parse_args():
         help="KV Router: Temperature for worker sampling via softmax. Higher values promote more randomness, and 0 fallbacks to deterministic.",
     )
     parser.add_argument(
+        "--max-workers-busy-queue-depth",
+        type=int,
+        default=5,
+        help="KV Router: Maximum number of waiting requests to be queued up before broadcasting all workers busy event.",
+    )
+    parser.add_argument(
         "--kv-events",
         action="store_true",
         dest="use_kv_events",
@@ -86,6 +92,7 @@ async def async_main():
             overlap_score_weight=flags.kv_overlap_score_weight,
             router_temperature=flags.router_temperature,
             use_kv_events=flags.use_kv_events,
+            max_workers_busy_queue_depth=flags.max_workers_busy_queue_depth,
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random

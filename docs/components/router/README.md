@@ -42,6 +42,11 @@ The KV Router supports several key configuration options:
   - `--kv-events`: Uses real-time events from workers for accurate cache tracking
   - `--no-kv-events`: Uses approximation based on routing decisions (lower overhead, less accurate)
 
+- **`--max-workers-busy-queue-depth <depth>`**: Maximum number of requests to queue when all workers are busy (default: 5)
+  - When all workers are at capacity, new requests are queued
+  - When the queue reaches maximum depth, the router broadcasts a "service down" event
+  - Queued requests are processed first when workers become available
+
 For a complete list of available options:
 ```bash
 python -m dynamo.frontend --help
@@ -67,6 +72,15 @@ The router maintains block information through two complementary systems:
   - Decremented when a request completes
 
 - **Cached Blocks**: Maintained globally by the KvIndexer, which builds a prefix tree from KV events reported by workers. This provides accurate overlap information for routing decisions.
+
+### Request Queue Management
+
+When all workers are busy, the KV Router implements a FIFO queue system:
+
+- **Queue Behavior**: New requests are added to the back of the queue when no workers are available
+- **Priority Processing**: Queued requests are processed before new incoming requests when workers become available
+- **Service Status Events**: The router publishes NATS events to `kv-all-workers-busy` when the queue reaches maximum capacity. This event is used by the frontend to optionally stop accepting new requests with a 429 (TOO_MANY_REQUESTS) status code.
+- **Queue Depth Monitoring**: The queue depth is included in service status events for external monitoring
 
 ## Cost Function
 

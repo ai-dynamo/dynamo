@@ -47,6 +47,7 @@ pub struct LocalModelBuilder {
     kv_cache_block_size: u32,
     http_port: u16,
     migration_limit: u32,
+    all_workers_busy_rejection_time_window: Option<u64>,
 }
 
 impl Default for LocalModelBuilder {
@@ -62,6 +63,7 @@ impl Default for LocalModelBuilder {
             template_file: Default::default(),
             router_config: Default::default(),
             migration_limit: Default::default(),
+            all_workers_busy_rejection_time_window: Default::default(),
         }
     }
 }
@@ -119,6 +121,14 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn all_workers_busy_rejection_time_window(
+        &mut self,
+        all_workers_busy_rejection_time_window: Option<u64>,
+    ) -> &mut Self {
+        self.all_workers_busy_rejection_time_window = all_workers_busy_rejection_time_window;
+        self
+    }
+
     /// Make an LLM ready for use:
     /// - Download it from Hugging Face (and NGC in future) if necessary
     /// - Resolve the path
@@ -155,6 +165,7 @@ impl LocalModelBuilder {
                 template,
                 http_port: self.http_port,
                 router_config: self.router_config.take().unwrap_or_default(),
+                all_workers_busy_rejection_time_window: self.all_workers_busy_rejection_time_window,
             });
         }
 
@@ -212,6 +223,7 @@ impl LocalModelBuilder {
             template,
             http_port: self.http_port,
             router_config: self.router_config.take().unwrap_or_default(),
+            all_workers_busy_rejection_time_window: self.all_workers_busy_rejection_time_window,
         })
     }
 }
@@ -224,6 +236,7 @@ pub struct LocalModel {
     template: Option<RequestTemplate>,
     http_port: u16, // Only used if input is HTTP server
     router_config: RouterConfig,
+    all_workers_busy_rejection_time_window: Option<u64>,
 }
 
 impl LocalModel {
@@ -253,6 +266,10 @@ impl LocalModel {
 
     pub fn router_config(&self) -> &RouterConfig {
         &self.router_config
+    }
+
+    pub fn all_workers_busy_rejection_time_window(&self) -> Option<u64> {
+        self.all_workers_busy_rejection_time_window
     }
 
     pub fn is_gguf(&self) -> bool {

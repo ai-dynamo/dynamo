@@ -48,6 +48,10 @@ struct Args {
     /// Block size for the router
     #[arg(long)]
     block_size: u32,
+
+    /// KV Router: Maximum number of waiting requests to be queued up before broadcasting all workers busy event
+    #[arg(long, default_value_t = 5)]
+    max_workers_busy_queue_depth: usize,
 }
 
 fn main() -> Result<()> {
@@ -66,7 +70,7 @@ async fn app(runtime: Runtime) -> Result<()> {
 
     let selector = Box::new(CustomWorkerSelector::default());
 
-    let router = KvRouter::new(component.clone(), args.block_size, Some(selector), true).await?;
+    let router = KvRouter::new(component.clone(), args.block_size, Some(selector), true, args.max_workers_busy_queue_depth).await?;
     let router = Ingress::for_engine(Arc::new(router))?;
 
     component

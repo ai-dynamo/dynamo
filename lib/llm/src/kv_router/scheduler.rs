@@ -17,9 +17,9 @@ use dynamo_runtime::component::Namespace;
 use dynamo_runtime::traits::events::EventPublisher;
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 use super::protocols::WorkerSelectionResult;
@@ -28,7 +28,7 @@ use crate::kv_router::indexer::OverlapScores;
 use crate::kv_router::protocols::LoadMetrics;
 use crate::kv_router::sequence::ActiveSequencesMultiWorker;
 use crate::kv_router::KvRouterConfig;
-use crate::kv_router::KV_HIT_RATE_SUBJECT;
+use crate::kv_router::{KV_ALL_WORKERS_BUSY_SUBJECT, KV_HIT_RATE_SUBJECT};
 use crate::tokens::TokenBlockSequence;
 use dynamo_runtime::component::Instance;
 
@@ -37,6 +37,12 @@ pub struct KVHitRateEvent {
     pub worker_id: i64,
     pub isl_blocks: usize,
     pub overlap_blocks: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KVAllWorkersBusyEvent {
+    pub max_queue_depth: usize,
+    pub timestamp: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -109,6 +115,7 @@ impl KvScheduler {
         block_size: u32,
         mut instances_rx: tokio::sync::watch::Receiver<Vec<Instance>>, // Changed from ProcessedEndpoints
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
+        max_workers_busy_queue_depth: usize,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
         let mut instances: Vec<Instance> = instances_rx.borrow_and_update().clone();
@@ -117,11 +124,23 @@ impl KvScheduler {
         let worker_ids: Vec<i64> = instances.iter().map(|i| i.instance_id).collect();
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<KVHitRateEvent>();
+        let ns_clone = ns.clone();
         tokio::spawn(async move {
             let mut event_rx = event_rx;
             while let Some(event) = event_rx.recv().await {
-                if let Err(e) = ns.publish(KV_HIT_RATE_SUBJECT, &event).await {
+                if let Err(e) = ns_clone.publish(KV_HIT_RATE_SUBJECT, &event).await {
                     tracing::warn!("Failed to publish KV hit rate event: {:?}", e);
+                }
+            }
+        });
+
+        let (all_workers_busy_event_tx, all_workers_busy_event_rx) =
+            tokio::sync::mpsc::unbounded_channel::<KVAllWorkersBusyEvent>();
+        tokio::spawn(async move {
+            let mut all_workers_busy_event_rx = all_workers_busy_event_rx;
+            while let Some(event) = all_workers_busy_event_rx.recv().await {
+                if let Err(e) = ns.publish(KV_ALL_WORKERS_BUSY_SUBJECT, &event).await {
+                    tracing::warn!("Failed to publish all workers busy event: {:?}", e);
                 }
             }
         });
@@ -136,70 +155,104 @@ impl KvScheduler {
         // Background task to handle scheduling requests
         tokio::spawn(async move {
             let mut request: SchedulingRequest;
+            let mut is_waiting_request: bool = false;
             let mut request_rx = request_rx;
             let mut pending_endpoint_update: Option<Vec<i64>> = None;
+            let mut waiting_requests_queue = VecDeque::with_capacity(max_workers_busy_queue_depth);
+
             tracing::trace!("scheduler background task started");
 
-            'outer: loop {
-                request = tokio::select! {
-                    biased;
+            loop {
+                // NOTE: We prioritize waiting requests over new requests
+                if !waiting_requests_queue.is_empty() {
+                    request = waiting_requests_queue
+                        .pop_front()
+                        .expect("waiting_requests_queue is not empty");
+                    tracing::trace!(
+                        "Processing queued request, {} remaining in the queue",
+                        waiting_requests_queue.len()
+                    );
+                    is_waiting_request = true;
+                } else {
+                    // Waiting queue is empty, we can process new requests
+                    request = tokio::select! {
+                        biased;
 
-                    _ = instances_rx.changed() => {
-                        instances = instances_rx.borrow_and_update().clone();
-                        let worker_ids: Vec<i64> = instances.iter().map(|i| i.instance_id).collect();
-                        pending_endpoint_update = Some(worker_ids);
-                        continue 'outer;
-                    }
-
-                    maybe_new_request = request_rx.recv() => {
-                        let Some(new_request) = maybe_new_request else {
-                            tracing::warn!("scheduler shutdown");
-                            break 'outer;
-                        };
-                        tracing::trace!("received request to be scheduled");
-                        new_request
-                    }
-                };
-
-                loop {
-                    // When calling selector.select_worker, we need to adapt
-                    match selector.select_worker(&instances, &request, block_size) {
-                        Ok(selection) => {
-                            if let Err(e) = event_tx.send(KVHitRateEvent {
-                                worker_id: selection.worker_id,
-                                isl_blocks: selection.required_blocks as usize,
-                                overlap_blocks: selection.overlap_blocks,
-                            }) {
-                                tracing::warn!("Failed to send KV hit rate event: {:?}", e);
-                            }
-
-                            let response = SchedulingResponse {
-                                best_worker_id: selection.worker_id,
-                                overlap_blocks: selection.overlap_blocks,
-                                endpoints_changed: pending_endpoint_update.take(),
-                            };
-                            request.respond(response);
-                            continue 'outer;
-                        }
-                        Err(KvSchedulerError::NoEndpoints) => {
-                            tracing::trace!("no endpoints available; waiting for endpoints update");
-                            instances_rx.changed().await.ok();
+                        _ = instances_rx.changed() => {
                             instances = instances_rx.borrow_and_update().clone();
-                            let worker_ids: Vec<i64> =
-                                instances.iter().map(|i| i.instance_id).collect();
+                            let worker_ids: Vec<i64> = instances.iter().map(|i| i.instance_id).collect();
                             pending_endpoint_update = Some(worker_ids);
                             continue;
                         }
-                        // TODO: this is not actually hooked up
-                        Err(KvSchedulerError::AllWorkersBusy) => {
-                            tracing::trace!("all workers busy; waiting for more capacity");
-                            tokio::time::sleep(Duration::from_millis(5)).await;
-                            continue;
+
+                        maybe_new_request = request_rx.recv() => {
+                            let Some(new_request) = maybe_new_request else {
+                                tracing::warn!("scheduler shutdown");
+                                break;
+                            };
+                            tracing::trace!("received request to be scheduled");
+                            new_request
                         }
-                        Err(e) => {
-                            tracing::error!("error scheduling request: {:?}", e);
-                            break 'outer;
+                    };
+                }
+
+                // When calling selector.select_worker, we need to adapt
+                match selector.select_worker(&instances, &request, block_size) {
+                    Ok(selection) => {
+                        if let Err(e) = event_tx.send(KVHitRateEvent {
+                            worker_id: selection.worker_id,
+                            isl_blocks: selection.required_blocks as usize,
+                            overlap_blocks: selection.overlap_blocks,
+                        }) {
+                            tracing::warn!("Failed to send KV hit rate event: {:?}", e);
                         }
+
+                        let response = SchedulingResponse {
+                            best_worker_id: selection.worker_id,
+                            overlap_blocks: selection.overlap_blocks,
+                            endpoints_changed: pending_endpoint_update.take(),
+                        };
+                        request.respond(response);
+                    }
+                    Err(KvSchedulerError::NoEndpoints) => {
+                        tracing::trace!("no endpoints available; waiting for endpoints update");
+                        instances_rx.changed().await.ok();
+                        instances = instances_rx.borrow_and_update().clone();
+                        let worker_ids: Vec<i64> =
+                            instances.iter().map(|i| i.instance_id).collect();
+                        pending_endpoint_update = Some(worker_ids);
+                    }
+                    Err(KvSchedulerError::AllWorkersBusy) => {
+                        tracing::trace!("all workers busy; waiting for more capacity");
+                        // Check if the waiting queue is att capacity
+                        if waiting_requests_queue.len() >= max_workers_busy_queue_depth {
+                            tracing::warn!(
+                                "waiting queue is at capacity, broadcasting all workers busy event"
+                            );
+                            if let Err(e) = all_workers_busy_event_tx.send(KVAllWorkersBusyEvent {
+                                max_queue_depth: max_workers_busy_queue_depth,
+                                timestamp: SystemTime::now()
+                                    .duration_since(UNIX_EPOCH)
+                                    .unwrap()
+                                    .as_secs(),
+                            }) {
+                                tracing::warn!("Failed to send all workers busy event: {:?}", e);
+                            }
+                        }
+
+                        if is_waiting_request {
+                            // If the request was already in the waiting queue, we need to move it to the front
+                            waiting_requests_queue.push_front(request);
+                        } else {
+                            // If the request was not previously in the waiting queue, we add it to the back of the waiting queue
+                            waiting_requests_queue.push_back(request);
+                        }
+
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                    Err(e) => {
+                        tracing::error!("error scheduling request: {:?}", e);
+                        break;
                     }
                 }
             }
