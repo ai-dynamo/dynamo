@@ -18,7 +18,7 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 
 # Examples
 /examples/*/deploy/ @hutm @biswapanda @ishandhanani @julienmancuso @hhzhang16 @mohammedabdulwahhab @atchernych
-/examples/ @ai-dynamo/Devops @nnshah1 @whoisj @nealvaidya @ai-dynamo/dynamo-rust-codeowners
+/examples/ @ai-dynamo/Devops @nnshah1 @whoisj @nealvaidya @ishandhanani @ai-dynamo/dynamo-rust-codeowners
 /examples/multimodal/ @indrajit96 @krishung5 @whoisj @hhzhang16
 
 # CI/CD
