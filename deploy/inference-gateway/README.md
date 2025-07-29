@@ -1,6 +1,7 @@
-or setting up the Inference Gateway with Dynamo for managing and routing inference requests.
+## Inference Gateway Setup with Dynamo
 
-This is an experimental setup that treats each Dynamo deployment as a black box and routes traffic randomly among the deployments.
+This Setup treats each Dynamo deployment as a black box and routes traffic randomly among the deployments.
+Currently, this setup is only kgateway based Inference Gateway.
 
 ## Table of Contents
 
@@ -15,7 +16,7 @@ This is an experimental setup that treats each Dynamo deployment as a black box 
 
 ## Installation Steps
 
-1. **Install Dynamo Cloud**
+1. **Install Dynamo Platform**
 
 [See Quickstart Guide](../../../docs/guides/dynamo_deploy/quickstart.md) to install Dynamo Cloud.
 
@@ -24,11 +25,13 @@ This is an experimental setup that treats each Dynamo deployment as a black box 
 
 First, deploy an inference gateway service. In this example, we'll install `kgateway` based gateway implementation.
 You can use the script below or follow the steps manually.
+
+Script:
 ```bash
-. install_gaie_crd_kgateway.sh
+./install_gaie_crd_kgateway.sh
 ```
 
-
+Manual steps:
 a. Deploy the Gateway API CRDs:
 ```bash
 GATEWAY_API_VERSION=v1.3.0
