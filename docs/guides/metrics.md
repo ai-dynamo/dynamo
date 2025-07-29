@@ -34,24 +34,24 @@ This hierarchical structure allows you to create metrics at the appropriate leve
 
 **Worker Metrics**: The core Dynamo backend system automatically exposes the following worker metrics with automatic `namespace`, `component`, and `endpoint` labeling:
 
-- `dynamo_concurrent_requests`: Number of requests currently being processed by work handler (gauge)
-- `dynamo_request_bytes_total`: Total number of bytes received in requests by work handler (counter)
-- `dynamo_request_duration_seconds`: Time spent processing requests by work handler (histogram)
-- `dynamo_requests_total`: Total number of requests processed by work handler (counter)
-- `dynamo_response_bytes_total`: Total number of bytes sent in responses by work handler (counter)
-- `dynamo_system_uptime_seconds`: Total uptime of the DistributedRuntime in seconds (gauge)
+- `dynamo_component_concurrent_requests`: Number of requests currently being processed by work handler (gauge)
+- `dynamo_component_request_bytes_total`: Total number of bytes received in requests by work handler (counter)
+- `dynamo_component_request_duration_seconds`: Time spent processing requests by work handler (histogram)
+- `dynamo_component_requests_total`: Total number of requests processed by work handler (counter)
+- `dynamo_component_response_bytes_total`: Total number of bytes sent in responses by work handler (counter)
+- `dynamo_component_system_uptime_seconds`: Total uptime of the DistributedRuntime in seconds (gauge)
 
 These metrics include labels for `namespace`, `component`, and `endpoint` to provide detailed observability into backend worker performance, request processing, and system health. Example label values include `namespace="dynamo"`, `component="backend"`, and `endpoint="generate"`.
 
 **Frontend Metrics**: Frontend labels and metrics are implemented separately from the core Dynamo metrics system. When using Dynamo HTTP Frontend (available with `--framework VLLM` or `--framework TENSORRTLLM`), the following metrics are automatically exposed:
 
-- `nv_llm_http_service_inflight_requests`: Number of inflight requests (gauge)
-- `nv_llm_http_service_input_sequence_tokens`: Input sequence length in tokens (histogram)
-- `nv_llm_http_service_inter_token_latency_seconds`: Inter-token latency in seconds (histogram)
-- `nv_llm_http_service_output_sequence_tokens`: Output sequence length in tokens (histogram)
-- `nv_llm_http_service_request_duration_seconds`: Duration of LLM requests (histogram)
-- `nv_llm_http_service_requests_total`: Total number of LLM requests processed (counter)
-- `nv_llm_http_service_time_to_first_token_seconds`: Time to first token in seconds (histogram)
+- `dynamo_frontend_inflight_requests`: Number of inflight requests (gauge)
+- `dynamo_frontend_input_sequence_tokens`: Input sequence length in tokens (histogram)
+- `dynamo_frontend_inter_token_latency_seconds`: Inter-token latency in seconds (histogram)
+- `dynamo_frontend_output_sequence_tokens`: Output sequence length in tokens (histogram)
+- `dynamo_frontend_request_duration_seconds`: Duration of LLM requests (histogram)
+- `dynamo_frontend_requests_total`: Total number of LLM requests processed (counter)
+- `dynamo_frontend_time_to_first_token_seconds`: Time to first token in seconds (histogram)
 
 These metrics include labels for `model` to provide detailed observability into the HTTP frontend performance. Some metrics also include additional labels such as `endpoint`, `request_type`, and `status`. Histogram metrics also include `le` (less than or equal) labels for bucket boundaries. Example label values include `model="qwen/qwen3-0.6b"`, `endpoint="chat_completions"`, `request_type="stream"`, and `status="success"`.
 
