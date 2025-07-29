@@ -82,7 +82,7 @@ helm install dynamo-gaie ./helm/dynamo-gaie -n my-model -f ./vllm_agg_qwen.yaml
 ```
 
 Key configurations include:
-- An InferenceModel resource for the DeepSeek model
+- An InferenceModel resource for the Qwen model
 - A service for the inference gateway
 - Required RBAC roles and bindings
 - RBAC permissions
