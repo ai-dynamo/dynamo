@@ -17,9 +17,9 @@ limitations under the License.
 
 # Dynamo MetricsRegistry Guide
 
-Dynamo MetricsRegistry is a common universal Dynamo built-in feature that provides standardized observability capabilities across all Dynamo components and services. It's automatically available whenever you use the DistributedRuntime framework.
+This guide covers the MetricsRegistry in Dynamo, which provides hierarchical Prometheus metrics with automatic labeling and namespace organization. The MetricsRegistry enables observability across distributed inference workloads.
 
-This guide covers the MetricsRegistry in Dynamo, which provides hierarchical Prometheus metrics with automatic labeling and namespace organization.
+**MetricsRegistry is a common universal Dynamo built-in** that provides standardized observability capabilities across all Dynamo components and services. It's automatically available whenever you use the DistributedRuntime framework.
 
 ## Overview
 
@@ -32,6 +32,53 @@ Dynamo's MetricsRegistry is built around a hierarchical registry framework that 
 - **Endpoint**: Endpoint-level metrics registry
 
 Each level in the hierarchy implements the MetricsRegistry trait, allowing you to create and manage metrics at the appropriate level while maintaining automatic namespace prefixing and labeling.
+
+## Transitioning from Raw Prometheus
+
+One of the key benefits of Dynamo's MetricsRegistry is how easy it is to transition from raw Prometheus metrics to the distributed runtime's Prometheus constructors. The transition is seamless and requires minimal code changes.
+
+### Before: Raw Prometheus
+
+```rust
+use prometheus::{Counter, Opts};
+
+let opts = Opts::new("my_counter", "A simple counter");
+let counter = Counter::with_opts(opts).unwrap();  // Prometheus counter
+```
+
+### After: Dynamo MetricsRegistry
+
+```rust
+use dynamo_runtime::MetricsRegistry;
+
+let counter = endpoint.create_intcounter("my_counter", "A simple counter", &[])?;  // Prometheus counter
+```
+
+**All the rest of your code can remain the same!** The counter still has the same API for incrementing, but now it's automatically:
+
+- Exposed on the HTTP metrics endpoint
+- Prefixed with the namespace (`dynamo_`)
+- Labeled with namespace, component, and endpoint information
+- Integrated into the distributed runtime's metrics collection
+
+### Enabling the HTTP Metrics Endpoint
+
+To expose your metrics via HTTP, simply enable the system endpoint with environment variables:
+
+```bash
+$ DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 python -m dynamo.vllm ... ... &
+```
+
+Then access your metrics:
+
+```bash
+$ curl http://localhost:8081/metrics
+# HELP dynamo_my_counter A simple counter
+# TYPE dynamo_my_counter counter
+dynamo_my_counter{component="example_component",endpoint="example_endpoint",namespace="dynamo"} 123
+```
+
+The metrics endpoint port can be configured using the `DYN_SYSTEM_PORT` environment variable. If set to 0, the system will assign a random available port, which is useful for integration testing to avoid port conflicts.
 
 ## Architecture
 
@@ -53,88 +100,9 @@ DistributedRuntime (DRT)
         └── EndpointN
 ```
 
-Each level in the hierarchy can create and manage metrics, with automatic namespace prefixing and labeling based on the hierarchy.
+### Automatic Labeling
 
-### Key Components
-
-- **MetricsRegistry**: Unified interface for creating and managing Prometheus metrics
-- **Prometheus Integration**: Native Prometheus metric types support
-- **Auto-labeling**: Automatic namespace, component, and endpoint labels
-- **Metrics Endpoint**: The `/metrics` HTTP endpoint is exposed when `DYN_SYSTEM_ENABLED` is `true`, allowing Prometheus to scrape metrics. Configure the port with `DYN_SYSTEM_PORT`.
-
-
-
-
-## Metric Types
-
-Major Prometheus metric types that are available via MetricsRegistry:
-
-### Basic Metrics
-- **Counter**: Monotonically increasing values (e.g., request counts)
-- **Gauge**: Values that can go up and down (e.g., active connections)
-- **Histogram**: Distributions of values (e.g., request durations)
-- **IntCounter**: Integer counters
-- **IntGauge**: Integer gauges
-
-### Vector Metrics (with dynamic labels)
-- **CounterVec**: Counters with dynamic labels
-- **IntCounterVec**: Integer counters with dynamic labels
-- **IntGaugeVec**: Integer gauges with dynamic labels
-
-## Base Metrics
-
-Dynamo automatically provides a set of base metrics that are inherited for free when using the DistributedRuntime and request handlers. The followings are implemented today:
-
-- **Request counters**: Total requests processed
-- **Request duration**: Processing time histograms
-- **Concurrent request tracking**: Current active requests
-- **Error tracking**: Detailed error counts by type (deserialization, invalid messages, response streams, generation, publishing)
-
-These base metrics are automatically created when using the Distributedruntime code that have request handlers. When an endpoint calls the request handler function, these metrics are automatically measured and updated. Additional base metrics are being added to the system to expand the default observability coverage.
-
-Base metrics are automatically exposed on the HTTP `/metrics` endpoint when the `DYN_SYSTEM_ENABLED` environment variable is set to `true`. This allows Prometheus and other monitoring tools to scrape the metrics without additional configuration.
-
-The metrics endpoint port can be configured using the `DYN_SYSTEM_PORT` environment variable. If set to 0, the system will assign a random available port, which is useful for integration testing to avoid port conflicts.
-
-## Prometheus Output Example
-
-Below is an example of how these metrics appear in Prometheus output on the HTTP /metrics endpoint:
-
-```prometheus
-# HELP dynamo_requests_total Total requests processed
-# TYPE dynamo_requests_total counter
-dynamo_requests_total{component="backend",endpoint="generate",namespace="dynamo"} 150
-
-# HELP dynamo_request_duration_seconds Request processing time
-# TYPE dynamo_request_duration_seconds histogram
-dynamo_request_duration_seconds_bucket{component="backend",endpoint="generate",namespace="dynamo",le="0.1"} 120
-dynamo_request_duration_seconds_bucket{component="backend",endpoint="generate",namespace="dynamo",le="0.5"} 145
-dynamo_request_duration_seconds_bucket{component="backend",endpoint="generate",namespace="dynamo",le="1.0"} 150
-dynamo_request_duration_seconds_sum{component="backend",endpoint="generate",namespace="dynamo"} 45.2
-dynamo_request_duration_seconds_count{component="backend",endpoint="generate",namespace="dynamo"} 150
-
-# HELP dynamo_concurrent_requests Current active requests
-# TYPE dynamo_concurrent_requests gauge
-dynamo_concurrent_requests{component="backend",endpoint="generate",namespace="dynamo"} 5
-
-# HELP dynamo_errors_total Total errors by type
-# TYPE dynamo_errors_total counter
-dynamo_errors_total{component="backend",endpoint="generate",error_type="generate",namespace="dynamo"} 2
-
-# HTTP server uptime metric
-dynamo_system_uptime_seconds{namespace="dynamo"} 3600
-```
-Note that MetricsRegistry automatically adds labels based on the hierarchy, such as namespace, component, and endpoint. In addition, the `dynamo_system_uptime_seconds` metric is also automatically added to track system uptime.
-
-### Error Types Tracked
-
-In the request handler, the error counter automatically tracks the following error types:
-- `deserialization`: Failed to deserialize request data
-- `invalid_message`: Unexpected message format
-- `response_stream`: Failed to create response stream
-- `generate`: Error during request generation
-- `publish_response`: Failed to publish response data
-- `publish_final`: Failed to publish final message
+The MetricsRegistry automatically adds labels based on the hierarchy, such as namespace, component, and endpoint. In addition, the `dynamo_system_uptime_seconds` metric is also automatically added to track system uptime.
 
 ## Code Examples
 
@@ -161,43 +129,61 @@ let login_success_rate = endpoint.create_gauge("login_success_rate", "Login succ
 // Create a CounterVec with dynamic labels
 let http_requests = component.create_countervec(
     "http_requests_total",
-    "HTTP requests by method and status",
-    &["method", "status"],  // Dynamic label names
-    &[("service", "api")]   // Static labels
+    "Total HTTP requests",
+    &["method", "status_code"],
+    &[]
 )?;
 
-// Use the vector with different label values
-http_requests.with_label_values(&["GET", "200"]).inc_by(1.0);
-http_requests.with_label_values(&["POST", "201"]).inc_by(1.0);
-http_requests.with_label_values(&["GET", "404"]).inc_by(1.0);
-
-// Create an IntGaugeVec for connection counts
-let connections = endpoint.create_intgaugevec(
-    "connections_active",
-    "Active connections by instance",
-    &["instance", "type"],
-    &[("service", "api")]
-)?;
-
-connections.with_label_values(&["server1", "websocket"]).set(10);
-connections.with_label_values(&["server2", "http"]).set(25);
+// Use the vector with specific label values
+http_requests.with_label_values(&["GET", "200"]).inc();
+http_requests.with_label_values(&["POST", "404"]).inc();
 ```
 
 ### Creating Histograms
 
 ```rust
-// Create histogram with custom buckets
-let request_duration = namespace.create_histogram(
+// Create a histogram for request duration
+let request_duration = endpoint.create_histogram(
     "request_duration_seconds",
-    "Request duration distribution",
+    "Request duration in seconds",
     &[],
-    Some(vec![0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0])
+    &[0.1, 0.5, 1.0, 2.0, 5.0]
 )?;
 
 // Record observations
-request_duration.observe(0.15);
-request_duration.observe(0.8);
-request_duration.observe(2.5);
+request_duration.observe(0.25);
+```
+
+## Base Metrics
+
+Dynamo automatically provides base metrics for all endpoints:
+
+- `dynamo_requests_total`: Total number of requests
+- `dynamo_request_duration_seconds`: Request duration histogram
+- `dynamo_errors_total`: Total number of errors by type
+- `dynamo_system_uptime_seconds`: System uptime
+
+These base metrics are automatically created when using the Distributedruntime code that have request handlers. When an endpoint calls the request handler function, these metrics are automatically measured and updated. Additional base metrics are being added to the system to expand the default observability coverage.
+
+## Prometheus Output Example
+
+```prometheus
+# HELP dynamo_requests_total Total requests
+# TYPE dynamo_requests_total counter
+dynamo_requests_total{component="backend",endpoint="generate",namespace="dynamo"} 1000
+
+# HELP dynamo_request_duration_seconds Request duration
+# TYPE dynamo_request_duration_seconds histogram
+dynamo_request_duration_seconds_bucket{component="backend",endpoint="generate",namespace="dynamo",le="0.1"} 800
+dynamo_request_duration_seconds_bucket{component="backend",endpoint="generate",namespace="dynamo",le="0.5"} 950
+dynamo_request_duration_seconds_bucket{component="backend",endpoint="generate",namespace="dynamo",le="1.0"} 1000
+
+# HELP dynamo_errors_total Total errors by type
+# TYPE dynamo_errors_total counter
+dynamo_errors_total{component="backend",endpoint="generate",error_type="generate",namespace="dynamo"} 2
+
+# HTTP server uptime metric
+dynamo_system_server_uptime_seconds{namespace="dynamo"} 3600
 ```
 
 ## Monitoring and Visualization
@@ -210,7 +196,7 @@ Configure Prometheus to scrape your metrics endpoint:
 scrape_configs:
   - job_name: 'dynamo'
     static_configs:
-      - targets: ['localhost:8080']
+      - targets: ['localhost:8081']
     metrics_path: '/metrics'
     scrape_interval: 15s
 ```
@@ -229,44 +215,19 @@ Use the provided Grafana dashboards in `deploy/metrics/grafana_dashboards/`:
 docker compose -f deploy/docker-compose.yml --profile metrics up -d
 
 # Access the dashboards
-# Grafana: http://localhost:3001 (dynamo/dynamo)
+# Grafana: http://localhost:3000 (admin/admin)
 # Prometheus: http://localhost:9090
 ```
 
-## Troubleshooting
+### Troubleshooting
 
-### Common Issues
+Common issues and solutions:
 
-1. **Metric Name Validation**
-   ```rust
-   // Invalid characters are automatically sanitized
-   namespace.create_counter("request-count", "Requests", &[])?;  // becomes "requestcount"
+1. **Metrics not appearing**: Check that `DYN_SYSTEM_ENABLED=true`
+2. **Port conflicts**: Use `DYN_SYSTEM_PORT=0` for random port assignment
+3. **Missing labels**: Ensure you're using the correct hierarchy level
 
-   // Use valid names for clarity
-   namespace.create_counter("request_count", "Requests", &[])?;
-   ```
-
-2. **Label Conflicts**
-   ```rust
-   // These will fail - "namespace", "component", and "endpoint" are reserved
-   namespace.create_counter("requests", "Requests", &[("namespace", "custom")])?;
-   namespace.create_counter("requests", "Requests", &[("component", "custom")])?;
-   namespace.create_counter("requests", "Requests", &[("endpoint", "custom")])?;
-
-   // Use different label names
-   namespace.create_counter("requests", "Requests", &[("service", "custom")])?;
-   ```
-
-3. **Vector Metric Configuration**
-   ```rust
-   // This will fail - CounterVec requires label names
-   component.create_countervec("requests", "Requests", &[], &[])?;
-
-   // Provide label names
-   component.create_countervec("requests", "Requests", &["method"], &[])?;
-   ```
-
-### Debugging Advice
+### Debugging
 
 Enable debug logging to see metric registration details:
 
@@ -300,34 +261,28 @@ println!("Metrics: {}", metrics);
 
 ```rust
 // Define custom buckets for your use case
-let custom_buckets = vec![0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0];
-let latency = namespace.create_histogram(
-    "request_latency_seconds",
-    "Request latency distribution",
+let custom_buckets = vec![0.001, 0.01, 0.1, 1.0, 10.0];
+let latency = endpoint.create_histogram(
+    "api_latency_seconds",
+    "API latency in seconds",
     &[],
-    Some(custom_buckets)
+    &custom_buckets
 )?;
 ```
 
 ### Metric Aggregation
 
-Metrics are automatically aggregated across hierarchy levels:
-
 ```rust
-// Create metrics at different levels
-let ns_counter = namespace.create_counter("requests", "Namespace requests", &[])?;
-let comp_counter = component.create_counter("requests", "Component requests", &[])?;
-let endpoint_counter = endpoint.create_counter("requests", "Endpoint requests", &[])?;
-
-// All will be visible in the final Prometheus output
-let all_metrics = drt.prometheus_metrics_fmt()?;
+// Aggregate metrics across multiple endpoints
+let total_requests = namespace.create_counter(
+    "total_requests",
+    "Total requests across all endpoints",
+    &[]
+)?;
 ```
-
-This MetricsRegistry provides observability capabilities for monitoring and debugging Dynamo applications at scale.
 
 ## Related Documentation
 
-- [Backend Guide](backend.md) - Creating Python workers with metrics
-- [KV Router Performance Tuning](kv_router_perf_tuning.md) - Performance optimization with metrics
-- [Disaggregation Performance Tuning](disagg_perf_tuning.md) - Distributed inference metrics
-- [Deploy Metrics README](../../deploy/metrics/README.md) - Monitoring stack setup and deployment
+- [Distributed Runtime Guide](../distributed.md)
+- [HTTP Service Guide](../http.md)
+- [Component Architecture](../components.md)
