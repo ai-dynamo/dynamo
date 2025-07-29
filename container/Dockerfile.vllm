@@ -191,24 +191,6 @@ ARG MAX_JOBS=72
 ENV MAX_JOBS=$MAX_JOBS
 ENV CUDA_HOME=/usr/local/cuda
 
-# properly install cmake so that gap can be installed
-RUN cmake --version
-
-ARG CMAKE_VERSION=3.31.8
-RUN mkdir /workspace/cmake_build
-WORKDIR /workspace/cmake_build
-
-# uninstall CMake
-RUN apt-get purge -y cmake
-# download newer version of CMake
-RUN wget https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
-    tar -xvzf cmake-${CMAKE_VERSION}-linux-$(uname -m).tar.gz && \
-    mv cmake-${CMAKE_VERSION}-linux-$(uname -m) custom_cmake
-ENV PATH=/workspace/cmake_build/custom_cmake/bin:$PATH
-
-# should be 3.31.8
-RUN cmake --version
-
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
         # TODO - split vllm, DeepEP, DeepGeMM, PPLX installs
@@ -222,7 +204,9 @@ ENV LD_LIBRARY_PATH=\
 $LD_LIBRARY_PATH
 
 # Install perf_analyzer and genai-perf
-RUN uv pip install perf_analyzer
+RUN if [ "$ARCH" = "arm64" ]; then \
+        uv pip install perf_analyzer; \
+    fi
 
 # Common dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
