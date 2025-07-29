@@ -206,7 +206,7 @@ Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disag
 
 See [client](../llm/README.md#client) section to learn how to send request to the deployment.
 
-NOTE: To send a request to a multi-node deployment, target the node which is running `dynamo-run in=http`.
+NOTE: To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
 
 ## Benchmarking
 
