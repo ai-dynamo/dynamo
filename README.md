@@ -172,8 +172,8 @@ uv pip install ai-dynamo[sglang]
 ```
 
 Run the backend/worker like this:
-```
-python -m dynamo.sglang.worker --help    #Note the '.worker' in the module path for SGLang
+```bash
+python -m dynamo.sglang.worker --help
 ```
 
 You can pass any sglang flags directly to this worker, see https://docs.sglang.ai/backend/server_arguments.html . See there to use multiple GPUs.

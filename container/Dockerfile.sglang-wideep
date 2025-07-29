@@ -13,9 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Note this container is built from a local dockerfile
-# Please see instructions in examples/sglang/README.md
-FROM sgl-wideep:latest
+FROM lmsysorg/sglang:latest
 
 # Add NIXL build dependencies
 RUN apt-get update -y && \
@@ -123,8 +121,6 @@ RUN cargo build --release
 RUN cd lib/bindings/python && pip install --break-system-packages -e . && cd ../../..
 RUN pip install --break-system-packages -e .
 
-ENV PYTHONPATH=/sgl-workspace/dynamo/components/planner/src:/sgl-workspace/dynamo/examples/sglang:$PYTHONPATH
-
 RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-${ARCH}.deb && \
     dpkg -i nats-server-v2.10.28-${ARCH}.deb && rm nats-server-v2.10.28-${ARCH}.deb
 
@@ -165,7 +161,4 @@ ENV PATH=/sgl-workspace/perf_analyzer/build/perf_analyzer/src/perf-analyzer-buil
 
 RUN pip install --break-system-packages genai-perf
 
-COPY examples/sglang/configs/deepseek_r1/wideep/* /sgl-workspace/dynamo/examples/sglang/configs/
-COPY examples/sglang/utils/benchmarking/* /sgl-workspace/dynamo/examples/sglang/utils/
-
-WORKDIR /sgl-workspace/dynamo/examples/sglang
+WORKDIR /sgl-workspace/dynamo/components/backends/sglang
