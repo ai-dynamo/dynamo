@@ -188,7 +188,7 @@ impl Flags {
                 self.router_temperature,
                 self.use_kv_events,
                 self.max_num_batched_tokens,
-                self.max_workers_busy_queue_depth,
+                Some(self.max_workers_busy_queue_depth),
             ),
         )
     }
