@@ -62,7 +62,7 @@ This is particularly beneficial for:
 - **Similar queries**: Common prefixes are computed once and reused
 - **Batch processing**: Related requests can be routed to workers with shared context
 
-For detailed technical information about how KV routing works, see the [KV Cache Routing Architecture documentation](../../docs/architecture/kv_cache_routing.md).
+For detailed technical information about how KV routing works, see the [KV Cache Routing Architecture documentation](../../../docs/architecture/kv_cache_routing.md).
 
 ## Prerequisites
 
@@ -122,24 +122,24 @@ Open a terminal on Node 1 and launch both workers:
 
 ```bash
 # Launch prefill worker in background
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang.worker \
-    --model-path Qwen/Qwen3-0.6B \           # Model to load from HuggingFace
-    --served-model-name Qwen/Qwen3-0.6B \    # Name clients will use in API calls
-    --page-size 16 \                         # KV cache block size (tokens per block)
-    --tp 1 \                                 # Tensor parallelism
-    --trust-remote-code \                    # Allow custom model code execution
-    --skip-tokenizer-init \                  # Skip tokenizer loading (handled by frontend)
-    --disaggregation-mode prefill \          # Run as prefill-only worker
-    --disaggregation-transfer-backend nixl & # Use NIXL for GPU-to-GPU transfers
-
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang.decode_worker \
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang.worker \
     --model-path Qwen/Qwen3-0.6B \
     --served-model-name Qwen/Qwen3-0.6B \
     --page-size 16 \
     --tp 1 \
     --trust-remote-code \
     --skip-tokenizer-init \
-    --disaggregation-mode decode \           # Run as decode-only worker
+    --disaggregation-mode prefill \
+    --disaggregation-transfer-backend nixl &
+
+CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang.decode_worker \
+    --model-path Qwen/Qwen3-0.6B \
+    --served-model-name Qwen/Qwen3-0.6B \
+    --page-size 16 \
+    --tp 1 \
+    --trust-remote-code \
+    --skip-tokenizer-init \
+    --disaggregation-mode decode \
     --disaggregation-transfer-backend nixl
 ```
 
@@ -156,7 +156,7 @@ Open a terminal on Node 2 and launch both workers:
 
 ```bash
 # Launch prefill worker in background
-CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang.worker \
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang.worker \
     --model-path Qwen/Qwen3-0.6B \
     --served-model-name Qwen/Qwen3-0.6B \
     --page-size 16 \
@@ -167,7 +167,7 @@ CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang.worker \
     --disaggregation-transfer-backend nixl &
 
 # Launch decode worker in foreground
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.sglang.decode_worker \
+CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.sglang.decode_worker \
     --model-path Qwen/Qwen3-0.6B \
     --served-model-name Qwen/Qwen3-0.6B \
     --page-size 16 \
