@@ -31,7 +31,7 @@ While theoretically each `DistributedRuntime` can have multiple `Namespace`s as 
 For example, a typical deployment configuration (like `components/backends/vllm/deploy/agg.yaml` or `components/backends/sglang/deploy/agg.yaml`) has multiple workers:
 
 - `Frontend`: Starts an HTTP server and handles incoming requests. The HTTP server routes all requests to the `Processor`.
-- `Processor`: When a new request arrives, `Processor` applies the chat template and performs the tokenization. 
+- `Processor`: When a new request arrives, `Processor` applies the chat template and performs the tokenization.
 Then, it route the request to the `Worker`.
 - `Worker` components (e.g., `VllmDecodeWorker`, `SGLangDecodeWorker`, `TrtllmWorker`): Perform the actual computation using their respective engines (vLLM, SGLang, TensorRT-LLM).
 

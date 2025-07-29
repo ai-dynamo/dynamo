@@ -52,7 +52,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ## Quick Start
 
-Below we provide a guide that lets you run all of our the common deployment patterns on a single node. 
+Below we provide a guide that lets you run all of our the common deployment patterns on a single node.
 
 ### Start NATS and ETCD in the background
 

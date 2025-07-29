@@ -19,7 +19,7 @@ limitations under the License.
 
 This directory contains practical examples demonstrating how to deploy and use Dynamo for distributed LLM inference. Each example includes setup instructions, configuration files, and explanations to help you understand different deployment patterns and use cases.
 
-> **Want to see a specific example?**  
+> **Want to see a specific example?**
 > Open a [GitHub issue](https://github.com/ai-dynamo/dynamo/issues) to request an example you'd like to see, or [open a pull request](https://github.com/ai-dynamo/dynamo/pulls) if you'd like to contribute your own!
 
 ## Basics & Tutorials
@@ -36,7 +36,7 @@ Learn fundamental Dynamo concepts through these introductory examples:
 Platform-specific deployment guides for production environments:
 
 - **[Amazon EKS](deployments/EKS/)** - Deploy Dynamo on Amazon Elastic Kubernetes Service
-- **[Azure AKS](deployments/AKS/)** - Deploy Dynamo on Azure Kubernetes Service  
+- **[Azure AKS](deployments/AKS/)** - Deploy Dynamo on Azure Kubernetes Service
 - **[Router Standalone](deployments/router_standalone/)** - Standalone router deployment patterns
 - **Amazon ECS** - _Coming soon_
 - **Google GKE** - _Coming soon_
