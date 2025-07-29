@@ -13,14 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 backend: pytorch
-tensor_parallel_size: 1
+tensor_parallel_size: 4
 moe_expert_parallel_size: 1
 enable_attention_dp: false
 max_num_tokens: 1024
 max_batch_size: 16
 trust_remote_code: true
 enable_chunked_prefill: true
-# External API does not support overlap scheduler
 disable_overlap_scheduler: true
 
 drafter_config:
@@ -32,5 +31,3 @@ kv_cache_config:
 
 cuda_graph_config:
   use_cuda_graph: true
-  #cuda_graph_batch_sizes:
-  #- 1

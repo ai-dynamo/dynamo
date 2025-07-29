@@ -5,19 +5,13 @@ import asyncio
 import logging
 import signal
 import sys
-import os
 
 import uvloop
 from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
-from dynamo.llm import (
-    ModelType,
-    get_tensorrtllm_engine,
-    get_tensorrtllm_publisher,
-    register_llm,
-)
+from dynamo.llm import get_tensorrtllm_engine, get_tensorrtllm_publisher
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.trtllm.utils.request_handlers.handlers import (
@@ -41,12 +35,8 @@ logging.getLogger().setLevel(logging.WARNING)
 
 async def graceful_shutdown(runtime):
     logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    pid = os.getpid()
-    print(f"[DRAFTER, PID: {pid}]     Received shutdown signal, shutting down DistributedRuntime")
     runtime.shutdown()
     logging.info("DistributedRuntime shutdown complete")
-    pid = os.getpid()
-    print(f"[DRAFTER, PID: {pid}]     DistributedRuntime shutdown complete")
 
 
 @dynamo_worker(static=False)
@@ -72,8 +62,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     Instantiate and serve
     """
     logging.info(f"Initializing the worker with config: {config}")
-    pid = os.getpid()
-    print(f"\n[DRAFTER, PID: {pid}]     Initializing the worker\n")
 
     next_client = None
     if config.next_endpoint:
@@ -128,8 +116,6 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     logging.info(f"TensorRT-LLM engine args: {arg_map}")
     engine_args = arg_map
-    pid = os.getpid()
-    print(f"\n[DRAFTER, PID: {pid}]     TensorRT-LLM engine args: {engine_args}\n")
 
     # Populate default sampling params from the model
     tokenizer = tokenizer_factory(arg_map["model"])

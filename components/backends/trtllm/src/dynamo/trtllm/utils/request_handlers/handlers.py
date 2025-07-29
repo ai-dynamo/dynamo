@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
-import os
 
 from dynamo.trtllm.utils.request_handlers.handler_base import (
     DisaggregationMode,
@@ -61,19 +60,8 @@ class AggregatedHandler(HandlerBase):
     def __init__(self, config: RequestHandlerConfig):
         super().__init__(config)
 
-    async def generate(self, request: dict, verifier: bool = False):
+    async def generate(self, request: dict):
         # Implement all steps locally.
-        if verifier:
-            print("\n")
-            print("-"*100)
-            print("PROCESSING REQUEST")
-            print("-"*100)
-            pid = os.getpid()
-            print(f"[VERIFIER, PID: {pid}]    Received request with token_ids: {request['token_ids']}")
-        else:
-            pid = os.getpid()
-            print(f"[DRAFTER, PID: {pid}]     Received request from verifier, generating tokens and sending to verifier")
-            print("-"*100)
         async for res in self.generate_locally(request):
             yield res
 

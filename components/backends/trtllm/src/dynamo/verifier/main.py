@@ -5,13 +5,12 @@ import asyncio
 import logging
 import signal
 import sys
-import os
 
 import uvloop
 from tensorrt_llm import SamplingParams
+from tensorrt_llm.llmapi.llm_args import ExternalAPIConfig, UserProvidedDecodingConfig
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
-from tensorrt_llm.llmapi.llm_args import UserProvidedDecodingConfig, ExternalAPIConfig
 
 from dynamo.llm import (
     ModelType,
@@ -37,18 +36,12 @@ from dynamo.verifier.utils.api_drafter import DynamoAPIDrafter
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
 configure_dynamo_logging()
-# TODO: remove this
-logging.getLogger().setLevel(logging.WARNING)
 
 
 async def graceful_shutdown(runtime):
     logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    pid = os.getpid()
-    print(f"[VERIFIER, PID: {pid}]    Received shutdown signal, shutting down DistributedRuntime")
     runtime.shutdown()
     logging.info("DistributedRuntime shutdown complete")
-    pid = os.getpid()
-    print(f"[VERIFIER, PID: {pid}]    DistributedRuntime shutdown complete")
 
 
 @dynamo_worker(static=False)
@@ -62,7 +55,7 @@ async def worker(runtime: DistributedRuntime):
 
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, signal_handler)
-    
+
     logging.info("Signal handlers set up for graceful shutdown")
 
     config = cmd_line_args()
@@ -74,8 +67,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     Instantiate and serve
     """
     logging.info(f"Initializing the worker with config: {config}")
-    pid = os.getpid()
-    print(f"\n[VERIFIER, PID: {pid}]    Initializing the worker\n")
 
     next_client = None
     if config.next_endpoint:
@@ -127,7 +118,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 "Only pytorch backend is supported for now to publish events and metrics."
             )
             sys.exit(1)
-    
+
     # Set speculative_config to use DynamoAPIDrafter in the verifier worker
     try:
         drafter_config = arg_map["drafter_config"]
@@ -137,17 +128,16 @@ async def init(runtime: DistributedRuntime, config: Config):
         else:
             max_draft_len = 10
     except KeyError:
-        raise ValueError("Verifier worker requires drafter_config to be specified in the engine config with drafter_endpoint.")
+        raise ValueError(
+            "Verifier worker requires drafter_config to be specified in the engine config with drafter_endpoint."
+        )
     del arg_map["drafter_config"]
-    
+
     drafter_config = ExternalAPIConfig(
         endpoint=drafter_endpoint,
         max_draft_len=max_draft_len,
     )
-    drafter = DynamoAPIDrafter(
-        spec_config=drafter_config,
-        runtime=runtime
-    )
+    drafter = DynamoAPIDrafter(spec_config=drafter_config, runtime=runtime)
     spec_config = UserProvidedDecodingConfig(
         drafter=drafter,
         max_draft_len=max_draft_len,
@@ -156,8 +146,6 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     logging.info(f"TensorRT-LLM engine args: {arg_map}")
     engine_args = arg_map
-    pid = os.getpid()
-    print(f"\n[VERIFIER, PID: {pid}]    TensorRT-LLM engine args: {engine_args}\n")
 
     # Populate default sampling params from the model
     tokenizer = tokenizer_factory(arg_map["model"])
@@ -204,11 +192,11 @@ async def init(runtime: DistributedRuntime, config: Config):
             ) as publisher:
                 handler_config.publisher = publisher
                 handler = RequestHandlerFactory().get_request_handler(handler_config)
-                 
-                await endpoint.serve_endpoint(lambda req : handler.generate(req, True))
+
+                await endpoint.serve_endpoint(lambda req: handler.generate(req, True))
         else:
             handler = RequestHandlerFactory().get_request_handler(handler_config)
-            await endpoint.serve_endpoint(lambda req : handler.generate(req, True))
+            await endpoint.serve_endpoint(lambda req: handler.generate(req, True))
 
 
 def main():
