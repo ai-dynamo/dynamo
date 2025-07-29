@@ -3,9 +3,10 @@
 
 use std::collections::HashMap;
 use std::env::var;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::RwLock;
 
 use super::metrics;
 use super::Metrics;
@@ -23,33 +24,41 @@ use tokio_util::sync::CancellationToken;
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
-    flags: RwLock<StateFlags>,
+    flags: StateFlags,
 }
 
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Debug)]
 struct StateFlags {
-    chat_endpoints_enabled: bool,
-    cmpl_endpoints_enabled: bool,
-    embeddings_endpoints_enabled: bool,
-    responses_endpoints_enabled: bool,
+    chat_endpoints_enabled: AtomicBool,
+    cmpl_endpoints_enabled: AtomicBool,
+    embeddings_endpoints_enabled: AtomicBool,
+    responses_endpoints_enabled: AtomicBool,
 }
 
 impl StateFlags {
     pub fn get(&self, endpoint_type: &EndpointType) -> bool {
         match endpoint_type {
-            EndpointType::Chat => self.chat_endpoints_enabled,
-            EndpointType::Completion => self.cmpl_endpoints_enabled,
-            EndpointType::Embedding => self.embeddings_endpoints_enabled,
-            EndpointType::Responses => self.responses_endpoints_enabled,
+            EndpointType::Chat => self.chat_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Completion => self.cmpl_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Embedding => self.embeddings_endpoints_enabled.load(Ordering::Relaxed),
+            EndpointType::Responses => self.responses_endpoints_enabled.load(Ordering::Relaxed),
         }
     }
 
-    pub fn set(&mut self, endpoint_type: &EndpointType, enabled: bool) {
+    pub fn set(&self, endpoint_type: &EndpointType, enabled: bool) {
         match endpoint_type {
-            EndpointType::Chat => self.chat_endpoints_enabled = enabled,
-            EndpointType::Completion => self.cmpl_endpoints_enabled = enabled,
-            EndpointType::Embedding => self.embeddings_endpoints_enabled = enabled,
-            EndpointType::Responses => self.responses_endpoints_enabled = enabled,
+            EndpointType::Chat => self
+                .chat_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Completion => self
+                .cmpl_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Embedding => self
+                .embeddings_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
+            EndpointType::Responses => self
+                .responses_endpoints_enabled
+                .store(enabled, Ordering::Relaxed),
         }
     }
 }
@@ -59,12 +68,12 @@ impl State {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            flags: RwLock::new(StateFlags {
-                chat_endpoints_enabled: false,
-                cmpl_endpoints_enabled: false,
-                embeddings_endpoints_enabled: false,
-                responses_endpoints_enabled: false,
-            }),
+            flags: StateFlags {
+                chat_endpoints_enabled: AtomicBool::new(false),
+                cmpl_endpoints_enabled: AtomicBool::new(false),
+                embeddings_endpoints_enabled: AtomicBool::new(false),
+                responses_endpoints_enabled: AtomicBool::new(false),
+            },
         }
     }
 
@@ -172,9 +181,7 @@ impl HttpService {
     }
 
     pub async fn enable_model_endpoint(&self, endpoint_type: EndpointType, enable: bool) {
-        let mut state_flags: tokio::sync::RwLockWriteGuard<'_, StateFlags> =
-            self.state.flags.write().await;
-        state_flags.set(&endpoint_type, enable);
+        self.state.flags.set(&endpoint_type, enable);
         tracing::info!(
             "{} endpoints {}",
             endpoint_type.as_str(),
@@ -207,16 +214,18 @@ impl HttpServiceConfigBuilder {
         let model_manager = Arc::new(ModelManager::new());
         let state = Arc::new(State::new(model_manager));
 
-        // Set initial state flags based on config
-        tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
-                let mut state_flags = state.flags.write().await;
-                state_flags.chat_endpoints_enabled = config.enable_chat_endpoints;
-                state_flags.cmpl_endpoints_enabled = config.enable_cmpl_endpoints;
-                state_flags.embeddings_endpoints_enabled = config.enable_embeddings_endpoints;
-                state_flags.responses_endpoints_enabled = config.enable_responses_endpoints;
-            });
-        });
+        state
+            .flags
+            .set(&EndpointType::Chat, config.enable_chat_endpoints);
+        state
+            .flags
+            .set(&EndpointType::Completion, config.enable_cmpl_endpoints);
+        state
+            .flags
+            .set(&EndpointType::Embedding, config.enable_embeddings_endpoints);
+        state
+            .flags
+            .set(&EndpointType::Responses, config.enable_responses_endpoints);
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -294,10 +303,8 @@ impl HttpServiceConfigBuilder {
                 move |req: axum::http::Request<axum::body::Body>, next: axum::middleware::Next| {
                     let state: Arc<State> = state_route.clone();
                     async move {
-                        // Read the flag value and drop the lock before async operations
-                        let guard = state.flags.read().await;
-                        let enabled = guard.get(&endpoint_type);
-
+                        // Check if the endpoint is enabled
+                        let enabled = state.flags.get(&endpoint_type);
                         if enabled {
                             Ok(next.run(req).await)
                         } else {
