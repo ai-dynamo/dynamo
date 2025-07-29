@@ -58,6 +58,10 @@ RUN apt-get update -y && \
     meson \
     ninja-build \
     pybind11-dev \
+    # These headers are missing with the hpcx installer, required
+    # by UCX to find RDMA devices
+    libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
+    libnuma-dev librdmacm-dev ibverbs-providers \
     # Rust build dependencies
 	clang \
     libclang-dev \
@@ -423,7 +427,15 @@ $LD_LIBRARY_PATH
 # libnuma-dev is a required dependency for sglang integration with NIXL
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN apt-get update && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential python3-dev libnuma-dev && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential python3-dev libnuma-dev \
+        # Curl for polling various endpoints.
+        curl \
+        # For debugging
+        vim \
+        # Libraries required by UCX to find RDMA devices
+        libibverbs1 rdma-core ibverbs-utils libibumad3 \
+        libnuma1 librdmacm1 ibverbs-providers && \
     rm -rf /var/lib/apt/lists/* && \
     uv venv $VIRTUAL_ENV --python 3.12 && \
     echo "source $VIRTUAL_ENV/bin/activate" >> ~/.bashrc
