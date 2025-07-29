@@ -17,7 +17,7 @@ use dynamo_runtime::{
 use crate::discovery::ModelEntry;
 use crate::entrypoint::RouterConfig;
 use crate::model_card::{self, ModelDeploymentCard};
-use crate::model_type::ModelType;
+use crate::model_type::{ModelInput, ModelType};
 use crate::request_template::RequestTemplate;
 
 mod network_name;
@@ -278,6 +278,7 @@ impl LocalModel {
         &mut self,
         endpoint: &Endpoint,
         model_type: ModelType,
+        model_input: ModelInput,
     ) -> anyhow::Result<()> {
         // A static component doesn't have an etcd_client because it doesn't need to register
         let Some(etcd_client) = endpoint.drt().etcd_client() else {
@@ -306,6 +307,7 @@ impl LocalModel {
             name: self.display_name().to_string(),
             endpoint: endpoint.id(),
             model_type,
+            model_input,
         };
         etcd_client
             .kv_create(

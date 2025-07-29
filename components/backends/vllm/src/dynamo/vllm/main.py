@@ -12,6 +12,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo.llm import (
+    ModelInput,
     ModelType,
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
@@ -143,6 +144,7 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
         await register_llm(
+            ModelInput.Tokens,
             ModelType.Backend,
             generate_endpoint,
             config.model,

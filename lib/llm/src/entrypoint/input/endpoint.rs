@@ -6,7 +6,7 @@ use std::{future::Future, pin::Pin, sync::Arc};
 use crate::{
     backend::Backend,
     engines::StreamingEngineAdapter,
-    model_type::ModelType,
+    model_type::{ModelInput, ModelType},
     preprocessor::{BackendOutput, PreprocessedRequest},
     types::{
         openai::chat_completions::{
@@ -49,7 +49,7 @@ pub async fn run(
                 Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateChatCompletionStreamResponse>>>>,
             >::for_engine(engine)?;
 
-            model.attach(&endpoint, ModelType::Chat).await?;
+            model.attach(&endpoint, ModelType::Chat, ModelInput::Text).await?;
             let fut_chat = endpoint.endpoint_builder().handler(ingress_chat).start();
 
             (Box::pin(fut_chat), Some(model.card().clone()))
@@ -74,7 +74,7 @@ pub async fn run(
                 .link(frontend)?;
             let ingress = Ingress::for_pipeline(pipeline)?;
 
-            model.attach(&endpoint, ModelType::Backend).await?;
+            model.attach(&endpoint, ModelType::Backend, ModelInput::Tokens).await?;
             let fut = endpoint.endpoint_builder().handler(ingress).start();
 
             (Box::pin(fut), Some(model.card().clone()))

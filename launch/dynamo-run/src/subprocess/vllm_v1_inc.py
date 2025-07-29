@@ -35,6 +35,7 @@ from vllm.v1.metrics.stats import IterationStats, SchedulerStats
 from dynamo.llm import (
     ForwardPassMetrics,
     KvStats,
+    ModelInput,
     ModelType,
     SpecDecodeStats,
     WorkerMetricsPublisher,
@@ -214,6 +215,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     clear_endpoint = component.endpoint("clear_kv_blocks")
 
     await register_llm(
+        ModelInput.Tokens,
         ModelType.Backend,
         generate_endpoint,
         config.model_path,

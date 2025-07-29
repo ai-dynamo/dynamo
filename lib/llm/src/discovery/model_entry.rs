@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     model_card::{self, ModelDeploymentCard},
-    model_type::ModelType,
+    model_type::{ModelInput, ModelType},
 };
 
 /// [ModelEntry] contains the information to discover models from the etcd cluster.
@@ -28,6 +28,11 @@ pub struct ModelEntry {
 
     /// Specifies whether the model is a chat, completions, etc model.
     pub model_type: ModelType,
+
+    /// Specifies the model input type.
+    /// `Tokens` for engines that expect pre-processed input.
+    /// `Text` for engines that take care of pre-processing themselves.
+    pub model_input: ModelInput,
 }
 
 impl ModelEntry {

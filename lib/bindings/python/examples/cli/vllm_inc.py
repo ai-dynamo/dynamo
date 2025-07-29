@@ -29,6 +29,7 @@ from vllm.inputs import TokensPrompt
 from dynamo.llm import (
     ForwardPassMetrics,
     KvStats,
+    ModelInput,
     ModelType,
     WorkerMetricsPublisher,
     WorkerStats,
@@ -224,6 +225,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     engine_client = await engine_context.__aenter__()
 
     await register_llm(
+        ModelInput.Tokens,
         ModelType.Backend,
         endpoint,
         config.model_path,
