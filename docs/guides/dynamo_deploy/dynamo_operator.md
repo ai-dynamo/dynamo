@@ -66,61 +66,6 @@ spec:
       envs:
       - name: SPECIFIC_ENV_VAR
         value: some_specific_value
-    Router:
-      replicas: 0
-      envs:
-      - name: SPECIFIC_ENV_VAR
-        value: some_specific_value
-```
-
-### CRD: `DynamoComponentDeployment`
-
-| Field              | Type     | Description                                                   | Required | Default |
-|--------------------|----------|---------------------------------------------------------------|----------|---------|
-| `dynamoNamespace` | string   | Namespace of the DynamoComponent                               | Yes      |         |
-| `serviceName`     | string   | Logical name of the service being deployed                     | Yes      |         |
-| `envs`            | array    | Environment variables for runtime                              | No       | `[]`    |
-| `annotations`     | map      | Additional metadata annotations for the pod                    | No       |         |
-| `labels`          | map      | Custom labels applied to the deployment and pod                | No       |         |
-| `resources`       | object   | Resource limits and requests (CPU, memory, GPU)                | No       |         |
-| `autoscaling`     | object   | Autoscaling rules for the deployment                           | No       |         |
-| `envFromSecret`   | string   | Reference to a secret for injecting env vars                   | No       |         |
-| `pvc`             | object   | Persistent volume claim configuration                          | No       |         |
-| `ingress`         | object   | Ingress configuration for exposing the service                 | No       |         |
-| `extraPodMetadata`| object   | Additional labels and annotations for the pod                  | No       |         |
-| `extraPodSpec`    | object   | Custom PodSpec fields to merge into the generated pod          | No       |         |
-| `livenessProbe`   | object   | Kubernetes liveness probe                                      | No       |         |
-| `readinessProbe`  | object   | Kubernetes readiness probe                                     | No       |         |
-| `replicas`        | int      | Number of replicas to run                                      | No       | `1`     |
-
-**API Version:** `nvidia.com/v1alpha1`
-**Scope:** Namespaced
-
-#### Example
-```yaml
-apiVersion: nvidia.com/v1alpha1
-kind: DynamoComponentDeployment
-metadata:
-  name: test-41fa991-vllmworker
-spec:
-  dynamoNamespace: dynamo
-  envs:
-    - name: DYN_DEPLOYMENT_CONFIG
-      value: '<long JSON config>'
-  externalServices:
-    PrefillWorker:
-      deploymentSelectorKey: dynamo
-      deploymentSelectorValue: PrefillWorker/dynamo
-  resources:
-    limits:
-      cpu: "10"
-      gpu: "1"
-      memory: 20Gi
-    requests:
-      cpu: "500m"
-      gpu: "1"
-      memory: 20Gi
-  serviceName: Frontend
 ```
 
 ## Installation
@@ -130,7 +75,7 @@ spec:
 
 ## GitOps Deployment with FluxCD
 
-This section describes how to use FluxCD for GitOps-based deployment of Dynamo inference graphs. GitOps enables you to manage your Dynamo deployments declaratively using Git as the source of truth. We'll use the [aggregated vLLM example](https://github.com/ai-dynamo/dynamo/blob/main/examples/llm/README.md) to demonstrate the workflow.
+This section describes how to use FluxCD for GitOps-based deployment of Dynamo inference graphs. GitOps enables you to manage your Dynamo deployments declaratively using Git as the source of truth. We'll use the [aggregated vLLM example](../../../components/backends/vllm/README.md) to demonstrate the workflow.
 
 ### Prerequisites
 
@@ -142,30 +87,13 @@ This section describes how to use FluxCD for GitOps-based deployment of Dynamo i
 
 The GitOps workflow for Dynamo deployments consists of three main steps:
 
-1. Build and push a pipeline to the Dynamo API store
+1. Build and push the Dynamo Operator
 2. Create and commit a DynamoGraphDeployment custom resource for initial deployment
-3. Update the pipeline by building a new version and updating the CR for subsequent updates
+3. Update the graph by building a new version and updating the CR for subsequent updates
 
-### Step 1: Build and Push Pipeline
+### Step 1: Build and Push Dynamo Cloud Operator
 
-First, build and push your pipeline using the Dynamo CLI:
-
-```bash
-# Set your project root directory
-export PROJECT_ROOT=$(pwd)
-
-# Configure environment variables
-export KUBE_NS=dynamo-cloud
-export DYNAMO_CLOUD=http://localhost:8080  # If using port-forward
-# OR
-# export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com  # If using Ingress/VirtualService
-
-# Build and push the service
-cd $PROJECT_ROOT/examples/llm
-DYNAMO_TAG=$(dynamo build --push graphs.agg:Frontend | grep "Successfully built" |  awk '{ print $NF }' | sed 's/\.$//')
-```
-
-The `--push` flag ensures the pipeline is pushed to the remote API store, making it available for deployment.
+First, follow to [See Install Dynamo Cloud](quickstart.md#install-dynamo-cloud).
 
 ### Step 2: Create Initial Deployment
 
@@ -216,18 +144,12 @@ The Dynamo operator will automatically reconcile it.
 You can monitor the deployment status using:
 
 ```bash
+
+export NAMESPACE=<namespace-with-the-dynamo-cloud-operator>
+
 # Check the DynamoGraphDeployment status
-kubectl get dynamographdeployment llm-agg -n $KUBE_NS
-
-# Check the component deployments
-kubectl get dynamocomponentdeployment -n $KUBE_NS
+kubectl get dynamographdeployment llm-agg -n $NAMESPACE
 ```
-
----
-
-## Deploying a Dynamo Pipeline using the Operator
-
-[See deployment steps](operator_deployment.md)
 
 
 ## Reconciliation Logic
