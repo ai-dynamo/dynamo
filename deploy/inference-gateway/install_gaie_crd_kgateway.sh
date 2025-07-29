@@ -1,4 +1,8 @@
-#! /bin/bash
+#!/usr/bin/env bash
+
+set -euo pipefail
+trap 'echo "Error at line $LINENO. Exiting."' ERR
+
 
 MODEL_NAMESPACE=my-model
 kubectl create namespace $MODEL_NAMESPACE || true
@@ -16,6 +20,7 @@ kubectl apply -f https://github.com/kubernetes-sigs/gateway-api-inference-extens
 # Install the Kgateway CRDs and Kgateway
 KGATEWAY_VERSION=v2.0.3
 KGATEWAY_SYSTEM_NAMESPACE=kgateway-system
+helm repo add kgateway-dev oci://cr.kgateway.dev/kgateway-dev || true
 helm upgrade -i --create-namespace --namespace $KGATEWAY_SYSTEM_NAMESPACE --version $KGATEWAY_VERSION kgateway-crds oci://cr.kgateway.dev/kgateway-dev/charts/kgateway-crds
 helm upgrade -i --namespace $KGATEWAY_SYSTEM_NAMESPACE --version $KGATEWAY_VERSION kgateway oci://cr.kgateway.dev/kgateway-dev/charts/kgateway --set inferenceExtension.enabled=true
 
