@@ -103,7 +103,7 @@ apt-get update && apt-get -y install git git-lfs
 ## Single Node Examples
 
 > [!IMPORTANT]
-> Below we provide some simple shell scripts that run the components for each configuration. Each shell script is simply running the `python3 dynamo.frontend` to start up the ingress and using `python3` to start up the workers. You can easily take each command and run them in separate terminals.
+> Below we provide some simple shell scripts that run the components for each configuration. Each shell script is simply running the `python3 -m dynamo.frontend <args>` to start up the ingress and using `python3 -m dynamo.trtllm <args>` to start up the workers. You can easily take each command and run them in separate terminals.
 
 This figure shows an overview of the major components to deploy:
 
@@ -206,9 +206,9 @@ Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disag
 
 See [client](../llm/README.md#client) section to learn how to send request to the deployment.
 
-NOTE: To send a request to a multi-node deployment, target the node which is running `dynamo-run in=http`.
+NOTE: To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
 
 ## Benchmarking
 
 To benchmark your deployment with GenAI-Perf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](../../benchmarks/llm/perf.sh)
+`model` name and `host` based on your deployment: [perf.sh](../../../benchmarks/llm/perf.sh)
