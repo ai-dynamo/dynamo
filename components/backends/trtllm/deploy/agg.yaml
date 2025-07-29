@@ -14,17 +14,15 @@ spec:
           port: 8000
         initialDelaySeconds: 60
         periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
+        timeoutSeconds: 2
+        failureThreshold: 5
       readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
+        httpGet:
+          path: /health
+          port: 8000
         initialDelaySeconds: 60
         periodSeconds: 60
-        timeoutSeconds: 30
+        timeoutSeconds: 2
         failureThreshold: 10
       dynamoNamespace: trtllm-agg
       componentType: main
@@ -82,9 +80,6 @@ spec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/trtllm
-          command:
-            - /bin/sh
-            - -c
           args:
             - "python3"
             - "-m"
