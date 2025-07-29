@@ -32,6 +32,8 @@ use crate::kv_router::{KV_ALL_WORKERS_BUSY_SUBJECT, KV_HIT_RATE_SUBJECT};
 use crate::tokens::TokenBlockSequence;
 use dynamo_runtime::component::Instance;
 
+const ALL_WORKERS_BUSY_CHANNEL_SIZE: usize = 32;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KVHitRateEvent {
     pub worker_id: i64,
@@ -135,7 +137,7 @@ impl KvScheduler {
         });
 
         let (all_workers_busy_event_tx, all_workers_busy_event_rx) =
-            tokio::sync::mpsc::unbounded_channel::<KVAllWorkersBusyEvent>();
+            tokio::sync::mpsc::channel::<KVAllWorkersBusyEvent>(ALL_WORKERS_BUSY_CHANNEL_SIZE);
         tokio::spawn(async move {
             let mut all_workers_busy_event_rx = all_workers_busy_event_rx;
             while let Some(event) = all_workers_busy_event_rx.recv().await {
@@ -155,46 +157,47 @@ impl KvScheduler {
         // Background task to handle scheduling requests
         tokio::spawn(async move {
             let mut request: SchedulingRequest;
-            let mut is_waiting_request: bool = false;
             let mut request_rx = request_rx;
             let mut pending_endpoint_update: Option<Vec<i64>> = None;
             let mut waiting_requests_queue = VecDeque::with_capacity(max_workers_busy_queue_depth);
+            let mut queue_was_above_capacity = false; // Tracks if the waiting queue was above capacity in the previous iteration
 
             tracing::trace!("scheduler background task started");
 
             loop {
-                // NOTE: We prioritize waiting requests over new requests
-                if !waiting_requests_queue.is_empty() {
-                    request = waiting_requests_queue
-                        .pop_front()
-                        .expect("waiting_requests_queue is not empty");
-                    tracing::trace!(
-                        "Processing queued request, {} remaining in the queue",
-                        waiting_requests_queue.len()
-                    );
-                    is_waiting_request = true;
-                } else {
-                    // Waiting queue is empty, we can process new requests
-                    request = tokio::select! {
-                        biased;
+                let mut is_waiting_request: bool = false;
+                request = tokio::select! {
+                    biased;
 
-                        _ = instances_rx.changed() => {
-                            instances = instances_rx.borrow_and_update().clone();
-                            let worker_ids: Vec<i64> = instances.iter().map(|i| i.instance_id).collect();
-                            pending_endpoint_update = Some(worker_ids);
-                            continue;
-                        }
+                    _ = instances_rx.changed() => {
+                        instances = instances_rx.borrow_and_update().clone();
+                        let worker_ids: Vec<i64> = instances.iter().map(|i| i.instance_id).collect();
+                        pending_endpoint_update = Some(worker_ids);
+                        continue;
+                    }
 
-                        maybe_new_request = request_rx.recv() => {
-                            let Some(new_request) = maybe_new_request else {
-                                tracing::warn!("scheduler shutdown");
-                                break;
-                            };
-                            tracing::trace!("received request to be scheduled");
-                            new_request
-                        }
-                    };
-                }
+                    // Prioritize processing queued requests over accepting new ones
+                    _ = async {}, if !waiting_requests_queue.is_empty() => {
+                        let queued_request = waiting_requests_queue
+                            .pop_front()
+                            .expect("waiting_requests_queue is not empty");
+                        tracing::trace!(
+                            "Processing queued request, {} remaining in the queue",
+                            waiting_requests_queue.len()
+                        );
+                        is_waiting_request = true;
+                        queued_request
+                    }
+
+                    maybe_new_request = request_rx.recv() => {
+                        let Some(new_request) = maybe_new_request else {
+                            tracing::warn!("scheduler shutdown");
+                            break;
+                        };
+                        tracing::trace!("received request to be scheduled");
+                        new_request
+                    }
+                };
 
                 // When calling selector.select_worker, we need to adapt
                 match selector.select_worker(&instances, &request, block_size) {
@@ -222,23 +225,34 @@ impl KvScheduler {
                             instances.iter().map(|i| i.instance_id).collect();
                         pending_endpoint_update = Some(worker_ids);
                     }
+                    // TODO: this is not actually hooked up on the `select_worker` function
                     Err(KvSchedulerError::AllWorkersBusy) => {
                         tracing::trace!("all workers busy; waiting for more capacity");
-                        // Check if the waiting queue is at capacity
-                        if waiting_requests_queue.len() >= max_workers_busy_queue_depth {
+
+                        let queue_exceeds_threshold =
+                            waiting_requests_queue.len() > max_workers_busy_queue_depth;
+                        let should_trigger_event =
+                            queue_exceeds_threshold && !queue_was_above_capacity;
+
+                        // Only send `all_workers_busy_event` when transition from below to above queue capacity
+                        if should_trigger_event {
                             tracing::warn!(
                                 "waiting queue is at capacity, broadcasting all workers busy event"
                             );
-                            if let Err(e) = all_workers_busy_event_tx.send(KVAllWorkersBusyEvent {
-                                max_queue_depth: max_workers_busy_queue_depth,
-                                timestamp: SystemTime::now()
-                                    .duration_since(UNIX_EPOCH)
-                                    .unwrap()
-                                    .as_secs(),
-                            }) {
+                            if let Err(e) = all_workers_busy_event_tx
+                                .send(KVAllWorkersBusyEvent {
+                                    max_queue_depth: max_workers_busy_queue_depth,
+                                    timestamp: SystemTime::now()
+                                        .duration_since(UNIX_EPOCH)
+                                        .unwrap()
+                                        .as_secs(),
+                                })
+                                .await
+                            {
                                 tracing::warn!("Failed to send all workers busy event: {:?}", e);
                             }
                         }
+                        queue_was_above_capacity = queue_exceeds_threshold;
 
                         if is_waiting_request {
                             // If the request was already in the waiting queue, we need to move it to the front
