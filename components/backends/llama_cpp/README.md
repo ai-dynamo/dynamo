@@ -3,7 +3,7 @@
 Usage:
 ```
 # Install ai-dynamo llama.cpp backend (CPU Mode)
-pip install "ai-dynamo[llama_cpp]" 
+pip install "ai-dynamo[llama_cpp]"
 
 # [Optional] To build llama.cpp for CUDA (needs a recent pip)
 pip install -r --force-reinstall requirements.gpu.txt
