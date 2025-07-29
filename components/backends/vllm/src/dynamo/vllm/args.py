@@ -31,6 +31,7 @@ class Config:
     component: str
     endpoint: str
     is_prefill_worker: bool
+    migration_limit: int = 0
     kv_port: Optional[int] = None
     side_channel_port: Optional[int] = None
 
@@ -56,6 +57,12 @@ def parse_args() -> Config:
         "--is-prefill-worker",
         action="store_true",
         help="Enable prefill functionality for this worker. Uses the provided namespace to construct dyn://namespace.prefill.generate",
+    )
+    parser.add_argument(
+        "--migration-limit",
+        type=int,
+        default=0,
+        help="Maximum number of times a request may be migrated to a different engine worker. The number may be overridden by the engine.",
     )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -102,6 +109,7 @@ def parse_args() -> Config:
     config.endpoint = parsed_endpoint_name
     config.engine_args = engine_args
     config.is_prefill_worker = args.is_prefill_worker
+    config.migration_limit = args.migration_limit
 
     if config.engine_args.block_size is None:
         config.engine_args.block_size = 16

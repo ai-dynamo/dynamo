@@ -209,6 +209,22 @@ The KV-aware routing arguments:
 
 - `--use-kv-events`: Sets whether to listen to KV events for maintaining the global view of cached blocks. If true, then we use the `KvIndexer` to listen to the block creation and deletion events. If false, `ApproxKvIndexer`, which assumes the kv cache of historical prompts exists for fixed time durations (hard-coded to 120s), is used to predict the kv cache hit ratio in each engine. Set false if your backend engine does not emit KV events.
 
+### Request Migration
+
+In a [Distributed System](#distributed-system), a request may fail due to connectivity issues between the HTTP Server and the Worker Engine.
+
+The HTTP Server will automatically track which Worker Engines are having connectivity issues with it and avoid routing new requests to the Engines with known connectivity issues.
+
+For ongoing requests, there is a `--migration-limit` flag which can be set on the Worker Engines that tells the HTTP Server how many times a request can be migrated to another Engine should there be a loss of connectivity to the current Engine.
+
+For example,
+```bash
+dynamo-run in=dyn://... out=vllm ... --migration-limit=3
+```
+indicates a request to this model may be migrated up to 3 times to another Engine, before failing the request, should the HTTP Server detects a connectivity issue to the current Engine.
+
+The migrated request will continue responding to the original request, allowing for a seamless transition between Engines, and a reduced overall request failure rate at the HTTP Server for enhanced user experience.
+
 ## Full usage details
 
  The `dynamo-run` is also an example of what can be built in Rust with the `dynamo-llm` and `dynamo-runtime` crates. The following guide shows how to build from source with all the features.
