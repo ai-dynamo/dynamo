@@ -67,14 +67,14 @@ mod integration {
     }
 
     struct RequestHandler {
-        backend_counter: Arc<AtomicU64>,
+        backend_counter: AtomicU64,
         normal_processing: bool,
     }
 
     impl RequestHandler {
         fn new(normal_processing: bool) -> Arc<Self> {
             Arc::new(Self {
-                backend_counter: Arc::new(AtomicU64::new(0)),
+                backend_counter: AtomicU64::new(0),
                 normal_processing,
             })
         }
@@ -143,7 +143,7 @@ mod integration {
             humantime::parse_duration(&run_duration).unwrap_or(Duration::from_secs(60));
 
         let batch_load = std::env::var("DYN_SOAK_BATCH_LOAD").unwrap_or("10000".to_string());
-        let batch_load: usize = batch_load.parse().unwrap_or(100);
+        let batch_load: usize = batch_load.parse().unwrap_or(10000);
 
         let client = runtime
             .namespace(DEFAULT_NAMESPACE)?
