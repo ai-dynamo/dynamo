@@ -121,7 +121,7 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 RUN cargo build --release
 
 RUN cd lib/bindings/python && pip install --break-system-packages -e . && cd ../../..
-RUN pip install --break-system-packages -e .
+RUN pip install --break-system-packages .
 
 RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-${ARCH}.deb && \
     dpkg -i nats-server-v2.10.28-${ARCH}.deb && rm nats-server-v2.10.28-${ARCH}.deb
