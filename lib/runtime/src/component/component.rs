@@ -86,25 +86,13 @@ mod tests {
     // todo - make a distributed runtime fixture
     // todo - two options - fully mocked or integration test
     #[tokio::test]
-    async fn test_publish() {
+    async fn test_publish_and_subscribe() {
         let rt = Runtime::from_current().unwrap();
         let dtr = DistributedRuntime::from_settings(rt.clone()).await.unwrap();
-        let ns = dtr.namespace("test_component_publish".to_string()).unwrap();
-        let cp = ns.component("test_component".to_string()).unwrap();
-        cp.publish("test_event", &"test".to_string()).await.unwrap();
-        rt.shutdown();
-    }
-
-    #[tokio::test]
-    async fn test_subscribe() {
-        let rt = Runtime::from_current().unwrap();
-        let dtr = DistributedRuntime::from_settings(rt.clone()).await.unwrap();
-        let ns = dtr
-            .namespace("test_component_subscribe".to_string())
-            .unwrap();
+        let ns = dtr.namespace("test_component".to_string()).unwrap();
         let cp = ns.component("test_component".to_string()).unwrap();
 
-        // Create a subscriber on the component (not namespace)
+        // Create a subscriber on the component
         let mut subscriber = cp.subscribe("test_event").await.unwrap();
 
         // Publish a message from the component
