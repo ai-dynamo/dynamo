@@ -28,4 +28,3 @@ For details about the Dynamo Cloud Platform, see the [Dynamo Operator Guide](dyn
 
 # 2. Follow [Examples](../../examples/README.md) to see how you can deploy your Inference Graphs.
 
-t
