@@ -55,6 +55,8 @@ class Config:
             f"model_path={self.model_path}, "
             f"served_model_name={self.served_model_name}, "
             f"tensor_parallel_size={self.tensor_parallel_size}, "
+            f"pipeline_parallel_size={self.pipeline_parallel_size}, "
+            f"expert_parallel_size={self.expert_parallel_size}, "
             f"kv_block_size={self.kv_block_size}, "
             f"gpus_per_node={self.gpus_per_node}, "
             f"max_batch_size={self.max_batch_size}, "
