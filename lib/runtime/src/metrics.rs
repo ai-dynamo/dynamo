@@ -221,7 +221,8 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     if USE_AUTO_LABELS {
         // Validate that user-provided labels don't conflict with auto-generated labels
         for (key, _) in labels {
-            if *key == "dynamo_namespace" || *key == "dynamo_component" || *key == "dynamo_endpoint" {
+            if *key == "dynamo_namespace" || *key == "dynamo_component" || *key == "dynamo_endpoint"
+            {
                 return Err(anyhow::anyhow!(
                     "Label '{}' is automatically added by auto_label feature and cannot be manually set",
                     key
