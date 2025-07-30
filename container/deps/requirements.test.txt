@@ -13,6 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+# aiohttp for async HTTP requests in tests
+aiohttp>=3.8.0
+# NATS client for messaging system tests
+nats-py>=2.0.0
 psutil>=5.0.0
 pyright
 pytest
@@ -26,7 +30,3 @@ pytest-timeout
 # add types library stub for PyYAML
 types-PyYAML
 types-requests
-# NATS client for messaging system tests
-nats-py>=2.0.0
-# aiohttp for async HTTP requests in tests
-aiohttp>=3.8.0
