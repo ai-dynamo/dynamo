@@ -15,7 +15,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 -->
 
-# Dynamo `MetricsRegistry`
+# Dynamo MetricsRegistry
 
 ## Overview
 
@@ -24,91 +24,75 @@ Dynamo provides built-in metrics capabilities through the `MetricsRegistry` trai
 The `MetricsRegistry` trait is implemented by `DistributedRuntime`, `Namespace`, `Component`, and `Endpoint`, providing a hierarchical approach to metric collection that matches Dynamo's distributed architecture:
 
 - `DistributedRuntime`: Global metrics across the entire runtime
-- `Namespace`: Metrics scoped to a specific namespace
-- `Component`: Metrics for a specific component within a namespace
-- `Endpoint`: Metrics for individual endpoints within a component
+- `Namespace`: Metrics scoped to a specific dynamo_namespace
+- `Component`: Metrics for a specific dynamo_component within a namespace
+- `Endpoint`: Metrics for individual dynamo_endpoint within a component
 
 This hierarchical structure allows you to create metrics at the appropriate level of granularity for your monitoring needs.
 
-**Worker Metrics**: Backend metrics automatically include labels for `namespace`, `component`, and `endpoint` based on the hierarchy level where they're created. Additional custom labels can be added at the implementor's discretion and will appear in the Prometheus output alongside the automatic labels.
+**Component Metrics**: The core Dynamo backend system automatically exposes these metrics with `dynamo_namespace`, `dynamo_component`, and `dynamo_endpoint` labels containing component (aka. worker) information. These labels are prefixed with "dynamo_" to avoid conflicts with existing Kubernetes labels:
 
-**Worker Metrics**: The core Dynamo backend system automatically exposes the following worker metrics with automatic `namespace`, `component`, and `endpoint` labeling:
+- `dynamo_component_concurrent_requests`: Requests currently being processed (gauge)
+- `dynamo_component_request_bytes_total`: Total bytes received in requests (counter)
+- `dynamo_component_request_duration_seconds`: Request processing time (histogram)
+- `dynamo_component_requests_total`: Total requests processed (counter)
+- `dynamo_component_response_bytes_total`: Total bytes sent in responses (counter)
+- `dynamo_component_system_uptime_seconds`: DistributedRuntime uptime (gauge)
 
-- `dynamo_component_concurrent_requests`: Number of requests currently being processed by work handler (gauge)
-- `dynamo_component_request_bytes_total`: Total number of bytes received in requests by work handler (counter)
-- `dynamo_component_request_duration_seconds`: Time spent processing requests by work handler (histogram)
-- `dynamo_component_requests_total`: Total number of requests processed by work handler (counter)
-- `dynamo_component_response_bytes_total`: Total number of bytes sent in responses by work handler (counter)
-- `dynamo_component_system_uptime_seconds`: Total uptime of the DistributedRuntime in seconds (gauge)
+**Frontend Metrics**: When using Dynamo HTTP Frontend (`--framework VLLM` or `--framework TENSORRTLLM`), these metrics are automatically exposed with `model` labels containing the model name:
 
-These metrics include labels for `namespace`, `component`, and `endpoint` to provide detailed observability into backend worker performance, request processing, and system health. Example label values include `namespace="dynamo"`, `component="backend"`, and `endpoint="generate"`.
-
-**Frontend Metrics**: Frontend labels and metrics are implemented separately from the core Dynamo metrics system. When using Dynamo HTTP Frontend (available with `--framework VLLM` or `--framework TENSORRTLLM`), the following metrics are automatically exposed:
-
-- `dynamo_frontend_inflight_requests`: Number of inflight requests (gauge)
-- `dynamo_frontend_input_sequence_tokens`: Input sequence length in tokens (histogram)
-- `dynamo_frontend_inter_token_latency_seconds`: Inter-token latency in seconds (histogram)
-- `dynamo_frontend_output_sequence_tokens`: Output sequence length in tokens (histogram)
-- `dynamo_frontend_request_duration_seconds`: Duration of LLM requests (histogram)
-- `dynamo_frontend_requests_total`: Total number of LLM requests processed (counter)
-- `dynamo_frontend_time_to_first_token_seconds`: Time to first token in seconds (histogram)
-
-These metrics include labels for `model` to provide detailed observability into the HTTP frontend performance. Some metrics also include additional labels such as `endpoint`, `request_type`, and `status`. Histogram metrics also include `le` (less than or equal) labels for bucket boundaries. Example label values include `model="qwen/qwen3-0.6b"`, `endpoint="chat_completions"`, `request_type="stream"`, and `status="success"`.
-
-### Automatic Metrics
-
-When you enable the metrics HTTP endpoint with `DYN_SYSTEM_ENABLED=true`, Dynamo automatically adds:
-
-- `dynamo_system_uptime_seconds`: System uptime counter
-- HTTP server metrics for the metrics endpoint itself
+- `dynamo_frontend_inflight_requests`: Inflight requests (gauge)
+- `dynamo_frontend_input_sequence_tokens`: Input sequence length (histogram)
+- `dynamo_frontend_inter_token_latency_seconds`: Inter-token latency (histogram)
+- `dynamo_frontend_output_sequence_tokens`: Output sequence length (histogram)
+- `dynamo_frontend_request_duration_seconds`: LLM request duration (histogram)
+- `dynamo_frontend_requests_total`: Total LLM requests (counter)
+- `dynamo_frontend_time_to_first_token_seconds`: Time to first token (histogram)
 
 ## Environment Configuration
 
-Enable the metrics HTTP endpoint:
+Enable metrics with environment variables:
 
 ```bash
 export DYN_SYSTEM_ENABLED=true
-export DYN_SYSTEM_PORT=8081  # Use 0 for random port assignment
+export DYN_SYSTEM_PORT=8081  # Use 0 for random port
 ```
 
-The `DYN_SYSTEM_PORT=0` assigns a random port, which is useful for integration testing to avoid port conflicts.
+With `DYN_SYSTEM_ENABLED=true`, Dynamo automatically adds:
+- `dynamo_system_uptime_seconds`: System uptime counter
+- HTTP server metrics for the metrics endpoint
 
 ## Implementation Examples
 
-For detailed implementation examples showing how to create metrics at different hierarchy levels, create vector metrics with dynamic labels, and transition from plain Prometheus, see the [Implementation Examples section](../../deploy/metrics/README.md#implementation-examples) in the deploy metrics README.
+See [Implementation Examples](../../deploy/metrics/README.md#implementation-examples) for detailed examples of creating metrics at different hierarchy levels and using dynamic labels.
 
 ## Prometheus Output Example
 
-To enable metrics, launch your Dynamo service with the required environment variables:
-
+Launch with metrics enabled:
 ```bash
-# Launch dynamo.vllm with metrics enabled (example):
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 python -m dynamo.vllm --model-path /path/to/model
 ```
 
-Then when you make the curl call to the metrics endpoint:
-
+Query metrics:
 ```bash
 curl http://localhost:8081/metrics
 ```
 
-You'll see output like this:
+Output:
 
 ```
 # HELP dynamo_my_counter My custom counter
 # TYPE dynamo_my_counter counter
-dynamo_my_counter{namespace="dynamo",component="backend",endpoint="generate"} 42
+dynamo_my_counter{dynamo_namespace="dynamo",dynamo_component="backend",dynamo_endpoint="generate"} 42
 
 # HELP dynamo_system_uptime_seconds System uptime
 # TYPE dynamo_system_uptime_seconds counter
-dynamo_system_uptime_seconds{namespace="dynamo"} 42
+dynamo_system_uptime_seconds{dynamo_namespace="dynamo"} 42
 ```
 
 ## Monitoring and Visualization
 
 ### Prometheus Configuration
-
-Configure Prometheus to scrape your metrics endpoint:
 
 ```yaml
 scrape_configs:
@@ -121,64 +105,43 @@ scrape_configs:
 
 ### Grafana Dashboards
 
-Use the provided Grafana dashboards in `deploy/metrics/grafana_dashboards/`:
-
-- `grafana-dynamo-dashboard.json`: General Dynamo dashboard for SW and HW metrics
+Use dashboards in `deploy/metrics/grafana_dashboards/`:
+- `grafana-dynamo-dashboard.json`: General Dynamo dashboard
 - `grafana-dcgm-metrics.json`: DCGM GPU metrics dashboard
 
-### Starting the Monitoring Stack
+### Start Monitoring Stack
 
 ```bash
-# Start Prometheus and Grafana
 docker compose -f deploy/docker-compose.yml --profile metrics up -d
-
-# Access the dashboards
 # Grafana: http://localhost:3000 (admin/admin)
 # Prometheus: http://localhost:9090
 ```
 
 ### Troubleshooting
 
-Common issues and solutions:
-
-1. **Metrics not appearing**: Check that `DYN_SYSTEM_ENABLED=true`
-2. **Port conflicts**: Use `DYN_SYSTEM_PORT=0` for random port assignment
-3. **Missing labels**: Ensure you're using the correct hierarchy level
+Common issues:
+1. **Metrics not appearing**: Check `DYN_SYSTEM_ENABLED=true`
+2. **Port conflicts**: Use `DYN_SYSTEM_PORT=0` for random port
+3. **Missing labels**: Verify hierarchy level
 
 ### Debugging
 
-Enable debug logging to see metric registration details:
-
 ```rust
-// Check metric output
 let metrics = namespace.prometheus_metrics_fmt()?;
 println!("Metrics: {}", metrics);
 ```
 
-### Verification Steps
+### Verification
 
-1. **Verify services are running:**
-   ```bash
-   docker compose ps
-   ```
-
-2. **Check logs:**
-   ```bash
-   docker compose logs prometheus
-   docker compose logs grafana
-   ```
-
-3. **Test metrics endpoint:**
-   ```bash
-   curl http://localhost:8081/metrics
-   ```
+```bash
+docker compose ps
+docker compose logs prometheus
+curl http://localhost:8081/metrics
+```
 
 ## Related Documentation
 
 - [Distributed Runtime Architecture](../architecture/distributed_runtime.md)
 - [Dynamo Architecture Overview](../architecture/architecture.md)
-- [Dynamo Flow](../architecture/dynamo_flow.md)
 - [Backend Guide](backend.md)
-- [Dynamo Run Guide](dynamo_run.md)
-- [Performance Tuning Guides](kv_router_perf_tuning.md)
 - [Metrics Implementation Examples](../../deploy/metrics/README.md#implementation-examples)
