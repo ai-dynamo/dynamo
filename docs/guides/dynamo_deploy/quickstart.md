@@ -92,7 +92,7 @@ export IMAGE_TAG=<your-pick>
 ./container/build.sh
 docker tag dynamo:latest-vllm <your-registry>/dynamo-base:$IMAGE_TAG
 docker login <your-registry>
-docker push <your-registry>/dynamo-base:latest-vllm
+docker push <your-registry>/dynamo-base:$IMAGE_TAG
 ```
 
 ### Install Dynamo Cloud
@@ -142,6 +142,8 @@ if you want guidance during the process, run the deployment script with the `--i
 ***Step 1: Install Custom Resource Definitions (CRDs)**
 
 ```bash
+dynamo/deploy/cloud/helm
+
 helm install dynamo-crds ./crds/ \
   --namespace default \
   --wait \
