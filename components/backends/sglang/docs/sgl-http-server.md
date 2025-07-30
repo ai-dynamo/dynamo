@@ -35,7 +35,7 @@ The discovery process queries etcd with the prefix `instances/` to find all regi
 
 ## Supported Endpoints
 
-All of these endpoints can be called using 
+All of these endpoints can be called using
 
 ```bash
 curl -X POST http://<ip>:9001/<endpoint>
