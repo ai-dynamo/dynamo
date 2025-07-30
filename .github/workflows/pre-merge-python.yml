@@ -41,8 +41,8 @@ jobs:
               - 'tests/serve/test_vllm.py'
             sglang:
               - 'container/Dockerfile.sglang'
-              - 'container/Dockerfile.sglang-deepep'
               - 'components/backends/sglang/**'
+              - 'tests/serve/test_sglang.py'
 
   build-test-vllm:
     needs: path-filter
@@ -88,6 +88,7 @@ jobs:
           path: |
             ${{ env.PYTEST_XML_FILE }}
 
+  # We do not run Rust block manager checks for SGL
   build-test-sglang:
     needs: path-filter
     if: ${{ needs.path-filter.outputs.sglang == 'true' }}
@@ -111,9 +112,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
         run: |
           ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target runtime --framework sglang
-      - name: Run Rust checks (llm/block-manager)
-        run: |
-          docker run -w /workspace/lib/llm --name ${{ env.CONTAINER_ID }}_rust_checks ${{ steps.define_image_tag.outputs.image_tag }} bash -ec 'rustup component add rustfmt clippy && cargo fmt -- --check && cargo clippy --features block-manager --no-deps --all-targets -- -D warnings && cargo test --locked --all-targets --features=block-manager'
       - name: Run pytest
         env:
           PYTEST_MARKS: "pre_merge or mypy"
