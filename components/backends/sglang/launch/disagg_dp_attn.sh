@@ -5,8 +5,8 @@
 # Setup cleanup trap
 cleanup() {
     echo "Cleaning up background processes..."
-    kill $DYNAMO_PID $PREFILL_PID 2>/dev/null || true
-    wait $DYNAMO_PID $PREFILL_PID 2>/dev/null || true
+    kill $DYNAMO_PID $PREFILL_PID $HTTP_SERVER_PID 2>/dev/null || true
+    wait $DYNAMO_PID $PREFILL_PID $HTTP_SERVER_PID 2>/dev/null || true
     echo "Cleanup complete."
 }
 trap cleanup EXIT INT TERM
@@ -20,6 +20,7 @@ DYNAMO_PID=$!
 
 # run http server
 python3 -m dynamo.sglang.utils.sgl_http_server --namespace dynamo &
+HTTP_SERVER_PID=$!
 
 # Set the expert distribution recording directory
 mkdir -p /tmp/sglang_expert_distribution_record
