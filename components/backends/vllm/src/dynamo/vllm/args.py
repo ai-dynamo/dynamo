@@ -2,13 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
-import asyncio
-import json
 import logging
 import os
-import socket
 import sys
-import time
 from typing import Optional
 
 from vllm.config import KVTransferConfig
@@ -16,9 +12,20 @@ from vllm.distributed.kv_events import KVEventsConfig
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils import FlexibleArgumentParser
 
+from .ports import (
+    DEFAULT_DYNAMO_PORT_MAX,
+    DEFAULT_DYNAMO_PORT_MIN,
+    DynamoPortRange,
+    EtcdContext,
+    PortAllocationRequest,
+    PortMetadata,
+    allocate_and_reserve_port,
+    allocate_and_reserve_port_block,
+    get_host_ip,
+)
+
 logger = logging.getLogger(__name__)
 
-# Only used if you run it manually from the command line
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
@@ -34,6 +41,7 @@ class Config:
     migration_limit: int = 0
     kv_port: Optional[int] = None
     side_channel_port: Optional[int] = None
+    port_range: DynamoPortRange
 
     # mirror vLLM
     model: str
@@ -63,6 +71,18 @@ def parse_args() -> Config:
         type=int,
         default=0,
         help="Maximum number of times a request may be migrated to a different engine worker. The number may be overridden by the engine.",
+    )
+    parser.add_argument(
+        "--dynamo-port-min",
+        type=int,
+        default=DEFAULT_DYNAMO_PORT_MIN,
+        help=f"Minimum port number for Dynamo services (default: {DEFAULT_DYNAMO_PORT_MIN}). Must be in registered ports range (1024-49151).",
+    )
+    parser.add_argument(
+        "--dynamo-port-max",
+        type=int,
+        default=DEFAULT_DYNAMO_PORT_MAX,
+        help=f"Maximum port number for Dynamo services (default: {DEFAULT_DYNAMO_PORT_MAX}). Must be in registered ports range (1024-49151).",
     )
 
     parser = AsyncEngineArgs.add_cli_args(parser)
@@ -110,6 +130,9 @@ def parse_args() -> Config:
     config.engine_args = engine_args
     config.is_prefill_worker = args.is_prefill_worker
     config.migration_limit = args.migration_limit
+    config.port_range = DynamoPortRange(
+        min=args.dynamo_port_min, max=args.dynamo_port_max
+    )
 
     if config.engine_args.block_size is None:
         config.engine_args.block_size = 16
@@ -120,106 +143,66 @@ def parse_args() -> Config:
     return config
 
 
-async def allocate_and_reserve_port(
-    namespace,
-    etcd_client,
-    worker_id: str,
-    reason: str,
-    max_attempts: int = 100,
-) -> int:
-    """
-    Get an OS-assigned port and atomically reserve it in ETCD.
-    Retries until successful or max_attempts reached.
-
-    Args:
-        max_attempts: Maximum number of ports to try (default: 100)
-
-    Raises:
-        RuntimeError: If unable to reserve a port within max_attempts
-        OSError: If unable to create sockets (system resource issues)
-    """
-
-    node_name = socket.gethostname()
-    try:
-        node_ip = socket.gethostbyname(node_name)
-    except socket.gaierror:
-        # If hostname cannot be resolved, fall back to localhost
-        logger.warning(
-            f"Hostname '{node_name}' cannot be resolved, falling back to '127.0.0.1'"
-        )
-        node_ip = "127.0.0.1"
-
-    for attempt in range(1, max_attempts + 1):
-        # Hold socket open just long enough to reserve in ETCD
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            sock.bind(("", 0))
-            port = sock.getsockname()[1]
-
-            # Reserve in ETCD while holding the socket
-            key = f"dyn://{namespace}/ports/{node_ip}/{port}"
-            value = {
-                "worker_id": worker_id,
-                "reason": reason,
-                "reserved_at": time.time(),
-                "pid": os.getpid(),
-            }
-
-            try:
-                await etcd_client.kv_create(
-                    key=key,
-                    value=json.dumps(value).encode(),
-                    lease_id=etcd_client.primary_lease_id(),
-                )
-                logger.debug(f"Reserved OS-assigned port {port} for {worker_id}")
-                return port
-
-            except Exception as e:
-                logger.debug(
-                    f"Port {port} on {node_name} was already reserved (attempt {attempt}): {e}"
-                )
-
-        if attempt < max_attempts:
-            await asyncio.sleep(0.01)
-
-    raise RuntimeError(
-        f"Failed to allocate and reserve a port after {max_attempts} attempts"
-    )
-
-
 async def configure_ports_with_etcd(config: Config, etcd_client):
     """Configure all settings that require ETCD, including port allocation and vLLM overrides."""
 
-    # First, allocate ports
+    etcd_context = EtcdContext(client=etcd_client, namespace=config.namespace)
+
     dp_rank = config.engine_args.data_parallel_rank or 0
     worker_id = f"vllm-{config.component}-dp{dp_rank}"
 
     # Allocate KV events port
-    kv_port = await allocate_and_reserve_port(
-        namespace=config.namespace,
-        etcd_client=etcd_client,
-        worker_id=f"{worker_id}",
-        reason="zmq_kv_event_port",
-    )
+    if config.engine_args.enable_prefix_caching:
+        kv_metadata = PortMetadata(worker_id=worker_id, reason="zmq_kv_event_port")
+        kv_port = await allocate_and_reserve_port(
+            etcd_context=etcd_context,
+            metadata=kv_metadata,
+            port_range=config.port_range,
+        )
+        config.kv_port = kv_port
+        logger.info(f"Allocated ZMQ KV events port: {kv_port} (worker_id={worker_id})")
 
-    # Allocate side channel port
-    side_channel_port = await allocate_and_reserve_port(
-        namespace=config.namespace,
-        etcd_client=etcd_client,
-        worker_id=f"{worker_id}",
-        reason="nixl_side_channel_port",
-    )
+    # Allocate side channel ports
+    # https://github.com/vllm-project/vllm/blob/releases/v0.10.0/vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py#L372
+    # NIXL calculates ports as: base_port + (dp_rank * tp_size) + tp_rank
+    # For dp_rank, we need to reserve tp_size consecutive ports
+    tp_size = config.engine_args.tensor_parallel_size or 1
 
-    # Update config with allocated ports
-    config.kv_port = kv_port
-    config.side_channel_port = side_channel_port
+    # The first port for this dp_rank will be at: base_port + (dp_rank * tp_size)
+    # We need to allocate tp_size consecutive ports starting from there
+    nixl_metadata = PortMetadata(worker_id=worker_id, reason="nixl_side_channel_port")
+    nixl_request = PortAllocationRequest(
+        etcd_context=etcd_context,
+        metadata=nixl_metadata,
+        port_range=config.port_range,
+        block_size=tp_size,
+    )
+    allocated_ports = await allocate_and_reserve_port_block(nixl_request)
+    first_port_for_dp_rank = allocated_ports[0]
+
+    # Calculate the base port that NIXL expects
+    # base_port = first_port_for_dp_rank - (dp_rank * tp_size)
+    nixl_offset = dp_rank * tp_size
+    base_side_channel_port = first_port_for_dp_rank - nixl_offset
+
+    if base_side_channel_port < 0:
+        raise ValueError(
+            f"NIXL base port calculation resulted in negative port: "
+            f"first_allocated_port={first_port_for_dp_rank}, offset={nixl_offset}, "
+            f"base_port={base_side_channel_port}. Current range: {config.port_range.min}-{config.port_range.max}. "
+            f"Consider using a higher port range."
+        )
+
+    config.side_channel_port = base_side_channel_port
+
+    logger.info(
+        f"Allocated NIXL side channel ports: base={base_side_channel_port}, "
+        f"allocated_ports={allocated_ports} (worker_id={worker_id}, dp_rank={dp_rank}, tp_size={tp_size})"
+    )
 
 
 def overwrite_args(config):
     """Set vLLM defaults for Dynamo."""
-    assert (
-        config.kv_port is not None
-    ), "Must set the kv_port, use configure_ports_with_etcd"
     assert (
         config.side_channel_port is not None
     ), "Must set the kv_port, use configure_ports_with_etcd"
@@ -261,36 +244,6 @@ def overwrite_args(config):
             logger.debug(f" engine_args.{key} = {value}")
         else:
             raise ValueError(f"{key} not found in AsyncEngineArgs from vLLM.")
-
-
-def get_host_ip() -> str:
-    """Get the IP address of the host.
-    This is needed for the side channel to work in multi-node deployments.
-    """
-    try:
-        host_name = socket.gethostname()
-    except socket.error as e:
-        logger.warning(f"Failed to get hostname: {e}, falling back to '127.0.0.1'")
-        return "127.0.0.1"
-    else:
-        try:
-            # Get the IP address of the hostname - this is needed for the side channel to work in multi-node deployments
-            host_ip = socket.gethostbyname(host_name)
-            # Test if the IP is actually usable by binding to it
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as test_socket:
-                test_socket.bind((host_ip, 0))
-            return host_ip
-        except socket.gaierror as e:
-            logger.warning(
-                f"Hostname '{host_name}' cannot be resolved: {e}, falling back to '127.0.0.1'"
-            )
-            return "127.0.0.1"
-        except socket.error as e:
-            # If hostname is not usable for binding, fall back to localhost
-            logger.warning(
-                f"Hostname '{host_name}' is not usable for binding: {e}, falling back to '127.0.0.1'"
-            )
-            return "127.0.0.1"
 
 
 def set_side_channel_host_and_port(config: Config):
