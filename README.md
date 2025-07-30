@@ -21,15 +21,29 @@ limitations under the License.
 [![Discord](https://dcbadge.limes.pink/api/server/D92uqZRjCZ?style=flat)](https://discord.gg/D92uqZRjCZ)
 [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/ai-dynamo/dynamo)
 
-| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[Documentation](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** |
+| **[Roadmap](https://github.com/ai-dynamo/dynamo/issues/762)** | **[Documentation](https://docs.nvidia.com/dynamo/latest/index.html)** | **[Support Matrix](docs/support_matrix.md)** | **[Examples](https://github.com/ai-dynamo/dynamo/tree/main/examples)** | **[Design Proposals](https://github.com/ai-dynamo/enhancements)** |
 
 # NVIDIA Dynamo
 
 High-throughput, low-latency inference framework designed for serving generative AI and reasoning models in multi-node distributed environments.
 
-## Latest News
+## Framework Support Matrix
 
-* [08/05] Deploy `openai/gpt-oss-120b` with disaggregated serving on NVIDIA Blackwell GPUs using Dynamo [➡️ link](./components/backends/trtllm/gpt-oss.md)
+| Feature | vLLM | SGLang | TensorRT-LLM |
+|---------|----------------------|----------------------------|----------------------------------------|
+| [**Disaggregated Serving**](/docs/architecture/disagg_serving.md) | ✅ | ✅ | ✅ |
+| [**Conditional Disaggregation**](/docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | 🚧 | 🚧 |
+| [**KV-Aware Routing**](/docs/architecture/kv_cache_routing.md) | ✅ | ✅ | ✅ |
+| [**SLA-Based Planner**](/docs/architecture/sla_planner.md) | ✅ | 🚧 | 🚧 |
+| [**Load Based Planner**](/docs/architecture/load_planner.md) | ✅ | 🚧 | 🚧 |
+| [**KVBM**](/docs/architecture/kvbm_architecture.md) | 🚧 | 🚧 | 🚧 |
+
+To learn more about each framework and their capabilities, check out each framework's README and deploy them with Dynamo!
+- **[vLLM](components/backends/vllm/README.md)**
+- **[SGLang](components/backends/sglang/README.md)**
+- **[TensorRT-LLM](components/backends/trtllm/README.md)**
+
+Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach.
 
 ## The Era of Multi-GPU, Multi-Node
 
@@ -50,24 +64,6 @@ Dynamo is designed to be inference engine agnostic (supports TRT-LLM, vLLM, SGLa
 <p align="center">
   <img src="./docs/images/frontpage-architecture.png" alt="Dynamo architecture" width="600" />
 </p>
-
-## Framework Support Matrix
-
-| Feature | vLLM | SGLang | TensorRT-LLM |
-|---------|----------------------|----------------------------|----------------------------------------|
-| [**Disaggregated Serving**](/docs/architecture/disagg_serving.md) | ✅ | ✅ | ✅ |
-| [**Conditional Disaggregation**](/docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | 🚧 | 🚧 |
-| [**KV-Aware Routing**](/docs/architecture/kv_cache_routing.md) | ✅ | ✅ | ✅ |
-| [**SLA-Based Planner**](/docs/architecture/sla_planner.md) | ✅ | 🚧 | 🚧 |
-| [**Load Based Planner**](/docs/architecture/load_planner.md) | ✅ | 🚧 | 🚧 |
-| [**KVBM**](/docs/architecture/kvbm_architecture.md) | 🚧 | 🚧 | 🚧 |
-
-To learn more about each framework and their capabilities, check out each framework's README!
-- **[vLLM](components/backends/vllm/README.md)**
-- **[SGLang](components/backends/sglang/README.md)**
-- **[TensorRT-LLM](components/backends/trtllm/README.md)**
-
-Built in Rust for performance and in Python for extensibility, Dynamo is fully open-source and driven by a transparent, OSS (Open Source Software) first development approach.
 
 # Installation
 
