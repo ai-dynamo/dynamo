@@ -11,6 +11,7 @@ import time
 
 import pytest
 import requests
+from huggingface_hub import snapshot_download
 
 from tests.utils.managed_process import ManagedProcess
 
@@ -35,7 +36,6 @@ class DynamoFrontendProcess(ManagedProcess):
 
         super().__init__(
             command=command,
-            timeout=30,
             display_output=True,
             terminate_existing=True,
             log_dir=log_dir,
@@ -79,7 +79,6 @@ class DynamoWorkerProcess(ManagedProcess):
 
         super().__init__(
             command=command,
-            timeout=120,
             display_output=True,
             terminate_existing=False,
             log_dir=log_dir,
@@ -89,6 +88,41 @@ class DynamoWorkerProcess(ManagedProcess):
     def get_pid(self):
         """Get the PID of the worker process"""
         return self.proc.pid if self.proc else None
+
+
+def download_model() -> None:
+    """
+    Download the DeepSeek-R1-Distill-Llama-8B model from HuggingFace Hub if not already cached.
+    """
+    model_id = "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
+    logger.info(f"Caching model {model_id}...")
+
+    max_retries = 5
+    retry_delay = 30  # seconds
+
+    for attempt in range(max_retries):
+        try:
+            # Download the model to the default cache directory
+            # This will skip download if the model is already cached
+            snapshot_download(
+                repo_id="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+                repo_type="model",
+                local_files_only=False,
+            )
+            logger.info(f"Model {model_id} is ready for use")
+            return  # Success, exit the function
+        except Exception as e:
+            if attempt < max_retries - 1:  # Not the last attempt
+                logger.warning(
+                    f"Failed to download model {model_id} (attempt {attempt + 1}/{max_retries}): {e}"
+                )
+                logger.info(f"Retrying in {retry_delay} seconds...")
+                time.sleep(retry_delay)
+            else:  # Last attempt failed
+                logger.error(
+                    f"Failed to download model {model_id} after {max_retries} attempts: {e}"
+                )
+                raise
 
 
 def send_completion_request(
@@ -146,13 +180,13 @@ def validate_openai_response(response: requests.Response) -> None:
     )
 
 
-def wait_for_worker_ready(
-    worker: DynamoWorkerProcess, worker_name: str, timeout_minutes: int = 5
-) -> None:
+def wait_for_worker_ready(worker: DynamoWorkerProcess, worker_name: str) -> None:
     """Wait for a worker to be ready by checking for 'Reading Events from' message in logs"""
     logger.info(f"Waiting for {worker_name} to be ready...")
     worker_ready = False
-    max_attempts = timeout_minutes * 12  # 5 seconds per attempt
+
+    timeout = 5  # minutes
+    max_attempts = timeout * 12  # 5 seconds per attempt
 
     for attempt in range(max_attempts):
         if worker._log_path and os.path.exists(worker._log_path):
@@ -160,10 +194,8 @@ def wait_for_worker_ready(
                 with open(worker._log_path, "r") as f:
                     log_content = f.read()
                     # Look for the Reading Events message that indicates worker is ready
-                    if "Reading Events from" in log_content:
-                        logger.info(
-                            f"{worker_name} is ready (found 'Reading Events from' message)"
-                        )
+                    if "Reading Events from " in log_content:
+                        logger.info(f"{worker_name} is ready")
                         worker_ready = True
                         break
             except Exception as e:
@@ -171,9 +203,7 @@ def wait_for_worker_ready(
         time.sleep(5)
 
     if not worker_ready:
-        pytest.fail(
-            f"{worker_name} failed to become ready (no 'Reading Events from' message found)"
-        )
+        pytest.fail(f"{worker_name} failed to become ready")
 
 
 def check_worker_received_request(worker_process: DynamoWorkerProcess) -> bool:
@@ -325,6 +355,9 @@ def test_request_migration_vllm(request, runtime_services):
     the system can handle the failure gracefully and migrate the request to
     another worker.
     """
+    # Step 0: Download the model from HuggingFace if not already cached
+    download_model()
+
     # Step 1: Start the frontend
     with DynamoFrontendProcess(request) as frontend:
         logger.info("Frontend started successfully")
