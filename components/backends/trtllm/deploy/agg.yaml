@@ -8,6 +8,8 @@ metadata:
 spec:
   services:
     Frontend:
+      dynamoNamespace: trtllm-agg
+      componentType: main
       livenessProbe:
         httpGet:
           path: /health
@@ -24,17 +26,15 @@ spec:
         initialDelaySeconds: 60
         periodSeconds: 60
         timeoutSeconds: 2
-        failureThreshold: 5
-      dynamoNamespace: trtllm-agg
-      componentType: main
+        failureThreshold: 10
       replicas: 1
       resources:
         requests:
-          cpu: "1"
-          memory: "2Gi"
+          cpu: "5"
+          memory: "10Gi"
         limits:
-          cpu: "1"
-          memory: "2Gi"
+          cpu: "5"
+          memory: "10Gi"
       extraPodSpec:
         mainContainer:
           image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
@@ -51,14 +51,14 @@ spec:
           path: /live
           port: 9090
         periodSeconds: 5
-        timeoutSeconds: 30
+        timeoutSeconds: 3
         failureThreshold: 1
       readinessProbe:
         httpGet:
           path: /health
           port: 9090
         periodSeconds: 10
-        timeoutSeconds: 30
+        timeoutSeconds: 3
         failureThreshold: 60
       dynamoNamespace: trtllm-agg
       componentType: worker
