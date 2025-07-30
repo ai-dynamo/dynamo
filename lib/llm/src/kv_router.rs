@@ -340,8 +340,19 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     return Ok(ResponseStream::new(Box::pin(stream), stream_context));
                 }
 
-                // Get the response stream from the worker
-                self.inner.direct(updated_request, instance_id).await
+                let stream = self.inner.direct(updated_request, instance_id).await?;
+
+                // Spawn a detached cleanup task
+                let chooser_clone = self.chooser.clone();
+                let stream_context_clone = stream.context();
+                tokio::spawn(async move {
+                    // Wait for the stream to be cancelled/stopped/completed
+                    stream_context_clone.stopped().await;
+                    chooser_clone.free(&context_id).await;
+                });
+
+                // Return the original stream unchanged
+                Ok(stream)
             }
         }
     }
