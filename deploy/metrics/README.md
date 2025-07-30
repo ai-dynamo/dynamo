@@ -15,7 +15,7 @@ The metrics aggregation service is being replaced by the **`MetricsRegistry`** b
 
 The Prometheus configuration in this directory has been updated to scrape from the new `dynamo-backend` job (port 8081) instead of the deprecated `metrics-aggregation-service` (port 9091).
 
-See the [Dynamo MetricsRegistry Guide](../../docs/guides/metrics.md) for detailed information on using the new metrics system.
+
 
 ---
 
