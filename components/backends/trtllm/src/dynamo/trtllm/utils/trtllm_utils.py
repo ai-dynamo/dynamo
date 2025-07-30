@@ -263,8 +263,14 @@ def cmd_line_args():
     config.next_endpoint = args.next_endpoint
 
     config.tensor_parallel_size = args.tensor_parallel_size
-    config.pipeline_parallel_size = args.pipeline_parallel_size
-    config.expert_parallel_size = args.expert_parallel_size
+    if args.pipeline_parallel_size is not None:
+        config.pipeline_parallel_size = args.pipeline_parallel_size
+    if args.expert_parallel_size is not None:
+        config.expert_parallel_size = args.expert_parallel_size
+    if args.gpus_per_node is not None:
+        config.gpus_per_node = args.gpus_per_node
+    if args.free_gpu_memory_fraction is not None:
+        config.free_gpu_memory_fraction = args.free_gpu_memory_fraction
     config.kv_block_size = args.kv_block_size
     config.migration_limit = args.migration_limit
     config.extra_engine_args = args.extra_engine_args
