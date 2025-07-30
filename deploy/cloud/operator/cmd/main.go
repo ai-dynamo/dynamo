@@ -36,7 +36,6 @@ import (
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
 	k8sCache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
@@ -208,14 +207,10 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Discover Grove installation by checking for podgangsets.grove.io CRD
-	// Use a direct client (non-cached) since the manager's cache isn't started yet
-	directClient, err := client.New(ctrl.GetConfigOrDie(), client.Options{Scheme: scheme})
-	if err != nil {
-		setupLog.Error(err, "unable to create direct client for Grove discovery")
-		os.Exit(1)
-	}
-	ctrlConfig.Grove.Enabled = commonController.DiscoverGroveInstallation(mainCtx, directClient)
+	// Detect Grove availability using discovery client
+	setupLog.Info("Detecting Grove availability...")
+	groveEnabled := commonController.DetectGroveAvailability(mainCtx, mgr)
+	ctrlConfig.Grove.Enabled = groveEnabled
 
 	// Create etcd client
 	cli, err := clientv3.New(clientv3.Config{

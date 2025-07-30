@@ -22,8 +22,9 @@ import (
 	"strings"
 	"time"
 
-	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/client-go/discovery"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
@@ -57,27 +58,40 @@ func (i *IngressConfig) UseVirtualService() bool {
 	return i.VirtualServiceGateway != ""
 }
 
-// DiscoverGroveInstallation checks if Grove is installed by looking for the podgangsets.grove.io CRD
-func DiscoverGroveInstallation(ctx context.Context, reader client.Reader) bool {
+// DetectGroveAvailability checks if Grove is available by checking if the Grove API group is registered
+// This approach uses the discovery client which is simpler and more reliable
+func DetectGroveAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	logger := log.FromContext(ctx)
 
-	crd := &apiextensionsv1.CustomResourceDefinition{}
-	crdName := "podgangsets.grove.io"
-
-	if err := reader.Get(ctx, client.ObjectKey{Name: crdName}, crd); err != nil {
-		logger.V(1).Info("Grove CRD not found, disabling Grove functionality", "crd", crdName, "error", err)
+	// Use the discovery client to check if Grove API groups are available
+	discoveryClient := mgr.GetConfig()
+	if discoveryClient == nil {
+		logger.Info("Grove detection failed, no discovery client available")
 		return false
 	}
 
-	// Check if CRD is established
-	for _, cond := range crd.Status.Conditions {
-		if cond.Type == apiextensionsv1.Established && cond.Status == apiextensionsv1.ConditionTrue {
-			logger.Info("Grove installation detected, enabling Grove functionality", "crd", crdName)
+	// Try to create a discovery client
+	discovery, err := discovery.NewDiscoveryClientForConfig(discoveryClient)
+	if err != nil {
+		logger.Error(err, "Grove detection failed, could not create discovery client")
+		return false
+	}
+
+	// Check if grove.io API group is available
+	apiGroups, err := discovery.ServerGroups()
+	if err != nil {
+		logger.Error(err, "Grove detection failed, could not list server groups")
+		return false
+	}
+
+	for _, group := range apiGroups.Groups {
+		if group.Name == "grove.io" {
+			logger.Info("Grove is available, grove.io API group found")
 			return true
 		}
 	}
 
-	logger.Info("Grove CRD found but not established, disabling Grove functionality", "crd", crdName)
+	logger.Info("Grove not available, grove.io API group not found")
 	return false
 }
 
