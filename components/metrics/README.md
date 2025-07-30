@@ -2,19 +2,21 @@
 
 ⚠️ **DEPRECATION NOTICE** ⚠️
 
-**This `metrics` component is being deprecated and will be removed in a future release.**
+**This `metrics` component is unmaintained and being deprecated.**
 
 The deprecated `metrics` component is being replaced by the **`MetricsRegistry`** built-in functionality that is now available directly in the `DistributedRuntime` framework. The `MetricsRegistry` provides:
 
 **For new projects and existing deployments, please migrate to using `MetricsRegistry` instead of this component.**
 
-See the [Dynamo MetricsRegistry Guide](../../docs/guides/metrics.md) for detailed information on using the new metrics system.
+This component may be migrated to the MetricsRegistry in the future.
+
+**📖 See the [Dynamo MetricsRegistry Guide](../../docs/guides/metrics.md) for detailed information on using the new metrics system.**
 
 ---
 
-The deprecated `metrics` component is a utility for collecting, aggregating, and publishing metrics from a Dynamo deployment, but it is being deprecated and replaced by `MetricsRegistry`.
+The deprecated `metrics` component is a utility for collecting, aggregating, and publishing metrics from a Dynamo deployment, but it is unmaintained and being deprecated in favor of `MetricsRegistry`.
 
-**Note**: This is a demo implementation. The deprecated `metrics` component is currently under active development and this documentation will change as the implementation evolves.
+**Note**: This is a demo implementation. The deprecated `metrics` component is no longer under active development.
 - In this demo the metrics names use the prefix "llm", but in production they will be prefixed with "dynamo" (e.g., the HTTP `/metrics` endpoint will serve metrics with "dynamo" prefixes)
 - This demo will only work when using examples/llm/configs/agg.yml-- other configurations will not work
 

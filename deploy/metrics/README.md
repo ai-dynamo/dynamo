@@ -1,24 +1,5 @@
 # Metrics Visualization with Prometheus and Grafana
 
-⚠️ **DEPRECATION NOTICE** ⚠️
-
-**The `metrics-aggregation-service` (port 9091) is being deprecated and will be removed in a future release.**
-
-The metrics aggregation service is being replaced by the **`MetricsRegistry`** built-in functionality that is now available directly in the `DistributedRuntime` framework. The new system provides:
-
-- **Built-in Prometheus HTTP endpoint** accessible via `DYN_SYSTEM_ENABLED=true` and `DYN_SYSTEM_PORT=<port>` (default: 8081)
-- **Automatic metric registration** when creating metrics via endpoint factory methods
-- **Automatic labeling** with namespace, component, and endpoint information
-- **Simplified deployment** - no separate metrics component required
-
-**For new projects and existing deployments, please migrate to using `MetricsRegistry` instead of the metrics aggregation service.**
-
-The Prometheus configuration in this directory has been updated to scrape from the new `dynamo-backend` job (port 8081) instead of the deprecated `metrics-aggregation-service` (port 9091).
-
-
-
----
-
 This directory contains configuration for visualizing metrics from the metrics aggregation service using Prometheus and Grafana.
 
 ## Components
@@ -79,7 +60,7 @@ As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build container
 
    - Start the [components/metrics](../../components/metrics/README.md) application to begin monitoring for metric events from dynamo workers and aggregating them on a Prometheus metrics endpoint: `http://localhost:9091/metrics`.
    - Uncomment the appropriate lines in prometheus.yml to poll port 9091.
-   - Start worker(s) that publishes KV Cache metrics: [examples/rust/service_metrics/bin/server](../../lib/runtime/examples/service_metrics/README.md)` can populate dummy KV Cache metrics.
+   - Start worker(s) that publishes KV Cache metrics: [lib/runtime/examples/service_metrics/README.md](../../lib/runtime/examples/service_metrics/README.md) can populate dummy KV Cache metrics.
 
 
 ## Configuration
@@ -114,24 +95,21 @@ The following configuration files should be present in this directory:
 - [grafana_dashboards/grafana-dcgm-metrics.json](./grafana_dashboards/grafana-dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
 - [grafana_dashboards/grafana-llm-metrics.json](./grafana_dashboards/grafana-llm-metrics.json): This file, which is being phased out, contains the Grafana dashboard configuration for LLM-specific metrics. It requires an additional `metrics` component to operate concurrently. A new version is under development.
 
-## Running the example `metrics` component
+## Running the deprecated `metrics` component
 
-IMPORTANT: This section is being phased out, and some metrics may not function as expected. A new solution is under development.
+⚠️ **DEPRECATION NOTICE** ⚠️
 
-⚠️ **DEPRECATED METRICS NOTICE** ⚠️
+When you run the example [components/metrics](../../components/metrics/README.md) component, it exposes a Prometheus /metrics endpoint with the following metrics (defined in [components/metrics/src/lib.rs](../../components/metrics/src/lib.rs)):
 
-**The following `llm_kv_*` metrics are deprecated and will be removed in a future release:**
+**⚠️ The following `llm_kv_*` metrics are deprecated:**
 
-When you run the example [components/metrics](../../components/metrics/README.md) component, it exposes a Prometheus /metrics endpoint with the followings (defined in [../../components/metrics/src/lib.rs](../../components/metrics/src/lib.rs)):
-- `llm_requests_active_slots`: Number of currently active request slots per worker
+- `llm_requests_active_slots`: Active request slots per worker
 - `llm_requests_total_slots`: Total available request slots per worker
-- `llm_kv_blocks_active`: Number of active KV blocks per worker ⚠️ **DEPRECATED**
-- `llm_kv_blocks_total`: Total KV blocks available per worker ⚠️ **DEPRECATED**
-- `llm_kv_hit_rate_percent`: Cumulative KV Cache hit percent per worker ⚠️ **DEPRECATED**
+- `llm_kv_blocks_active`: Active KV blocks per worker
+- `llm_kv_blocks_total`: Total KV blocks available per worker
+- `llm_kv_hit_rate_percent`: KV Cache hit percent per worker
 - `llm_load_avg`: Average load across workers
 - `llm_load_std`: Load standard deviation across workers
-
-**These `llm_kv_*` metrics are being replaced by the new `dynamo_*` metrics from the MetricsRegistry system. Please migrate to the new system.**
 
 ## Troubleshooting
 
