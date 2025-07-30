@@ -44,21 +44,14 @@ jobs:
               - 'container/Dockerfile.sglang-deepep'
               - 'components/backends/sglang/**'
 
-  build-test:
+  build-test-vllm:
     needs: path-filter
+    if: ${{ needs.path-filter.outputs.vllm == 'true' }}
     runs-on:
         group: Fastchecker
-    strategy:
-      matrix:
-        include:
-          - framework: vllm
-            target: ci_minimum
-          - framework: sglang
-            target: runtime
-    name: Build and Test - ${{ matrix.framework }}
-    if: ${{ (matrix.framework == 'vllm' && needs.path-filter.outputs.vllm == 'true') || (matrix.framework == 'sglang' && needs.path-filter.outputs.sglang == 'true') }}
+    name: Build and Test - vllm
     env:
-      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework }}
+      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_vllm
       PYTEST_XML_FILE: pytest_test_report.xml
     steps:
       - name: Checkout repository
@@ -68,12 +61,12 @@ jobs:
       - name: Define Image Tag
         id: define_image_tag
         run: |
-          echo "image_tag=dynamo:latest-${{ matrix.framework }}" >> $GITHUB_OUTPUT
+          echo "image_tag=dynamo:latest-vllm" >> $GITHUB_OUTPUT
       - name: Build image
         env:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
         run: |
-          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target ${{ matrix.target }} --framework ${{ matrix.framework }}
+          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target ci_minimum --framework vllm
       - name: Run Rust checks (llm/block-manager)
         run: |
           docker run -w /workspace/lib/llm --name ${{ env.CONTAINER_ID }}_rust_checks ${{ steps.define_image_tag.outputs.image_tag }} bash -ec 'rustup component add rustfmt clippy && cargo fmt -- --check && cargo clippy --features block-manager --no-deps --all-targets -- -D warnings && cargo test --locked --all-targets --features=block-manager'
@@ -90,7 +83,51 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ${{ matrix.framework }}-python-test-results
+          name: vllm-python-test-results
+          if-no-files-found: error
+          path: |
+            ${{ env.PYTEST_XML_FILE }}
+
+  build-test-sglang:
+    needs: path-filter
+    if: ${{ needs.path-filter.outputs.sglang == 'true' }}
+    runs-on:
+        group: Fastchecker
+    name: Build and Test - sglang
+    env:
+      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_sglang
+      PYTEST_XML_FILE: pytest_test_report.xml
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Define Image Tag
+        id: define_image_tag
+        run: |
+          echo "image_tag=dynamo:latest-sglang" >> $GITHUB_OUTPUT
+      - name: Build image
+        env:
+          GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
+        run: |
+          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target runtime --framework sglang
+      - name: Run Rust checks (llm/block-manager)
+        run: |
+          docker run -w /workspace/lib/llm --name ${{ env.CONTAINER_ID }}_rust_checks ${{ steps.define_image_tag.outputs.image_tag }} bash -ec 'rustup component add rustfmt clippy && cargo fmt -- --check && cargo clippy --features block-manager --no-deps --all-targets -- -D warnings && cargo test --locked --all-targets --features=block-manager'
+      - name: Run pytest
+        env:
+          PYTEST_MARKS: "pre_merge or mypy"
+        run: |
+          docker run -w /workspace --name ${{ env.CONTAINER_ID }}_pytest ${{ steps.define_image_tag.outputs.image_tag }} bash -c "pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
+      - name: Copy test report from test Container
+        if: always()
+        run: |
+          docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/${{ env.PYTEST_XML_FILE }} .
+      - name: Archive test report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sglang-python-test-results
           if-no-files-found: error
           path: |
             ${{ env.PYTEST_XML_FILE }}
