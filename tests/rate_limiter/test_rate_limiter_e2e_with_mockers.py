@@ -6,9 +6,9 @@ import json
 import logging
 import os
 import time
-import nats
 
 import aiohttp
+import nats
 import pytest
 
 from tests.conftest import download_models
