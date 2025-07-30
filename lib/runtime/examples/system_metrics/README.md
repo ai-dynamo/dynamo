@@ -4,14 +4,14 @@ This example demonstrates how to add automatic Prometheus metrics profiling to a
 
 ## Overview
 
-The `RequestHandlerMetrics` system provides automatic profiling capabilities that are applied to all request handlers automatically. It automatically tracks:
+Request handlers are measured automatically when using the DistributedRuntime code. The DistributedRuntime uses the `MetricsRegistry` trait which provides automatic profiling capabilities that are applied to all request handlers automatically. It automatically tracks:
 
 - **Request Count**: Total number of requests processed
 - **Request Duration**: Time spent processing each request
 - **Request/Response Bytes**: Total bytes received and sent
 - **Error Count**: Total number of errors encountered
 
-Additionally, the example demonstrates how to add custom metrics with data bytes tracking in `MySystemStatsMetrics`.
+Additionally, the example demonstrates how to add custom metrics with data bytes tracking.
 
 ## How It Works
 
@@ -65,7 +65,7 @@ The `dynamo_component_errors_total` metric includes the following error types:
 - `dynamo_component_concurrent_requests` - Number of requests currently being processed
 
 ### Custom Metrics (Optional)
-- `dynamo_component_my_custom_bytes_processed_total` - Total data bytes processed by system handler (example)
+- `dynamo_component_bytes_processed_total` - Total data bytes processed by system handler (example)
 
 ### Labels
 All metrics automatically include these labels from the endpoint:
@@ -84,9 +84,9 @@ When the system is running, you'll see metrics from the /metrics HTTP path like 
 # TYPE dynamo_component_concurrent_requests gauge
 dynamo_component_concurrent_requests{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 0
 
-# HELP dynamo_component_my_custom_bytes_processed_total Example of a custom metric. Total number of data bytes processed by system handler
-# TYPE dynamo_component_my_custom_bytes_processed_total counter
-dynamo_component_my_custom_bytes_processed_total{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 42
+# HELP dynamo_component_bytes_processed_total Example of a custom metric. Total number of data bytes processed by system handler
+# TYPE dynamo_component_bytes_processed_total counter
+dynamo_component_bytes_processed_total{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 42
 
 # HELP dynamo_component_request_bytes_total Total number of bytes received in requests by request handler
 # TYPE dynamo_component_request_bytes_total counter
@@ -122,31 +122,13 @@ dynamo_component_response_bytes_total{dynamo_component="example_component",dynam
 uptime_seconds{dynamo_namespace="http_server"} 1.8226759879999999
 ```
 
-## Examples
+## Example
 
-### Example 1: Simple Handler with Automatic Profiling
-
-```rust
-struct SimpleHandler;
-
-#[async_trait]
-impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for SimpleHandler {
-    async fn generate(&self, input: SingleIn<String>) -> Result<ManyOut<Annotated<String>>> {
-        // Your business logic here
-        // No need to add any metrics code!
-        Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
-    }
-}
-
-// Automatic profiling - no additional code needed!
-let ingress = Ingress::for_engine(SimpleHandler::new())?;
-```
-
-### Example 2: Custom Handler with Data Bytes Tracking
+### Request Handler with Automatic Profiling and Optional Custom Metrics
 
 ```rust
 struct RequestHandler {
-    metrics: Option<Arc<MySystemStatsMetrics>>,
+    metrics: Option<Arc<CustomMetrics>>,
 }
 
 #[async_trait]
@@ -154,36 +136,43 @@ impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for Reques
     async fn generate(&self, input: SingleIn<String>) -> Result<ManyOut<Annotated<String>>> {
         let (data, ctx) = input.into_parts();
 
-        // Track data bytes processed (custom metric)
+        // Optional: Track custom metrics
         if let Some(metrics) = &self.metrics {
             metrics.data_bytes_processed.inc_by(data.len() as u64);
         }
 
         // Your business logic here...
+        // No need to add any automatic metrics code!
 
         Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
     }
 }
 
-// Create custom metrics and handler
-let system_metrics = MySystemStatsMetrics::from_endpoint(&endpoint)?;
-let handler = RequestHandler::with_metrics(system_metrics);
+// Create handler (with or without custom metrics)
+let handler = if enable_custom_metrics {
+    let custom_metrics = CustomMetrics::from_endpoint(&endpoint)?;
+    RequestHandler::with_metrics(custom_metrics)
+} else {
+    RequestHandler::new()
+};
+
+// Automatic profiling - no additional code needed!
 let ingress = Ingress::for_engine(handler)?;
 
-// Add custom metrics IN ADDITION to automatic ones
-// You'll get both: automatic metrics (dynamo_component_requests_total, dynamo_component_request_duration_seconds, etc.)
-// AND custom metrics (dynamo_component_my_custom_bytes_processed_total)
-ingress.add_metrics(&endpoint)?;
+// Optional: Add custom metrics IN ADDITION to automatic ones
+if enable_custom_metrics {
+    ingress.add_metrics(&endpoint)?;
+}
+
+// Endpoint code to add ingress to the handler below...
 ```
 
 ## Benefits
 
-1. **Zero Code Changes**: Existing handlers automatically get profiling metrics
-2. **Simple API**: Just create an Ingress and you get metrics automatically
-3. **Optional Custom Metrics**: Add custom metrics when needed
-4. **Automatic Profiling**: Request count, duration, and error tracking out of the box
-5. **Automatic Labeling**: Endpoint provides proper namespace/component/endpoint labels
-6. **Performance**: Minimal overhead, metrics are only recorded when provided
+1. **Little/No Code Changes**: Existing handlers automatically get profiling metrics, and easy to add custom metrics for your particular application.
+2. **Simple API**: Simply swap out Prometheus constructors with one of the endpoint's factory methods.
+3. **Automatic Profiling**: Request count, duration, and error tracking out of the box for request handlers.
+4. **Automatic Labeling**: Endpoint provides proper namespace/component/endpoint labels
 
 ## Running the Example
 
