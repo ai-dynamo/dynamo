@@ -62,3 +62,40 @@ async def graceful_shutdown(runtime):
     logging.info("Received shutdown signal, shutting down DistributedRuntime")
     runtime.shutdown()
     logging.info("DistributedRuntime shutdown complete")
+
+
+def setup_native_endpoints(server_args, component, handler, tasks):
+    """Setup sgl native endpoints"""
+    # flush cache
+    flush_endpoint = component.endpoint("flush_cache")
+    tasks.append(flush_endpoint.serve_endpoint(handler.flush_cache))
+
+    # expert distribution endpoints
+    if server_args.expert_distribution_recorder_mode is not None:
+        start_expert_distribution_endpoint = component.endpoint(
+            "start_expert_distribution_record"
+        )
+        stop_expert_distribution_endpoint = component.endpoint(
+            "stop_expert_distribution_record"
+        )
+        dump_expert_distribution_endpoint = component.endpoint(
+            "dump_expert_distribution_record"
+        )
+
+        tasks.append(
+            start_expert_distribution_endpoint.serve_endpoint(
+                handler.start_expert_distribution_record
+            )
+        )
+        tasks.append(
+            stop_expert_distribution_endpoint.serve_endpoint(
+                handler.stop_expert_distribution_record
+            )
+        )
+        tasks.append(
+            dump_expert_distribution_endpoint.serve_endpoint(
+                handler.dump_expert_distribution_record
+            )
+        )
+
+    return tasks

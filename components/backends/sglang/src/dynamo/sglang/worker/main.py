@@ -32,6 +32,7 @@ from dynamo.sglang.common import (
     DisaggPreprocessedRequest,
     graceful_shutdown,
     parse_sglang_args_inc,
+    setup_native_endpoints,
 )
 
 configure_dynamo_logging()
@@ -362,10 +363,9 @@ async def init(
     )
     _ = ZmqKvEventPublisher(component=component, config=zmq_config)
 
-    tasks = [endpoint.serve_endpoint(handler.generate)]
+    t = [endpoint.serve_endpoint(handler.generate)]
 
-    flush_endpoint = component.endpoint("flush_cache")
-    tasks.append(flush_endpoint.serve_endpoint(handler.flush_cache))
+    tasks = setup_native_endpoints(server_args, component, handler, t)
 
     await asyncio.gather(*tasks)
 

@@ -18,6 +18,9 @@ python3 -m dynamo.sglang.utils.clear_namespace --namespace dynamo
 python3 -m dynamo.frontend --http-port=8000 &
 DYNAMO_PID=$!
 
+# run http server
+python3 -m dynamo.sglang.utils.sgl_http_server --namespace dynamo &
+
 # run prefill worker
 python3 -m dynamo.sglang.worker \
   --model-path silence09/DeepSeek-R1-Small-2layers \
@@ -29,6 +32,7 @@ python3 -m dynamo.sglang.worker \
   --skip-tokenizer-init \
   --disaggregation-mode prefill \
   --disaggregation-transfer-backend nixl \
+  --expert-distribution-recorder-mode stat \
   --port 30000 &
 PREFILL_PID=$!
 
@@ -43,4 +47,5 @@ CUDA_VISIBLE_DEVICES=2,3 python3 -m dynamo.sglang.decode_worker \
   --skip-tokenizer-init \
   --disaggregation-mode decode \
   --disaggregation-transfer-backend nixl \
+  --expert-distribution-recorder-mode stat \
   --port 31000

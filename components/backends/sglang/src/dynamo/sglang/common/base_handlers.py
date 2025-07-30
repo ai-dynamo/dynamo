@@ -1,4 +1,3 @@
-import os
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
@@ -33,7 +32,7 @@ class BaseWorkerHandler(ABC):
         """Flush KV cache for each worker"""
 
         _ = request
-        self.engine.flush_cache()
+        await self.engine.tokenizer_manager.flush_cache()
         yield {
             "status": "success",
             "message": "Cache flush initiated. Check backend logs for status",
@@ -44,7 +43,7 @@ class BaseWorkerHandler(ABC):
         Start recording expert distribution.
         """
         _ = request
-        self.engine.start_expert_distribution_recorder()
+        await self.engine.tokenizer_manager.start_expert_distribution_record()
         yield {
             "status": "success",
             "message": "Expert distribution recording started. Check backend logs for status",
@@ -55,7 +54,7 @@ class BaseWorkerHandler(ABC):
         Stop recording expert distribution.
         """
         _ = request
-        self.engine.stop_expert_distribution_recorder()
+        await self.engine.tokenizer_manager.stop_expert_distribution_record()
         yield {
             "status": "success",
             "message": "Expert distribution recording stopped. Check backend logs for status",
@@ -67,25 +66,9 @@ class BaseWorkerHandler(ABC):
         to determine where to save the expert distribution (SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR). This endpoint
         takes in a directory path, validates it, and sets the environment variable
         """
-        dir = request.get("directory")
-        if not dir:
-            yield {
-                "status": "error",
-                "message": "Directory path is required",
-            }
-            return
-
-        # Validate directory
-        if not os.path.exists(dir):
-            yield {
-                "status": "error",
-                "message": f"Directory {dir} does not exist",
-            }
-            return
-
-        os.environ["SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR"] = dir
-        self.engine.dump_expert_distribution_record()
+        _ = request
+        await self.engine.tokenizer_manager.dump_expert_distribution_record()
         yield {
             "status": "success",
-            "message": f"Expert distribution recording dumped to {dir}",
+            "message": "Check backend logs for expert distribution path!",
         }

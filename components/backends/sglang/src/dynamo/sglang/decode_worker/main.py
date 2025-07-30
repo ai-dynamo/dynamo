@@ -19,6 +19,7 @@ from dynamo.sglang.common import (
     BaseWorkerHandler,
     graceful_shutdown,
     parse_sglang_args_inc,
+    setup_native_endpoints,
 )
 
 configure_dynamo_logging()
@@ -69,17 +70,18 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
     """Initialize decode worker"""
 
     engine = sgl.Engine(server_args=server_args)
+    t = []
 
     component = runtime.namespace("dynamo").component("decode")
     await component.create_service()
 
-    gen_endpoint = component.endpoint("generate")
-    flush_endpoint = component.endpoint("flush_cache")
-
     handler = DecodeRequestHandler(engine, server_args, component)
 
-    tasks = [gen_endpoint.serve_endpoint(handler.generate)]
-    tasks.append(flush_endpoint.serve_endpoint(handler.flush_cache))
+    gen_endpoint = component.endpoint("generate")
+
+    t.append(gen_endpoint.serve_endpoint(handler.generate))
+
+    tasks = setup_native_endpoints(server_args, component, handler, t)
 
     await asyncio.gather(*tasks)
 

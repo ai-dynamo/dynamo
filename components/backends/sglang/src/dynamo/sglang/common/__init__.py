@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Base handlers
-from .base_handlers import BaseSglangRequestHandler
+from .base_handlers import BaseWorkerHandler
 
 # Protocol types
 from .protocol import (
@@ -14,7 +14,12 @@ from .protocol import (
 )
 
 # Utilities
-from .sgl_utils import graceful_shutdown, parse_sglang_args_inc, reserve_free_port
+from .sgl_utils import (
+    graceful_shutdown,
+    parse_sglang_args_inc,
+    reserve_free_port,
+    setup_native_endpoints,
+)
 
 __all__ = [
     # Protocol types
@@ -27,6 +32,7 @@ __all__ = [
     "parse_sglang_args_inc",
     "reserve_free_port",
     "graceful_shutdown",
+    "setup_native_endpoints",
     # Base handlers
-    "BaseSglangRequestHandler",
+    "BaseWorkerHandler",
 ]
