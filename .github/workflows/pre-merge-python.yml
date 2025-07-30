@@ -53,12 +53,10 @@ jobs:
         include:
           - framework: vllm
             target: ci_minimum
-            condition: ${{ needs.path-filter.outputs.vllm == 'true' }}
           - framework: sglang
             target: runtime
-            condition: ${{ needs.path-filter.outputs.sglang == 'true' }}
     name: Build and Test - ${{ matrix.framework }}
-    if: ${{ matrix.condition == 'true' }}
+    if: ${{ (matrix.framework == 'vllm' && needs.path-filter.outputs.vllm == 'true') || (matrix.framework == 'sglang' && needs.path-filter.outputs.sglang == 'true') }}
     env:
       CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework }}
       PYTEST_XML_FILE: pytest_test_report.xml
