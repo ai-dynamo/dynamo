@@ -141,7 +141,7 @@ spec:
             - -c
           args:
             - "python3 -m dynamo.planner.prometheus"
-    backend:
+    VllmDecodeWorker:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker
@@ -191,7 +191,7 @@ spec:
             - -c
           args:
             - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B 2>&1 | tee /tmp/vllm.log"
-    prefill:
+    VllmPrefillWorker:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
       componentType: worker

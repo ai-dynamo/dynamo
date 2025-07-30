@@ -15,31 +15,31 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: dynamo-deepseek-epp
-  namespace: default
+  name: {{ .Values.model.shortName }}-epp
+  namespace: {{ .Release.Namespace }}
   labels:
-    app: dynamo-deepseek-epp
+    app: {{ .Values.model.shortName }}-epp
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: dynamo-deepseek-epp
+      app: {{ .Values.model.shortName }}-epp
   template:
     metadata:
       labels:
-        app: dynamo-deepseek-epp
+        app: {{ .Values.model.shortName }}-epp
     spec:
       # Conservatively, this timeout should mirror the longest grace period of the pods within the pool
       terminationGracePeriodSeconds: 130
       containers:
       - name: epp
-        image: us-central1-docker.pkg.dev/k8s-staging-images/gateway-api-inference-extension/epp:v0.4.0
+        image: {{ .Values.extension.image }}
         imagePullPolicy: IfNotPresent
         args:
         - -poolName
-        - "dynamo-deepseek"
+        - "{{ .Values.model.shortName }}-pool"
         - "-poolNamespace"
-        - "default"
+        - "{{ .Release.Namespace }}"
         - -v
         - "4"
         - --zap-encoder
