@@ -20,18 +20,27 @@ package controller_common
 import (
 	"context"
 	"strings"
+	"time"
 
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
+type GroveConfig struct {
+	// Enabled is automatically determined by checking if Grove CRDs are installed in the cluster
+	Enabled bool
+	// TerminationDelay configures the termination delay for Grove PodGangSets
+	TerminationDelay time.Duration
+}
+
 type Config struct {
 	// Enable resources filtering, only the resources belonging to the given namespace will be handled.
 	RestrictedNamespace string
 	EnableLWS           bool
-	EnableGrove         bool
+	Grove               GroveConfig
 	EtcdAddress         string
 	NatsAddress         string
 	IngressConfig       IngressConfig
@@ -46,6 +55,30 @@ type IngressConfig struct {
 
 func (i *IngressConfig) UseVirtualService() bool {
 	return i.VirtualServiceGateway != ""
+}
+
+// DiscoverGroveInstallation checks if Grove is installed by looking for the podgangsets.grove.io CRD
+func DiscoverGroveInstallation(ctx context.Context, reader client.Reader) bool {
+	logger := log.FromContext(ctx)
+
+	crd := &apiextensionsv1.CustomResourceDefinition{}
+	crdName := "podgangsets.grove.io"
+
+	if err := reader.Get(ctx, client.ObjectKey{Name: crdName}, crd); err != nil {
+		logger.V(1).Info("Grove CRD not found, disabling Grove functionality", "crd", crdName, "error", err)
+		return false
+	}
+
+	// Check if CRD is established
+	for _, cond := range crd.Status.Conditions {
+		if cond.Type == apiextensionsv1.Established && cond.Status == apiextensionsv1.ConditionTrue {
+			logger.Info("Grove installation detected, enabling Grove functionality", "crd", crdName)
+			return true
+		}
+	}
+
+	logger.Info("Grove CRD found but not established, disabling Grove functionality", "crd", crdName)
+	return false
 }
 
 func EphemeralDeploymentEventFilter(config Config) predicate.Predicate {

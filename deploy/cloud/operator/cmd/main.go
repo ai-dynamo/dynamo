@@ -92,7 +92,7 @@ func main() {
 	var ingressControllerTLSSecretName string
 	var ingressHostSuffix string
 	var enableLWS bool
-	var enableGrove bool
+	var groveTerminationDelay time.Duration
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -120,8 +120,8 @@ func main() {
 		"The suffix to use for the ingress host")
 	flag.BoolVar(&enableLWS, "enable-lws", false,
 		"If set, enable leader worker set")
-	flag.BoolVar(&enableGrove, "enable-grove", false,
-		"If set, enable grove")
+	flag.DurationVar(&groveTerminationDelay, "grove-termination-delay", 15*time.Minute,
+		"The termination delay for Grove PodGangSets")
 	opts := zap.Options{
 		Development: true,
 	}
@@ -133,9 +133,12 @@ func main() {
 	ctrlConfig := commonController.Config{
 		RestrictedNamespace: restrictedNamespace,
 		EnableLWS:           enableLWS,
-		EnableGrove:         enableGrove,
-		EtcdAddress:         etcdAddr,
-		NatsAddress:         natsAddr,
+		Grove: commonController.GroveConfig{
+			Enabled:          false, // Will be set after Grove discovery
+			TerminationDelay: groveTerminationDelay,
+		},
+		EtcdAddress: etcdAddr,
+		NatsAddress: natsAddr,
 		IngressConfig: commonController.IngressConfig{
 			VirtualServiceGateway:      istioVirtualServiceGateway,
 			IngressControllerClassName: ingressControllerClassName,
@@ -200,6 +203,9 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+
+	// Discover Grove installation by checking for podgangsets.grove.io CRD
+	ctrlConfig.Grove.Enabled = commonController.DiscoverGroveInstallation(mainCtx, mgr.GetClient())
 
 	// Create etcd client
 	cli, err := clientv3.New(clientv3.Config{
