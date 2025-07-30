@@ -231,7 +231,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         }
 
         // Add auto-generated labels with sanitized values
-        if hierarchy.len() > 3 {
+        if hierarchy.len() > 1 {
             let namespace = &hierarchy[1];
             if !namespace.is_empty() {
                 let valid_namespace = lint_prometheus_name(namespace)?;
