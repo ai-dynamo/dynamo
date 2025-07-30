@@ -271,6 +271,10 @@ def cmd_line_args():
         config.gpus_per_node = args.gpus_per_node
     if args.free_gpu_memory_fraction is not None:
         config.free_gpu_memory_fraction = args.free_gpu_memory_fraction
+    config.max_batch_size = args.max_batch_size
+    config.max_num_tokens = args.max_num_tokens
+    config.max_seq_len = args.max_seq_len
+    config.max_beam_width = args.max_beam_width
     config.kv_block_size = args.kv_block_size
     config.migration_limit = args.migration_limit
     config.extra_engine_args = args.extra_engine_args
