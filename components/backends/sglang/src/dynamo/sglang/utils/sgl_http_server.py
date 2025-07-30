@@ -8,6 +8,7 @@ import logging
 import uvicorn
 import uvloop
 from fastapi import FastAPI
+from fastapi.routing import APIRoute
 
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
@@ -169,8 +170,8 @@ class SglangHttpServer:
 
         # Debug: print all registered routes
         for route in self.app.routes:
-            if hasattr(route, "path"):
-                logging.info(f"Registered route: {route.methods} {route.path}")
+            if isinstance(route, APIRoute):
+                logging.debug(f"Registered route: {route.methods} {route.path}")
 
         await server.serve()
 
