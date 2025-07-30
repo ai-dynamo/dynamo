@@ -29,7 +29,7 @@ class Config:
         self.model_path: str = ""
         self.served_model_name: Optional[str] = None
         self.tensor_parallel_size: int = 1
-        self.pipeline_parallel_size: Optional[int] = None
+        self.pipeline_parallel_size: int = 1
         self.expert_parallel_size: Optional[int] = None
         self.kv_block_size: int = 32
         self.migration_limit: int = 0
