@@ -12,17 +12,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-apiVersion: v1
-kind: Service
+apiVersion: inference.networking.x-k8s.io/v1alpha2
+kind: InferenceModel
 metadata:
-  name: dynamo-deepseek-epp
-  namespace: default
+  name: {{ .Values.model.shortName }}-model
+  namespace: {{ .Release.Namespace }}
 spec:
-  selector:
-    app: dynamo-deepseek-epp
-  ports:
-    - protocol: TCP
-      port: 9002
-      targetPort: 9002
-      appProtocol: http2
-  type: ClusterIP
+  criticality: {{ .Values.model.criticality }}
+  modelName: {{ .Values.model.identifier }}
+  poolRef:
+    group: inference.networking.x-k8s.io
+    kind: InferencePool
+    name: {{ .Values.model.shortName }}-pool
