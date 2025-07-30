@@ -73,10 +73,7 @@ vllm = [
 sglang = [
     "uvloop",
     "nixl",
-    "sglang[runtime_common]==0.4.9.post1",
-    "einops",
-    "sgl-kernel==0.2.4",
-    "sentencepiece",
+    "sglang[all]==0.4.9.post6",
 ]
 
 llama_cpp = [
