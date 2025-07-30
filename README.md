@@ -167,10 +167,15 @@ To specify which GPUs to use set environment variable `CUDA_VISIBLE_DEVICES`.
 
 ## SGLang
 
+
 ```
-# Install libnuma
+# Install libnuma-dev
 apt install -y libnuma-dev
 
+# Install flashinfer-python pre-release (required by sglang for optimized inference)
+uv pip install "flashinfer-python==0.2.9rc2" --prerelease=allow
+
+# Install ai-dynamo with sglang support
 uv pip install ai-dynamo[sglang]
 ```
 
