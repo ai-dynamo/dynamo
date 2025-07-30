@@ -74,9 +74,11 @@ class SLAPlannerDefaults(BasePlannerDefaults):
 
 
 class VllmComponentName:
-    prefill_worker = "prefill"
+    prefill_worker_k8s_name = "VllmPrefillWorker"
+    prefill_worker_component_name = "prefill"
     prefill_worker_endpoint = "generate"
-    decode_worker = "backend"
+    decode_worker_k8s_name = "VllmDecodeWorker"
+    decode_worker_component_name = "backend"
     decode_worker_endpoint = "generate"
 
 

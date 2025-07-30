@@ -13,14 +13,17 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 apiVersion: inference.networking.x-k8s.io/v1alpha2
-kind: InferenceModel
+kind: InferencePool
 metadata:
-  name: deep-seek-model
-  namespace: default
+  name: {{ .Values.model.shortName }}-pool
+  namespace: {{ .Release.Namespace }}
 spec:
-  criticality: Critical
-  modelName: deepseek-ai/DeepSeek-R1-Distill-Llama-8B
-  poolRef:
-    group: inference.networking.x-k8s.io
-    kind: InferencePool
-    name: dynamo-deepseek
+  targetPortNumber: {{ .Values.inferencePool.port }}
+  selector:
+    nvidia.com/dynamo-component: Frontend
+    nvidia.com/dynamo-namespace: {{ .Values.dynamoNamespace }}
+  extensionRef:
+    failureMode: FailOpen
+    group: ""
+    kind: Service
+    name: {{ .Values.model.shortName }}-epp
