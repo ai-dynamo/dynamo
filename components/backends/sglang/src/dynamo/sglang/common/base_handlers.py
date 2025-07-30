@@ -65,9 +65,7 @@ class BaseWorkerHandler(ABC):
 
     async def dump_expert_distribution_record(self, request: dict):
         """
-        Internally SGL uses an environment variable
-        to determine where to save the expert distribution (SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR). This endpoint
-        takes in a directory path, validates it, and sets the environment variable
+        Dumps the expert distribution record to the directory specified in the environment variable `SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR`.
         """
         _ = request
         await self.engine.tokenizer_manager.dump_expert_distribution_record()
