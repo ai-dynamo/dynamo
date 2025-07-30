@@ -209,6 +209,9 @@ enum UpdateSequences {
     ActiveBlocks {
         resp_tx: mpsc::SyncSender<usize>,
     },
+    ActiveTokens {
+        resp_tx: mpsc::SyncSender<usize>,
+    },
     Shutdown,
 }
 
@@ -291,6 +294,10 @@ impl ActiveSequencesMultiWorker {
                     UpdateSequences::ActiveBlocks { resp_tx } => {
                         let active_blocks = active_sequences.active_blocks();
                         let _ = resp_tx.send(active_blocks);
+                    }
+                    UpdateSequences::ActiveTokens { resp_tx } => {
+                        let active_tokens = active_sequences.active_tokens();
+                        let _ = resp_tx.send(active_tokens);
                     }
                     UpdateSequences::Shutdown => {
                         break;
@@ -478,6 +485,11 @@ impl ActiveSequencesMultiWorker {
     pub fn active_blocks(&self) -> HashMap<WorkerId, usize> {
         self.query_workers(None, |_, resp_tx| UpdateSequences::ActiveBlocks { resp_tx })
     }
+
+    /// Query all workers for their current number of active tokens
+    pub fn active_tokens(&self) -> HashMap<WorkerId, usize> {
+        self.query_workers(None, |_, resp_tx| UpdateSequences::ActiveTokens { resp_tx })
+    }
 }
 
 impl Drop for ActiveSequencesMultiWorker {
@@ -533,6 +545,21 @@ mod tests {
             2,  // worker_id
         );
 
+        // Verify active tokens after adding requests
+        let tokens_after_add = seq_manager.active_tokens();
+        assert_eq!(
+            tokens_after_add[&0], 12,
+            "Worker 0 should have 12 active tokens"
+        );
+        assert_eq!(
+            tokens_after_add[&1], 8,
+            "Worker 1 should have 8 active tokens"
+        );
+        assert_eq!(
+            tokens_after_add[&2], 16,
+            "Worker 2 should have 16 active tokens"
+        );
+
         // Test potential blocks for sequence [0, 1]
         let potential_blocks = seq_manager.potential_blocks(vec![0, 1]);
 
@@ -554,7 +581,7 @@ mod tests {
             "Worker 2 should have 4 potential blocks"
         );
 
-        // Free all requests
+        // Free all original requests
         seq_manager.free(&"request_0".to_string());
         seq_manager.free(&"request_1".to_string());
         seq_manager.free(&"request_2".to_string());
@@ -564,5 +591,20 @@ mod tests {
         assert_eq!(active_blocks[&0], 0, "Worker 0 should have 0 active blocks");
         assert_eq!(active_blocks[&1], 0, "Worker 1 should have 0 active blocks");
         assert_eq!(active_blocks[&2], 0, "Worker 2 should have 0 active blocks");
+
+        // Verify active tokens are zero for all workers
+        let final_tokens = seq_manager.active_tokens();
+        assert_eq!(
+            final_tokens[&0], 0,
+            "Worker 0 should have 0 active tokens after freeing all"
+        );
+        assert_eq!(
+            final_tokens[&1], 0,
+            "Worker 1 should have 0 active tokens after freeing all"
+        );
+        assert_eq!(
+            final_tokens[&2], 0,
+            "Worker 2 should have 0 active tokens after freeing all"
+        );
     }
 }

@@ -341,18 +341,18 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 }
 
                 let stream = self.inner.direct(updated_request, instance_id).await?;
-
-                // Spawn a detached cleanup task
                 let chooser_clone = self.chooser.clone();
-                let stream_context_clone = stream.context();
-                tokio::spawn(async move {
-                    // Wait for the stream to be cancelled/stopped/completed
-                    stream_context_clone.stopped().await;
-                    chooser_clone.free(&context_id).await;
-                });
+                let context_id_clone = context_id.clone();
 
-                // Return the original stream unchanged
-                Ok(stream)
+                let stream = stream
+                    .map(Some)
+                    .chain(futures::stream::once(async move {
+                        chooser_clone.free(&context_id_clone).await;
+                        None
+                    }))
+                    .filter_map(|x| async { x });
+
+                return Ok(ResponseStream::new(Box::pin(stream), stream_context));
             }
         }
     }
