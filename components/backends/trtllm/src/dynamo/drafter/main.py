@@ -29,8 +29,6 @@ from dynamo.trtllm.utils.trtllm_utils import (
 DEFAULT_KV_EVENT_BUFFER_MAX_SIZE = 1024
 
 configure_dynamo_logging()
-# TODO: remove this
-logging.getLogger().setLevel(logging.WARNING)
 
 
 async def graceful_shutdown(runtime):
