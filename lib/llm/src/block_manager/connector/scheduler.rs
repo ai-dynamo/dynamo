@@ -275,6 +275,7 @@ pub struct Scheduler {
     // This object coordinates the two-stage execution of a scheduled transfer request
     // Because we require signals from both leader and worker, this object holds the first
     // signal to arrive while waiting for the other.
+    #[deprecated(note = "use scheduled_requests instead")]
     enqueued_requests:
         HashMap<String, HashMap<uuid::Uuid, Either<WorkerArrivedFirst, TransferArrivedFirst>>>,
 
@@ -352,7 +353,7 @@ impl Scheduler {
                         self.remove_slot(request_id);
                     }
                     Some(SchedulerMessage::EnqueueRequest(request)) => {
-                        self.handle_enqueue_request(request);
+                        self.handle_worker_request(request);
                     }
                     None => {
                         return false;
@@ -366,7 +367,7 @@ impl Scheduler {
             maybe_transfer_msg = self.transfer_rx.recv(), if !self.transfer_rx.is_closed() => {
                 match maybe_transfer_msg {
                     Some(TransferToSchedulerMessage::ScheduleRequest(request)) => {
-                        self.handle_schedule_request(request);
+                        self.handle_scheduled_transfer_request(request);
                     }
                     Some(TransferToSchedulerMessage::ImmediateResult(result)) => {
                         self.handle_immediate_result(result);
@@ -401,6 +402,19 @@ impl Scheduler {
         debug_assert!(self.slots.contains_key(&request_id), "slot not found");
         self.cancel_tokens.remove(&request_id);
         self.slots.remove(&request_id);
+
+        let maybe_controller = self.scheduled_requests.remove(&request_id);
+        debug_assert!(
+            maybe_controller.is_none() || maybe_controller.unwrap().is_empty(),
+            "any scheduled request should be removed and enqueued/scheduled before the slot is removed"
+        );
+
+        let maybe_unprocessed_results = self.unprocessed_immediate_results.remove(&request_id);
+        debug_assert!(
+            maybe_unprocessed_results.is_none() || maybe_unprocessed_results.unwrap().is_empty(),
+            "any unprocessed immediate results should be removed before the slot is removed"
+        );
+
         tracing::debug!(
             request_id,
             iteration = self.iteration,
@@ -408,15 +422,16 @@ impl Scheduler {
         );
     }
 
-    fn handle_enqueue_request(&mut self, request: WorkerTransferRequest) {
+    fn handle_worker_request(&mut self, request: WorkerTransferRequest) {
         debug_assert!(
             self.slots.contains_key(&request.request_id),
             "slot does not exist"
         );
-        let slot = self
-            .slots
-            .get_mut(&request.request_id)
-            .expect("slot does not exist");
+
+        // let maybe_controller = self.common_function(request_id, uuid, None);
+        // if let Some(controller) = maybe_controller {
+        //     self.schedule_request(controller);
+        // }
 
         unimplemented!("@ziqi")
     }
@@ -472,17 +487,17 @@ impl Scheduler {
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.leader_request.request_id))]
-    fn handle_schedule_request(&mut self, request: TransferScheduleRequest) {
-        let request_id = request.leader_request.request_id.clone();
+    fn handle_scheduled_transfer_request(&mut self, request: TransferScheduleRequest) {
+        let controller = self.process_scheduled_transfer_request(request).unwrap();
 
-        // the slot may or may not exist
-        // if it exists, the worker side may or may not have arrived first
+        // extract request id and uuid
+        // call our common function with Some(controller)
 
-        // tracing::debug!("engine state adding slot");
-        // let slot = SchedulerSlot::new(request, self.iteration);
-        // self.slots.insert(request_id, slot);
+        // let maybe_controller = self.common_function(request_id, uuid, Some(controller));
 
-        // capture a clone of the atomic counter, and pass it through with the request
+        // if let Some(controller) = maybe_controller {
+        //    self.schedule_request(controller);
+        // }
 
         unimplemented!("@ziqi")
     }
@@ -898,47 +913,12 @@ mod tests {
     //         handle.mark_complete(Ok(())).await;
     //     });
 
-    //     // In this test, we will manually circumvent the coordinated scheduling of the transfer task
-    //     // with the paired worker request by tapping the scheduler's internal receive channel direclty
-    //     // and
-    //     // scheduler.step().await;
-
-    //     // Get the pending schedule request from the scheduler's internal queue
-    //     // In a real implementation, this would be handled by the scheduler's internal logic
-    //     // For this test, we'll simulate finding a pending request and using our coordination function
-
     //     // Simulate the scheduler making a decision and coordinating the execution
     //     if let Some(msg) = scheduler.transfer_rx.try_recv().ok() {
     //         match msg {
     //             TransferToSchedulerMessage::ScheduleRequest(schedule_req) => {
     //                 let decision = SchedulingDecision::Execute;
 
-    //                 // Extract the decision sender from the ScheduledTaskHandle that would be created
-    //                 let (decision_tx, decision_rx) = oneshot::channel();
-    //                 let cancel_token = CancellationToken::new();
-
-    //                 // Create a mock ScheduledTaskHandle to send to the client
-    //                 let task_handle = ScheduledTaskHandle {
-    //                     request_id: schedule_req.leader_request.request_id.clone(),
-    //                     uuid: schedule_req.leader_request.uuid,
-    //                     decision_rx,
-    //                     cancel_token: cancel_token.child_token(),
-    //                 };
-
-    //                 // Send the task handle back to the client side
-    //                 if schedule_req.response_tx.send(task_handle).is_ok() {
-    //                     // Now use our coordination function to send the decision and await completion
-    //                     let coordination_result =
-    //                         Scheduler::coordinate_scheduled_transfer_execution(
-    //                             decision_tx,
-    //                             decision,
-    //                         )
-    //                         .await;
-
-    //                     // The coordination should succeed
-    //                     assert!(coordination_result.is_ok());
-    //                 }
-    //             }
     //             _ => {}
     //         }
     //     }
