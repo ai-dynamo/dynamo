@@ -30,6 +30,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	clientv3 "go.etcd.io/etcd/client/v3"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -73,6 +74,10 @@ func init() {
 	utilruntime.Must(volcanoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(grovev1alpha1.AddToScheme(scheme))
+
+	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
+
+	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -127,8 +132,6 @@ func main() {
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
-
-	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
 
 	ctrlConfig := commonController.Config{
 		RestrictedNamespace: restrictedNamespace,
