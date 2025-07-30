@@ -113,9 +113,6 @@ pub struct TransferScheduleRequest {
 }
 
 pub struct ScheduledTaskHandle {
-    pub request_id: String,
-    pub uuid: uuid::Uuid,
-    pub transfer_type: TransferType,
     pub decision_rx: oneshot::Receiver<(SchedulingDecision, oneshot::Sender<anyhow::Result<()>>)>,
     pub cancel_token: CancellationToken,
 }
@@ -165,37 +162,8 @@ pub struct WorkerSchedulerRequest {
     pub cancel_token: CancellationToken,
 }
 
-// /// One-time use completion handle. Should only be triggered once after the operation is complete and the memory
-// /// being targetting can be reused elsewhere.
-// pub struct TransferCompletionHandle(Option<Arc<AtomicU64>>);
-
-// impl TransferCompletionHandle {
-//     pub(crate) fn new(counter: Arc<AtomicU64>) -> Self {
-//         Self(Some(counter))
-//     }
-
-//     pub fn mark_as_complete(&mut self) {
-//         if let Some(counter) = self.0.take() {
-//             counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-//         }
-//     }
-// }
-
-// impl Drop for TransferCompletionHandle {
-//     fn drop(&mut self) {
-//         if let Some(counter) = self.0.take() {
-//             tracing::error!("increment on drop dropped without being marked as complete - this could lead silent data corruption");
-//             counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-//         }
-//     }
-// }
-
-pub enum CompletionStatus {
-    Ok,
-    Err(String),
-    Cancelled,
-}
-
+/// One-time use object returned from [`Scheduler::schedule_transfer`]
+/// This object carries with it the [`SchedulingDecision`] and is used to mark the transfer as complete.
 #[async_trait::async_trait]
 pub trait TransferCompletionHandle: Send {
     fn scheduler_decision(&self) -> SchedulingDecision;
