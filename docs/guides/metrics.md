@@ -19,7 +19,36 @@ limitations under the License.
 
 ## Overview
 
-Dynamo provides built-in metrics capabilities through the `MetricsRegistry` trait, which is automatically available whenever you use the `DistributedRuntime` framework. This guide explains how to use metrics for observability and monitoring across all Dynamo components and services.
+Dynamo provides built-in metrics capabilities through the `MetricsRegistry` trait, which is automatically available whenever you use the `DistributedRuntime` framework. This guide explains how to use metrics for observability and monitoring across all Dynamo components.
+
+## Automatic Metrics
+
+Dynamo automatically exposes metrics with the `dynamo_` name prefixes. It also adds labels such as `dynamo_namespace`, `dynamo_component`, and `dynamo_endpoint` -- the prefix is needed as to not conflict with existing Kubernetes labels.
+
+**Component Metrics**: The core Dynamo backend system automatically exposes metrics with the `dynamo_component_*` prefix. The followings are examples that currently exist for all components that use the `DistributedRuntime` framework. More metrics are being added and will appear in future releases:
+
+- `dynamo_component_concurrent_requests`: Requests currently being processed (gauge)
+- `dynamo_component_request_bytes_total`: Total bytes received in requests (counter)
+- `dynamo_component_request_duration_seconds`: Request processing time (histogram)
+- `dynamo_component_requests_total`: Total requests processed (counter)
+- `dynamo_component_response_bytes_total`: Total bytes sent in responses (counter)
+- `dynamo_component_system_uptime_seconds`: DistributedRuntime uptime (gauge)
+
+**Specialized Component Metrics**: Some components expose additional metrics specific to their functionality. For example, the Preprocessor will have labels in the following convention:
+
+- `dynamo_preprocessor_*`: Metrics specific to preprocessor components
+
+**Frontend Metrics**: When using Dynamo HTTP Frontend (`--framework VLLM` or `--framework TENSORRTLLM`), these metrics are automatically exposed with the `dynamo_frontend_*` prefix. These metrics include `model` labels containing the model name:
+
+- `dynamo_frontend_inflight_requests`: Inflight requests (gauge)
+- `dynamo_frontend_input_sequence_tokens`: Input sequence length (histogram)
+- `dynamo_frontend_inter_token_latency_seconds`: Inter-token latency (histogram)
+- `dynamo_frontend_output_sequence_tokens`: Output sequence length (histogram)
+- `dynamo_frontend_request_duration_seconds`: LLM request duration (histogram)
+- `dynamo_frontend_requests_total`: Total LLM requests (counter)
+- `dynamo_frontend_time_to_first_token_seconds`: Time to first token (histogram)
+
+## Metrics Hierarchy
 
 The `MetricsRegistry` trait is implemented by `DistributedRuntime`, `Namespace`, `Component`, and `Endpoint`, providing a hierarchical approach to metric collection that matches Dynamo's distributed architecture:
 
@@ -29,25 +58,6 @@ The `MetricsRegistry` trait is implemented by `DistributedRuntime`, `Namespace`,
 - `Endpoint`: Metrics for individual dynamo_endpoint within a component
 
 This hierarchical structure allows you to create metrics at the appropriate level of granularity for your monitoring needs.
-
-**Component Metrics**: The core Dynamo backend system automatically exposes these metrics with `dynamo_namespace`, `dynamo_component`, and `dynamo_endpoint` labels containing component (aka. worker) information. These labels are prefixed with "dynamo_" to avoid conflicts with existing Kubernetes labels:
-
-- `dynamo_component_concurrent_requests`: Requests currently being processed (gauge)
-- `dynamo_component_request_bytes_total`: Total bytes received in requests (counter)
-- `dynamo_component_request_duration_seconds`: Request processing time (histogram)
-- `dynamo_component_requests_total`: Total requests processed (counter)
-- `dynamo_component_response_bytes_total`: Total bytes sent in responses (counter)
-- `dynamo_component_system_uptime_seconds`: DistributedRuntime uptime (gauge)
-
-**Frontend Metrics**: When using Dynamo HTTP Frontend (`--framework VLLM` or `--framework TENSORRTLLM`), these metrics are automatically exposed with `model` labels containing the model name:
-
-- `dynamo_frontend_inflight_requests`: Inflight requests (gauge)
-- `dynamo_frontend_input_sequence_tokens`: Input sequence length (histogram)
-- `dynamo_frontend_inter_token_latency_seconds`: Inter-token latency (histogram)
-- `dynamo_frontend_output_sequence_tokens`: Output sequence length (histogram)
-- `dynamo_frontend_request_duration_seconds`: LLM request duration (histogram)
-- `dynamo_frontend_requests_total`: Total LLM requests (counter)
-- `dynamo_frontend_time_to_first_token_seconds`: Time to first token (histogram)
 
 ## Environment Configuration
 
@@ -79,7 +89,6 @@ curl http://localhost:8081/metrics
 ```
 
 Output:
-
 ```
 # HELP dynamo_my_counter My custom counter
 # TYPE dynamo_my_counter counter
