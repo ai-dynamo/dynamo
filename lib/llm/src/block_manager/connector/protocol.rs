@@ -167,12 +167,12 @@ pub struct WorkerSchedulerRequest {
 #[async_trait::async_trait]
 pub trait TransferCompletionHandle: Send {
     fn scheduler_decision(&self) -> SchedulingDecision;
-    async fn mark_complete(&mut self, result: anyhow::Result<()>);
+    async fn mark_complete(&self, result: anyhow::Result<()>);
 }
 
 pub struct ScheduledTransferCompletionHandle {
     scheduler_decision: SchedulingDecision,
-    completion_tx: Option<oneshot::Sender<anyhow::Result<()>>>,
+    completion_tx: Mutex<Option<oneshot::Sender<anyhow::Result<()>>>>,
 }
 
 impl ScheduledTransferCompletionHandle {
@@ -182,7 +182,7 @@ impl ScheduledTransferCompletionHandle {
     ) -> Self {
         Self {
             scheduler_decision,
-            completion_tx: Some(completion_tx),
+            completion_tx: Mutex::new(Some(completion_tx)),
         }
     }
 }
@@ -193,8 +193,8 @@ impl TransferCompletionHandle for ScheduledTransferCompletionHandle {
         self.scheduler_decision
     }
 
-    async fn mark_complete(&mut self, result: anyhow::Result<()>) {
-        if let Some(completion_tx) = self.completion_tx.take() {
+    async fn mark_complete(&self, result: anyhow::Result<()>) {
+        if let Some(completion_tx) = self.completion_tx.lock().unwrap().take() {
             if completion_tx.send(result).is_err() {
                 tracing::error!(
                     "failed to send completion status; this could lead to silent data corruption"
@@ -206,7 +206,7 @@ impl TransferCompletionHandle for ScheduledTransferCompletionHandle {
 
 impl Drop for ScheduledTransferCompletionHandle {
     fn drop(&mut self) {
-        if self.completion_tx.is_some() {
+        if self.completion_tx.lock().unwrap().is_some() {
             // This is a fundamental logic error. The results of the application are undefined.
             // We must abort.
             panic!(concat!(
@@ -227,7 +227,7 @@ pub struct ImmediateTransferResult {
 pub struct ImmediateTransferCompletionHandle {
     request_id: String,
     uuid: uuid::Uuid,
-    completion_tx: Option<tokio::sync::mpsc::Sender<TransferToSchedulerMessage>>,
+    completion_tx: Mutex<Option<tokio::sync::mpsc::Sender<TransferToSchedulerMessage>>>,
 }
 
 impl ImmediateTransferCompletionHandle {
@@ -239,7 +239,7 @@ impl ImmediateTransferCompletionHandle {
         Self {
             request_id,
             uuid,
-            completion_tx: Some(completion_tx),
+            completion_tx: Mutex::new(Some(completion_tx)),
         }
     }
 }
@@ -250,8 +250,13 @@ impl TransferCompletionHandle for ImmediateTransferCompletionHandle {
         SchedulingDecision::Execute
     }
 
-    async fn mark_complete(&mut self, result: anyhow::Result<()>) {
-        if let Some(completion_tx) = self.completion_tx.take() {
+    async fn mark_complete(&self, result: anyhow::Result<()>) {
+        // To ensure the future is Send, avoid holding the MutexGuard across .await.
+        let completion_tx = {
+            let mut guard = self.completion_tx.lock().unwrap();
+            guard.take()
+        };
+        if let Some(completion_tx) = completion_tx {
             if completion_tx
                 .send(TransferToSchedulerMessage::ImmediateResult(
                     ImmediateTransferResult {
@@ -271,7 +276,7 @@ impl TransferCompletionHandle for ImmediateTransferCompletionHandle {
 
 impl Drop for ImmediateTransferCompletionHandle {
     fn drop(&mut self) {
-        if self.completion_tx.is_some() {
+        if self.completion_tx.lock().unwrap().is_some() {
             // This is a fundamental logic error. The results of the application are undefined.
             // We must abort.
             panic!(concat!(
@@ -291,7 +296,7 @@ impl TransferCompletionHandle for CancelledTransferCompletionHandle {
         SchedulingDecision::Cancel
     }
 
-    async fn mark_complete(&mut self, _result: anyhow::Result<()>) {
+    async fn mark_complete(&self, _result: anyhow::Result<()>) {
         // Do nothing
     }
 }

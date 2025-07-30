@@ -594,6 +594,26 @@ pub struct ScheduledTaskController {
     decision_tx: oneshot::Sender<(SchedulingDecision, oneshot::Sender<anyhow::Result<()>>)>,
 }
 
+impl ScheduledTaskController {
+    pub fn trigger(self, decision: SchedulingDecision) -> anyhow::Result<ScheduledTaskAsyncResult> {
+        let (completion_tx, completion_rx) = oneshot::channel();
+        self.decision_tx
+            .send((decision, completion_tx))
+            .map_err(|_| anyhow::anyhow!(DISCONNECTED_WARNING))?;
+        Ok(ScheduledTaskAsyncResult { completion_rx })
+    }
+}
+
+pub struct ScheduledTaskAsyncResult {
+    completion_rx: oneshot::Receiver<anyhow::Result<()>>,
+}
+
+impl ScheduledTaskAsyncResult {
+    pub async fn await_completion(self) -> anyhow::Result<()> {
+        self.completion_rx.await.unwrap()
+    }
+}
+
 pub struct SchedulerCreateSlotDetails {
     pub request_id: String,
     pub completed: Arc<AtomicU64>,
@@ -875,55 +895,80 @@ mod tests {
         // the transfer engine will immediately return a completion handle
     }
 
-    // #[tokio::test]
-    // async fn test_coordinate_scheduled_transfer_execution() {
-    //     dynamo_runtime::logging::init();
+    #[tokio::test]
+    async fn test_coordinate_scheduled_transfer_execution() {
+        dynamo_runtime::logging::init();
 
-    //     let cancel_token = CancellationToken::new();
-    //     let (mut scheduler, mut worker_client, transfer_client) = Scheduler::new(cancel_token);
+        let cancel_token = CancellationToken::new();
+        let (mut scheduler, _worker_client, transfer_client) = Scheduler::new(cancel_token);
 
-    //     let operation_id = uuid::Uuid::new_v4();
+        let operation_id = uuid::Uuid::new_v4();
 
-    //     // Create a scheduled transfer request
-    //     let request = LeaderTransferRequest {
-    //         request_id: "test".to_string(),
-    //         uuid: operation_id,
-    //         requirement: None,
-    //         request_type: RequestType::Scheduled,
-    //     };
+        // Create a scheduled transfer request
+        let request = LeaderTransferRequest {
+            request_id: "test".to_string(),
+            uuid: operation_id,
+            requirement: None,
+            request_type: RequestType::Scheduled,
+        };
 
-    //     // allows us to pause the transfer task after the scheduler decision is made
-    //     // but before the transfer is marked as complete
-    //     let (execute_transfer_tx, execute_transfer_rx) = oneshot::channel();
+        // allows us to pause the transfer task after the scheduler decision is made
+        // but before the transfer is marked as complete
+        let (got_handle_tx, got_handle_rx) = oneshot::channel();
 
-    //     // Spawn the schedule_transfer call which will await our coordination function
-    //     let transfer_task = tokio::spawn(async move {
-    //         let mut handle = transfer_client
-    //             .clone()
-    //             .schedule_transfer(request)
-    //             .await
-    //             .unwrap();
+        // Spawn the schedule_transfer call which will await our coordination function
+        let _transfer_task = tokio::spawn(async move {
+            let handle = transfer_client
+                .clone()
+                .schedule_transfer(request)
+                .await
+                .unwrap();
 
-    //         assert!(handle.scheduler_decision() == SchedulingDecision::Execute);
+            got_handle_tx
+                .send(handle)
+                .map_err(|_| {
+                    anyhow::anyhow!("failed to send handle back on testing oneshot channel")
+                })
+                .unwrap();
+        });
 
-    //         // Simulate some work being done - wait until the test releases us
-    //         let _ = execute_transfer_rx.await;
+        assert!(got_handle_rx.is_empty());
 
-    //         // Mark the transfer as complete with success
-    //         handle.mark_complete(Ok(())).await;
-    //     });
+        // Simulate the scheduler making a decision and coordinating the execution
+        // We skip that logic and go straight to the point we have a controller
+        let controller = match scheduler.transfer_rx.recv().await {
+            Some(msg) => match msg {
+                TransferToSchedulerMessage::ScheduleRequest(schedule_req) => scheduler
+                    .process_scheduled_transfer_request(schedule_req)
+                    .ok(),
+                _ => {
+                    assert!(false, "unexpected message type");
+                    None
+                }
+            },
+            None => {
+                assert!(false, "channel closed");
+                None
+            }
+        };
 
-    //     // Simulate the scheduler making a decision and coordinating the execution
-    //     if let Some(msg) = scheduler.transfer_rx.try_recv().ok() {
-    //         match msg {
-    //             TransferToSchedulerMessage::ScheduleRequest(schedule_req) => {
-    //                 let decision = SchedulingDecision::Execute;
+        // we still do not have both sides
+        // we have the scheduler side controller, but we must trigger the controller to get a handle on the transfer engine
+        let scheduler_controller = controller.expect("Expected a controller from the scheduler");
+        assert!(got_handle_rx.is_empty());
 
-    //             _ => {}
-    //         }
-    //     }
+        // Simulate some work being done - wait until the test releases us
+        let scheduler_result = scheduler_controller
+            .trigger(SchedulingDecision::Execute)
+            .unwrap();
 
-    //     // Wait for the transfer task to complete
-    //     transfer_handle.await.unwrap();
-    // }
+        // simulate the transfer engine receiving the decision
+        let transfer_handle = got_handle_rx.await.unwrap();
+
+        // Mark the transfer as complete with success
+        transfer_handle.mark_complete(Ok(())).await;
+
+        // wait for the scheduler to complete
+        scheduler_result.await_completion().await.unwrap();
+    }
 }
