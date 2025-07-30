@@ -945,13 +945,11 @@ mod tests {
                     .process_scheduled_transfer_request(schedule_req)
                     .ok(),
                 _ => {
-                    assert!(false, "unexpected message type");
-                    None
+                    unreachable!("unexpected message type");
                 }
             },
             None => {
-                assert!(false, "channel closed");
-                None
+                unreachable!("channel closed");
             }
         };
 
