@@ -15,6 +15,7 @@
 
 import argparse
 import contextlib
+import logging
 import socket
 from argparse import Namespace
 
@@ -55,3 +56,9 @@ def _reserve_disaggregation_bootstrap_port():
     """
     with reserve_free_port() as port:
         return port
+
+
+async def graceful_shutdown(runtime):
+    logging.info("Received shutdown signal, shutting down DistributedRuntime")
+    runtime.shutdown()
+    logging.info("DistributedRuntime shutdown complete")
