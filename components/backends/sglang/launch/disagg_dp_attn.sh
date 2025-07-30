@@ -21,6 +21,10 @@ DYNAMO_PID=$!
 # run http server
 python3 -m dynamo.sglang.utils.sgl_http_server --namespace dynamo &
 
+# Set the expert distribution recording directory
+mkdir -p /tmp/sglang_expert_distribution_record
+export SGLANG_EXPERT_DISTRIBUTION_RECORDER_DIR=/tmp/sglang_expert_distribution_record
+
 # run prefill worker
 python3 -m dynamo.sglang.worker \
   --model-path silence09/DeepSeek-R1-Small-2layers \
