@@ -968,6 +968,11 @@ mod tests {
         // simulate the transfer engine receiving the decision
         let transfer_handle = got_handle_rx.await.unwrap();
 
+        assert_eq!(
+            transfer_handle.scheduler_decision(),
+            SchedulingDecision::Execute
+        );
+
         // Mark the transfer as complete with success
         transfer_handle.mark_complete(Ok(())).await;
 
