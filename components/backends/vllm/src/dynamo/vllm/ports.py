@@ -13,6 +13,8 @@ import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
+from dynamo.runtime import EtcdKvCache
+
 logger = logging.getLogger(__name__)
 
 # Default port range in the registered ports section
@@ -42,7 +44,7 @@ class DynamoPortRange:
 class EtcdContext:
     """Context for ETCD operations"""
 
-    client: object  # etcd client instance
+    client: EtcdKvCache  # etcd client instance
     namespace: str  # Namespace for keys (used in key prefix)
 
     def make_port_key(self, port: int) -> str:
