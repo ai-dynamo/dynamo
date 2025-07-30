@@ -22,36 +22,16 @@ on:
   pull_request:
 
 jobs:
-  path-filter:
-    runs-on: ubuntu-latest
-    outputs:
-      vllm: ${{ steps.filter.outputs.vllm }}
-      sglang: ${{ steps.filter.outputs.sglang }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            vllm:
-              - 'container/Dockerfile.vllm'
-              - 'container/deps/requirements.vllm.txt'
-              - 'container/deps/vllm/**'
-              - 'components/backends/vllm/**'
-              - 'tests/serve/test_vllm.py'
-            sglang:
-              - 'container/Dockerfile.sglang'
-              - 'components/backends/sglang/**'
-              - 'tests/serve/test_sglang.py'
-
-  build-test-vllm:
-    needs: path-filter
-    if: ${{ needs.path-filter.outputs.vllm == 'true' }}
+  build-test:
     runs-on:
         group: Fastchecker
-    name: Build and Test - vllm
+    strategy:
+      matrix:
+        framework:
+          - vllm
+    name: Build and Test - ${{ matrix.framework }}
     env:
-      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_vllm
+      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework }}
       PYTEST_XML_FILE: pytest_test_report.xml
     steps:
       - name: Checkout repository
@@ -61,12 +41,12 @@ jobs:
       - name: Define Image Tag
         id: define_image_tag
         run: |
-          echo "image_tag=dynamo:latest-vllm" >> $GITHUB_OUTPUT
+          echo "image_tag=dynamo:latest-${{ matrix.framework }}" >> $GITHUB_OUTPUT
       - name: Build image
         env:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
         run: |
-          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target ci_minimum --framework vllm
+          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target ci_minimum --framework ${{ matrix.framework }}
       - name: Run Rust checks (llm/block-manager)
         run: |
           docker run -w /workspace/lib/llm --name ${{ env.CONTAINER_ID }}_rust_checks ${{ steps.define_image_tag.outputs.image_tag }} bash -ec 'rustup component add rustfmt clippy && cargo fmt -- --check && cargo clippy --features block-manager --no-deps --all-targets -- -D warnings && cargo test --locked --all-targets --features=block-manager'
@@ -83,49 +63,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: vllm-python-test-results
-          if-no-files-found: error
-          path: |
-            ${{ env.PYTEST_XML_FILE }}
-
-  # We do not run Rust block manager checks for SGL
-  build-test-sglang:
-    needs: path-filter
-    if: ${{ needs.path-filter.outputs.sglang == 'true' }}
-    runs-on:
-        group: Fastchecker
-    name: Build and Test - sglang
-    env:
-      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_sglang
-      PYTEST_XML_FILE: pytest_test_report.xml
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-      - name: Define Image Tag
-        id: define_image_tag
-        run: |
-          echo "image_tag=dynamo:latest-sglang" >> $GITHUB_OUTPUT
-      - name: Build image
-        env:
-          GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
-        run: |
-          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target runtime --framework sglang
-      - name: Run pytest
-        env:
-          PYTEST_MARKS: "pre_merge or mypy"
-        run: |
-          docker run -w /workspace --name ${{ env.CONTAINER_ID }}_pytest ${{ steps.define_image_tag.outputs.image_tag }} bash -c "pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
-      - name: Copy test report from test Container
-        if: always()
-        run: |
-          docker cp ${{ env.CONTAINER_ID }}_pytest:/workspace/${{ env.PYTEST_XML_FILE }} .
-      - name: Archive test report
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: sglang-python-test-results
+          name: ${{ matrix.framework }}-python-test-results
           if-no-files-found: error
           path: |
             ${{ env.PYTEST_XML_FILE }}
