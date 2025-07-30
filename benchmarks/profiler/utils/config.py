@@ -153,9 +153,12 @@ class VllmV1ConfigModifier:
         config["spec"]["services"][
             WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
         ]["resources"]["requests"]["gpu"] = str(tp_size)
-        if "limits" in config["spec"]["services"][
-            WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
-        ]["resources"]:
+        if (
+            "limits"
+            in config["spec"]["services"][
+                WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
+            ]["resources"]
+        ):
             config["spec"]["services"][
                 WORKER_COMPONENT_NAMES["vllm"].decode_worker_k8s_name
             ]["resources"]["limits"]["gpu"] = str(tp_size)
