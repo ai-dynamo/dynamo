@@ -22,7 +22,7 @@ use dynamo_llm::http::{
     },
     service::{
         error::HttpError,
-        metrics::{Endpoint, FRONTEND_METRIC_PREFIX, RequestType, Status},
+        metrics::{Endpoint, RequestType, Status, FRONTEND_METRIC_PREFIX},
         service_v2::HttpService,
         Metrics,
     },
@@ -357,7 +357,7 @@ async fn test_http_service() {
     let families = registry.gather();
     let histogram_metric_family = families
         .into_iter()
-        .find(|m| m.get_name() == &format!("{}_request_duration_seconds", FRONTEND_METRIC_PREFIX))
+        .find(|m| m.get_name() == format!("{}_request_duration_seconds", FRONTEND_METRIC_PREFIX))
         .expect("Histogram metric not found");
 
     assert_eq!(

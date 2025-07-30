@@ -66,8 +66,6 @@ impl Clone for HttpServerInfo {
 }
 
 
-
-
 /// HTTP server state containing metrics and uptime tracking
 pub struct HttpServerState {
     // global drt registry is for printing out the entire Prometheus format output
