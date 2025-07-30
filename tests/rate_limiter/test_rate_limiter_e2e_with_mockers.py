@@ -48,7 +48,7 @@ class RateLimitTestFrontend(ManagedProcess):
             "--http-port",
             str(frontend_port),
             "--all-workers-busy-rejection-time-window",
-            str(rate_limit_duration_ms / 1000),
+            str(rate_limit_duration_ms // 1000),
             "--max-workers-busy-queue-depth",
             str(max_queue_depth),
         ]
@@ -79,10 +79,6 @@ class MockerProcess(ManagedProcess):
             "python",
             "-m",
             "dynamo.mocker",
-            "--kv-cache-block-size",
-            str(BLOCK_SIZE),
-            "--router-mode",
-            "kv",
             "--model-path",
             MODEL_NAME,
             "--extra-engine-args",
@@ -112,7 +108,6 @@ async def publish_all_workers_busy_event(nats_url: str = "nats://localhost:4222"
         event_data = {"max_queue_depth": 1, "timestamp": int(time.time())}
 
         # Publish to the KV all workers busy subject
-        # Based on scheduler.rs, the full subject would be: namespace.{namespace_name}.kv-all-workers-busy
         subject = "namespace.test-namespace.kv-all-workers-busy"
 
         payload = json.dumps(event_data).encode()
@@ -166,14 +161,11 @@ async def test_rate_limiter_e2e(request, runtime_services):
     6. Verify requests return to normal after rate limiting expires
     """
 
-    # Download model for this test
     download_models([MODEL_NAME])
 
-    # runtime_services provides NATS and etcd
     nats_process, etcd_process = runtime_services
     logger.info("Starting rate limiter e2e test")
 
-    # Create mocker args file
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
     mocker_args_file = os.path.join(request.node.name, "mocker_args.json")
     with open(mocker_args_file, "w") as f:
@@ -234,7 +226,7 @@ async def test_rate_limiter_e2e(request, runtime_services):
 
         # Step 5: Wait for rate limiting to expire
         logger.info("=== Waiting for rate limit to expire ===")
-        await wait_for_rate_limit_to_clear(RATE_LIMIT_DURATION_MS / 1000.0)
+        await wait_for_rate_limit_to_clear(2 * RATE_LIMIT_DURATION_MS / 1000.0)
 
         # Step 6: Verify requests work again
         logger.info("=== Testing normal operation after rate limit expires ===")

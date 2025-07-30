@@ -108,17 +108,10 @@ impl RateLimitState {
 
     /// Check if state is currently rate limited
     pub fn is_rate_limited(&self) -> bool {
-        if self.rate_limit_start.is_none() {
-            return false;
+        match self.rate_limit_start {
+            Some(start_time) => start_time.elapsed() < self.rate_limit_duration,
+            None => false,
         }
-
-        // Check if rate limit duration has expired
-        if let Some(start_time) = self.rate_limit_start {
-            if start_time.elapsed() > self.rate_limit_duration {
-                return false;
-            }
-        }
-        true
     }
 
     /// Set rate limit state to true and record the start time
@@ -349,5 +342,27 @@ mod tests {
         // Wait for the rate limit to expire
         sleep(Duration::from_millis(21)).await;
         assert!(!rate_limiter.is_rate_limited());
+    }
+
+    #[tokio::test]
+    async fn test_http_service_updates_rate_limit_time_window() {
+        let rate_limiter = HttpServiceRateLimiter::new(Some(Duration::from_secs(1)));
+        {
+            let mut state = rate_limiter.rate_limit_state.write().unwrap();
+            state.set_rate_limit();
+        }
+        assert!(rate_limiter.is_rate_limited());
+
+        sleep(Duration::from_millis(550)).await;
+
+        {
+            let mut state = rate_limiter.rate_limit_state.write().unwrap();
+            state.set_rate_limit();
+        }
+        assert!(rate_limiter.is_rate_limited());
+
+        sleep(Duration::from_millis(550)).await;
+
+        assert!(rate_limiter.is_rate_limited());
     }
 }
