@@ -92,10 +92,8 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS}
 
 RUN cd dynamo && cargo build --release
 
-RUN cd dynamo/lib/bindings/python && \
-    pip install --break-system-packages -e . && \
-    cd /sgl-workspace/dynamo && \
-    pip install --break-system-packages .
+RUN cd lib/bindings/python && pip install --break-system-packages -e . && cd ../../..
+RUN pip install --break-system-packages .
 
 RUN pip install --break-system-packages sglang-router==0.1.5
 
