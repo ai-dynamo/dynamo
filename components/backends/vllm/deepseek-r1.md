@@ -26,10 +26,10 @@ node 1
 On node 0 (where the frontend was started) send a test request to verify your deployment:
 
 ```bash
-curl localhost:8033/v1/chat/completions \
+curl localhost:8080/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "model": "deepseek-ai/DeepSeek-R1",
     "messages": [
     {
         "role": "user",
