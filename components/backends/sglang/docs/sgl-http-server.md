@@ -42,7 +42,7 @@ curl -X POST http://<ip>:9001/<endpoint>
 ```
 
 #### `/flush_cache`
-Flushes the radix cache across all SGLang components. Useful for resetting after a warmup or a benchmarking run.
+Flushes the kv cache across all SGLang components. Useful for resetting after a warmup or a benchmarking run.
 
 #### `/start_expert_distribution_record`
 Begins recording expert distribution metrics across SGLang components.
