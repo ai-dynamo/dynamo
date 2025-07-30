@@ -11,11 +11,13 @@ spec:
       dynamoNamespace: trtllm-disagg
       componentType: main
       livenessProbe:
-        httpGet:
-          path: /health
-          port: 8000
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
         periodSeconds: 5
-        timeoutSeconds: 2
+        timeoutSeconds: 3
         failureThreshold: 3
       readinessProbe:
         exec:
@@ -25,7 +27,7 @@ spec:
             - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
         initialDelaySeconds: 60
         periodSeconds: 60
-        timeoutSeconds: 2
+        timeoutSeconds: 3
         failureThreshold: 10
       replicas: 1
       resources:
@@ -55,7 +57,7 @@ spec:
           port: 9090
         periodSeconds: 5
         timeoutSeconds: 3
-        failureThreshold: 1
+        failureThreshold: 3
       readinessProbe:
         httpGet:
           path: /health
@@ -79,6 +81,7 @@ spec:
               path: /health
               port: 9090
             periodSeconds: 10
+            timeoutSeconds: 3
             failureThreshold: 60
           image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/trtllm
@@ -105,7 +108,7 @@ spec:
           port: 9090
         periodSeconds: 5
         timeoutSeconds: 3
-        failureThreshold: 1
+        failureThreshold: 3
       readinessProbe:
         httpGet:
           path: /health
@@ -129,6 +132,7 @@ spec:
               path: /health
               port: 9090
             periodSeconds: 10
+            timeoutSeconds: 3
             failureThreshold: 60
           image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/trtllm

@@ -9,11 +9,13 @@ spec:
   services:
     Frontend:
       livenessProbe:
-        httpGet:
-          path: /health
-          port: 8000
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
         periodSeconds: 5
-        timeoutSeconds: 2
+        timeoutSeconds: 3
         failureThreshold: 3
       readinessProbe:
         exec:
@@ -23,7 +25,7 @@ spec:
             - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
         initialDelaySeconds: 60
         periodSeconds: 60
-        timeoutSeconds: 2
+        timeoutSeconds: 3
         failureThreshold: 5
       dynamoNamespace: trtllm-agg-router
       componentType: main
@@ -52,7 +54,7 @@ spec:
           port: 9090
         periodSeconds: 5
         timeoutSeconds: 3
-        failureThreshold: 1
+        failureThreshold: 3
       readinessProbe:
         httpGet:
           path: /health
