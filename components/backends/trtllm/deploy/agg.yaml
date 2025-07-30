@@ -10,18 +10,21 @@ spec:
     Frontend:
       livenessProbe:
         httpGet:
-          path: /live
-          port: 9090
-        periodSeconds: 5
-        timeoutSeconds: 30
-        failureThreshold: 1
-      readinessProbe:
-        httpGet:
           path: /health
-          port: 9090
-        periodSeconds: 10
-        timeoutSeconds: 30
-        failureThreshold: 60
+          port: 8000
+        periodSeconds: 5
+        timeoutSeconds: 2
+        failureThreshold: 3
+      readinessProbe:
+        exec:
+          command:
+            - /bin/sh
+            - -c
+            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
+        initialDelaySeconds: 60
+        periodSeconds: 60
+        timeoutSeconds: 2
+        failureThreshold: 5
       dynamoNamespace: trtllm-agg
       componentType: main
       replicas: 1
@@ -41,13 +44,6 @@ spec:
             - -c
           args:
             - "python3 -m dynamo.frontend --http-port 8000"
-          envs:
-            - name: DYN_SYSTEM_ENABLED
-              value: "true"
-            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-              value: "[\"generate\"]"
-            - name: DYN_SYSTEM_PORT
-              value: "9090"
     TRTLLMWorker:
       envFromSecret: hf-token-secret
       livenessProbe:
@@ -76,8 +72,21 @@ spec:
           cpu: "10"
           memory: "20Gi"
           gpu: "1"
+      envs:
+        - name: DYN_SYSTEM_ENABLED
+          value: "true"
+        - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+          value: "[\"generate\"]"
+        - name: DYN_SYSTEM_PORT
+          value: "9090"
       extraPodSpec:
         mainContainer:
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 9090
+            periodSeconds: 10
+            failureThreshold: 60
           image: nvcr.io/nvidian/nim-llm-dev/trtllm-runtime:dep-233.17
           workingDir: /workspace/components/backends/trtllm
           args:
@@ -90,10 +99,3 @@ spec:
             - "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
             - "--extra-engine-args"
             - "engine_configs/agg.yaml"
-          envs:
-            - name: DYN_SYSTEM_ENABLED
-              value: "true"
-            - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
-              value: "[\"generate\"]"
-            - name: DYN_SYSTEM_PORT
-              value: "9090"
