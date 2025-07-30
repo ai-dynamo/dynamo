@@ -35,7 +35,7 @@ class PrometheusAPIClient:
         increase(metric_sum[interval])/increase(metric_count[interval])
 
         Args:
-            metric_name: Base metric name (e.g., 'dynamo_frontend_inter_token_latency_seconds')
+            metric_name: Base metric name (e.g., 'inter_token_latency_seconds')
             interval: Time interval for the query (e.g., '60s')
             operation_name: Human-readable name for error logging
 
@@ -43,7 +43,8 @@ class PrometheusAPIClient:
             Average metric value or 0 if no data/error
         """
         try:
-            query = f"increase(dynamo_frontend_{metric_name}_sum[{interval}])/increase(dynamo_frontend_{metric_name}_count[{interval}])"
+            full_metric_name = f"dynamo_frontend_{metric_name}"
+            query = f"increase({full_metric_name}_sum[{interval}])/increase({full_metric_name}_count[{interval}])"
             result = self.prom.custom_query(query=query)
             if not result:
                 # No data available yet (no requests made) - return 0 silently
