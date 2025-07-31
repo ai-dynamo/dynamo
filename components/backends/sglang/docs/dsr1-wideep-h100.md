@@ -12,7 +12,7 @@ Dynamo supports SGLang's implementation of wide expert parallelism and large sca
 1. Pull the SGLang release `v0.4.8.post1` container. We are actively working on validating newer releases.
 
 ```bash
-docker pull docker pull lmsysorg/sglang:v0.4.8.post1-cu126
+docker pull lmsysorg/sglang:v0.4.8.post1-cu126
 ```
 
 You can also pull a specific tag from the [lmsys dockerhub](https://hub.docker.com/r/lmsysorg/sglang/tags)
