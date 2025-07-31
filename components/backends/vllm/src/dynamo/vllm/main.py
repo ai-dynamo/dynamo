@@ -115,8 +115,8 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
         await asyncio.gather(
             # for prefill, we want to shutdown the engine after all prefill requests are finished because
             #     (temp reason): we don't support re-routing prefill requests
-            #     (long-term reason): prefill engine should pull from a global queue so there is 
-            #                         only a few in-flight requests that can be quickly finished 
+            #     (long-term reason): prefill engine should pull from a global queue so there is
+            #                         only a few in-flight requests that can be quickly finished
             generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=True),
             clear_endpoint.serve_endpoint(handler.clear_kv_blocks),
         )

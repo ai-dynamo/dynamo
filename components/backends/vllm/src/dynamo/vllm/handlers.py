@@ -20,11 +20,6 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
-class EngineShutdownError(Exception):
-    """Raised when the engine is shut down during token generation."""
-    pass
-
-
 class BaseWorkerHandler(ABC):
     """
     Request handler for the generate and clear_kv_blocks endpoints.
@@ -79,8 +74,10 @@ class BaseWorkerHandler(ABC):
                 yield out
                 num_output_tokens_so_far = next_total_toks
         except asyncio.CancelledError:
-            # Convert CancelledError to EngineShutdownError when the engine is shut down
-            raise EngineShutdownError("Engine was shut down during token generation") from None
+            # raise EngineShGeneratorExit when engine exits so that frontend can migrate the request
+            raise GeneratorExit(
+                "Decode engine was shut down during token generation"
+            ) from None
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
@@ -163,12 +160,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "kv_transfer_params"
                 ] = prefill_response.kv_transfer_params
 
-        try:
-            async for tok in self.generate_tokens(prompt, sampling_params, request_id):
-                yield tok
-        except EngineShutdownError:
-            # here we silently quit so that router can migrate the request
-            return
+        async for tok in self.generate_tokens(prompt, sampling_params, request_id):
+            yield tok
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
@@ -198,4 +191,6 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                 ).model_dump_json()
         except asyncio.CancelledError:
             # raise the error because we cannot migrate prefill requests
-            raise EngineShutdownError("Engine was shut down during token generation") from None
+            raise GeneratorExit(
+                "Prefill engine was shut down during token generation"
+            ) from None

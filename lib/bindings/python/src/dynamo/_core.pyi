@@ -220,7 +220,7 @@ class Endpoint:
         """
         Serve an endpoint discoverable by all connected clients at
         `{{ namespace }}/components/{{ component_name }}/endpoints/{{ endpoint_name }}`
-        
+
         Args:
             handler: The request handler function
             graceful_shutdown: Whether to wait for inflight requests to complete during shutdown (default: True)
