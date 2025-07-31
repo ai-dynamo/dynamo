@@ -121,7 +121,7 @@ python3 -m dynamo.sglang.decode_worker \
   --deepep-mode low_latency \
   --mem-fraction-static 0.835 \
   --ep-num-redundant-experts 32 \
-  --cuda-graph-bs 256
+  --cuda-graph-bs 128
 ```
 
 On the other decode nodes (this example has 9 total decode nodes), run the same command but change `--node-rank` to 1, 2, 3, 4, 5, 6, 7, and 8
