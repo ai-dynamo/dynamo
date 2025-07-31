@@ -152,6 +152,9 @@ RUN cmake --version
 RUN apt-get update -y && \
     apt-get install -y --no-install-recommends \
     rapidjson-dev \
+    # jq and curl for polling various endpoints and health checks
+    jq \
+    curl \
     zlib1g-dev
 
 RUN git clone --depth=1 https://github.com/triton-inference-server/perf_analyzer.git && \
