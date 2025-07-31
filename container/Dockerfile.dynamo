@@ -254,7 +254,8 @@ RUN mkdir -p /opt/dynamo/bindings/wheels && \
     cp wheels/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/.
 
 RUN uv pip install /workspace/wheels/ai_dynamo_runtime*cp312*.whl && \
-    uv pip install /workspace/wheels/ai_dynamo*any.whl
+    uv pip install /workspace/wheels/ai_dynamo*any.whl && \
+    uv pip install /workspace/wheels/nixl*.whl
 
 RUN uv pip install /workspace/benchmarks
 
