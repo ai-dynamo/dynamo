@@ -101,8 +101,10 @@ async def init(runtime: DistributedRuntime, config: Config):
             kv_cache_config["event_buffer_max_size"] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
         else:
             kv_cache_config = arg_map["kv_cache_config"]
-            if not kv_cache_config.event_buffer_max_size:
-                kv_cache_config.event_buffer_max_size = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            if "event_buffer_max_size" not in kv_cache_config:
+                kv_cache_config[
+                    "event_buffer_max_size"
+                ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
         arg_map["kv_cache_config"] = kv_cache_config
 
         # Only pytorch backend is supported for now to publish events and metrics.
