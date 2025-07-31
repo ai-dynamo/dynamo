@@ -41,7 +41,7 @@ pub async fn run(
         .router_config(Some(flags.router_config()))
         .request_template(flags.request_template.clone())
         .migration_limit(flags.migration_limit)
-        .all_workers_busy_rejection_time_window(flags.all_workers_busy_rejection_time_window);
+        .all_workers_busy_rejection_time_window(flags.all_workers_busy_rejection_time_window)
         .is_mocker(matches!(out_opt, Some(Output::Mocker)));
 
     // TODO: old, address this later:
