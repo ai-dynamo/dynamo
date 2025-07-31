@@ -151,6 +151,8 @@ pub async fn spawn_http_server(
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
     // Create HTTP server state with the provided metrics registry
     let server_state = Arc::new(HttpServerState::new(drt)?);
+    let state = Arc::clone(&server_state);
+    let system_health = state.drt().system_health.lock().await;
 
     // Initialize the start time
     server_state
@@ -159,14 +161,14 @@ pub async fn spawn_http_server(
 
     let app = Router::new()
         .route(
-            "/health",
+            &system_health.health_path,
             get({
                 let state = Arc::clone(&server_state);
                 move |tracing_ctx| health_handler(state, "health", tracing_ctx)
             }),
         )
         .route(
-            "/live",
+            &system_health.live_path,
             get({
                 let state = Arc::clone(&server_state);
                 move |tracing_ctx| health_handler(state, "live", tracing_ctx)
@@ -368,9 +370,9 @@ mod tests {
         println!("Full metrics response:\n{}", response);
 
         let expected = "\
-# HELP dynamo_uptime_seconds Total uptime of the DistributedRuntime in seconds
-# TYPE dynamo_uptime_seconds gauge
-dynamo_uptime_seconds{namespace=\"http_server\"} 42
+# HELP http_server_dynamo_uptime_seconds Total uptime of the DistributedRuntime in seconds
+# TYPE http_server_dynamo_uptime_seconds gauge
+http_server_dynamo_uptime_seconds{namespace=\"http_server\"} 42
 ";
         assert_eq!(response, expected);
     }
@@ -398,7 +400,7 @@ dynamo_uptime_seconds{namespace=\"http_server\"} 42
     #[case("notready", 503, "notready")]
     #[tokio::test]
     #[cfg(feature = "integration")]
-    async fn test_health_endpoints(
+    async fn test_default_health_endpoints(
         #[case] starting_health_status: &'static str,
         #[case] expected_status: u16,
         #[case] expected_body: &'static str,
@@ -440,14 +442,84 @@ dynamo_uptime_seconds{namespace=\"http_server\"} 42
                     ("/someRandomPathNotFoundHere", 404, "Route not found"),
                 ] {
                     println!("[test] Sending request to {}", path);
-                    let traceparent_value =
-                        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
-                    let tracestate_value = "vendor1=opaqueValue1,vendor2=opaqueValue2";
-                    let mut headers = reqwest::header::HeaderMap::new();
-                    headers.insert(
-                        reqwest::header::HeaderName.from_static("traceparent"),
-                        reqwest::header::HeaderValue.from_str(traceparent_value)?,
+                    let url = format!("http://{}{}", addr, path);
+                    let response = client.get(&url).send().await.unwrap();
+                    let status = response.status();
+                    let body = response.text().await.unwrap();
+                    println!(
+                        "[test] Response for {}: status={}, body={:?}",
+                        path, status, body
                     );
+                    assert_eq!(
+                        status, expect_status,
+                        "Response: status={}, body={:?}",
+                        status, body
+                    );
+                    assert!(
+                        body.contains(expect_body),
+                        "Response: status={}, body={:?}",
+                        status,
+                        body
+                    );
+                }
+            })(),
+        )
+        .await;
+    }
+
+    #[rstest]
+    #[case("ready", 200, "ready")]
+    #[case("notready", 503, "notready")]
+    #[tokio::test]
+    #[cfg(feature = "integration")]
+    async fn test_custom_health_endpoint_paths(
+        #[case] starting_health_status: &'static str,
+        #[case] expected_status: u16,
+        #[case] expected_body: &'static str,
+    ) {
+        use std::sync::Arc;
+        use tokio::time::sleep;
+        use tokio_util::sync::CancellationToken;
+        // use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        // use reqwest for HTTP requests
+
+        // Closure call is needed here to satisfy async_with_vars
+
+        crate::logging::init();
+
+        #[allow(clippy::redundant_closure_call)]
+        temp_env::async_with_vars(
+            [
+                (
+                    "DYN_SYSTEM_STARTING_HEALTH_STATUS",
+                    Some(starting_health_status),
+                ),
+                ("DYN_SYSTEM_HEALTH_PATH",Some("/custom/health")),
+                ("DYN_SYSTEM_LIVE_PATH", Some("/custom/live")),
+            ],
+            (async || {
+                let runtime = crate::Runtime::from_settings().unwrap();
+                let drt = Arc::new(
+                    crate::DistributedRuntime::from_settings_without_discovery(runtime)
+                        .await
+                        .unwrap(),
+                );
+                let cancel_token = CancellationToken::new();
+                let (addr, _) = spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt)
+                    .await
+                    .unwrap();
+                println!("[test] Waiting for server to start...");
+                sleep(std::time::Duration::from_millis(1000)).await;
+                println!("[test] Server should be up, starting requests...");
+                let client = reqwest::Client::new();
+                for (path, expect_status, expect_body) in [
+                    ("/custom/health", expected_status, expected_body),
+                    ("/custom/live", expected_status, expected_body),
+                    ("/health", 404, "Route not found"),
+                    ("/live", 404, "Route not found"),
+                    ("/someRandomPathNotFoundHere", 404, "Route not found"),
+                ] {
+                    println!("[test] Sending request to {}", path);
                     let url = format!("http://{}{}", addr, path);
                     let response = client.get(&url).send().await.unwrap();
                     let status = response.status();
@@ -514,11 +586,11 @@ dynamo_uptime_seconds{namespace=\"http_server\"} 42
                     let mut headers = reqwest::header::HeaderMap::new();
                     headers.insert(
                         reqwest::header::HeaderName::from_static("traceparent"),
-                        reqwest::header::HeaderValue::from_str(traceparent_value)?,
+                        reqwest::header::HeaderValue::from_str(traceparent_value).unwrap(),
                     );
                     headers.insert(
                         reqwest::header::HeaderName::from_static("tracestate"),
-                        reqwest::header::HeaderValue::from_str(tracestate_value)?,
+                        reqwest::header::HeaderValue::from_str(tracestate_value).unwrap(),
                     );
                     let url = format!("http://{}{}", addr, path);
                     let response = client.get(&url).headers(headers).send().await.unwrap();
