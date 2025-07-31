@@ -117,6 +117,12 @@ class Publisher:
         self.kv_listener = kv_listener
         self.worker_id = worker_id
         self.kv_block_size = kv_block_size
+        self.max_window_size = None
+
+        # WRN: Adding backward compatibility.
+        # The "window_size" field was added to the KV event only recently, so some TRTLLM versions might not include this parameter.
+        # This flag ensures that slightly older versions of TRTLLM can still work with KV routing.
+        self.events_contain_window_size = False
 
         # Needed by the events and metrics publishers
         self.metrics_publisher = None
@@ -290,6 +296,15 @@ class Publisher:
         async for event in events:
             logging.debug(f"KV cache event received: {event}")
             event_id = event["event_id"]
+            self.update_max_window_size(event)
+
+            # drop the events that is not emitted from the global attention layer.
+            if (
+                self.events_contain_window_size
+                and event["window_size"] != self.max_window_size
+            ):
+                continue
+
             data = event["data"]
             if data["type"] == "stored":
                 parent_hash = _to_signed_i64(data["parent_hash"])
@@ -393,6 +408,17 @@ class Publisher:
             self.publish_kv_cache_events_thread.join(timeout=cleanup_timeout)
             if self.publish_kv_cache_events_thread.is_alive():
                 logging.warning("KV cache events thread did not stop within timeout")
+
+    def update_max_window_size(self, event):
+        if "window_size" in event:
+            self.events_contain_window_size = True
+
+            window_size = event["window_size"]
+            if self.max_window_size is None or window_size > self.max_window_size:
+                self.max_window_size = window_size
+                logging.debug(
+                    f"kv events max_window_size has been updated to {self.max_window_size}"
+                )
 
 
 @asynccontextmanager
