@@ -158,14 +158,6 @@ RUN if [ "$ARCH" = "arm64" ]; then \
 RUN mkdir /opt/dynamo && \
     uv venv /opt/dynamo/venv --python 3.12
 
-# Common dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
-
-# Install test dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
-
 # Activate virtual environment
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
@@ -252,6 +244,14 @@ COPY . /workspace
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
     mkdir /opt/dynamo/bindings/lib && \
     cp wheels/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/.
+
+# Common dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
+
+# Install test dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
 
 RUN uv pip install /workspace/wheels/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/wheels/ai_dynamo*any.whl && \
