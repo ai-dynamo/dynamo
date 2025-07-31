@@ -70,7 +70,6 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
     """Initialize decode worker"""
 
     engine = sgl.Engine(server_args=server_args)
-    t = []
 
     component = runtime.namespace("dynamo").component("decode")
     await component.create_service()
@@ -79,9 +78,9 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
 
     gen_endpoint = component.endpoint("generate")
 
-    t.append(gen_endpoint.serve_endpoint(handler.generate))
+    tasks = [gen_endpoint.serve_endpoint(handler.generate)]
 
-    tasks = setup_native_endpoints(server_args, component, handler, t)
+    tasks.extend(setup_native_endpoints(server_args, component, handler))
 
     await asyncio.gather(*tasks)
 

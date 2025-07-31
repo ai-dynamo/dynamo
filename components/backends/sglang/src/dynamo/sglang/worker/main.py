@@ -363,9 +363,9 @@ async def init(
     )
     _ = ZmqKvEventPublisher(component=component, config=zmq_config)
 
-    t = [endpoint.serve_endpoint(handler.generate)]
+    tasks = [endpoint.serve_endpoint(handler.generate)]
 
-    tasks = setup_native_endpoints(server_args, component, handler, t)
+    tasks.extend(setup_native_endpoints(server_args, component, handler))
 
     await asyncio.gather(*tasks)
 
