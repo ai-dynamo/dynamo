@@ -38,5 +38,4 @@ Users who need more control over their deployments can use the manual deployment
 - Provides full control over deployment parameters
 - Requires manual management of infrastructure components
 - Documentation:
-  - [Using the Deployment Script](manual_helm_deployment.md#using-the-deployment-script): all-in-one script for manual deployment
-  - [Helm Deployment Guide](manual_helm_deployment.md#helm-deployment-guide): detailed instructions for manual deployment
+  - [Helm Deployment Guide](../../../deploy/helm/README.md): detailed instructions for manual deployment

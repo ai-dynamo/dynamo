@@ -35,7 +35,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ### Components
 
-- workers: For aggregated serving, we have two workers, [encode_worker](components/encode_worker.py) for encoding and [decode_worker](components/decode_worker.py) for prefilling and decoding.
+- workers: For aggregated serving, we have two workers, [encode_worker](../../../components/encode_worker.py) for encoding and [decode_worker](components/decode_worker.py) for prefilling and decoding.
 - processor: Tokenizes the prompt and passes it to the decode worker.
 - frontend: HTTP endpoint to handle incoming requests.
 
