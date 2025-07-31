@@ -15,7 +15,7 @@
 
 # This should be pinned to the sglang version that is installed with Dynamo
 # in the pyproject.toml
-FROM lmsysorg/sglang:v0.4.9.post6-cu126
+FROM lmsysorg/sglang:v0.4.8.post1-cu126
 
 # Add NIXL build dependencies
 RUN apt-get update -y && \
