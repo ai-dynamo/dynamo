@@ -22,9 +22,10 @@ VSWA is a mechanism in which a model’s layers alternate between multiple slidi
 
 ## Notes
 * To run Gemma 3 with VSWA, ensure that the container has TensorRT-LLM v1.0.0rc4 installed.
-
-## Limitation
-* The current KV event-based KV routing does not work well with VSWA. The Dynamo team is actively working on adding support to distinguish between events from different layer groups.
+* To run Gemma 3 with VSWA and KV Routing, ensure that the container is built with the default experimental TRT-LLM commit.
+```bash
+./container/build.sh --framework TENSORRTLLM --use-default-experimental-tensorrtllm-commit
+```
 
 ### Aggregated Serving
 ```bash
@@ -35,6 +36,15 @@ export AGG_ENGINE_ARGS=engine_configs/gemma3/vswa_agg.yaml
 ./launch/agg.sh
 ```
 
+### Aggregated Serving with KV Routing
+```bash
+cd $DYNAMO_HOME/components/backends/trtllm
+export MODEL_PATH=google/gemma-3-1b-it
+export SERVED_MODEL_NAME=$MODEL_PATH
+export AGG_ENGINE_ARGS=engine_configs/gemma3/vswa_agg.yaml
+./launch/agg_router.sh
+```
+
 #### Disaggregated Serving
 ```bash
 cd $DYNAMO_HOME/components/backends/trtllm
@@ -43,4 +53,14 @@ export SERVED_MODEL_NAME=$MODEL_PATH
 export PREFILL_ENGINE_ARGS=engine_configs/gemma3/vswa_prefill.yaml
 export DECODE_ENGINE_ARGS=engine_configs/gemma3/vswa_decode.yaml
 ./launch/disagg.sh
+```
+
+#### Disaggregated Serving with KV Routing
+```bash
+cd $DYNAMO_HOME/components/backends/trtllm
+export MODEL_PATH=google/gemma-3-1b-it
+export SERVED_MODEL_NAME=$MODEL_PATH
+export PREFILL_ENGINE_ARGS=engine_configs/gemma3/vswa_prefill.yaml
+export DECODE_ENGINE_ARGS=engine_configs/gemma3/vswa_decode.yaml
+./launch/disagg_router.sh
 ```
