@@ -176,7 +176,6 @@ uv pip install ai-dynamo[sglang]
 
 Run the backend/worker like this:
 ```
-# Note the '.worker' in the module path for SGLang
 python -m dynamo.sglang.worker --help
 ```
 

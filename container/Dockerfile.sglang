@@ -27,7 +27,7 @@ ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG SGLANG_VERSION="0.4.9.post1"
+ARG SGLANG_VERSION="0.4.9.post6"
 
 ##################################
 ########## Base Image ############
@@ -429,8 +429,9 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential python3-dev libnuma-dev \
-        # Curl for polling various endpoints.
+        # jq and curl for polling various endpoints and health checks
         curl \
+        jq \
         # For debugging
         vim \
         # Libraries required by UCX to find RDMA devices
@@ -446,7 +447,7 @@ RUN apt-get update && \
 COPY --from=ci_minimum /workspace/target/release/metrics /usr/local/bin/metrics
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 COPY --from=base /workspace/wheels/nixl/*.whl wheelhouse/
-RUN uv pip install ai-dynamo[sglang] --find-links wheelhouse
+RUN uv pip install "ai-dynamo[sglang]" --pre --find-links wheelhouse
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \

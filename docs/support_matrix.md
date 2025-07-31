@@ -58,9 +58,9 @@ If you are using a **GPU**, the following GPU models and architectures are suppo
 
 | **Python Package** | **Version**   | glibc version                        | CUDA Version |
 | :----------------- | :------------ | :----------------------------------- | :----------- |
-| ai-dynamo          | 0.3.2         | >=2.28                               |              |
-| ai-dynamo-runtime  | 0.3.2         | >=2.28 (Python 3.12 has known issues)|              |
-| NIXL               | 0.4.0         | >=2.27                               | >=11.8       |
+| ai-dynamo          | 0.4.0         | >=2.28                               |              |
+| ai-dynamo-runtime  | 0.4.0         | >=2.28 (Python 3.12 has known issues)|              |
+| NIXL               | 0.5.0         | >=2.27                               | >=11.8       |
 
 ### Build Dependency
 

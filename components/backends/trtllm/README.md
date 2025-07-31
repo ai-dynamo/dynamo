@@ -49,12 +49,12 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | TensorRT-LLM | Notes |
 |---------|--------------|-------|
-| [**Disaggregated Serving**](../../docs/architecture/disagg_serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
-| [**KV-Aware Routing**](../../docs/architecture/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../docs/architecture/sla_planner.md) | 🚧 | Planned |
-| [**Load Based Planner**](../../docs/architecture/load_planner.md) | 🚧 | Planned |
-| [**KVBM**](../../docs/architecture/kvbm_architecture.md) | 🚧 | Planned |
+| [**Disaggregated Serving**](../../../docs/architecture/disagg_serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
+| [**KV-Aware Routing**](../../../docs/architecture/kv_cache_routing.md) | ✅ |  |
+| [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | 🚧 | Planned |
+| [**Load Based Planner**](../../../docs/architecture/load_planner.md) | 🚧 | Planned |
+| [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | 🚧 | Planned |
 
 ### Large Scale P/D and WideEP Features
 
@@ -184,6 +184,65 @@ For comprehensive instructions on multinode serving, see the [multinode-examples
 
 ### Speculative Decoding
 - **[Llama 4 Maverick Instruct + Eagle Speculative Decoding](./llama4_plus_eagle.md)**
+
+### Kubernetes Deployment
+
+For Kubernetes deployment, YAML manifests are provided in the `deploy/` directory. These define DynamoGraphDeployment resources for various configurations:
+
+- `agg.yaml` - Aggregated serving
+- `agg_router.yaml` - Aggregated serving with KV routing
+- `disagg.yaml` - Disaggregated serving
+- `disagg_router.yaml` - Disaggregated serving with KV routing
+
+#### Prerequisites
+
+- **Dynamo Cloud**: Follow the [Quickstart Guide](../../../docs/guides/dynamo_deploy/quickstart.md) to deploy Dynamo Cloud first.
+
+- **Container Images**: The deployment files currently require access to `nvcr.io/nvidian/nim-llm-dev/trtllm-runtime`. If you don't have access, build and push your own image:
+  ```bash
+  ./container/build.sh --framework tensorrtllm
+  # Tag and push to your container registry
+  # Update the image references in the YAML files
+  ```
+
+- **Port Forwarding**: After deployment, forward the frontend service to access the API:
+  ```bash
+  kubectl port-forward deployment/trtllm-v1-disagg-frontend-<pod-uuid-info> 8080:8000
+  ```
+
+#### Deploy to Kubernetes
+
+Example with disagg:
+Export the NAMESPACE  you used in your Dynamo Cloud Installation.
+
+```bash
+cd dynamo
+cd components/backends/trtllm/deploy
+kubectl apply -f disagg.yaml -n $NAMESPACE
+```
+
+To change `DYN_LOG` level, edit the yaml file by adding
+
+```yaml
+...
+spec:
+  envs:
+    - name: DYN_LOG
+      value: "debug" # or other log levels
+  ...
+```
+
+### Client
+
+See [client](../llm/README.md#client) section to learn how to send request to the deployment.
+
+NOTE: To send a request to a multi-node deployment, target the node which is running `dynamo-run in=http`.
+
+### Benchmarking
+
+To benchmark your deployment with GenAI-Perf, see this utility script, configuring the
+`model` name and `host` based on your deployment: [perf.sh](../../benchmarks/llm/perf.sh)
+
 
 ## Disaggregation Strategy
 

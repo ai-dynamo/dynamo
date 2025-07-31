@@ -83,7 +83,7 @@ spec:
           args:
             - "python3"
             - "-m"
-            - "dynamo.sglang.worker"
+            - "dynamo.sglang.decode_worker"
             - "--model-path"
             - "deepseek-ai/DeepSeek-R1-Distill-Llama-8B"
             - "--served-model-name"
