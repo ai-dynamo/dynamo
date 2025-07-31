@@ -396,14 +396,18 @@ http_server_dynamo_uptime_seconds{namespace=\"http_server\"} 42
     }
 
     #[rstest]
-    #[case("ready", 200, "ready")]
-    #[case("notready", 503, "notready")]
+    #[case("ready", 200, "ready", None, None)]
+    #[case("notready", 503, "notready", None, None)]
+    #[case("ready", 200, "ready", Some("/custom/health"), Some("/custom/live"))]
+    #[case("notready", 503, "notready", Some("/custom/health"), Some("/custom/live"))]
     #[tokio::test]
     #[cfg(feature = "integration")]
-    async fn test_default_health_endpoints(
+    async fn test_health_endpoints(
         #[case] starting_health_status: &'static str,
         #[case] expected_status: u16,
         #[case] expected_body: &'static str,
+        #[case] custom_health_path: Option<&'static str>,
+        #[case] custom_live_path: Option<&'static str>,
     ) {
         use std::sync::Arc;
         use tokio::time::sleep;
@@ -417,10 +421,9 @@ http_server_dynamo_uptime_seconds{namespace=\"http_server\"} 42
 
         #[allow(clippy::redundant_closure_call)]
         temp_env::async_with_vars(
-            [(
-                "DYN_SYSTEM_STARTING_HEALTH_STATUS",
-                Some(starting_health_status),
-            )],
+            [("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some(starting_health_status)),
+            ("DYN_SYSTEM_HEALTH_PATH", custom_health_path),
+            ("DYN_SYSTEM_LIVE_PATH", custom_live_path)],
             (async || {
                 let runtime = crate::Runtime::from_settings().unwrap();
                 let drt = Arc::new(
@@ -436,89 +439,28 @@ http_server_dynamo_uptime_seconds{namespace=\"http_server\"} 42
                 sleep(std::time::Duration::from_millis(1000)).await;
                 println!("[test] Server should be up, starting requests...");
                 let client = reqwest::Client::new();
-                for (path, expect_status, expect_body) in [
-                    ("/health", expected_status, expected_body),
-                    ("/live", expected_status, expected_body),
-                    ("/someRandomPathNotFoundHere", 404, "Route not found"),
-                ] {
-                    println!("[test] Sending request to {}", path);
-                    let url = format!("http://{}{}", addr, path);
-                    let response = client.get(&url).send().await.unwrap();
-                    let status = response.status();
-                    let body = response.text().await.unwrap();
-                    println!(
-                        "[test] Response for {}: status={}, body={:?}",
-                        path, status, body
-                    );
-                    assert_eq!(
-                        status, expect_status,
-                        "Response: status={}, body={:?}",
-                        status, body
-                    );
-                    assert!(
-                        body.contains(expect_body),
-                        "Response: status={}, body={:?}",
-                        status,
-                        body
-                    );
+                
+                // Prepare test cases
+                let mut test_cases = vec![];
+                if custom_health_path.is_none() {
+                    // When using default paths, test the default paths
+                    test_cases.push(("/health", expected_status, expected_body));
+                } else {
+                    // When using custom paths, default paths should not exist
+                    test_cases.push(("/health", 404, "Route not found"));
+                    test_cases.push((custom_health_path.unwrap(), expected_status, expected_body));
                 }
-            })(),
-        )
-        .await;
-    }
+                if custom_live_path.is_none() {
+                    // When using default paths, test the default paths
+                    test_cases.push(("/live", expected_status, expected_body));
+                } else {
+                    // When using custom paths, default paths should not exist
+                    test_cases.push(("/live", 404, "Route not found"));
+                    test_cases.push((custom_live_path.unwrap(), expected_status, expected_body));
+                }
+                test_cases.push(("/someRandomPathNotFoundHere", 404, "Route not found"));
 
-    #[rstest]
-    #[case("ready", 200, "ready")]
-    #[case("notready", 503, "notready")]
-    #[tokio::test]
-    #[cfg(feature = "integration")]
-    async fn test_custom_health_endpoint_paths(
-        #[case] starting_health_status: &'static str,
-        #[case] expected_status: u16,
-        #[case] expected_body: &'static str,
-    ) {
-        use std::sync::Arc;
-        use tokio::time::sleep;
-        use tokio_util::sync::CancellationToken;
-        // use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        // use reqwest for HTTP requests
-
-        // Closure call is needed here to satisfy async_with_vars
-
-        crate::logging::init();
-
-        #[allow(clippy::redundant_closure_call)]
-        temp_env::async_with_vars(
-            [
-                (
-                    "DYN_SYSTEM_STARTING_HEALTH_STATUS",
-                    Some(starting_health_status),
-                ),
-                ("DYN_SYSTEM_HEALTH_PATH",Some("/custom/health")),
-                ("DYN_SYSTEM_LIVE_PATH", Some("/custom/live")),
-            ],
-            (async || {
-                let runtime = crate::Runtime::from_settings().unwrap();
-                let drt = Arc::new(
-                    crate::DistributedRuntime::from_settings_without_discovery(runtime)
-                        .await
-                        .unwrap(),
-                );
-                let cancel_token = CancellationToken::new();
-                let (addr, _) = spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt)
-                    .await
-                    .unwrap();
-                println!("[test] Waiting for server to start...");
-                sleep(std::time::Duration::from_millis(1000)).await;
-                println!("[test] Server should be up, starting requests...");
-                let client = reqwest::Client::new();
-                for (path, expect_status, expect_body) in [
-                    ("/custom/health", expected_status, expected_body),
-                    ("/custom/live", expected_status, expected_body),
-                    ("/health", 404, "Route not found"),
-                    ("/live", 404, "Route not found"),
-                    ("/someRandomPathNotFoundHere", 404, "Route not found"),
-                ] {
+                for (path, expect_status, expect_body) in test_cases {
                     println!("[test] Sending request to {}", path);
                     let url = format!("http://{}{}", addr, path);
                     let response = client.get(&url).send().await.unwrap();
