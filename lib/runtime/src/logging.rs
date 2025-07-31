@@ -50,6 +50,7 @@ use tracing_subscriber::{filter::Directive, fmt};
 use crate::config::{disable_ansi_logging, jsonl_logging_enabled};
 use axum::extract::FromRequestParts;
 use axum::http::request::Parts;
+use axum::http;
 use serde_json::Value;
 use std::convert::Infallible;
 use std::time::Instant;
@@ -64,6 +65,9 @@ use tracing_subscriber::registry::SpanData;
 use tracing_subscriber::Layer;
 use tracing_subscriber::Registry;
 use uuid::Uuid;
+use async_nats::{HeaderMap, HeaderValue};
+use tower_http::trace::{TraceLayer, DefaultMakeSpan};
+use axum::http::Request;
 
 /// ENV used to set the log level
 const FILTER_ENV: &str = "DYN_LOG";
@@ -130,24 +134,147 @@ pub fn is_valid_span_id(span_id: &str) -> bool {
 
 pub struct DistributedTraceIdLayer;
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistributedTraceContext {
-    trace_id: String,
-    span_id: String,
-    parent_id: Option<String>,
-    tracestate: Option<String>,
-    start: Instant,
+    pub trace_id: String,
+    pub span_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracestate: Option<String>,
+    #[serde(skip)]
+    start: Option<Instant>,
+    #[serde(skip)]
     end: Option<Instant>,
-    x_request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x_request_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+impl DistributedTraceContext {
+    /// Create a traceparent string from the context
+    pub fn create_traceparent(&self) -> String {
+        format!(
+            "00-{}-{}-01",
+            self.trace_id, self.span_id
+        )
+    }
+    /*
+    pub fn insert_headers(&self, headers: &mut HeaderMap) {
+	headers.insert("traceparent",self.create_traceparent());
+	if self.tracestate.is_some() {
+	    headers.insert("tracestate",self.tracestate);
+	}
+	if let Some(x_request_id) = self.x_request_id {
+	    headers.insert("x_request_id",x_request_id);
+	}
+    }
+    */
+    /*
+    pub to_headers(&self) -> HeaderMap {
+	let mut headers = HeaderMap::new();
+	headers.insert("traceparent",trace_context.create_traceparent());
+	if let Some(tracestate) = trace_context.tracestate {
+	    headers.insert("tracestate",tracestate);
+	}
+	if let Some(x_request_id) = trace_context.x_request_id {
+	    headers.insert("x_request_id",x_request_id);
+	}
+	}
+	headers
+    }*/
+}
+
+/// Parse a traceparent string into its components
+pub fn parse_traceparent(traceparent: &str) -> (Option<String>, Option<String>) {
+    let pieces: Vec<_> = traceparent.split('-').collect();
+    if pieces.len() != 4 {
+        return (None , None)
+    }
+    let version = pieces[0];
+    let trace_id = pieces[1];
+    let parent_id = pieces[2];
+
+    if !is_valid_trace_id(trace_id) || !is_valid_span_id(parent_id) {
+        return (None, None)
+    }
+
+    (Some(trace_id.to_string()), Some(parent_id.to_string()))
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct TraceParent {
     pub trace_id: Option<String>,
     pub parent_id: Option<String>,
     pub tracestate: Option<String>,
     pub x_request_id: Option<String>,
 }
+
+trait GenericHeaders {
+    fn get(&self, key: &str) -> Option<&str>;
+}
+
+impl GenericHeaders for async_nats::HeaderMap {
+    fn get(&self, key: &str) -> Option<&str> {
+        async_nats::HeaderMap::get(self, key).map(|value| value.as_str())
+    }
+}
+
+impl GenericHeaders for http::HeaderMap {
+    fn get(&self, key: &str) -> Option<&str> {
+        http::HeaderMap::get(self, key).and_then(|value|value.to_str().ok())
+    }
+}
+
+
+impl TraceParent {
+    pub fn from_headers<H:GenericHeaders>(headers:&H) -> TraceParent {
+	let mut trace_id = None;
+        let mut parent_id = None;
+        let mut tracestate = None;
+	let mut x_request_id = None;
+
+	if let Some(header_value) = headers.get("traceparent") {
+	    (trace_id, parent_id) = parse_traceparent(header_value);
+	}
+
+	if let Some(header_value) = headers.get("x_request_id") {
+	    x_request_id = Some(header_value.to_string());
+	}
+
+	if let Some(header_value) = headers.get("tracestate") {
+	    tracestate = Some(header_value.to_string());
+	}
+
+	TraceParent{
+	    trace_id: trace_id,
+	    parent_id: parent_id,
+	    tracestate: tracestate,
+	    x_request_id: x_request_id
+	}
+    }
+}
+
+
+// Takes Axum request and returning a span
+pub fn make_request_span<B>(req: &Request<B>) -> Span {
+    let method = req.method();
+    let uri = req.uri();
+    let version = format!("{:?}", req.version());
+
+    let trace_parent = TraceParent::from_headers(req.headers());
+
+    tracing::info_span!(
+        "http-request",
+        method = %method,
+        uri = %uri,
+        version = %version,
+        trace_id = trace_parent.trace_id,
+        parent_id = trace_parent.parent_id,
+        x_request_id = trace_parent.x_request_id,
+    )
+}
+
+
 
 impl<S> FromRequestParts<S> for TraceParent
 where
@@ -161,20 +288,13 @@ where
         let mut tracestate = None;
         if let Some(header_value) = parts.headers.get("traceparent") {
             if let Ok(header_str) = header_value.to_str() {
-                let pieces: Vec<_> = header_str.split('-').collect();
-                if pieces.len() == 4 {
-                    let candidate_trace_id = pieces[1];
-                    let candidate_parent_id = pieces[2];
 
-                    if is_valid_trace_id(candidate_trace_id)
-                        && is_valid_span_id(candidate_parent_id)
-                    {
-                        trace_id = Some(candidate_trace_id.to_string());
-                        parent_id = Some(candidate_parent_id.to_string());
-                    } else {
-                        tracing::debug!("Invalid traceparent header: {}", header_str);
-                    }
+		(trace_id, parent_id) = parse_traceparent(header_str);
+
+		if trace_id.is_none() || parent_id.is_none() {
+		    tracing::debug!("Invalid traceparent header: {}", header_str);
                 }
+
             }
         }
 
@@ -230,8 +350,11 @@ where
                 extensions.get_mut::<DistributedTraceContext>()
             {
                 distributed_tracing_context.end = Some(Instant::now());
+		//println!("span closed trace {:?} span {:?}",distributed_tracing_context.trace_id, distributed_tracing_context.span_id);
+
             }
         }
+//	println!("span closed!");
     }
 
     // Adds W3C compliant span_id, trace_id, and parent_id if not already present
@@ -306,13 +429,16 @@ where
                 span_id = Some(generate_span_id());
             }
 
+//	    println!("new span trace {:?} span {:?} file {:?} line {:?}",trace_id, span_id, visitor.fields.get("file"), visitor.fields.get("target"));
+
+
             let mut extensions = span.extensions_mut();
             extensions.insert(DistributedTraceContext {
                 trace_id: trace_id.expect("Trace ID must be set"),
                 span_id: span_id.expect("Span ID must be set"),
                 parent_id,
                 tracestate,
-                start: Instant::now(),
+                start: Some(Instant::now()),
                 end: None,
                 x_request_id,
             });

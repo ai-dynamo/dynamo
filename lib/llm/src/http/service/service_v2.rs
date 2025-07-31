@@ -173,6 +173,7 @@ impl HttpServiceConfigBuilder {
         ];
 
         if config.enable_chat_endpoints {
+	    println!("goobie!");
             routes.push(super::openai::chat_completions_router(
                 state.clone(),
                 config.request_template.clone(), // TODO clone()? reference?

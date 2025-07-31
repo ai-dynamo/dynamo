@@ -40,7 +40,11 @@ use crate::protocols::openai::{
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
 use dynamo_runtime::logging::TraceParent;
+use dynamo_runtime::logging::make_request_span;
 use tracing::Instrument;
+use tower_http::trace::TraceLayer;
+use tracing::Level;
+use tower_http::trace::DefaultMakeSpan;
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 
@@ -170,10 +174,10 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
 				       x_request_id= trace_parent.x_request_id,
 				       tracestate= trace_parent.tracestate))]
 async fn handler_completions(
+    trace_parent:TraceParent, // Used for tracing only
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateCompletionRequest>,
-    trace_parent:TraceParent, // Used for tracing only
+    Json(request): Json<NvCreateCompletionRequest>
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -363,6 +367,7 @@ async fn embeddings(
 }
 
 async fn handler_chat_completions(
+    trace_parent: TraceParent, // Used for Tracing Only
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
     Json(request): Json<NvCreateChatCompletionRequest>,
@@ -378,7 +383,7 @@ async fn handler_chat_completions(
     // create the connection handles
     let (mut connection_handle, stream_handle) = create_connection_monitor(context.clone()).await;
 
-    let response = tokio::spawn(chat_completions(state, template, request, stream_handle))
+    let response = tokio::spawn(chat_completions(state, template, request, stream_handle).in_current_span())
         .await
         .map_err(|e| {
             ErrorMessage::internal_server_error(&format!(
@@ -402,7 +407,7 @@ async fn handler_chat_completions(
 ///
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
-#[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.id()))]
+#[tracing::instrument(skip_all, fields(request_id = %request.id()))]
 async fn chat_completions(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
@@ -978,7 +983,9 @@ pub fn chat_completions_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_chat_completions))
+	.layer(TraceLayer::new_for_http().make_span_with(make_request_span))
         .with_state((state, template));
+    println!("here you silly!");
     (vec![doc], router)
 }
 
