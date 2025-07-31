@@ -71,7 +71,8 @@ pub struct KvRouterConfig {
 
     pub use_kv_events: bool,
 
-    // note: this is not actually used for now
+    // TODO: this is not actually used for now
+    // Would need this (along with total kv blocks) to trigger AllWorkersBusy error for e.g. rate-limiting
     pub max_num_batched_tokens: u32,
 }
 
