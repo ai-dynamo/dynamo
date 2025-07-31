@@ -484,6 +484,16 @@ impl Scheduler {
         }
     }
 
+    // This function is used to handle the request from worker or transfer based on their arrival order.
+    // It returns Some(ScheduledTaskController) if both worker and transfer have arrived, or None if any of them has not arrived yet.
+    //
+    // More details:
+    // If no uuid is found in scheduled_requests, it means neither worker nor transfer has arrived yet.
+    // Then, we will insert controller into scheduled_requests (for transfer) or None (for worker) and return None.
+    //
+    // If uuid is found in scheduled_requests, it means either worker or transfer has arrived.
+    // Then, we check the incoming controller. If it is Some, it means worker has arrived first and we can return it.
+    // If it is None, it means the transfer has arrived first and we can return the existing controller.
     fn handle_request(&mut self, request_id: String, uuid: uuid::Uuid, controller: Option<ScheduledTaskController>) -> Option<ScheduledTaskController> {
         let mut entry = self.scheduled_requests.entry(request_id).or_default();
         match entry.remove(&uuid) {
