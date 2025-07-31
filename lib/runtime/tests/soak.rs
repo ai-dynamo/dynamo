@@ -20,7 +20,7 @@
 //! It will also measure the latency of the requests.
 //!
 //! A reasonable soak test configuration to start off is 1 minute duration with 10000 batch load:
-//! export DYN_NORMAL_PROCESSING=false
+//! export DYN_QUEUED_UP_PROCESSING=true
 //! export DYN_SOAK_BATCH_LOAD=10000
 //! export DYN_SOAK_RUN_DURATION=60s
 //! cargo test --test soak integration::main --features integration -- --nocapture
@@ -74,14 +74,14 @@ mod integration {
 
     struct RequestHandler {
         backend_counter: AtomicU64,
-        normal_processing: bool,
+        queued_up_processing: bool,
     }
 
     impl RequestHandler {
-        fn new(normal_processing: bool) -> Arc<Self> {
+        fn new(queued_up_processing: bool) -> Arc<Self> {
             Arc::new(Self {
                 backend_counter: AtomicU64::new(0),
-                normal_processing,
+                queued_up_processing,
             })
         }
     }
@@ -99,7 +99,7 @@ mod integration {
                 .map(|c| Annotated::from_data(c.to_string()))
                 .collect::<Vec<_>>();
 
-            if self.normal_processing {
+            if self.queued_up_processing {
                 let iter_stream = stream::iter(chars);
                 Ok(ResponseStream::new(Box::pin(iter_stream), ctx.context()))
             } else {
@@ -116,13 +116,13 @@ mod integration {
     }
 
     async fn backend(runtime: DistributedRuntime) -> Result<Arc<RequestHandler>> {
-        // get the normal processing setting from env (not delayed)
-        let normal_processing =
-            std::env::var("DYN_NORMAL_PROCESSING").unwrap_or("true".to_string());
-        let normal_processing: bool = normal_processing.parse().unwrap_or(true);
+        // get the queued up processing setting from env (not delayed)
+        let queued_up_processing =
+            std::env::var("DYN_QUEUED_UP_PROCESSING").unwrap_or("false".to_string());
+        let queued_up_processing: bool = queued_up_processing.parse().unwrap_or(false);
 
         // attach an ingress to an engine
-        let handler = RequestHandler::new(normal_processing);
+        let handler = RequestHandler::new(queued_up_processing);
         let ingress = Ingress::for_engine(handler.clone())?;
 
         // // make the ingress discoverable via a component service
