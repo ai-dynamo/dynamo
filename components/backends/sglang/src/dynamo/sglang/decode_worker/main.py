@@ -15,14 +15,19 @@ from sglang.srt.server_args import ServerArgs
 
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.sglang.utils.sgl_utils import parse_sglang_args_inc
+from dynamo.sglang.common import (
+    BaseWorkerHandler,
+    graceful_shutdown,
+    parse_sglang_args_inc,
+    setup_native_endpoints,
+)
 
 configure_dynamo_logging()
 
 
-class DecodeRequestHandler:
-    def __init__(self, engine: sgl.Engine):
-        self.engine = engine
+class DecodeRequestHandler(BaseWorkerHandler):
+    def __init__(self, engine: sgl.Engine, server_args: ServerArgs, component):
+        super().__init__(engine, server_args, component)
         logging.info("Decode request handler initialized")
 
     async def generate(self, request: str):
@@ -41,20 +46,6 @@ class DecodeRequestHandler:
 
         async for result in results:
             yield result
-
-    async def flush_cache(self, request: dict):
-        _ = request
-        asyncio.create_task(self.engine.tokenizer_manager.flush_cache())
-        yield {
-            "status": "success",
-            "message": "Cache flush initiated. Check backend logs for status",
-        }
-
-
-async def graceful_shutdown(runtime):
-    logging.info("Received shutdown signal, shutting down DistributedRuntime")
-    runtime.shutdown()
-    logging.info("DistributedRuntime shutdown complete")
 
 
 @dynamo_worker(static=False)
@@ -80,16 +71,16 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
 
     engine = sgl.Engine(server_args=server_args)
 
-    handler = DecodeRequestHandler(engine)
-
     component = runtime.namespace("dynamo").component("decode")
     await component.create_service()
 
+    handler = DecodeRequestHandler(engine, server_args, component)
+
     gen_endpoint = component.endpoint("generate")
-    flush_endpoint = component.endpoint("flush_cache")
 
     tasks = [gen_endpoint.serve_endpoint(handler.generate)]
-    tasks.append(flush_endpoint.serve_endpoint(handler.flush_cache))
+
+    tasks.extend(setup_native_endpoints(server_args, component, handler))
 
     await asyncio.gather(*tasks)
 

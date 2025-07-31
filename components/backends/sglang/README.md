@@ -139,6 +139,8 @@ cd $DYNAMO_ROOT/components/backends/sglang
 ./launch/disagg_dp_attn.sh
 ```
 
+When using MoE models, you can also use the our implementation of the native SGLang endpoints to record expert distribution data. The `disagg_dp_attn.sh` script automatically sets up the SGLang HTTP server, the environment variable that controls the expert distribution recording directory, and sets up the expert distribution recording mode to `stat`. You can learn more about expert parallelism load balancing [here](docs/expert-distribution-eplb.md).
+
 ## Request Migration
 
 In a [Distributed System](#distributed-system), a request may fail due to connectivity issues between the Frontend and the Backend.
@@ -165,12 +167,6 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 ### Large scale P/D disaggregation with WideEP
 - **[Run DeepSeek-R1 on 104+ H100s](docs/dsr1-wideep-h100.md)**
 - **[Run DeepSeek-R1 on GB200s](docs/dsr1-wideep-gb200.md)**
-
-### Speculative Decoding
-- **[Deploying DeepSeek-R1 with MTP - coming soon!](.)**
-
-### Structured Output and Tool Calling
-- **[Tool calling with Dynamo - coming soon!](.)**
 
 ### Supporting SGLang's native endpoints via Dynamo
 - **[HTTP Server for native SGLang endpoints](docs/sgl-http-server.md)**
