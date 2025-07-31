@@ -83,7 +83,8 @@ RUN apt-get update -y && \
     libnuma-dev librdmacm-dev ibverbs-providers \
     # Rust build dependencies
 	clang \
-    libclang-dev
+    libclang-dev \
+    protobuf-compiler
 
 #Required for pre-merge test validation
 ### NATS & ETCD SETUP ###
