@@ -167,8 +167,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
             async for tok in self.generate_tokens(prompt, sampling_params, request_id):
                 yield tok
         except EngineShutdownError:
-            # Re-raise EngineShutdownError to propagate the shutdown signal
-            raise
+            # here we silently quit so that router can migrate the request
+            return
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
@@ -197,5 +197,5 @@ class PrefillWorkerHandler(BaseWorkerHandler):
                     kv_transfer_params=res.kv_transfer_params,
                 ).model_dump_json()
         except asyncio.CancelledError:
-            # Convert CancelledError to EngineShutdownError when the engine is shut down
+            # raise the error because we cannot migrate prefill requests
             raise EngineShutdownError("Engine was shut down during token generation") from None
