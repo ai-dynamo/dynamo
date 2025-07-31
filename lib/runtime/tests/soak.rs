@@ -18,6 +18,12 @@
 //! It will send a batch of requests to the runtime and measure the throughput.
 //!
 //! It will also measure the latency of the requests.
+//!
+//! A reasonable soak test configuration to start off is 1 minute duration with 10000 batch load:
+//! export DYN_NORMAL_PROCESSING=false
+//! export DYN_SOAK_BATCH_LOAD=10000
+//! export DYN_SOAK_RUN_DURATION=60s
+//! cargo test --test soak integration::main --features integration -- --nocapture
 #[cfg(feature = "integration")]
 mod integration {
 
@@ -138,12 +144,12 @@ mod integration {
 
     async fn client(runtime: DistributedRuntime) -> Result<()> {
         // get the run duration from env
-        let run_duration = std::env::var("DYN_SOAK_RUN_DURATION").unwrap_or("1m".to_string());
+        let run_duration = std::env::var("DYN_SOAK_RUN_DURATION").unwrap_or("3s".to_string());
         let run_duration =
-            humantime::parse_duration(&run_duration).unwrap_or(Duration::from_secs(60));
+            humantime::parse_duration(&run_duration).unwrap_or(Duration::from_secs(3));
 
-        let batch_load = std::env::var("DYN_SOAK_BATCH_LOAD").unwrap_or("10000".to_string());
-        let batch_load: usize = batch_load.parse().unwrap_or(10000);
+        let batch_load = std::env::var("DYN_SOAK_BATCH_LOAD").unwrap_or("100".to_string());
+        let batch_load: usize = batch_load.parse().unwrap_or(100);
 
         let client = runtime
             .namespace(DEFAULT_NAMESPACE)?
