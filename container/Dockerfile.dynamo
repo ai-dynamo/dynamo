@@ -284,8 +284,8 @@ ENV CARGO_TARGET_DIR=/workspace/target
 
 WORKDIR /workspace
 
-COPY --from=wheel_builder /workspace/dist/*.whl /
-COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
+COPY --from=wheel_builder /workspace/dist/*.whl /workspace/wheels/
+COPY --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 
 # Copy Cargo cache to avoid re-downloading dependencies
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
@@ -296,11 +296,11 @@ COPY . /workspace
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
     mkdir /opt/dynamo/bindings/lib && \
-    cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
+    cp wheels/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
     cp target/release/metrics /usr/local/bin
 
-RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
-    uv pip install /workspace/dist/ai_dynamo*any.whl
+RUN uv pip install /workspace/wheels/ai_dynamo_runtime*cp312*.whl && \
+    uv pip install /workspace/wheels/ai_dynamo*any.whl
 
 RUN uv pip install /workspace/benchmarks
 
