@@ -36,10 +36,7 @@ class BaseWorkerHandler(ABC):
 
         _ = request
         await self.engine.tokenizer_manager.flush_cache()
-        yield {
-            "status": "success",
-            "message": "Cache flush initiated. Check backend logs for status",
-        }
+        yield True
 
     async def start_expert_distribution_record(self, request: dict):
         """
@@ -47,10 +44,7 @@ class BaseWorkerHandler(ABC):
         """
         _ = request
         await self.engine.tokenizer_manager.start_expert_distribution_record()
-        yield {
-            "status": "success",
-            "message": "Expert distribution recording started. Check backend logs for status",
-        }
+        yield True
 
     async def stop_expert_distribution_record(self, request: dict):
         """
@@ -58,10 +52,7 @@ class BaseWorkerHandler(ABC):
         """
         _ = request
         await self.engine.tokenizer_manager.stop_expert_distribution_record()
-        yield {
-            "status": "success",
-            "message": "Expert distribution recording stopped. Check backend logs for status",
-        }
+        yield True
 
     async def dump_expert_distribution_record(self, request: dict):
         """
@@ -69,7 +60,4 @@ class BaseWorkerHandler(ABC):
         """
         _ = request
         await self.engine.tokenizer_manager.dump_expert_distribution_record()
-        yield {
-            "status": "success",
-            "message": "Check backend logs for expert distribution path!",
-        }
+        yield True
