@@ -15,8 +15,8 @@
 
 FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}
 
-ARG MODE="hopper"                            
-ARG SGLANG_IMAGE_TAG="v0.4.8.post1-cu126"  
+ARG MODE="hopper"
+ARG SGLANG_IMAGE_TAG="v0.4.8.post1-cu126"
 ARG ARCH="amd64"
 ARG ARCH_ALT="x86_64"
 ARG NIXL_UCX_REF="v1.19.x"
@@ -67,7 +67,7 @@ RUN if [ "$MODE" = "hopper" ]; then \
 
 ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
 
-# Dynamo 
+# Dynamo
 WORKDIR /sgl-workspace
 RUN git clone https://github.com/ai-dynamo/dynamo.git
 
