@@ -5,11 +5,11 @@ import asyncio
 import json
 import logging
 import os
+import time
 
 import aiohttp
 import pytest
 
-from tests.conftest import download_models
 from tests.utils.managed_process import ManagedProcess
 
 pytestmark = pytest.mark.pre_merge
@@ -96,9 +96,6 @@ def test_mocker_kv_router(request, runtime_services):
     This test doesn't require GPUs and runs quickly for pre-merge validation.
     """
 
-    # Download only the Qwen model for this test
-    download_models([MODEL_NAME])
-
     # runtime_services starts etcd and nats
     logger.info("Starting mocker KV router test")
 
@@ -131,6 +128,9 @@ def test_mocker_kv_router(request, runtime_services):
         # Start all mockers
         for mocker in mocker_processes:
             mocker.__enter__()
+
+        # Give 2 seconds for setups (download tokenizer)
+        time.sleep(2)
 
         # Send test requests
         test_payload = {
