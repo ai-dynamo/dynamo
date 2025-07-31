@@ -245,7 +245,6 @@ pub enum SchedulerMessage {
     UpdateLayersCompleted(LayerName, LayerIndex),
 
     /// Worker received a notification that the given request id has been completed.
-    ///
     RequestFinished(String),
 }
 
@@ -536,7 +535,8 @@ impl Scheduler {
     //
     // this must tokio spawn and an indpendent task
     fn execute_scheduled_transfer(&mut self, xfer_req: ScheduledTaskController) {
-        tokio::spawn(xfer_req.execute(SchedulingDecision::Execute));
+        let completed = self.slots.get(&xfer_req.request.request_id).unwrap().completed.clone();
+        tokio::spawn(xfer_req.execute(SchedulingDecision::Execute, completed));
     }
 
     /// Translate the [`TransferScheduleRequest`] into a local [`ScheduledTaskController`]
@@ -613,14 +613,16 @@ pub struct ScheduledTaskController {
 }
 
 impl ScheduledTaskController {
-    pub async fn execute(self, decision: SchedulingDecision) -> anyhow::Result<()> {
+    pub async fn execute(self, decision: SchedulingDecision, completed: Arc<AtomicU64>) -> anyhow::Result<()> {
         let (completion_tx, completion_rx) = oneshot::channel();
         self.decision_tx
             .send((decision, completion_tx))
             .map_err(|_| anyhow::anyhow!(DISCONNECTED_WARNING))?;
         completion_rx
             .await
-            .map_err(|_| anyhow::anyhow!(DISCONNECTED_WARNING))?
+            .map_err(|_| anyhow::anyhow!(DISCONNECTED_WARNING))?;
+        completed.fetch_add(1, Ordering::Relaxed);
+        Ok(())
     }
 }
 
@@ -908,6 +910,25 @@ mod tests {
                 .len(),
             0
         );
+
+        assert_eq!(
+            worker_client
+                .slots
+                .get("test")
+                .unwrap()
+                .completed
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            scheduler
+                .slots
+                .get("test")
+                .unwrap()
+                .completed
+                .load(Ordering::Relaxed),
+            1
+        );
     }
 
     #[tokio::test]
@@ -976,6 +997,25 @@ mod tests {
                 .len(),
             0
         );
+
+        assert_eq!(
+            worker_client
+                .slots
+                .get("test")
+                .unwrap()
+                .completed
+                .load(Ordering::Relaxed),
+            1
+        );
+        assert_eq!(
+            scheduler
+                .slots
+                .get("test")
+                .unwrap()
+                .completed
+                .load(Ordering::Relaxed),
+            1
+        );
     }
 
     #[tokio::test]
@@ -1039,8 +1079,9 @@ mod tests {
         assert!(got_handle_rx.is_empty());
 
         // Simulate some work being done - wait until the test releases us
+        let completed = Arc::new(AtomicU64::new(0));
         let scheduler_result =
-            tokio::spawn(scheduler_controller.execute(SchedulingDecision::Execute));
+            tokio::spawn(scheduler_controller.execute(SchedulingDecision::Execute, completed.clone()));
 
         // simulate the transfer engine receiving the decision
         let transfer_handle = got_handle_rx.await.unwrap();
@@ -1055,5 +1096,7 @@ mod tests {
 
         // wait for the scheduler to complete
         scheduler_result.await.unwrap().unwrap();
+        // after the scheduler completes, the completed counter should be 1
+        assert_eq!(completed.load(Ordering::Relaxed), 1);
     }
 }
