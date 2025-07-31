@@ -28,7 +28,7 @@ disable_overlap_scheduler: true
 speculative_config:
   decoding_type: Eagle
   max_draft_len: 1
-  speculative_model_dir: "/lustre/nvidia_Llama-4-Maverick-17B-128E-Eagle3"
+  speculative_model_dir: nvidia/Llama-4-Maverick-17B-128E-Eagle3
   eagle3_one_model: true
 
 kv_cache_config:
