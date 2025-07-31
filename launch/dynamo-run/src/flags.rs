@@ -133,8 +133,8 @@ pub struct Flags {
     pub last: Vec<String>,
 
     /// KV Router: Maximum number of waiting requests to be queued up before broadcasting all workers busy event
-    #[arg(long, default_value_t = 5)]
-    pub max_workers_busy_queue_depth: usize,
+    #[arg(long)]
+    pub max_workers_busy_queue_depth: Option<usize>,
 
     /// All workers busy rejection time window in seconds
     #[arg(long)]
@@ -188,7 +188,7 @@ impl Flags {
                 self.router_temperature,
                 self.use_kv_events,
                 self.max_num_batched_tokens,
-                Some(self.max_workers_busy_queue_depth),
+                self.max_workers_busy_queue_depth,
             ),
         )
     }

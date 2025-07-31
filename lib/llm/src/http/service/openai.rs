@@ -65,11 +65,12 @@ impl ErrorMessage {
 
     /// Service Unavailable
     /// This is returned when the service is live, but not ready.
-    pub fn _service_unavailable() -> ErrorResponse {
+    /// The client should retry after a short delay.
+    pub fn service_unavailable_error() -> ErrorResponse {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorMessage {
-                error: "Service is not ready".to_string(),
+                error: "Service is unavailable".to_string(),
             }),
         )
     }
@@ -82,18 +83,6 @@ impl ErrorMessage {
         tracing::error!("Internal server error: {msg}");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorMessage {
-                error: msg.to_string(),
-            }),
-        )
-    }
-
-    /// Service Unavailable Error
-    /// Return this error when the service is overloaded.
-    /// The client should retry after a short delay.
-    pub fn service_unavailable_error(msg: &str) -> ErrorResponse {
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorMessage {
                 error: msg.to_string(),
             }),
@@ -179,9 +168,7 @@ fn check_rate_limited(
         state
             .metrics_clone()
             .inc_rate_limited_requests_count(model, endpoint, request_type);
-        return Err(ErrorMessage::service_unavailable_error(
-            "Service is overloaded, try again later.",
-        ));
+        return Err(ErrorMessage::service_unavailable_error());
     }
     Ok(())
 }
