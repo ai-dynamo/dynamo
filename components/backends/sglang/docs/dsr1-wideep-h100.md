@@ -57,7 +57,7 @@ In each container, you should be in the `/sgl-workspace/dynamo/components/backen
 
 ```bash
 # run ingress
-dynamo run in=http out=dyn &
+python3 -m dynamo.frontend --http-port=8000 &
 # optionally run the http server that allows you to flush the kv cache for all workers (see benchmarking section below)
 python3 utils/sgl_http_server.py --ns dynamo &
 # run prefill worker
@@ -93,7 +93,7 @@ python3 -m dynamo.sglang.worker \
 
 On the other prefill node (since this example has 4 total prefill nodes), run the same command but change `--node-rank` to 1,2, and 3
 
-7. Run the decode worker on the head decode node
+6. Run the decode worker on the head decode node
 
 ```bash
 python3 -m dynamo.sglang.decode_worker \
@@ -131,6 +131,7 @@ On the other decode nodes (this example has 9 total decode nodes), run the same 
 In the official [blog post repro instructions](https://github.com/sgl-project/sglang/issues/6017), SGL uses batch inference to benchmark their prefill and decode workers. They do this by pretokenizing the ShareGPT dataset and then creating a batch of 8192 requests with ISL 4096 and OSL 5 (for prefill stress test) and a batch of 40000 with ISL 2000 and OSL 100 (for decode stress test). If you want to repro these benchmarks, you will need to add the following flags to the prefill and decode commands:
 
 prefill:
+
 ```bash
 ...
 --max-running-requests 8192 \
@@ -142,6 +143,7 @@ prefill:
 ```
 
 decode:
+
 ```bash
 ...
 --max-running-requests 18432 \
@@ -152,9 +154,10 @@ decode:
 We currently provide 2 different ways to perform an end to end benchmark which includes using our OpenAI frontend and tokenization. We will continue to add better support for these sorts of large single batch workloads in the future.
 
 1. **GenAI Perf to benchmark end to end performance with 8k ISL 256 OSL**
-We've found that 8k ISL 256 OSL provides a good baseline for measuring end to end disaggregated serving performance for DSR1. As WideEP allows for a higher throughput, we provide a script that runs this workload at high concurrencies. DeepGEMM kernels can sometimes take a while to warm up. We provide a short ramping warmup script that can be used.
+   We've found that 8k ISL 256 OSL provides a good baseline for measuring end to end disaggregated serving performance for DSR1. As WideEP allows for a higher throughput, we provide a script that runs this workload at high concurrencies. DeepGEMM kernels can sometimes take a while to warm up. We provide a short ramping warmup script that can be used.
 
 Example usage:
+
 ```bash
 # warmup
 ./utils/bench.sh HEAD_PREFILL_NODE_IP --type warmup
@@ -165,9 +168,10 @@ curl -X POST http://${HEAD_PREFILL_NODE_IP}:9001/flush_cache
 ```
 
 2. **GenAI Perf to benchmark completions with custom dataset**
-We provide a script that generates a JSONL file of the ShareGPT dataset and then use GenAI Perf to benchmark the prefill and decode workers. We use ShareGPT in order to leverage the pre-existing EPLB distributions provided by the SGLang team. If you don't want to use ShareGPT - you can also use GenAIPerf's synthetic dataset setup But note you will have to use dynamic EPLB configurations or record your own as the `init-expert-location` provided by SGLang is tuned specifically for the ShareGPT dataset at a 4096 ISL and 5 OSL.
+   We provide a script that generates a JSONL file of the ShareGPT dataset and then use GenAI Perf to benchmark the prefill and decode workers. We use ShareGPT in order to leverage the pre-existing EPLB distributions provided by the SGLang team. If you don't want to use ShareGPT - you can also use GenAIPerf's synthetic dataset setup But note you will have to use dynamic EPLB configurations or record your own as the `init-expert-location` provided by SGLang is tuned specifically for the ShareGPT dataset at a 4096 ISL and 5 OSL.
 
 Example usage:
+
 ```bash
 # generate data
 python3 src/dynamo/sglang/utils/generate_bench_data.py --output data.jsonl --num-prompts 8192 --input-len 4096 --output-len 5 --model deepseek-ai/DeepSeek-R1
