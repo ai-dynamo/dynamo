@@ -1,10 +1,10 @@
-# Generic Profiling for Request Handlers
+# Generic Metrics for Component Endpoints
 
-This example demonstrates how to add automatic Prometheus metrics profiling to any request handler without modifying the handler code itself.
+This example demonstrates the automatic metrics provided to component endpoints by default.
 
 ## Overview
 
-Request handlers are measured automatically when using the DistributedRuntime code. The DistributedRuntime uses the `MetricsRegistry` trait which provides automatic profiling capabilities that are applied to all request handlers automatically. It automatically tracks:
+Component endpoints are measured automatically when using the DistributedRuntime code. The DistributedRuntime uses the `MetricsRegistry` trait which provides automatic measurement capabilities that are applied to all component endpoints automatically. It automatically tracks:
 
 - **Request Count**: Total number of requests processed
 - **Request Duration**: Time spent processing each request
@@ -15,14 +15,14 @@ Additionally, the example demonstrates how to add custom metrics with data bytes
 
 ## How It Works
 
-**Automatic Metrics**: All request handlers automatically get profiling metrics without any code changes.
+**Automatic Metrics**: All component endpoints automatically get measurement metrics without any code changes.
 
 **Custom Metrics**: If you want to add custom metrics IN ADDITION to the automatic ones, you can use the `add_metrics` method:
 
 ```rust
 use dynamo_runtime::pipeline::network::Ingress;
 
-// Automatic profiling - no code changes needed!
+// Automatic measurements - no code changes needed!
 let ingress = Ingress::for_engine(my_handler)?;
 
 // Optional: Add custom metrics IN ADDITION to automatic ones
@@ -35,13 +35,13 @@ The endpoint automatically provides proper labeling (dynamo_namespace, dynamo_co
 
 The `Ingress` struct provides methods for metrics:
 
-- **Automatic**: All request handlers get profiling metrics automatically
+- **Automatic**: All component endpoints get measurement metrics automatically
 - `Ingress::add_metrics(&endpoint)` - Add custom metrics IN ADDITION to automatic ones (optional)
 
 ## Metrics Generated
 
 ### Automatic Metrics (No Code Changes Required)
-The following Prometheus metrics are automatically created for all request handlers:
+The following Prometheus metrics are automatically created for all component endpoints:
 
 ### Counters
 - `dynamo_component_requests_total` - Total requests processed
@@ -80,7 +80,7 @@ These labels are prefixed with "dynamo_" to avoid collisions with Kubernetes and
 When the system is running, you'll see metrics from the /metrics HTTP path like this:
 
 ```prometheus
-# HELP dynamo_component_concurrent_requests Number of requests currently being processed by request handler
+# HELP dynamo_component_concurrent_requests Number of requests currently being processed by component endpoint
 # TYPE dynamo_component_concurrent_requests gauge
 dynamo_component_concurrent_requests{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 0
 
@@ -88,11 +88,11 @@ dynamo_component_concurrent_requests{dynamo_component="example_component",dynamo
 # TYPE dynamo_component_bytes_processed_total counter
 dynamo_component_bytes_processed_total{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 42
 
-# HELP dynamo_component_request_bytes_total Total number of bytes received in requests by request handler
+# HELP dynamo_component_request_bytes_total Total number of bytes received in requests by component endpoint
 # TYPE dynamo_component_request_bytes_total counter
 dynamo_component_request_bytes_total{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 1098
 
-# HELP dynamo_component_request_duration_seconds Time spent processing requests by request handler
+# HELP dynamo_component_request_duration_seconds Time spent processing requests by component endpoint
 # TYPE dynamo_component_request_duration_seconds histogram
 dynamo_component_request_duration_seconds_bucket{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace",le="0.005"} 3
 dynamo_component_request_duration_seconds_bucket{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace",le="0.01"} 3
@@ -109,11 +109,11 @@ dynamo_component_request_duration_seconds_bucket{dynamo_component="example_compo
 dynamo_component_request_duration_seconds_sum{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 0.00048793700000000003
 dynamo_component_request_duration_seconds_count{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 3
 
-# HELP dynamo_component_requests_total Total number of requests processed by request handler
+# HELP dynamo_component_requests_total Total number of requests processed by component endpoint
 # TYPE dynamo_component_requests_total counter
 dynamo_component_requests_total{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 3
 
-# HELP dynamo_component_response_bytes_total Total number of bytes sent in responses by request handler
+# HELP dynamo_component_response_bytes_total Total number of bytes sent in responses by component endpoint
 # TYPE dynamo_component_response_bytes_total counter
 dynamo_component_response_bytes_total{dynamo_component="example_component",dynamo_endpoint="example_endpoint9881",dynamo_namespace="example_namespace"} 1917
 
@@ -124,7 +124,7 @@ uptime_seconds{dynamo_namespace="http_server"} 1.8226759879999999
 
 ## Example
 
-### Request Handler with Automatic Profiling and Optional Custom Metrics
+### Component Endpoint with Automatic Measurements and Optional Custom Metrics
 
 ```rust
 struct RequestHandler {
@@ -142,7 +142,7 @@ impl AsyncEngine<SingleIn<String>, ManyOut<Annotated<String>>, Error> for Reques
         }
 
         // Your business logic here...
-        // No need to add any automatic metrics code!
+        // No need to add any automatic measurement code!
 
         Ok(ResponseStream::new(Box::pin(stream), ctx.context()))
     }
@@ -156,7 +156,7 @@ let handler = if enable_custom_metrics {
     RequestHandler::new()
 };
 
-// Automatic profiling - no additional code needed!
+// Automatic measurements - no additional code needed!
 let ingress = Ingress::for_engine(handler)?;
 
 // Optional: Add custom metrics IN ADDITION to automatic ones
@@ -169,9 +169,9 @@ if enable_custom_metrics {
 
 ## Benefits
 
-1. **Little/No Code Changes**: Existing handlers automatically get profiling metrics, and easy to add custom metrics for your particular application.
+1. **Little/No Code Changes**: Existing handlers automatically get measurement metrics, and easy to add custom metrics for your particular application.
 2. **Simple API**: Simply swap out Prometheus constructors with one of the endpoint's factory methods.
-3. **Automatic Profiling**: Request count, duration, and error tracking out of the box for request handlers.
+3. **Automatic Measurements**: Request count, duration, and error tracking out of the box for component endpoints.
 4. **Automatic Labeling**: Endpoint provides proper namespace/component/endpoint labels
 
 ## Running the Example
@@ -198,7 +198,7 @@ Then make curl requests to the frontend (see the [main README](../../../../READM
 Once running, you can query the metrics:
 
 ```bash
-# Get all request handler metrics for components
+# Get all component endpoint metrics for components
 curl http://localhost:8081/metrics | grep -E "dynamo_component"
 
 # Get all frontend metrics
