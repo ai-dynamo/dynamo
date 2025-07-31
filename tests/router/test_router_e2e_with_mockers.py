@@ -5,7 +5,6 @@ import asyncio
 import json
 import logging
 import os
-import time
 
 import aiohttp
 import pytest
@@ -128,9 +127,6 @@ def test_mocker_kv_router(request, runtime_services):
         # Start all mockers
         for mocker in mocker_processes:
             mocker.__enter__()
-
-        # Give 2 seconds for setups (download tokenizer)
-        time.sleep(2)
 
         # Send test requests
         test_payload = {
