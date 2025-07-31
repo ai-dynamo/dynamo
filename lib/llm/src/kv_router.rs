@@ -263,6 +263,11 @@ impl KvRouter {
     }
 
     /// Free all blocks associated with a request
+    pub async fn mark_prefill_completed(&self, request_id: &String) {
+        self.scheduler.mark_prefill_completed(request_id).await
+    }
+
+    /// Free all blocks associated with a request
     pub async fn free(&self, request_id: &String) {
         self.scheduler.free(request_id).await
     }
@@ -340,19 +345,23 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     return Ok(ResponseStream::new(Box::pin(stream), stream_context));
                 }
 
-                let stream = self.inner.direct(updated_request, instance_id).await?;
-                let chooser_clone = self.chooser.clone();
-                let context_id_clone = context_id.clone();
+                let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
+                let stream_context = response_stream.context();
+                let chooser = self.chooser.clone();
 
-                let stream = stream
-                    .map(Some)
-                    .chain(futures::stream::once(async move {
-                        chooser_clone.free(&context_id_clone).await;
-                        None
-                    }))
-                    .filter_map(|x| async { x });
+                let wrapped_stream = Box::pin(async_stream::stream! {
+                    if let Some(first_item) = response_stream.next().await {
+                        chooser.mark_prefill_completed(&context_id).await;
+                        yield first_item;
+                    }
 
-                return Ok(ResponseStream::new(Box::pin(stream), stream_context));
+                    while let Some(item) = response_stream.next().await {
+                        yield item;
+                    }
+
+                    chooser.free(&context_id).await;
+                });
+                Ok(ResponseStream::new(wrapped_stream, stream_context))
             }
         }
     }

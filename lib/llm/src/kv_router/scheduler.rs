@@ -256,6 +256,11 @@ impl KvScheduler {
         Ok(response.best_worker_id)
     }
 
+    pub async fn mark_prefill_completed(&self, request_id: &String) {
+        let mut sequences = self.sequences.lock().await;
+        sequences.mark_prefill_completed(request_id)
+    }
+
     /// Free all blocks associated with a request
     pub async fn free(&self, request_id: &String) {
         let mut sequences = self.sequences.lock().await;

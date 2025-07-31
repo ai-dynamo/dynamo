@@ -129,6 +129,16 @@ impl ActiveSequences {
         self.active_blocks
     }
 
+    /// Mark prefill as completed for a request, removing it from prefill_tokens tracking
+    pub fn mark_prefill_completed(&mut self, request_id: &RequestId) {
+        if let Some(tokens) = self.prefill_tokens.remove(request_id) {
+            self.active_tokens = self
+                .active_tokens
+                .checked_sub(tokens.saturating_sub(1)) // Keep 1 token for decoding
+                .expect("active_tokens underflow");
+        }
+    }
+
     pub fn new_tokens(&self, isl: usize, overlap: u32) -> usize {
         isl.checked_sub((overlap as usize) * self.block_size)
             .unwrap_or_else(|| panic!("prefill_tokens < 0 with overlap {overlap} and ISL {isl}"))
@@ -190,6 +200,9 @@ enum UpdateSequences {
         overlap: u32,
     },
     Free {
+        request_id: RequestId,
+    },
+    MarkPrefillCompleted {
         request_id: RequestId,
     },
     NewBlocks {
@@ -263,6 +276,9 @@ impl ActiveSequencesMultiWorker {
                     }
                     UpdateSequences::Free { request_id } => {
                         active_sequences.free(&request_id);
+                    }
+                    UpdateSequences::MarkPrefillCompleted { request_id } => {
+                        active_sequences.mark_prefill_completed(&request_id);
                     }
                     UpdateSequences::NewBlocks {
                         token_sequence,
@@ -383,6 +399,21 @@ impl ActiveSequencesMultiWorker {
             .expect("Failed to send free command to worker");
 
         self.request_to_worker.remove(request_id);
+    }
+
+    /// Mark prefill as completed for a request
+    pub fn mark_prefill_completed(&mut self, request_id: &RequestId) {
+        let worker_id = self
+            .request_to_worker
+            .get(request_id)
+            .copied()
+            .expect("Request ID not found in request_to_worker mapping");
+
+        self.senders[&worker_id]
+            .send(UpdateSequences::MarkPrefillCompleted {
+                request_id: request_id.clone(),
+            })
+            .expect("Failed to send mark_prefill_completed command to worker");
     }
 
     /// Get the number of workers
