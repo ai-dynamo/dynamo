@@ -158,6 +158,14 @@ RUN if [ "$ARCH" = "arm64" ]; then \
 RUN mkdir /opt/dynamo && \
     uv venv /opt/dynamo/venv --python 3.12
 
+# Common dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
+
+# Install test dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
+
 # Activate virtual environment
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
