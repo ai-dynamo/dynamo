@@ -81,7 +81,7 @@ RUN apt-get update -y && \
     rm -rf /var/lib/apt/lists/*
 
 ARG NIXL_UCX_REF=v1.19.x
-ARG NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
+ARG NIXL_REF=0.4.1
 
 ENV NIXL_SRC_DIR=/opt/nixl
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
@@ -437,7 +437,8 @@ RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential \
         python3-dev \
-        # Curl for polling various endpoints.
+        # jq and curl for polling various endpoints and health checks
+        jq \
         curl \
         # For debugging
         vim \

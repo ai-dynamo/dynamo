@@ -16,13 +16,15 @@ tensor_parallel_size: 1
 moe_expert_parallel_size: 1
 enable_attention_dp: false
 max_num_tokens: 8192
-max_batch_size: 16
 trust_remote_code: true
 backend: pytorch
 enable_chunked_prefill: true
 # Overlap scheduler not currently supported in prefill only workers.
 disable_overlap_scheduler: true
-use_cuda_graph: false
-
+cuda_graph_config:
+  max_batch_size: 16
 kv_cache_config:
   free_gpu_memory_fraction: 0.95
+
+cache_transceiver_config:
+  backend: default

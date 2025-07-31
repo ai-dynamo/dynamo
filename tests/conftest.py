@@ -41,11 +41,12 @@ TEST_MODELS = [
 ]
 
 
-def download_models(model_list=None):
+def download_models(model_list=None, ignore_weights=False):
     """Download models - can be called directly or via fixture
 
     Args:
         model_list: List of model IDs to download. If None, downloads TEST_MODELS.
+        ignore_weights: If True, skips downloading model weight files. Default is False.
     """
     if model_list is None:
         model_list = TEST_MODELS
@@ -65,15 +66,33 @@ def download_models(model_list=None):
         from huggingface_hub import snapshot_download
 
         for model_id in model_list:
-            logging.info(f"Pre-downloading model: {model_id}")
+            logging.info(
+                f"Pre-downloading {'model (no weights)' if ignore_weights else 'model'}: {model_id}"
+            )
 
             try:
-                # Download the full model snapshot (includes all files)
-                # HuggingFace will handle caching automatically
-                snapshot_download(
-                    repo_id=model_id,
-                    token=hf_token,
-                )
+                if ignore_weights:
+                    # Weight file patterns to exclude (based on hub.rs implementation)
+                    weight_patterns = [
+                        "*.bin",
+                        "*.safetensors",
+                        "*.h5",
+                        "*.msgpack",
+                        "*.ckpt.index",
+                    ]
+
+                    # Download everything except weight files
+                    snapshot_download(
+                        repo_id=model_id,
+                        token=hf_token,
+                        ignore_patterns=weight_patterns,
+                    )
+                else:
+                    # Download the full model snapshot (includes all files)
+                    snapshot_download(
+                        repo_id=model_id,
+                        token=hf_token,
+                    )
                 logging.info(f"Successfully pre-downloaded: {model_id}")
 
             except Exception as e:
@@ -91,6 +110,13 @@ def download_models(model_list=None):
 def predownload_models():
     """Fixture wrapper around download_models for all TEST_MODELS"""
     download_models()
+    yield
+
+
+@pytest.fixture(scope="session")
+def predownload_tokenizers():
+    """Fixture wrapper around download_models for all TEST_MODELS"""
+    download_models(ignore_weights=True)
     yield
 
 
@@ -127,14 +153,24 @@ def pytest_collection_modifyitems(config, items):
         # Auto-inject predownload_models fixture for serve tests only (not router tests)
         # Skip items that don't have fixturenames (like MypyFileItem)
         if hasattr(item, "fixturenames"):
-            # Only apply to tests in the serve directory
+            # Guard clause: skip if already has the fixtures
             if (
-                ("serve" in str(item.path))
-                and ("predownload_models" not in item.fixturenames)
-                and (not item.get_closest_marker("skip_model_download"))
+                "predownload_models" in item.fixturenames
+                or "predownload_tokenizers" in item.fixturenames
             ):
+                continue
+
+            # Guard clause: skip if marked with skip_model_download
+            if item.get_closest_marker("skip_model_download"):
+                continue
+
+            # Add appropriate fixture based on test path
+            if "serve" in str(item.path):
                 item.fixturenames = list(item.fixturenames)
                 item.fixturenames.append("predownload_models")
+            elif "router" in str(item.path):
+                item.fixturenames = list(item.fixturenames)
+                item.fixturenames.append("predownload_tokenizers")
 
 
 class EtcdServer(ManagedProcess):
