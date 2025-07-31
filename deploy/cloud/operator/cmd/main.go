@@ -51,6 +51,7 @@ import (
 
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/etcd"
@@ -125,7 +126,7 @@ func main() {
 		"The suffix to use for the ingress host")
 	flag.BoolVar(&enableLWS, "enable-lws", false,
 		"If set, enable leader worker set")
-	flag.DurationVar(&groveTerminationDelay, "grove-termination-delay", 15*time.Minute,
+	flag.DurationVar(&groveTerminationDelay, "grove-termination-delay", consts.DefaultGroveTerminationDelay,
 		"The termination delay for Grove PodGangSets")
 	opts := zap.Options{
 		Development: true,

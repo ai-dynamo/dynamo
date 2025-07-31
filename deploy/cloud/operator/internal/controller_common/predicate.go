@@ -64,21 +64,21 @@ func DetectGroveAvailability(ctx context.Context, mgr ctrl.Manager) bool {
 	logger := log.FromContext(ctx)
 
 	// Use the discovery client to check if Grove API groups are available
-	discoveryClient := mgr.GetConfig()
-	if discoveryClient == nil {
+	cfg := mgr.GetConfig()
+	if cfg == nil {
 		logger.Info("Grove detection failed, no discovery client available")
 		return false
 	}
 
 	// Try to create a discovery client
-	discovery, err := discovery.NewDiscoveryClientForConfig(discoveryClient)
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(cfg)
 	if err != nil {
 		logger.Error(err, "Grove detection failed, could not create discovery client")
 		return false
 	}
 
 	// Check if grove.io API group is available
-	apiGroups, err := discovery.ServerGroups()
+	apiGroups, err := discoveryClient.ServerGroups()
 	if err != nil {
 		logger.Error(err, "Grove detection failed, could not list server groups")
 		return false
