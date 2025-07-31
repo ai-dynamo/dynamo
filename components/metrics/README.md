@@ -94,7 +94,7 @@ To visualize the metrics being exposed on the Prometheus endpoint,
 see the Prometheus and Grafana configurations in
 [deploy/metrics](../../deploy/metrics):
 ```bash
-docker compose -f deploy/metrics/docker-compose.yml --profile metrics up -d
+docker compose -f deploy/docker-compose.yml --profile metrics up -d
 ```
 
 ## Metrics Collection Modes

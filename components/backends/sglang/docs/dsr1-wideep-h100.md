@@ -9,15 +9,13 @@ Dynamo supports SGLang's implementation of wide expert parallelism and large sca
 
 ## Instructions
 
-1. Build the SGLang DeepEP container.
+1. Pull the SGLang release `v0.4.8.post1` container. We are actively working on validating newer releases.
 
 ```bash
-git clone -b v0.4.9.post2 https://github.com/sgl-project/sglang.git
-cd sglang/docker
-docker build -f Dockerfile -t sgl-widepep .
+docker pull lmsysorg/sglang:v0.4.8.post1-cu126
 ```
 
-You will now have a `sgl-widepep:latest` image
+You can also pull a specific tag from the [lmsys dockerhub](https://hub.docker.com/r/lmsysorg/sglang/tags)
 
 2. Build the Dynamo container
 

@@ -110,6 +110,8 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
 
         sampling_params = SamplingParams(**self.default_sampling_params)
+
+        sampling_params.detokenize = False
         for key, value in request["sampling_options"].items():
             if value is not None and hasattr(sampling_params, key):
                 setattr(sampling_params, key, value)

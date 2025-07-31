@@ -11,15 +11,12 @@ from tensorrt_llm import SamplingParams
 from tensorrt_llm.llmapi.llm_utils import update_llm_args_with_extra_options
 from tensorrt_llm.llmapi.tokenizer import tokenizer_factory
 
-from dynamo.llm import (
-    ModelType,
-    get_tensorrtllm_engine,
-    get_tensorrtllm_publisher,
-    register_llm,
-)
+from dynamo.llm import ModelType, register_llm
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
-from dynamo.trtllm.utils.request_handlers.handlers import (
+from dynamo.trtllm.engine import get_llm_engine
+from dynamo.trtllm.publisher import get_publisher
+from dynamo.trtllm.request_handlers.handlers import (
     RequestHandlerConfig,
     RequestHandlerFactory,
 )
@@ -104,8 +101,10 @@ async def init(runtime: DistributedRuntime, config: Config):
             kv_cache_config["event_buffer_max_size"] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
         else:
             kv_cache_config = arg_map["kv_cache_config"]
-            if not kv_cache_config.event_buffer_max_size:
-                kv_cache_config.event_buffer_max_size = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
+            if "event_buffer_max_size" not in kv_cache_config:
+                kv_cache_config[
+                    "event_buffer_max_size"
+                ] = DEFAULT_KV_EVENT_BUFFER_MAX_SIZE
         arg_map["kv_cache_config"] = kv_cache_config
 
         # Only pytorch backend is supported for now to publish events and metrics.
@@ -129,7 +128,7 @@ async def init(runtime: DistributedRuntime, config: Config):
     # We already detokenize inside HandlerBase. No need to also do it in TRTLLM.
     default_sampling_params.detokenize = False
 
-    async with get_tensorrtllm_engine(engine_args) as engine:
+    async with get_llm_engine(engine_args) as engine:
         endpoint = component.endpoint(config.endpoint)
 
         if is_first_worker(config):
@@ -140,6 +139,7 @@ async def init(runtime: DistributedRuntime, config: Config):
                 config.model_path,
                 config.served_model_name,
                 kv_cache_block_size=config.kv_block_size,
+                migration_limit=config.migration_limit,
             )
 
         # publisher will be set later if publishing is enabled.
@@ -159,7 +159,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             kv_listener = runtime.namespace(config.namespace).component(
                 config.component
             )
-            async with get_tensorrtllm_publisher(
+            async with get_publisher(
                 component,
                 engine,
                 kv_listener,

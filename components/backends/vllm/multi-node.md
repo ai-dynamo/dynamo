@@ -22,7 +22,7 @@ Start the required services on your head node. These endpoints must be accessibl
 
 ```bash
 # On head node (node-1)
-docker compose -f deploy/metrics/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 Default ports:

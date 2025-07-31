@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# if deploymentType is empty, or explicitly set to basic, use basic as default
+{{- if or (not .Values.deploymentType) (eq .Values.deploymentType "basic") -}}
 {{- range $serviceName, $serviceSpec := .Values.spec.services }}
 ---
 apiVersion: apps/v1
@@ -116,4 +118,5 @@ spec:
             port: health
             scheme: HTTP
           {{- end }}
+{{- end }}
 {{- end }}

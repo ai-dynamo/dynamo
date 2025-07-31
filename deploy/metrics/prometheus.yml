@@ -34,11 +34,18 @@ scrape_configs:
       - targets: ['dcgm-exporter:9401']  # on the "monitoring" network
 
   # This is a demo service that needs to be launched manually. See components/metrics/README.md
-  # Note that you may need to disable the firewall on your host. On Ubuntu: sudo ufw allow 8000/tcp
-  - job_name: 'llm-demo'
+  # Note that you may need to disable the firewall on your host. On Ubuntu: sudo ufw allow 8080/tcp
+  # You can also force the port, if the default is different: python -m dynamo.frontend --http-port 8080
+  - job_name: 'dynamo-frontend'
     scrape_interval: 10s
     static_configs:
-      - targets: ['host.docker.internal:8000']  # on the "monitoring" network
+      - targets: ['host.docker.internal:8080']  # on the "monitoring" network
+
+  # Launch via: DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 dynamo.<backend> ...
+  - job_name: 'dynamo-backend'
+    scrape_interval: 6s
+    static_configs:
+      - targets: ['host.docker.internal:8081']
 
   # This is another demo aggregator that needs to be launched manually. See components/metrics/README.md
   # Note that you may need to disable the firewall on your host. On Ubuntu: sudo ufw allow 9091/tcp

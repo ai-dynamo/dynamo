@@ -19,7 +19,7 @@ limitations under the License.
 
 ## Overview
 
-Dynamo `DistributedRuntime` is the core infrastructure in dynamo that enables distributed communication and coordination between different dynamo components. It is implemented in rust (`/lib/runtime`) and exposed to other programming languages via binding (i.e., python bindings can be found in `/lib/bindings/python`). `DistributedRuntime` follows a hierarchical structure:
+Dynamo's `DistributedRuntime` is the core infrastructure in the framework that enables distributed communication and coordination between different Dynamo components. It is implemented in rust (`/lib/runtime`) and exposed to other programming languages via bindings (i.e., python bindings can be found in `/lib/bindings/python`). `DistributedRuntime` follows a hierarchical structure:
 
 - `DistributedRuntime`: This is the highest level object that exposes the distributed runtime interface. It maintains connection to external services (e.g., etcd for service discovery and NATS for messaging) and manages lifecycle with cancellation tokens.
 - `Namespace`: A `Namespace` is a logical grouping of components that isolate between different model deployments.
@@ -28,13 +28,14 @@ Dynamo `DistributedRuntime` is the core infrastructure in dynamo that enables di
 
 While theoretically each `DistributedRuntime` can have multiple `Namespace`s as long as their names are unique (similar logic also applies to `Component/Namespace` and `Endpoint/Component`), in practice, each dynamo components typically are deployed with its own process and thus has its own `DistributedRuntime` object. However, they share the same namespace to discover each other.
 
-For example, the deployment configuration `examples/llm/configs/disagg.yaml` have four workers:
+For example, a typical deployment configuration (like `components/backends/vllm/deploy/agg.yaml` or `components/backends/sglang/deploy/agg.yaml`) has multiple workers:
 
-- `Frontend`: Start an HTTP server and register a `chat/completions` endpoint. The HTTP server route the request to the `Processor`.
-- `Processor`: When a new request arrives, `Processor` applies the chat template and perform the tokenization. Then, it route the request to the `VllmWorker`.
-- `VllmWorker` and `PrefillWorker`: Perform the actual decode and prefill computation.
+- `Frontend`: Starts an HTTP server and handles incoming requests. The HTTP server routes all requests to the `Processor`.
+- `Processor`: When a new request arrives, `Processor` applies the chat template and performs the tokenization.
+Then, it routes the request to the `Worker`.
+- `Worker` components (e.g., `VllmDecodeWorker`, `SGLangDecodeWorker`, `TrtllmWorker`): Perform the actual computation using their respective engines (vLLM, SGLang, TensorRT-LLM).
 
-Since the four workers are deployed in different processes, each of them have their own `DistributedRuntime`. Within their own `DistributedRuntime`, they all have their own `Namespace`s named `dynamo`. Then, under their own `dynamo` namespace, they have their own `Component`s named `Frontend/Processor/VllmWorker/PrefillWorker`. Lastly, for the `Endpoint`, `Frontend` has no `Endpoints`, `Processor` and `VllmWorker` each has a `generate` endpoint, and `PrefillWorker` has a placeholder `mock` endpoint. Their `DistributedRuntime`s and `Namespace`s are set in the `@service` decorators in `examples/llm/components/<frontend/processor/worker/prefill_worker>.py`. Their `Component`s are set by their name in `/deploy/dynamo/sdk/src/dynamo/sdk/cli/serve_dynamo.py`. Their `Endpoint`s are set by the `@endpoint` decorators in `examples/llm/components/<frontend/processor/worker/prefill_worker>.py`.
+Since the workers are deployed in different processes, each of them has its own `DistributedRuntime`. Within their own `DistributedRuntime`, they all share the same `Namespace` (e.g., `vllm-agg`, `sglang-agg`). Then, under their namespace, they have their own `Component`s: `Frontend` uses the `make_engine` function which handles HTTP serving and routing automatically, while worker components create components with names like `worker`, `decode`, or `prefill` and register endpoints like `generate`, `flush_cache`, or `clear_kv_blocks`. The `Frontend` component doesn't explicitly create endpoints - instead, the `make_engine` function handles the HTTP server and worker discovery. Worker components create their endpoints programmatically using the `component.endpoint()` method. Their `DistributedRuntime`s are initialized in their respective main functions, their `Namespace`s are configured in the deployment YAML, their `Component`s are created programmatically (e.g., `runtime.namespace("dynamo").component("worker")`), and their `Endpoint`s are created using the `component.endpoint()` method.
 
 ## Initialization
 
@@ -55,7 +56,7 @@ The hierarchy and naming in etcd and NATS may change over time, and this documen
 - `Component`: When a `Component` object is created, similar to `Namespace`, it isn't be registered in etcd. When `create_service` is called, it creates a NATS service group using `{namespace_name}.{service_name}` and registers a service in the registry of the `Component`, where the registry is an internal data structure that tracks all services and endpoints within the `DistributedRuntime`.
 - `Endpoint`: When an Endpoint object is created and started, it performs two key registrations:
   - NATS Registration: The endpoint is registered with the NATS service group created during service creation. The endpoint is assigned a unique subject following the naming: `{namespace_name}.{service_name}.{endpoint_name}-{lease_id_hex}`.
-  - etcd Registration: The endpoint information is stored in etcd at a path following the naming: `/services/{namespace}/{component}/{endpoint}-{lease_id}`. Note that the endpoints of different workers of the same type (i.e., two `PrefillWorker`s in one deployment) share the same `Namespace`, `Componenet`, and `Endpoint` name. They are distinguished by their different primary `lease_id` of their `DistributedRuntime`.
+  - etcd Registration: The endpoint information is stored in etcd at a path following the naming: `/services/{namespace}/{component}/{endpoint}-{lease_id}`. Note that the endpoints of different workers of the same type (i.e., two `VllmPrefillWorker`s in one deployment) share the same `Namespace`, `Component`, and `Endpoint` name. They are distinguished by their different primary `lease_id` of their `DistributedRuntime`.
 
 ## Calling Endpoints
 
@@ -74,19 +75,6 @@ After selecting which endpoint to hit, the `Client` sends the serialized request
 We provide native rust and python (through binding) examples for basic usage of `DistributedRuntime`:
 
 - Rust: `/lib/runtime/examples/`
-- Python: `/lib/bindings/python/examples/`. We also provide a complete example of using `DistributedRuntime` for communication and Dynamo's LLM library for prompt templates and (de)tokenization to deploy a vllm-based service. Please refer to `lib/bindings/python/examples/hello_world/server_vllm.py` for details.
+- Python: We also provide complete examples of using `DistributedRuntime`. Please refer to the engines in `/components/backends` for full implementation details.
 
-```{note}
-Building a vLLM docker image for ARM machines currently involves building vLLM from source, which is known to be slow and requires extensive system RAM; see [vLLM Issue 8878](https://github.com/vllm-project/vllm/issues/8878).
 
-You can tune the number of parallel build jobs for building VLLM from source
-on ARM based on your available cores and system RAM with `VLLM_MAX_JOBS`.
-
-For example, on an ARM machine with low system resources:
-`./container/build.sh --framework vllm --platform linux/arm64 --build-arg VLLM_MAX_JOBS=2`
-
-For example, on a GB200 which has very high CPU cores and memory resource:
-`./container/build.sh --framework vllm --platform linux/arm64 --build-arg VLLM_MAX_JOBS=64`
-
-When vLLM has pre-built ARM wheels published, this process can be improved.
-```

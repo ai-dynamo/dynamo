@@ -105,7 +105,7 @@ dynamo-build:
     FROM +rust-base
     WORKDIR /workspace
     COPY Cargo.toml Cargo.lock ./
-    COPY pyproject.toml README.md hatch_build.py ./
+    COPY pyproject.toml README.md ./
     COPY components/ components/
     COPY lib/ lib/
     COPY launch/ launch/
@@ -114,14 +114,6 @@ dynamo-build:
     ENV CARGO_TARGET_DIR=/workspace/target
     RUN cargo build --release --locked --features llamacpp,cuda && \
         cargo doc --no-deps
-
-    # Create symlinks for wheel building
-    RUN mkdir -p /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/ && \
-        # Remove existing symlinks
-        rm -f /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/* && \
-        # Create new symlinks pointing to the correct location
-        ln -sf /workspace/target/release/dynamo-run /workspace/deploy/sdk/src/dynamo/sdk/cli/bin/dynamo-run
-
 
     RUN cd /workspace/lib/bindings/python && \
         uv build --wheel --out-dir /workspace/dist --python 3.12

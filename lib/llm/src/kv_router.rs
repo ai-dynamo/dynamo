@@ -34,7 +34,7 @@ use crate::{
             compute_block_hash_for_seq, KvIndexer, KvIndexerInterface, KvRouterError,
             OverlapScores, RouterEvent,
         },
-        metrics_aggregator::EndpointCollector,
+        // metrics_aggregator::EndpointCollector,
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
         scoring::ProcessedEndpoints,
@@ -43,6 +43,7 @@ use crate::{
     protocols::common::llm_backend::LLMEngineOutput,
 };
 
+use dynamo_runtime::component::Instance;
 use dynamo_runtime::traits::events::EventSubscriber;
 
 // [gluo TODO] shouldn't need to be public
@@ -55,7 +56,7 @@ pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 pub trait WorkerSelector {
     fn select_worker(
         &self,
-        workers: &ProcessedEndpoints,
+        workers: &[Instance],
         request: &SchedulingRequest,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
@@ -151,8 +152,16 @@ impl KvRouter {
             .primary_lease()
             .expect("Cannot KV route static workers")
             .primary_token();
-        let metrics_aggregator =
-            EndpointCollector::new(component.clone(), cancellation_token.clone()).await;
+
+        let generate_endpoint = component.endpoint("generate");
+        let client = generate_endpoint.client().await?;
+
+        let instances_rx = match client.instance_source.as_ref() {
+            InstanceSource::Dynamic(rx) => rx.clone(),
+            InstanceSource::Static => {
+                panic!("Expected dynamic instance source for KV routing");
+            }
+        };
 
         let indexer = if use_kv_events {
             Indexer::KvIndexer(KvIndexer::new(cancellation_token.clone(), block_size))
@@ -168,7 +177,7 @@ impl KvRouter {
         let scheduler = KvScheduler::start(
             component.namespace().clone(),
             block_size,
-            metrics_aggregator.endpoints_watcher(),
+            instances_rx,
             selector,
         )
         .await?;
@@ -325,6 +334,7 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                 let isl = backend_input.token_ids.len();
                 backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
                 let updated_request = context.map(|_| backend_input);
+
                 // if request has the annotation "query_instance_id", for example
                 // curl -d '{... ,"nvext": { "annotations": ["query_instance_id"]}}'
                 // request will not be routed to worker immediately
@@ -333,61 +343,59 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
                     let response =
                         Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
                     let stream = stream::iter(vec![response]);
-                    Ok(ResponseStream::new(Box::pin(stream), stream_context))
-                } else {
-                    // Get the response stream from the worker
-                    let mut response_stream =
-                        self.inner.direct(updated_request, instance_id).await?;
+                    return Ok(ResponseStream::new(Box::pin(stream), stream_context));
+                }
+                // Get the response stream from the worker
+                let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
 
-                    // Wrap the stream to track tokens
-                    let stream_context = response_stream.context();
-                    let chooser = self.chooser.clone();
-                    let request_id = context_id.clone();
-                    let block_size = chooser.block_size() as usize;
+                // Wrap the stream to track tokens
+                let stream_context = response_stream.context();
+                let chooser = self.chooser.clone();
+                let request_id = context_id.clone();
+                let block_size = chooser.block_size() as usize;
 
-                    let wrapped_stream = Box::pin(async_stream::stream! {
-                        let mut accumulated_tokens = Vec::new();
-                        let mut total_output_length = 0usize;
-                        let mut last_block_index = (isl.saturating_sub(1)) / block_size;
-                        let mut first_push_done = false;
+                let wrapped_stream = Box::pin(async_stream::stream! {
+                    let mut accumulated_tokens = Vec::new();
+                    let mut total_output_length = 0usize;
+                    let mut last_block_index = (isl.saturating_sub(1)) / block_size;
+                    let mut first_push_done = false;
 
-                        while let Some(item) = response_stream.next().await {
-                            // Track tokens if they exist in the response
-                            let Some(ref output) = item.data else {
-                                yield item;
-                                continue;
-                            };
-                            if output.token_ids.is_empty() {
-                                yield item;
-                                continue;
-                            }
-
-                            // Add tokens to accumulator
-                            accumulated_tokens.extend_from_slice(&output.token_ids);
-                            total_output_length += output.token_ids.len();
-
-                            // Always push for the first generated token (to mark prefill done)
-                            // or when we've moved to a new block
-                            let current_block_index = (isl + total_output_length).saturating_sub(1) / block_size;
-                            let should_push = (!first_push_done && total_output_length >= 1) ||
-                                        (first_push_done && current_block_index > last_block_index);
-
-                            if should_push {
-                                chooser.push(&request_id, &accumulated_tokens).await;
-                                accumulated_tokens.clear();
-                                last_block_index = current_block_index;
-                                if !first_push_done {
-                                    first_push_done = true;
-                                }
-                            }
-
+                    while let Some(item) = response_stream.next().await {
+                        // Track tokens if they exist in the response
+                        let Some(ref output) = item.data else {
                             yield item;
+                            continue;
+                        };
+                        if output.token_ids.is_empty() {
+                            yield item;
+                            continue;
                         }
 
-                        chooser.free(&request_id).await;
-                    });
-                    Ok(ResponseStream::new(wrapped_stream, stream_context))
-                }
+                        // Add tokens to accumulator
+                        accumulated_tokens.extend_from_slice(&output.token_ids);
+                        total_output_length += output.token_ids.len();
+
+                        // Always push for the first generated token (to mark prefill done)
+                        // or when we've moved to a new block
+                        let current_block_index = (isl + total_output_length).saturating_sub(1) / block_size;
+                        let should_push = (!first_push_done && total_output_length >= 1) ||
+                                    (first_push_done && current_block_index > last_block_index);
+
+                        if should_push {
+                            chooser.push(&request_id, &accumulated_tokens).await;
+                            accumulated_tokens.clear();
+                            last_block_index = current_block_index;
+                            if !first_push_done {
+                                first_push_done = true;
+                            }
+                        }
+
+                        yield item;
+                    }
+
+                    chooser.free(&request_id).await;
+                });
+                Ok(ResponseStream::new(wrapped_stream, stream_context))
             }
         }
     }

@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Default values for dynamo-gaie.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# This is the Dynamo namespace where the dynamo model is deployed
+dynamoNamespace: "vllm-agg"
+
+# This is the port on which the model is exposed
+model:
+  # This is the model name that will be used to route traffic to the dynamo model
+  # for example, if the model name is Qwen/Qwen3-0.6B, then the modelShortName should be qwen
+  identifier: "Qwen/Qwen3-0.6B"
+  # This is the short name of the model that will be used to generate the resource names
+  shortName: "qwen"

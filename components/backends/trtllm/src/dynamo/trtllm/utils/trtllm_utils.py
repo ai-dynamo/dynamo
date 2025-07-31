@@ -4,7 +4,7 @@
 import argparse
 from typing import Optional
 
-from dynamo.trtllm.utils.request_handlers.handler_base import (
+from dynamo.trtllm.request_handlers.handler_base import (
     DisaggregationMode,
     DisaggregationStrategy,
 )
@@ -28,6 +28,7 @@ class Config:
         self.served_model_name: Optional[str] = None
         self.tensor_parallel_size: int = 1
         self.kv_block_size: int = 32
+        self.migration_limit: int = 0
         self.extra_engine_args: str = ""
         self.publish_events_and_metrics: bool = False
         self.disaggregation_mode: DisaggregationMode = DEFAULT_DISAGGREGATION_MODE
@@ -46,6 +47,7 @@ class Config:
             f"tensor_parallel_size={self.tensor_parallel_size}, "
             f"kv_block_size={self.kv_block_size}, "
             f"extra_engine_args={self.extra_engine_args}, "
+            f"migration_limit={self.migration_limit}, "
             f"publish_events_and_metrics={self.publish_events_and_metrics}, "
             f"disaggregation_mode={self.disaggregation_mode}, "
             f"disaggregation_strategy={self.disaggregation_strategy}, "
@@ -112,6 +114,12 @@ def cmd_line_args():
     # query the block size from the TRTLLM engine.
     parser.add_argument(
         "--kv-block-size", type=int, default=32, help="Size of a KV cache block."
+    )
+    parser.add_argument(
+        "--migration-limit",
+        type=int,
+        default=0,
+        help="Maximum number of times a request may be migrated to a different engine worker. The number may be overridden by the engine.",
     )
 
     parser.add_argument(
@@ -188,6 +196,7 @@ def cmd_line_args():
 
     config.tensor_parallel_size = args.tensor_parallel_size
     config.kv_block_size = args.kv_block_size
+    config.migration_limit = args.migration_limit
     config.extra_engine_args = args.extra_engine_args
     config.publish_events_and_metrics = args.publish_events_and_metrics
 

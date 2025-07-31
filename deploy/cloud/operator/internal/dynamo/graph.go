@@ -176,7 +176,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		}
 		// merge the envs from the parent deployment with the envs from the service
 		if len(parentDynamoGraphDeployment.Spec.Envs) > 0 {
-			deployment.Spec.Envs = mergeEnvs(parentDynamoGraphDeployment.Spec.Envs, deployment.Spec.Envs)
+			deployment.Spec.Envs = MergeEnvs(parentDynamoGraphDeployment.Spec.Envs, deployment.Spec.Envs)
 		}
 		err := updateDynDeploymentConfig(deployment, commonconsts.DynamoServicePort)
 		if err != nil {
@@ -279,7 +279,7 @@ func overrideWithDynDeploymentConfig(ctx context.Context, dynamoDeploymentCompon
 	return nil
 }
 
-func mergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
+func MergeEnvs(common, specific []corev1.EnvVar) []corev1.EnvVar {
 	envMap := make(map[string]corev1.EnvVar)
 
 	// Add all common environment variables.
@@ -362,7 +362,7 @@ func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.Dyn
 		}
 		// merge the envs from the parent deployment with the envs from the service
 		if len(dynamoDeployment.Spec.Envs) > 0 {
-			container.Env = mergeEnvs(dynamoDeployment.Spec.Envs, container.Env)
+			container.Env = MergeEnvs(dynamoDeployment.Spec.Envs, container.Env)
 		}
 		container.Env = append(container.Env, corev1.EnvVar{
 			Name:  commonconsts.EnvDynamoServicePort,

@@ -148,6 +148,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             config.model,
             config.served_model_name,
             kv_cache_block_size=config.engine_args.block_size,
+            migration_limit=config.migration_limit,
         )
 
     factory = StatLoggerFactory(component, config.engine_args.data_parallel_rank or 0)
@@ -185,8 +186,6 @@ async def init(runtime: DistributedRuntime, config: Config):
 
         handler.kv_publisher = kv_publisher
 
-    print(f"FINAL: {engine_client.vllm_config.cache_config.enable_prefix_caching}")
-    print(f"FINAL: {engine_client.vllm_config.kv_events_config}")
     try:
         await asyncio.gather(
             generate_endpoint.serve_endpoint(handler.generate),

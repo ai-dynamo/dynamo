@@ -69,6 +69,9 @@ impl EndpointConfigBuilder {
         // acquire the registry lock
         let registry = endpoint.drt().component_registry.inner.lock().await;
 
+        // Add metrics to the handler. The endpoint provides additional information to the handler.
+        handler.add_metrics(&endpoint)?;
+
         // get the group
         let group = registry
             .services

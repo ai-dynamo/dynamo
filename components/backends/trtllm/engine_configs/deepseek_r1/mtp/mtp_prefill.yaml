@@ -27,8 +27,9 @@ max_num_tokens: 8192
 max_seq_len: 8192
 kv_cache_config:
   free_gpu_memory_fraction: 0.75
+  dtype: fp8
+
 print_iter_log: true
-kv_cache_dtype: fp8
 disable_overlap_scheduler: true
 
 # Enable the MTP(Multi-Token Prediction) in the prefill model engine

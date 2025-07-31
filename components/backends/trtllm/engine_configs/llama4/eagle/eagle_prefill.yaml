@@ -29,7 +29,7 @@ speculative_config:
   decoding_type: Eagle
   max_draft_len: 1
   pytorch_weights_path: nvidia/Llama-4-Maverick-17B-128E-Eagle3
-  eagle3_one_model: False
+  eagle3_one_model: false
 
 kv_cache_config:
   free_gpu_memory_fraction: 0.5

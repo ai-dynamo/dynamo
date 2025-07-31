@@ -26,11 +26,11 @@ use super::protocols::WorkerSelectionResult;
 use super::WorkerSelector;
 use crate::kv_router::indexer::OverlapScores;
 use crate::kv_router::protocols::LoadMetrics;
-use crate::kv_router::scoring::ProcessedEndpoints;
 use crate::kv_router::sequence::ActiveSequencesMultiWorker;
 use crate::kv_router::KvRouterConfig;
 use crate::kv_router::KV_HIT_RATE_SUBJECT;
 use crate::tokens::TokenBlockSequence;
+use dynamo_runtime::component::Instance;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KVHitRateEvent {
@@ -107,12 +107,14 @@ impl KvScheduler {
     pub async fn start(
         ns: Namespace,
         block_size: u32,
-        endpoints_rx: tokio::sync::watch::Receiver<ProcessedEndpoints>,
+        mut instances_rx: tokio::sync::watch::Receiver<Vec<Instance>>, // Changed from ProcessedEndpoints
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
-        let mut endpoints_rx = endpoints_rx;
-        let mut endpoints: ProcessedEndpoints = endpoints_rx.borrow_and_update().clone();
+        let mut instances: Vec<Instance> = instances_rx.borrow_and_update().clone();
+
+        // Get worker IDs from instances
+        let worker_ids: Vec<i64> = instances.iter().map(|i| i.instance_id).collect();
 
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<KVHitRateEvent>();
         tokio::spawn(async move {
@@ -126,7 +128,7 @@ impl KvScheduler {
 
         let sequences = Arc::new(Mutex::new(ActiveSequencesMultiWorker::new(
             block_size as usize,
-            endpoints.worker_ids(),
+            worker_ids,
         )));
 
         // Channel to accept new scheduling requests
@@ -142,9 +144,10 @@ impl KvScheduler {
                 request = tokio::select! {
                     biased;
 
-                    _ = endpoints_rx.changed() => {
-                        endpoints = endpoints_rx.borrow_and_update().clone();
-                        pending_endpoint_update = Some(endpoints.worker_ids());
+                    _ = instances_rx.changed() => {
+                        instances = instances_rx.borrow_and_update().clone();
+                        let worker_ids: Vec<i64> = instances.iter().map(|i| i.instance_id).collect();
+                        pending_endpoint_update = Some(worker_ids);
                         continue 'outer;
                     }
 
@@ -159,7 +162,8 @@ impl KvScheduler {
                 };
 
                 loop {
-                    match selector.select_worker(&endpoints, &request, block_size) {
+                    // When calling selector.select_worker, we need to adapt
+                    match selector.select_worker(&instances, &request, block_size) {
                         Ok(selection) => {
                             if let Err(e) = event_tx.send(KVHitRateEvent {
                                 worker_id: selection.worker_id,
@@ -179,9 +183,11 @@ impl KvScheduler {
                         }
                         Err(KvSchedulerError::NoEndpoints) => {
                             tracing::trace!("no endpoints available; waiting for endpoints update");
-                            endpoints_rx.changed().await.ok();
-                            endpoints = endpoints_rx.borrow_and_update().clone();
-                            pending_endpoint_update = Some(endpoints.worker_ids());
+                            instances_rx.changed().await.ok();
+                            instances = instances_rx.borrow_and_update().clone();
+                            let worker_ids: Vec<i64> =
+                                instances.iter().map(|i| i.instance_id).collect();
+                            pending_endpoint_update = Some(worker_ids);
                             continue;
                         }
                         // TODO: this is not actually hooked up
@@ -353,13 +359,13 @@ impl DefaultWorkerSelector {
 impl WorkerSelector for DefaultWorkerSelector {
     fn select_worker(
         &self,
-        workers: &ProcessedEndpoints,
+        workers: &[Instance],
         request: &SchedulingRequest,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError> {
         assert!(request.isl_tokens > 0);
 
-        if workers.endpoints.is_empty() {
+        if workers.is_empty() {
             return Err(KvSchedulerError::NoEndpoints);
         }
 
@@ -376,9 +382,10 @@ impl WorkerSelector for DefaultWorkerSelector {
         let mut max_logit = f64::NEG_INFINITY;
 
         // Calculate logits for each worker
-        for (worker_id, _) in workers.endpoints.iter() {
+        for instance in workers.iter() {
+            let worker_id = instance.instance_id;
             // this is the number of tokens each worker would have if the request were scheduled there
-            let potential_tokens = *potential_active_tokens.get(worker_id).unwrap_or_else(|| {
+            let potential_tokens = *potential_active_tokens.get(&worker_id).unwrap_or_else(|| {
                 tracing::warn!(
                     "assuming {isl} tokens for {worker_id}, as the endpoint does not exist yet"
                 );
@@ -386,7 +393,7 @@ impl WorkerSelector for DefaultWorkerSelector {
             }) as f64;
 
             // this is the number of blocks each worker would have if the request were scheduled there
-            let potential_blocks = *potential_active_blocks.get(worker_id).unwrap_or_else(||
+            let potential_blocks = *potential_active_blocks.get(&worker_id).unwrap_or_else(||
                 {tracing::warn!("assuming {request_blocks} decoding blocks for {worker_id}, as the endpoint does not exist yet");
                 &request_blocks
             }) as f64;
@@ -398,12 +405,12 @@ impl WorkerSelector for DefaultWorkerSelector {
                 + potential_blocks;
             max_logit = max_logit.max(logit);
 
-            worker_logits.insert(*worker_id, logit);
+            worker_logits.insert(worker_id, logit);
 
             tracing::info!(
                 "Formula for {worker_id}: {logit:.3} = {:.1} * {potential_prefill_blocks:.3} + {potential_blocks:.3}  (cached_blocks: {})",
                 self.kv_router_config.overlap_score_weight,
-                overlaps.get(worker_id).unwrap_or(&0),
+                overlaps.get(&worker_id).unwrap_or(&0),
             );
         }
 

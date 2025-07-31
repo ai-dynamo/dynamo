@@ -15,7 +15,7 @@ trap cleanup EXIT INT TERM
 python3 -m dynamo.sglang.utils.clear_namespace --namespace dynamo
 
 # run ingress
-dynamo run in=http out=dyn --http-port=8000 &
+python3 -m dynamo.frontend --http-port=8000 &
 DYNAMO_PID=$!
 
 # run prefill worker
@@ -33,7 +33,7 @@ python3 -m dynamo.sglang.worker \
 PREFILL_PID=$!
 
 # run decode worker
-CUDA_VISIBLE_DEVICES=2,3 python3 dynamo.sglang.decode_worker \
+CUDA_VISIBLE_DEVICES=2,3 python3 -m dynamo.sglang.decode_worker \
   --model-path silence09/DeepSeek-R1-Small-2layers \
   --served-model-name silence09/DeepSeek-R1-Small-2layers \
   --tp 2 \
