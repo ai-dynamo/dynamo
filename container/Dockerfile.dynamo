@@ -34,9 +34,10 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 # Redeclare ARCH and ARCH_ALT so they're available in this stage
 ARG ARCH
 ARG ARCH_ALT
+ARG CARGO_BUILD_JOBS
 
 ARG NIXL_UCX_REF=v1.19.x
-ARG NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
+ARG NIXL_REF=0.4.1
 
 ENV NIXL_SRC_DIR=/opt/nixl
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
@@ -47,6 +48,24 @@ ENV LD_LIBRARY_PATH=$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:$LD_LIBRARY_PATH
 USER root
 ARG PYTHON_VERSION=3.12
 
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+
+ENV RUSTUP_HOME=/usr/local/rustup \
+    CARGO_HOME=/usr/local/cargo \
+    PATH=/usr/local/cargo/bin:$PATH \
+    RUST_VERSION=1.87.0
+
+# Define Rust target based on ARCH_ALT ARG
+ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
+
+# Install Rust using RUSTARCH derived from ARCH_ALT
+RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
+    # TODO: Add SHA check back based on RUSTARCH
+    chmod +x rustup-init && \
+    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
+    rm rustup-init && \
+    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
+
 RUN apt-get update -y && \
     apt-get install -y \
     # NIXL build dependencies
@@ -54,36 +73,17 @@ RUN apt-get update -y && \
     meson \
     ninja-build \
     pybind11-dev \
+    autoconf \
+    libtool \
+    net-tools \
+    git \
     # These headers are missing with the hpcx installer, required
     # by UCX to find RDMA devices
     libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
     libnuma-dev librdmacm-dev ibverbs-providers \
     # Rust build dependencies
 	clang \
-    libclang-dev \
-	git \
-    # Install utilities
-    nvtop \
-    tmux \
-    vim \
-    autoconf \
-    libtool \
-    net-tools
-
-WORKDIR /workspace
-
-#Required for pre-merge test validation
-### NATS & ETCD SETUP ###
-# nats
-RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-${ARCH}.deb && \
-    dpkg -i nats-server-v2.10.28-${ARCH}.deb && rm nats-server-v2.10.28-${ARCH}.deb
-# etcd
-ENV ETCD_VERSION="v3.5.21"
-RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
-    mkdir -p /usr/local/bin/etcd && \
-    tar -xvf /tmp/etcd.tar.gz -C /usr/local/bin/etcd --strip-components=1 && \
-    rm /tmp/etcd.tar.gz
-ENV PATH=/usr/local/bin/etcd/:$PATH
+    libclang-dev
 
 ### UCX EFA Setup ###
 RUN rm -rf /opt/hpcx/ucx && \
@@ -111,20 +111,13 @@ RUN rm -rf /opt/hpcx/ucx && \
     make -j install-strip &&                        \
     ldconfig
 
-ENV LD_LIBRARY_PATH=\
-/usr/lib:/usr/local/ucx/lib:\
-/usr/local/ucx/lib/ucx:\
-$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:$LD_LIBRARY_PATH
 ENV CPATH=/usr/include:$CPATH
 ENV PATH=/usr/bin:$PATH
 ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
-SHELL ["/bin/bash", "-c"]
-
-WORKDIR /workspace
 
 ### NIXL SETUP ###
 # Clone nixl source
-# TEMP: disable gds backend for arm64
 RUN git clone "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
     cd ${NIXL_SRC_DIR} && \
     git checkout ${NIXL_REF} && \
@@ -139,17 +132,6 @@ RUN git clone "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
     ninja && \
     ninja install;
 
-
-
-# Install uv and create virtualenv
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
-RUN mkdir /opt/dynamo && \
-    uv venv /opt/dynamo/venv --python 3.12
-
-# Activate virtual environment
-ENV VIRTUAL_ENV=/opt/dynamo/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
-
 # Install NIXL Python module
 # TODO: Move gds_path selection based on arch into NIXL build
 # TEMP: disable gds backend for arm64
@@ -158,63 +140,15 @@ RUN if [ "$ARCH" = "arm64" ]; then \
         --config-settings=setup-args="-Ddisable_gds_backend=true"; \
     else \
         cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl; \
-    fi && \
-    # Install the wheel
-    # TODO: Move NIXL wheel install to the wheel_builder stage
-    uv pip install /workspace/wheels/nixl/*.whl
+    fi
 
+# Create virtual environment
+RUN mkdir /opt/dynamo && \
+    uv venv /opt/dynamo/venv --python 3.12
 
-
-# Common dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
-
-# Install test dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
-
-# ### MISC UTILITY SETUP ###
-
-# Finish pyright install
-RUN pyright --help > /dev/null 2>&1
-
-# Enable Git operations in the /workspace directory
-RUN printf "[safe]\n      directory=/workspace\n" > /root/.gitconfig
-
-
-### BUILDS ###
-
-# Rust build/dev dependencies
-RUN apt update -y && \
-    apt install --no-install-recommends -y \
-    build-essential \
-    protobuf-compiler \
-    cmake \
-    libssl-dev \
-    pkg-config
-
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.87.0
-
-# Define Rust target based on ARCH_ALT ARG
-ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
-
-# Install Rust using RUSTARCH derived from ARCH_ALT
-RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
-    # TODO: Add SHA check back based on RUSTARCH
-    chmod +x rustup-init && \
-    ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
-    rm rustup-init && \
-    chmod -R a+w $RUSTUP_HOME $CARGO_HOME
-
-ARG CARGO_BUILD_JOBS
-# Set CARGO_BUILD_JOBS to 16 if not provided
-# This is to prevent cargo from building $(nproc) jobs in parallel,
-# which might exceed the number of opened files limit.
-ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
-
+# Activate virtual environment
+ENV VIRTUAL_ENV=/opt/dynamo/venv
+ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
 ##################################
 ##### Wheel Build Image ##########
@@ -233,27 +167,22 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 # Use build arg RELEASE_BUILD = true to generate wheels for Python 3.10, 3.11 and 3.12.
 ARG RELEASE_BUILD
 
-# Keep in sync with the base image.
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-
 WORKDIR /workspace
 
 RUN yum update -y \
-    && yum install -y llvm-toolset \
-    && yum install -y python3.12-devel \
-    && yum install -y protobuf-compiler \
+    && yum install -y llvm-toolset protobuf-compiler python3.12-devel \
     && yum clean all \
     && rm -rf /var/cache/yum
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     CARGO_TARGET_DIR=/workspace/target \
-    VIRTUAL_ENV=/opt/dynamo/venv
+    VIRTUAL_ENV=/opt/dynamo/venv \
+    NIXL_PREFIX=/opt/nvidia/nvda_nixl
 
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
 COPY --from=base $NIXL_PREFIX $NIXL_PREFIX
-COPY --from=base /workspace /workspace
 COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
 ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
 
@@ -267,14 +196,7 @@ COPY rust-toolchain.toml /workspace/
 
 # Copy source code
 COPY lib/ /workspace/lib/
-COPY components /workspace/components
-COPY launch /workspace/launch
-
-RUN cargo build \
-	--release \
-	--locked \
-	--features dynamo-llm/block-manager \
-	--workspace
+COPY components/ /workspace/components/
 
 # Build dynamo wheel
 RUN uv build --wheel --out-dir /workspace/dist && \
@@ -309,8 +231,7 @@ COPY . /workspace
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
     mkdir /opt/dynamo/bindings/lib && \
-    cp wheels/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
-    cp target/release/metrics /usr/local/bin
+    cp wheels/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/.
 
 RUN uv pip install /workspace/wheels/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/wheels/ai_dynamo*any.whl
