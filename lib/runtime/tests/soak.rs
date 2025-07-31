@@ -100,10 +100,7 @@ mod integration {
                 .collect::<Vec<_>>();
 
             if self.queued_up_processing {
-                let iter_stream = stream::iter(chars);
-                Ok(ResponseStream::new(Box::pin(iter_stream), ctx.context()))
-            } else {
-                // delayed processing, just to saturate the queue
+                // queued up processing - delayed response to saturate the queue
                 let async_stream = async_stream::stream! {
                     for c in chars {
                         yield c;
@@ -111,6 +108,10 @@ mod integration {
                     }
                 };
                 Ok(ResponseStream::new(Box::pin(async_stream), ctx.context()))
+            } else {
+                // normal processing - immediate response
+                let iter_stream = stream::iter(chars);
+                Ok(ResponseStream::new(Box::pin(iter_stream), ctx.context()))
             }
         }
     }
