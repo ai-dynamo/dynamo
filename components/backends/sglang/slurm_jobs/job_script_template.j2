@@ -7,7 +7,7 @@
 #SBATCH --time={{ time_limit }}
 #SBATCH --output=logs/%j/log.out
 #SBATCH --error=logs/%j/log.err
-#SBATCH --partition=36x2-a01r
+#SBATCH --partition={{ partition }}
 
 # Constants
 PREFILL_NODES={{ prefill_nodes }}

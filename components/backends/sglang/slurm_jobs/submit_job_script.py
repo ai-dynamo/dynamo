@@ -109,6 +109,11 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
         default=False,
         help="Use SGLang commands instead of Dynamo",
     )
+    parser.add_argument(
+        "--partition",
+        default="batch",
+        help="SLURM partition to use",
+    )
     return parser.parse_args(args)
 
 
@@ -131,6 +136,7 @@ def main(input_args: list[str] | None = None):
         "network_interface": args.network_interface,
         "gpu_type": args.gpu_type,
         "use_sglang_commands": args.use_sglang_commands,
+        "partition": args.partition,
     }
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".sh") as temp_file:
