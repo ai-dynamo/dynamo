@@ -431,12 +431,10 @@ impl Scheduler {
             "slot does not exist"
         );
 
-        // let maybe_controller = self.common_function(request_id, uuid, None);
-        // if let Some(controller) = maybe_controller {
-        //     self.schedule_request(controller);
-        // }
-
-        unimplemented!("@ziqi")
+        let maybe_controller = self.handle_request(request.request_id.clone(), request.uuid.clone(), None);
+        if let Some(controller) = maybe_controller {
+            self.schedule_request(controller);
+        }
     }
 
     fn start_iteration(&mut self, iteration: u64) {
@@ -489,39 +487,75 @@ impl Scheduler {
         }
     }
 
+    // This function is used to handle the request from worker or transfer based on their arrival order.
+    // It returns Some(ScheduledTaskController) if both worker and transfer have arrived, or None if any of them has not arrived yet.
+    //
+    // More details:
+    // If no uuid is found in scheduled_requests, it means neither worker nor transfer has arrived yet.
+    // Then, we will insert controller into scheduled_requests (for transfer) or None (for worker) and return None.
+    //
+    // If uuid is found in scheduled_requests, it means either worker or transfer has arrived.
+    // Then, we check the incoming controller. If it is Some, it means worker has arrived first and we can return it.
+    // If it is None, it means the transfer has arrived first and we can return the existing controller.
+    fn handle_request(&mut self, request_id: String, uuid: uuid::Uuid, controller: Option<ScheduledTaskController>) -> Option<ScheduledTaskController> {
+        let mut entry = self.scheduled_requests.entry(request_id).or_default();
+        match entry.remove(&uuid) {
+            Some(existing_controller) => {
+                match controller {
+                    Some(controller) => {
+                        Some(controller)
+                    }
+                    None => {
+                        existing_controller
+                    }
+                }
+            }
+            None => {
+                match controller {
+                    Some(controller) => {
+                        entry.insert(uuid, Some(controller));
+                        None
+                    }
+                    None => {
+                        entry.insert(uuid, None);
+                        None
+                    }
+                }
+            }
+        }
+    }
+
     #[tracing::instrument(level = "debug", skip_all, fields(request_id = %request.leader_request.request_id))]
     fn handle_scheduled_transfer_request(&mut self, request: TransferScheduleRequest) {
         let controller = self.process_scheduled_transfer_request(request).unwrap();
 
-        // extract request id and uuid
-        // call our common function with Some(controller)
+        let maybe_controller = self.handle_request(controller.request.request_id.clone(), controller.request.uuid.clone(), Some(controller));
 
-        // let maybe_controller = self.common_function(request_id, uuid, Some(controller));
-
-        // if let Some(controller) = maybe_controller {
-        //    self.schedule_request(controller);
-        // }
-
-        unimplemented!("@ziqi")
+        if let Some(controller) = maybe_controller {
+           self.schedule_request(controller);
+        }
     }
 
     // this function will be a scheduler and will dispatch requests to be executed
-    fn schedule_request(&mut self, xfer_req: TransferScheduleRequest) {
+    fn schedule_request(&mut self, xfer_req: ScheduledTaskController) {
         // tokio spawn execute_scheduled_transfer for first impl.  add fanciness later.
-        unimplemented!("@ziqi")
+        self.execute_scheduled_transfer(xfer_req);
     }
 
     // this function will execute a transfer request, monitor its completion, and increment its
     // atomic completion counter when finished.
     //
     // this must tokio spawn and an indpendent task
-    fn execute_scheduled_transfer(&mut self, xfer_req: TransferScheduleRequest) {
+    fn execute_scheduled_transfer(&mut self, xfer_req: ScheduledTaskController) {
         // this will issue the signal to the transfer engine to start the transfer
         // this is oneshot sender with a SchedulingDecision
         // then this will monitor the oneshot received of a result<()> to monitor completion
         // when completed, panic if error, otherwise increment the atomic counter
 
-        unimplemented!("@ziqi")
+        let (result_tx, result_rx) = oneshot::channel();
+        xfer_req.decision_tx.send((SchedulingDecision::Execute, result_tx)).unwrap();
+
+        // TBD: do real transfer here
     }
 
     /// Translate the [`TransferScheduleRequest`] into a local [`ScheduledTaskController`]
@@ -825,6 +859,7 @@ mod tests {
         assert_eq!(worker_client.slots.get("test").unwrap().operations.len(), 1);
     }
 
+    // this test verifies that the scheduler can handle the case where the transfer engine's   /// in this case, the request arrives first via the worker client, meaning it traverse
     #[tokio::test]
     async fn test_transfer_scheduled_arrives_first() {
         dynamo_runtime::logging::init();
@@ -842,12 +877,37 @@ mod tests {
             request_type: RequestType::Scheduled,
         };
 
-        let mut handle = tokio::spawn(transfer_client.clone().schedule_transfer(request));
+        // transfer arrives first
+        let handle = tokio::spawn(transfer_client.schedule_transfer(request.clone()));
+        scheduler.step().await;
 
-        // the transfer engine will immediately return a completion handle
+        // scheduled_requests should contain <request id, <uuid, and Some(controller)>> since transfer arrived first
+        assert_eq!(scheduler.scheduled_requests.get(&request.request_id).unwrap().len(), 1);
+        assert!(scheduler.scheduled_requests.get(&request.request_id).unwrap().get(&operation_id).unwrap().is_some());
+
+        worker_client.create_slot("test".to_string()).unwrap();
+        assert!(!scheduler.slots.contains_key("test"));
+        scheduler.step().await;
+        assert!(scheduler.slots.contains_key("test"));
+
+        let request = WorkerTransferRequest {
+            request_id: "test".to_string(),
+            uuid: operation_id,
+            transfer_type: TransferType::Store,
+            request_type: RequestType::Scheduled,
+        };
+
+        // worker arrives last
+        worker_client.enqueue_request(request.clone());
+        scheduler.step().await;
+
+        let mut handle = handle.await.unwrap().unwrap();
+        handle.mark_complete(Ok(())).await;
+
+        // after worker arrives, <uuid, and Some(controller)> inserted by transfer should be removed from scheduled_requests
+        assert_eq!(scheduler.scheduled_requests.get(&request.request_id).unwrap().len(), 0);
     }
 
-    /// in this case, the request arrives first via the worker client, meaning it traverse
     #[tokio::test]
     async fn test_transfer_scheduled_arrives_last() {
         dynamo_runtime::logging::init();
@@ -857,7 +917,26 @@ mod tests {
 
         let operation_id = uuid::Uuid::new_v4();
 
-        // on the transfer engine, a request arrives with a request type of scheduled
+        worker_client.create_slot("test".to_string()).unwrap();
+        assert!(!scheduler.slots.contains_key("test"));
+        scheduler.step().await;
+        assert!(scheduler.slots.contains_key("test"));
+
+        let request = WorkerTransferRequest {
+            request_id: "test".to_string(),
+            uuid: operation_id,
+            transfer_type: TransferType::Store,
+            request_type: RequestType::Scheduled,
+        };
+
+        // worker arrives first
+        worker_client.enqueue_request(request.clone());
+        scheduler.step().await;
+
+        // scheduled_requests should contain <request id, <uuid, and None>> since worker arrived first
+        assert_eq!(scheduler.scheduled_requests.get(&request.request_id).unwrap().len(), 1);
+        assert!(scheduler.scheduled_requests.get(&request.request_id).unwrap().get(&operation_id).unwrap().is_none());
+
         let request = LeaderTransferRequest {
             request_id: "test".to_string(),
             uuid: operation_id,
@@ -865,37 +944,15 @@ mod tests {
             request_type: RequestType::Scheduled,
         };
 
-        // let (tx_1, rx_1) = tokio::sync::oneshot::channel();
-
-        // let mut handle = tokio::spawn(async move {
-        //     let handle = transfer_client
-        //         .clone()
-        //         .schedule_transfer(request)
-        //         .await
-        //         .unwrap();
-        //     //let _ = rx_1.await;
-
-        //     handle.mark_complete(Ok(())).await;
-        // });
-
-        // test state of scheduler before first message arrives.
-
-        // scheudler.step().await;
-
-        // trigger task
-
-        // task is running
-
-        // advance transfer tx_1 - this will mark the end of the task and trigger the completion handle
-        // drop(tx_1);
-
-        // sleep for a bit
-
-        // check atomic counter
-
-        // test the first arrival state.
-
-        // the transfer engine will immediately return a completion handle
+        // transfer arrives last
+        let handle = tokio::spawn(transfer_client.schedule_transfer(request.clone()));
+        scheduler.step().await;
+        let mut handle = handle.await.unwrap().unwrap();
+        assert_eq!(handle.scheduler_decision(), SchedulingDecision::Execute);
+        handle.mark_complete(Ok(())).await;
+        
+        // after transfer arrives, <uuid, and None> inserted by worker should be removed from scheduled_requests
+        assert_eq!(scheduler.scheduled_requests.get(&request.request_id).unwrap().len(), 0);
     }
 
     #[tokio::test]
