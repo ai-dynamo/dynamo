@@ -42,6 +42,7 @@ pub async fn run(
         .request_template(flags.request_template.clone())
         .migration_limit(flags.migration_limit)
         .all_workers_busy_rejection_time_window(flags.all_workers_busy_rejection_time_window);
+        .is_mocker(matches!(out_opt, Some(Output::Mocker)));
 
     // TODO: old, address this later:
     // If `in=dyn` we want the trtllm/sglang/vllm subprocess to listen on that endpoint.

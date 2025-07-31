@@ -156,18 +156,18 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
     uuid.to_string()
 }
 
-/// Check if the service is rate limited and return appropriate error response
-fn check_rate_limited(
+/// Check if the service is request throttled and return appropriate error response
+fn check_request_throttled(
     state: &Arc<service_v2::State>,
     model: &str,
     endpoint: &Endpoint,
     request_type: &RequestType,
 ) -> Result<(), ErrorResponse> {
-    if state.rate_limiter().is_rate_limited() {
-        tracing::warn!("Service is rate limited, rejecting current request");
+    if state.request_throttler().is_throttled() {
+        tracing::warn!("Triggered request throttling, the system is currently overloaded. Rejecting current request");
         state
             .metrics_clone()
-            .inc_rate_limited_requests_count(model, endpoint, request_type);
+            .inc_request_throttled_requests_count(model, endpoint, request_type);
         return Err(ErrorMessage::service_unavailable_error());
     }
     Ok(())
@@ -197,9 +197,9 @@ async fn handler_completions(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // check if the service is rate limited
+    // check if the service is request throttled
     let request_type = extract_request_type(request.inner.stream.unwrap_or(false));
-    check_rate_limited(
+    check_request_throttled(
         &state,
         &request.inner.model,
         &Endpoint::Completions,
@@ -338,8 +338,8 @@ async fn embeddings(
     // return a 503 if the service is not ready
     check_ready(&state)?;
 
-    // check if the service is rate limited
-    check_rate_limited(
+    // check if the service is request throttled
+    check_request_throttled(
         &state,
         &request.inner.model,
         &Endpoint::Embeddings,
@@ -404,8 +404,8 @@ async fn handler_chat_completions(
     check_ready(&state)?;
 
     let request_type = extract_request_type(request.inner.stream.unwrap_or(false));
-    // check if the service is rate limited
-    check_rate_limited(
+    // check if the service is request throttled
+    check_request_throttled(
         &state,
         &request.inner.model,
         &Endpoint::ChatCompletions,
@@ -636,8 +636,8 @@ async fn handler_responses(
     check_ready(&state)?;
 
     let request_type = extract_request_type(request.inner.stream.unwrap_or(false));
-    // check if the service is rate limited
-    check_rate_limited(
+    // check if the service is request throttled
+    check_request_throttled(
         &state,
         &request.inner.model,
         &Endpoint::Responses,

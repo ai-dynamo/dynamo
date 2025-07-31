@@ -180,6 +180,7 @@ pub fn make_engine<'p>(
         .router_config(args.router_config.clone().map(|rc| rc.into()))
         .http_port(args.http_port)
         .all_workers_busy_rejection_time_window(args.all_workers_busy_rejection_time_window);
+        .is_mocker(matches!(args.engine_type, EngineType::Mocker));
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let local_model = builder.build().await.map_err(to_pyerr)?;
         let inner = select_engine(distributed_runtime, args, local_model)

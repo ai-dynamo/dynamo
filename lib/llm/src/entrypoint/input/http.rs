@@ -7,7 +7,7 @@ use crate::{
     discovery::{ModelManager, ModelWatcher, MODEL_ROOT_PATH},
     engines::StreamingEngineAdapter,
     entrypoint::{input::common, EngineConfig},
-    http::service::{rate_limiter::HttpServiceRateLimiter, service_v2},
+    http::service::{request_throttler::HttpServiceRequestThrottler, service_v2},
     kv_router::KvRouterConfig,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
@@ -34,15 +34,15 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
     match engine_config {
         EngineConfig::Dynamic(_) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
-            let rate_limiter = http_service.rate_limiter_clone();
+            let request_throttler = http_service.request_throttler_clone();
             if all_workers_busy_rejection_time_window.is_some() {
-                if let Err(e) = start_rate_limiter_monitoring(
+                if let Err(e) = start_request_throttler_monitoring(
                     &distributed_runtime,
                     &engine_config,
-                    &rate_limiter,
+                    &request_throttler,
                     runtime.primary_token(),
                 ) {
-                    tracing::error!(%e, "failed to start rate limiter monitoring");
+                    tracing::error!(%e, "failed to start request throttler monitoring");
                 }
             }
             match distributed_runtime.etcd_client() {
@@ -124,20 +124,20 @@ async fn run_watcher(
     Ok(())
 }
 
-/// Starts the rate limiter monitoring for the given namespace.
-/// This is used to monitor the rate limiter for the given namespace and start the rate limiting if the all workers busy event is received.
-fn start_rate_limiter_monitoring(
+/// Starts the request throttler monitoring for the given namespace.
+/// This is used to monitor the request throttler for the given namespace and start the request throttling if the all workers busy event is received.
+fn start_request_throttler_monitoring(
     runtime: &DistributedRuntime,
     engine_config: &EngineConfig,
-    rate_limiter: &HttpServiceRateLimiter,
+    request_throttler: &HttpServiceRequestThrottler,
     cancellation_token: CancellationToken,
 ) -> anyhow::Result<()> {
     let namespace = engine_config.local_model().endpoint_id().namespace.clone();
     let namespace = runtime.namespace(namespace)?;
     tracing::info!(
-        "Starting rate limit monitoring for namespace={}",
+        "Starting request throttler monitoring for namespace={}",
         namespace.name()
     );
-    rate_limiter.start_monitoring(namespace, cancellation_token)?;
+    request_throttler.start_monitoring(namespace, cancellation_token)?;
     Ok(())
 }

@@ -9,7 +9,7 @@ use super::metrics;
 use super::Metrics;
 use super::RouteDoc;
 use crate::discovery::ModelManager;
-use crate::http::service::rate_limiter::HttpServiceRateLimiter;
+use crate::http::service::request_throttler::HttpServiceRequestThrottler;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
@@ -20,15 +20,15 @@ use tokio_util::sync::CancellationToken;
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
-    rate_limiter: HttpServiceRateLimiter,
+    request_throttler: HttpServiceRequestThrottler,
 }
 
 impl State {
-    pub fn new(manager: Arc<ModelManager>, rate_limiter: HttpServiceRateLimiter) -> Self {
+    pub fn new(manager: Arc<ModelManager>, request_throttler: HttpServiceRequestThrottler) -> Self {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
-            rate_limiter,
+            request_throttler,
         }
     }
 
@@ -41,16 +41,16 @@ impl State {
         Arc::as_ref(&self.manager)
     }
 
-    pub fn rate_limiter(&self) -> &HttpServiceRateLimiter {
-        &self.rate_limiter
+    pub fn request_throttler(&self) -> &HttpServiceRequestThrottler {
+        &self.request_throttler
     }
 
     pub fn manager_clone(&self) -> Arc<ModelManager> {
         self.manager.clone()
     }
 
-    pub fn rate_limiter_clone(&self) -> HttpServiceRateLimiter {
-        self.rate_limiter.clone()
+    pub fn request_throttler_clone(&self) -> HttpServiceRequestThrottler {
+        self.request_throttler.clone()
     }
 
     // TODO
@@ -113,8 +113,8 @@ impl HttpService {
         Arc::as_ref(&self.state)
     }
 
-    pub fn rate_limiter_clone(&self) -> HttpServiceRateLimiter {
-        self.state().rate_limiter_clone()
+    pub fn request_throttler_clone(&self) -> HttpServiceRequestThrottler {
+        self.state().request_throttler_clone()
     }
 
     pub fn model_manager(&self) -> &ModelManager {
@@ -173,12 +173,12 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let rate_limiter = HttpServiceRateLimiter::new(
+        let request_throttler = HttpServiceRequestThrottler::new(
             config
                 .all_workers_busy_rejection_time_window
                 .map(Duration::from_secs),
         );
-        let state = Arc::new(State::new(model_manager, rate_limiter));
+        let state = Arc::new(State::new(model_manager, request_throttler));
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
