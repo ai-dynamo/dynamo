@@ -1,0 +1,48 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+dynamo:
+  name: vllm
+  components:
+  - name: Decode
+    image: nvcr.io/nvstaging/nvaie/jwyman:dynamo_vllm-25.07.28.0
+    resources:
+      cpu: 16
+      gpu: 1
+      memory: 96Gi
+    # envs:
+    # - name: NIXL_LOG_LEVEL
+    #   value: DEBUG
+    probes:
+    workingDir: /workspace/components/backends/vllm
+    command: python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B  2>&1 | tee /tmp/vllm.log
+    logLevel: debug
+
+  - name: Prefill
+    image: nvcr.io/nvstaging/nvaie/jwyman:dynamo_vllm-25.07.28.0
+    resources:
+      cpu: 16
+      gpu: 1
+      memory: 96Gi
+    # envs:
+    # - name: NIXL_LOG_LEVEL
+    #   value: DEBUG
+    workingDir: /workspace/components/backends/vllm
+    command: python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B  --is-prefill-worker 2>&1 | tee /tmp/vllm.log
+    logLevel: debug
+
+  frontend:
+    image: nvcr.io/nvstaging/nvaie/jwyman:dynamo_vllm-25.07.28.0
+    resources:
+      cpu: 4
+      memory: 8Gi
+    workingDir: /workspace/components/backends/vllm
+    command: python3 -m dynamo.frontend --http-port 8000
+    logLevel: debug
+
+pullSecrets:
+  container:
+  - name: ngc-container-pull
+  model:
+    key: api-token
+    name: hf-model-pull

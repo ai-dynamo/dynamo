@@ -1,0 +1,12 @@
+{{ $.Chart.Name }} ({{ $.Chart.Version }}) installation complete.
+
+Release Name: {{ $.Release.Name }}
+Namespace: {{ $.Release.Namespace }}
+Deployment Name: {{ $.Release.Name }}
+Service Name: {{ $.Release.Name }}
+
+Helpful commands:
+
+  $ helm status --namespace={{ $.Release.Namespace }} {{ $.Release.Name }}
+  $ helm get --namespace={{ $.Release.Namespace }} all {{ $.Release.Name }}
+  $ kubectl get --namespace={{ $.Release.Namespace }} --selector='nvidia.com/dynamo-namespace={{ $.Values.dynamo.name }}' deployments,pods,services,podmonitors
