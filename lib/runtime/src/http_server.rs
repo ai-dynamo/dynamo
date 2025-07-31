@@ -399,7 +399,13 @@ dynamo_system_uptime_seconds{namespace=\"dynamo\"} 42
     #[case("ready", 200, "ready", None, None)]
     #[case("notready", 503, "notready", None, None)]
     #[case("ready", 200, "ready", Some("/custom/health"), Some("/custom/live"))]
-    #[case("notready", 503, "notready", Some("/custom/health"), Some("/custom/live"))]
+    #[case(
+        "notready",
+        503,
+        "notready",
+        Some("/custom/health"),
+        Some("/custom/live")
+    )]
     #[tokio::test]
     #[cfg(feature = "integration")]
     async fn test_health_endpoints(
@@ -421,9 +427,14 @@ dynamo_system_uptime_seconds{namespace=\"dynamo\"} 42
 
         #[allow(clippy::redundant_closure_call)]
         temp_env::async_with_vars(
-            [("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some(starting_health_status)),
-            ("DYN_SYSTEM_HEALTH_PATH", custom_health_path),
-            ("DYN_SYSTEM_LIVE_PATH", custom_live_path)],
+            [
+                (
+                    "DYN_SYSTEM_STARTING_HEALTH_STATUS",
+                    Some(starting_health_status),
+                ),
+                ("DYN_SYSTEM_HEALTH_PATH", custom_health_path),
+                ("DYN_SYSTEM_LIVE_PATH", custom_live_path),
+            ],
             (async || {
                 let runtime = crate::Runtime::from_settings().unwrap();
                 let drt = Arc::new(
@@ -439,7 +450,7 @@ dynamo_system_uptime_seconds{namespace=\"dynamo\"} 42
                 sleep(std::time::Duration::from_millis(1000)).await;
                 println!("[test] Server should be up, starting requests...");
                 let client = reqwest::Client::new();
-                
+
                 // Prepare test cases
                 let mut test_cases = vec![];
                 if custom_health_path.is_none() {
@@ -528,11 +539,11 @@ dynamo_system_uptime_seconds{namespace=\"dynamo\"} 42
                     let mut headers = reqwest::header::HeaderMap::new();
                     headers.insert(
                         reqwest::header::HeaderName::from_static("traceparent"),
-                        reqwest::header::HeaderValue::from_str(traceparent_value).unwrap(),
+                        reqwest::header::HeaderValue::from_str(traceparent_value)?,
                     );
                     headers.insert(
                         reqwest::header::HeaderName::from_static("tracestate"),
-                        reqwest::header::HeaderValue::from_str(tracestate_value).unwrap(),
+                        reqwest::header::HeaderValue::from_str(tracestate_value)?,
                     );
                     let url = format!("http://{}{}", addr, path);
                     let response = client.get(&url).headers(headers).send().await.unwrap();

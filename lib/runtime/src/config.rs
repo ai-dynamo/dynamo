@@ -21,7 +21,6 @@ const DEFAULT_SYSTEM_PORT: u16 = 9090;
 const DEFAULT_SYSTEM_HEALTH_PATH: &str = "/health";
 const DEFAULT_SYSTEM_LIVE_PATH: &str = "/live";
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerConfig {
     /// Grace shutdown period for the system server.
@@ -457,29 +456,34 @@ mod tests {
 
     #[test]
     fn test_system_health_endpoint_path_default() {
-        temp_env::with_vars(
-            vec![("DYN_SYSTEM_HEALTH_PATH", None::<&str>)], || {
+        temp_env::with_vars(vec![("DYN_SYSTEM_HEALTH_PATH", None::<&str>)], || {
             let config = RuntimeConfig::from_settings().unwrap();
-            assert_eq!(config.system_health_path, DEFAULT_SYSTEM_HEALTH_PATH.to_string());
+            assert_eq!(
+                config.system_health_path,
+                DEFAULT_SYSTEM_HEALTH_PATH.to_string()
+            );
         });
 
-        temp_env::with_vars(
-            vec![("DYN_SYSTEM_LIVE_PATH", None::<&str>)], || {
+        temp_env::with_vars(vec![("DYN_SYSTEM_LIVE_PATH", None::<&str>)], || {
             let config = RuntimeConfig::from_settings().unwrap();
-            assert_eq!(config.system_live_path, DEFAULT_SYSTEM_LIVE_PATH.to_string());
+            assert_eq!(
+                config.system_live_path,
+                DEFAULT_SYSTEM_LIVE_PATH.to_string()
+            );
         });
     }
 
     #[test]
     fn test_system_health_endpoint_path_custom() {
         temp_env::with_vars(
-            vec![("DYN_SYSTEM_HEALTH_PATH", Some("/custom/health"))], || {
-            let config = RuntimeConfig::from_settings().unwrap();
-            assert_eq!(config.system_health_path, "/custom/health");
-        });
+            vec![("DYN_SYSTEM_HEALTH_PATH", Some("/custom/health"))],
+            || {
+                let config = RuntimeConfig::from_settings().unwrap();
+                assert_eq!(config.system_health_path, "/custom/health");
+            },
+        );
 
-        temp_env::with_vars(
-            vec![("DYN_SYSTEM_LIVE_PATH", Some("/custom/live"))], || {
+        temp_env::with_vars(vec![("DYN_SYSTEM_LIVE_PATH", Some("/custom/live"))], || {
             let config = RuntimeConfig::from_settings().unwrap();
             assert_eq!(config.system_live_path, "/custom/live");
         });
