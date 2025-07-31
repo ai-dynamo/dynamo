@@ -535,6 +535,7 @@ impl Scheduler {
     //
     // this must tokio spawn and an indpendent task
     fn execute_scheduled_transfer(&mut self, xfer_req: ScheduledTaskController) {
+        debug_assert!(self.slots.contains_key(&xfer_req.request.request_id), "slot not found");
         let completed = self.slots.get(&xfer_req.request.request_id).unwrap().completed.clone();
         tokio::spawn(xfer_req.execute(SchedulingDecision::Execute, completed));
     }
@@ -618,7 +619,7 @@ impl ScheduledTaskController {
         self.decision_tx
             .send((decision, completion_tx))
             .map_err(|_| anyhow::anyhow!(DISCONNECTED_WARNING))?;
-        completion_rx
+        let _ = completion_rx
             .await
             .map_err(|_| anyhow::anyhow!(DISCONNECTED_WARNING))?;
         completed.fetch_add(1, Ordering::Relaxed);
@@ -861,14 +862,14 @@ mod tests {
         };
 
         // transfer arrives first
-        let handle = tokio::spawn(transfer_client.schedule_transfer(request.clone()));
+        let handle = tokio::spawn(transfer_client.schedule_transfer(request));
         scheduler.step().await;
 
         // enqueued_requests should contain <request id, <uuid, and Some(controller)>> since transfer arrived first
         assert_eq!(
             scheduler
                 .enqueued_requests
-                .get(&request.request_id)
+                .get("test")
                 .unwrap()
                 .len(),
             1
@@ -876,7 +877,7 @@ mod tests {
         assert!(matches!(
             scheduler
                 .enqueued_requests
-                .get(&request.request_id)
+                .get("test")
                 .unwrap()
                 .get(&operation_id),
             Some(TransferRequestSource::Transfer(_))
@@ -895,7 +896,7 @@ mod tests {
         };
 
         // worker arrives last
-        worker_client.enqueue_request(request.clone());
+        worker_client.enqueue_request(request);
         scheduler.step().await;
 
         let handle = handle.await.unwrap().unwrap();
@@ -905,12 +906,14 @@ mod tests {
         assert_eq!(
             scheduler
                 .enqueued_requests
-                .get(&request.request_id)
+                .get("test")
                 .unwrap()
                 .len(),
             0
         );
 
+        // wait a bit to make sure the scheduled transfer to complete
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         assert_eq!(
             worker_client
                 .slots
@@ -929,6 +932,9 @@ mod tests {
                 .load(Ordering::Relaxed),
             1
         );
+
+        // make sure all operations are complete
+        assert!(worker_client.slots.get("test").unwrap().is_complete());
     }
 
     #[tokio::test]
@@ -953,14 +959,14 @@ mod tests {
         };
 
         // worker arrives first
-        worker_client.enqueue_request(request.clone());
+        worker_client.enqueue_request(request);
         scheduler.step().await;
 
         // enqueued_requests should contain <request id, <uuid, and None>> since worker arrived first
         assert_eq!(
             scheduler
                 .enqueued_requests
-                .get(&request.request_id)
+                .get("test")
                 .unwrap()
                 .len(),
             1
@@ -968,7 +974,7 @@ mod tests {
         assert!(matches!(
             scheduler
                 .enqueued_requests
-                .get(&request.request_id)
+                .get("test")
                 .unwrap()
                 .get(&operation_id),
             Some(TransferRequestSource::Worker)
@@ -982,7 +988,7 @@ mod tests {
         };
 
         // transfer arrives last
-        let handle = tokio::spawn(transfer_client.schedule_transfer(request.clone()));
+        let handle = tokio::spawn(transfer_client.schedule_transfer(request));
         scheduler.step().await;
         let handle = handle.await.unwrap().unwrap();
         assert_eq!(handle.scheduler_decision(), SchedulingDecision::Execute);
@@ -992,12 +998,14 @@ mod tests {
         assert_eq!(
             scheduler
                 .enqueued_requests
-                .get(&request.request_id)
+                .get("test")
                 .unwrap()
                 .len(),
             0
         );
 
+        // wait a bit to make sure the scheduled transfer to complete
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         assert_eq!(
             worker_client
                 .slots
@@ -1016,6 +1024,9 @@ mod tests {
                 .load(Ordering::Relaxed),
             1
         );
+
+        // make sure all operations are complete
+        assert!(worker_client.slots.get("test").unwrap().is_complete());
     }
 
     #[tokio::test]
