@@ -135,10 +135,14 @@ Grafana is pre-configured with:
 
 ### Troubleshooting
 
-1. Verify services are running:
-  ```bash
-  docker compose ps
-  ```
+The following configuration files should be present in this directory:
+- [docker-compose.yml](../docker-compose.yml): Defines the Prometheus and Grafana services
+- [prometheus.yml](./prometheus.yml): Contains Prometheus scraping configuration
+- [grafana-datasources.yml](./grafana-datasources.yml): Contains Grafana datasource configuration
+- [grafana_dashboards/grafana-dashboard-providers.yml](./grafana_dashboards/grafana-dashboard-providers.yml): Contains Grafana dashboard provider configuration
+- [grafana_dashboards/grafana-dynamo-dashboard.json](./grafana_dashboards/grafana-dynamo-dashboard.json): A general Dynamo Dashboard for both SW and HW metrics.
+- [grafana_dashboards/grafana-dcgm-metrics.json](./grafana_dashboards/grafana-dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
+- [grafana_dashboards/grafana-llm-metrics.json](./grafana_dashboards/grafana-llm-metrics.json): This file, which is being phased out, contains the Grafana dashboard configuration for LLM-specific metrics. It requires an additional `metrics` component to operate concurrently. A new version is under development.
 
 2. Check logs:
   ```bash

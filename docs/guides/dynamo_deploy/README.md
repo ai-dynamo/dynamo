@@ -99,3 +99,9 @@ Additional Resources:
 - [Port Forward Documentation](https://kubernetes.io/docs/tasks/access-application-cluster/port-forward-access-application-cluster/)
 - [Examples Deployment Guide](../../examples/README.md#deploying-a-particular-example)
 
+- Used for manually deploying inference graphs to Kubernetes
+- Contains Helm charts and configurations for deploying individual inference pipelines
+- Provides full control over deployment parameters
+- Requires manual management of infrastructure components
+- Documentation:
+  - [Helm Deployment Guide](../../../deploy/helm/README.md): detailed instructions for manual deployment

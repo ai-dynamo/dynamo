@@ -235,7 +235,7 @@ The [documentation](https://docs.vllm.ai/en/v0.9.2/configuration/serve_args.html
 
 ## Request Migration
 
-You can enable [request migration](../../../docs/architecture/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
+In a Distributed System, a request may fail due to connectivity issues between the Frontend and the Backend.
 
 ```bash
 python3 -m dynamo.vllm ... --migration-limit=3

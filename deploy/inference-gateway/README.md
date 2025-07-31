@@ -20,7 +20,6 @@ Currently, this setup is only kgateway based Inference Gateway.
 
 [See Quickstart Guide](../../docs/guides/dynamo_deploy/quickstart.md) to install Dynamo Cloud.
 
-
 2. **Deploy Inference Gateway**
 
 First, deploy an inference gateway service. In this example, we'll install `kgateway` based gateway implementation.

@@ -265,7 +265,7 @@ Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disag
 
 ## Request Migration
 
-You can enable [request migration](../../../docs/architecture/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
+In a Distributed System, a request may fail due to connectivity issues between the Frontend and the Backend.
 
 ```bash
 python3 -m dynamo.trtllm ... --migration-limit=3
@@ -275,7 +275,7 @@ This allows a request to be migrated up to 3 times before failing. See the [Requ
 
 ## Client
 
-See [client](../llm/README.md#client) section to learn how to send request to the deployment.
+See the [quickstart guide](../../../examples/basics/quickstart/README.md#3-send-requests) to learn how to send request to the deployment.
 
 NOTE: To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
 

@@ -13,7 +13,7 @@ python -m dynamo.llama_cpp --model-path /data/models/Qwen3-0.6B-Q8_0.gguf [args]
 
 ## Request Migration
 
-You can enable [request migration](../../../docs/architecture/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
+In a Distributed System, a request may fail due to connectivity issues between the Frontend and the Backend.
 
 ```bash
 python3 -m dynamo.llama_cpp ... --migration-limit=3

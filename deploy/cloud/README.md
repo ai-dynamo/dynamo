@@ -21,3 +21,6 @@ This directory contains the infrastructure components required for the Dynamo cl
 
 For detailed documentation on setting up and using the Dynamo Cloud Platform, please refer to:
 - [Dynamo Cloud Platform Guide](../../docs/guides/dynamo_deploy/dynamo_cloud.md)
+- [Operator Deployment Guide](../../docs/guides/dynamo_deploy/dynamo_operator.md)
+
+For a quick start example, see [examples/runtime/hello_world/README.md#deployment-to-kubernetes](../../examples/runtime/hello_world/README.md#deployment-to-kubernetes)
