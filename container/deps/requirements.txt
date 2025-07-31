@@ -46,6 +46,7 @@ sentencepiece
 tensorboard==2.19.0
 tensorboardX==2.6.2.2
 transformers
+triton==3.3.1. # 3.4.0 breaks tensorrt-llm 1.0.0rc4
 types-aiofiles
 types-PyYAML
 uvicorn
