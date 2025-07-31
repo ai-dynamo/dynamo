@@ -64,13 +64,10 @@ Use this approach when developing or customizing Dynamo as a contributor, or usi
 
 Ensure you have the source code checked out and are in the `dynamo` directory:
 
-```bash
-cd deploy/cloud/helm/
-```
 
 ### Set Environment Variables
 
-Our examples use the `nvcr.io` but you can setup your own values if you use another docker registry.
+Our examples use the [`nvcr.io`](https://nvcr.io/nvidia/ai-dynamo/) but you can setup your own values if you use another docker registry.
 
 ```bash
 export NAMESPACE=dynamo-cloud # or whatever you prefer.
@@ -98,15 +95,13 @@ docker login <your-registry>
 docker push <your-registry>/dynamo-base:latest-vllm
 ```
 
-[More on image building](../../../../README.md)
-
-
 ### Install Dynamo Cloud
 
 You need to build and push the Dynamo Cloud Operator Image by running
 
 ```bash
-earthly --push +all-docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+cd deploy/cloud/operator
+earthly --push +docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 ```
 
 The  Nvidia Cloud Operator image will be pulled from the `$DOCKER_SERVER/dynamo-operator:$IMAGE_TAG`.
@@ -197,3 +192,4 @@ kubectl create secret generic hf-token-secret \
 ```
 
 Follow the [Examples](../../examples/README.md)
+For more details on how to create your own deployments follow [Create Deployment Guide](create_deployment.md)

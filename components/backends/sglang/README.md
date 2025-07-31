@@ -34,12 +34,12 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | SGLang | Notes |
 |---------|--------|-------|
-| [**Disaggregated Serving**](../../docs/architecture/disagg_serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
-| [**KV-Aware Routing**](../../docs/architecture/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../docs/architecture/sla_planner.md) | ❌ | Planned |
-| [**Load Based Planner**](../../docs/architecture/load_planner.md) | ❌ | Planned |
-| [**KVBM**](../../docs/architecture/kvbm_architecture.md) | ❌ | Planned |
+| [**Disaggregated Serving**](../../../docs/architecture/disagg_serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP [PR](https://github.com/sgl-project/sglang/pull/7730) |
+| [**KV-Aware Routing**](../../../docs/architecture/kv_cache_routing.md) | ✅ |  |
+| [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | ❌ | Planned |
+| [**Load Based Planner**](../../../docs/architecture/load_planner.md) | ❌ | Planned |
+| [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | ❌ | Planned |
 
 ### Large Scale P/D and WideEP Features
 
@@ -56,10 +56,10 @@ Below we provide a guide that lets you run all of our the common deployment patt
 
 ### Start NATS and ETCD in the background
 
-Start using [Docker Compose](../../deploy/metrics/docker-compose.yml)
+Start using [Docker Compose](../../../deploy/docker-compose.yml)
 
 ```bash
-docker compose -f deploy/metrics/docker-compose.yml up -d
+docker compose -f deploy/docker-compose.yml up -d
 ```
 
 ### Build container
@@ -138,6 +138,22 @@ You can use this configuration to test out disaggregated serving with dp attenti
 cd $DYNAMO_ROOT/components/backends/sglang
 ./launch/disagg_dp_attn.sh
 ```
+
+## Request Migration
+
+In a [Distributed System](#distributed-system), a request may fail due to connectivity issues between the Frontend and the Backend.
+
+The Frontend will automatically track which Backends are having connectivity issues with it and avoid routing new requests to the Backends with known connectivity issues.
+
+For ongoing requests, there is a `--migration-limit` flag which can be set on the Backend that tells the Frontend how many times a request can be migrated to another Backend should there be a loss of connectivity to the current Backend.
+
+For example,
+```bash
+python3 -m dynamo.sglang ... --migration-limit=3
+```
+indicates a request to this model may be migrated up to 3 times to another Backend, before failing the request, should the Frontend detects a connectivity issue to the current Backend.
+
+The migrated request will continue responding to the original request, allowing for a seamless transition between Backends, and a reduced overall request failure rate at the Frontend for enhanced user experience.
 
 ## Advanced Examples
 

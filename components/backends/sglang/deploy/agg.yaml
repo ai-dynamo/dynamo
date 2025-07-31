@@ -42,7 +42,7 @@ spec:
           workingDir: /workspace/components/backends/sglang
           command: ["sh", "-c"]
           args:
-            - "python3 -m dynamo.sglang.utils.clear_namespace --namespace dynamo && python3 -m dynamo.frontend"
+            - "python3 -m dynamo.sglang.utils.clear_namespace --namespace sglang-agg && python3 -m dynamo.frontend --http-port=8000"
     SGLangDecodeWorker:
       envFromSecret: hf-token-secret
       livenessProbe:

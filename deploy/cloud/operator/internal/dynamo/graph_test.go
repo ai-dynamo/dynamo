@@ -24,15 +24,18 @@ import (
 	"sort"
 	"testing"
 
+	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	compounaiCommon "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/google/go-cmp/cmp"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func TestGenerateDynamoComponentsDeployments(t *testing.T) {
@@ -88,7 +91,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						},
 					},
 				},
-				ingressSpec: &v1alpha1.IngressSpec{},
 			},
 			want: map[string]*v1alpha1.DynamoComponentDeployment{
 				"service1": {
@@ -197,7 +199,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						},
 					},
 				},
-				ingressSpec: &v1alpha1.IngressSpec{},
 			},
 			want: map[string]*v1alpha1.DynamoComponentDeployment{
 				"service1": {
@@ -306,7 +307,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						},
 					},
 				},
-				ingressSpec: &v1alpha1.IngressSpec{},
 			},
 			want:    nil,
 			wantErr: true,
@@ -387,7 +387,7 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 								commonconsts.KubeLabelDynamoNamespace: "dynamo-test-dynamographdeployment",
 							},
 							Autoscaling: nil,
-							Ingress: v1alpha1.IngressSpec{
+							Ingress: &v1alpha1.IngressSpec{
 								Enabled: true,
 								Host:    "test-dynamographdeployment",
 							},
@@ -607,7 +607,6 @@ func TestGenerateDynamoComponentsDeployments(t *testing.T) {
 						},
 					},
 				},
-				ingressSpec: &v1alpha1.IngressSpec{},
 			},
 			want: map[string]*v1alpha1.DynamoComponentDeployment{
 				"service1": {
@@ -1107,12 +1106,407 @@ func Test_mergeEnvs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := mergeEnvs(tt.args.common, tt.args.specific)
+			got := MergeEnvs(tt.args.common, tt.args.specific)
 			sort.Slice(got, func(i, j int) bool {
 				return got[i].Name < got[j].Name
 			})
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("mergeEnvs() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGenerateGrovePodGangSet(t *testing.T) {
+	type args struct {
+		ctx              context.Context
+		dynamoDeployment *v1alpha1.DynamoGraphDeployment
+		controllerConfig controller_common.Config
+	}
+	tests := []struct {
+		name    string
+		args    args
+		want    *grovev1alpha1.PodGangSet
+		wantErr bool
+	}{
+		{
+			name: "test_generate_grove_pod_gang_set",
+			args: args{
+				ctx: context.Background(),
+				controllerConfig: controller_common.Config{
+					EtcdAddress: "etcd-address",
+					NatsAddress: "nats-address",
+				},
+				dynamoDeployment: &v1alpha1.DynamoGraphDeployment{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-dynamo-graph-deployment",
+						Namespace: "test-namespace",
+					},
+					Spec: v1alpha1.DynamoGraphDeploymentSpec{
+						Envs: []corev1.EnvVar{
+							{
+								Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
+								Value: "1",
+							},
+						},
+						Services: map[string]*v1alpha1.DynamoComponentDeploymentOverridesSpec{
+							"Frontend": {
+								DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+									Replicas: &[]int32{1}[0],
+									Resources: &common.Resources{
+										Requests: &common.ResourceItem{
+											CPU:    "1",
+											Memory: "1Gi",
+										},
+										Limits: &common.ResourceItem{
+											CPU:    "1",
+											Memory: "1Gi",
+											GPU:    "1",
+										},
+									},
+									Envs: []corev1.EnvVar{
+										{
+											Name:  "FRONTEND_ENV_1",
+											Value: "1",
+										},
+									},
+									EnvFromSecret: &[]string{"frontend-secret"}[0],
+									LivenessProbe: &corev1.Probe{
+										ProbeHandler: corev1.ProbeHandler{
+											HTTPGet: &corev1.HTTPGetAction{
+												Path: "/health",
+												Port: intstr.FromInt(8080),
+											},
+										},
+									},
+									ReadinessProbe: &corev1.Probe{
+										ProbeHandler: corev1.ProbeHandler{
+											HTTPGet: &corev1.HTTPGetAction{
+												Path: "/ready",
+												Port: intstr.FromInt(8080),
+											},
+										},
+									},
+									ExtraPodSpec: &common.ExtraPodSpec{
+										MainContainer: &corev1.Container{
+											Command: []string{
+												"/bin/sh",
+												"-c",
+												"echo $FRONTEND_ENV_1",
+											},
+											Args: []string{
+												"--frontend-env-1",
+												"1",
+											},
+											Image: "frontend-image",
+										},
+									},
+								},
+							},
+							"Planner": {
+								DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+									Replicas: &[]int32{2}[0],
+									Resources: &common.Resources{
+										Requests: &common.ResourceItem{
+											CPU:    "2",
+											Memory: "2Gi",
+										},
+										Limits: &common.ResourceItem{
+											CPU:    "2",
+											Memory: "2Gi",
+											GPU:    "2",
+										},
+									},
+									Envs: []corev1.EnvVar{
+										{
+											Name:  "PLANNER_ENV_1",
+											Value: "2",
+										},
+									},
+									PVC: &v1alpha1.PVC{
+										Name:       &[]string{"planner-pvc"}[0],
+										MountPoint: &[]string{"/planner"}[0],
+									},
+									EnvFromSecret: &[]string{"planner-secret"}[0],
+									LivenessProbe: &corev1.Probe{
+										ProbeHandler: corev1.ProbeHandler{
+											HTTPGet: &corev1.HTTPGetAction{
+												Path: "/health",
+												Port: intstr.FromInt(8080),
+											},
+										},
+									},
+									ReadinessProbe: &corev1.Probe{
+										ProbeHandler: corev1.ProbeHandler{
+											HTTPGet: &corev1.HTTPGetAction{
+												Path: "/ready",
+												Port: intstr.FromInt(8080),
+											},
+										},
+									},
+									ExtraPodSpec: &common.ExtraPodSpec{
+										MainContainer: &corev1.Container{
+											Command: []string{
+												"/bin/sh",
+												"-c",
+												"echo $PLANNER_ENV_1",
+											},
+											Args: []string{
+												"--planner-env-1",
+												"1",
+											},
+											Image: "planner-image",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			want: &grovev1alpha1.PodGangSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-dynamo-graph-deployment",
+					Namespace: "test-namespace",
+				},
+				Spec: grovev1alpha1.PodGangSetSpec{
+					Replicas: 1,
+					Template: grovev1alpha1.PodGangSetTemplateSpec{
+						Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
+							{
+								Name: "frontend",
+								Labels: map[string]string{
+									commonconsts.KubeLabelDynamoSelector: "test-dynamo-graph-deployment-frontend",
+								},
+								Spec: grovev1alpha1.PodCliqueSpec{
+									RoleName: "frontend",
+									Replicas: 1,
+									PodSpec: corev1.PodSpec{
+										ImagePullSecrets: []corev1.LocalObjectReference{},
+										Containers: []corev1.Container{
+											{
+												Name:  "main",
+												Image: "frontend-image",
+												Command: []string{
+													"/bin/sh",
+													"-c",
+													"echo $FRONTEND_ENV_1",
+												},
+												Args: []string{
+													"--frontend-env-1",
+													"1",
+												},
+												EnvFrom: []corev1.EnvFromSource{
+													{
+														SecretRef: &corev1.SecretEnvSource{
+															LocalObjectReference: corev1.LocalObjectReference{
+																Name: "frontend-secret",
+															},
+														},
+													},
+												},
+												LivenessProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/health",
+															Port: intstr.FromInt(8080),
+														},
+													},
+												},
+												ReadinessProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/ready",
+															Port: intstr.FromInt(8080),
+														},
+													},
+												},
+												Env: []corev1.EnvVar{
+													{
+														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
+														Value: "1",
+													},
+													{
+														Name:  "FRONTEND_ENV_1",
+														Value: "1",
+													},
+													{
+														Name:  "DYNAMO_PORT",
+														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+													},
+													{
+														Name:  "NATS_SERVER",
+														Value: "nats-address",
+													},
+													{
+														Name:  "ETCD_ENDPOINTS",
+														Value: "etcd-address",
+													},
+												},
+												Resources: corev1.ResourceRequirements{
+													Requests: corev1.ResourceList{
+														corev1.ResourceCPU:    resource.MustParse("1"),
+														corev1.ResourceMemory: resource.MustParse("1Gi"),
+													},
+													Limits: corev1.ResourceList{
+														corev1.ResourceCPU:                    resource.MustParse("1"),
+														corev1.ResourceMemory:                 resource.MustParse("1Gi"),
+														corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
+													},
+												},
+												Ports: []corev1.ContainerPort{
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoContainerPortName,
+														ContainerPort: int32(commonconsts.DynamoServicePort),
+													},
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoHealthPortName,
+														ContainerPort: int32(commonconsts.DynamoHealthPort),
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+							{
+								Name: "planner",
+								Labels: map[string]string{
+									commonconsts.KubeLabelDynamoSelector: "test-dynamo-graph-deployment-planner",
+								},
+								Spec: grovev1alpha1.PodCliqueSpec{
+									RoleName: "planner",
+									Replicas: 2,
+									PodSpec: corev1.PodSpec{
+										ImagePullSecrets: []corev1.LocalObjectReference{},
+										Volumes: []corev1.Volume{
+											{
+												Name: "planner-pvc",
+												VolumeSource: corev1.VolumeSource{
+													PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+														ClaimName: "planner-pvc",
+													},
+												},
+											},
+										},
+										Containers: []corev1.Container{
+											{
+												Name:  "main",
+												Image: "planner-image",
+												Command: []string{
+													"/bin/sh",
+													"-c",
+													"echo $PLANNER_ENV_1",
+												},
+												Args: []string{
+													"--planner-env-1",
+													"1",
+												},
+												EnvFrom: []corev1.EnvFromSource{
+													{
+														SecretRef: &corev1.SecretEnvSource{
+															LocalObjectReference: corev1.LocalObjectReference{
+																Name: "planner-secret",
+															},
+														},
+													},
+												},
+												LivenessProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/health",
+															Port: intstr.FromInt(8080),
+														},
+													},
+												},
+												ReadinessProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/ready",
+															Port: intstr.FromInt(8080),
+														},
+													},
+												},
+												Env: []corev1.EnvVar{
+													{
+														Name:  "DYNAMO_POD_GANG_SET_REPLICAS",
+														Value: "1",
+													},
+													{
+														Name:  "PLANNER_ENV_1",
+														Value: "2",
+													},
+													{
+														Name:  "DYNAMO_PORT",
+														Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+													},
+													{
+														Name:  "NATS_SERVER",
+														Value: "nats-address",
+													},
+													{
+														Name:  "ETCD_ENDPOINTS",
+														Value: "etcd-address",
+													},
+												},
+												Resources: corev1.ResourceRequirements{
+													Requests: corev1.ResourceList{
+														corev1.ResourceCPU:    resource.MustParse("2"),
+														corev1.ResourceMemory: resource.MustParse("2Gi"),
+													},
+													Limits: corev1.ResourceList{
+														corev1.ResourceCPU:                    resource.MustParse("2"),
+														corev1.ResourceMemory:                 resource.MustParse("2Gi"),
+														corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
+													},
+												},
+												VolumeMounts: []corev1.VolumeMount{
+													{
+														Name:      "planner-pvc",
+														MountPath: "/planner",
+													},
+												},
+												Ports: []corev1.ContainerPort{
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoContainerPortName,
+														ContainerPort: int32(commonconsts.DynamoServicePort),
+													},
+													{
+														Protocol:      corev1.ProtocolTCP,
+														Name:          commonconsts.DynamoHealthPortName,
+														ContainerPort: int32(commonconsts.DynamoHealthPort),
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := GenerateGrovePodGangSet(tt.args.ctx, tt.args.dynamoDeployment, tt.args.controllerConfig, nil)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("GenerateGrovePodGangSet() error = %v, wantErr %v", err, tt.wantErr)
+				return
+			}
+			sort.Slice(got.Spec.Template.Cliques, func(i, j int) bool {
+				return got.Spec.Template.Cliques[i].Name < got.Spec.Template.Cliques[j].Name
+			})
+			sort.Slice(tt.want.Spec.Template.Cliques, func(i, j int) bool {
+				return tt.want.Spec.Template.Cliques[i].Name < tt.want.Spec.Template.Cliques[j].Name
+			})
+			if diff := cmp.Diff(got, tt.want); diff != "" {
+				t.Errorf("GenerateGrovePodGangSet() mismatch (-want +got):\n%s", diff)
 			}
 		})
 	}
