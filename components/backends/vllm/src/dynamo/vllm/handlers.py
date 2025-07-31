@@ -20,6 +20,11 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
+class EngineShutdownError(Exception):
+    """Raised when the engine is shut down during token generation."""
+    pass
+
+
 class BaseWorkerHandler(ABC):
     """
     Request handler for the generate and clear_kv_blocks endpoints.
@@ -50,28 +55,32 @@ class BaseWorkerHandler(ABC):
         gen = self.engine_client.generate(prompt, sampling_params, request_id)
 
         num_output_tokens_so_far = 0
-        async for res in gen:
-            # res is vllm's RequestOutput
+        try:
+            async for res in gen:
+                # res is vllm's RequestOutput
 
-            # This is the expected way for a request to end.
-            # The new token ID will be eos, don't forward it.
-            if res.finished:
-                yield {"finish_reason": "stop", "token_ids": []}
-                break
+                # This is the expected way for a request to end.
+                # The new token ID will be eos, don't forward it.
+                if res.finished:
+                    yield {"finish_reason": "stop", "token_ids": []}
+                    break
 
-            if not res.outputs:
-                yield {"finish_reason": "error", "token_ids": []}
-                break
+                if not res.outputs:
+                    yield {"finish_reason": "error", "token_ids": []}
+                    break
 
-            output = res.outputs[0]
-            next_total_toks = len(output.token_ids)
-            out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
-            if output.finish_reason:
-                out["finish_reason"] = output.finish_reason
-            if output.stop_reason:
-                out["stop_reason"] = output.stop_reason
-            yield out
-            num_output_tokens_so_far = next_total_toks
+                output = res.outputs[0]
+                next_total_toks = len(output.token_ids)
+                out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+                if output.finish_reason:
+                    out["finish_reason"] = output.finish_reason
+                if output.stop_reason:
+                    out["stop_reason"] = output.stop_reason
+                yield out
+                num_output_tokens_so_far = next_total_toks
+        except asyncio.CancelledError:
+            # Convert CancelledError to EngineShutdownError when the engine is shut down
+            raise EngineShutdownError("Engine was shut down during token generation") from None
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
@@ -154,8 +163,12 @@ class DecodeWorkerHandler(BaseWorkerHandler):
                     "kv_transfer_params"
                 ] = prefill_response.kv_transfer_params
 
-        async for tok in self.generate_tokens(prompt, sampling_params, request_id):
-            yield tok
+        try:
+            async for tok in self.generate_tokens(prompt, sampling_params, request_id):
+                yield tok
+        except EngineShutdownError:
+            # Re-raise EngineShutdownError to propagate the shutdown signal
+            raise
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
@@ -170,15 +183,19 @@ class PrefillWorkerHandler(BaseWorkerHandler):
         gen = self.engine_client.generate(prompt, sampling_params, request_id)
 
         # Generate only 1 token in prefill
-        async for res in gen:
-            logger.debug(f"kv transfer params: {res.kv_transfer_params}")
-            yield MyRequestOutput(
-                request_id=res.request_id,
-                prompt=res.prompt,
-                prompt_token_ids=res.prompt_token_ids,
-                prompt_logprobs=res.prompt_logprobs,
-                outputs=res.outputs,
-                finished=res.finished,
-                metrics=res.metrics,
-                kv_transfer_params=res.kv_transfer_params,
-            ).model_dump_json()
+        try:
+            async for res in gen:
+                logger.debug(f"kv transfer params: {res.kv_transfer_params}")
+                yield MyRequestOutput(
+                    request_id=res.request_id,
+                    prompt=res.prompt,
+                    prompt_token_ids=res.prompt_token_ids,
+                    prompt_logprobs=res.prompt_logprobs,
+                    outputs=res.outputs,
+                    finished=res.finished,
+                    metrics=res.metrics,
+                    kv_transfer_params=res.kv_transfer_params,
+                ).model_dump_json()
+        except asyncio.CancelledError:
+            # Convert CancelledError to EngineShutdownError when the engine is shut down
+            raise EngineShutdownError("Engine was shut down during token generation") from None

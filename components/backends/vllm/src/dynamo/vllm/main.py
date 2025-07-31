@@ -113,7 +113,11 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     try:
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(handler.generate),
+            # for prefill, we want to shutdown the engine after all prefill requests are finished because
+            #     (temp reason): we don't support re-routing prefill requests
+            #     (long-term reason): prefill engine should pull from a global queue so there is 
+            #                         only a few in-flight requests that can be quickly finished 
+            generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=True),
             clear_endpoint.serve_endpoint(handler.clear_kv_blocks),
         )
     except Exception as e:
@@ -142,6 +146,9 @@ async def init(runtime: DistributedRuntime, config: Config):
     )
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+        print(f"Migration limit: {config.migration_limit}")
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         await register_llm(
             ModelType.Backend,
             generate_endpoint,
@@ -188,7 +195,9 @@ async def init(runtime: DistributedRuntime, config: Config):
 
     try:
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(handler.generate),
+            # for decode, we want to transfer the in-flight requests to other decode engines,
+            # because graceful shutting down can take a long time for long OSLs
+            generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=False),
             clear_endpoint.serve_endpoint(handler.clear_kv_blocks),
         )
     except Exception as e:
