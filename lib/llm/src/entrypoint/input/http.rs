@@ -20,29 +20,30 @@ use dynamo_runtime::{DistributedRuntime, Runtime};
 
 /// Build and run an HTTP service
 pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Result<()> {
+    let all_workers_busy_rejection_time_window = engine_config
+        .local_model()
+        .all_workers_busy_rejection_time_window();
     let http_service = service_v2::HttpService::builder()
         .port(engine_config.local_model().http_port())
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
         .enable_embeddings_endpoints(true)
         .with_request_template(engine_config.local_model().request_template())
-        .with_all_workers_busy_rejection_time_window(
-            engine_config
-                .local_model()
-                .all_workers_busy_rejection_time_window(),
-        )
+        .with_all_workers_busy_rejection_time_window(all_workers_busy_rejection_time_window)
         .build()?;
     match engine_config {
         EngineConfig::Dynamic(_) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
             let rate_limiter = http_service.rate_limiter_clone();
-            if let Err(e) = start_rate_limiter_monitoring(
-                &distributed_runtime,
-                &engine_config,
-                &rate_limiter,
-                runtime.primary_token(),
-            ) {
-                tracing::error!(%e, "failed to start rate limiter monitoring");
+            if all_workers_busy_rejection_time_window.is_some() {
+                if let Err(e) = start_rate_limiter_monitoring(
+                    &distributed_runtime,
+                    &engine_config,
+                    &rate_limiter,
+                    runtime.primary_token(),
+                ) {
+                    tracing::error!(%e, "failed to start rate limiter monitoring");
+                }
             }
             match distributed_runtime.etcd_client() {
                 Some(etcd_client) => {

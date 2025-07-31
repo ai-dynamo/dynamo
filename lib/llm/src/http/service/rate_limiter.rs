@@ -163,6 +163,11 @@ impl HttpServiceRateLimiter {
         namespace: Namespace,
         cancellation_token: CancellationToken,
     ) -> Result<()> {
+        if !self.is_enabled {
+            tracing::warn!("Rate limiter is disabled, skipping monitoring");
+            return Ok(());
+        }
+
         let rate_limit_duration = { self.rate_limit_state.read().unwrap().rate_limit_duration };
         let rate_limiter = self.rate_limit_state.clone();
 

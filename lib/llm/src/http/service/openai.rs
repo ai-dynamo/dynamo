@@ -88,12 +88,12 @@ impl ErrorMessage {
         )
     }
 
-    /// Too many requests error
+    /// Service Unavailable Error
     /// Return this error when the service is overloaded.
     /// The client should retry after a short delay.
-    pub fn too_many_requests_error(msg: &str) -> ErrorResponse {
+    pub fn service_unavailable_error(msg: &str) -> ErrorResponse {
         (
-            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::SERVICE_UNAVAILABLE,
             Json(ErrorMessage {
                 error: msg.to_string(),
             }),
@@ -179,7 +179,9 @@ fn check_rate_limited(
         state
             .metrics_clone()
             .inc_rate_limited_requests_count(model, endpoint, request_type);
-        return Err(ErrorMessage::too_many_requests_error("Rate limit exceeded"));
+        return Err(ErrorMessage::service_unavailable_error(
+            "Service is overloaded, try again later.",
+        ));
     }
     Ok(())
 }

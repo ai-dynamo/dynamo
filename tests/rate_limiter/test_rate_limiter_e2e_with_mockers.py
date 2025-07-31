@@ -53,6 +53,10 @@ class RateLimitTestFrontend(ManagedProcess):
             str(max_queue_depth),
         ]
 
+        # Force fixed namespace for coordination
+        env = os.environ.copy()
+        env["DYN_NAMESPACE"] = "test-namespace"
+
         super().__init__(
             command=command,
             timeout=60,
@@ -184,7 +188,7 @@ async def test_rate_limiter_e2e(request, runtime_services):
 
         # Start mocker processes
         for i in range(NUM_MOCKERS):
-            endpoint = f"dyn://test-namespace.mocker-{i}.generate"
+            endpoint = "dyn://test-namespace.mocker.generate"
             logger.info(f"Starting mocker instance {i} on endpoint {endpoint}")
 
             mocker = MockerProcess(request, endpoint, mocker_args_file)
