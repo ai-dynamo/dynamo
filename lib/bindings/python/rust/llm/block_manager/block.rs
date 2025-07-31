@@ -17,6 +17,7 @@
 
 use super::*;
 use dynamo_llm::block_manager::block::BlockDataExt;
+use dynamo_llm::block_manager::block::BlockDataProviderMut;
 use pyo3::{
     types::{PyList, PyTuple},
     PyObject, PyResult, Python,
@@ -27,12 +28,14 @@ pub enum BlockType {
     Pinned(
         dynamo_llm::block_manager::block::MutableBlock<
             dynamo_llm::block_manager::storage::PinnedStorage,
+            dynamo_llm::block_manager::block::locality::Local,
             dynamo_llm::block_manager::block::BasicMetadata,
         >,
     ),
     Device(
         dynamo_llm::block_manager::block::MutableBlock<
             dynamo_llm::block_manager::storage::DeviceStorage,
+            dynamo_llm::block_manager::block::locality::Local,
             dynamo_llm::block_manager::block::BasicMetadata,
         >,
     ),
@@ -56,8 +59,8 @@ impl Block {
     ) -> Self {
         Self {
             inner: block,
-            dtype: dtype,
-            device_id: device_id,
+            dtype,
+            device_id,
             py_itr_idx: 0,
         }
     }
@@ -77,12 +80,7 @@ impl Block {
     fn to_list<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyList>> {
         let layers: Vec<layer::Layer> = (0..self.num_layers())
             .map(|layer_idx| {
-                layer::Layer::from_rust(
-                    self.inner.clone(),
-                    layer_idx,
-                    self.dtype.clone(),
-                    self.device_id,
-                )
+                layer::Layer::from_rust(self.inner.clone(), layer_idx, self.dtype, self.device_id)
             })
             .collect();
         PyList::new(py, layers)
@@ -100,12 +98,7 @@ impl Block {
                 index, num_layers
             )));
         }
-        let layer = layer::Layer::from_rust(
-            self.inner.clone(),
-            index,
-            self.dtype.clone(),
-            self.device_id,
-        );
+        let layer = layer::Layer::from_rust(self.inner.clone(), index, self.dtype, self.device_id);
         Ok(layer)
     }
 
@@ -125,7 +118,7 @@ impl Block {
         let layer = layer::Layer::from_rust(
             self.inner.clone(),
             self.py_itr_idx,
-            self.dtype.clone(),
+            self.dtype,
             self.device_id,
         );
         self.py_itr_idx += 1;
@@ -174,11 +167,15 @@ impl Block {
             let mut mutable_block = self.inner.lock().unwrap();
             ptr = match &mut *mutable_block {
                 BlockType::Pinned(block) => {
-                    let mut block_view_mut = block.block_view_mut().map_err(to_pyerr)?;
+                    use dynamo_llm::block_manager::block::private::PrivateToken;
+                    let block_data = block.block_data_mut(PrivateToken);
+                    let mut block_view_mut = block_data.block_view_mut().map_err(to_pyerr)?;
                     (unsafe { block_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
                 }
                 BlockType::Device(block) => {
-                    let mut block_view_mut = block.block_view_mut().map_err(to_pyerr)?;
+                    use dynamo_llm::block_manager::block::private::PrivateToken;
+                    let block_data = block.block_data_mut(PrivateToken);
+                    let mut block_view_mut = block_data.block_view_mut().map_err(to_pyerr)?;
                     (unsafe { block_view_mut.as_mut_ptr() }) as *mut std::ffi::c_void
                 }
             };
@@ -206,7 +203,7 @@ impl Block {
             self.inner.clone(),
             ptr,
             vec![num_blocks, num_layers, num_outer_dims, page_size, inner_dim],
-            self.dtype.clone(),
+            self.dtype,
             self.device_id,
         )
     }
