@@ -5,12 +5,14 @@ This directory contains configuration for visualizing metrics from the metrics a
 > [!NOTE]
 > For detailed information about Dynamo's metrics system, including hierarchical metrics, automatic labeling, and usage examples, see the [Metrics Guide](../../docs/guides/metrics.md).
 
-## Components
+## Overview
+
+### Components
 
 - **Prometheus Server**: Collects and stores metrics from Dynamo services and other components.
 - **Grafana**: Provides dashboards by querying the Prometheus Server.
 
-## Topology
+### Topology
 
 Default Service Relationship Diagram:
 ```mermaid
@@ -32,17 +34,63 @@ The dcgm-exporter service in the Docker Compose network is configured to use por
 
 As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build containers with `--framework VLLM` or `--framework TENSORRTLLM`.
 
+### Available Metrics
+
+#### Component Metrics
+
+The core Dynamo backend system automatically exposes metrics with the `dynamo_component_*` prefix for all components that use the `DistributedRuntime` framework:
+
+- `dynamo_component_concurrent_requests`: Requests currently being processed (gauge)
+- `dynamo_component_request_bytes_total`: Total bytes received in requests (counter)
+- `dynamo_component_request_duration_seconds`: Request processing time (histogram)
+- `dynamo_component_requests_total`: Total requests processed (counter)
+- `dynamo_component_response_bytes_total`: Total bytes sent in responses (counter)
+- `dynamo_component_system_uptime_seconds`: DistributedRuntime uptime (gauge)
+
+#### Specialized Component Metrics
+
+Some components expose additional metrics specific to their functionality:
+
+- `dynamo_preprocessor_*`: Metrics specific to preprocessor components
+
+#### Frontend Metrics
+
+When using Dynamo HTTP Frontend (`--framework VLLM` or `--framework TENSORRTLLM`), these metrics are automatically exposed with the `dynamo_frontend_*` prefix and include `model` labels containing the model name:
+
+- `dynamo_frontend_inflight_requests`: Inflight requests (gauge)
+- `dynamo_frontend_input_sequence_tokens`: Input sequence length (histogram)
+- `dynamo_frontend_inter_token_latency_seconds`: Inter-token latency (histogram)
+- `dynamo_frontend_output_sequence_tokens`: Output sequence length (histogram)
+- `dynamo_frontend_request_duration_seconds`: LLM request duration (histogram)
+- `dynamo_frontend_requests_total`: Total LLM requests (counter)
+- `dynamo_frontend_time_to_first_token_seconds`: Time to first token (histogram)
+
+### Required Files
+
+The following configuration files should be present in this directory:
+- [docker-compose.yml](./docker-compose.yml): Defines the Prometheus and Grafana services
+- [prometheus.yml](./prometheus.yml): Contains Prometheus scraping configuration
+- [grafana-datasources.yml](./grafana-datasources.yml): Contains Grafana datasource configuration
+- [grafana_dashboards/grafana-dashboard-providers.yml](./grafana_dashboards/grafana-dashboard-providers.yml): Contains Grafana dashboard provider configuration
+- [grafana_dashboards/grafana-dynamo-dashboard.json](./grafana_dashboards/grafana-dynamo-dashboard.json): A general Dynamo Dashboard for both SW and HW metrics.
+- [grafana_dashboards/grafana-dcgm-metrics.json](./grafana_dashboards/grafana-dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
+- [grafana_dashboards/grafana-llm-metrics.json](./grafana_dashboards/grafana-llm-metrics.json): This file, which is being phased out, contains the Grafana dashboard configuration for LLM-specific metrics. It requires an additional `metrics` component to operate concurrently. A new version is under development.
+
 ## Getting Started
+
+### Prerequisites
 
 1. Make sure Docker and Docker Compose are installed on your system
 
-2. Start Dynamo dependencies. Assume you're at the root dynamo path:
+### Quick Start
+
+1. Start Dynamo dependencies. Assume you're at the root dynamo path:
 
    ```bash
    # Start the basic services (etcd & natsd), along with Prometheus and Grafana
    docker compose -f deploy/docker-compose.yml --profile metrics up -d
 
-   # Minimum components for Dynamo: etcd/nats/dcgm-exporter
+   # Minimum components for Dynamo (will not have Prometheus and Grafana): etcd/nats/dcgm-exporter
    docker compose -f deploy/docker-compose.yml up -d
    ```
 
@@ -51,7 +99,7 @@ As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build container
    export CUDA_VISIBLE_DEVICES=0,2
    ```
 
-3. Web servers started. The ones that end in /metrics are in Prometheus format:
+2. Web servers started. The ones that end in /metrics are in Prometheus format:
    - Grafana: `http://localhost:3001` (default login: dynamo/dynamo)
    - Prometheus Server: `http://localhost:9090`
    - NATS Server: `http://localhost:8222` (monitoring endpoints: /varz, /healthz, etc.)
@@ -59,15 +107,14 @@ As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build container
    - etcd Server: `http://localhost:2379/metrics`
    - DCGM Exporter: `http://localhost:9401/metrics`
 
-4. Optionally, if you want to experiment further, look through [components/metrics/README.md](../../components/metrics/README.md) for more details on launching a metrics server (subscribes to nats), mock_worker (publishes to nats), and real workers.
 
    - Start the [components/metrics](../../components/metrics/README.md) application to begin monitoring for metric events from dynamo workers and aggregating them on a Prometheus metrics endpoint: `http://localhost:9091/metrics`.
    - Uncomment the appropriate lines in prometheus.yml to poll port 9091.
    - Start worker(s) that publishes KV Cache metrics: [lib/runtime/examples/service_metrics/README.md](../../lib/runtime/examples/service_metrics/README.md) can populate dummy KV Cache metrics.
 
-## Configuration
+### Configuration
 
-### Prometheus
+#### Prometheus
 
 The Prometheus configuration is specified in [prometheus.yml](./prometheus.yml). This file is set up to collect metrics from the metrics aggregation service endpoint.
 
@@ -79,25 +126,29 @@ After making changes to prometheus.yml, it is necessary to reload the configurat
 docker compose -f deploy/docker-compose.yml up prometheus -d --force-recreate
 ```
 
-### Grafana
+#### Grafana
 
 Grafana is pre-configured with:
 - Prometheus datasource
 - Sample dashboard for visualizing service metrics
 ![grafana image](./grafana-dynamo-composite.png)
 
-## Required Files
+### Troubleshooting
 
-The following configuration files should be present in this directory:
-- [docker-compose.yml](./docker-compose.yml): Defines the Prometheus and Grafana services
-- [prometheus.yml](./prometheus.yml): Contains Prometheus scraping configuration
-- [grafana-datasources.yml](./grafana-datasources.yml): Contains Grafana datasource configuration
-- [grafana_dashboards/grafana-dashboard-providers.yml](./grafana_dashboards/grafana-dashboard-providers.yml): Contains Grafana dashboard provider configuration
-- [grafana_dashboards/grafana-dynamo-dashboard.json](./grafana_dashboards/grafana-dynamo-dashboard.json): A general Dynamo Dashboard for both SW and HW metrics.
-- [grafana_dashboards/grafana-dcgm-metrics.json](./grafana_dashboards/grafana-dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
-- [grafana_dashboards/grafana-llm-metrics.json](./grafana_dashboards/grafana-llm-metrics.json): This file, which is being phased out, contains the Grafana dashboard configuration for LLM-specific metrics. It requires an additional `metrics` component to operate concurrently. A new version is under development.
+1. Verify services are running:
+  ```bash
+  docker compose ps
+  ```
 
-## Implementation Examples
+2. Check logs:
+  ```bash
+  docker compose logs prometheus
+  docker compose logs grafana
+  ```
+
+3. For issues with the legacy metrics component (being phased out), see [components/metrics/README.md](../../components/metrics/README.md) for details on the exposed metrics and troubleshooting steps.
+
+## Developer Guide
 
 ### Creating Metrics at Different Hierarchy Levels
 
