@@ -15,6 +15,7 @@ trap cleanup EXIT INT TERM
 python3 -m dynamo.sglang.utils.clear_namespace --namespace dynamo
 
 # run ingress
+# run ingress
 python -m dynamo.frontend --router-mode kv --http-port=8000 &
 DYNAMO_PID=$!
 
