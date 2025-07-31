@@ -238,6 +238,7 @@ pub struct VllmConnectorSlot {
     /// use this to issue [`LocalTransferRequest`]s to the transfer engine
     xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
 
+    rt: tokio::runtime::Runtime,
 }
 
 impl VllmConnectorSlot {
@@ -260,6 +261,11 @@ impl VllmConnectorSlot {
 
         // spawn a task to handle the transfer requests
         // use critical task pattern
+        let rt = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(1)
+                .enable_all()
+                .build()
+                .unwrap();
 
         let xfer_engine_task = CriticalTaskExecutionHandle::new_with_runtime(
             |cancellation_token| async move {
@@ -267,9 +273,11 @@ impl VllmConnectorSlot {
             },
             system_cancellation_token,
             "LocalTransferEngine",
-            &leader.drt().rt().primary(),
+            &rt.handle(),
         ).unwrap();
         xfer_engine_task.detach();
+
+        tracing::info!("LocalTransferEngine task detached successfully");
 
         Self {
             request_id,
@@ -278,6 +286,7 @@ impl VllmConnectorSlot {
             block_size,
             leader,
             xfer_tx,
+            rt,
 
             // default values
             state: SlotState::Initialized,
@@ -318,6 +327,25 @@ impl Slot for VllmConnectorSlot {
 
     fn mark_as_prefilling(&mut self, iteration: u64) -> Result<(), SlotError> {
         self.state = SlotState::Prefilling;
+
+        let token_blocks = self.sequence.blocks().to_vec();
+        let mut block_ids: Vec<_> = self.mutable.iter().map(|b| *b).collect();
+        block_ids.truncate(token_blocks.len());
+
+        let local_offload_req = LocalOffloadRequest {
+            request_id: self.request_id.clone(),
+            block_ids,
+            token_blocks,
+            operation_id: uuid::Uuid::new_v4(),
+        };
+
+        let xfer_req = LocalTransferRequest::Offload(local_offload_req.clone());
+        tracing::warn!("local_offload_req: {:?}", local_offload_req);
+
+        if let Err(e) = self.xfer_tx.send(xfer_req) {
+            tracing::error!("Failed to send transfer request: {:?}", e);
+            return Err(SlotError::InvalidOperation(format!("Transfer engine unavailable: {}", e)));
+        }
 
         Ok(())
     }
@@ -571,10 +599,12 @@ impl ExternallyManagedDeviceSlot for VllmConnectorSlot {
     }
 }
 
+#[derive(Debug, Clone)]
 enum LocalTransferRequest {
     Offload(LocalOffloadRequest),
 }
 
+#[derive(Debug, Clone)]
 struct LocalOffloadRequest {
     request_id: String,
     block_ids: Vec<BlockId>,
