@@ -33,7 +33,6 @@ class BaseWorkerHandler(ABC):
 
     async def flush_cache(self, request: dict):
         """Flush KV cache for each worker"""
-
         _ = request
         await self.engine.tokenizer_manager.flush_cache()
         yield True
