@@ -96,7 +96,7 @@ TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.tensorrt_llm to use the ai-dynamo[trtllm] package.
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.0.0rc0"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.0.0rc4"
 TENSORRTLLM_PIP_WHEEL=""
 
 
