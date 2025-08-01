@@ -250,7 +250,9 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
     uv pip install --requirement /tmp/requirements.txt
 
-RUN uv pip install ai-dynamo nixl --find-links wheelhouse
+RUN uv pip install /workspace/wheelhouse/ai_dynamo_runtime*cp312*.whl && \
+    uv pip install /workspace/wheelhouse/ai_dynamo*any.whl && \
+    uv pip install /workspace/wheelhouse/nixl/nixl*.whl
 
 RUN uv pip install /workspace/benchmarks
 
