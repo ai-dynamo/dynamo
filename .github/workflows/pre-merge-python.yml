@@ -53,7 +53,7 @@ jobs:
       - name: Start services with docker-compose
         working-directory: ./deploy
         run: |
-          docker-compose up -d nats-server etcd-server
+          docker compose up -d nats-server etcd-server
           # Wait for services to be ready
           sleep 15
       - name: Run Rust Integration Tests
@@ -63,7 +63,7 @@ jobs:
         if: always()
         working-directory: ./deploy
         run: |
-          docker-compose down
+          docker compose down
       - name: Run pytest
         env:
           PYTEST_MARKS: "pre_merge or mypy"
