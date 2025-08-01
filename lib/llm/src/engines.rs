@@ -149,7 +149,7 @@ impl<E> EngineDispatcher<E> {
 
 /// Trait on request types that allows us to validate the data
 pub trait ValidateRequest {
-    fn validate(&self) -> Result<(), anyhow::Error>;
+    fn validate_fields(&self) -> Result<(), anyhow::Error>;
 }
 
 /// Trait that allows handling both completion and chat completions requests
@@ -297,7 +297,7 @@ where
         let (request, context) = incoming_request.into_parts();
 
         // Validate the request first
-        if let Err(validation_error) = request.validate() {
+        if let Err(validation_error) = request.validate_fields() {
             return Err(anyhow::anyhow!("Validation failed: {}", validation_error));
         }
 
@@ -419,5 +419,196 @@ impl
         req: SingleIn<NvCreateChatCompletionRequest>,
     ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
         self.0.handle_chat(req).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
+    use crate::protocols::openai::completions::NvCreateCompletionRequest;
+    use async_openai::types::{
+        ChatCompletionRequestMessage, CreateChatCompletionRequestArgs, CreateCompletionRequestArgs,
+    };
+    use dynamo_runtime::pipeline::{Error, ManyOut, SingleIn};
+
+    struct MockEngine;
+
+    #[async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<NvCreateCompletionRequest>,
+            ManyOut<Annotated<NvCreateCompletionResponse>>,
+            Error,
+        > for MockEngine
+    {
+        async fn generate(
+            &self,
+            incoming_request: SingleIn<NvCreateCompletionRequest>,
+        ) -> Result<ManyOut<Annotated<NvCreateCompletionResponse>>, Error> {
+            let (_, context) = incoming_request.into_parts();
+            let ctx = context.context();
+            let output = stream! {
+                yield Annotated::from_data(
+                    NvCreateCompletionResponse {
+                        inner: async_openai::types::CreateCompletionResponse {
+                            id: "test".to_string(),
+                            object: "text_completion".to_string(),
+                            created: 0,
+                            model: "test".to_string(),
+                            choices: vec![],
+                            usage: None,
+                            system_fingerprint: None,
+                        }
+                    }
+                );
+            };
+            Ok(ResponseStream::new(Box::pin(output), ctx))
+        }
+    }
+
+    #[async_trait]
+    impl
+        AsyncEngine<
+            SingleIn<NvCreateChatCompletionRequest>,
+            ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>,
+            Error,
+        > for MockEngine
+    {
+        async fn generate(
+            &self,
+            incoming_request: SingleIn<NvCreateChatCompletionRequest>,
+        ) -> Result<ManyOut<Annotated<NvCreateChatCompletionStreamResponse>>, Error> {
+            let (_, context) = incoming_request.into_parts();
+            let ctx = context.context();
+            let output = stream! {
+                yield Annotated::from_data(
+                    NvCreateChatCompletionStreamResponse {
+                        inner: async_openai::types::CreateChatCompletionStreamResponse {
+                            id: "test".to_string(),
+                            object: "chat.completion.chunk".to_string(),
+                            created: 0,
+                            model: "test".to_string(),
+                            choices: vec![],
+                            usage: None,
+                            service_tier: None,
+                            system_fingerprint: None,
+                        }
+                    }
+                );
+            };
+            Ok(ResponseStream::new(Box::pin(output), ctx))
+        }
+    }
+
+    #[tokio::test]
+    async fn test_validate_engine_with_valid_completion_request() {
+        let inner_engine = MockEngine;
+        let validate_engine = ValidateEngine::new(inner_engine);
+
+        let request = CreateCompletionRequestArgs::default()
+            .model("gpt-3.5-turbo")
+            .prompt("Test prompt")
+            .max_tokens(100u32)
+            .build()
+            .unwrap();
+
+        let nv_request = NvCreateCompletionRequest {
+            inner: request,
+            nvext: None,
+        };
+
+        let single_in = SingleIn::new(nv_request);
+        let result = validate_engine.generate(single_in).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_engine_with_invalid_completion_request() {
+        let inner_engine = MockEngine;
+        let validate_engine = ValidateEngine::new(inner_engine);
+
+        let request = CreateCompletionRequestArgs::default()
+            .model("") // Invalid empty model
+            .prompt("Test prompt")
+            .build()
+            .unwrap();
+
+        let nv_request = NvCreateCompletionRequest {
+            inner: request,
+            nvext: None,
+        };
+
+        let single_in = SingleIn::new(nv_request);
+        let result = validate_engine.generate(single_in).await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Validation failed"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_engine_with_valid_chat_completion_request() {
+        let inner_engine = MockEngine;
+        let validate_engine = ValidateEngine::new(inner_engine);
+
+        let request = CreateChatCompletionRequestArgs::default()
+            .model("gpt-3.5-turbo")
+            .messages(vec![ChatCompletionRequestMessage::User(
+                async_openai::types::ChatCompletionRequestUserMessage {
+                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                        "Hello".to_string(),
+                    ),
+                    name: None,
+                },
+            )])
+            .build()
+            .unwrap();
+
+        let nv_request = NvCreateChatCompletionRequest {
+            inner: request,
+            nvext: None,
+        };
+
+        let single_in = SingleIn::new(nv_request);
+        let result = validate_engine.generate(single_in).await;
+
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_validate_engine_with_invalid_chat_completion_request() {
+        let inner_engine = MockEngine;
+        let validate_engine = ValidateEngine::new(inner_engine);
+
+        let request = CreateChatCompletionRequestArgs::default()
+            .model("") // Invalid empty model
+            .messages(vec![ChatCompletionRequestMessage::User(
+                async_openai::types::ChatCompletionRequestUserMessage {
+                    content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
+                        "Hello".to_string(),
+                    ),
+                    name: None,
+                },
+            )])
+            .build()
+            .unwrap();
+
+        let nv_request = NvCreateChatCompletionRequest {
+            inner: request,
+            nvext: None,
+        };
+
+        let single_in = SingleIn::new(nv_request);
+        let result = validate_engine.generate(single_in).await;
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Validation failed"));
     }
 }
