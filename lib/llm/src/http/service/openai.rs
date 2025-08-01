@@ -407,7 +407,7 @@ async fn handler_chat_completions(
 ///
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
-#[tracing::instrument(skip_all, fields(request_id = %request.id()))]
+#[tracing::instrument(level = "debug",skip_all, fields(request_id = %request.id()))]
 async fn chat_completions(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,
