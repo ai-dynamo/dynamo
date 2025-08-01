@@ -101,6 +101,11 @@ jobs:
       run: |
         cargo-deny --version || cargo install cargo-deny@0.16.4
         cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config ${{ github.workspace }}/deny.toml
+    - name: Build Project
+      working-directory: ${{ matrix.dir }}
+      run: cargo build --locked
+      # FIXME: Improve build time and lower this timeout (ex: caching)
+      timeout-minutes: 15
     - name: Run Doc Tests
       working-directory: ${{ matrix.dir }}
       run: cargo doc --no-deps && cargo test --locked --doc
@@ -145,5 +150,3 @@ jobs:
         else
           echo "No integration tests found in ${{ matrix.dir }}, skipping"
         fi
-      # FIXME: Improve build/test time and lower this timeout
-      timeout-minutes: 20
