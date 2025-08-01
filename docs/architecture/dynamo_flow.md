@@ -17,7 +17,7 @@ limitations under the License.
 
 # Dynamo Architecture Flow
 
-This diagram shows the NVIDIA Dynamo disaggregated inference system as implemented in [examples/llm](https://github.com/ai-dynamo/dynamo/tree/main/examples/llm). Color-coded flows indicate different types of operations:
+This diagram shows the NVIDIA Dynamo disaggregated inference system as implemented in [examples/llm](https://github.com/ai-dynamo/dynamo/tree/v0.3.2/examples/llm). Color-coded flows indicate different types of operations:
 
 ## 🔵 Main Request Flow (Blue)
 The primary user journey through the system:

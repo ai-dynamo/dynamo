@@ -263,7 +263,7 @@ Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disag
 
 ## Request Migration
 
-In a [Distributed System](#distributed-system), a request may fail due to connectivity issues between the Frontend and the Backend.
+In a Distributed System, a request may fail due to connectivity issues between the Frontend and the Backend.
 
 The Frontend will automatically track which Backends are having connectivity issues with it and avoid routing new requests to the Backends with known connectivity issues.
 
@@ -279,7 +279,7 @@ The migrated request will continue responding to the original request, allowing 
 
 ## Client
 
-See [client](../llm/README.md#client) section to learn how to send request to the deployment.
+See the [quickstart guide](../../../examples/basics/quickstart/README.md#3-send-requests) to learn how to send request to the deployment.
 
 NOTE: To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
 

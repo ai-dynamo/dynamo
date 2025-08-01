@@ -235,7 +235,7 @@ The [documentation](https://docs.vllm.ai/en/v0.9.2/configuration/serve_args.html
 
 ## Request Migration
 
-In a [Distributed System](#distributed-system), a request may fail due to connectivity issues between the Frontend and the Backend.
+In a Distributed System, a request may fail due to connectivity issues between the Frontend and the Backend.
 
 The Frontend will automatically track which Backends are having connectivity issues with it and avoid routing new requests to the Backends with known connectivity issues.
 

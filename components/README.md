@@ -77,4 +77,4 @@ To get started with Dynamo components:
 4. **Run deployment scripts** from the engine's launch directory
 5. **Monitor performance** using the metrics component
 
-For detailed instructions, see the README files in each component directory and the main [Dynamo documentation](../../docs/).
+For detailed instructions, see the README files in each component directory and the main [Dynamo documentation](../docs/).

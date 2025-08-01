@@ -1,10 +1,10 @@
 # Example: Deploy Multi-node SGLang with Dynamo on SLURM
 
-This folder implements the example of [SGLang DeepSeek-R1 Disaggregated with WideEP](../dsr1-wideep.md) on a SLURM cluster.
+This folder implements the example of [SGLang DeepSeek-R1 Disaggregated with WideEP](../docs/dsr1-wideep-h100.md) on a SLURM cluster.
 
 ## Overview
 
-The scripts in this folder set up multiple cluster nodes to run the [SGLang DeepSeek-R1 Disaggregated with WideEP](../dsr1-wideep.md) example, with separate nodes handling prefill and decode.
+The scripts in this folder set up multiple cluster nodes to run the [SGLang DeepSeek-R1 Disaggregated with WideEP](../docs/dsr1-wideep-h100.md) example, with separate nodes handling prefill and decode.
 The node setup is done using Python job submission scripts with Jinja2 templates for flexible configuration. The setup also includes GPU utilization monitoring capabilities to track performance during benchmarks.
 
 ## Scripts
@@ -56,7 +56,7 @@ For simplicity of the example, we will make some assumptions about your SLURM cl
    If your cluster supports similar container based plugins, you may be able to
    modify the template to use that instead.
 3. We assume you have already built a recent Dynamo+SGLang container image as
-   described [here](../dsr1-wideep.md#instructions).
+   described [here](../docs/dsr1-wideep-h100.md#instructions).
    This is the image that can be passed to the `--container-image` argument in later steps.
 
 ## Usage

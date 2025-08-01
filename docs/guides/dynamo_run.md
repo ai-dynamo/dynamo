@@ -211,7 +211,7 @@ The KV-aware routing arguments:
 
 ### Request Migration
 
-In a [Distributed System](#distributed-system), a request may fail due to connectivity issues between the HTTP Server and the Worker Engine.
+In a Distributed System, a request may fail due to connectivity issues between the HTTP Server and the Worker Engine.
 
 The HTTP Server will automatically track which Worker Engines are having connectivity issues with it and avoid routing new requests to the Engines with known connectivity issues.
 
@@ -482,11 +482,11 @@ The trtllm engine requires [etcd](https://etcd.io/) and [nats](https://nats.io/)
 
 ##### Step 1: Build the environment
 
-See instructions [here](https://github.com/ai-dynamo/dynamo/blob/main/examples/tensorrt_llm/README.md#build-docker) to build the dynamo container with TensorRT-LLM.
+See instructions [here](https://github.com/ai-dynamo/dynamo/tree/main/components/backends/trtllm#build-container) to build the dynamo container with TensorRT-LLM.
 
 ##### Step 2: Run the environment
 
-See instructions [here](https://github.com/ai-dynamo/dynamo/blob/main/examples/tensorrt_llm/README.md#run-container) to run the built environment.
+See instructions [here](https://github.com/ai-dynamo/dynamo/tree/main/components/backends/trtllm#run-container) to run the built environment.
 
 ##### Step 3: Execute `dynamo-run` command
 
@@ -678,10 +678,6 @@ Here are some example engines:
     * [sglang](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_sglang.py)
 - Chat:
     * [sglang](https://github.com/ai-dynamo/dynamo/blob/main/lib/bindings/python/examples/hello_world/server_sglang_tok.py)
-
-More fully-featured Backend engines (used by `dynamo-run`):
-- [vllm](https://github.com/ai-dynamo/dynamo/blob/main/launch/dynamo-run/src/subprocess/vllm_inc.py)
-- [sglang](https://github.com/ai-dynamo/dynamo/blob/main/launch/dynamo-run/src/subprocess/sglang_inc.py)
 
 ### Debugging
 
