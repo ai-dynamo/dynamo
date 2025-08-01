@@ -50,15 +50,12 @@ class RequestThrottlerTestFrontend(ManagedProcess):
             str(request_throttle_duration_ms // 1000),
             "--max-workers-busy-queue-depth",
             str(max_queue_depth),
+            "--namespace",
+            "test-namespace",
         ]
-
-        # Force fixed namespace for coordination
-        env = os.environ.copy()
-        env["DYNAMO_NAMESPACE"] = "test-namespace"
 
         super().__init__(
             command=command,
-            env=env,
             timeout=60,
             display_output=True,
             health_check_ports=[frontend_port],
@@ -89,6 +86,8 @@ class MockerProcess(ManagedProcess):
             mocker_args_file,
             "--endpoint",
             endpoint,
+            "--namespace",
+            "test-namespace",
         ]
 
         super().__init__(
@@ -196,7 +195,7 @@ async def test_request_throttler_e2e(request, runtime_services):
             mocker.__enter__()
 
         # Give system time to fully initialize
-        await asyncio.sleep(2)
+        await asyncio.sleep(5)
 
         base_url = f"http://localhost:{FRONTEND_PORT}/v1/chat/completions"
 
@@ -365,6 +364,8 @@ async def test_request_throttler_disabled(request, runtime_services):
         "kv",
         "--http-port",
         str(FRONTEND_PORT + 2),
+        "--namespace",
+        "test-namespace",
     ]
 
     frontend = ManagedProcess(
