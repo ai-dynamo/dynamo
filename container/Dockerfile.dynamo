@@ -21,6 +21,7 @@ ARG RELEASE_BUILD
 #
 # NOTE: There isn't an easy way to define one of these values based on the other value
 # without adding if statements everywhere, so just define both as ARGs for now.
+#TODO OPS-592: Leverage uname -m to determine ARCH instead of passing it as an arg
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
 
@@ -64,7 +65,7 @@ ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
 
 # Install Rust using RUSTARCH derived from ARCH_ALT
 RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
-    # TODO: Add SHA check back based on RUSTARCH
+    # TODO OPS-591: Add SHA check back based on RUSTARCH
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
     rm rustup-init && \
@@ -147,15 +148,12 @@ RUN git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.
     else \
         nixl_build_args=""; \
     fi && \
-    mkdir build && \
     meson setup build/ --buildtype=release --prefix=$NIXL_PREFIX $nixl_build_args && \
-    cd build/ && \
-    ninja -j$(nproc) && \
-    ninja install
+    ninja -C build/ -j$(nproc) && \
+    ninja -C build/ install
 
 # Install NIXL Python module
-# TODO: Move gds_path selection based on arch into NIXL build
-# TEMP: disable gds backend for arm64
+# TODO OPS-590: Move gds_path selection based on arch into NIXL build and re-enable gds backend for arm64
 RUN if [ "$ARCH" = "arm64" ]; then \
         cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheelhouse/nixl \
         --config-settings=setup-args="-Ddisable_gds_backend=true"; \
@@ -190,10 +188,10 @@ ARG RELEASE_BUILD
 
 WORKDIR /workspace
 
-RUN yum update -y \
-    && yum install -y llvm-toolset protobuf-compiler python3.12-devel \
-    && yum clean all \
-    && rm -rf /var/cache/yum
+RUN dnf update -y \
+    && dnf install -y llvm-toolset protobuf-compiler python3.12-devel \
+    && dnf clean all \
+    && rm -rf /var/cache/dnf
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
