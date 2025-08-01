@@ -52,12 +52,12 @@
 
                 // Enhanced rust-analyzer configuration
                 "rust-analyzer.linkedProjects": [
-                    "dynamo/Cargo.toml",
-                    "dynamo/lib/runtime/Cargo.toml",
-                    "dynamo/lib/llm/Cargo.toml",
-                    "dynamo/lib/tokens/Cargo.toml",
-                    "dynamo/lib/bindings/python/Cargo.toml",
-                    "dynamo/launch/dynamo-run/Cargo.toml"
+                    "Cargo.toml",
+                    "lib/runtime/Cargo.toml",
+                    "lib/llm/Cargo.toml",
+                    "lib/tokens/Cargo.toml",
+                    "lib/bindings/python/Cargo.toml",
+                    "launch/dynamo-run/Cargo.toml"
                 ],
 
                 "files.trimTrailingWhitespace": true,
@@ -65,7 +65,7 @@
             }
         }
     },
-    "workspaceFolder": "/home/ubuntu",
+    "workspaceFolder": "/home/ubuntu/dynamo",
     "workspaceMount": "source=${localWorkspaceFolder},target=/home/ubuntu/dynamo,type=bind,consistency=cached",
     "userEnvProbe": "interactiveShell",
     "postCreateCommand": "/bin/bash /home/ubuntu/dynamo/.devcontainer/post-create.sh", // Runs cargo build and pip installs packages
@@ -79,9 +79,15 @@
         // Default mounts
         "source=/tmp/,target=/tmp/,type=bind",
         "source=dynamo-bashhistory,target=/home/ubuntu/.commandhistory,type=volume", // For bash history
-        "source=dynamo-precommit-cache,target=/home/ubuntu/.cache/pre-commit,type=volume"  // For pre-commit cache
+        "source=dynamo-precommit-cache,target=/home/ubuntu/.cache/pre-commit,type=volume",  // For pre-commit cache
 
-        // Uncomment for additional functionality
+        // The following line is needed. Otherwise, you will get an error below:
+        // "The final error Failed to read .gitconfig: TypeError [ERR_INVALID_ARG_TYPE]: The "path" argument must be of type string. Received undefined suggests there's an issue with Git configuration path resolution, but this doesn't prevent the container from starting successfully."
+        "source=${localEnv:HOME}/.gitconfig,target=/home/ubuntu/.gitconfig,type=bind",
+
+        // By default, mount your local Hugging Face cache directory to the container.
+        "source=${localEnv:HOME}/.cache/huggingface,target=/home/ubuntu/.cache/huggingface,type=bind"
+        // But if you want to customize the HuggingFace cache directory, set the HF_HOME env var and then uncomment the following line:
         // "source=${localEnv:HF_HOME},target=/home/ubuntu/.cache/huggingface,type=bind", // Uncomment to enable HF Cache Mount. Make sure to set HF_HOME env var in you .bashrc
     ]
 }

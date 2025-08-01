@@ -17,13 +17,13 @@ limitations under the License.
 
 # NVIDIA Dynamo Development Environment
 
-> Warning: devcontainers is an experimental feature and we are not testing in CI. Please submit any feedback using the issues on GitHub.
+> Warning: Dev Containers (aka `devcontainers`) is an experimental feature and we are not testing in CI. Please submit any feedback using the issues on GitHub.
 
 ## Prerequisites
 - [Docker](https://docs.docker.com/get-started/get-docker/) installed and configured on your host system
-- Visual Studio Code with the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) installed
+- IDEs: Both VS Code and Cursor have Dev Containers extensions
 - Appropriate NVIDIA drivers (compatible with CUDA 12.8)
-- If you want to run the examples, set your Hugging Face token env var `HF_TOKEN` in your local startup (.bashrc, .zshrc or .profile file)
+- For models that require authentication, set your Hugging Face token env var `HF_TOKEN` in your local startup (.bashrc, .zshrc or .profile file). Many models do not require this token.
 
 ## Quick Start
 1. Build the container image
@@ -36,18 +36,28 @@ The container will be built and give certain file permissions to your local uid 
 
 > Note: Currently local-dev is only implemented for --framework VLLM
 
-2. Open Dynamo folder in VS Code
-- Press Ctrl + Shift + P
+2. Install Dev Containers extension in your IDE
+
+**VS Code:**
+- Install [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) from Microsoft marketplace
+
+**Cursor:**
+- Press `Cmd+Shift+X` (Mac) or `Ctrl+Shift+X` (Linux/Windows) to open Extensions
+- Search for "Dev Containers" and install the one by **Anysphere**
+- Do not download the version from Microsoft as it is not compatible with Cursor
+
+3. Open Dynamo folder in your IDE
+- Press `Cmd+Shift+P` (Mac) or `Ctrl+Shift+P` (Linux/Windows)
 - Select "Dev Containers: Open Folder in Container"
 
-If you want to mount your hugging face cache, go to `.devcontainer` and uncomment in the mounts section:
+Optional: If you want to mount your Hugging Face cache, go to `.devcontainer` and uncomment in the mounts section:
 
 ```json
 // "source=${localEnv:HF_HOME},target=/home/ubuntu/.cache/huggingface,type=bind", // Uncomment to enable HF Cache Mount. Make sure to set HF_HOME env var in you .bashrc
 ```
 Make sure HF_HOME is sourced in your .bashrc or .zshenv and your vscode default terminal is set properly.
 
-3. Wait for Initialization
+4. Wait for Initialization
 - The container will mount your local code
 - `post-create.sh` will build the project and configure the environment
 
@@ -59,6 +69,12 @@ If you make changes to Rust code and want to compile, use [cargo build](https://
 
 ```bash
 cd /home/ubuntu/dynamo && cargo build --locked --profile dev
+```
+
+Note that the cargo target directory is defined in devcontainer.json in `rust-analyzer.cargo.targetDir`, which should be `/home/ubuntu/dynamo/.build/target`. You can verify this by typing:
+```bash
+$ cargo metadata --format-version=1 | jq -r '.target_directory'
+/home/ubuntu/dynamo/.build/target
 ```
 
 Before pushing code to GitHub, remember to run `cargo fmt` and `cargo clippy`
@@ -85,7 +101,7 @@ File Structure:
 - Local dynamo repo mounts to `/home/ubuntu/dynamo`
 - Python venv in `/opt/dynamo/venv`
 - Build artifacts in `dynamo/.build/target`
-- HuggingFace cache preserved between sessions (Mounting local path `HF_HOME` at `/home/ubuntu/.cache/huggingface`)
+- Hugging Face cache preserved between sessions (Mounting local path `HF_HOME` at `/home/ubuntu/.cache/huggingface`)
 - Bash memory preserved between sessions at `/home/ubuntu/.commandhistory` using docker volume `dynamo-bashhistory`
 - Precommit peeserved between sessions at `/home/ubuntu/.cache/precommit` using docker volume `dynamo-precommit-cache`
 
@@ -150,3 +166,52 @@ Note: If both `~/.bash_profile` and `~/.profile` exist, bash will only read `~/.
 
 
 See VS Code Dev Containers [documentation](https://code.visualstudio.com/docs/devcontainers/containers) for more details.
+
+## Troubleshooting
+
+### Volume Corruption Issues
+
+If you encounter strange errors (like `postCreateCommand` failing with exit code 1), your Docker volumes may be corrupted.
+
+**Solution: Wipe Docker Volumes**
+
+```bash
+# Remove Dynamo volumes that are specified in devcontainer.json (may be corrupted)
+docker volume rm dynamo-bashhistory dynamo-precommit-cache
+
+# Or remove all volumes (use with caution)
+docker volume prune
+
+# Rebuild: ./container/build.sh --target local-dev
+```
+
+**Note:** This resets bash history and pre-commit cache, but preserves your source code.
+
+**Volume Mounts in devcontainer.json:**
+- `dynamo-bashhistory` → `/home/ubuntu/.commandhistory` (bash history)
+- `dynamo-precommit-cache` → `/home/ubuntu/.cache/pre-commit` (pre-commit cache)
+
+### Permission Issues
+
+If you start experiencing permission problems (e.g., "Permission denied" errors), you may need to fix file ownership outside the container. This commonly happens when `container/run.sh` runs as root, creating files with root ownership:
+
+```bash
+# Replace <user> with your actual username
+cd <your dynamo directory>
+sudo chown -R <user>:<user> .
+```
+
+This fixes ownership when files are created with different user IDs between the host and container.
+
+### Build Issues
+
+If you encounter build errors or strange compilation issues, try running `cargo clean` to clear the build cache and rebuild from scratch.
+
+If `cargo clean` doesn't resolve the issue, you can manually remove the build directory outside the container:
+
+```bash
+# Replace <user> with your actual username
+sudo rm -rf /home/<user>/dynamo/.build/target
+```
+
+This forces a complete rebuild of all Rust artifacts.
