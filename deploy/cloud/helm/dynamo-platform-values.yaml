@@ -24,7 +24,6 @@ dynamo-operator:
 
   dynamo:
     enableLWS: ${ENABLE_LWS}
-    enableGrove: ${ENABLE_GROVE}
     ingress:
       enabled: ${INGRESS_ENABLED}
       className: ${INGRESS_CLASS}

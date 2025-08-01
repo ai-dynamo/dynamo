@@ -16,7 +16,8 @@
 //! Metric Registry Framework for Dynamo.
 //!
 //! This module provides registry classes for Prometheus metrics
-//! that auto populates the labels with the namespace-component-endpoint hierarchy.
+//! that auto populates the labels with the component-endpoint hierarchy.
+//! All metrics are prefixed with "dynamo_component_" to avoid collisions with Kubernetes and other monitoring system labels.
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -24,18 +25,15 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-// If set to true, then metrics will be labeled with the namespace, component, and endpoint.
+// If set to true, then metrics will be labeled with the dynamo_namespace, dynamo_component, and dynamo_endpoint.
+// These labels are prefixed with "dynamo_" to avoid collisions with Kubernetes and other monitoring system labels.
 pub const USE_AUTO_LABELS: bool = true;
 
 // Prometheus imports
 use prometheus::Encoder;
 
-fn build_metric_name(namespace: &str, metric_name: &str) -> String {
-    if !namespace.is_empty() {
-        format!("{}_{}", namespace, metric_name)
-    } else {
-        metric_name.to_string()
-    }
+fn build_metric_name(metric_name: &str) -> String {
+    format!("dynamo_component_{}", metric_name)
 }
 
 /// Lints a metric name component by stripping off invalid characters and validating Prometheus naming pattern
@@ -206,18 +204,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     // Build hierarchy: parent_hierarchy + [basename]
     let hierarchy = [parent_hierarchy.clone(), vec![basename.clone()]].concat();
 
-    let namespace = if hierarchy.len() >= 2 {
-        let potential_namespace = &hierarchy[1];
-        if !potential_namespace.is_empty() {
-            lint_prometheus_name(potential_namespace)?
-        } else {
-            "".to_string()
-        }
-    } else {
-        "".to_string()
-    };
-
-    let metric_name = build_metric_name(&namespace, metric_name);
+    let metric_name = build_metric_name(metric_name);
 
     // Validate that user-provided labels don't have duplicate keys
     for (key, _) in labels {
@@ -234,7 +221,8 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     if USE_AUTO_LABELS {
         // Validate that user-provided labels don't conflict with auto-generated labels
         for (key, _) in labels {
-            if *key == "namespace" || *key == "component" || *key == "endpoint" {
+            if *key == "dynamo_namespace" || *key == "dynamo_component" || *key == "dynamo_endpoint"
+            {
                 return Err(anyhow::anyhow!(
                     "Label '{}' is automatically added by auto_label feature and cannot be manually set",
                     key
@@ -243,15 +231,21 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         }
 
         // Add auto-generated labels with sanitized values
-        if !namespace.is_empty() {
-            updated_labels.push(("namespace".to_string(), namespace.to_string()));
+        if hierarchy.len() > 1 {
+            let namespace = &hierarchy[1];
+            if !namespace.is_empty() {
+                let valid_namespace = lint_prometheus_name(namespace)?;
+                if !valid_namespace.is_empty() {
+                    updated_labels.push(("dynamo_namespace".to_string(), valid_namespace));
+                }
+            }
         }
         if hierarchy.len() > 2 {
             let component = &hierarchy[2];
             if !component.is_empty() {
                 let valid_component = lint_prometheus_name(component)?;
                 if !valid_component.is_empty() {
-                    updated_labels.push(("component".to_string(), valid_component));
+                    updated_labels.push(("dynamo_component".to_string(), valid_component));
                 }
             }
         }
@@ -260,7 +254,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
             if !endpoint.is_empty() {
                 let valid_endpoint = lint_prometheus_name(endpoint)?;
                 if !valid_endpoint.is_empty() {
-                    updated_labels.push(("endpoint".to_string(), valid_endpoint));
+                    updated_labels.push(("dynamo_endpoint".to_string(), valid_endpoint));
                 }
             }
         }
@@ -560,12 +554,12 @@ mod tests {
 
     #[test]
     fn test_build_metric_name_with_prefix() {
-        // Test that build_metric_name correctly prepends the namespace
-        let result = build_metric_name("", "requests");
-        assert_eq!(result, "requests");
+        // Test that build_metric_name correctly prepends the dynamo_component prefix
+        let result = build_metric_name("requests");
+        assert_eq!(result, "dynamo_component_requests");
 
-        let result = build_metric_name("dynamo", "requests");
-        assert_eq!(result, "dynamo_requests");
+        let result = build_metric_name("counter");
+        assert_eq!(result, "dynamo_component_counter");
     }
 
     #[test]
@@ -645,6 +639,7 @@ mod tests {
 mod test_prefixes {
     use super::create_test_drt;
     use super::*;
+    use prometheus::core::Collector;
 
     #[test]
     fn test_hierarchical_prefixes_and_parent_hierarchies() {
@@ -797,7 +792,7 @@ mod test_prefixes {
         println!("\n=== Testing Invalid Namespace Behavior ===");
 
         // Create a namespace with invalid name (contains hyphen)
-        let invalid_namespace = drt.namespace("test-namespace").unwrap();
+        let invalid_namespace = drt.namespace("@@123").unwrap();
 
         // Debug: Let's see what the hierarchy looks like
         println!(
@@ -810,16 +805,26 @@ mod test_prefixes {
         );
         println!("Invalid namespace prefix: '{}'", invalid_namespace.prefix());
 
-        // Try to create a metric - this should fail because the namespace name will be used in the metric name
+        // Try to create a metric - this should succeed because the namespace name will be sanitized
         let result = invalid_namespace.create_counter("test_counter", "A test counter", &[]);
-        println!("Result with invalid namespace 'test-namespace':");
+        println!("Result with invalid namespace '@@123':");
         println!("{:?}", result);
 
-        // The result should be an error from Prometheus
+        // The result should be an error because '@@123' gets sanitized to '123' which is invalid
         assert!(
             result.is_err(),
-            "Creating metric with invalid namespace should fail"
+            "Creating metric with namespace '@@123' should fail because it gets sanitized to '123' which is invalid"
         );
+
+        // Verify the error message indicates the sanitized name is still invalid
+        if let Err(e) = &result {
+            let error_msg = e.to_string();
+            assert!(
+                error_msg.contains("123"),
+                "Error message should mention the sanitized name '123', got: {}",
+                error_msg
+            );
+        }
 
         // For comparison, show a valid namespace works
         let valid_namespace = drt.namespace("test_namespace").unwrap();
@@ -868,9 +873,9 @@ mod test_simple_metricsregistry_trait {
         println!("{}", endpoint_output);
 
         let expected_endpoint_output = format!(
-            r#"# HELP testnamespace_testcounter A test counter
-# TYPE testnamespace_testcounter counter
-testnamespace_testcounter{{component="testcomponent",endpoint="testendpoint",namespace="testnamespace"}} 123.456789
+            r#"# HELP dynamo_component_testcounter A test counter
+# TYPE dynamo_component_testcounter counter
+dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="testendpoint",dynamo_namespace="testnamespace"}} 123.456789
 "#
         );
 
@@ -896,12 +901,12 @@ testnamespace_testcounter{{component="testcomponent",endpoint="testendpoint",nam
         println!("{}", component_output);
 
         let expected_component_output = format!(
-            r#"# HELP testnamespace_testcounter A test counter
-# TYPE testnamespace_testcounter counter
-testnamespace_testcounter{{component="testcomponent",endpoint="testendpoint",namespace="testnamespace"}} 123.456789
-# HELP testnamespace_testgauge A test gauge
-# TYPE testnamespace_testgauge gauge
-testnamespace_testgauge{{component="testcomponent",namespace="testnamespace"}} 50000
+            r#"# HELP dynamo_component_testcounter A test counter
+# TYPE dynamo_component_testcounter counter
+dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="testendpoint",dynamo_namespace="testnamespace"}} 123.456789
+# HELP dynamo_component_testgauge A test gauge
+# TYPE dynamo_component_testgauge gauge
+dynamo_component_testgauge{{dynamo_component="testcomponent",dynamo_namespace="testnamespace"}} 50000
 "#
         );
 
@@ -926,15 +931,15 @@ testnamespace_testgauge{{component="testcomponent",namespace="testnamespace"}} 5
         println!("{}", namespace_output);
 
         let expected_namespace_output = format!(
-            r#"# HELP testintcounter A test int counter
-# TYPE testintcounter counter
-testintcounter{{namespace="testnamespace"}} 12345
-# HELP testnamespace_testcounter A test counter
-# TYPE testnamespace_testcounter counter
-testnamespace_testcounter{{component="testcomponent",endpoint="testendpoint",namespace="testnamespace"}} 123.456789
-# HELP testnamespace_testgauge A test gauge
-# TYPE testnamespace_testgauge gauge
-testnamespace_testgauge{{component="testcomponent",namespace="testnamespace"}} 50000
+            r#"# HELP dynamo_component_testcounter A test counter
+# TYPE dynamo_component_testcounter counter
+dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="testendpoint",dynamo_namespace="testnamespace"}} 123.456789
+# HELP dynamo_component_testgauge A test gauge
+# TYPE dynamo_component_testgauge gauge
+dynamo_component_testgauge{{dynamo_component="testcomponent",dynamo_namespace="testnamespace"}} 50000
+# HELP dynamo_component_testintcounter A test int counter
+# TYPE dynamo_component_testintcounter counter
+dynamo_component_testintcounter{{dynamo_namespace="testnamespace"}} 12345
 "#
         );
 
@@ -1002,35 +1007,35 @@ testnamespace_testgauge{{component="testcomponent",namespace="testnamespace"}} 5
         println!("{}", drt_output);
 
         let expected_drt_output = format!(
-            r#"# HELP testcountervec A test counter vector
-# TYPE testcountervec counter
-testcountervec{{method="GET",service="api",status="200"}} 10
-testcountervec{{method="POST",service="api",status="201"}} 5
-# HELP testhistogram A test histogram
-# TYPE testhistogram histogram
-testhistogram_bucket{{le="1"}} 0
-testhistogram_bucket{{le="2.5"}} 2
-testhistogram_bucket{{le="5"}} 3
-testhistogram_bucket{{le="10"}} 3
-testhistogram_bucket{{le="+Inf"}} 3
-testhistogram_sum 7.5
-testhistogram_count 3
-# HELP testintcounter A test int counter
-# TYPE testintcounter counter
-testintcounter{{namespace="testnamespace"}} 12345
-# HELP testintgauge A test int gauge
-# TYPE testintgauge gauge
-testintgauge 42
-# HELP testintgaugevec A test int gauge vector
-# TYPE testintgaugevec gauge
-testintgaugevec{{instance="server1",service="api",status="active"}} 10
-testintgaugevec{{instance="server2",service="api",status="inactive"}} 0
-# HELP testnamespace_testcounter A test counter
-# TYPE testnamespace_testcounter counter
-testnamespace_testcounter{{component="testcomponent",endpoint="testendpoint",namespace="testnamespace"}} 123.456789
-# HELP testnamespace_testgauge A test gauge
-# TYPE testnamespace_testgauge gauge
-testnamespace_testgauge{{component="testcomponent",namespace="testnamespace"}} 50000
+            r#"# HELP dynamo_component_testcounter A test counter
+# TYPE dynamo_component_testcounter counter
+dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="testendpoint",dynamo_namespace="testnamespace"}} 123.456789
+# HELP dynamo_component_testcountervec A test counter vector
+# TYPE dynamo_component_testcountervec counter
+dynamo_component_testcountervec{{method="GET",service="api",status="200"}} 10
+dynamo_component_testcountervec{{method="POST",service="api",status="201"}} 5
+# HELP dynamo_component_testgauge A test gauge
+# TYPE dynamo_component_testgauge gauge
+dynamo_component_testgauge{{dynamo_component="testcomponent",dynamo_namespace="testnamespace"}} 50000
+# HELP dynamo_component_testhistogram A test histogram
+# TYPE dynamo_component_testhistogram histogram
+dynamo_component_testhistogram_bucket{{le="1"}} 0
+dynamo_component_testhistogram_bucket{{le="2.5"}} 2
+dynamo_component_testhistogram_bucket{{le="5"}} 3
+dynamo_component_testhistogram_bucket{{le="10"}} 3
+dynamo_component_testhistogram_bucket{{le="+Inf"}} 3
+dynamo_component_testhistogram_sum 7.5
+dynamo_component_testhistogram_count 3
+# HELP dynamo_component_testintcounter A test int counter
+# TYPE dynamo_component_testintcounter counter
+dynamo_component_testintcounter{{dynamo_namespace="testnamespace"}} 12345
+# HELP dynamo_component_testintgauge A test int gauge
+# TYPE dynamo_component_testintgauge gauge
+dynamo_component_testintgauge 42
+# HELP dynamo_component_testintgaugevec A test int gauge vector
+# TYPE dynamo_component_testintgaugevec gauge
+dynamo_component_testintgaugevec{{instance="server1",service="api",status="active"}} 10
+dynamo_component_testintgaugevec{{instance="server2",service="api",status="inactive"}} 0
 "#
         );
 

@@ -47,6 +47,8 @@ scrape_configs:
     static_configs:
       - targets: ['host.docker.internal:8081']
 
+  # DEPRECATED: This metrics aggregation service is being deprecated in favor of MetricsRegistry
+  # The new system uses the 'dynamo-backend' job above instead of this separate service
   # This is another demo aggregator that needs to be launched manually. See components/metrics/README.md
   # Note that you may need to disable the firewall on your host. On Ubuntu: sudo ufw allow 9091/tcp
   - job_name: 'metrics-aggregation-service'

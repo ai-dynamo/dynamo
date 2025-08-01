@@ -63,6 +63,7 @@ use xxhash_rust::xxh3;
 pub const XXH3_SEED: u64 = 1337;
 
 use crate::kv_router::protocols::*;
+use crate::tokens::SequenceHash;
 
 /// Errors that can occur in the KV Router.
 #[derive(Debug, thiserror::Error)]
@@ -131,6 +132,40 @@ pub fn compute_block_hash_for_seq(tokens: &[u32], kv_block_size: u32) -> Vec<Loc
             compute_block_hash(&Bytes::from(bytes)) // Convert the byte Vec to Bytes
         })
         .collect()
+}
+
+/// Compute rolling sequence hashes for a vector of block hashes.
+///
+/// This mirrors the behavior in tokens.rs where:
+/// - The first block's sequence hash equals its block hash
+/// - Subsequent blocks' sequence hash = hash([parent_sequence_hash, current_block_hash], seed)
+///
+/// ### Arguments
+///
+/// * `block_hashes` - A vector of `LocalBlockHash` values representing the block hashes.
+///
+/// ### Returns
+///
+/// A vector of u64 values representing the sequence hashes for each block.
+pub fn compute_seq_hash_for_block(block_hashes: &[LocalBlockHash]) -> Vec<SequenceHash> {
+    if block_hashes.is_empty() {
+        return Vec::new();
+    }
+
+    let mut sequence_hashes = Vec::with_capacity(block_hashes.len());
+    sequence_hashes.push(block_hashes[0].0);
+
+    for i in 1..block_hashes.len() {
+        let parent_seq_hash = sequence_hashes[i - 1];
+        let current_block_hash = block_hashes[i].0;
+
+        let combined = [parent_seq_hash, current_block_hash];
+        let bytes: Vec<u8> = combined.iter().flat_map(|&num| num.to_le_bytes()).collect();
+        let seq_hash = compute_hash(&bytes);
+        sequence_hashes.push(seq_hash);
+    }
+
+    sequence_hashes
 }
 
 /// A [`KvCacheEvent`] on a specific LLM worker denoted by [`WorkerId`].

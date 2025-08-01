@@ -86,27 +86,17 @@ mod tests {
     // todo - make a distributed runtime fixture
     // todo - two options - fully mocked or integration test
     #[tokio::test]
-    async fn test_publish() {
+    async fn test_publish_and_subscribe() {
         let rt = Runtime::from_current().unwrap();
         let dtr = DistributedRuntime::from_settings(rt.clone()).await.unwrap();
-        let ns = dtr.namespace("test".to_string()).unwrap();
-        let cp = ns.component("component".to_string()).unwrap();
-        cp.publish("test", &"test".to_string()).await.unwrap();
-        rt.shutdown();
-    }
+        let ns = dtr.namespace("test_component".to_string()).unwrap();
+        let cp = ns.component("test_component".to_string()).unwrap();
 
-    #[tokio::test]
-    async fn test_subscribe() {
-        let rt = Runtime::from_current().unwrap();
-        let dtr = DistributedRuntime::from_settings(rt.clone()).await.unwrap();
-        let ns = dtr.namespace("test".to_string()).unwrap();
-        let cp = ns.component("component".to_string()).unwrap();
+        // Create a subscriber on the component
+        let mut subscriber = cp.subscribe("test_event").await.unwrap();
 
-        // Create a subscriber
-        let mut subscriber = ns.subscribe("test").await.unwrap();
-
-        // Publish a message
-        cp.publish("test", &"test_message".to_string())
+        // Publish a message from the component
+        cp.publish("test_event", &"test_message".to_string())
             .await
             .unwrap();
 

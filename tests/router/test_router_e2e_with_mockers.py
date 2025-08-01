@@ -9,7 +9,6 @@ import os
 import aiohttp
 import pytest
 
-from tests.conftest import download_models
 from tests.utils.managed_process import ManagedProcess
 
 pytestmark = pytest.mark.pre_merge
@@ -95,9 +94,6 @@ def test_mocker_kv_router(request, runtime_services):
     Test KV router with multiple mocker engine instances.
     This test doesn't require GPUs and runs quickly for pre-merge validation.
     """
-
-    # Download only the Qwen model for this test
-    download_models([MODEL_NAME])
 
     # runtime_services starts etcd and nats
     logger.info("Starting mocker KV router test")
