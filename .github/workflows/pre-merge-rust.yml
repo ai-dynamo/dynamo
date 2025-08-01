@@ -50,14 +50,47 @@ jobs:
         sudo apt-get update -y
         sudo apt-get install -y protobuf-compiler
 
-    # Advanced Rust caching - replaces manual registry/tools caching
-    - name: Set up Rust cache
-      uses: swatinem/rust-cache@v2
+    # Enhanced multi-layer Rust caching strategy using actions/cache@v4
+    - name: Cache Cargo registry index
+      uses: actions/cache@v4
       with:
-        # Cache key based on working directory to avoid conflicts between matrix jobs
-        workspaces: ${{ matrix.dir }}
-        # Additional cache key components for better invalidation
-        key: ${{ matrix.dir }}
+        path: ~/.cargo/registry/index
+        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-index-
+
+    - name: Cache Cargo registry cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/registry/cache
+        key: ${{ runner.os }}-cargo-cache-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-cache-
+
+    - name: Cache Cargo git database
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/git/db
+        key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-git-
+
+    - name: Cache Cargo tools
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin
+        key: ${{ runner.os }}-cargo-tools-${{ hashFiles('**/Cargo.lock') }}-v1
+        restore-keys: |
+          ${{ runner.os }}-cargo-tools-
+
+    - name: Cache target directory
+      uses: actions/cache@v4
+      with:
+        path: ${{ matrix.dir }}/target
+        key: ${{ runner.os }}-target-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
+        restore-keys: |
+          ${{ runner.os }}-target-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}-
+          ${{ runner.os }}-target-${{ matrix.dir }}-
 
     - name: Install Rust in dev environment
       # Install Rust only to run GitHub Local Actions in (dev environment) using the `ACT` environment variable.
@@ -73,6 +106,16 @@ jobs:
       run: |
         rustup toolchain install 1.86.0 --profile minimal --component rustfmt,clippy
         rustup default 1.86.0
+
+    - name: Optimize Cargo cache
+      run: |
+        # Clean up old build artifacts to optimize cache size
+        if [ -d "${{ matrix.dir }}/target" ]; then
+          # Remove incremental compilation artifacts (they don't cache well)
+          find "${{ matrix.dir }}/target" -name incremental -type d -exec rm -rf {} + 2>/dev/null || true
+          # Remove old fingerprints to force rebuild verification
+          find "${{ matrix.dir }}/target" -name .fingerprint -type d -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+        fi
 
     - name: Check code formatting and run Clippy
       working-directory: ${{ matrix.dir }}
@@ -139,11 +182,41 @@ jobs:
         sudo apt-get update -y
         sudo apt-get install -y protobuf-compiler
 
-    - name: Set up Rust cache
-      uses: swatinem/rust-cache@v2
+    # Enhanced multi-layer Rust caching strategy for integration tests
+    - name: Cache Cargo registry index
+      uses: actions/cache@v4
       with:
-        workspaces: ${{ matrix.dir }}
-        key: ${{ matrix.dir }}-integration
+        path: ~/.cargo/registry/index
+        key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-index-
+
+    - name: Cache Cargo registry cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/registry/cache
+        key: ${{ runner.os }}-cargo-cache-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-cache-
+
+    - name: Cache Cargo git database
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/git/db
+        key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-git-
+
+    - name: Cache target directory for integration tests
+      uses: actions/cache@v4
+      with:
+        path: ${{ matrix.dir }}/target
+        key: ${{ runner.os }}-target-integration-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}-${{ hashFiles('**/*.rs') }}
+        restore-keys: |
+          ${{ runner.os }}-target-integration-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}-
+          ${{ runner.os }}-target-integration-${{ matrix.dir }}-
+          ${{ runner.os }}-target-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}-
+          ${{ runner.os }}-target-${{ matrix.dir }}-
 
     - name: Install Rust in dev environment
       if: ${{ env.ACT }}
@@ -156,6 +229,16 @@ jobs:
       run: |
         rustup toolchain install 1.86.0 --profile minimal
         rustup default 1.86.0
+
+    - name: Optimize Cargo cache for integration tests
+      run: |
+        # Clean up old build artifacts to optimize cache size
+        if [ -d "${{ matrix.dir }}/target" ]; then
+          # Remove incremental compilation artifacts (they don't cache well)
+          find "${{ matrix.dir }}/target" -name incremental -type d -exec rm -rf {} + 2>/dev/null || true
+          # Remove old fingerprints to force rebuild verification
+          find "${{ matrix.dir }}/target" -name .fingerprint -type d -mtime +1 -exec rm -rf {} + 2>/dev/null || true
+        fi
 
     - name: Wait for services to be ready
       run: |
