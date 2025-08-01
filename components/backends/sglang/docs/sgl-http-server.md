@@ -74,7 +74,7 @@ The server accepts the following command-line arguments:
 
 Start the server:
 ```bash
-python src/dynamo/sglang/utils/sgl_http_server.py --port 9001 --namespace dynamo
+python3 -m dynamo.sglang.utils.sgl_http_server --ns dynamo
 ```
 
 The server will automatically discover all SGLang components in the specified namespace and provide HTTP endpoints for managing them.
