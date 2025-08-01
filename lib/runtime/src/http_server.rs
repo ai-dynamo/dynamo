@@ -65,26 +65,6 @@ impl Clone for HttpServerInfo {
     }
 }
 
-pub struct HttpMetricsRegistry {
-    pub drt: Arc<crate::DistributedRuntime>,
-}
-
-impl crate::traits::DistributedRuntimeProvider for HttpMetricsRegistry {
-    fn drt(&self) -> &crate::DistributedRuntime {
-        &self.drt
-    }
-}
-
-impl MetricsRegistry for HttpMetricsRegistry {
-    fn basename(&self) -> String {
-        "http_server".to_string()
-    }
-
-    fn parent_hierarchy(&self) -> Vec<String> {
-        [self.drt().parent_hierarchy(), vec![self.drt().basename()]].concat()
-    }
-}
-
 /// HTTP server state containing metrics and uptime tracking
 pub struct HttpServerState {
     // global drt registry is for printing out the entire Prometheus format output
@@ -96,10 +76,9 @@ pub struct HttpServerState {
 impl HttpServerState {
     /// Create new HTTP server state with the provided metrics registry
     pub fn new(drt: Arc<crate::DistributedRuntime>) -> anyhow::Result<Self> {
-        let http_metrics_registry = Arc::new(HttpMetricsRegistry { drt: drt.clone() });
         // Note: This metric is created at the DRT level (no namespace), so we manually add "dynamo_" prefix
         // to maintain consistency with the project's metric naming convention
-        let uptime_gauge = http_metrics_registry.as_ref().create_gauge(
+        let uptime_gauge = drt.as_ref().create_gauge(
             "dynamo_uptime_seconds",
             "Total uptime of the DistributedRuntime in seconds",
             &[],
@@ -368,9 +347,9 @@ mod tests {
         println!("Full metrics response:\n{}", response);
 
         let expected = "\
-# HELP dynamo_uptime_seconds Total uptime of the DistributedRuntime in seconds
-# TYPE dynamo_uptime_seconds gauge
-dynamo_uptime_seconds{namespace=\"http_server\"} 42
+# HELP dynamo_component_dynamo_uptime_seconds Total uptime of the DistributedRuntime in seconds
+# TYPE dynamo_component_dynamo_uptime_seconds gauge
+dynamo_component_dynamo_uptime_seconds 42
 ";
         assert_eq!(response, expected);
     }
@@ -445,8 +424,8 @@ dynamo_uptime_seconds{namespace=\"http_server\"} 42
                     let tracestate_value = "vendor1=opaqueValue1,vendor2=opaqueValue2";
                     let mut headers = reqwest::header::HeaderMap::new();
                     headers.insert(
-                        reqwest::header::HeaderName.from_static("traceparent"),
-                        reqwest::header::HeaderValue.from_str(traceparent_value)?,
+                        reqwest::header::HeaderName::from_static("traceparent"),
+                        reqwest::header::HeaderValue::from_str(traceparent_value).unwrap(),
                     );
                     let url = format!("http://{}{}", addr, path);
                     let response = client.get(&url).send().await.unwrap();

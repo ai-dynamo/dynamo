@@ -100,8 +100,8 @@ spec:
         {{- if .Values.dynamo.enableLWS }}
           - --enable-lws
         {{- end }}
-        {{- if .Values.dynamo.enableGrove }}
-          - --enable-grove
+        {{- if .Values.dynamo.groveTerminationDelay }}
+          - --grove-termination-delay={{ .Values.dynamo.groveTerminationDelay }}
         {{- end }}
         command:
         - /manager

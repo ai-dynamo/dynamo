@@ -116,7 +116,6 @@ rules:
   - patch
   - update
   - watch
-{{- if .Values.dynamo.enableGrove }}
 - apiGroups:
   - grove.io
   resources:
@@ -129,7 +128,6 @@ rules:
   - patch
   - update
   - watch
-{{- end }}
 - apiGroups:
   - apps
   resources:

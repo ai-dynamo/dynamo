@@ -71,7 +71,7 @@ RUN rm -rf /opt/hpcx/ucx && \
 
 ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
 
-ARG NIXL_TAG=0.3.1
+ARG NIXL_TAG=0.4.1
 RUN git clone https://github.com/ai-dynamo/nixl.git && cd nixl && git checkout ${NIXL_TAG} && pip install --break-system-packages . --config-settings=setup-args="-Ducx_path=/usr/local/ucx"
 
 WORKDIR /sgl-workspace

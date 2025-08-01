@@ -4,6 +4,8 @@
 import argparse
 from typing import Optional
 
+from tensorrt_llm.llmapi import BuildConfig
+
 from dynamo.trtllm.request_handlers.handler_base import (
     DisaggregationMode,
     DisaggregationStrategy,
@@ -27,8 +29,16 @@ class Config:
         self.model_path: str = ""
         self.served_model_name: Optional[str] = None
         self.tensor_parallel_size: int = 1
+        self.pipeline_parallel_size: int = 1
+        self.expert_parallel_size: Optional[int] = None
         self.kv_block_size: int = 32
         self.migration_limit: int = 0
+        self.gpus_per_node: Optional[int] = None
+        self.max_batch_size: int = BuildConfig.max_batch_size
+        self.max_num_tokens: int = BuildConfig.max_num_tokens
+        self.max_seq_len: int = BuildConfig.max_seq_len
+        self.max_beam_width: int = BuildConfig.max_beam_width
+        self.free_gpu_memory_fraction: Optional[float] = None
         self.extra_engine_args: str = ""
         self.publish_events_and_metrics: bool = False
         self.disaggregation_mode: DisaggregationMode = DEFAULT_DISAGGREGATION_MODE
@@ -45,7 +55,15 @@ class Config:
             f"model_path={self.model_path}, "
             f"served_model_name={self.served_model_name}, "
             f"tensor_parallel_size={self.tensor_parallel_size}, "
+            f"pipeline_parallel_size={self.pipeline_parallel_size}, "
+            f"expert_parallel_size={self.expert_parallel_size}, "
             f"kv_block_size={self.kv_block_size}, "
+            f"gpus_per_node={self.gpus_per_node}, "
+            f"max_batch_size={self.max_batch_size}, "
+            f"max_num_tokens={self.max_num_tokens}, "
+            f"max_seq_len={self.max_seq_len}, "
+            f"max_beam_width={self.max_beam_width}, "
+            f"free_gpu_memory_fraction={self.free_gpu_memory_fraction}, "
             f"extra_engine_args={self.extra_engine_args}, "
             f"migration_limit={self.migration_limit}, "
             f"publish_events_and_metrics={self.publish_events_and_metrics}, "
@@ -108,8 +126,21 @@ def cmd_line_args():
         help="Name to serve the model under. Defaults to deriving it from model path.",
     )
     parser.add_argument(
-        "--tensor-parallel-size", type=int, default=1, help="Number of GPUs to use."
+        "--tensor-parallel-size", type=int, default=1, help="Tensor parallelism size."
     )
+    parser.add_argument(
+        "--pipeline-parallel-size",
+        type=int,
+        default=None,
+        help="Pipeline parallelism size.",
+    )
+    parser.add_argument(
+        "--expert-parallel-size",
+        type=int,
+        default=None,
+        help="expert parallelism size.",
+    )
+
     # IMPORTANT: We should ideally not expose this to users. We should be able to
     # query the block size from the TRTLLM engine.
     parser.add_argument(
@@ -120,6 +151,43 @@ def cmd_line_args():
         type=int,
         default=0,
         help="Maximum number of times a request may be migrated to a different engine worker. The number may be overridden by the engine.",
+    )
+    parser.add_argument(
+        "--gpus-per-node",
+        type=int,
+        default=None,
+        help="Number of GPUs per node. If not provided, will be inferred from the environment.",
+    )
+    parser.add_argument(
+        "--max-batch-size",
+        type=int,
+        default=BuildConfig.max_batch_size,
+        help="Maximum number of requests that the engine can schedule.",
+    )
+    parser.add_argument(
+        "--max-num-tokens",
+        type=int,
+        default=BuildConfig.max_num_tokens,
+        help="Maximum number of batched input tokens after padding is removed in each batch.",
+    )
+    parser.add_argument(
+        "--max-seq-len",
+        type=int,
+        default=BuildConfig.max_seq_len,
+        help="Maximum total length of one request, including prompt and outputs. "
+        "If unspecified, the value is deduced from the model config.",
+    )
+    parser.add_argument(
+        "--max-beam-width",
+        type=int,
+        default=BuildConfig.max_beam_width,
+        help="Maximum number of beams for beam search decoding.",
+    )
+    parser.add_argument(
+        "--free-gpu-memory-fraction",
+        type=float,
+        default=None,
+        help="Free GPU memory fraction reserved for KV Cache, after allocating model weights and buffers.",
     )
 
     parser.add_argument(
@@ -195,6 +263,18 @@ def cmd_line_args():
     config.next_endpoint = args.next_endpoint
 
     config.tensor_parallel_size = args.tensor_parallel_size
+    if args.pipeline_parallel_size is not None:
+        config.pipeline_parallel_size = args.pipeline_parallel_size
+    if args.expert_parallel_size is not None:
+        config.expert_parallel_size = args.expert_parallel_size
+    if args.gpus_per_node is not None:
+        config.gpus_per_node = args.gpus_per_node
+    if args.free_gpu_memory_fraction is not None:
+        config.free_gpu_memory_fraction = args.free_gpu_memory_fraction
+    config.max_batch_size = args.max_batch_size
+    config.max_num_tokens = args.max_num_tokens
+    config.max_seq_len = args.max_seq_len
+    config.max_beam_width = args.max_beam_width
     config.kv_block_size = args.kv_block_size
     config.migration_limit = args.migration_limit
     config.extra_engine_args = args.extra_engine_args

@@ -23,6 +23,7 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
@@ -1136,6 +1137,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 				controllerConfig: controller_common.Config{
 					EtcdAddress: "etcd-address",
 					NatsAddress: "nats-address",
+					Grove: controller_common.GroveConfig{
+						TerminationDelay: 15 * time.Minute,
+					},
 				},
 				dynamoDeployment: &v1alpha1.DynamoGraphDeployment{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1272,6 +1276,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 				Spec: grovev1alpha1.PodGangSetSpec{
 					Replicas: 1,
 					Template: grovev1alpha1.PodGangSetTemplateSpec{
+						TerminationDelay: &metav1.Duration{Duration: 15 * time.Minute},
 						Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
 							{
 								Name: "frontend",

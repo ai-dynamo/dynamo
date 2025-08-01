@@ -60,7 +60,7 @@ As of Q2 2025, Dynamo HTTP Frontend metrics are exposed when you build container
 
    - Start the [components/metrics](../../components/metrics/README.md) application to begin monitoring for metric events from dynamo workers and aggregating them on a Prometheus metrics endpoint: `http://localhost:9091/metrics`.
    - Uncomment the appropriate lines in prometheus.yml to poll port 9091.
-   - Start worker(s) that publishes KV Cache metrics: [examples/rust/service_metrics/bin/server](../../lib/runtime/examples/service_metrics/README.md)` can populate dummy KV Cache metrics.
+   - Start worker(s) that publishes KV Cache metrics: [lib/runtime/examples/service_metrics/README.md](../../lib/runtime/examples/service_metrics/README.md) can populate dummy KV Cache metrics.
 
 
 ## Configuration
@@ -95,16 +95,19 @@ The following configuration files should be present in this directory:
 - [grafana_dashboards/grafana-dcgm-metrics.json](./grafana_dashboards/grafana-dcgm-metrics.json): Contains Grafana dashboard configuration for DCGM GPU metrics
 - [grafana_dashboards/grafana-llm-metrics.json](./grafana_dashboards/grafana-llm-metrics.json): This file, which is being phased out, contains the Grafana dashboard configuration for LLM-specific metrics. It requires an additional `metrics` component to operate concurrently. A new version is under development.
 
-## Running the example `metrics` component
+## Running the deprecated `metrics` component
 
-IMPORTANT: This section is being phased out, and some metrics may not function as expected. A new solution is under development.
+⚠️ **DEPRECATION NOTICE** ⚠️
 
-When you run the example [components/metrics](../../components/metrics/README.md) component, it exposes a Prometheus /metrics endpoint with the followings (defined in [../../components/metrics/src/lib.rs](../../components/metrics/src/lib.rs)):
-- `llm_requests_active_slots`: Number of currently active request slots per worker
+When you run the example [components/metrics](../../components/metrics/README.md) component, it exposes a Prometheus /metrics endpoint with the following metrics (defined in [components/metrics/src/lib.rs](../../components/metrics/src/lib.rs)):
+
+**⚠️ The following `llm_kv_*` metrics are deprecated:**
+
+- `llm_requests_active_slots`: Active request slots per worker
 - `llm_requests_total_slots`: Total available request slots per worker
-- `llm_kv_blocks_active`: Number of active KV blocks per worker
+- `llm_kv_blocks_active`: Active KV blocks per worker
 - `llm_kv_blocks_total`: Total KV blocks available per worker
-- `llm_kv_hit_rate_percent`: Cumulative KV Cache hit percent per worker
+- `llm_kv_hit_rate_percent`: KV Cache hit percent per worker
 - `llm_load_avg`: Average load across workers
 - `llm_load_std`: Load standard deviation across workers
 
