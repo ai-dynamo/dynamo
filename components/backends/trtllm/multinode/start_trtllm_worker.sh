@@ -22,13 +22,6 @@ if [[ -z ${ENGINE_CONFIG} ]]; then
     exit 1
 fi
 
-# NOTE: When this script is run directly from srun, the environment variables
-# for TRTLLM KV cache are not set. So we need to set them here.
-# Related issue: https://github.com/ai-dynamo/dynamo/issues/1743
-if [[ -z ${TRTLLM_USE_UCX_KVCACHE} ]] && [[ -z ${TRTLLM_USE_NIXL_KVCACHE} ]]; then
-    export TRTLLM_USE_UCX_KVCACHE=1
-fi
-
 EXTRA_ARGS=""
 if [[ -n ${DISAGGREGATION_MODE} ]]; then
   EXTRA_ARGS+="--disaggregation-mode ${DISAGGREGATION_MODE} "

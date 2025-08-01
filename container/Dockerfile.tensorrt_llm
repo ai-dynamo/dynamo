@@ -332,26 +332,6 @@ RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
     pip install dist/ai_dynamo*any.whl
 
 ENV DYNAMO_HOME=/workspace
-
-# Use UCX for TRTLLM KV Cache Transfer
-ARG TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL
-ENV TRTLLM_USE_UCX_KVCACHE=1
-
-# Create a script that sets the environment variables and source it.
-# If TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL is set to 1, unset TRTLLM_USE_UCX_KVCACHE
-# and set TRTLLM_USE_NIXL_KVCACHE to 1.
-RUN echo '#!/bin/bash' > /usr/local/bin/set_trtllm_env.sh && \
-    if [ "$TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL" = "1" ]; then \
-        echo 'unset TRTLLM_USE_UCX_KVCACHE' >> /usr/local/bin/set_trtllm_env.sh; \
-        echo 'export TRTLLM_USE_NIXL_KVCACHE=1' >> /usr/local/bin/set_trtllm_env.sh; \
-    else \
-        echo '# TRTLLM_USE_UCX_KVCACHE should already be set to 1' >> /usr/local/bin/set_trtllm_env.sh; \
-    fi && \
-    chmod +x /usr/local/bin/set_trtllm_env.sh
-
-# Source the script in bashrc
-RUN echo 'source /usr/local/bin/set_trtllm_env.sh' >> /root/.bashrc
-
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
@@ -500,11 +480,6 @@ COPY --from=dev /workspace/target/release/metrics /usr/local/bin/metrics
 RUN uv pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" \
     "${TENSORRTLLM_PIP_WHEEL}" && \
     uv pip install ai-dynamo nixl --find-links wheelhouse
-
-# Setup TRTLLM environment variables, same as in dev image
-ENV TRTLLM_USE_UCX_KVCACHE=1
-COPY --from=dev /usr/local/bin/set_trtllm_env.sh /usr/local/bin/set_trtllm_env.sh
-RUN echo 'source /usr/local/bin/set_trtllm_env.sh' >> /root/.bashrc
 
 # Copy benchmarks, backends and tests for CI
 # TODO: Remove this once we have a functional CI image built on top of the runtime image
