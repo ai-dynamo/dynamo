@@ -50,6 +50,20 @@ jobs:
       - name: Run Rust checks (llm/block-manager)
         run: |
           docker run -w /workspace/lib/llm --name ${{ env.CONTAINER_ID }}_rust_checks ${{ steps.define_image_tag.outputs.image_tag }} bash -ec 'rustup component add rustfmt clippy && cargo fmt -- --check && cargo clippy --features block-manager --no-deps --all-targets -- -D warnings && cargo test --locked --all-targets --features=block-manager'
+      - name: Start services with docker-compose
+        working-directory: ./deploy
+        run: |
+          docker-compose up -d nats-server etcd-server
+          # Wait for services to be ready
+          sleep 15
+      - name: Run Rust Integration Tests
+        run: |
+          docker run --network deploy_server -w /workspace/lib/llm --name ${{ env.CONTAINER_ID }}_integration_tests ${{ steps.define_image_tag.outputs.image_tag }} bash -ec 'cargo test --locked --features integration -- --nocapture'
+      - name: Cleanup services
+        if: always()
+        working-directory: ./deploy
+        run: |
+          docker-compose down
       - name: Run pytest
         env:
           PYTEST_MARKS: "pre_merge or mypy"
