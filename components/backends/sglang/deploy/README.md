@@ -57,18 +57,6 @@ resources:
     gpu: "1"
 ```
 
-**Health Checks:**
-```yaml
-livenessProbe:
-  httpGet:          # For Frontend
-    path: /health
-    port: 8000
-  exec:             # For Workers
-    command: ["/bin/sh", "-c", "exit 0"]
-readinessProbe:
-  # Similar structure
-```
-
 **Container Configuration:**
 ```yaml
 extraPodSpec:
@@ -119,31 +107,14 @@ args:
 kubectl apply -f <your-template>.yaml
 ```
 
-## Resource Requirements
-
-| Component | CPU | Memory | GPU | Purpose |
-|-----------|-----|--------|-----|---------|
-| Frontend | 5 cores | 10Gi | 0 | HTTP API server |
-| DecodeWorker | 10 cores | 20Gi | 1 | Model inference |
-| PrefillWorker | 10 cores | 20Gi | 1 | Initial token processing (disagg only) |
-
-**Note:** Adjust resources based on your model size and performance requirements.
-
 ## Model Configuration
 
-All templates use **DeepSeek-R1-Distill-Llama-8B** as the default model. Key parameters:
-
-- `--page-size 16`: KV cache page size
-- `--tp 1`: Tensor parallelism degree
-- `--trust-remote-code`: Enable custom model code
-- `--skip-tokenizer-init`: Optimize startup time
+All templates use **DeepSeek-R1-Distill-Llama-8B** as the default model. But you can use any sglang argument and configuration. Key parameters:
 
 ## Monitoring and Health
 
 - **Frontend health endpoint**: `http://<frontend-service>:8000/health`
 - **Liveness probes**: Check process health every 60s
-- **Readiness probes**: Ensure service readiness before routing traffic
-- **Failure threshold**: 10 consecutive failures trigger restart
 
 ## Further Reading
 
