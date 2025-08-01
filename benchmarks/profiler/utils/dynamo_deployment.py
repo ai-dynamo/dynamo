@@ -17,9 +17,9 @@ import argparse
 import asyncio
 import time
 from pathlib import Path
-from typing import Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
-import aiofiles
+import aiofiles  # type: ignore[import-untyped]
 import httpx  # added for HTTP requests
 import kubernetes_asyncio as kubernetes
 import yaml
@@ -62,9 +62,9 @@ class DynamoDeploymentClient:
         self.deployment_name = deployment_name
         self.model_name = model_name
         self.service_name = service_name or f"{deployment_name}-frontend"
-        self.components: list[str] = []  # Will store component names from CR
+        self.components: List[str] = []  # Will store component names from CR
         self.deployment_spec: Optional[
-            dict
+            Dict[str, Any]
         ] = None  # Will store the full deployment spec
         self.base_log_dir = Path(base_log_dir) if base_log_dir else Path("logs")
         self.frontend_port = frontend_port

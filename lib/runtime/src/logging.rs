@@ -134,74 +134,18 @@ pub fn is_valid_span_id(span_id: &str) -> bool {
 
 pub struct DistributedTraceIdLayer;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct DistributedTraceContext {
-    pub trace_id: String,
-    pub span_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub parent_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tracestate: Option<String>,
-    #[serde(skip)]
-    start: Option<Instant>,
-    #[serde(skip)]
+    trace_id: String,
+    span_id: String,
+    parent_id: Option<String>,
+    tracestate: Option<String>,
+    start: Instant,
     end: Option<Instant>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub x_request_id: Option<String>,
+    x_request_id: Option<String>,
 }
 
-impl DistributedTraceContext {
-    /// Create a traceparent string from the context
-    pub fn create_traceparent(&self) -> String {
-        format!(
-            "00-{}-{}-01",
-            self.trace_id, self.span_id
-        )
-    }
-    /*
-    pub fn insert_headers(&self, headers: &mut HeaderMap) {
-	headers.insert("traceparent",self.create_traceparent());
-	if self.tracestate.is_some() {
-	    headers.insert("tracestate",self.tracestate);
-	}
-	if let Some(x_request_id) = self.x_request_id {
-	    headers.insert("x_request_id",x_request_id);
-	}
-    }
-    */
-    /*
-    pub to_headers(&self) -> HeaderMap {
-	let mut headers = HeaderMap::new();
-	headers.insert("traceparent",trace_context.create_traceparent());
-	if let Some(tracestate) = trace_context.tracestate {
-	    headers.insert("tracestate",tracestate);
-	}
-	if let Some(x_request_id) = trace_context.x_request_id {
-	    headers.insert("x_request_id",x_request_id);
-	}
-	}
-	headers
-    }*/
-}
-
-/// Parse a traceparent string into its components
-pub fn parse_traceparent(traceparent: &str) -> (Option<String>, Option<String>) {
-    let pieces: Vec<_> = traceparent.split('-').collect();
-    if pieces.len() != 4 {
-        return (None , None)
-    }
-    let version = pieces[0];
-    let trace_id = pieces[1];
-    let parent_id = pieces[2];
-
-    if !is_valid_trace_id(trace_id) || !is_valid_span_id(parent_id) {
-        return (None, None)
-    }
-
-    (Some(trace_id.to_string()), Some(parent_id.to_string()))
-}
-
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct TraceParent {
     pub trace_id: Option<String>,
     pub parent_id: Option<String>,
@@ -350,7 +294,6 @@ where
                 extensions.get_mut::<DistributedTraceContext>()
             {
                 distributed_tracing_context.end = Some(Instant::now());
-
             }
         }
     }
@@ -433,7 +376,7 @@ where
                 span_id: span_id.expect("Span ID must be set"),
                 parent_id,
                 tracestate,
-                start: Some(Instant::now()),
+                start: Instant::now(),
                 end: None,
                 x_request_id,
             });

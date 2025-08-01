@@ -4,6 +4,9 @@
 
 Follow individual examples under components/backends/ to serve models locally.
 
+For example follow the [vLLM Backend Example](../../components/backends/vllm/README.md)
+
+For a basic GPU - unaware example see the [Hello World Example](../../examples/runtime/hello_world/README.md)
 
 ## Deploying Examples to Kubernetes
 
@@ -14,14 +17,9 @@ Before you can deploy your graphs, you need to deploy the Dynamo Runtime and Dyn
 If you are a **👤 Dynamo User** first follow the [Quickstart Guide](../guides/dynamo_deploy/quickstart.md) first.
 
 ### Instructions for Dynamo Contributor
-If you are a **🧑‍💻 Dynamo Contributor** first follow the instructions in [deploy/cloud/helm/README.md](../../deploy/cloud/helm/README.md) to create your Dynamo Cloud deployment.
-
-
-You would have to rebuild the dynamo platform images as the code evolves. For more details please look at the [Cloud Guide](../guides/dynamo_deploy/dynamo_cloud.md)
-
-```bash
-export DYNAMO_IMAGE=<your-registry>/<your-image-name>:<your-tag>
-```
+If you are a **🧑‍💻 Dynamo Contributor** you may have to rebuild the dynamo platform images as the code evolves.
+For more details read the [Cloud Guide](../guides/dynamo_deploy/dynamo_cloud.md)
+Read more on deploying Dynamo Cloud read [deploy/cloud/helm/README.md](../../deploy/cloud/helm/README.md).
 
 
 ### Deploying a particular example
@@ -42,12 +40,26 @@ kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
 You can use `kubectl get dynamoGraphDeployment -n ${NAMESPACE}` to view your deployment.
 You can use `kubectl delete dynamoGraphDeployment <your-dep-name> -n ${NAMESPACE}` to delete the deployment.
 
+We provide a Custom Resource yaml file for many examples under the `deploy/` folder.
+Use [VLLM YAML](../../components/backends/vllm/deploy/agg.yaml) for an example.
+
 
 **Note 1** Example Image
 
-The examples use a prebuilt image from the `nvcr.io/nvidian/nim-llm-dev registry`.
+The examples use a prebuilt image from the `nvcr.io` registry.
 You can build your own image and update the image location in your CR file prior to applying.
-See [Building the Dynamo Base Image](../../README.md#building-the-dynamo-base-image)
+You could build your own image using
+
+```bash
+./container/build.sh --framework <your-inference-framework>
+```
+
+For example for the `sglang` run
+```bash
+./container/build.sh --framework sglang
+```
+
+Then you would need to overwrite the image in the examples.
 
 ```bash
 extraPodSpec:
@@ -67,9 +79,9 @@ Look for one that ends in `-frontend` and use it for port forward.
 
 ```bash
 SERVICE_NAME=$(kubectl get svc -n ${NAMESPACE} -o name | grep frontend | sed 's|.*/||' | sed 's|-frontend||' | head -n1)
-kubectl port-forward svc/${SERVICE_NAME}-frontend 8000:8000 -n ${NAMESPACE}
+kubectl port-forward svc/${SERVICE_NAME}-frontend 8080:8080 -n ${NAMESPACE}
 ```
 
 Consult the [Port Forward Documentation](https://kubernetes.io/docs/tasks/access-application-cluster/port-forward-access-application-cluster/)
 
-More on [LLM examples](llm_deployment.md)
+

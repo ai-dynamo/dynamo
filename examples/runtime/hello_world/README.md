@@ -61,7 +61,7 @@ The example demonstrates:
  # clone the dynamo repository if necessary
  # git clone https://github.com/ai-dynamo/dynamo.git
  cd dynamo
- docker compose -f deploy/metrics/docker-compose.yml up -d
+ docker compose -f deploy/docker-compose.yml up -d
  ```
 
 ### Running the Example
@@ -101,3 +101,22 @@ Hello star!
 
 - **`worker`**: A dynamo worker that connects to the backend service and processes the streaming response
 
+## Deployment to Kubernetes
+
+Note that this a very simple degenerate example which does not demonstrate the standard Dynamo FrontEnd-Backend deployment. The hello-world client is not a web server, it is a one-off function which sends the predefined text "world,sun,moon,star" to the backend. The example is meant to show the HelloWorldWorker. As such you will only see the HelloWorldWorker pod in deployment. The client will run and exit and the pod will not be operational.
+
+
+Follow the [Quickstart Guide](../../../docs/guides/dynamo_deploy/quickstart.md) to install Dynamo Cloud.
+Then deploy to kubernetes using
+
+```bash
+export NAMESPACE=<your-namespace>
+cd dynamo
+kubectl apply -f examples/runtime/hello_world/deploy/hello_world.yaml -n ${NAMESPACE}
+```
+
+to delete your deployment:
+
+```bash
+kubectl delete dynamographdeployment hello-world -n ${NAMESPACE}
+```

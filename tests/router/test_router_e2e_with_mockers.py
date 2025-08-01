@@ -9,7 +9,6 @@ import os
 import aiohttp
 import pytest
 
-from tests.conftest import download_models
 from tests.utils.managed_process import ManagedProcess
 
 pytestmark = pytest.mark.pre_merge
@@ -18,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
 NUM_MOCKERS = 2
+BLOCK_SIZE = 16
 SPEEDUP_RATIO = 10.0
 NUM_REQUESTS = 100
 PORT = 8090  # Starting port for mocker instances
@@ -59,6 +59,8 @@ class KVRouterProcess(ManagedProcess):
             "python",
             "-m",
             "dynamo.frontend",
+            "--kv-cache-block-size",
+            str(BLOCK_SIZE),
             "--router-mode",
             "kv",
             "--http-port",
@@ -93,14 +95,11 @@ def test_mocker_kv_router(request, runtime_services):
     This test doesn't require GPUs and runs quickly for pre-merge validation.
     """
 
-    # Download only the Qwen model for this test
-    download_models([MODEL_NAME])
-
     # runtime_services starts etcd and nats
     logger.info("Starting mocker KV router test")
 
     # Create mocker args file
-    mocker_args = {"speedup_ratio": SPEEDUP_RATIO}
+    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
 
     mocker_args_file = os.path.join(request.node.name, "mocker_args.json")
     with open(mocker_args_file, "w") as f:

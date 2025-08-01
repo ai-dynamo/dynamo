@@ -67,7 +67,7 @@ Ensure you have the source code checked out and are in the `dynamo` directory:
 
 ### Set Environment Variables
 
-Our examples use the [`nvcr.io`](nvcr.io/nvidia/ai-dynamo/) but you can setup your own values if you use another docker registry.
+Our examples use the [`nvcr.io`](https://nvcr.io/nvidia/ai-dynamo/) but you can setup your own values if you use another docker registry.
 
 ```bash
 export NAMESPACE=dynamo-cloud # or whatever you prefer.
