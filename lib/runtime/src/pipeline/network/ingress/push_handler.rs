@@ -16,9 +16,9 @@
 use super::*;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tracing::info_span;
 use tracing::Instrument;
-use std::sync::Arc;
 
 /// Metrics configuration for profiling work handlers
 #[derive(Clone, Debug)]

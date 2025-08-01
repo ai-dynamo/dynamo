@@ -39,13 +39,10 @@ use crate::protocols::openai::{
 };
 use crate::request_template::RequestTemplate;
 use crate::types::Annotated;
-use dynamo_runtime::logging::TraceParent;
-use dynamo_runtime::logging::make_request_span;
-use tracing::Instrument;
-use tower_http::trace::TraceLayer;
-use tracing::Level;
-use tower_http::trace::DefaultMakeSpan;
 use dynamo_runtime::logging::get_distributed_tracing_context;
+use dynamo_runtime::logging::make_request_span;
+use tower_http::trace::TraceLayer;
+use tracing::Instrument;
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 
@@ -139,18 +136,17 @@ impl From<HttpError> for ErrorMessage {
 
 /// Get the request ID from a primary source, or next from the headers, or lastly create a new one if not present
 fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
-
     // Try to get request id from trace context
     if let Some(trace_context) = get_distributed_tracing_context() {
-	if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
-	    return x_dynamo_request_id
-	}
+        if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
+            return x_dynamo_request_id;
+        }
     }
 
     // Try to get the request ID from the primary source
     if let Some(primary) = primary {
         if let Ok(uuid) = uuid::Uuid::parse_str(primary) {
-	    return uuid.to_string();
+            return uuid.to_string();
         }
     }
 
@@ -162,7 +158,7 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
     // Try to parse the request ID as a UUID, or generate a new one if missing/invalid
     let uuid = match request_id_opt {
         Some(request_id) => {
-	    uuid::Uuid::parse_str(request_id).unwrap_or_else(|_| uuid::Uuid::new_v4())
+            uuid::Uuid::parse_str(request_id).unwrap_or_else(|_| uuid::Uuid::new_v4())
         }
         None => uuid::Uuid::new_v4(),
     };
@@ -181,7 +177,7 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
 async fn handler_completions(
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
-    Json(request): Json<NvCreateCompletionRequest>
+    Json(request): Json<NvCreateCompletionRequest>,
 ) -> Result<Response, ErrorResponse> {
     // return a 503 if the service is not ready
     check_ready(&state)?;
@@ -196,7 +192,8 @@ async fn handler_completions(
 
     // possibly long running task
     // if this returns a streaming response, the stream handle will be armed and captured by the response stream
-    let response = tokio::spawn(completions(state, request, stream_handle)).in_current_span()
+    let response = tokio::spawn(completions(state, request, stream_handle))
+        .in_current_span()
         .await
         .map_err(|e| {
             ErrorMessage::internal_server_error(&format!(
@@ -386,14 +383,15 @@ async fn handler_chat_completions(
     // create the connection handles
     let (mut connection_handle, stream_handle) = create_connection_monitor(context.clone()).await;
 
-    let response = tokio::spawn(chat_completions(state, template, request, stream_handle).in_current_span())
-        .await
-        .map_err(|e| {
-            ErrorMessage::internal_server_error(&format!(
-                "Failed to await chat completions task: {:?}",
-                e,
-            ))
-        })?;
+    let response =
+        tokio::spawn(chat_completions(state, template, request, stream_handle).in_current_span())
+            .await
+            .map_err(|e| {
+                ErrorMessage::internal_server_error(&format!(
+                    "Failed to await chat completions task: {:?}",
+                    e,
+                ))
+            })?;
 
     // if we got here, then we will return a response and the potentially long running task has completed successfully
     // without need to be cancelled.
@@ -970,7 +968,7 @@ pub fn completions_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_completions))
-	.layer(TraceLayer::new_for_http().make_span_with(make_request_span))
+        .layer(TraceLayer::new_for_http().make_span_with(make_request_span))
         .with_state(state);
     (vec![doc], router)
 }
@@ -986,7 +984,7 @@ pub fn chat_completions_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_chat_completions))
-	.layer(TraceLayer::new_for_http().make_span_with(make_request_span))
+        .layer(TraceLayer::new_for_http().make_span_with(make_request_span))
         .with_state((state, template));
     (vec![doc], router)
 }
@@ -1001,7 +999,7 @@ pub fn embeddings_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(embeddings))
-	.layer(TraceLayer::new_for_http().make_span_with(make_request_span))
+        .layer(TraceLayer::new_for_http().make_span_with(make_request_span))
         .with_state(state);
     (vec![doc], router)
 }
@@ -1017,7 +1015,7 @@ pub fn list_models_router(
 
     let router = Router::new()
         .route(&openai_path, get(list_models_openai))
-	.layer(TraceLayer::new_for_http().make_span_with(make_request_span))
+        .layer(TraceLayer::new_for_http().make_span_with(make_request_span))
         .with_state(state);
 
     (vec![doc_for_openai], router)
@@ -1034,7 +1032,7 @@ pub fn responses_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_responses))
-	.layer(TraceLayer::new_for_http().make_span_with(make_request_span))
+        .layer(TraceLayer::new_for_http().make_span_with(make_request_span))
         .with_state((state, template));
     (vec![doc], router)
 }

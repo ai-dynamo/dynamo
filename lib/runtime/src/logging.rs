@@ -48,12 +48,15 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::{filter::Directive, fmt};
 
 use crate::config::{disable_ansi_logging, jsonl_logging_enabled};
+use async_nats::{HeaderMap, HeaderValue};
 use axum::extract::FromRequestParts;
-use axum::http::request::Parts;
 use axum::http;
+use axum::http::request::Parts;
+use axum::http::Request;
 use serde_json::Value;
 use std::convert::Infallible;
 use std::time::Instant;
+use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tracing::field::Field;
 use tracing::span;
 use tracing::Id;
@@ -65,9 +68,6 @@ use tracing_subscriber::registry::SpanData;
 use tracing_subscriber::Layer;
 use tracing_subscriber::Registry;
 use uuid::Uuid;
-use async_nats::{HeaderMap, HeaderValue};
-use tower_http::trace::{TraceLayer, DefaultMakeSpan};
-use axum::http::Request;
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 
@@ -157,10 +157,7 @@ pub struct DistributedTraceContext {
 impl DistributedTraceContext {
     /// Create a traceparent string from the context
     pub fn create_traceparent(&self) -> String {
-        format!(
-            "00-{}-{}-01",
-            self.trace_id, self.span_id
-        )
+        format!("00-{}-{}-01", self.trace_id, self.span_id)
     }
 }
 
@@ -168,14 +165,14 @@ impl DistributedTraceContext {
 pub fn parse_traceparent(traceparent: &str) -> (Option<String>, Option<String>) {
     let pieces: Vec<_> = traceparent.split('-').collect();
     if pieces.len() != 4 {
-        return (None , None)
+        return (None, None);
     }
     let version = pieces[0];
     let trace_id = pieces[1];
     let parent_id = pieces[2];
 
     if !is_valid_trace_id(trace_id) || !is_valid_span_id(parent_id) {
-        return (None, None)
+        return (None, None);
     }
 
     (Some(trace_id.to_string()), Some(parent_id.to_string()))
@@ -190,7 +187,7 @@ pub struct TraceParent {
     pub x_dynamo_request_id: Option<String>,
 }
 
-trait GenericHeaders {
+pub trait GenericHeaders {
     fn get(&self, key: &str) -> Option<&str>;
 }
 
@@ -202,55 +199,50 @@ impl GenericHeaders for async_nats::HeaderMap {
 
 impl GenericHeaders for http::HeaderMap {
     fn get(&self, key: &str) -> Option<&str> {
-        http::HeaderMap::get(self, key).and_then(|value|value.to_str().ok())
+        http::HeaderMap::get(self, key).and_then(|value| value.to_str().ok())
     }
 }
-
 
 impl TraceParent {
-    pub fn from_headers<H:GenericHeaders>(headers:&H) -> TraceParent {
-	let mut trace_id = None;
+    pub fn from_headers<H: GenericHeaders>(headers: &H) -> TraceParent {
+        let mut trace_id = None;
         let mut parent_id = None;
         let mut tracestate = None;
-	let mut x_request_id = None;
-	let mut x_dynamo_request_id = None;
+        let mut x_request_id = None;
+        let mut x_dynamo_request_id = None;
 
+        if let Some(header_value) = headers.get("traceparent") {
+            (trace_id, parent_id) = parse_traceparent(header_value);
+        }
 
-	if let Some(header_value) = headers.get("traceparent") {
-	    (trace_id, parent_id) = parse_traceparent(header_value);
-	}
+        if let Some(header_value) = headers.get("x-request-id") {
+            x_request_id = Some(header_value.to_string());
+        }
 
-	if let Some(header_value) = headers.get("x-request-id") {
-	    x_request_id = Some(header_value.to_string());
-	}
+        if let Some(header_value) = headers.get("tracestate") {
+            tracestate = Some(header_value.to_string());
+        }
 
-	if let Some(header_value) = headers.get("tracestate") {
-	    tracestate = Some(header_value.to_string());
-	}
+        if let Some(header_value) = headers.get(DYNAMO_REQUEST_ID_HEADER) {
+            x_dynamo_request_id = Some(header_value.to_string());
+        }
 
-	if let Some(header_value) = headers.get(DYNAMO_REQUEST_ID_HEADER) {
-	    x_dynamo_request_id = Some(header_value.to_string());
-	}
-
-	// Try to parse the request ID as a UUID, or generate a new one if missing/invalid
-	let uuid = match x_dynamo_request_id  {
-            Some(x_dynamo_request_id) => {
-		uuid::Uuid::parse_str(x_dynamo_request_id.as_str()).unwrap_or_else(|_| uuid::Uuid::new_v4())
-            }
+        // Try to parse the request ID as a UUID, or generate a new one if missing/invalid
+        let uuid = match x_dynamo_request_id {
+            Some(x_dynamo_request_id) => uuid::Uuid::parse_str(x_dynamo_request_id.as_str())
+                .unwrap_or_else(|_| uuid::Uuid::new_v4()),
             None => uuid::Uuid::new_v4(),
-	};
+        };
 
-
-	TraceParent{
-	    trace_id: trace_id,
-	    parent_id: parent_id,
-	    tracestate: tracestate,
-	    x_request_id: x_request_id,
-	    x_dynamo_request_id: Some(uuid.to_string())
-	}
+        TraceParent {
+            trace_id,
+            parent_id,
+            tracestate,
+            x_request_id,
+            x_dynamo_request_id: Some(uuid.to_string()),
+        }
     }
 }
-
 
 // Takes Axum request and returning a span
 pub fn make_request_span<B>(req: &Request<B>) -> Span {
@@ -268,12 +260,10 @@ pub fn make_request_span<B>(req: &Request<B>) -> Span {
         trace_id = trace_parent.trace_id,
         parent_id = trace_parent.parent_id,
         x_request_id = trace_parent.x_request_id,
-	x_dynamo_request_id = trace_parent.x_dynamo_request_id,
+    x_dynamo_request_id = trace_parent.x_dynamo_request_id,
 
     )
 }
-
-
 
 #[derive(Debug, Default)]
 pub struct FieldVisitor {
@@ -305,7 +295,6 @@ where
                 extensions.get_mut::<DistributedTraceContext>()
             {
                 distributed_tracing_context.end = Some(Instant::now());
-
             }
         }
     }
@@ -317,7 +306,7 @@ where
             let mut parent_id: Option<String> = None;
             let mut span_id: Option<String> = None;
             let mut x_request_id: Option<String> = None;
-	    let mut x_dynamo_request_id: Option<String> = None;
+            let mut x_dynamo_request_id: Option<String> = None;
             let mut tracestate: Option<String> = None;
             let mut visitor = FieldVisitor::default();
             attrs.record(&mut visitor);
@@ -354,7 +343,7 @@ where
                 x_request_id = Some(x_request_id_input.to_string());
             }
 
-	    if let Some(x_request_id_input) = visitor.fields.get("x_dynamo_request_id") {
+            if let Some(x_request_id_input) = visitor.fields.get("x_dynamo_request_id") {
                 x_dynamo_request_id = Some(x_request_id_input.to_string());
             }
 
@@ -396,7 +385,7 @@ where
                 start: Some(Instant::now()),
                 end: None,
                 x_request_id,
-		x_dynamo_request_id
+                x_dynamo_request_id,
             });
         }
     }
@@ -700,7 +689,7 @@ where
                     visitor.fields.remove("x_request_id");
                 }
 
-		if let Some(x_dynamo_request_id) = tracing_context.x_dynamo_request_id.clone() {
+                if let Some(x_dynamo_request_id) = tracing_context.x_dynamo_request_id.clone() {
                     visitor.fields.insert(
                         "x_dynamo_request_id".to_string(),
                         serde_json::Value::String(x_dynamo_request_id),
@@ -708,7 +697,6 @@ where
                 } else {
                     visitor.fields.remove("dynamo_x_request_id");
                 }
-
             } else {
                 tracing::error!(
                     "Distributed Trace Context not found, falling back to internal ids"

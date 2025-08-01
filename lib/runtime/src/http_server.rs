@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use crate::config::HealthStatus;
+use crate::logging::make_request_span;
 use crate::logging::TraceParent;
 use crate::metrics::MetricsRegistry;
 use crate::traits::DistributedRuntimeProvider;
@@ -25,12 +26,11 @@ use std::sync::OnceLock;
 use std::time::Instant;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
+use tower_http::trace::DefaultMakeSpan;
+use tower_http::trace::TraceLayer;
 use tracing;
 use tracing::Instrument;
-use tower_http::trace::TraceLayer;
 use tracing::Level;
-use tower_http::trace::DefaultMakeSpan;
-use crate::logging::make_request_span;
 
 /// HTTP server information containing socket address and handle
 #[derive(Debug)]
@@ -162,14 +162,11 @@ pub async fn spawn_http_server(
                 move || metrics_handler(state)
             }),
         )
-        .fallback(|| {
-            async {
-                tracing::info!("[fallback handler] called");
-                (StatusCode::NOT_FOUND, "Route not found").into_response()
-            }
+        .fallback(|| async {
+            tracing::info!("[fallback handler] called");
+            (StatusCode::NOT_FOUND, "Route not found").into_response()
         })
-	.layer(TraceLayer::new_for_http().make_span_with(make_request_span))
-	;
+        .layer(TraceLayer::new_for_http().make_span_with(make_request_span));
 
     let address = format!("{}:{}", host, port);
     tracing::info!("[spawn_http_server] binding to: {}", address);
@@ -212,8 +209,8 @@ pub async fn spawn_http_server(
 //						      tracestate= trace_parent.tracestate))]
 async fn health_handler(
     state: Arc<HttpServerState>,
- //   route: &'static str,       // Used for tracing only
- ) -> impl IntoResponse {
+    //   route: &'static str,       // Used for tracing only
+) -> impl IntoResponse {
     let system_health = state.drt().system_health.lock().await;
     let (mut healthy, endpoints) = system_health.get_health_status();
     let uptime = match state.uptime() {
