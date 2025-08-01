@@ -202,11 +202,6 @@ pub async fn spawn_http_server(
 }
 
 /// Health handler
-// #[tracing::instrument(skip_all, level="trace", fields(route= %route,
-//						      trace_id = trace_parent.trace_id,
-//						      parent_id = trace_parent.parent_id,
-//						      x_request_id= trace_parent.x_request_id,
-//						      tracestate= trace_parent.tracestate))]
 async fn health_handler(
     state: Arc<HttpServerState>,
     //   route: &'static str,       // Used for tracing only
@@ -241,11 +236,6 @@ async fn health_handler(
 }
 
 /// Metrics handler with DistributedRuntime uptime
-//#[tracing::instrument(skip_all, level="trace", fields(route= %route,
-//						      trace_id = trace_parent.trace_id,
-//						      parent_id = trace_parent.parent_id,
-//						      x_request_id = trace_parent.x_request_id,
-//                                                      tracestate = trace_parent.tracestate))]
 async fn metrics_handler(
     state: Arc<HttpServerState>,
     //route: &'static str,       // Used for tracing only
