@@ -30,3 +30,41 @@ Please the [Quickstart Guide](quickstart.md) for steps to install Dynamo Cloud.
 
 [Deploying a particular example](../../examples/README.md#deploying-a-particular-example)
 
+Set your dynamo root directory
+cd
+export PROJECT_ROOT=$(pwd)
+export NAMESPACE= # the namespace you used to deploy Dynamo cloud to.
+Deploying an example consists of the simple kubectl apply -f ... -n ${NAMESPACE} command. For example:
+
+kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
+You can use kubectl get dynamoGraphDeployment -n ${NAMESPACE} to view your deployment. You can use kubectl delete dynamoGraphDeployment -n ${NAMESPACE} to delete the deployment.
+
+We provide a Custom Resource YAML file for many examples under the components/backends/{engine}/deploy folders. Consult the examples below for the CRs for a specific inference backend.
+
+View [SGLang K8s](
+
+View [vLLM K8s]
+
+View [TRTLLM K8s]
+
+The examples use a prebuilt image from the nvcr.io registry. You can point to the public images on [Dynamo NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo) or build your own image and update the image location in your CR YAML prior to applying. You could build your own image using
+
+./container/build.sh --framework
+For example for the sglang run
+
+./container/build.sh --framework sglang
+Then you would need to overwrite the image in the examples.
+
+extraPodSpec:
+mainContainer:
+image: <image-in-your-$DYNAMO_IMAGE>
+Note 2 Setup port forward if needed when deploying to Kubernetes.
+
+List the services in your namespace:
+
+kubectl get svc -n ${NAMESPACE}
+Look for one that ends in -frontend and use it for port forward.
+
+SERVICE_NAME=$(kubectl get svc -n ${NAMESPACE} -o name | grep frontend | sed 's|.*/||' | sed 's|-frontend||' | head -n1)
+kubectl port-forward svc/${SERVICE_NAME}-frontend 8080:8080 -n ${NAMESPACE}
+Consult the Port Forward Documentation
