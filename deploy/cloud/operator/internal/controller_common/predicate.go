@@ -20,18 +20,28 @@ package controller_common
 import (
 	"context"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/meta"
+	"k8s.io/client-go/discovery"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 )
 
+type GroveConfig struct {
+	// Enabled is automatically determined by checking if Grove CRDs are installed in the cluster
+	Enabled bool
+	// TerminationDelay configures the termination delay for Grove PodGangSets
+	TerminationDelay time.Duration
+}
+
 type Config struct {
 	// Enable resources filtering, only the resources belonging to the given namespace will be handled.
 	RestrictedNamespace string
 	EnableLWS           bool
-	EnableGrove         bool
+	Grove               GroveConfig
 	EtcdAddress         string
 	NatsAddress         string
 	IngressConfig       IngressConfig
@@ -46,6 +56,43 @@ type IngressConfig struct {
 
 func (i *IngressConfig) UseVirtualService() bool {
 	return i.VirtualServiceGateway != ""
+}
+
+// DetectGroveAvailability checks if Grove is available by checking if the Grove API group is registered
+// This approach uses the discovery client which is simpler and more reliable
+func DetectGroveAvailability(ctx context.Context, mgr ctrl.Manager) bool {
+	logger := log.FromContext(ctx)
+
+	// Use the discovery client to check if Grove API groups are available
+	cfg := mgr.GetConfig()
+	if cfg == nil {
+		logger.Info("Grove detection failed, no discovery client available")
+		return false
+	}
+
+	// Try to create a discovery client
+	discoveryClient, err := discovery.NewDiscoveryClientForConfig(cfg)
+	if err != nil {
+		logger.Error(err, "Grove detection failed, could not create discovery client")
+		return false
+	}
+
+	// Check if grove.io API group is available
+	apiGroups, err := discoveryClient.ServerGroups()
+	if err != nil {
+		logger.Error(err, "Grove detection failed, could not list server groups")
+		return false
+	}
+
+	for _, group := range apiGroups.Groups {
+		if group.Name == "grove.io" {
+			logger.Info("Grove is available, grove.io API group found")
+			return true
+		}
+	}
+
+	logger.Info("Grove not available, grove.io API group not found")
+	return false
 }
 
 func EphemeralDeploymentEventFilter(config Config) predicate.Predicate {

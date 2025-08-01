@@ -29,7 +29,7 @@ use crate::kv_router::protocols::LoadMetrics;
 use crate::kv_router::sequence::ActiveSequencesMultiWorker;
 use crate::kv_router::KvRouterConfig;
 use crate::kv_router::KV_HIT_RATE_SUBJECT;
-use crate::tokens::TokenBlockSequence;
+use crate::tokens::SequenceHash;
 use dynamo_runtime::component::Instance;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -217,15 +217,13 @@ impl KvScheduler {
         &self,
         request_id: String,
         isl_tokens: usize,
-        block_size: u32,
-        tokens: &[u32],
+        token_seq: Vec<SequenceHash>,
         overlaps: OverlapScores,
     ) -> Result<i64, KvSchedulerError> {
         let mut sequences = self.sequences.lock().await;
 
-        let token_sequence = TokenBlockSequence::from_slice(tokens, block_size, None);
         let (potential_blocks, potential_tokens) =
-            sequences.potential_blocks_and_tokens(token_sequence, overlaps.clone());
+            sequences.potential_blocks_and_tokens(token_seq.clone(), isl_tokens, overlaps.clone());
 
         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
         let request = SchedulingRequest {
@@ -247,10 +245,10 @@ impl KvScheduler {
             sequences.update_workers(new_worker_ids);
         }
 
-        let token_sequence = TokenBlockSequence::from_slice(tokens, block_size, None);
         sequences.add_request(
             request_id,
-            token_sequence,
+            token_seq,
+            isl_tokens,
             response.overlap_blocks,
             response.best_worker_id,
         );
@@ -258,10 +256,9 @@ impl KvScheduler {
         Ok(response.best_worker_id)
     }
 
-    /// Push tokens to a specific request's sequence
-    pub async fn push(&self, request_id: &String, tokens: &[u32]) {
+    pub async fn mark_prefill_completed(&self, request_id: &String) {
         let mut sequences = self.sequences.lock().await;
-        sequences.push(request_id, tokens)
+        sequences.mark_prefill_completed(request_id)
     }
 
     /// Free all blocks associated with a request
