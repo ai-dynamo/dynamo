@@ -39,17 +39,19 @@ ARG CARGO_BUILD_JOBS
 ARG NIXL_UCX_REF=v1.19.x
 ARG NIXL_REF=0.4.1
 
-ENV NIXL_SRC_DIR=/opt/nixl
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
-ENV LD_LIBRARY_PATH=$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:$LD_LIBRARY_PATH
+# Environment variables for NIXL
+ENV NIXL_SRC_DIR=/opt/nixl \
+    NIXL_PREFIX=/opt/nvidia/nvda_nixl \
+    NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins \
+    LD_LIBRARY_PATH=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu:/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins:$LD_LIBRARY_PATH
 
 USER root
 ARG PYTHON_VERSION=3.12
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
+# Rust environment setup
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
@@ -84,14 +86,17 @@ RUN apt-get update -y && \
     libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
     libnuma-dev librdmacm-dev ibverbs-providers \
     # Rust build dependencies
-	clang \
+    clang \
     libclang-dev \
-    protobuf-compiler
+    protobuf-compiler && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-#Required for pre-merge test validation
-### NATS & ETCD SETUP ###
-RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-${ARCH}.deb && \
+# Download external dependencies in parallel for better performance
+RUN --mount=type=cache,target=/var/cache/apt \
+    wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-${ARCH}.deb && \
     dpkg -i nats-server-v2.10.28-${ARCH}.deb && rm nats-server-v2.10.28-${ARCH}.deb
+
 ENV ETCD_VERSION="v3.5.21"
 RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
     mkdir -p /usr/local/bin/etcd && \
@@ -104,9 +109,8 @@ RUN rm -rf /opt/hpcx/ucx && \
     rm -rf /usr/local/ucx && \
     echo "Building UCX with reference $NIXL_UCX_REF" && \
     cd /usr/local/src &&                            \
-    git clone https://github.com/openucx/ucx.git && \
+    git clone --depth 1 --branch $NIXL_UCX_REF https://github.com/openucx/ucx.git && \
     cd ucx &&                                       \
-    git checkout $NIXL_UCX_REF &&                   \
     ./autogen.sh && ./configure                     \
     --prefix=/usr/local/ucx                         \
     --enable-shared                                 \
@@ -121,20 +125,22 @@ RUN rm -rf /opt/hpcx/ucx && \
     --with-dm                                       \
     --with-gdrcopy=/usr/local                       \
     --enable-mt &&                                  \
-    make -j &&                                      \
-    make -j install-strip &&                        \
-    ldconfig
+    make -j$(nproc) &&                              \
+    make -j$(nproc) install-strip &&                \
+    ldconfig && \
+    cd /usr/local/src && \
+    rm -rf ucx
 
-ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:$LD_LIBRARY_PATH
-ENV CPATH=/usr/include:$CPATH
-ENV PATH=/usr/bin:$PATH
-ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
+# UCX environment variables
+ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:$LD_LIBRARY_PATH \
+    CPATH=/usr/include:$CPATH \
+    PATH=/usr/bin:$PATH \
+    PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
 
 ### NIXL SETUP ###
-# Clone nixl source
-RUN git clone "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
+# Clone nixl source with shallow clone for faster download
+RUN git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
     cd ${NIXL_SRC_DIR} && \
-    git checkout ${NIXL_REF} && \
     if [ "$ARCH" = "arm64" ]; then \
         nixl_build_args="-Ddisable_gds_backend=true"; \
     else \
@@ -143,8 +149,8 @@ RUN git clone "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
     mkdir build && \
     meson setup build/ --buildtype=release --prefix=$NIXL_PREFIX $nixl_build_args && \
     cd build/ && \
-    ninja && \
-    ninja install;
+    ninja -j$(nproc) && \
+    ninja install
 
 # Install NIXL Python module
 # TODO: Move gds_path selection based on arch into NIXL build
@@ -161,8 +167,8 @@ RUN mkdir /opt/dynamo && \
     uv venv /opt/dynamo/venv --python 3.12
 
 # Activate virtual environment
-ENV VIRTUAL_ENV=/opt/dynamo/venv
-ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV VIRTUAL_ENV=/opt/dynamo/venv \
+    PATH="/opt/dynamo/venv/bin:${PATH}"
 
 ##################################
 ##### Wheel Build Image ##########
@@ -200,13 +206,8 @@ COPY --from=base $NIXL_PREFIX $NIXL_PREFIX
 COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
 ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
 
-# Copy configuration files
-COPY pyproject.toml /workspace/
-COPY README.md /workspace/
-COPY LICENSE /workspace/
-COPY Cargo.toml /workspace/
-COPY Cargo.lock /workspace/
-COPY rust-toolchain.toml /workspace/
+# Copy configuration files first for better layer caching
+COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml /workspace/
 
 # Copy source code
 COPY lib/ /workspace/lib/
@@ -228,8 +229,10 @@ RUN uv build --wheel --out-dir /workspace/dist && \
 ##############################################
 FROM base AS dev
 
-ENV DYNAMO_HOME=/workspace
-ENV CARGO_TARGET_DIR=/workspace/target
+# Application environment variables
+ENV DYNAMO_HOME=/workspace \
+    CARGO_TARGET_DIR=/workspace/target \
+    PYTHONPATH=/workspace:$PYTHONPATH
 
 WORKDIR /workspace
 
