@@ -1,36 +1,30 @@
 <!--
 SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 SPDX-License-Identifier: Apache-2.0
-
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
-
-http://www.apache.org/licenses/LICENSE-2.0
-
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
 -->
-
->[!NOTE]
->This information is temporary and will change soon.
 
 # KV Cache Routing
 This documentation explains how Key-Value (KV) cache routing works in Dynamo, providing optimized inference for large language models by intelligently directing requests to workers with the most relevant cached data while simultaneously load balancing based on utilization metrics sent by the workers.
 
+To enable KV cache aware routing start the frontend node like this:
+```
+python -m dynamo.frontend --router-mode kv
+```
+
+The engine announces when a KV block is created or removed. The Dynamo router run finds the worker with the best match for those KV blocks and directs the traffic to that node.
+
+For performance testing, compare a typical workload with `--router-mode random|round-robin` to see if it can benefit from KV-aware routing.
+
+The KV-aware routing arguments:
+
+- `--kv-overlap-score-weight`: Sets the amount of weighting on overlaps with prefix caches, which directly contributes to the prefill cost. A large weight is expected to yield a better TTFT (at the expense of worse ITL). When set to 0, prefix caches are not considered at all (falling back to pure load balancing behavior on the active blocks).
+
+- `--router-temperature`: Sets the temperature when randomly selecting workers to route to via softmax sampling on the router cost logits. Setting it to 0 recovers the deterministic behavior where the min logit is picked.
+
+- `--use-kv-events`: Sets whether to listen to KV events for maintaining the global view of cached blocks. If true, then we use the `KvIndexer` to listen to the block creation and deletion events. If false, `ApproxKvIndexer`, which assumes the kv cache of historical prompts exists for fixed time durations (hard-coded to 120s), is used to predict the kv cache hit ratio in each engine. Set false if your backend engine does not emit KV events.
+
+
 ## Architecture
-Dynamo's architecture consists of three key concepts:
-
-- **Namespace**: Groups related components (similar to directories in a file system). In our examples, we use the label `dynamo`. This avoids collisions between two different dynamo graphs.
-- **Component**: The deployable unit in Dynamo. Components are self-contained and typically map to separate Docker containers. In our examples, we use labels like `VllmWorker `, `Router`, `Processor` for the components. Components can be created in Python or Rust.
-- **Endpoint**: Functions attached to components that transform inputs into outputs. Endpoints are discoverable and callable by other components. In our examples we use the label `generate` for most of the endpoints.
-
-A Dynamo graph is a collection of components that are linked together to form a graph. There are two paths through the graphs. The request path and the response path. For LLMs the request path is single-in (a single message) and the response path is many-out (streamed output).
-
-A common pattern is to spin up multiple of the same components that serve the same endpoints, for example, when you want to duplicate models to serve more requests. Each endpoint will get a unique identifier and you will have to tell Dynamo how to route requests between these endpoints.
 
 Colloquially, we refer to a Dynamo component that serves an endpoint for LLM inference as a **worker**.
 
@@ -150,32 +144,6 @@ The KVIndexer builds and maintains a global view of cached blocks in a prefix tr
 
 The KVIndexer has a method `find_matches_for_request`, which takes in tokens and returns a dictionary with keys of worker id and values of the number of matched KV Blocks.
 
-Example:
-```python
-from dynamo.llm import KvIndexer
-from dynamo.sdk import dynamo_context
-
-runtime = dynamo_context["runtime"]
-kv_listener = runtime.namespace("dynamo").component("VllmWorker")
-await kv_listener.create_service()
-
-indexer = KvIndexer(kv_listener, block_size=16)
-indexer.find_matches_for_request([INPUT SEQUENCE OF TOKEN IDs])
-```
-
-Sample Output:
-```
-{
-	123456789: 10,
-	987654321: 3,
-	543219876: 7,
-}
-```
-
-```{note}
-This example is designed to help you understand KV cache routing; it won't run outside of the context of dynamo serve. See the examples/ directory for runnable examples.
-```
-
 ### WorkerMetricsPublisher
 We added a KvMetrics Publisher which sends the following metrics to the KvMetricsAggregator:
 - num_requests_waiting
@@ -191,48 +159,3 @@ Currently, the WorkerMetricsPublisher exists as a Python binding.
 ### KvMetricsAggregator
 The KvMetricsAggregator receives these metrics and aggregates them. It has a method `get_metrics` which returns an object of `AggregatedMetrics`.
 
-Example:
-```python
-from dynamo.llm import KvMetricsAggregator
-from dynamo.sdk import dynamo_context
-
-runtime = dynamo_context["runtime"]
-kv_listener = runtime.namespace("dynamo").component("VllmWorker")
-await kv_listener.create_service()
-metrics_aggregator = KvMetricsAggregator(kv_listener)
-
-for endpoint in metrics_aggregator.get_metrics().endpoints:
-    print("Worker ID: ", endpoint.worker_id)
-    print("GPU Cache Usage: ", endpoint.gpu_cache_usage_perc)
-    print("Number of Requests Waiting: ", endpoint.num_requests_waiting)
-    print("GPU Prefix Cache Hit Rate: ", endpoint.gpu_prefix_cache_hit_rate)
-    print("***")
-```
-
-Sample Output:
-```
-Worker ID: 123456789
-GPU Cache Usage: 0.5
-Number of Requests Waiting: 2
-GPU Prefix Cache Hit Rate: 0.1
-***
-Worker ID: 987654321
-GPU Cache Usage: 0.5
-Number of Requests Waiting: 1
-GPU Prefix Cache Hit Rate: 0.1
-***
-```
-
-```{note}
-This example is for building understanding, it will not run outside of the context of dynamo serve. See the examples/ folder for runnable examples.
-```
-
-### [KV Router](https://github.com/ai-dynamo/dynamo/blob/main/examples/llm/components/kv_router.py)
-The Router component makes intelligent worker selection decisions
-1. Receives incoming requests as tokens
-2. Queries the KVIndexer to find potential cache hits across workers
-3. Collects performance metrics from workers (via KvMetricsAggregator)
-4. Uses a cost function to determine the optimal worker for each request
-5. Returns chosen worker
-
-The processor manages tokenizing the request, sending it to the KV Router and then once it receives a response, directs the request to the selected worker using direct() routing.

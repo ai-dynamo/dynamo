@@ -413,6 +413,9 @@ async fn chat_completions(
     // and early return a 501 NOT_IMPLEMENTED status code. Otherwise, proceeed.
     validate_chat_completion_unsupported_fields(&request)?;
 
+    // Handle required fields like messages shouldn't be empty.
+    validate_chat_completion_required_fields(&request)?;
+
     // Apply template values if present
     if let Some(template) = template {
         if request.inner.model.is_empty() {
@@ -553,6 +556,23 @@ pub fn validate_chat_completion_unsupported_fields(
         return Err(ErrorMessage::not_implemented_error(
             "`functions` is deprecated. Please migrate to use `tools` instead.",
         ));
+    }
+
+    Ok(())
+}
+
+/// Validates that required fields are present and valid in the chat completion request
+pub fn validate_chat_completion_required_fields(
+    request: &NvCreateChatCompletionRequest,
+) -> Result<(), ErrorResponse> {
+    let inner = &request.inner;
+
+    if inner.messages.is_empty() {
+        return Err(ErrorMessage::from_http_error(HttpError {
+            code: 400,
+            message: "The 'messages' field cannot be empty. At least one message is required."
+                .to_string(),
+        }));
     }
 
     Ok(())
@@ -1009,6 +1029,10 @@ mod tests {
         Role as ResponseRole, ServiceTier, TextConfig, TextResponseFormat, ToolChoice,
         ToolChoiceMode, Truncation,
     };
+    use async_openai::types::{
+        ChatCompletionRequestMessage, ChatCompletionRequestUserMessage,
+        ChatCompletionRequestUserMessageContent, CreateChatCompletionRequest,
+    };
 
     use super::*;
     use crate::discovery::ModelManagerError;
@@ -1194,5 +1218,45 @@ mod tests {
             let result = validate_response_unsupported_fields(&req);
             assert!(result.is_some(), "Expected rejection for `{field}`");
         }
+    }
+
+    #[test]
+    fn test_validate_chat_completion_required_fields_empty_messages() {
+        let request = NvCreateChatCompletionRequest {
+            inner: CreateChatCompletionRequest {
+                model: "test-model".to_string(),
+                messages: vec![],
+                ..Default::default()
+            },
+            nvext: None,
+        };
+        let result = validate_chat_completion_required_fields(&request);
+        assert!(result.is_err());
+        if let Err((status, error_response)) = result {
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+            assert_eq!(
+                error_response.error,
+                "The 'messages' field cannot be empty. At least one message is required."
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_chat_completion_required_fields_with_messages() {
+        let request = NvCreateChatCompletionRequest {
+            inner: CreateChatCompletionRequest {
+                model: "test-model".to_string(),
+                messages: vec![ChatCompletionRequestMessage::User(
+                    ChatCompletionRequestUserMessage {
+                        content: ChatCompletionRequestUserMessageContent::Text("Hello".to_string()),
+                        name: None,
+                    },
+                )],
+                ..Default::default()
+            },
+            nvext: None,
+        };
+        let result = validate_chat_completion_required_fields(&request);
+        assert!(result.is_ok());
     }
 }
