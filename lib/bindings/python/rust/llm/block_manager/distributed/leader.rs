@@ -39,7 +39,7 @@ fn get_leader_init_timeout_secs(override_key: &str) -> u64 {
 #[derive(Clone, Dissolve)]
 pub struct KvbmLeader {
     leader: Arc<KvbmLeaderImpl>,
-    rt: Arc<tokio::runtime::Runtime>,
+    drt: DistributedRuntime,
 }
 
 impl KvbmLeader {
@@ -51,8 +51,8 @@ impl KvbmLeader {
 #[pymethods]
 impl KvbmLeader {
     #[new]
-    #[pyo3(signature = (bytes_per_block, world_size))]
-    fn new(bytes_per_block: usize, world_size: usize) -> PyResult<Self> {
+    #[pyo3(signature = (bytes_per_block, world_size, drt))]
+    fn new(bytes_per_block: usize, world_size: usize, drt: DistributedRuntime) -> PyResult<Self> {
         let num_host_blocks = compute_num_blocks(CPU_CACHE, CPU_CACHE_OVERRIDE, bytes_per_block);
         let num_disk_blocks = compute_num_blocks(DISK_CACHE, DISK_CACHE_OVERRIDE, bytes_per_block);
 
@@ -66,20 +66,18 @@ impl KvbmLeader {
             .num_disk_blocks(num_disk_blocks)
             .world_size(world_size)
             .leader_init_timeout_secs(leader_init_timeout_sec)
+            .drt(drt.inner().clone())
             .build()
             .map_err(to_pyerr)?;
 
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(to_pyerr)?;
+        let rt = drt.inner().runtime().primary();
 
         let leader =
             rt.block_on(async move { KvbmLeaderImpl::new(config).await.map_err(to_pyerr) })?;
 
         Ok(Self {
             leader: Arc::new(leader),
-            rt: Arc::new(rt),
+            drt,
         })
     }
 }

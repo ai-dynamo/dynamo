@@ -7,7 +7,6 @@ use dynamo_runtime::DistributedRuntime;
 use utils::*;
 use zmq::*;
 
-use dynamo_runtime::traits::DistributedRuntimeProvider;
 use dynamo_runtime::utils::leader_worker_barrier::LeaderBarrier;
 
 use derive_builder::Builder;
@@ -46,9 +45,8 @@ pub struct KvbmLeaderConfig {
     #[builder(default = "120")]
     leader_init_timeout_secs: u64,
 
-    /// The DRT to use for the leader.
-    #[builder(default = "None")]
-    dtr: Option<DistributedRuntime>,
+    #[builder(setter(strip_option))]
+    drt: Option<DistributedRuntime>,
 }
 
 impl KvbmLeaderConfig {
@@ -71,11 +69,10 @@ pub struct KvbmLeader {
 
 impl KvbmLeader {
     pub async fn new(mut config: KvbmLeaderConfig) -> anyhow::Result<Self> {
-        let drt = match config.dtr.take() {
+        let drt = match config.drt.take() {
             Some(dtr) => dtr,
             None => {
-                let runtime = dynamo_runtime::Runtime::from_current()?;
-                DistributedRuntime::from_settings(runtime).await?
+                anyhow::bail!("No distributed runtime provided");
             }
         };
 

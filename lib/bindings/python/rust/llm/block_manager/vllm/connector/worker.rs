@@ -255,9 +255,7 @@ impl KvConnectorWorker {
         if self.layers_complete == self.kv_caches.len() {
             let offloading_operations = std::mem::take(&mut self.offloading_operations);
             for operation in offloading_operations {
-                let request_id = operation.request_id.clone();
                 self.connector.enqueue_request(operation);
-                self.maybe_finished_offloading.insert(request_id);
             }
         }
         Ok(())
@@ -344,93 +342,5 @@ impl KvConnectorWorker {
         }
 
         (is_finished_offloading, is_finished_onboarding)
-    }
-}
-
-#[derive(Default)]
-struct EngineState {
-    slots: HashMap<String, EngineSlot>,
-    iteration: u64,
-    layers_complete: u32,
-    block_transfer_handler: Option<Arc<BlockTransferHandler>>,
-}
-
-impl EngineState {
-    fn add_slot(&mut self, req: CreateEngineSlotRequest, created_at: u64) {
-        let request_id = req.request_id.clone();
-        debug_assert!(!self.slots.contains_key(&request_id), "slot already exists");
-        tracing::debug!(request_id, "engine state adding slot");
-        self.slots
-            .insert(request_id, EngineSlot::new(req, created_at));
-    }
-
-    fn remove_slot(&mut self, request_id: String) {
-        debug_assert!(self.slots.contains_key(&request_id), "slot not found");
-        self.slots.remove(&request_id);
-        tracing::debug!(request_id, "engine state removing slot");
-    }
-
-    fn update_iteration(&mut self, iteration: u64) {
-        self.iteration = iteration;
-        tracing::debug!(iteration, "engine state updating iteration");
-    }
-
-    fn update_layers_completed(&mut self, last_layer_name: String, layers_completed: u32) {
-        self.layers_complete = layers_completed;
-        tracing::trace!(
-            iteration = self.iteration,
-            layers_completed,
-            "layer {last_layer_name} is complete"
-        );
-    }
-
-    fn enqueue_block_transfer(&mut self, operation: ConnectorOperation) {
-        debug_assert!(
-            self.block_transfer_handler.is_some(),
-            "block transfer handler not registered"
-        );
-        let slot = self.slots.get(&operation.req_id).unwrap();
-        let completed_counter = IncrementOnDrop::new(slot.completed.clone());
-
-        let block_transfer_handler = self.block_transfer_handler.as_ref().unwrap().clone();
-
-        // add in a scheduler and concurency limiter
-
-        tokio::spawn(async move {
-            tracing::debug!(
-                request_id = operation.req_id,
-                "executing block transfer for request_id"
-            );
-            if let Err(e) = block_transfer_handler
-                .execute_transfer(operation.xfer_req)
-                .await
-            {
-                panic!(
-                    "failed to execute block transfer for request_id {}: {e:#?}",
-                    operation.req_id
-                );
-            }
-
-            tracing::debug!(
-                request_id = operation.req_id,
-                "block transfer for request_id completed"
-            );
-
-            drop(completed_counter);
-        });
-    }
-}
-
-pub struct IncrementOnDrop(Arc<AtomicU64>);
-
-impl IncrementOnDrop {
-    fn new(counter: Arc<AtomicU64>) -> Self {
-        Self(counter)
-    }
-}
-
-impl Drop for IncrementOnDrop {
-    fn drop(&mut self) {
-        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 }

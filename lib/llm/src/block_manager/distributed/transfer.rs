@@ -164,22 +164,30 @@ impl Handler for BlockTransferHandler {
                 operation = %req.uuid,
                 "scheduling transfer"
             );
+
             let client = self
                 .scheduler_client
                 .as_ref()
                 .expect("scheduler client is required")
                 .clone();
+
             let handle = client.schedule_transfer(req).await?;
 
             // we don't support cancellation yet
             assert_eq!(handle.scheduler_decision(), SchedulingDecision::Execute);
 
-            let result = self.execute_transfer(request).await;
+            tracing::info!("executing transfer");
+            let result = self.execute_transfer(request.clone()).await;
+            tracing::info!("executing transfer complete");
             handle.mark_complete(result).await;
+            tracing::info!("mark_complete complete");
         } else {
             self.execute_transfer(request).await?;
         }
 
-        message.ack().await
+        tracing::info!("pre-ack");
+        message.ack().await?;
+        tracing::info!("post-ack");
+        Ok(())
     }
 }

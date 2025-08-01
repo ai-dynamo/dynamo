@@ -190,6 +190,12 @@ struct DistributedRuntime {
     event_loop: PyObject,
 }
 
+impl DistributedRuntime {
+    fn inner(&self) -> &rs::DistributedRuntime {
+        &self.inner
+    }
+}
+
 #[pyclass]
 #[derive(Clone)]
 struct EtcdClient {

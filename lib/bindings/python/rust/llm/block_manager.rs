@@ -56,7 +56,7 @@ type VllmController = Arc<
 #[derive(Clone)]
 pub struct BlockManager {
     inner: VllmBlockManager,
-    _rt: Arc<tokio::runtime::Runtime>,
+    drt: DistributedRuntime,
     _controller: Option<VllmController>,
 }
 
@@ -89,7 +89,7 @@ impl BlockManager {
 
         config = config.model(model_config.build().map_err(to_pyerr)?);
 
-        let (leader, rt) = if let Some(leader) = leader {
+        let (leader, drt) = if let Some(leader) = leader {
             let (leader, rt) = leader.dissolve();
 
             if !disable_device_pool {
@@ -138,16 +138,19 @@ impl BlockManager {
                     .map_err(to_pyerr)?,
             );
 
-            (
-                None,
-                Arc::new(
-                    tokio::runtime::Builder::new_multi_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(to_pyerr)?,
-                ),
-            )
+            unimplemented!("construct a drt or get one from args")
+            // (
+            //     None,
+            //     Arc::new(
+            //         tokio::runtime::Builder::new_multi_thread()
+            //             .enable_all()
+            //             .build()
+            //             .map_err(to_pyerr)?,
+            //     ),
+            // )
         };
+
+        let rt = drt.inner().runtime().primary();
 
         let config = config.build().map_err(to_pyerr)?;
         Ok(BlockManager {
@@ -163,7 +166,7 @@ impl BlockManager {
                     .await
                 })
                 .map_err(to_pyerr)?,
-            _rt: rt,
+            drt,
             _controller: None,
         })
     }
@@ -180,7 +183,10 @@ impl BlockManager {
 
         let block_manager = self.inner.clone();
         let controller = self
-            ._rt
+            .drt
+            .inner()
+            .runtime()
+            .primary()
             .block_on(controller::Controller::new(
                 block_manager,
                 component.inner.clone(),

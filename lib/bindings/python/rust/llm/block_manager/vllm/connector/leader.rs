@@ -21,12 +21,11 @@ use dynamo_llm::block_manager::{
 };
 use dynamo_llm::tokens::{SaltHash, TokenBlockSequence, Tokens};
 
-use std::collections::HashSet;
 use std::{
-    collections::VecDeque,
+    collections::HashSet,
     sync::{Arc, Mutex},
 };
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 type VllmLocality = Logical<DistributedLeaderWorkerResources>;
 
@@ -60,8 +59,10 @@ impl KvConnectorLeader {
         let block_manager = block_manager.get_block_manager().clone();
         let block_size = block_manager.block_size();
 
+        let leader = leader.get_inner();
+
         Self {
-            slot_manager: ConnectorSlotManager::new(block_manager.clone(), leader.get_inner()),
+            slot_manager: ConnectorSlotManager::new(block_manager.clone(), leader),
             block_manager,
             block_size,
             inflight_requests: HashSet::new(),
@@ -273,11 +274,7 @@ impl KvConnectorLeader {
         serde_json::to_vec(&md).map_err(to_pyerr)
     }
 
-    pub fn request_finished(
-        &mut self,
-        request_id: String,
-        block_ids: Vec<BlockId>,
-    ) -> PyResult<bool> {
+    fn request_finished(&mut self, request_id: String, block_ids: Vec<BlockId>) -> PyResult<bool> {
         tracing::debug!("Request finished: {request_id}; block_ids: {block_ids:?}");
         // grab the slot
         let shared_slot = self.slot_manager.get_slot(&request_id).map_err(to_pyerr)?;

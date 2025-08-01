@@ -33,6 +33,7 @@ from dynamo.llm import BlockManager, KvbmLeader
 from dynamo.llm.vllm_integration.rust import KvbmRequest
 from dynamo.llm.vllm_integration.rust import KvConnectorLeader as RustKvConnectorLeader
 from dynamo.llm.vllm_integration.rust import SchedulerOutput as RustSchedulerOutput
+from dynamo.runtime import DistributedRuntime
 
 
 class DynamoConnectorMetadata(KVConnectorMetadata):
@@ -50,7 +51,13 @@ class KvConnectorLeader:
     that can be used in the vLLM KV cache manager protocol.
     """
 
-    def __init__(self, vllm_config: "VllmConfig", engine_id: str):
+    def __init__(self, vllm_config: "VllmConfig", engine_id: str, **kwargs):
+        drt = kwargs.get("drt", None)
+        if drt is None:
+            self.drt = DistributedRuntime(event_loop=None, is_static=False)
+        else:
+            self.drt = drt
+
         self.vllm_config = vllm_config
         world_size = vllm_config.parallel_config.world_size
         bytes_per_block = CacheEngine.get_cache_block_size(
@@ -59,7 +66,9 @@ class KvConnectorLeader:
             vllm_config.parallel_config,
         )
         total_bytes = bytes_per_block * world_size
-        leader = KvbmLeader(total_bytes, world_size)
+
+        leader = KvbmLeader(total_bytes, world_size, drt=self.drt)
+
         block_manager = BlockManager(
             0,
             leader,

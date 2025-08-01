@@ -259,13 +259,6 @@ pub struct VllmConnectorSlot {
     /// We must hold these blocks in the slot state until the scheduler trigger the onboarding.
     staging_from_disk: Option<Vec<ImmutableBlock<DiskStorage, VllmLocality, BasicMetadata>>>,
 
-    /// Blocks to be offloaded to the host
-    /// We must hold these blocks in the slot state until the scheduler trigger the offloading.
-    offload_to_host: Vec<MutableBlock<PinnedStorage, VllmLocality, BasicMetadata>>,
-
-    /// The host block ids
-    offloaded_to_host_blocks: Vec<usize>,
-
     /// The number of blocks cached from the device
     blocks_cached_from_device: usize,
 
@@ -329,8 +322,6 @@ impl VllmConnectorSlot {
             device_blocks: Vec::new(),
             staging_from_host: None,
             staging_from_disk: None,
-            offload_to_host: Vec::new(),
-            offloaded_to_host_blocks: Vec::new(),
             pending_operations: None,
             blocks_cached_from_device: 0,
             blocks_cached_from_host: 0,
@@ -427,7 +418,7 @@ impl Slot for VllmConnectorSlot {
                 .iter()
                 .skip(self.evaluated_blocks)
                 .take(num_candidate_blocks)
-                .map(|b| *b)
+                .copied()
                 .collect::<Vec<_>>();
 
             assert_eq!(
@@ -443,7 +434,7 @@ impl Slot for VllmConnectorSlot {
                 .iter()
                 .skip(self.evaluated_blocks)
                 .take(num_candidate_blocks)
-                .map(|b| b.clone())
+                .cloned()
                 .collect::<Vec<_>>();
 
             self.offload_blocks(&offload_block_ids, &offload_token_blocks)
@@ -665,12 +656,12 @@ impl VllmConnectorSlot {
         assert!(block_ids.len() == token_blocks.len());
         let operation_id = uuid::Uuid::new_v4();
 
-        let xfer_req = LocalTransferRequest::Offload(LocalOffloadRequest {
-            request_id: self.request_id.clone(),
+        let xfer_req = LocalTransferRequest::Offload(LocalOffloadRequest::new(
+            self.request_id.clone(),
+            block_ids.to_vec(),
+            token_blocks.to_vec(),
             operation_id,
-            block_ids: block_ids.to_vec(),
-            token_blocks: token_blocks.to_vec(),
-        });
+        ));
 
         let worker_req = WorkerTransferRequest {
             request_id: self.request_id.clone(),
@@ -787,6 +778,9 @@ impl LocalTransferEngine {
     async fn process_request(&mut self, req: LocalTransferRequest) -> anyhow::Result<()> {
         match req {
             LocalTransferRequest::Offload(offload_req) => {
+                let request_id = &offload_req.request_id;
+                let operation_id = &offload_req.operation_id;
+
                 tracing::debug!(
                     "Processing offload request for {} blocks",
                     offload_req.block_ids.len()
@@ -794,7 +788,7 @@ impl LocalTransferEngine {
 
                 // TODO: Implement actual offload logic
                 // 1. Acquire mutable host blocks
-                let mut host_blocks = self
+                let host_blocks = self
                     .block_manager
                     .host()
                     .unwrap()
@@ -808,6 +802,12 @@ impl LocalTransferEngine {
                     .into_iter()
                     .zip(host_block_ids.into_iter())
                     .collect();
+
+                tracing::info!(
+                    request_id = request_id,
+                    operation_id = %operation_id,
+                    "offload - stage 1 complete"
+                );
 
                 // 2. Apply token blocks
 
@@ -823,6 +823,11 @@ impl LocalTransferEngine {
 
                     blocks_to_register.push(mutable_block);
                 }
+                tracing::info!(
+                    request_id = request_id,
+                    operation_id = %operation_id,
+                    "offload - stage 2 complete"
+                );
 
                 // 3. Issue the offload request using `leader`
 
@@ -831,13 +836,18 @@ impl LocalTransferEngine {
                     to_pool: BlockTransferPool::Host,
                     blocks: block_pairs,
                     connector_req: Some(LeaderTransferRequest {
-                        request_id: offload_req.request_id,
+                        request_id: offload_req.request_id.clone(),
                         uuid: offload_req.operation_id,
                         requirement: None,
                         request_type: RequestType::Scheduled,
                     }),
                 };
                 let notify_receiver = self.leader.transfer_blocks_request(block_xfer_req).await?;
+                tracing::info!(
+                    request_id = request_id,
+                    operation_id = %operation_id,
+                    "offload - stage 3 complete"
+                );
 
                 // 4. Wait for the offload request to complete
                 match notify_receiver.await {
@@ -848,13 +858,26 @@ impl LocalTransferEngine {
                         return Err(anyhow::anyhow!("Transfer completion notification failed"));
                     }
                 }
+                tracing::info!(
+                    request_id = request_id,
+                    operation_id = %operation_id,
+                    "offload - stage 4 complete"
+                );
+
                 // 5. Register the mutable blocks
-                self.block_manager
+                let immutable_blocks = self
+                    .block_manager
                     .host()
                     .unwrap()
                     .register_blocks(blocks_to_register)
                     .await?;
 
+                tracing::info!(
+                    request_id = request_id,
+                    operation_id = %operation_id,
+                    "registered {} blocks",
+                    immutable_blocks.len()
+                );
                 Ok(())
             }
         }
