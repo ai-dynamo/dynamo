@@ -193,7 +193,6 @@ async fn handler_completions(
     // possibly long running task
     // if this returns a streaming response, the stream handle will be armed and captured by the response stream
     let response = tokio::spawn(completions(state, request, stream_handle).in_current_span())
-        .in_current_span()
         .await
         .map_err(|e| {
             ErrorMessage::internal_server_error(&format!(
