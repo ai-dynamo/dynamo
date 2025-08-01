@@ -202,9 +202,7 @@ pub async fn spawn_http_server(
 }
 
 /// Health handler
-async fn health_handler(
-    state: Arc<HttpServerState>,
-) -> impl IntoResponse {
+async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
     let system_health = state.drt().system_health.lock().await;
     let (mut healthy, endpoints) = system_health.get_health_status();
     let uptime = match state.uptime() {
@@ -235,9 +233,7 @@ async fn health_handler(
 }
 
 /// Metrics handler with DistributedRuntime uptime
-async fn metrics_handler(
-    state: Arc<HttpServerState>,
-) -> impl IntoResponse {
+async fn metrics_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
     // Update the uptime gauge with current value
     state.update_uptime_gauge();
 
