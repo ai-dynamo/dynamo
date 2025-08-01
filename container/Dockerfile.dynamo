@@ -108,23 +108,24 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 RUN rm -rf /opt/hpcx/ucx && \
     rm -rf /usr/local/ucx && \
     echo "Building UCX with reference $NIXL_UCX_REF" && \
-    cd /usr/local/src &&                            \
+    cd /usr/local/src && \
     git clone --depth 1 --branch $NIXL_UCX_REF https://github.com/openucx/ucx.git && \
-    cd ucx &&                                       \
-    ./autogen.sh && ./configure                     \
-    --prefix=/usr/local/ucx                         \
-    --enable-shared                                 \
-    --disable-static                                \
-    --disable-doxygen-doc                           \
-    --enable-optimizations                          \
-    --enable-cma                                    \
-    --enable-devel-headers                          \
-    --with-cuda=/usr/local/cuda                     \
-    --with-verbs                                    \
-    --with-efa                                      \
-    --with-dm                                       \
-    --with-gdrcopy=/usr/local                       \
-    --enable-mt &&                                  \
+    cd ucx && \
+    ./autogen.sh && \
+    ./configure \
+      --prefix=/usr/local/ucx \
+      --enable-shared \
+      --disable-static \
+      --disable-doxygen-doc \
+      --enable-optimizations \
+      --enable-cma \
+      --enable-devel-headers \
+      --with-cuda=/usr/local/cuda \
+      --with-verbs \
+      --with-efa \
+      --with-dm \
+      --with-gdrcopy=/usr/local \
+      --enable-mt && \
     make -j$(nproc) &&                              \
     make -j$(nproc) install-strip &&                \
     ldconfig && \
