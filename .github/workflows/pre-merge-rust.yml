@@ -104,7 +104,7 @@ jobs:
 
     - name: Set up Rust toolchain with pinned version
       run: |
-        rustup toolchain install 1.86.0 --profile minimal --component rustfmt,clippy
+        rustup toolchain install 1.86.0 --component rustfmt,clippy
         rustup default 1.86.0
 
     - name: Optimize Cargo cache
@@ -227,7 +227,7 @@ jobs:
 
     - name: Set up Rust toolchain
       run: |
-        rustup toolchain install 1.86.0 --profile minimal
+        rustup toolchain install 1.86.0
         rustup default 1.86.0
 
     - name: Optimize Cargo cache for integration tests
