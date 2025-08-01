@@ -129,6 +129,12 @@ indent = "    "
 skip = ["build"]
 known_first_party = ["dynamo"]
 
+[pytest]
+pythonpath = [
+    ".",
+    "components/backends/vlm/src"
+]
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 tmp_path_retention_policy = "failed"
