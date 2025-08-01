@@ -43,11 +43,11 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ### Large Scale P/D and WideEP Features
 
-| Feature            | SGLang | Notes                                                                 |
-|--------------------|--------|-----------------------------------------------------------------------|
-| **WideEP**         | ✅/🚧 | Full support on H100s/GB200 WIP [PR](https://github.com/sgl-project/sglang/pull/7556)                                     |
-| **DP Rank Routing**| 🚧    | Direct routing supported. Process per DP rank is not supported        |
-| **GB200 Support**  | 🚧    | WIP [PR](https://github.com/sgl-project/sglang/pull/7556) |
+| Feature             | SGLang | Notes                                                        |
+|---------------------|--------|--------------------------------------------------------------|
+| **WideEP**          | ✅     | Full support on H100s/GB200                                  |
+| **DP Rank Routing** | 🚧     | Direct routing supported. Dynamo KV router does not router to DP worker |
+| **GB200 Support**   | ✅     |                                                              |
 
 
 ## Quick Start
@@ -161,7 +161,7 @@ The migrated request will continue responding to the original request, allowing 
 
 Below we provide a selected list of advanced examples. Please open up an issue if you'd like to see a specific example!
 
-### Run on multi-node
+### Run a multi-node sized model
 - **[Run a multi-node model](docs/multinode-examples.md)**
 
 ### Large scale P/D disaggregation with WideEP
@@ -173,10 +173,10 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 
 ## Deployment
 
-We currently provide deployment examples for Kubernetes (coming soon!) and SLURM
+We currently provide deployment examples for Kubernetes and SLURM.
 
 ## Kubernetes
-- **[Deploying Dynamo with SGLang on Kubernetes - coming soon!](.)**
+- **[Deploying Dynamo with SGLang on Kubernetes](deploy/)**
 
 ## SLURM
 - **[Deploying Dynamo with SGLang on SLURM](slurm_jobs/README.md)**
