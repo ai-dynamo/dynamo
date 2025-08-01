@@ -150,6 +150,7 @@ COPY --from=trtllm_wheel . /trtllm_wheel/
 # Note: TensorRT needs to be uninstalled before installing the TRTLLM wheel
 # because there might be mismatched versions of TensorRT between the NGC PyTorch
 # and the TRTLLM wheel.
+# Locking triton version to 3.3.1 as 3.4.0 breaks tensorrt-llm 1.0.0rc4
 RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
     pip uninstall -y tensorrt && \
     if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
@@ -157,14 +158,19 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
         WHEEL_FILE=$(find /trtllm_wheel -name "*.whl" | head -n 1); \
         if [ -n "$WHEEL_FILE" ]; then \
             pip install "$WHEEL_FILE"; \
+            if [ "$ARCH" = "amd64" ]; then \
+                pip install "triton==3.3.1"; \
+            fi; \
         else \
             echo "No wheel file found in /trtllm_wheel directory."; \
             exit 1; \
         fi; \
     else \
-         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
-         pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" \
-         "${TENSORRTLLM_PIP_WHEEL}" ; \
+        # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
+        pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}"; \
+        if [ "$ARCH" = "amd64" ]; then \
+            pip install "triton==3.3.1"; \
+        fi; \
     fi
 
 # Install test dependencies
@@ -497,8 +503,11 @@ COPY --from=dev /workspace/target/release/metrics /usr/local/bin/metrics
 # NOTE: If a package (tensorrt_llm) exists on both --index-url and --extra-index-url,
 # uv will prioritize the --extra-index-url, unless --index-strategy unsafe-best-match
 # is also specified. So set the configurable index as a --extra-index-url for prioritization.
-RUN uv pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" \
-    "${TENSORRTLLM_PIP_WHEEL}" && \
+# locking triton version to 3.3.1 as 3.4.0 breaks tensorrt-llm 1.0.0rc4
+RUN uv pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" && \
+    if [ "$ARCH" = "amd64" ]; then \
+        pip install "triton==3.3.1"; \
+    fi; \
     uv pip install ai-dynamo nixl --find-links wheelhouse
 
 # Setup TRTLLM environment variables, same as in dev image
