@@ -35,7 +35,8 @@ on:
     - 'Cargo.lock'
 
 jobs:
-  pre-merge-rust:
+  # Fast checks that don't require external services - provides quick feedback
+  fast-checks:
     runs-on: ubuntu-latest
     strategy:
       matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
@@ -90,3 +91,87 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+
+  # Integration tests that require external services (nats, etcd)
+  integration-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
+    permissions:
+      contents: read
+    # nats/etcd services needed in background for integration tests
+    services:
+      nats-server:
+        image: nats:2.11.4
+        options: --name nats-server
+        ports:
+          - 4222:4222
+          - 6222:6222
+          - 8222:8222
+        env:
+          NATS_ARGS: "-js --trace -m 8222"
+      etcd-server:
+        image: bitnami/etcd:3.6.1
+        ports:
+          - 2379:2379
+          - 2380:2380
+        env:
+          ALLOW_NONE_AUTHENTICATION: yes
+    steps:
+    - uses: actions/checkout@v4
+    - name: Set up system dependencies
+      run: |
+        sudo apt-get update -y
+        sudo apt-get install -y protobuf-compiler
+    - name: Cache Cargo Registry
+      uses: actions/cache@v3
+      with:
+        path: ~/.cargo/registry
+        key: ${{ runner.os }}-cargo-registry-${{ github.head_ref || github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
+    - name: Install Rust in dev environment
+      # Install Rust only to run GitHub Local Actions in (dev environment) using the `ACT` environment variable.
+      # See act usage: https://nektosact.com/introduction.html
+      # https://nektosact.com/usage/index.html?highlight=env.Act#skipping-steps
+      if: ${{ env.ACT }}
+      run: |
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        rustup toolchain install 1.86.0-x86_64-unknown-linux-gnu
+        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+    - name: Wait for Services to be Ready
+      run: |
+        echo "Waiting for services to be ready..."
+        # Wait for NATS server to be ready
+        for i in {1..30}; do
+          if curl -f http://localhost:8222/varz >/dev/null 2>&1; then
+            echo "NATS server is ready"
+            break
+          fi
+          if [ $i -eq 30 ]; then
+            echo "NATS server failed to start"
+            exit 1
+          fi
+          sleep 2
+        done
+        # Wait for etcd server to be ready
+        for i in {1..30}; do
+          if curl -f http://localhost:2379/health >/dev/null 2>&1; then
+            echo "etcd server is ready"
+            break
+          fi
+          if [ $i -eq 30 ]; then
+            echo "etcd server failed to start"
+            exit 1
+          fi
+          sleep 2
+        done
+    - name: Run Integration Tests
+      working-directory: ${{ matrix.dir }}
+      run: |
+        # Only run integration tests if the integration feature exists
+        if cargo test --locked --features integration --no-run 2>/dev/null; then
+          echo "Running integration tests in ${{ matrix.dir }}"
+          cargo test --locked --features integration
+        else
+          echo "No integration tests found in ${{ matrix.dir }}, skipping"
+        fi
+      timeout-minutes: 10
