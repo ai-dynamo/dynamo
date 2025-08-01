@@ -42,7 +42,7 @@ In each container, you should be in the `/sgl-workspace/dynamo/components/backen
 3. On the head prefill node, run the helper script provided to generate commands to start the `nats-server`, `etcd`. This script will also tell you which environment variables to export on each node to make deployment easier.
 
 ```bash
-./utils/gen_env_vars.sh
+./components/backends/sglang/src/dynamo/sglang/utils/gen_env_vars.sh
 ```
 
 4. Run the ingress and prefill worker
@@ -51,7 +51,7 @@ In each container, you should be in the `/sgl-workspace/dynamo/components/backen
 # run ingress
 python3 -m dynamo.frontend --http-port=8000 &
 # optionally run the http server that allows you to flush the kv cache for all workers (see benchmarking section below)
-python3 utils/sgl_http_server.py --ns dynamo &
+python3 -m dynamo.sglang.utils.sgl_http_server --ns dynamo &
 # run prefill worker
 python3 -m dynamo.sglang.worker \
   --model-path /model/ \
