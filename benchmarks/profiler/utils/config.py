@@ -17,9 +17,9 @@ import logging
 from copy import deepcopy
 from typing import Literal
 
-from utils.defaults import DEFAULT_MODEL_NAME, DYNAMO_RUN_DEFAULT_PORT
-
 from dynamo.planner.defaults import WORKER_COMPONENT_NAMES
+
+from .defaults import DEFAULT_MODEL_NAME, DYNAMO_RUN_DEFAULT_PORT
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
