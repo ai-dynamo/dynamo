@@ -885,6 +885,19 @@ impl LocalTransferEngine {
         }
     }
 
+    // build an adapted TaskTracker:
+    // https://docs.rs/tokio-util/latest/tokio_util/task/task_tracker/struct.TaskTracker.html
+    //
+    // this should track completions via atomic counters using the dynamo prometheus metrics
+    // - critical_tasks: labels - success, failure, cancelled
+    //
+    // should spawn any task/future that returns either any task that can be converted to a
+    // Result<CompletionStatus, String> where CompletionStatus is an enum with Ok and Cancelled.
+    // anyhow::Result<()> can be considered non-cancellable and coerced to Ok(CompletionStatus::Ok)
+    // tasks allowed to cancel should return a CompletionStatus.
+    //
+    // This should be a composable unit that we can layer on specialized types of critical tasks
+    // with their own sets of custom metrics.
     async fn execute(&mut self, cancellation_token: CancellationToken) -> anyhow::Result<()> {
         loop {
             tokio::select! {
