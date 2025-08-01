@@ -28,15 +28,5 @@ Please the [Quickstart Guide](quickstart.md) for steps to install Dynamo Cloud.
 
 # 2. Deploy your inference graph.
 
-You can deploy your graphs using the same command:
+[Deploying a particular example](../../examples/README.md#deploying-a-particular-example)
 
-```bash
-kubectl apply -f CRD.yaml
-```
-
-Consult the examples below for the CRD mathcin
-vLLM K8s (hyperlink to /deploy)
-
-SGLang k8s (hyperlink to /deploy)
-
-TRTLLM k8s (hyperlink to /deploy)
