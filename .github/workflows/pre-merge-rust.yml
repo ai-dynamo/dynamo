@@ -168,9 +168,9 @@ jobs:
       working-directory: ${{ matrix.dir }}
       run: |
         # Only run integration tests if the integration feature exists
-        if cargo test --locked --features integration --no-run 2>/dev/null; then
+        if cargo test --locked --features integration --no-default-features --no-run; then
           echo "Running integration tests in ${{ matrix.dir }}"
-          cargo test --locked --features integration
+          cargo test --locked --features integration --no-default-features
         else
           echo "No integration tests found in ${{ matrix.dir }}, skipping"
         fi
