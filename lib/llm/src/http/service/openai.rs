@@ -45,6 +45,7 @@ use tracing::Instrument;
 use tower_http::trace::TraceLayer;
 use tracing::Level;
 use tower_http::trace::DefaultMakeSpan;
+use dynamo_runtime::logging::get_distributed_tracing_context;
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 
@@ -138,10 +139,18 @@ impl From<HttpError> for ErrorMessage {
 
 /// Get the request ID from a primary source, or next from the headers, or lastly create a new one if not present
 fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> String {
+
+    // Try to get request id from trace context
+    if let Some(trace_context) = get_distributed_tracing_context() {
+	if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
+	    return x_dynamo_request_id
+	}
+    }
+
     // Try to get the request ID from the primary source
     if let Some(primary) = primary {
         if let Ok(uuid) = uuid::Uuid::parse_str(primary) {
-            return uuid.to_string();
+	    return uuid.to_string();
         }
     }
 
@@ -153,7 +162,7 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
     // Try to parse the request ID as a UUID, or generate a new one if missing/invalid
     let uuid = match request_id_opt {
         Some(request_id) => {
-            uuid::Uuid::parse_str(request_id).unwrap_or_else(|_| uuid::Uuid::new_v4())
+	    uuid::Uuid::parse_str(request_id).unwrap_or_else(|_| uuid::Uuid::new_v4())
         }
         None => uuid::Uuid::new_v4(),
     };
@@ -169,12 +178,7 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
 ///
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
-#[tracing::instrument(skip_all, fields(trace_id = trace_parent.trace_id,
-				       parent_id = trace_parent.parent_id,
-				       x_request_id= trace_parent.x_request_id,
-				       tracestate= trace_parent.tracestate))]
 async fn handler_completions(
-    trace_parent:TraceParent, // Used for tracing only
     State(state): State<Arc<service_v2::State>>,
     headers: HeaderMap,
     Json(request): Json<NvCreateCompletionRequest>
@@ -367,7 +371,6 @@ async fn embeddings(
 }
 
 async fn handler_chat_completions(
-    trace_parent: TraceParent, // Used for Tracing Only
     State((state, template)): State<(Arc<service_v2::State>, Option<RequestTemplate>)>,
     headers: HeaderMap,
     Json(request): Json<NvCreateChatCompletionRequest>,
@@ -407,7 +410,6 @@ async fn handler_chat_completions(
 ///
 /// Note: For all requests, streaming or non-streaming, we always call the engine with streaming enabled. For
 /// non-streaming requests, we will fold the stream into a single response as part of this handler.
-#[tracing::instrument(level = "debug",skip_all, fields(request_id = %request.id()))]
 async fn chat_completions(
     state: Arc<service_v2::State>,
     template: Option<RequestTemplate>,

@@ -27,6 +27,10 @@ use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tracing;
 use tracing::Instrument;
+use tower_http::trace::TraceLayer;
+use tracing::Level;
+use tower_http::trace::DefaultMakeSpan;
+use crate::logging::make_request_span;
 
 /// HTTP server information containing socket address and handle
 #[derive(Debug)]
@@ -141,36 +145,31 @@ pub async fn spawn_http_server(
             "/health",
             get({
                 let state = Arc::clone(&server_state);
-                move |tracing_ctx| health_handler(state, "health", tracing_ctx)
+                move || health_handler(state)
             }),
         )
         .route(
             "/live",
             get({
                 let state = Arc::clone(&server_state);
-                move |tracing_ctx| health_handler(state, "live", tracing_ctx)
+                move || health_handler(state)
             }),
         )
         .route(
             "/metrics",
             get({
                 let state = Arc::clone(&server_state);
-                move |tracing_ctx| metrics_handler(state, "metrics", tracing_ctx)
+                move || metrics_handler(state)
             }),
         )
-        .fallback(|tracing_ctx: TraceParent| {
+        .fallback(|| {
             async {
                 tracing::info!("[fallback handler] called");
                 (StatusCode::NOT_FOUND, "Route not found").into_response()
             }
-            .instrument(tracing::trace_span!(
-                "fallback handler",
-                trace_id = tracing_ctx.trace_id,
-                parent_id = tracing_ctx.parent_id,
-                x_request_id = tracing_ctx.x_request_id,
-                tracestate = tracing_ctx.tracestate
-            ))
-        });
+        })
+	.layer(TraceLayer::new_for_http().make_span_with(make_request_span))
+	;
 
     let address = format!("{}:{}", host, port);
     tracing::info!("[spawn_http_server] binding to: {}", address);
@@ -206,16 +205,15 @@ pub async fn spawn_http_server(
 }
 
 /// Health handler
-#[tracing::instrument(skip_all, level="trace", fields(route= %route,
-						      trace_id = trace_parent.trace_id,
-						      parent_id = trace_parent.parent_id,
-						      x_request_id= trace_parent.x_request_id,
-						      tracestate= trace_parent.tracestate))]
+// #[tracing::instrument(skip_all, level="trace", fields(route= %route,
+//						      trace_id = trace_parent.trace_id,
+//						      parent_id = trace_parent.parent_id,
+//						      x_request_id= trace_parent.x_request_id,
+//						      tracestate= trace_parent.tracestate))]
 async fn health_handler(
     state: Arc<HttpServerState>,
-    route: &'static str,       // Used for tracing only
-    trace_parent: TraceParent, // Used for tracing only
-) -> impl IntoResponse {
+ //   route: &'static str,       // Used for tracing only
+ ) -> impl IntoResponse {
     let system_health = state.drt().system_health.lock().await;
     let (mut healthy, endpoints) = system_health.get_health_status();
     let uptime = match state.uptime() {
@@ -246,15 +244,15 @@ async fn health_handler(
 }
 
 /// Metrics handler with DistributedRuntime uptime
-#[tracing::instrument(skip_all, level="trace", fields(route= %route,
-						      trace_id = trace_parent.trace_id,
-						      parent_id = trace_parent.parent_id,
-						      x_request_id = trace_parent.x_request_id,
-                                                      tracestate = trace_parent.tracestate))]
+//#[tracing::instrument(skip_all, level="trace", fields(route= %route,
+//						      trace_id = trace_parent.trace_id,
+//						      parent_id = trace_parent.parent_id,
+//						      x_request_id = trace_parent.x_request_id,
+//                                                      tracestate = trace_parent.tracestate))]
 async fn metrics_handler(
     state: Arc<HttpServerState>,
-    route: &'static str,       // Used for tracing only
-    trace_parent: TraceParent, // Used for tracing only
+    //route: &'static str,       // Used for tracing only
+    //trace_parent: TraceParent, // Used for tracing only
 ) -> impl IntoResponse {
     // Update the uptime gauge with current value
     state.update_uptime_gauge();

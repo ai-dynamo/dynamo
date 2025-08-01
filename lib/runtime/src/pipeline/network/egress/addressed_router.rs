@@ -166,6 +166,9 @@ where
 	    if let Some(x_request_id) = trace_context.x_request_id {
 		headers.insert("x-request-id",x_request_id);
 	    }
+	    if let Some(x_dynamo_request_id) = trace_context.x_dynamo_request_id {
+		headers.insert("x-dynamo-request-id",x_dynamo_request_id);
+	    }
 	}
 
         // we might need to add a timeout on this if there is no subscriber to the subject; however, I think nats

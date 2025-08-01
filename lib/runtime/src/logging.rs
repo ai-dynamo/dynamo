@@ -69,6 +69,8 @@ use async_nats::{HeaderMap, HeaderValue};
 use tower_http::trace::{TraceLayer, DefaultMakeSpan};
 use axum::http::Request;
 
+pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
+
 /// ENV used to set the log level
 const FILTER_ENV: &str = "DYN_LOG";
 
@@ -134,23 +136,58 @@ pub fn is_valid_span_id(span_id: &str) -> bool {
 
 pub struct DistributedTraceIdLayer;
 
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DistributedTraceContext {
-    trace_id: String,
-    span_id: String,
-    parent_id: Option<String>,
-    tracestate: Option<String>,
-    start: Instant,
+    pub trace_id: String,
+    pub span_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracestate: Option<String>,
+    #[serde(skip)]
+    start: Option<Instant>,
+    #[serde(skip)]
     end: Option<Instant>,
-    x_request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x_request_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub x_dynamo_request_id: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+impl DistributedTraceContext {
+    /// Create a traceparent string from the context
+    pub fn create_traceparent(&self) -> String {
+        format!(
+            "00-{}-{}-01",
+            self.trace_id, self.span_id
+        )
+    }
+}
+
+/// Parse a traceparent string into its components
+pub fn parse_traceparent(traceparent: &str) -> (Option<String>, Option<String>) {
+    let pieces: Vec<_> = traceparent.split('-').collect();
+    if pieces.len() != 4 {
+        return (None , None)
+    }
+    let version = pieces[0];
+    let trace_id = pieces[1];
+    let parent_id = pieces[2];
+
+    if !is_valid_trace_id(trace_id) || !is_valid_span_id(parent_id) {
+        return (None, None)
+    }
+
+    (Some(trace_id.to_string()), Some(parent_id.to_string()))
+}
+
+#[derive(Debug, Clone, Default)]
 pub struct TraceParent {
     pub trace_id: Option<String>,
     pub parent_id: Option<String>,
     pub tracestate: Option<String>,
     pub x_request_id: Option<String>,
+    pub x_dynamo_request_id: Option<String>,
 }
 
 trait GenericHeaders {
@@ -176,6 +213,8 @@ impl TraceParent {
         let mut parent_id = None;
         let mut tracestate = None;
 	let mut x_request_id = None;
+	let mut x_dynamo_request_id = None;
+
 
 	if let Some(header_value) = headers.get("traceparent") {
 	    (trace_id, parent_id) = parse_traceparent(header_value);
@@ -189,11 +228,25 @@ impl TraceParent {
 	    tracestate = Some(header_value.to_string());
 	}
 
+	if let Some(header_value) = headers.get(DYNAMO_REQUEST_ID_HEADER) {
+	    x_dynamo_request_id = Some(header_value.to_string());
+	}
+
+	// Try to parse the request ID as a UUID, or generate a new one if missing/invalid
+	let uuid = match x_dynamo_request_id  {
+            Some(x_dynamo_request_id) => {
+		uuid::Uuid::parse_str(x_dynamo_request_id.as_str()).unwrap_or_else(|_| uuid::Uuid::new_v4())
+            }
+            None => uuid::Uuid::new_v4(),
+	};
+
+
 	TraceParent{
 	    trace_id: trace_id,
 	    parent_id: parent_id,
 	    tracestate: tracestate,
-	    x_request_id: x_request_id
+	    x_request_id: x_request_id,
+	    x_dynamo_request_id: Some(uuid.to_string())
 	}
     }
 }
@@ -215,54 +268,12 @@ pub fn make_request_span<B>(req: &Request<B>) -> Span {
         trace_id = trace_parent.trace_id,
         parent_id = trace_parent.parent_id,
         x_request_id = trace_parent.x_request_id,
+	x_dynamo_request_id = trace_parent.x_dynamo_request_id,
+
     )
 }
 
 
-
-impl<S> FromRequestParts<S> for TraceParent
-where
-    S: Send + Sync,
-{
-    type Rejection = Infallible;
-
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
-        let mut trace_id = None;
-        let mut parent_id = None;
-        let mut tracestate = None;
-        if let Some(header_value) = parts.headers.get("traceparent") {
-            if let Ok(header_str) = header_value.to_str() {
-
-		(trace_id, parent_id) = parse_traceparent(header_str);
-
-		if trace_id.is_none() || parent_id.is_none() {
-		    tracing::debug!("Invalid traceparent header: {}", header_str);
-                }
-
-            }
-        }
-
-        if let Some(header_value) = parts.headers.get("tracestate") {
-            if let Ok(header_str) = header_value.to_str() {
-                tracestate = Some(header_str.to_string());
-            }
-        }
-
-        // Extract X-Request-ID or x-request-id (case-insensitive)
-        let x_request_id = parts
-            .headers
-            .get("x-request-id")
-            .and_then(|val| val.to_str().ok())
-            .map(|s| s.to_string());
-
-        Ok(TraceParent {
-            trace_id,
-            parent_id,
-            tracestate,
-            x_request_id,
-        })
-    }
-}
 
 #[derive(Debug, Default)]
 pub struct FieldVisitor {
@@ -294,6 +305,7 @@ where
                 extensions.get_mut::<DistributedTraceContext>()
             {
                 distributed_tracing_context.end = Some(Instant::now());
+
             }
         }
     }
@@ -305,6 +317,7 @@ where
             let mut parent_id: Option<String> = None;
             let mut span_id: Option<String> = None;
             let mut x_request_id: Option<String> = None;
+	    let mut x_dynamo_request_id: Option<String> = None;
             let mut tracestate: Option<String> = None;
             let mut visitor = FieldVisitor::default();
             attrs.record(&mut visitor);
@@ -339,6 +352,10 @@ where
 
             if let Some(x_request_id_input) = visitor.fields.get("x_request_id") {
                 x_request_id = Some(x_request_id_input.to_string());
+            }
+
+	    if let Some(x_request_id_input) = visitor.fields.get("x_dynamo_request_id") {
+                x_dynamo_request_id = Some(x_request_id_input.to_string());
             }
 
             if parent_id.is_none() {
@@ -376,9 +393,10 @@ where
                 span_id: span_id.expect("Span ID must be set"),
                 parent_id,
                 tracestate,
-                start: Instant::now(),
+                start: Some(Instant::now()),
                 end: None,
                 x_request_id,
+		x_dynamo_request_id
             });
         }
     }
@@ -428,16 +446,17 @@ fn setup_logging() {
 
 #[cfg(not(feature = "tokio-console"))]
 fn setup_logging() {
-    let filter_layer = filters(load_config());
+    let fmt_filter_layer = filters(load_config());
+    let trace_filter_layer = filters(load_config());
     if jsonl_logging_enabled() {
         let l = fmt::layer()
             .with_ansi(false)
             .with_span_events(FmtSpan::NEW | FmtSpan::CLOSE)
             .event_format(CustomJsonFormatter::new())
             .with_writer(std::io::stderr)
-            .with_filter(filter_layer);
+            .with_filter(fmt_filter_layer);
         tracing_subscriber::registry()
-            .with(DistributedTraceIdLayer)
+            .with(DistributedTraceIdLayer.with_filter(trace_filter_layer))
             .with(l)
             .init();
     } else {
@@ -445,7 +464,7 @@ fn setup_logging() {
             .with_ansi(!disable_ansi_logging())
             .event_format(fmt::format().compact().with_timer(TimeFormatter::new()))
             .with_writer(std::io::stderr)
-            .with_filter(filter_layer);
+            .with_filter(fmt_filter_layer);
         tracing_subscriber::registry().with(l).init();
     }
 }
@@ -680,6 +699,16 @@ where
                 } else {
                     visitor.fields.remove("x_request_id");
                 }
+
+		if let Some(x_dynamo_request_id) = tracing_context.x_dynamo_request_id.clone() {
+                    visitor.fields.insert(
+                        "x_dynamo_request_id".to_string(),
+                        serde_json::Value::String(x_dynamo_request_id),
+                    );
+                } else {
+                    visitor.fields.remove("dynamo_x_request_id");
+                }
+
             } else {
                 tracing::error!(
                     "Distributed Trace Context not found, falling back to internal ids"
