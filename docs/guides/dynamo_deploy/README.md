@@ -17,14 +17,26 @@ limitations under the License.
 
 # Deploying Inference Graphs to Kubernetes
 
-We expect users to deploy their inference graphs using CRDs or helm charts.
+ We expect users to deploy their inference graphs using CRDs or helm charts.
 
-Prior to deploying an inference graph the user should deploy the Dynamo Cloud Platform.
-Dynamo Cloud acts as an orchestration layer between the end user and Kubernetes, handling the complexity of deploying your graphs for you. This is a one-time action, only necessary the first time you deploy a DynamoGraph.
+# 1. Install Dynamo Cloud.
+
+Prior to deploying an inference graph the user should deploy the Dynamo Cloud Platform. Dynamo Cloud acts as an orchestration layer between the end user and Kubernetes, handling the complexity of deploying your graphs for you. This is a one-time action, only necessary the first time you deploy a DynamoGraph.
 
 
-# 1. Please follow [Installing Dynamo Cloud](./dynamo_cloud.md) for steps to install.
-For details about the Dynamo Cloud Platform, see the [Dynamo Operator Guide](dynamo_operator.md)
+Please the [Quickstart Guide](quickstart.md) for steps to install Dynamo Cloud.
 
-# 2. Follow [Examples](../../examples/README.md) to see how you can deploy your Inference Graphs.
+# 2. Deploy your inference graph.
 
+You can deploy your graphs using the same command:
+
+```bash
+kubectl apply -f CRD.yaml
+```
+
+Consult the examples below for the CRD mathcin
+vLLM K8s (hyperlink to /deploy)
+
+SGLang k8s (hyperlink to /deploy)
+
+TRTLLM k8s (hyperlink to /deploy)
