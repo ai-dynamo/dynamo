@@ -67,6 +67,8 @@ class DynamoWorkerProcess(ManagedProcess):
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
 
+        # TODO: Have the managed process take a command name explicitly to distinguish
+        #       between processes started with the same command.
         log_dir = f"{request.node.name}_{worker_id}"
 
         # Clean up any existing log directory from previous runs
@@ -242,7 +244,7 @@ def determine_worker_roles(worker1: DynamoWorkerProcess, worker2: DynamoWorkerPr
 
 def start_completion_request(primary_worker_name: str):
     """
-    Start a formal request in a separate thread.
+    Start a request in a separate thread.
 
     Args:
         primary_worker_name: Name of the primary worker expected to handle the request
@@ -301,16 +303,16 @@ def validate_completion_response(
     """
     request_thread.join(timeout=300)
     if request_thread.is_alive():
-        pytest.fail("Formal request did not complete within timeout")
+        pytest.fail("Request did not complete within timeout")
 
     # Get the response
     if response_queue.empty():
-        pytest.fail("No response received for formal request")
+        pytest.fail("No response received for request")
     response = response_queue.get()
 
     # Validate the response
     validate_openai_response(response)
-    logger.info("✓ Formal request completed successfully after worker failure")
+    logger.info("✓ Request completed successfully after worker failure")
 
 
 def verify_migration_occurred(frontend_process: DynamoFrontendProcess) -> None:
@@ -390,6 +392,7 @@ def test_request_migration_vllm(request, runtime_services):
                 logger.info("Test request completed successfully")
 
                 # Step 4: Determine worker roles based on test request handling
+                # Frontend must use round-robin for the detection to work correctly
                 primary_worker, backup_worker = determine_worker_roles(worker1, worker2)
 
                 # Step 5: Send the formal request (expected to be received by the primary worker)
