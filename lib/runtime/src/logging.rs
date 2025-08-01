@@ -225,19 +225,21 @@ impl TraceParent {
             x_dynamo_request_id = Some(header_value.to_string());
         }
 
-        // Try to parse the request ID as a UUID, or generate a new one if missing/invalid
-        let uuid = match x_dynamo_request_id {
-            Some(x_dynamo_request_id) => uuid::Uuid::parse_str(x_dynamo_request_id.as_str())
-                .unwrap_or_else(|_| uuid::Uuid::new_v4()),
-            None => uuid::Uuid::new_v4(),
-        };
+	// validate is uuid
+        let x_dynamo_request_id = match x_dynamo_request_id {
+	    Some(x_dynamo_request_id) => match uuid::Uuid::parse_str(x_dynamo_request_id.as_str()) {
+		Ok(_) => Some(x_dynamo_request_id),
+		Err(_) => None,
+	    },
+	    None => None,
+	};
 
         TraceParent {
             trace_id,
             parent_id,
             tracestate,
             x_request_id,
-            x_dynamo_request_id: Some(uuid.to_string()),
+            x_dynamo_request_id
         }
     }
 }

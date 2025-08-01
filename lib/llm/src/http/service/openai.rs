@@ -42,6 +42,7 @@ use crate::types::Annotated;
 use dynamo_runtime::logging::get_distributed_tracing_context;
 use dynamo_runtime::logging::make_request_span;
 use tower_http::trace::TraceLayer;
+use tracing::Instrument;
 
 pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
 
