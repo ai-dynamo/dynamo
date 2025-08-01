@@ -54,8 +54,13 @@ class RequestThrottlerTestFrontend(ManagedProcess):
             "test-namespace",
         ]
 
+        # Force fixed namespace for coordination
+        env = os.environ.copy()
+        env["DYN_NAMESPACE"] = "test-namespace"
+
         super().__init__(
             command=command,
+            env=env,
             timeout=60,
             display_output=True,
             health_check_ports=[frontend_port],
@@ -86,8 +91,6 @@ class MockerProcess(ManagedProcess):
             mocker_args_file,
             "--endpoint",
             endpoint,
-            "--namespace",
-            "test-namespace",
         ]
 
         super().__init__(
@@ -122,8 +125,10 @@ async def publish_all_workers_busy_event(nats_url: str = "nats://localhost:4222"
         await nc.close()
 
 
-async def send_test_request(url: str, expect_success: bool = True) -> tuple[int, str]:
-    """Send a test HTTP request and return status code and response text"""
+async def send_test_request(
+    url: str, expect_success: bool = True, max_retries: int = 4
+) -> tuple[int, str]:
+    """Send a request with exponential backoff retry for system readiness"""
     payload = {
         "model": MODEL_NAME,
         "messages": [{"role": "user", "content": "Hello, how are you?"}],
@@ -131,18 +136,31 @@ async def send_test_request(url: str, expect_success: bool = True) -> tuple[int,
         "max_tokens": 5,
     }
 
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                url, json=payload, timeout=aiohttp.ClientTimeout(total=10)
-            ) as response:
-                text = await response.text()
-                logger.info(f"Request returned status {response.status}")
-                return response.status, text
+    wait_time = 1  # Start with 1 second
 
-    except Exception as e:
-        logger.error(f"Request failed with error: {e}")
-        return 500, str(e)
+    for attempt in range(max_retries + 1):
+        await asyncio.sleep(wait_time)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, json=payload, timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    text = await response.text()
+                    if response.status == 200:
+                        logger.info(f"Request succeeded on attempt {attempt + 1}")
+                        return response.status, text
+                    else:
+                        logger.warning(
+                            f"Attempt {attempt + 1} failed with status {response.status}: {text}"
+                        )
+        except Exception as e:
+            logger.warning(f"Attempt {attempt + 1} failed with error: {e}")
+
+        if attempt < max_retries:
+            wait_time *= 2  # Double the wait time (exponential backoff)
+
+    # If we get here, all retries failed
+    return 404, "Failed after all retries"
 
 
 async def wait_for_request_throttle_to_clear(duration_seconds: float):
@@ -364,12 +382,14 @@ async def test_request_throttler_disabled(request, runtime_services):
         "kv",
         "--http-port",
         str(FRONTEND_PORT + 2),
-        "--namespace",
-        "test-namespace",
     ]
+
+    env = os.environ.copy()
+    env["DYN_NAMESPACE"] = "test-namespace"
 
     frontend = ManagedProcess(
         command=command,
+        env=env,
         timeout=60,
         display_output=True,
         health_check_ports=[FRONTEND_PORT + 2],
