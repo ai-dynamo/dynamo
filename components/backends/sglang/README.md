@@ -173,10 +173,10 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 
 ## Deployment
 
-We currently provide deployment examples for Kubernetes (coming soon!) and SLURM
+We currently provide deployment examples for Kubernetes and SLURM.
 
 ## Kubernetes
-- **[Deploying Dynamo with SGLang on Kubernetes - coming soon!](.)**
+- **[Deploying Dynamo with SGLang on Kubernetes](deploy/README.md)**
 
 ## SLURM
 - **[Deploying Dynamo with SGLang on SLURM](slurm_jobs/README.md)**

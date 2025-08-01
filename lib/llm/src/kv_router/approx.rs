@@ -23,7 +23,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-use crate::tokens::TokenBlockSequence;
+use crate::tokens::{SequenceHash, TokenBlockSequence};
 
 use crate::kv_router::indexer::{
     compute_block_hash_for_seq, DumpRequest, KvIndexerInterface, KvRouterError, OverlapScores,
@@ -295,6 +295,26 @@ impl ApproxKvIndexer {
         self.kv_block_size
     }
 
+    /// Core function to process a routing decision with pre-computed hashes
+    pub async fn process_routing_decision(
+        &self,
+        worker_id: WorkerId,
+        local_hashes: Vec<LocalBlockHash>,
+        sequence_hashes: Vec<SequenceHash>,
+    ) -> Result<(), KvRouterError> {
+        self.route_tx
+            .send(RouterResult {
+                worker_id,
+                local_hashes,
+                sequence_hashes,
+            })
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+
+        Ok(())
+    }
+
+    /// Wrapper function that computes hashes from tokens and calls the core function
     pub async fn process_routing_decision_for_request(
         &self,
         tokens: &[u32],
@@ -309,16 +329,8 @@ impl ApproxKvIndexer {
             .map(|b| b.sequence_hash())
             .collect::<Vec<_>>();
 
-        self.route_tx
-            .send(RouterResult {
-                worker_id,
-                local_hashes,
-                sequence_hashes,
-            })
+        self.process_routing_decision(worker_id, local_hashes, sequence_hashes)
             .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
-
-        Ok(())
     }
 }
 

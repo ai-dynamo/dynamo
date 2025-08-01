@@ -316,6 +316,9 @@ func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.Dyn
 	gangSet.Name = dynamoDeployment.Name
 	gangSet.Namespace = dynamoDeployment.Namespace
 	gangSet.Spec.Replicas = 1
+	if controllerConfig.Grove.TerminationDelay > 0 {
+		gangSet.Spec.Template.TerminationDelay = &metav1.Duration{Duration: controllerConfig.Grove.TerminationDelay}
+	}
 	for componentName, component := range dynamoDeployment.Spec.Services {
 		container := corev1.Container{
 			Name:           "main",

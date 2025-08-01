@@ -54,10 +54,11 @@ class RequestThrottlerTestFrontend(ManagedProcess):
 
         # Force fixed namespace for coordination
         env = os.environ.copy()
-        env["DYN_NAMESPACE"] = "test-namespace"
+        env["DYNAMO_NAMESPACE"] = "test-namespace"
 
         super().__init__(
             command=command,
+            env=env,
             timeout=60,
             display_output=True,
             health_check_ports=[frontend_port],
