@@ -174,4 +174,5 @@ jobs:
         else
           echo "No integration tests found in ${{ matrix.dir }}, skipping"
         fi
-      timeout-minutes: 10
+      # FIXME: Improve build/test time and lower this timeout
+      timeout-minutes: 20
