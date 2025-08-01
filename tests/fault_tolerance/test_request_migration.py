@@ -5,7 +5,6 @@ import logging
 import os
 import queue
 import shutil
-import signal
 import threading
 import time
 
@@ -13,7 +12,7 @@ import pytest
 import requests
 from huggingface_hub import snapshot_download
 
-from tests.utils.managed_process import ManagedProcess
+from tests.utils.managed_process import ManagedProcess, terminate_process_tree
 
 logger = logging.getLogger(__name__)
 
@@ -268,29 +267,6 @@ def start_completion_request(primary_worker_name: str):
     return request_thread, response_queue
 
 
-def kill_worker_process(worker_info: tuple):
-    """
-    Kill a worker process using SIGKILL.
-
-    Args:
-        worker_info: Tuple containing (worker_process, worker_name)
-    """
-    worker_process, worker_name = worker_info
-    target_worker_pid = worker_process.get_pid()
-    try:
-        # Kill the process group (process and its children)
-        os.kill(-target_worker_pid, signal.SIGKILL)
-        logger.info(
-            f"Successfully killed {worker_name} process group with PID {target_worker_pid}"
-        )
-    except ProcessLookupError:
-        pytest.fail(
-            f"Failed to kill {worker_name} - PID {target_worker_pid} already terminated"
-        )
-    except PermissionError:
-        pytest.fail(f"Failed to kill {worker_name} - permission denied")
-
-
 def validate_completion_response(
     request_thread: threading.Thread, response_queue: queue.Queue
 ):
@@ -408,7 +384,9 @@ def test_request_migration_vllm(request, runtime_services):
                     f"Killing {primary_worker[1]} with PID {primary_worker[0].get_pid()}"
                 )
                 time.sleep(0.5)
-                kill_worker_process(primary_worker)
+                terminate_process_tree(
+                    primary_worker[0].get_pid(), immediate_kill=True, timeout=0
+                )
 
                 # Step 7: Validate the completion response
                 logger.info("Waiting for formal request to complete")
