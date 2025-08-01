@@ -28,9 +28,6 @@ use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tower_http::trace::DefaultMakeSpan;
 use tower_http::trace::TraceLayer;
-use tracing;
-use tracing::Instrument;
-use tracing::Level;
 
 /// HTTP server information containing socket address and handle
 #[derive(Debug)]
