@@ -396,15 +396,16 @@ dynamo_system_uptime_seconds{namespace=\"dynamo\"} 42
     }
 
     #[rstest]
-    #[case("ready", 200, "ready", None, None)]
-    #[case("notready", 503, "notready", None, None)]
-    #[case("ready", 200, "ready", Some("/custom/health"), Some("/custom/live"))]
+    #[case("ready", 200, "ready", None, None, 3)]
+    #[case("notready", 503, "notready", None, None, 3)]
+    #[case("ready", 200, "ready", Some("/custom/health"), Some("/custom/live"), 5)]
     #[case(
         "notready",
         503,
         "notready",
         Some("/custom/health"),
-        Some("/custom/live")
+        Some("/custom/live"),
+        5
     )]
     #[tokio::test]
     #[cfg(feature = "integration")]
@@ -414,6 +415,7 @@ dynamo_system_uptime_seconds{namespace=\"dynamo\"} 42
         #[case] expected_body: &'static str,
         #[case] custom_health_path: Option<&'static str>,
         #[case] custom_live_path: Option<&'static str>,
+        #[case] expected_num_tests: usize,
     ) {
         use std::sync::Arc;
         use tokio::time::sleep;
@@ -470,6 +472,7 @@ dynamo_system_uptime_seconds{namespace=\"dynamo\"} 42
                     test_cases.push((custom_live_path.unwrap(), expected_status, expected_body));
                 }
                 test_cases.push(("/someRandomPathNotFoundHere", 404, "Route not found"));
+                assert_eq!(test_cases.len(), expected_num_tests);
 
                 for (path, expect_status, expect_body) in test_cases {
                     println!("[test] Sending request to {}", path);
