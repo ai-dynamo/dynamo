@@ -35,13 +35,30 @@ on:
     - 'Cargo.lock'
 
 jobs:
-  # Fast checks that don't require external services - provides quick feedback
-  fast-checks:
+  pre-merge-rust:
     runs-on: ubuntu-latest
     strategy:
       matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
     permissions:
       contents: read
+    # nats/etcd services needed in background for integration tests
+    services:
+      nats-server:
+        image: nats:2.11.4
+        options: --name nats-server
+        ports:
+          - 4222:4222
+          - 6222:6222
+          - 8222:8222
+        env:
+          NATS_ARGS: "-js --trace -m 8222"
+      etcd-server:
+        image: bitnami/etcd:3.6.1
+        ports:
+          - 2379:2379
+          - 2380:2380
+        env:
+          ALLOW_NONE_AUTHENTICATION: yes
     steps:
     - uses: actions/checkout@v4
     - name: Set up system dependencies
@@ -91,52 +108,6 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
-
-  # Integration tests that require external services (nats, etcd)
-  integration-tests:
-    runs-on: ubuntu-latest
-    strategy:
-      matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
-    permissions:
-      contents: read
-    # nats/etcd services needed in background for integration tests
-    services:
-      nats-server:
-        image: nats:2.11.4
-        options: --name nats-server
-        ports:
-          - 4222:4222
-          - 6222:6222
-          - 8222:8222
-        env:
-          NATS_ARGS: "-js --trace -m 8222"
-      etcd-server:
-        image: bitnami/etcd:3.6.1
-        ports:
-          - 2379:2379
-          - 2380:2380
-        env:
-          ALLOW_NONE_AUTHENTICATION: yes
-    steps:
-    - uses: actions/checkout@v4
-    - name: Set up system dependencies
-      run: |
-        sudo apt-get update -y
-        sudo apt-get install -y protobuf-compiler
-    - name: Cache Cargo Registry
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ github.head_ref || github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
-    - name: Install Rust in dev environment
-      # Install Rust only to run GitHub Local Actions in (dev environment) using the `ACT` environment variable.
-      # See act usage: https://nektosact.com/introduction.html
-      # https://nektosact.com/usage/index.html?highlight=env.Act#skipping-steps
-      if: ${{ env.ACT }}
-      run: |
-        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        rustup toolchain install 1.86.0-x86_64-unknown-linux-gnu
-        echo "$HOME/.cargo/bin" >> $GITHUB_PATH
     - name: Wait for Services to be Ready
       run: |
         echo "Waiting for services to be ready..."
