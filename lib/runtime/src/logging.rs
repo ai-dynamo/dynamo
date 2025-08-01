@@ -237,7 +237,7 @@ impl TraceParent {
 	    (trace_id, parent_id) = parse_traceparent(header_value);
 	}
 
-	if let Some(header_value) = headers.get("x_request_id") {
+	if let Some(header_value) = headers.get("x-request-id") {
 	    x_request_id = Some(header_value.to_string());
 	}
 
@@ -350,11 +350,9 @@ where
                 extensions.get_mut::<DistributedTraceContext>()
             {
                 distributed_tracing_context.end = Some(Instant::now());
-		//println!("span closed trace {:?} span {:?}",distributed_tracing_context.trace_id, distributed_tracing_context.span_id);
 
             }
         }
-//	println!("span closed!");
     }
 
     // Adds W3C compliant span_id, trace_id, and parent_id if not already present
@@ -428,9 +426,6 @@ where
             if span_id.is_none() {
                 span_id = Some(generate_span_id());
             }
-
-//	    println!("new span trace {:?} span {:?} file {:?} line {:?}",trace_id, span_id, visitor.fields.get("file"), visitor.fields.get("target"));
-
 
             let mut extensions = span.extensions_mut();
             extensions.insert(DistributedTraceContext {

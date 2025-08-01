@@ -14,11 +14,16 @@
 // limitations under the License.
 
 use async_nats::client::Client;
+use async_nats::{HeaderMap, HeaderValue};
 use tracing as log;
 
 use super::*;
 use crate::{protocols::maybe_error::MaybeError, Result};
 use tokio_stream::{wrappers::ReceiverStream, StreamExt, StreamNotifyClose};
+use tracing::Instrument;
+use crate::logging::get_distributed_tracing_context;
+use crate::logging::DistributedTraceContext;
+
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -39,7 +44,7 @@ struct RequestControlMessage {
     id: String,
     request_type: RequestType,
     response_type: ResponseType,
-    connection_info: ConnectionInfo,
+    connection_info: ConnectionInfo
 }
 
 pub struct AddressedRequest<T> {
@@ -120,7 +125,7 @@ where
             id: engine_ctx.id().to_string(),
             request_type: RequestType::SingleIn,
             response_type: ResponseType::ManyOut,
-            connection_info,
+            connection_info
         };
 
         // next build the two part message where we package the connection info and the request into
@@ -148,11 +153,26 @@ where
 
         log::trace!(request_id, "enqueueing two-part message to nats");
 
+	// Insert Trace Context into Headers
+	// Enables span to be created in push_endpoint before
+	// payload is parsed
+
+	let mut headers = HeaderMap::new();
+	if let Some(trace_context) = get_distributed_tracing_context() {
+	    headers.insert("traceparent",trace_context.create_traceparent());
+	    if let Some(tracestate) = trace_context.tracestate {
+		headers.insert("tracestate",tracestate);
+	    }
+	    if let Some(x_request_id) = trace_context.x_request_id {
+		headers.insert("x-request-id",x_request_id);
+	    }
+	}
+
         // we might need to add a timeout on this if there is no subscriber to the subject; however, I think nats
         // will handle this for us
         let _response = self
             .req_transport
-            .request(address.to_string(), buffer)
+            .request_with_headers(address.to_string(), headers, buffer)
             .await?;
 
         log::trace!(request_id, "awaiting transport handshake");

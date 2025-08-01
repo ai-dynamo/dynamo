@@ -968,6 +968,7 @@ pub fn completions_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_completions))
+	.layer(TraceLayer::new_for_http().make_span_with(make_request_span))
         .with_state(state);
     (vec![doc], router)
 }
@@ -985,7 +986,6 @@ pub fn chat_completions_router(
         .route(&path, post(handler_chat_completions))
 	.layer(TraceLayer::new_for_http().make_span_with(make_request_span))
         .with_state((state, template));
-    println!("here you silly!");
     (vec![doc], router)
 }
 
@@ -999,6 +999,7 @@ pub fn embeddings_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(embeddings))
+	.layer(TraceLayer::new_for_http().make_span_with(make_request_span))
         .with_state(state);
     (vec![doc], router)
 }
@@ -1014,6 +1015,7 @@ pub fn list_models_router(
 
     let router = Router::new()
         .route(&openai_path, get(list_models_openai))
+	.layer(TraceLayer::new_for_http().make_span_with(make_request_span))
         .with_state(state);
 
     (vec![doc_for_openai], router)
@@ -1030,6 +1032,7 @@ pub fn responses_router(
     let doc = RouteDoc::new(axum::http::Method::POST, &path);
     let router = Router::new()
         .route(&path, post(handler_responses))
+	.layer(TraceLayer::new_for_http().make_span_with(make_request_span))
         .with_state((state, template));
     (vec![doc], router)
 }
