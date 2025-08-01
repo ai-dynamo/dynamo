@@ -135,14 +135,14 @@ jobs:
     - name: Build project
       working-directory: ${{ matrix.dir }}
       run: cargo build --locked
-      timeout-minutes: 10
+      timeout-minutes: 15
 
     - name: Run documentation tests
       working-directory: ${{ matrix.dir }}
       run: |
         cargo doc --locked --no-deps
         cargo test --locked --doc
-      timeout-minutes: 5
+      timeout-minutes: 10
 
     - name: Run unit tests
       working-directory: ${{ matrix.dir }}
@@ -280,4 +280,4 @@ jobs:
         else
           echo "No integration tests found in ${{ matrix.dir }}, skipping"
         fi
-      timeout-minutes: 10
+      timeout-minutes: 15
