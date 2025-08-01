@@ -77,7 +77,7 @@ impl crate::traits::DistributedRuntimeProvider for HttpMetricsRegistry {
 
 impl MetricsRegistry for HttpMetricsRegistry {
     fn basename(&self) -> String {
-        "http_server".to_string()
+        "dynamo".to_string()
     }
 
     fn parent_hierarchy(&self) -> Vec<String> {
@@ -100,7 +100,7 @@ impl HttpServerState {
         // Note: This metric is created at the DRT level (no namespace), so we manually add "dynamo_" prefix
         // to maintain consistency with the project's metric naming convention
         let uptime_gauge = http_metrics_registry.as_ref().create_gauge(
-            "dynamo_uptime_seconds",
+            "system_uptime_seconds",
             "Total uptime of the DistributedRuntime in seconds",
             &[],
         )?;
@@ -368,9 +368,9 @@ mod tests {
         println!("Full metrics response:\n{}", response);
 
         let expected = "\
-# HELP dynamo_uptime_seconds Total uptime of the DistributedRuntime in seconds
-# TYPE dynamo_uptime_seconds gauge
-dynamo_uptime_seconds{namespace=\"http_server\"} 42
+# HELP dynamo_system_uptime_seconds Total uptime of the DistributedRuntime in seconds
+# TYPE dynamo_system_uptime_seconds gauge
+dynamo_system_uptime_seconds{namespace=\"dynamo\"} 42
 ";
         assert_eq!(response, expected);
     }

@@ -66,13 +66,13 @@ trtllm =[
 
 vllm = [
     "uvloop",
-    "nixl",
+    "nixl<=0.4.1",
     "vllm==0.10.0",
 ]
 
 sglang = [
     "uvloop",
-    "nixl",
+    "nixl<=0.4.1",
     "sglang[all]==0.4.9.post6",
 ]
 
