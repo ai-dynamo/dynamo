@@ -26,6 +26,8 @@ use std::collections::HashMap;
 use tokio::sync::Mutex;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+use crate::logging::TraceParent;
+use tracing::Instrument;
 
 #[derive(Builder)]
 pub struct PushEndpoint {
@@ -82,6 +84,8 @@ impl PushEndpoint {
                     tracing::warn!("Failed to respond to request; this may indicate the request has shutdown: {:?}", e);
                 }
 
+
+
                 let ingress = self.service_handler.clone();
                 let worker_id = "".to_string();
 
@@ -90,9 +94,28 @@ impl PushEndpoint {
                 let inflight_clone = inflight.clone();
                 let notify_clone = notify.clone();
 
+		// Handler headers here for tracing
+
+		let mut traceparent = TraceParent::default();
+
+		if let Some(headers) = req.message.headers.as_ref() {
+
+		    traceparent = TraceParent::from_headers(headers);
+		}
+
                 tokio::spawn(async move {
                     tracing::trace!(worker_id, "handling new request");
-                    let result = ingress.handle_payload(req.message.payload).await;
+                    let result = ingress.handle_payload(req.message.payload).instrument(
+
+			// Create span with trace ids as set
+			// in headers.
+			tracing::info_span!(
+			    "handle_payload",
+			    trace_id = traceparent.trace_id,
+			    parent_id = traceparent.parent_id,
+			    x_request_id = traceparent.x_request_id,
+			    tracestate = traceparent.tracestate
+		    )).await;
                     match result {
                         Ok(_) => {
                             tracing::trace!(worker_id, "request handled successfully");
