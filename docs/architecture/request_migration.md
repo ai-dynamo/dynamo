@@ -8,9 +8,9 @@ Request migration is implemented through a Migration operator that sits in the L
 
 ## Architecture Components
 
-### Migration Operator
+### Migrator
 
-The Migration operator is integrated into the LLM processing pipeline between the frontend preprocessing and the actual service backends. This positioning allows it to intercept all communication flows and manage failure scenarios transparently.
+The migration system is integrated into the LLM processing pipeline between the frontend preprocessing and the actual service backends. This positioning allows it to intercept all communication flows and manage failure scenarios transparently.
 
 Key responsibilities:
 - Intercepts all requests and responses flowing through the pipeline
@@ -20,7 +20,7 @@ Key responsibilities:
 
 ### Migration Limit Configuration
 
-Each worker can be configured with a migration limit parameter that specifies the maximum number of times a request can be migrated to another worker:
+Each model can be configured with a migration limit parameter that specifies the maximum number of times a request can be migrated to another worker:
 
 - Default behavior: no migration allowed
 - Can be set independently for different engine types
@@ -29,7 +29,7 @@ Each worker can be configured with a migration limit parameter that specifies th
 
 ## Token State Tracking and Request Migration
 
-The core of the migration system is its ability to preserve and continue partial generations through careful token state management. This ensures that when a worker fails mid-generation, the new worker can seamlessly continue from the exact point of failure.
+The core of the migration system is the ability to preserve and continue partial generations through token state management. This ensures that when a worker fails mid-generation, the new worker can seamlessly continue from the exact point of failure.
 
 ### Token Accumulation Process
 
@@ -37,7 +37,7 @@ When a request is being processed and responses are flowing back from a worker, 
 
 1. **Initial Request State**: The system starts with the original preprocessed request containing the initial prompt tokens.
 
-2. **Response Tracking**: As each response arrives from the worker, the migration system extracts the newly generated tokens and appends them to the request's token sequence. This creates an ever-growing accumulation of all tokens that have been successfully generated.
+2. **Response Tracking**: As each response arrives from the worker, the migration system extracts the newly generated tokens and appends them to the request's token sequence. This creates accumulates all tokens that have been generated.
 
 3. **Token Count Management**: The system also updates the remaining token budget to reflect the number of tokens already generated, ensuring that the total generation stays within the originally requested limits.
 
@@ -49,7 +49,7 @@ The migration system handles two distinct failure scenarios:
 
 **Scenario**: Worker is unreachable when creating the initial connection.
 
-**Error Pattern**: Communication system reports no available workers for the request.
+**Error Pattern**: Communication system reports chosen worker instance is unavailable.
 
 **Migration Process**:
 - Detects connection failure during initial stream setup
@@ -65,7 +65,7 @@ The migration system handles two distinct failure scenarios:
 
 **Migration Process**:
 
-1. **Failure Detection**: The system detects the stream disconnection through error monitoring and logging.
+1. **Failure Detection**: The system detects the stream disconnection through error monitoring.
 
 2. **State Preservation**: At this point, the request's token sequence contains both the original prompt tokens and all successfully generated tokens from the failed worker.
 
