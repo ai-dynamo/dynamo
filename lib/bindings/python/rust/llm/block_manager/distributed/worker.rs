@@ -6,7 +6,10 @@ use super::*;
 use std::sync::Arc;
 use utils::get_barrier_id;
 
-use llm_rs::block_manager::distributed::{KvbmWorker as KvbmWorkerImpl, KvbmWorkerConfig};
+use llm_rs::block_manager::distributed::{
+    BlockTransferHandler as RustBlockTransferHandler, KvbmWorker as KvbmWorkerImpl,
+    KvbmWorkerConfig,
+};
 use llm_rs::block_manager::storage::torch::{TorchDevice, TorchTensor};
 
 /// A wrapper around a Torch tensor.
@@ -40,7 +43,7 @@ impl VllmTensor {
                 .call_method0(py, "stride")?
                 .extract::<Vec<usize>>(py)?;
 
-            tracing::debug!("VllmTensor: {data_ptr}, {size_bytes}, {shape:?}, {stride:?}");
+            tracing::trace!("VllmTensor: {data_ptr}, {size_bytes}, {shape:?}, {stride:?}");
 
             Ok(Self {
                 _py_tensor: py_tensor,
@@ -77,23 +80,50 @@ impl TorchTensor for VllmTensor {
 }
 
 #[pyclass]
+#[derive(Clone)]
+pub struct BlockTransferHandler {
+    _impl: Arc<RustBlockTransferHandler>,
+}
+
+impl BlockTransferHandler {
+    pub fn get_handler(&self) -> Arc<RustBlockTransferHandler> {
+        self._impl.clone()
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
 pub struct KvbmWorker {
-    _impl: Arc<KvbmWorkerImpl>,
-    _rt: tokio::runtime::Runtime,
+    inner: Arc<Mutex<KvbmWorkerImpl>>,
+    _drt: DistributedRuntime,
+}
+
+impl KvbmWorker {
+    pub fn get_inner(&self) -> Arc<Mutex<KvbmWorkerImpl>> {
+        self.inner.clone()
+    }
 }
 
 #[pymethods]
 impl KvbmWorker {
     #[new]
-    #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, worker_id=0, dtype_width_bytes=2))]
+    #[pyo3(signature = (num_device_blocks, page_size, tensors, device_id=0, dtype_width_bytes=2, drt=None))]
     fn new(
         num_device_blocks: usize,
         page_size: usize,
         tensors: Vec<Py<PyAny>>,
         device_id: usize,
-        worker_id: usize,
         dtype_width_bytes: usize,
+        drt: Option<DistributedRuntime>,
     ) -> PyResult<Self> {
+        let py_drt = drt.ok_or_else(|| {
+            pyo3::exceptions::PyValueError::new_err("DistributedRuntime (drt) must be provided")
+        })?;
+
+        // rusty drt
+        let drt = py_drt.inner.clone();
+        let rt = drt.runtime().primary();
+
         let mut vllm_tensors: Vec<Arc<dyn TorchTensor>> = Vec::with_capacity(tensors.len());
 
         for tensor in tensors {
@@ -104,27 +134,26 @@ impl KvbmWorker {
         let barrier_id = get_barrier_id();
 
         let config = KvbmWorkerConfig::builder()
+            .drt(drt)
             .num_device_blocks(num_device_blocks)
             .page_size(page_size)
             .tensors(vllm_tensors)
             .device_id(device_id)
-            .worker_id(worker_id)
             .dtype_width_bytes(dtype_width_bytes)
             .barrier_id(barrier_id)
             .build()
             .map_err(to_pyerr)?;
 
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
+        let worker = rt
+            .block_on(async move {
+                let kvbm_worker = KvbmWorkerImpl::new(config).await?;
+                anyhow::Ok(kvbm_worker)
+            })
             .map_err(to_pyerr)?;
 
-        let worker =
-            rt.block_on(async move { KvbmWorkerImpl::new(config).await.map_err(to_pyerr) })?;
-
         Ok(Self {
-            _impl: Arc::new(worker),
-            _rt: rt,
+            inner: Arc::new(Mutex::new(worker)),
+            _drt: py_drt,
         })
     }
 }

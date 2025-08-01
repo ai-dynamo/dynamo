@@ -16,6 +16,7 @@ use crate::block_manager::{
         transfer::{TransferContext, WriteTo, WriteToStrategy},
         Block, BlockDataProvider, BlockDataProviderMut, ReadableBlock, WritableBlock,
     },
+    connector::scheduler::{SchedulingDecision, TransferSchedulerClient},
     storage::{DeviceStorage, DiskStorage, Local, PinnedStorage},
     BasicMetadata, Storage,
 };
@@ -28,11 +29,14 @@ type LocalBlock<S, M> = Block<S, locality::Local, M>;
 type LocalBlockDataList<S> = Vec<LocalBlockData<S>>;
 
 /// A handler for all block transfers. Wraps a group of [`BlockTransferPoolManager`]s.
+#[derive(Clone)]
 pub struct BlockTransferHandler {
     device: Option<LocalBlockDataList<DeviceStorage>>,
     host: Option<LocalBlockDataList<PinnedStorage>>,
     disk: Option<LocalBlockDataList<DiskStorage>>,
     context: Arc<TransferContext>,
+    scheduler_client: Option<TransferSchedulerClient>,
+    // add worker-connector scheduler client here
 }
 
 impl BlockTransferHandler {
@@ -41,12 +45,15 @@ impl BlockTransferHandler {
         host_blocks: Option<Vec<LocalBlock<PinnedStorage, BasicMetadata>>>,
         disk_blocks: Option<Vec<LocalBlock<DiskStorage, BasicMetadata>>>,
         context: Arc<TransferContext>,
+        scheduler_client: Option<TransferSchedulerClient>,
+        // add worker-connector scheduler client here
     ) -> Result<Self> {
         Ok(Self {
             device: Self::get_local_data(device_blocks),
             host: Self::get_local_data(host_blocks),
             disk: Self::get_local_data(disk_blocks),
             context,
+            scheduler_client,
         })
     }
 
@@ -116,19 +123,8 @@ impl BlockTransferHandler {
 
         channel
     }
-}
 
-#[async_trait]
-impl Handler for BlockTransferHandler {
-    async fn handle(&self, mut message: MessageHandle) -> Result<()> {
-        if message.data.len() != 1 {
-            return Err(anyhow::anyhow!(
-                "Block transfer request must have exactly one data element"
-            ));
-        }
-
-        let request: BlockTransferRequest = serde_json::from_slice(&message.data[0])?;
-
+    pub async fn execute_transfer(&self, request: BlockTransferRequest) -> Result<()> {
         tracing::debug!(
             "Performing transfer of {} blocks from {:?} to {:?}",
             request.blocks().len(),
@@ -147,8 +143,59 @@ impl Handler for BlockTransferHandler {
         }?;
 
         notify.await?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl Handler for BlockTransferHandler {
+    async fn handle(&self, mut message: MessageHandle) -> Result<()> {
+        if message.data.len() != 1 {
+            return Err(anyhow::anyhow!(
+                "Block transfer request must have exactly one data element"
+            ));
+        }
+
+        let mut request: BlockTransferRequest = serde_json::from_slice(&message.data[0])?;
+
+        let result = if let Some(req) = request.connector_req.take() {
+            let operation_id = req.uuid;
+
+            tracing::debug!(
+                request_id = %req.request_id,
+                operation_id = %operation_id,
+                "scheduling transfer"
+            );
+
+            let client = self
+                .scheduler_client
+                .as_ref()
+                .expect("scheduler client is required")
+                .clone();
+
+            let handle = client.schedule_transfer(req).await?;
+
+            // we don't support cancellation yet
+            assert_eq!(handle.scheduler_decision(), SchedulingDecision::Execute);
+
+            match self.execute_transfer(request).await {
+                Ok(_) => {
+                    handle.mark_complete(Ok(())).await;
+                    Ok(())
+                }
+                Err(e) => {
+                    handle.mark_complete(Err(anyhow::anyhow!("{}", e))).await;
+                    Err(e)
+                }
+            }
+        } else {
+            self.execute_transfer(request).await
+        };
+
+        // we always ack regardless of if we error or not
         message.ack().await?;
 
-        Ok(())
+        // the error may trigger a cancellation
+        result
     }
 }

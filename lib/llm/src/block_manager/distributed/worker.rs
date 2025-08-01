@@ -1,5 +1,4 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
@@ -12,6 +11,7 @@ use zmq::*;
 
 use crate::block_manager::{
     block::{layout_to_blocks, locality, transfer::TransferContext, Block},
+    connector::scheduler::TransferSchedulerClient,
     layout::LayoutType,
     storage::{torch::TorchTensor, DeviceAllocator, DeviceStorage, DiskAllocator, PinnedAllocator},
     BasicMetadata, BlockMetadata, LayoutConfigBuilder, NixlLayout, Storage,
@@ -24,11 +24,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::runtime::Handle;
+use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 
 use dynamo_runtime::{
     utils::{leader_worker_barrier::WorkerBarrier, task::CriticalTaskExecutionHandle},
-    DistributedRuntime, Runtime,
+    DistributedRuntime,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,7 +37,7 @@ pub struct KvbmWorkerData {
     pub num_device_blocks: usize,
 }
 
-fn load_and_validate_tensors(
+pub fn load_and_validate_tensors(
     tensors: &[Arc<dyn TorchTensor>],
     device_id: usize,
 ) -> anyhow::Result<(Vec<DeviceStorage>, Vec<usize>)> {
@@ -81,9 +82,11 @@ fn load_and_validate_tensors(
     Ok((device_tensors, shape.unwrap()))
 }
 
-#[derive(Builder, Debug)]
+#[derive(Builder)]
 #[builder(pattern = "owned")]
 pub struct KvbmWorkerConfig {
+    drt: DistributedRuntime,
+
     num_device_blocks: usize,
 
     #[builder(default = "32")]
@@ -95,14 +98,14 @@ pub struct KvbmWorkerConfig {
     #[builder(default = "0")]
     device_id: usize,
 
-    #[builder(default = "1")]
-    worker_id: usize,
-
     #[builder(default = "2")]
     dtype_width_bytes: usize,
 
     #[builder(default = "String::from(\"kvbm\")")]
     barrier_id: String,
+
+    #[builder(default = "None")]
+    scheduler_client: Option<TransferSchedulerClient>,
 }
 
 impl KvbmWorkerConfig {
@@ -125,6 +128,7 @@ fn build_agent(worker_id: usize, use_gds: bool) -> anyhow::Result<NixlAgent> {
 
 pub struct KvbmWorker {
     task: Option<CriticalTaskExecutionHandle>,
+    block_transfer_handler_rx: Option<oneshot::Receiver<transfer::BlockTransferHandler>>,
 }
 
 impl KvbmWorker {
@@ -187,7 +191,15 @@ impl KvbmWorker {
 
         let layout_builder_clone = layout_builder.clone();
 
-        let cancel_token = CancellationToken::new();
+        // add worker-connector scheduler here
+        // let scheduler = KvbmWorkerScheduler::new(config.scheduler.clone());
+        let cancel_token = config.drt.primary_token().clone();
+
+        // establish a oneshot channel to get back the raw BlockTransferHandler
+        let (handler_tx, handler_rx) = oneshot::channel();
+
+        let scheduler_client = config.scheduler_client.clone();
+
         let task = CriticalTaskExecutionHandle::new(
             move |cancel_token| {
                 KvbmWorker::worker_task(
@@ -196,13 +208,27 @@ impl KvbmWorker {
                     layout_type,
                     config,
                     cancel_token,
+                    handler_tx,
+                    scheduler_client,
                 )
             },
-            cancel_token,
+            cancel_token.clone(),
             "kvbm-worker-task",
         )?;
 
-        Ok(Self { task: Some(task) })
+        Ok(Self {
+            task: Some(task),
+            block_transfer_handler_rx: Some(handler_rx),
+        })
+    }
+
+    /// One-time use method to extract the block transfer handler from the worker.
+    ///
+    /// This is a bit of a hack. Improve the API design around this in the future.
+    pub fn block_transfer_handler_rx(
+        &mut self,
+    ) -> Option<tokio::sync::oneshot::Receiver<BlockTransferHandler>> {
+        self.block_transfer_handler_rx.take()
     }
 
     fn make_layout<S: Storage, M: BlockMetadata>(
@@ -228,19 +254,27 @@ impl KvbmWorker {
         layout_type: LayoutType,
         config: KvbmWorkerConfig,
         cancel_token: CancellationToken,
+        handler_tx: oneshot::Sender<BlockTransferHandler>,
+        scheduler_client: Option<TransferSchedulerClient>,
     ) -> anyhow::Result<()> {
-        let runtime = Runtime::from_current()?;
-        let drt = DistributedRuntime::from_settings(runtime).await?;
+        let drt = config.drt.clone();
+
+        let worker_id = drt
+            .primary_lease()
+            .ok_or(anyhow::anyhow!(
+                "unable to get primary lease; check that drt is not static"
+            ))?
+            .id() as usize;
 
         tracing::info!(
             "Worker {} waiting on barrier {}",
-            config.worker_id,
+            worker_id,
             config.barrier_id
         );
 
         let worker_barrier = WorkerBarrier::<KvbmLeaderData, KvbmWorkerData>::new(
             config.barrier_id,
-            config.worker_id.to_string(),
+            worker_id.to_string(),
         );
 
         let worker_data = KvbmWorkerData {
@@ -259,11 +293,11 @@ impl KvbmWorker {
 
         tracing::info!(
             "Worker {} received leader data: {:?}",
-            config.worker_id,
+            worker_id,
             leader_data
         );
 
-        let agent = build_agent(config.worker_id, leader_data.num_disk_blocks > 0)?;
+        let agent = build_agent(worker_id, leader_data.num_disk_blocks > 0)?;
 
         let transfer_context = Arc::new(TransferContext::new(
             Arc::new(Some(agent)),
@@ -280,7 +314,7 @@ impl KvbmWorker {
             device_layout,
             transfer_context.nixl_agent().as_ref(),
             0,
-            config.worker_id,
+            worker_id,
         )?);
 
         let host_blocks = if leader_data.num_host_blocks > 0 {
@@ -294,7 +328,7 @@ impl KvbmWorker {
                 host_layout,
                 transfer_context.nixl_agent().as_ref(),
                 1,
-                config.worker_id,
+                worker_id,
             )?)
         } else {
             None
@@ -311,15 +345,28 @@ impl KvbmWorker {
                 disk_layout,
                 transfer_context.nixl_agent().as_ref(),
                 2,
-                config.worker_id,
+                worker_id,
             )?)
         } else {
             None
         };
 
         // Create the handler for our active message worker.
-        let block_transfer_handler =
-            BlockTransferHandler::new(device_blocks, host_blocks, disk_blocks, transfer_context)?;
+        let block_transfer_handler = BlockTransferHandler::new(
+            device_blocks,
+            host_blocks,
+            disk_blocks,
+            transfer_context,
+            scheduler_client,
+        )?;
+
+        tracing::debug!("sending block transfer handler to worker");
+        handler_tx
+            .send(block_transfer_handler.clone())
+            .map_err(|_| {
+                anyhow::anyhow!("Failed to send block transfer handler over oneshot channel")
+            })?;
+        tracing::debug!("sent block transfer handler to worker");
 
         let handlers = HashMap::from([(
             ZMQ_TRANSFER_BLOCKS_MESSAGE.to_string(),

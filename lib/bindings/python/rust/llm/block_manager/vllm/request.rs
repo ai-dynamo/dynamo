@@ -7,7 +7,7 @@ use dynamo_llm::tokens::compute_hash_v2;
 
 /// Request Inputs
 #[pyclass]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Dissolve)]
 #[allow(dead_code)]
 pub struct KvbmRequest {
     pub request_id: String,

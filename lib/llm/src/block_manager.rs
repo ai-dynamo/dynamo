@@ -23,6 +23,7 @@ pub mod config;
 mod state;
 
 pub mod block;
+pub mod connector;
 pub mod distributed;
 pub mod events;
 pub mod layout;

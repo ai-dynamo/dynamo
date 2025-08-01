@@ -9,8 +9,35 @@ mod leader;
 mod worker;
 
 pub use leader::{KvbmLeader, KvbmLeaderConfig};
-pub use utils::{BlockTransferPool, BlockTransferRequest};
+pub use transfer::BlockTransferHandler;
+pub use utils::{
+    BlockTransferPool, BlockTransferRequest, ConnectorRequestLeader, ConnectorTransferType,
+};
 pub use worker::{KvbmWorker, KvbmWorkerConfig};
+pub use zmq::Handler;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskReady {
+    Continue,
+    Cancel,
+}
+#[async_trait::async_trait]
+pub trait ScheduledTaskHandle: Send + Sync {
+    async fn ready(&self) -> TaskReady;
+    fn mark_complete(&self);
+}
+
+pub struct SchedulerRequest<T> {
+    pub handle_tx: tokio::sync::oneshot::Sender<Box<dyn ScheduledTaskHandle>>,
+    pub task: T,
+}
+
+// impl<T> SchedulerRequest<T> {
+//     pub fn new(task: T) -> (Self, tokio::sync::oneshot::Sender<Box<dyn ScheduledTaskHandle>>) {
+//         let (handle_tx, handle_rx) = tokio::sync::oneshot::channel();
+//         Self { handle_tx, task }
+//     }
+// }
 
 #[cfg(all(test, feature = "testing-cuda", feature = "testing-etcd"))]
 mod tests {
