@@ -21,13 +21,11 @@ limitations under the License.
 
 # 1. Install Dynamo Cloud.
 
-Prior to deploying an inference graph the user should deploy the Dynamo Cloud Platform. Please the [Quickstart Guide](quickstart.md) for steps to install Dynamo Cloud.
+Prior to deploying an inference graph the user should deploy the Dynamo Cloud Platform. Reference the [Quickstart Guide](quickstart.md) for steps to install Dynamo Cloud with Helm.
 
 Dynamo Cloud acts as an orchestration layer between the end user and Kubernetes, handling the complexity of deploying your graphs for you. This is a one-time action, only necessary the first time you deploy a DynamoGraph.
 
 # 2. Deploy your inference graph.
-
-[Deploying a particular example](../../examples/README.md#deploying-a-particular-example)
 
 We provide a Custom Resource YAML file for many examples under the components/backends/{engine}/deploy folders. Consult the examples below for the CRs for a specific inference backend.
 
@@ -97,4 +95,7 @@ SERVICE_NAME=$(kubectl get svc -n ${NAMESPACE} -o name | grep frontend | sed 's|
 kubectl port-forward svc/${SERVICE_NAME}-frontend 8080:8080 -n ${NAMESPACE}
 ```
 
-Consult the [Port Forward Documentation](https://kubernetes.io/docs/tasks/access-application-cluster/port-forward-access-application-cluster/)
+Additional Resources:
+- [Port Forward Documentation](https://kubernetes.io/docs/tasks/access-application-cluster/port-forward-access-application-cluster/)
+- [Examples Deployment Guide](../../examples/README.md#deploying-a-particular-example)
+
