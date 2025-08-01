@@ -41,11 +41,11 @@ You can use kubectl get dynamoGraphDeployment -n ${NAMESPACE} to view your deplo
 
 We provide a Custom Resource YAML file for many examples under the components/backends/{engine}/deploy folders. Consult the examples below for the CRs for a specific inference backend.
 
-View [SGLang K8s](
+[View SGLang K8s](../../components/backends/sglang/deploy/README.md)
 
-View [vLLM K8s]
+[View vLLM K8s](../../components/backends/vllm/deploy/README.md)
 
-View [TRTLLM K8s]
+[View TRT-LLM K8s](../../components/backends/trtllm/deploy/README.md)
 
 The examples use a prebuilt image from the nvcr.io registry. You can point to the public images on [Dynamo NGC](https://catalog.ngc.nvidia.com/orgs/nvidia/teams/ai-dynamo/collections/ai-dynamo) or build your own image and update the image location in your CR YAML prior to applying. You could build your own image using
 
