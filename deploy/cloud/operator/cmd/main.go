@@ -30,6 +30,7 @@ import (
 	// to ensure that exec-entrypoint and run can make use of them.
 	clientv3 "go.etcd.io/etcd/client/v3"
 	corev1 "k8s.io/api/core/v1"
+	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
 	_ "k8s.io/client-go/plugin/pkg/client/auth"
@@ -50,6 +51,7 @@ import (
 
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	nvidiacomv1alpha1 "github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
+	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller"
 	commonController "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/etcd"
@@ -73,6 +75,10 @@ func init() {
 	utilruntime.Must(volcanoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(grovev1alpha1.AddToScheme(scheme))
+
+	utilruntime.Must(apiextensionsv1.AddToScheme(scheme))
+
+	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
 	//+kubebuilder:scaffold:scheme
 }
 
@@ -92,7 +98,7 @@ func main() {
 	var ingressControllerTLSSecretName string
 	var ingressHostSuffix string
 	var enableLWS bool
-	var enableGrove bool
+	var groveTerminationDelay time.Duration
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -120,22 +126,23 @@ func main() {
 		"The suffix to use for the ingress host")
 	flag.BoolVar(&enableLWS, "enable-lws", false,
 		"If set, enable leader worker set")
-	flag.BoolVar(&enableGrove, "enable-grove", false,
-		"If set, enable grove")
+	flag.DurationVar(&groveTerminationDelay, "grove-termination-delay", consts.DefaultGroveTerminationDelay,
+		"The termination delay for Grove PodGangSets")
 	opts := zap.Options{
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
 	flag.Parse()
 
-	utilruntime.Must(istioclientsetscheme.AddToScheme(scheme))
-
 	ctrlConfig := commonController.Config{
 		RestrictedNamespace: restrictedNamespace,
 		EnableLWS:           enableLWS,
-		EnableGrove:         enableGrove,
-		EtcdAddress:         etcdAddr,
-		NatsAddress:         natsAddr,
+		Grove: commonController.GroveConfig{
+			Enabled:          false, // Will be set after Grove discovery
+			TerminationDelay: groveTerminationDelay,
+		},
+		EtcdAddress: etcdAddr,
+		NatsAddress: natsAddr,
 		IngressConfig: commonController.IngressConfig{
 			VirtualServiceGateway:      istioVirtualServiceGateway,
 			IngressControllerClassName: ingressControllerClassName,
@@ -200,6 +207,11 @@ func main() {
 		setupLog.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
+
+	// Detect Grove availability using discovery client
+	setupLog.Info("Detecting Grove availability...")
+	groveEnabled := commonController.DetectGroveAvailability(mainCtx, mgr)
+	ctrlConfig.Grove.Enabled = groveEnabled
 
 	// Create etcd client
 	cli, err := clientv3.New(clientv3.Config{

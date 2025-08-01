@@ -1,5 +1,7 @@
 package consts
 
+import "time"
+
 const (
 	HPACPUDefaultAverageUtilization = 80
 
@@ -37,4 +39,6 @@ const (
 	PlannerServiceAccountName = "planner-serviceaccount"
 
 	DefaultIngressSuffix = "local"
+
+	DefaultGroveTerminationDelay = 15 * time.Minute
 )
