@@ -24,4 +24,3 @@ kv_cache_config:
     - 512
     - 512
     - 32768
-  enable_block_reuse: false
