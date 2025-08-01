@@ -55,6 +55,8 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     PATH=/usr/local/cargo/bin:$PATH \
     RUST_VERSION=1.87.0
 
+WORKDIR /workspace
+
 # Define Rust target based on ARCH_ALT ARG
 ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
 
@@ -148,10 +150,10 @@ RUN git clone "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
 # TODO: Move gds_path selection based on arch into NIXL build
 # TEMP: disable gds backend for arm64
 RUN if [ "$ARCH" = "arm64" ]; then \
-        cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl \
+        cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheelhouse/nixl \
         --config-settings=setup-args="-Ddisable_gds_backend=true"; \
     else \
-        cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl; \
+        cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheelhouse/nixl; \
     fi
 
 # Create virtual environment
@@ -231,7 +233,7 @@ ENV CARGO_TARGET_DIR=/workspace/target
 
 WORKDIR /workspace
 
-COPY --from=wheel_builder /workspace/dist/*.whl /workspace/wheels/
+COPY --from=wheel_builder /workspace/dist/*.whl /workspace/wheelhouse/
 COPY --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 
 # Copy Cargo cache to avoid re-downloading dependencies
@@ -239,11 +241,6 @@ COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
 # Copy rest of the code
 COPY . /workspace
-
-# Package the bindings
-RUN mkdir -p /opt/dynamo/bindings/wheels && \
-    mkdir /opt/dynamo/bindings/lib && \
-    cp wheels/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/.
 
 # Common dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
@@ -253,9 +250,7 @@ RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requi
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
     uv pip install --requirement /tmp/requirements.txt
 
-RUN uv pip install /workspace/wheels/ai_dynamo_runtime*cp312*.whl && \
-    uv pip install /workspace/wheels/ai_dynamo*any.whl && \
-    uv pip install /workspace/wheels/nixl*.whl
+RUN uv pip install ai-dynamo nixl --find-links wheelhouse
 
 RUN uv pip install /workspace/benchmarks
 
