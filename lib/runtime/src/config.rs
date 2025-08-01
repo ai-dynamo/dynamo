@@ -17,6 +17,10 @@ const DEFAULT_SYSTEM_HOST: &str = "0.0.0.0";
 /// Default system port for health and metrics endpoints
 const DEFAULT_SYSTEM_PORT: u16 = 9090;
 
+/// Default health endpoint paths
+const DEFAULT_SYSTEM_HEALTH_PATH: &str = "/health";
+const DEFAULT_SYSTEM_LIVE_PATH: &str = "/live";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkerConfig {
     /// Grace shutdown period for the system server.
@@ -110,6 +114,16 @@ pub struct RuntimeConfig {
     #[builder(default = "vec![]")]
     #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
     pub use_endpoint_health_status: Vec<String>,
+
+    /// Health endpoint paths
+    /// Set this at runtime with environment variable DYN_SYSTEM_HEALTH_PATH
+    #[builder(default = "DEFAULT_SYSTEM_HEALTH_PATH.to_string()")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub system_health_path: String,
+    /// Set this at runtime with environment variable DYN_SYSTEM_LIVE_PATH
+    #[builder(default = "DEFAULT_SYSTEM_LIVE_PATH.to_string()")]
+    #[builder_field_attr(serde(skip_serializing_if = "Option::is_none"))]
+    pub system_live_path: String,
 }
 
 impl fmt::Display for RuntimeConfig {
@@ -134,6 +148,8 @@ impl fmt::Display for RuntimeConfig {
             "starting_health_status={:?}",
             self.starting_health_status
         )?;
+        write!(f, ", system_health_path={}", self.system_health_path)?;
+        write!(f, ", system_live_path={}", self.system_live_path)?;
 
         Ok(())
     }
@@ -169,6 +185,8 @@ impl RuntimeConfig {
                             "ENABLED" => "system_enabled",
                             "USE_ENDPOINT_HEALTH_STATUS" => "use_endpoint_health_status",
                             "STARTING_HEALTH_STATUS" => "starting_health_status",
+                            "HEALTH_PATH" => "system_health_path",
+                            "LIVE_PATH" => "system_live_path",
                             _ => k.as_str(),
                         };
                         Some(mapped_key.into())
@@ -207,6 +225,8 @@ impl RuntimeConfig {
             system_enabled: false,
             starting_health_status: HealthStatus::NotReady,
             use_endpoint_health_status: vec![],
+            system_health_path: DEFAULT_SYSTEM_HEALTH_PATH.to_string(),
+            system_live_path: DEFAULT_SYSTEM_LIVE_PATH.to_string(),
         }
     }
 
@@ -234,6 +254,8 @@ impl Default for RuntimeConfig {
             system_enabled: false,
             starting_health_status: HealthStatus::NotReady,
             use_endpoint_health_status: vec![],
+            system_health_path: DEFAULT_SYSTEM_HEALTH_PATH.to_string(),
+            system_live_path: DEFAULT_SYSTEM_LIVE_PATH.to_string(),
         }
     }
 }
@@ -430,6 +452,41 @@ mod tests {
                 assert!(config.use_endpoint_health_status == vec!["ready"]);
             },
         );
+    }
+
+    #[test]
+    fn test_system_health_endpoint_path_default() {
+        temp_env::with_vars(vec![("DYN_SYSTEM_HEALTH_PATH", None::<&str>)], || {
+            let config = RuntimeConfig::from_settings().unwrap();
+            assert_eq!(
+                config.system_health_path,
+                DEFAULT_SYSTEM_HEALTH_PATH.to_string()
+            );
+        });
+
+        temp_env::with_vars(vec![("DYN_SYSTEM_LIVE_PATH", None::<&str>)], || {
+            let config = RuntimeConfig::from_settings().unwrap();
+            assert_eq!(
+                config.system_live_path,
+                DEFAULT_SYSTEM_LIVE_PATH.to_string()
+            );
+        });
+    }
+
+    #[test]
+    fn test_system_health_endpoint_path_custom() {
+        temp_env::with_vars(
+            vec![("DYN_SYSTEM_HEALTH_PATH", Some("/custom/health"))],
+            || {
+                let config = RuntimeConfig::from_settings().unwrap();
+                assert_eq!(config.system_health_path, "/custom/health");
+            },
+        );
+
+        temp_env::with_vars(vec![("DYN_SYSTEM_LIVE_PATH", Some("/custom/live"))], || {
+            let config = RuntimeConfig::from_settings().unwrap();
+            assert_eq!(config.system_live_path, "/custom/live");
+        });
     }
 
     #[test]

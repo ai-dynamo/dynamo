@@ -87,12 +87,16 @@ pub struct SystemHealth {
     system_health: HealthStatus,
     endpoint_health: HashMap<String, HealthStatus>,
     use_endpoint_health_status: Vec<String>,
+    health_path: String,
+    live_path: String,
 }
 
 impl SystemHealth {
     pub fn new(
         starting_health_status: HealthStatus,
         use_endpoint_health_status: Vec<String>,
+        health_path: String,
+        live_path: String,
     ) -> Self {
         let mut endpoint_health = HashMap::new();
         for endpoint in &use_endpoint_health_status {
@@ -102,6 +106,8 @@ impl SystemHealth {
             system_health: starting_health_status,
             endpoint_health,
             use_endpoint_health_status,
+            health_path,
+            live_path,
         }
     }
     pub fn set_health_status(&mut self, status: HealthStatus) {
