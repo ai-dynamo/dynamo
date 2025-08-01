@@ -99,13 +99,14 @@ jobs:
       if: ${{ env.ACT }}
       run: |
         curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-        rustup toolchain install 1.86.0-x86_64-unknown-linux-gnu
+        rustup toolchain install 1.87.0-x86_64-unknown-linux-gnu
         echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
     - name: Set up Rust toolchain with pinned version
       run: |
-        rustup toolchain install 1.86.0 --component rustfmt,clippy
-        rustup default 1.86.0
+        rustup toolchain install 1.87.0
+        rustup default 1.87.0
+        rustup component add rustfmt clippy
 
     - name: Optimize Cargo cache
       run: |
@@ -225,10 +226,11 @@ jobs:
         rustup toolchain install 1.86.0-x86_64-unknown-linux-gnu
         echo "$HOME/.cargo/bin" >> $GITHUB_PATH
 
-    - name: Set up Rust toolchain
+    - name: Set up Rust toolchain with pinned version
       run: |
-        rustup toolchain install 1.86.0
-        rustup default 1.86.0
+        rustup toolchain install 1.87.0
+        rustup default 1.87.0
+        rustup component add rustfmt clippy
 
     - name: Optimize Cargo cache for integration tests
       run: |
