@@ -11,10 +11,10 @@ Basic deployment pattern with frontend and a single decode worker.
 - `Frontend`: OpenAI-compatible API server
 - `SGLangDecodeWorker`: Single worker handling both prefill and decode
 
-### 2. **Aggregated Router Deployment** (`agg_router.yaml`) 
+### 2. **Aggregated Router Deployment** (`agg_router.yaml`)
 Enhanced aggregated deployment with KV cache routing capabilities.
 
-**Architecture:** 
+**Architecture:**
 - `Frontend`: OpenAI-compatible API server with router mode enabled (`--router-mode kv`)
 - `SGLangDecodeWorker`: Single worker handling both prefill and decode
 
@@ -52,7 +52,7 @@ resources:
     memory: "20Gi"
     gpu: "1"
   limits:
-    cpu: "10" 
+    cpu: "10"
     memory: "20Gi"
     gpu: "1"
 ```
@@ -96,7 +96,7 @@ Before using these templates, ensure you have:
 ### 1. Choose Your Template
 Select the deployment pattern that matches your requirements:
 - Use `agg.yaml` for development/testing
-- Use `agg_router.yaml` for production with load balancing  
+- Use `agg_router.yaml` for production with load balancing
 - Use `disagg.yaml` for maximum performance
 
 ### 2. Customize Configuration
@@ -110,7 +110,7 @@ image: your-registry/sglang-runtime:your-tag
 args:
   - "--model-path"
   - "your-org/your-model"
-  - "--served-model-name" 
+  - "--served-model-name"
   - "your-org/your-model"
 ```
 
@@ -134,7 +134,7 @@ kubectl apply -f <your-template>.yaml
 All templates use **DeepSeek-R1-Distill-Llama-8B** as the default model. Key parameters:
 
 - `--page-size 16`: KV cache page size
-- `--tp 1`: Tensor parallelism degree  
+- `--tp 1`: Tensor parallelism degree
 - `--trust-remote-code`: Enable custom model code
 - `--skip-tokenizer-init`: Optimize startup time
 
