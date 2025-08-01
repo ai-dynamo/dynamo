@@ -1,15 +1,12 @@
 // SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
-mod slot;
 use dynamo_llm::block_manager::connector::protocol::TransferType;
 use dynamo_llm::block_manager::connector::scheduler::{
     Scheduler, TransferSchedulerClient, WorkerSchedulerClient,
 };
-use slot::{CreateEngineSlotRequest, EngineSlot};
 
 use std::collections::{HashMap, HashSet};
-use std::sync::atomic::AtomicU64;
 use std::sync::{Arc, OnceLock};
 
 use super::*;
@@ -19,30 +16,10 @@ use crate::{
     DistributedRuntime as PyDistributedRuntime,
 };
 
-use dynamo_llm::block_manager::distributed::{BlockTransferHandler, KvbmWorker, KvbmWorkerConfig};
+use dynamo_llm::block_manager::distributed::{KvbmWorker, KvbmWorkerConfig};
 use dynamo_llm::block_manager::storage::torch::TorchTensor;
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
-use dynamo_runtime::{CancellationToken, DistributedRuntime};
-
-enum EngineMessage {
-    /// Update the iteration count
-    UpdateIteration(u64),
-
-    /// Trigger a layer to be completed
-    UpdateLayersCompleted(String, u32),
-
-    /// Create a request slot with request id, counter and cancel token
-    CreateEngineSlot(CreateEngineSlotRequest),
-
-    /// Issue a request to the engine to complete a request and remove it
-    RemoveEngineSlot(String),
-
-    /// Register the transfer engine with the worker
-    RegisterTransferEngine(tokio::sync::oneshot::Receiver<BlockTransferHandler>),
-
-    /// Enqueue a block transfer request
-    EnqueueBlockTransfer(ConnectorOperation),
-}
+use dynamo_runtime::DistributedRuntime;
 
 #[pyclass]
 pub struct KvConnectorWorker {
