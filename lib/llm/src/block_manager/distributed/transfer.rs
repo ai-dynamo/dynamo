@@ -158,10 +158,12 @@ impl Handler for BlockTransferHandler {
 
         let mut request: BlockTransferRequest = serde_json::from_slice(&message.data[0])?;
 
-        if let Some(req) = request.connector_req.take() {
+        let result = if let Some(req) = request.connector_req.take() {
+            let operation_id = req.uuid;
+
             tracing::debug!(
-                request_id = req.request_id,
-                operation = %req.uuid,
+                request_id = %req.request_id,
+                operation_id = %operation_id,
                 "scheduling transfer"
             );
 
@@ -176,18 +178,24 @@ impl Handler for BlockTransferHandler {
             // we don't support cancellation yet
             assert_eq!(handle.scheduler_decision(), SchedulingDecision::Execute);
 
-            tracing::info!("executing transfer");
-            let result = self.execute_transfer(request.clone()).await;
-            tracing::info!("executing transfer complete");
-            handle.mark_complete(result).await;
-            tracing::info!("mark_complete complete");
+            match self.execute_transfer(request).await {
+                Ok(_) => {
+                    handle.mark_complete(Ok(())).await;
+                    Ok(())
+                }
+                Err(e) => {
+                    handle.mark_complete(Err(anyhow::anyhow!("{}", e))).await;
+                    Err(e)
+                }
+            }
         } else {
-            self.execute_transfer(request).await?;
-        }
+            self.execute_transfer(request).await
+        };
 
-        tracing::info!("pre-ack");
+        // we always ack regardless of if we error or not
         message.ack().await?;
-        tracing::info!("post-ack");
-        Ok(())
+
+        // the error may trigger a cancellation
+        result
     }
 }

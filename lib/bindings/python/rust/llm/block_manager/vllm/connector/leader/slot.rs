@@ -52,9 +52,6 @@ pub enum SlotState {
     /// The slot was not scheduled in the previous iteration.
     Initialized,
 
-    /// The slot was previously scheduled, but not in the last iteration.
-    NotScheduled,
-
     /// The slot is prepared to load kv blocks from external storage; however, the onboarding operation
     /// has not been triggered yet. The usize is the number of tokens that are ready for onboarding.
     OnboardStaged(usize),
@@ -96,10 +93,8 @@ pub trait Slot: std::fmt::Debug {
         num_scheduled_tokens: usize,
     ) -> Result<(), SlotError>;
 
-    fn mark_as_scheduled(&mut self, iteration: u64) -> Result<(), SlotError>;
-    fn mark_as_prefilling(&mut self, iteration: u64) -> Result<(), SlotError>;
-    fn mark_as_decoding(&mut self, iteration: u64) -> Result<(), SlotError>;
-    fn mark_as_not_scheduled(&mut self, iteration: u64) -> Result<(), SlotError>;
+    fn record_start_iteration(&mut self, iteration: u64) -> Result<(), SlotError>;
+
     fn mark_as_finished(&mut self, iteration: u64) -> Result<(), SlotError>;
 
     /// The number of device blocks that have been allocated to the slot.
@@ -116,6 +111,15 @@ pub trait Slot: std::fmt::Debug {
 
     /// Take all pending operations for the slot.
     fn take_pending_operations(&mut self) -> Option<Vec<WorkerTransferRequest>>;
+
+    /// Record the number of tokens that were cached on the device.
+    fn record_cached_device_tokens(&mut self, num_tokens: usize);
+
+    /// Record the number of tokens that were cached on the host.
+    fn record_cached_host_tokens(&mut self, num_tokens: usize);
+
+    /// Record the number of tokens that were cached on the disk.
+    fn record_cached_disk_tokens(&mut self, num_tokens: usize);
 }
 
 pub trait ExternallyManagedDeviceSlot: Slot {
@@ -132,19 +136,41 @@ pub trait ExternallyManagedDeviceSlot: Slot {
 pub struct ConnectorSlotManager<R: RequestKey> {
     slots: Mutex<HashMap<R, Arc<Mutex<VllmConnectorSlot>>>>,
     block_manager: VllmBlockManager,
-    leader: Arc<KvbmLeader>,
+    /// use this to issue [`LocalTransferRequest`]s to the transfer engine
+    xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
+    _transfer_engine_handle: Option<CriticalTaskExecutionHandle>,
 }
 
 impl<R: RequestKey> ConnectorSlotManager<R> {
-    pub fn new(block_manager: VllmBlockManager, leader: Arc<KvbmLeader>) -> Self {
+    pub fn new(
+        block_manager: VllmBlockManager,
+        leader: Arc<KvbmLeader>,
+        drt: DistributedRuntime,
+    ) -> Self {
         tracing::debug!(
             "creating slot manager with block size: {}",
             block_manager.block_size()
         );
+
+        let (xfer_tx, xfer_rx) = mpsc::unbounded_channel();
+
+        let mut xfer_engine = LocalTransferEngine::new(block_manager.clone(), leader, xfer_rx);
+
+        let xfer_engine_task = CriticalTaskExecutionHandle::new_with_runtime(
+            |cancellation_token| async move { xfer_engine.execute(cancellation_token).await },
+            drt.primary_token(),
+            "LocalTransferEngine",
+            &drt.runtime().primary(),
+        )
+        .unwrap();
+
+        tracing::info!("LocalTransferEngine task detached successfully");
+
         Self {
             slots: Mutex::new(HashMap::new()),
             block_manager,
-            leader,
+            xfer_tx,
+            _transfer_engine_handle: Some(xfer_engine_task),
         }
     }
 }
@@ -167,7 +193,7 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
             tokens.into(),
             salt_hash,
             self.block_manager.clone(),
-            self.leader.clone(),
+            self.xfer_tx.clone(),
         );
         self.slots
             .lock()
@@ -188,18 +214,26 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
     }
 }
 
+impl<R: RequestKey> Drop for ConnectorSlotManager<R> {
+    fn drop(&mut self) {
+        if let Some(task) = self._transfer_engine_handle.take() {
+            task.cancel();
+            task.detach();
+        }
+    }
+}
+
 pub struct VllmConnectorSlot {
     request_id: String,
 
     /// The state of the slot.
     state: SlotState,
 
-    /// Current position in the sequence of tokens that have been computed.
-    /// When the slot is initialized, we populate the sequence with the prefill tokens.
-    /// However, those tokens are not yet prefilled, so they are not yet represented
-    /// in the sequence_position.
-    computed_position: usize,
-
+    // /// Current position in the sequence of tokens that have been computed.
+    // /// When the slot is initialized, we populate the sequence with the prefill tokens.
+    // /// However, those tokens are not yet prefilled, so they are not yet represented
+    // /// in the sequence_position.
+    // computed_position: usize,
     /// The sequence of token blocks
     sequence: TokenBlockSequence,
 
@@ -215,18 +249,16 @@ pub struct VllmConnectorSlot {
     staging_from_disk: Option<Vec<ImmutableBlock<DiskStorage, VllmLocality, BasicMetadata>>>,
 
     /// The number of blocks cached from the device
-    blocks_cached_from_device: usize,
+    tokens_cached_from_device: usize,
 
     /// The number of blocks cached from the host
-    blocks_cached_from_host: usize,
+    tokens_cached_from_host: usize,
 
     /// The number of blocks cached from the disk
-    blocks_cached_from_disk: usize,
+    tokens_cached_from_disk: usize,
 
     /// Phantom data to ensure the storage type is correct.
     block_manager: VllmBlockManager,
-
-    leader: Arc<KvbmLeader>,
 
     block_size: usize,
 
@@ -236,8 +268,6 @@ pub struct VllmConnectorSlot {
 
     /// use this to issue [`LocalTransferRequest`]s to the transfer engine
     xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
-
-    rt: tokio::runtime::Runtime,
 
     /// This is the current position for which we are applying some number of active/scheduled tokens.
     /// On application, then we decide what actions we take.
@@ -250,65 +280,36 @@ pub struct VllmConnectorSlot {
 }
 
 impl VllmConnectorSlot {
-    pub fn new(
+    fn new(
         request_id: String,
         tokens: Tokens,
         salt_hash: SaltHash,
         block_manager: VllmBlockManager,
-        leader: Arc<KvbmLeader>,
+        xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
     ) -> Self {
         assert!(!tokens.is_empty(), "tokens must be non-empty");
         let block_size = block_manager.block_size();
         debug_assert!(block_size.is_power_of_two() && block_size <= 1024);
         let sequence = TokenBlockSequence::new(tokens, block_size as u32, Some(salt_hash));
 
-        let (xfer_tx, xfer_rx) = mpsc::unbounded_channel();
-
-        let mut xfer_engine =
-            LocalTransferEngine::new(block_manager.clone(), leader.clone(), xfer_rx);
-        let system_cancellation_token = CancellationToken::new();
-
-        // spawn a task to handle the transfer requests
-        // use critical task pattern
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .unwrap();
-
-        let xfer_engine_task = CriticalTaskExecutionHandle::new_with_runtime(
-            |cancellation_token| async move { xfer_engine.execute(cancellation_token).await },
-            system_cancellation_token,
-            "LocalTransferEngine",
-            rt.handle(),
-        )
-        .unwrap();
-        xfer_engine_task.detach();
-
-        tracing::info!("LocalTransferEngine task detached successfully");
-
         Self {
             request_id,
             sequence,
             block_manager,
             block_size,
-            leader,
             xfer_tx,
-            rt,
-
             // default values
             state: SlotState::Initialized,
             iteration_first_scheduled: None,
-            computed_position: 0,
             current_position: 0,
             evaluated_blocks: 0,
             device_blocks: Vec::new(),
             staging_from_host: None,
             staging_from_disk: None,
             pending_operations: None,
-            blocks_cached_from_device: 0,
-            blocks_cached_from_host: 0,
-            blocks_cached_from_disk: 0,
+            tokens_cached_from_device: 0,
+            tokens_cached_from_host: 0,
+            tokens_cached_from_disk: 0,
         }
     }
 }
@@ -317,7 +318,7 @@ impl std::fmt::Debug for VllmConnectorSlot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VllmConnectorSlot")
             .field("state", &self.state)
-            .field("computed_position", &self.computed_position)
+            .field("current_position", &self.current_position)
             .field("num_tokens", &self.sequence.total_tokens())
             .finish()
     }
@@ -330,6 +331,21 @@ impl Slot for VllmConnectorSlot {
 
     fn state(&self) -> SlotState {
         self.state
+    }
+
+    fn record_cached_device_tokens(&mut self, num_tokens: usize) {
+        self.tokens_cached_from_device = num_tokens;
+        tracing::debug!("recording {} cached device tokens", num_tokens,);
+    }
+
+    fn record_cached_host_tokens(&mut self, num_tokens: usize) {
+        self.tokens_cached_from_host = num_tokens;
+        tracing::debug!("recording {} cached host tokens", num_tokens);
+    }
+
+    fn record_cached_disk_tokens(&mut self, num_tokens: usize) {
+        self.tokens_cached_from_disk = num_tokens;
+        tracing::debug!("recording {} cached disk tokens", num_tokens);
     }
 
     fn apply_scheduler_output(
@@ -376,13 +392,17 @@ impl Slot for VllmConnectorSlot {
 
         // now we decide what we should do from the current position to the num_scheduled_tokens
         tracing::debug!(
-            "applying kv cache policy at current_position: {}; num_scheduled_tokens: {}",
+            "applying kv cache policy at current_position: {}; num_scheduled_tokens: {}; num_evaluated_blocks: {}",
             self.current_position,
-            num_scheduled_tokens
+            num_scheduled_tokens,
+            self.evaluated_blocks
         );
 
         // TODO(ryan) - apply policy
         let next_position = self.current_position + num_scheduled_tokens;
+
+        debug_assert!(next_position / self.block_size >= self.evaluated_blocks);
+
         let num_candidate_blocks = (next_position / self.block_size) - self.evaluated_blocks;
 
         tracing::debug!(
@@ -433,35 +453,26 @@ impl Slot for VllmConnectorSlot {
 
         // advance current and computed position
         self.current_position += num_scheduled_tokens;
-        self.computed_position += num_scheduled_tokens;
 
         Ok(())
     }
 
-    fn mark_as_prefilling(&mut self, _iteration: u64) -> Result<(), SlotError> {
-        self.state = SlotState::Prefilling;
-        Ok(())
-    }
-
-    fn mark_as_decoding(&mut self, _iteration: u64) -> Result<(), SlotError> {
-        self.state = SlotState::Decoding;
-        Ok(())
-    }
-
-    fn mark_as_scheduled(&mut self, iteration: u64) -> Result<(), SlotError> {
+    fn record_start_iteration(&mut self, iteration: u64) -> Result<(), SlotError> {
         if self.iteration_first_scheduled.is_none() {
             self.iteration_first_scheduled = Some(iteration);
         }
         Ok(())
     }
 
-    fn mark_as_not_scheduled(&mut self, _iteration: u64) -> Result<(), SlotError> {
-        self.state = SlotState::NotScheduled;
-        Ok(())
-    }
-
     fn mark_as_finished(&mut self, _iteration: u64) -> Result<(), SlotError> {
         self.state = SlotState::Finishing;
+        tracing::info!(
+            request_id = %self.request_id,
+            "request set to finish: cached_gpu_tokens: {}; cached_host_tokens: {}; cached_disk_tokens: {}",
+            self.tokens_cached_from_device,
+            self.tokens_cached_from_host,
+            self.tokens_cached_from_disk
+        );
         Ok(())
     }
 
@@ -470,7 +481,7 @@ impl Slot for VllmConnectorSlot {
     }
 
     fn computed_tokens(&self) -> usize {
-        self.computed_position
+        self.current_position
     }
 
     fn num_device_blocks_allocated(&self) -> usize {
@@ -527,6 +538,7 @@ impl Slot for VllmConnectorSlot {
             .unwrap_or_default();
 
         let num_matched_host_blocks = host_blocks.len();
+        self.record_cached_host_tokens(num_matched_host_blocks * block_size);
 
         // advance the search offset by the number of matched host blocks
         let search_offset = search_offset + num_matched_host_blocks;
@@ -540,6 +552,7 @@ impl Slot for VllmConnectorSlot {
             .unwrap_or_default();
 
         let num_matched_disk_blocks = disk_blocks.len();
+        self.record_cached_disk_tokens(num_matched_disk_blocks * block_size);
 
         let num_matched_blocks = num_matched_host_blocks + num_matched_disk_blocks;
 
@@ -600,10 +613,10 @@ impl Slot for VllmConnectorSlot {
         }
 
         debug_assert_eq!(self.evaluated_blocks, 0);
-        debug_assert_eq!(self.computed_position % self.block_size, 0);
+        debug_assert_eq!(self.current_position % self.block_size, 0);
         debug_assert_eq!(num_external_tokens % self.block_size, 0);
 
-        let num_computed_blocks = self.computed_position / self.block_size;
+        let num_computed_blocks = self.current_position / self.block_size;
 
         // shift the evaluated blocks position to the end of the computed/cached blocks
         self.evaluated_blocks = num_computed_blocks;
@@ -656,6 +669,7 @@ impl Slot for VllmConnectorSlot {
         }
 
         self.state = SlotState::Onboarding(num_external_tokens);
+        self.advance_computed_position(num_external_tokens)?;
 
         Ok(())
     }
@@ -663,14 +677,21 @@ impl Slot for VllmConnectorSlot {
 
 impl ExternallyManagedDeviceSlot for VllmConnectorSlot {
     fn advance_computed_position(&mut self, num_tokens: usize) -> Result<(), SlotError> {
-        if self.computed_position + num_tokens > self.sequence().total_tokens() {
+        if self.current_position + num_tokens > self.sequence().total_tokens() {
             return Err(SlotError::InvalidOperation(format!(
                 "cannot advance computed position by {num_tokens} tokens, total tokens is {}",
                 self.sequence().total_tokens()
             )));
         }
 
-        self.computed_position += num_tokens;
+        tracing::debug!(
+            "advancing computed position by {} tokens from {} to {}",
+            num_tokens,
+            self.current_position,
+            self.current_position + num_tokens
+        );
+
+        self.current_position += num_tokens;
         Ok(())
     }
 
@@ -919,7 +940,7 @@ impl LocalTransferEngine {
                     .zip(host_block_ids.into_iter())
                     .collect();
 
-                tracing::info!(
+                tracing::debug!(
                     request_id = request_id,
                     operation_id = %operation_id,
                     "offload - stage 1 complete"
@@ -939,7 +960,7 @@ impl LocalTransferEngine {
 
                     blocks_to_register.push(mutable_block);
                 }
-                tracing::info!(
+                tracing::debug!(
                     request_id = request_id,
                     operation_id = %operation_id,
                     "offload - stage 2 complete"
@@ -959,7 +980,7 @@ impl LocalTransferEngine {
                     }),
                 };
                 let notify_receiver = self.leader.transfer_blocks_request(block_xfer_req).await?;
-                tracing::info!(
+                tracing::debug!(
                     request_id = request_id,
                     operation_id = %operation_id,
                     "offload - stage 3 complete"
@@ -974,7 +995,7 @@ impl LocalTransferEngine {
                         return Err(anyhow::anyhow!("Transfer completion notification failed"));
                     }
                 }
-                tracing::info!(
+                tracing::debug!(
                     request_id = request_id,
                     operation_id = %operation_id,
                     "offload - stage 4 complete"
@@ -988,7 +1009,7 @@ impl LocalTransferEngine {
                     .register_blocks(blocks_to_register)
                     .await?;
 
-                tracing::info!(
+                tracing::debug!(
                     request_id = request_id,
                     operation_id = %operation_id,
                     "registered {} blocks",

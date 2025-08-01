@@ -185,7 +185,7 @@ struct EtcdKvCache {
 
 #[pyclass]
 #[derive(Clone)]
-struct DistributedRuntime {
+pub struct DistributedRuntime {
     inner: rs::DistributedRuntime,
     event_loop: PyObject,
 }

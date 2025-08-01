@@ -4,12 +4,14 @@
 pub mod slot;
 
 use super::*;
+use dynamo_runtime::DistributedRuntime;
 use slot::{ConnectorSlotManager, SlotError, SlotManager, SlotState};
 
 use crate::llm::block_manager::BlockManager as PyBlockManager;
 use crate::llm::block_manager::{
     distributed::KvbmLeader as PyKvbmLeader, vllm::KvbmRequest, VllmBlockManager,
 };
+use crate::DistributedRuntime as PyDistributedRuntime;
 
 use dynamo_llm::block_manager::{
     block::{
@@ -38,7 +40,6 @@ impl From<SlotError> for PyErr {
 #[pyclass]
 pub struct KvConnectorLeader {
     slot_manager: ConnectorSlotManager<String>,
-    block_manager: VllmBlockManager,
     block_size: usize,
     inflight_requests: HashSet<String>,
     onboarding_slots: HashSet<String>,
@@ -48,8 +49,13 @@ pub struct KvConnectorLeader {
 #[pymethods]
 impl KvConnectorLeader {
     #[new]
-    #[pyo3(signature = (worker_id, block_manager, leader))]
-    pub fn new(worker_id: String, block_manager: PyBlockManager, leader: PyKvbmLeader) -> Self {
+    #[pyo3(signature = (worker_id, drt, block_manager, leader))]
+    pub fn new(
+        worker_id: String,
+        drt: PyDistributedRuntime,
+        block_manager: PyBlockManager,
+        leader: PyKvbmLeader,
+    ) -> Self {
         tracing::info!(
             "KvConnectorLeader initialized with worker_id: {}",
             worker_id
@@ -61,9 +67,11 @@ impl KvConnectorLeader {
 
         let leader = leader.get_inner();
 
+        // if we need a drt, get it from here
+        let drt = drt.inner().clone();
+
         Self {
-            slot_manager: ConnectorSlotManager::new(block_manager.clone(), leader),
-            block_manager,
+            slot_manager: ConnectorSlotManager::new(block_manager.clone(), leader, drt.clone()),
             block_size,
             inflight_requests: HashSet::new(),
             onboarding_slots: HashSet::new(),
@@ -97,6 +105,7 @@ impl KvConnectorLeader {
         // vllm is telling us that the tokens have been computed, since we do not have insight into the device pool
         // we accept this and advance the computed position
         slot.advance_computed_position(num_computed_tokens)?;
+        slot.record_cached_device_tokens(num_computed_tokens);
 
         // early exit if we cannot match full block
         if (slot.sequence().total_tokens() - num_computed_tokens) < self.block_size {
@@ -216,7 +225,7 @@ impl KvConnectorLeader {
             // inform the worker that a new request-slot should be created
             md.create_slot(new_req.request_id.clone());
 
-            slot.mark_as_scheduled(iteration)?;
+            slot.record_start_iteration(iteration)?;
 
             debug_assert!(
                 matches!(
@@ -276,8 +285,6 @@ impl KvConnectorLeader {
             }
         }
 
-        std::thread::sleep(std::time::Duration::from_secs(1));
-
         tracing::debug!("scheduler_output: {scheduler_output:#?}");
         serde_json::to_vec(&md).map_err(to_pyerr)
     }
@@ -290,6 +297,11 @@ impl KvConnectorLeader {
         // mark the slot as finished
         let mut slot = shared_slot.lock().map_err(to_pyerr)?;
         slot.mark_as_finished(self.iteration_counter)?;
+
+        // todo: allow the request to resolve when it should exit
+        // the request may have some outstanding operations
+        // we would like to inform it to shutdown, then have it signal to the work that is officially gone,
+        // then we can remove the slot and trigger the worker to clean up as well.
 
         // remove it from the manager as we will never use it again
         self.slot_manager.remove_slot(&request_id)?;

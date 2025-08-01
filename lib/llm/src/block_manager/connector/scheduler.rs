@@ -61,10 +61,20 @@ impl TransferSchedulerClient {
                     leader_request: request,
                     response_tx,
                 };
+
+                tracing::debug!("sending schedule request to scheduler");
                 scheduler_tx
                     .send(TransferToSchedulerMessage::ScheduleRequest(request))
                     .await?;
-                Ok(response_rx.await?.wait_for_decision().await)
+
+                tracing::debug!("awaiting response from scheduler");
+                let handle = response_rx.await?.wait_for_decision().await;
+
+                tracing::debug!(
+                    "received scheduler decision: {:?}",
+                    handle.scheduler_decision()
+                );
+                Ok(handle)
             }
         }
     }
@@ -158,10 +168,6 @@ impl WorkerSchedulerClientSlot {
 
 impl WorkerSchedulerClient {
     pub fn create_slot(&mut self, request_id: String) -> Result<(), SchedulerError> {
-        // create a child token which will cancel on the parent but can be cancelled individually
-        // with out effecting the parent
-        let token = self.cancel_token.child_token();
-
         // create a request slot with the child token
         // this will be the local worker slot
         let slot = WorkerSchedulerClientSlot::default();
@@ -535,8 +541,16 @@ impl Scheduler {
     //
     // this must tokio spawn and an indpendent task
     fn execute_scheduled_transfer(&mut self, xfer_req: ScheduledTaskController) {
-        debug_assert!(self.slots.contains_key(&xfer_req.request.request_id), "slot not found");
-        let completed = self.slots.get(&xfer_req.request.request_id).unwrap().completed.clone();
+        debug_assert!(
+            self.slots.contains_key(&xfer_req.request.request_id),
+            "slot not found"
+        );
+        let completed = self
+            .slots
+            .get(&xfer_req.request.request_id)
+            .unwrap()
+            .completed
+            .clone();
         tokio::spawn(xfer_req.execute(SchedulingDecision::Execute, completed));
     }
 
@@ -614,7 +628,11 @@ pub struct ScheduledTaskController {
 }
 
 impl ScheduledTaskController {
-    pub async fn execute(self, decision: SchedulingDecision, completed: Arc<AtomicU64>) -> anyhow::Result<()> {
+    pub async fn execute(
+        self,
+        decision: SchedulingDecision,
+        completed: Arc<AtomicU64>,
+    ) -> anyhow::Result<()> {
         let (completion_tx, completion_rx) = oneshot::channel();
         self.decision_tx
             .send((decision, completion_tx))
@@ -866,14 +884,7 @@ mod tests {
         scheduler.step().await;
 
         // enqueued_requests should contain <request id, <uuid, and Some(controller)>> since transfer arrived first
-        assert_eq!(
-            scheduler
-                .enqueued_requests
-                .get("test")
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(scheduler.enqueued_requests.get("test").unwrap().len(), 1);
         assert!(matches!(
             scheduler
                 .enqueued_requests
@@ -903,14 +914,7 @@ mod tests {
         handle.mark_complete(Ok(())).await;
 
         // after worker arrives, <uuid, and Some(controller)> inserted by transfer should be removed from enqueued_requests
-        assert_eq!(
-            scheduler
-                .enqueued_requests
-                .get("test")
-                .unwrap()
-                .len(),
-            0
-        );
+        assert_eq!(scheduler.enqueued_requests.get("test").unwrap().len(), 0);
 
         // wait a bit to make sure the scheduled transfer to complete
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -963,14 +967,7 @@ mod tests {
         scheduler.step().await;
 
         // enqueued_requests should contain <request id, <uuid, and None>> since worker arrived first
-        assert_eq!(
-            scheduler
-                .enqueued_requests
-                .get("test")
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(scheduler.enqueued_requests.get("test").unwrap().len(), 1);
         assert!(matches!(
             scheduler
                 .enqueued_requests
@@ -995,14 +992,7 @@ mod tests {
         handle.mark_complete(Ok(())).await;
 
         // after transfer arrives, <uuid, and None> inserted by worker should be removed from enqueued_requests
-        assert_eq!(
-            scheduler
-                .enqueued_requests
-                .get("test")
-                .unwrap()
-                .len(),
-            0
-        );
+        assert_eq!(scheduler.enqueued_requests.get("test").unwrap().len(), 0);
 
         // wait a bit to make sure the scheduled transfer to complete
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -1091,8 +1081,9 @@ mod tests {
 
         // Simulate some work being done - wait until the test releases us
         let completed = Arc::new(AtomicU64::new(0));
-        let scheduler_result =
-            tokio::spawn(scheduler_controller.execute(SchedulingDecision::Execute, completed.clone()));
+        let scheduler_result = tokio::spawn(
+            scheduler_controller.execute(SchedulingDecision::Execute, completed.clone()),
+        );
 
         // simulate the transfer engine receiving the decision
         let transfer_handle = got_handle_rx.await.unwrap();
