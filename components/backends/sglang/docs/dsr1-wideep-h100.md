@@ -9,22 +9,16 @@ Dynamo supports SGLang's implementation of wide expert parallelism and large sca
 
 ## Instructions
 
-1. Pull the SGLang release `v0.4.8.post1` container. We are actively working on validating newer releases.
-
-```bash
-docker pull lmsysorg/sglang:v0.4.8.post1-cu126
-```
-
-You can also pull a specific tag from the [lmsys dockerhub](https://hub.docker.com/r/lmsysorg/sglang/tags)
-
-2. Build the Dynamo container
+1. Build the Dynamo container
 
 ```bash
 cd $DYNAMO_ROOT
 docker build -f container/Dockerfile.sglang-wideep . -t dynamo-wideep --no-cache
 ```
 
-3. You can run this container on each 8xH100 node using the following command.
+You can use a specific tag from the [lmsys dockerhub](https://hub.docker.com/r/lmsysorg/sglang/tags) by adding `--build-arg SGLANG_IMAGE_TAG=<tag>` to the build command.
+
+2. You can run this container on each 8xH100 node using the following command.
 
 > [!IMPORTANT]
 > We recommend downloading DeepSeek-R1 and then mounting it to the container. You can find the model [here](https://huggingface.co/deepseek-ai/DeepSeek-R1)
@@ -47,13 +41,13 @@ docker run \
 
 In each container, you should be in the `/sgl-workspace/dynamo/components/backends/sglang` directory.
 
-4. On the head prefill node, run the helper script provided to generate commands to start the `nats-server`, `etcd`. This script will also tell you which environment variables to export on each node to make deployment easier.
+3. On the head prefill node, run the helper script provided to generate commands to start the `nats-server`, `etcd`. This script will also tell you which environment variables to export on each node to make deployment easier.
 
 ```bash
 ./utils/gen_env_vars.sh
 ```
 
-5. Run the ingress and prefill worker
+4. Run the ingress and prefill worker
 
 ```bash
 # run ingress
@@ -93,7 +87,7 @@ python3 -m dynamo.sglang.worker \
 
 On the other prefill node (since this example has 4 total prefill nodes), run the same command but change `--node-rank` to 1,2, and 3
 
-6. Run the decode worker on the head decode node
+5. Run the decode worker on the head decode node
 
 ```bash
 python3 -m dynamo.sglang.decode_worker \

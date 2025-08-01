@@ -13,10 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+ARG SGLANG_IMAGE_TAG="v0.4.10-cu126"
+
 FROM lmsysorg/sglang:${SGLANG_IMAGE_TAG}
 
 ARG MODE="hopper"
-ARG SGLANG_IMAGE_TAG="v0.4.8.post1-cu126"
 ARG ARCH="amd64"
 ARG ARCH_ALT="x86_64"
 ARG NIXL_UCX_REF="v1.19.x"
