@@ -275,6 +275,21 @@ impl DistributedRuntime {
         Ok(DistributedRuntime { inner, event_loop })
     }
 
+    #[staticmethod]
+    fn detached(py: Python) -> PyResult<Self> {
+        let rt = rs::Worker::runtime_from_existing().map_err(to_pyerr)?;
+        let handle = rt.primary();
+
+        let inner = handle
+            .block_on(rs::DistributedRuntime::from_settings(rt))
+            .map_err(to_pyerr)?;
+
+        Ok(DistributedRuntime {
+            inner,
+            event_loop: py.None(),
+        })
+    }
+
     fn namespace(&self, name: String) -> PyResult<Namespace> {
         Ok(Namespace {
             inner: self.inner.namespace(name).map_err(to_pyerr)?,

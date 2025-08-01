@@ -41,7 +41,7 @@ class KvConnectorWorker:
     def __init__(self, vllm_config: "VllmConfig", engine_id: str, **kwargs):
         drt = kwargs.get("drt", None)
         if drt is None:
-            self.drt = DistributedRuntime(event_loop=None, is_static=False)
+            self.drt = DistributedRuntime.detached()
         else:
             self.drt = drt
 
