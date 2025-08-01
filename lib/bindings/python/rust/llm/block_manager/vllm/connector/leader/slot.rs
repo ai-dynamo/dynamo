@@ -133,6 +133,12 @@ pub struct ConnectorSlotManager<R: RequestKey> {
     slots: Mutex<HashMap<R, Arc<Mutex<VllmConnectorSlot>>>>,
     block_manager: VllmBlockManager,
     leader: Arc<KvbmLeader>,
+    /// use this to issue [`LocalTransferRequest`]s to the transfer engine
+    xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
+
+    // todo - revert this to a handle.
+    rt: tokio::runtime::Runtime,
+    _transfer_engine_handle: Option<CriticalTaskExecutionHandle>,
 }
 
 impl<R: RequestKey> ConnectorSlotManager<R> {
@@ -141,10 +147,38 @@ impl<R: RequestKey> ConnectorSlotManager<R> {
             "creating slot manager with block size: {}",
             block_manager.block_size()
         );
+
+        let (xfer_tx, xfer_rx) = mpsc::unbounded_channel();
+
+        let mut xfer_engine =
+            LocalTransferEngine::new(block_manager.clone(), leader.clone(), xfer_rx);
+        let system_cancellation_token = CancellationToken::new();
+
+        // spawn a task to handle the transfer requests
+        // use critical task pattern
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let xfer_engine_task = CriticalTaskExecutionHandle::new_with_runtime(
+            |cancellation_token| async move { xfer_engine.execute(cancellation_token).await },
+            system_cancellation_token,
+            "LocalTransferEngine",
+            &rt.handle(),
+        )
+        .unwrap();
+
+        tracing::info!("LocalTransferEngine task detached successfully");
+
         Self {
             slots: Mutex::new(HashMap::new()),
             block_manager,
             leader,
+            xfer_tx,
+            rt,
+            _transfer_engine_handle: Some(xfer_engine_task),
         }
     }
 }
@@ -168,6 +202,7 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
             salt_hash,
             self.block_manager.clone(),
             self.leader.clone(),
+            self.xfer_tx.clone(),
         );
         self.slots
             .lock()
@@ -185,6 +220,16 @@ impl<R: RequestKey> SlotManager<R> for ConnectorSlotManager<R> {
     fn remove_slot(&self, request_id: &R) -> Result<(), SlotError> {
         self.slots.lock().unwrap().remove(request_id);
         Ok(())
+    }
+}
+
+impl<R: RequestKey> Drop for ConnectorSlotManager<R> {
+
+    fn drop(&mut self) {
+        if let Some(task) = self._transfer_engine_handle.take() {
+            task.cancel();
+            task.detach();
+        }
     }
 }
 
@@ -237,10 +282,6 @@ pub struct VllmConnectorSlot {
     /// use this to issue [`LocalTransferRequest`]s to the transfer engine
     xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
 
-    // todo - revert this to a handle.
-    // todo - move the offload engine to the slot manager and only provide a clone of the xfer_tx to the slot
-    rt: tokio::runtime::Runtime,
-
     /// This is the current position for which we are applying some number of active/scheduled tokens.
     /// On application, then we decide what actions we take.
     /// This the point that we will call our generic policy object.
@@ -258,36 +299,12 @@ impl VllmConnectorSlot {
         salt_hash: SaltHash,
         block_manager: VllmBlockManager,
         leader: Arc<KvbmLeader>,
+        xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
     ) -> Self {
         assert!(!tokens.is_empty(), "tokens must be non-empty");
         let block_size = block_manager.block_size();
         debug_assert!(block_size.is_power_of_two() && block_size <= 1024);
         let sequence = TokenBlockSequence::new(tokens, block_size as u32, Some(salt_hash));
-
-        let (xfer_tx, xfer_rx) = mpsc::unbounded_channel();
-
-        let mut xfer_engine =
-            LocalTransferEngine::new(block_manager.clone(), leader.clone(), xfer_rx);
-        let system_cancellation_token = CancellationToken::new();
-
-        // spawn a task to handle the transfer requests
-        // use critical task pattern
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
-            .enable_all()
-            .build()
-            .unwrap();
-
-        let xfer_engine_task = CriticalTaskExecutionHandle::new_with_runtime(
-            |cancellation_token| async move { xfer_engine.execute(cancellation_token).await },
-            system_cancellation_token,
-            "LocalTransferEngine",
-            rt.handle(),
-        )
-        .unwrap();
-        xfer_engine_task.detach();
-
-        tracing::info!("LocalTransferEngine task detached successfully");
 
         Self {
             request_id,
@@ -296,8 +313,6 @@ impl VllmConnectorSlot {
             block_size,
             leader,
             xfer_tx,
-            rt,
-
             // default values
             state: SlotState::Initialized,
             iteration_first_scheduled: None,
