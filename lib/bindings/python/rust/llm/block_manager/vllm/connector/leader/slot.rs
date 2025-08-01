@@ -3,14 +3,13 @@
 
 use dynamo_llm::{
     block_manager::{
-        connector::protocol::{
-            LeaderTransferRequest, RequestType, TransferScheduleRequest, TransferType,
-        },
+        block::{locality::LocalityProvider, BlockMetadata},
+        connector::protocol::{LeaderTransferRequest, RequestType, TransferType},
         distributed::{BlockTransferPool, BlockTransferRequest, KvbmLeader},
+        Storage,
     },
     tokens::TokenBlock,
 };
-use dynamo_runtime::traits::{DistributedRuntimeProvider, RuntimeProvider};
 use dynamo_runtime::utils::task::CriticalTaskExecutionHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -61,9 +60,8 @@ pub enum SlotState {
     OnboardStaged(usize),
 
     /// The slot is actively copying blocks to device storage from some external storage(s).
-    /// The u64 is the iteration at which the onboarding operation was triggered.
-    // TODO(ryan) - reset to usize for num tokens so we can advance the computed position
-    Onboarding(u64),
+    /// The usize is the number of tokens that are being onboarded.
+    Onboarding(usize),
 
     /// The slot is actively prefilling the sequence.
     Prefilling,
@@ -101,7 +99,6 @@ pub trait Slot: std::fmt::Debug {
     fn mark_as_scheduled(&mut self, iteration: u64) -> Result<(), SlotError>;
     fn mark_as_prefilling(&mut self, iteration: u64) -> Result<(), SlotError>;
     fn mark_as_decoding(&mut self, iteration: u64) -> Result<(), SlotError>;
-    fn mark_as_onboarding(&mut self, iteration: u64) -> Result<(), SlotError>;
     fn mark_as_not_scheduled(&mut self, iteration: u64) -> Result<(), SlotError>;
     fn mark_as_finished(&mut self, iteration: u64) -> Result<(), SlotError>;
 
@@ -113,6 +110,9 @@ pub trait Slot: std::fmt::Debug {
     ///
     /// If external tokens are matched, then the slot will transition to the [`SlotState::Onboarding`] state.
     fn acquire_all_local_matches(&mut self) -> Result<(), SlotError>;
+
+    /// Trigger the onboarding operation for the slot.
+    fn trigger_onboarding(&mut self, num_external_tokens: usize) -> Result<(), SlotError>;
 
     /// Take all pending operations for the slot.
     fn take_pending_operations(&mut self) -> Option<Vec<WorkerTransferRequest>>;
@@ -237,8 +237,6 @@ pub struct VllmConnectorSlot {
     /// use this to issue [`LocalTransferRequest`]s to the transfer engine
     xfer_tx: mpsc::UnboundedSender<LocalTransferRequest>,
 
-    // todo - revert this to a handle.
-    // todo - move the offload engine to the slot manager and only provide a clone of the xfer_tx to the slot
     rt: tokio::runtime::Runtime,
 
     /// This is the current position for which we are applying some number of active/scheduled tokens.
@@ -450,11 +448,6 @@ impl Slot for VllmConnectorSlot {
         Ok(())
     }
 
-    fn mark_as_onboarding(&mut self, iteration: u64) -> Result<(), SlotError> {
-        self.state = SlotState::Onboarding(iteration);
-        Ok(())
-    }
-
     fn mark_as_scheduled(&mut self, iteration: u64) -> Result<(), SlotError> {
         if self.iteration_first_scheduled.is_none() {
             self.iteration_first_scheduled = Some(iteration);
@@ -548,7 +541,7 @@ impl Slot for VllmConnectorSlot {
 
         let num_matched_disk_blocks = disk_blocks.len();
 
-        let mut num_matched_blocks = num_matched_host_blocks + num_matched_disk_blocks;
+        let num_matched_blocks = num_matched_host_blocks + num_matched_disk_blocks;
 
         tracing::debug!(
             "matched {} host blocks and {} disk blocks; {} total blocks",
@@ -594,6 +587,75 @@ impl Slot for VllmConnectorSlot {
         };
 
         self.state = SlotState::OnboardStaged(num_new_matched_tokens);
+
+        Ok(())
+    }
+
+    fn trigger_onboarding(&mut self, num_external_tokens: usize) -> Result<(), SlotError> {
+        if !matches!(self.state(), SlotState::OnboardStaged(_)) {
+            return Err(SlotError::InvalidOperation(format!(
+                "slot must be in the OnboardStaged state to trigger onboarding; got {:?}",
+                self.state()
+            )));
+        }
+
+        debug_assert_eq!(self.evaluated_blocks, 0);
+        debug_assert_eq!(self.computed_position % self.block_size, 0);
+        debug_assert_eq!(num_external_tokens % self.block_size, 0);
+
+        let num_computed_blocks = self.computed_position / self.block_size;
+
+        // shift the evaluated blocks position to the end of the computed/cached blocks
+        self.evaluated_blocks = num_computed_blocks;
+
+        // match the host / disk blocks to the newly assigned mutable device blocks
+        if let Some(host_blocks) = self.staging_from_host.take() {
+            let num_host_blocks = host_blocks.len();
+
+            // get device block ids
+            let dst_block_ids = self
+                .device_blocks
+                .iter()
+                .skip(self.evaluated_blocks)
+                .take(num_host_blocks)
+                .copied()
+                .collect::<Vec<_>>();
+
+            debug_assert_eq!(dst_block_ids.len(), num_host_blocks);
+
+            // construct offload requests - transfer engine + worker
+            let src_blocks = Box::new(AnyImmutableBlocks::<PinnedStorage, _, _>::new(host_blocks));
+
+            self.onboard_blocks(src_blocks, dst_block_ids)?;
+
+            // shift the evaluated blocks position to the end of the computed/cached blocks
+            self.evaluated_blocks += num_host_blocks;
+        }
+
+        if let Some(disk_blocks) = self.staging_from_disk.take() {
+            let num_disk_blocks = disk_blocks.len();
+
+            // get device block ids
+            let dst_block_ids = self
+                .device_blocks
+                .iter()
+                .skip(self.evaluated_blocks)
+                .take(num_disk_blocks)
+                .copied()
+                .collect::<Vec<_>>();
+
+            debug_assert_eq!(dst_block_ids.len(), num_disk_blocks);
+
+            // construct offload requests - transfer engine + worker
+            let src_blocks = Box::new(AnyImmutableBlocks::<DiskStorage, _, _>::new(disk_blocks));
+
+            self.onboard_blocks(src_blocks, dst_block_ids)?;
+
+            // shift the evaluated blocks position to the end of the computed/cached blocks
+            self.evaluated_blocks += num_disk_blocks;
+        }
+
+        self.state = SlotState::Onboarding(num_external_tokens);
 
         Ok(())
     }
@@ -675,6 +737,52 @@ impl VllmConnectorSlot {
         Ok(())
     }
 
+    fn onboard_blocks(
+        &mut self,
+        src_blocks: Box<dyn AnyBlocks>,
+        dst_block_ids: Vec<BlockId>,
+    ) -> Result<(), SlotError> {
+        debug_assert_eq!(src_blocks.len(), dst_block_ids.len());
+
+        let num_blocks = src_blocks.len();
+        let src_storage_pool = src_blocks.storage_pool();
+        let operation_id = uuid::Uuid::new_v4();
+
+        let xfer_req = LocalTransferRequest::Onboard(LocalOnboardRequest::new(
+            self.request_id.clone(),
+            src_blocks,
+            dst_block_ids,
+            operation_id,
+        ));
+
+        let worker_req = WorkerTransferRequest {
+            request_id: self.request_id.clone(),
+            uuid: operation_id,
+            transfer_type: TransferType::Load,
+            request_type: RequestType::Immediate,
+        };
+
+        if let Err(e) = self.xfer_tx.send(xfer_req) {
+            tracing::error!("Failed to send transfer request: {:?}", e);
+            return Err(SlotError::InvalidOperation(format!(
+                "Transfer engine unavailable: {}; aborting offload",
+                e
+            )));
+        }
+
+        self.append_pending_operation(worker_req);
+
+        tracing::debug!(
+            request_id = self.request_id,
+            operation_id = %operation_id,
+            "onboarding {} blocks from {:?} to device",
+            num_blocks,
+            src_storage_pool,
+        );
+
+        Ok(())
+    }
+
     fn append_pending_operation(&mut self, operation: WorkerTransferRequest) {
         if let Some(pending_operations) = self.pending_operations.as_mut() {
             pending_operations.push(operation);
@@ -684,12 +792,11 @@ impl VllmConnectorSlot {
     }
 }
 
-#[derive(Debug, Clone)]
 enum LocalTransferRequest {
     Offload(LocalOffloadRequest),
+    Onboard(LocalOnboardRequest),
 }
 
-#[derive(Debug, Clone)]
 struct LocalOffloadRequest {
     request_id: String,
     block_ids: Vec<BlockId>,
@@ -709,6 +816,30 @@ impl LocalOffloadRequest {
             request_id,
             block_ids,
             token_blocks,
+            operation_id,
+        }
+    }
+}
+
+struct LocalOnboardRequest {
+    request_id: String,
+    src_blocks: Box<dyn AnyBlocks>,
+    dst_block_ids: Vec<BlockId>,
+    operation_id: uuid::Uuid,
+}
+
+impl LocalOnboardRequest {
+    pub fn new(
+        request_id: String,
+        src_blocks: Box<dyn AnyBlocks>,
+        dst_block_ids: Vec<BlockId>,
+        operation_id: uuid::Uuid,
+    ) -> Self {
+        debug_assert!(src_blocks.len() == dst_block_ids.len());
+        Self {
+            request_id,
+            src_blocks,
+            dst_block_ids,
             operation_id,
         }
     }
@@ -865,6 +996,104 @@ impl LocalTransferEngine {
                 );
                 Ok(())
             }
+            LocalTransferRequest::Onboard(onboard_req) => {
+                let request_id = &onboard_req.request_id;
+                let operation_id = &onboard_req.operation_id;
+
+                // extract source block ids
+                let src_block_ids = onboard_req.src_blocks.block_ids();
+
+                // create block pairs
+                let block_pairs = src_block_ids
+                    .iter()
+                    .zip(onboard_req.dst_block_ids.iter())
+                    .map(|(src, dst)| (*src, *dst))
+                    .collect::<Vec<_>>();
+
+                // create transfer request
+                let block_xfer_req = BlockTransferRequest {
+                    from_pool: onboard_req.src_blocks.storage_pool(),
+                    to_pool: BlockTransferPool::Device,
+                    blocks: block_pairs,
+                    connector_req: Some(LeaderTransferRequest {
+                        request_id: request_id.clone(),
+                        uuid: *operation_id,
+                        requirement: None,
+                        request_type: RequestType::Immediate,
+                    }),
+                };
+
+                let notify_receiver = self.leader.transfer_blocks_request(block_xfer_req).await?;
+
+                match notify_receiver.await {
+                    Ok(_) => {
+                        tracing::debug!("Transfer completed successfully");
+                    }
+                    Err(_) => {
+                        return Err(anyhow::anyhow!("Transfer completion notification failed"));
+                    }
+                }
+
+                Ok(())
+            }
         }
+    }
+}
+
+// todo move to core lib
+pub trait AnyBlocks: Send {
+    fn len(&self) -> usize;
+    fn storage_pool(&self) -> BlockTransferPool;
+    fn block_ids(&self) -> Vec<BlockId>;
+}
+
+struct AnyImmutableBlocks<S: Storage, L: LocalityProvider, M: BlockMetadata> {
+    blocks: Vec<ImmutableBlock<S, L, M>>,
+    storage_pool: BlockTransferPool,
+}
+
+impl<L: LocalityProvider, M: BlockMetadata> AnyImmutableBlocks<PinnedStorage, L, M> {
+    pub fn new(blocks: Vec<ImmutableBlock<PinnedStorage, L, M>>) -> Self {
+        Self {
+            blocks,
+            storage_pool: BlockTransferPool::Host,
+        }
+    }
+}
+
+impl<L: LocalityProvider, M: BlockMetadata> AnyImmutableBlocks<DiskStorage, L, M> {
+    pub fn new(blocks: Vec<ImmutableBlock<DiskStorage, L, M>>) -> Self {
+        Self {
+            blocks,
+            storage_pool: BlockTransferPool::Disk,
+        }
+    }
+}
+
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> AnyImmutableBlocks<S, L, M> {
+    pub fn storage_pool(&self) -> BlockTransferPool {
+        self.storage_pool
+    }
+
+    pub fn block_ids(&self) -> Vec<BlockId> {
+        self.blocks.iter().map(|b| b.block_id()).collect()
+    }
+
+    fn len(&self) -> usize {
+        self.blocks.len()
+    }
+}
+
+impl<S: Storage, L: LocalityProvider, M: BlockMetadata> AnyBlocks for AnyImmutableBlocks<S, L, M> {
+    fn len(&self) -> usize {
+        self.len()
+    }
+
+    fn storage_pool(&self) -> BlockTransferPool {
+        self.storage_pool()
+    }
+
+    fn block_ids(&self) -> Vec<BlockId> {
+        self.block_ids()
     }
 }

@@ -9,7 +9,7 @@ use crate::block_manager::connector::protocol::LeaderTransferRequest;
 pub const ZMQ_PING_MESSAGE: &str = "ping";
 pub const ZMQ_TRANSFER_BLOCKS_MESSAGE: &str = "transfer_blocks";
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Copy)]
 pub enum BlockTransferPool {
     Device,
     Host,

@@ -111,6 +111,11 @@ impl KvConnectorLeader {
         // we always return true here as we always asynchronously onboard matched blocks
         if let SlotState::OnboardStaged(num_external_tokens) = slot.state() {
             debug_assert!((num_computed_tokens + num_external_tokens) % self.block_size == 0);
+            tracing::debug!(
+                request_id = request_id,
+                "scheduling onboarding for {} external tokens",
+                num_external_tokens
+            );
             Ok((num_external_tokens, true))
         } else {
             Ok((0, false))
@@ -127,7 +132,7 @@ impl KvConnectorLeader {
         &mut self,
         request_id: String,
         block_ids: Vec<BlockId>,
-        num_external_tokens: u64,
+        num_external_tokens: usize,
     ) -> PyResult<()> {
         tracing::debug!(
             request_id,
@@ -144,6 +149,12 @@ impl KvConnectorLeader {
         // the second call will show num_external_tokens == 0
         // this call is just letting us know the other blocks that are being used for the remainder of the prefill
         if num_external_tokens > 0 {
+            tracing::debug!(
+                request_id = request_id,
+                "triggering onboarding for {} external tokens",
+                num_external_tokens
+            );
+            slot.trigger_onboarding(num_external_tokens)?;
             self.onboarding_slots.insert(request_id);
         }
 
@@ -176,14 +187,11 @@ impl KvConnectorLeader {
         //
         // This is kind of a nice abstraction as it keeps the events simplier; however, we now create the request-slot
         // once for onboarding (this loop), then again for prefill/decode (new_requests loop).
-        tracing::debug!("evalatuing {} onboarding slots", onboarding_slots.len());
         for request_id in onboarding_slots.iter() {
             let shared_slot = self.slot_manager.get_slot(request_id).map_err(to_pyerr)?;
             let mut slot = shared_slot.lock().map_err(to_pyerr)?;
 
-            tracing::debug!("marking slot as onboarding: {request_id}");
             md.create_slot(request_id.clone());
-            slot.mark_as_onboarding(iteration)?;
 
             if let Some(pending_ops) = slot.take_pending_operations() {
                 tracing::debug!("adding {} pending onboarding operations", pending_ops.len());
