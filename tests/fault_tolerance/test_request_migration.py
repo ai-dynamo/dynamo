@@ -65,6 +65,9 @@ class DynamoWorkerProcess(ManagedProcess):
         # Set debug logging environment
         env = os.environ.copy()
         env["DYN_LOG"] = "debug"
+        env["DYN_SYSTEM_ENABLED"] = "true"
+        env["DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS"] = '["generate"]'
+        env["DYN_SYSTEM_PORT"] = f"808{worker_id[-1]}"
 
         # TODO: Have the managed process take a command name explicitly to distinguish
         #       between processes started with the same command.
@@ -80,15 +83,33 @@ class DynamoWorkerProcess(ManagedProcess):
 
         super().__init__(
             command=command,
+            env=env,
+            health_check_urls=[
+                (f"http://localhost:808{worker_id[-1]}/health", self.is_ready)
+            ],
+            timeout=300,
             display_output=True,
             terminate_existing=False,
             log_dir=log_dir,
-            env=env,
         )
 
     def get_pid(self):
         """Get the PID of the worker process"""
         return self.proc.pid if self.proc else None
+
+    def is_ready(self, response) -> bool:
+        """Check the health of the worker process"""
+        try:
+            data = response.json()
+            if data.get("status") == "ready":
+                logger.info(f"{self.worker_id} status is ready")
+                return True
+            logger.warning(
+                f"{self.worker_id} status is not ready: {data.get('status')}"
+            )
+        except ValueError:
+            logger.warning(f"{self.worker_id} health response is not valid JSON")
+        return False
 
 
 def download_model() -> None:
@@ -179,32 +200,6 @@ def validate_openai_response(response: requests.Response) -> None:
     logger.info(
         f"Received valid completion response: {data['choices'][0]['text'][:100]}..."
     )
-
-
-def wait_for_worker_ready(worker: DynamoWorkerProcess, worker_name: str) -> None:
-    """Wait for a worker to be ready by checking for 'Reading Events from' message in logs"""
-    logger.info(f"Waiting for {worker_name} to be ready...")
-    worker_ready = False
-
-    timeout = 5  # minutes
-    max_attempts = timeout * 12  # 5 seconds per attempt
-
-    for attempt in range(max_attempts):
-        if worker._log_path and os.path.exists(worker._log_path):
-            try:
-                with open(worker._log_path, "r") as f:
-                    log_content = f.read()
-                    # Look for the Reading Events message that indicates worker is ready
-                    if "Reading Events from " in log_content:
-                        logger.info(f"{worker_name} is ready")
-                        worker_ready = True
-                        break
-            except Exception as e:
-                logger.warning(f"Could not read {worker_name} log: {e}")
-        time.sleep(5)
-
-    if not worker_ready:
-        pytest.fail(f"{worker_name} failed to become ready")
 
 
 def check_worker_received_request(worker_process: DynamoWorkerProcess) -> bool:
@@ -347,17 +342,11 @@ def test_request_migration_vllm(request, runtime_services):
         worker1 = DynamoWorkerProcess(request, "worker1")
 
         with worker1:
-            # Wait for worker1 to be fully ready
-            wait_for_worker_ready(worker1, "Worker 1")
-
             # Start worker2 after worker1 is ready
             logger.info("Starting worker 2...")
             worker2 = DynamoWorkerProcess(request, "worker2")
 
             with worker2:
-                # Wait for worker2 to be fully ready
-                wait_for_worker_ready(worker2, "Worker 2")
-
                 logger.info(f"Worker 1 PID: {worker1.get_pid()}")
                 logger.info(f"Worker 2 PID: {worker2.get_pid()}")
 
