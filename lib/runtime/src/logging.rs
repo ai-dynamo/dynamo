@@ -69,8 +69,6 @@ use tracing_subscriber::Layer;
 use tracing_subscriber::Registry;
 use uuid::Uuid;
 
-pub const DYNAMO_REQUEST_ID_HEADER: &str = "x-dynamo-request-id";
-
 /// ENV used to set the log level
 const FILTER_ENV: &str = "DYN_LOG";
 
@@ -223,7 +221,7 @@ impl TraceParent {
             tracestate = Some(header_value.to_string());
         }
 
-        if let Some(header_value) = headers.get(DYNAMO_REQUEST_ID_HEADER) {
+        if let Some(header_value) = headers.get("x-dynamo-request-id") {
             x_dynamo_request_id = Some(header_value.to_string());
         }
 
@@ -695,7 +693,7 @@ where
                         serde_json::Value::String(x_dynamo_request_id),
                     );
                 } else {
-                    visitor.fields.remove("dynamo_x_request_id");
+                    visitor.fields.remove("x_dynamo_request_id");
                 }
             } else {
                 tracing::error!(
