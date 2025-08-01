@@ -93,8 +93,12 @@ class MockerProcess(ManagedProcess):
             endpoint,
         ]
 
+        env = os.environ.copy()
+        env["DYN_NAMESPACE"] = "test-namespace"
+
         super().__init__(
             command=command,
+            env=env,
             timeout=60,
             display_output=True,
             health_check_ports=[],
@@ -170,6 +174,64 @@ async def wait_for_request_throttle_to_clear(duration_seconds: float):
     await asyncio.sleep(wait_time)
 
 
+async def wait_for_ready(base_url: str, timeout: int = 60):
+    """Wait for system to be ready, handling specific error conditions"""
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": "Hello, how are you?"}],
+        "stream": False,
+        "max_tokens": 5,
+    }
+
+    start_time = time.time()
+    retry_delay = 5
+
+    logger.info("Waiting for system to be ready")
+
+    while time.time() - start_time < timeout:
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    base_url, json=payload, timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    text = await response.text()
+
+                    if response.status == 500:
+                        try:
+                            error_data = json.loads(text)
+                            error = error_data.get("error", "")
+                            if "no responders" in error:
+                                logger.warning("Retrying due to no responders")
+                                await asyncio.sleep(retry_delay)
+                                continue
+                        except json.JSONDecodeError:
+                            pass
+
+                    if response.status == 404:
+                        try:
+                            error_data = json.loads(text)
+                            error = error_data.get("error", "")
+                            if "Model not found" in error:
+                                logger.warning("Retrying due to model not found")
+                                await asyncio.sleep(retry_delay)
+                                continue
+                        except json.JSONDecodeError:
+                            pass
+
+                    if response.status == 200:
+                        logger.info("System is ready")
+                        return
+
+                    logger.warning(f"Unexpected status {response.status}: {text}")
+                    await asyncio.sleep(retry_delay)
+
+        except Exception as e:
+            logger.warning(f"Request failed: {e}, retrying...")
+            await asyncio.sleep(retry_delay)
+
+    raise TimeoutError(f"System not ready after {timeout} seconds")
+
+
 @pytest.mark.pre_merge
 async def test_request_throttler_e2e(request, runtime_services):
     """
@@ -216,6 +278,9 @@ async def test_request_throttler_e2e(request, runtime_services):
         await asyncio.sleep(5)
 
         base_url = f"http://localhost:{FRONTEND_PORT}/v1/chat/completions"
+
+        # Wait for system to be ready
+        await wait_for_ready(base_url)
 
         # Step 1: Verify normal requests work
         logger.info("=== Testing normal operation ===")
@@ -313,6 +378,9 @@ async def test_request_throttler_multiple_events(request, runtime_services):
 
         base_url = f"http://localhost:{FRONTEND_PORT + 1}/v1/chat/completions"
 
+        # Wait for system to be ready
+        await wait_for_ready(base_url)
+
         # Trigger first request throttling event
         logger.info("=== Triggering first request throttling event ===")
         await publish_all_workers_busy_event()
@@ -382,6 +450,8 @@ async def test_request_throttler_disabled(request, runtime_services):
         "kv",
         "--http-port",
         str(FRONTEND_PORT + 2),
+        "--namespace",
+        "test-namespace",
     ]
 
     env = os.environ.copy()
@@ -414,6 +484,9 @@ async def test_request_throttler_disabled(request, runtime_services):
         await asyncio.sleep(2)
 
         base_url = f"http://localhost:{FRONTEND_PORT + 2}/v1/chat/completions"
+
+        # Wait for system to be ready
+        await wait_for_ready(base_url)
 
         # Verify normal operation
         status, _ = await send_test_request(base_url)
