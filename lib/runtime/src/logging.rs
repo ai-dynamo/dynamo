@@ -225,15 +225,9 @@ impl TraceParent {
             x_dynamo_request_id = Some(header_value.to_string());
         }
 
-	// validate is uuid
-        let x_dynamo_request_id = match x_dynamo_request_id {
-	    Some(x_dynamo_request_id) => match uuid::Uuid::parse_str(x_dynamo_request_id.as_str()) {
-		Ok(_) => Some(x_dynamo_request_id),
-		Err(_) => None,
-	    },
-	    None => None,
-	};
-
+        // Validate UUID format
+        let x_dynamo_request_id = x_dynamo_request_id
+            .filter(|id| uuid::Uuid::parse_str(id).is_ok());
         TraceParent {
             trace_id,
             parent_id,
