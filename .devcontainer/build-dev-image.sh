@@ -3,8 +3,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# This script takes an existing pre-blt image from CI and turns it into a dev image.
-# It will be tagged as the same image but with -dev suffix.
+# This script takes an existing pre-built image from CI and converts it into a development image.
+# The resulting image will be tagged with a '-dev' suffix.
+# The development image will include tools such as cargo, uv, and maturin for building and managing Rust and Python components.
 #
 # Usage: ./build-dev-image.sh [OPTIONS] <ci-image-name>
 # Example: ./build-dev-image.sh gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:66231cf0977716a60dc082c344f7e81a245929f3-32632154-vllm-amd64
