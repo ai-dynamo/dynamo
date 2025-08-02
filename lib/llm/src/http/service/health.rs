@@ -30,6 +30,7 @@
 
 use super::{service_v2, RouteDoc};
 use axum::{http::Method, http::StatusCode, response::IntoResponse, routing::get, Json, Router};
+use dynamo_runtime::instances::list_all_instances;
 use serde_json::json;
 use std::sync::Arc;
 
@@ -79,13 +80,25 @@ async fn health_handler(
     axum::extract::State(state): axum::extract::State<Arc<service_v2::State>>,
 ) -> impl IntoResponse {
     let model_entries = state.manager().get_model_entries();
+    let instances = if let Some(etcd_client) = state.etcd_client() {
+        match list_all_instances(etcd_client).await {
+            Ok(instances) => instances,
+            Err(err) => {
+                tracing::warn!("Failed to fetch instances from etcd: {}", err);
+                vec![]
+            }
+        }
+    } else {
+        vec![]
+    };
 
     if model_entries.is_empty() {
         (
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({
                 "status": "unhealthy",
-                "message": "No endpoints available"
+                "message": "No endpoints available",
+                "instances": instances
             })),
         )
     } else {
@@ -97,7 +110,8 @@ async fn health_handler(
             StatusCode::OK,
             Json(json!({
                 "status": "healthy",
-                "endpoints": endpoints
+                "endpoints": endpoints,
+                "instances": instances
             })),
         )
     }
