@@ -43,24 +43,30 @@ jobs:
       contents: read
     env:
       RUSTC_WRAPPER: "sccache"
-      SCCACHE_GHA_ENABLED: "true"
+      # CACHE_VERSION is arbitrary and is used to invalidate the cache.
+      CACHE_VERSION: "1"
     steps:
     - uses: actions/checkout@v4
     - name: Set up system dependencies
       run: |
         sudo apt-get update -y
         sudo apt-get install -y protobuf-compiler
-    - name: Cache Cargo Registry
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ github.head_ref || github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
-    - name: Cache Cargo Tools
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/bin
-        key: ${{ runner.os }}-cargo-tools-${{ github.head_ref || github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
 
+    - name: Cache Cargo Artifacts
+      uses: actions/cache@v4
+      with:
+        key: ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-${{ github.job }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          ~/.cache/sccache/
+          ~/.rustup/
+          target/
+        restore-keys: |
+          ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-${{ github.job }}
+          ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}
     - name: Install sccache
       run: |
         SCCACHE_VERSION="0.10.0"
