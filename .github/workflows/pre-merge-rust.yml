@@ -62,7 +62,7 @@ jobs:
         key: ${{ runner.os }}-cargo-tools-${{ github.head_ref || github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
 
     - name: Run sccache-cache
-      uses: mozilla-actions/sccache-action@v0.0.9
+      uses: mozilla-actions/sccache-action@v0.0.6
 
     - name: Install Rust in dev environment
       # Install Rust only to run GitHub Local Actions in (dev environment) using the `ACT` environment variable.
