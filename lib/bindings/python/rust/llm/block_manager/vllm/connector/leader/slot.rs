@@ -510,11 +510,13 @@ impl Slot for VllmConnectorSlot {
             .sequence()
             .blocks()
             .iter()
-            .skip(num_computed_blocks)
             .map(|b| b.sequence_hash())
             .collect::<Vec<_>>();
 
-        tracing::debug!("matching against {} block hashes", sequence_hashes.len());
+        // we start matching non-device blocks after the device blocks
+        let search_offset = num_computed_blocks;
+
+        tracing::debug!("matching against {} block hashes", sequence_hashes[search_offset..].len());
 
         // we should do this opportunistically after this operation is done
         // ideally it was triggered by the match_sequence_hashes_blocking calls directly
@@ -526,9 +528,6 @@ impl Slot for VllmConnectorSlot {
         // if let Some(disk) = self.block_manager.disk() {
         //     disk.touch_blocks_blocking(&sequence_hashes)?;
         // }
-
-        // we start matching non-device blocks after the device blocks
-        let search_offset = num_computed_blocks;
 
         let mut host_blocks = self
             .block_manager
@@ -565,6 +564,11 @@ impl Slot for VllmConnectorSlot {
 
         // early exit if we did not match any blocks
         if num_matched_blocks == 0 {
+            return Ok(());
+        }
+
+        // early exit if we need to onboard 0 blocks
+        if (num_computed_blocks + num_matched_blocks) * block_size == self.sequence().total_tokens() {
             return Ok(());
         }
 
