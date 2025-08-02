@@ -68,6 +68,7 @@ mkdir -p $CARGO_TARGET_DIR
 
 # build project, it will be saved at $HOME/dynamo/.build/target
 cargo build --locked --profile dev --features mistralrs
+
 cargo doc --no-deps
 
 # install the python bindings

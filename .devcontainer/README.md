@@ -26,7 +26,11 @@ limitations under the License.
 - For models that require authentication, set your Hugging Face token env var `HF_TOKEN` in your local startup (.bashrc, .zshrc or .profile file). Many models do not require this token.
 
 ## Quick Start
-1. Build the container image
+
+There are two ways to build the development container image:
+
+### Method 1: Slow Build (better-tested, more reliable)
+Build from your current source code:
 
 ```bash
 ./container/build.sh --target local-dev
@@ -35,6 +39,32 @@ limitations under the License.
 The container will be built and give certain file permissions to your local uid and gid.
 
 > Note: Currently local-dev is only implemented for --framework VLLM
+
+### Method 2: Fast Build (Depends on CI reliability)
+Use a pre-built CI image from GitLab registry:
+
+1. **Find your current Git SHA:**
+   ```bash
+   git rev-parse HEAD
+   ```
+
+2. **Search the GitLab registry -- you must be on the company VPN:**
+   Go to https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/85325
+
+3. **Find your SHA:** Search for your commit SHA (e.g., `e61f1c8a40dafa7780d4983e545cc1eb09e9d2ee`)
+
+4. **Copy the full container URL:** Hover over the clipboard icon to get the complete URL (e.g., `gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:e61f1c8a40dafa7780d4983e545cc1eb09e9d2ee-29598585-vllm-amd64`)
+
+5. **Build the dev image:**
+   ```bash
+   .devcontainer/build-dev-image.sh gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:e61f1c8a40dafa7780d4983e545cc1eb09e9d2ee-29598585-vllm-amd64
+   ```
+
+   This creates a development image called `dynamo:latest-vllm-local-dev`
+
+**Trade-offs:**
+- **Method 1:** Slower but well-tested and reliable
+- **Method 2:** Faster but depends on CI system availability and may not be available for all commits
 
 2. Install Dev Containers extension in your IDE
 
