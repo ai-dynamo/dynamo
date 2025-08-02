@@ -350,6 +350,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "de45108900e1f9b9242f7f2e254aa3e2c029c921c258fe9e6b4217eeebd54288"
 dependencies = [
  "axum-core 0.5.2",
+ "axum-macros",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -415,6 +416,17 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "axum-macros"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "604fde5e028fea851ce1d8570bbdc034bec850d157f7569d10f347d06808c05c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.100",
 ]
 
 [[package]]
@@ -1224,6 +1236,7 @@ dependencies = [
  "tokio-util",
  "toktrie",
  "toktrie_hf_tokenizers",
+ "tower-http",
  "tracing",
  "unicode-segmentation",
  "url",
@@ -1299,6 +1312,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
+ "tower-http",
  "tracing",
  "tracing-subscriber",
  "url",
@@ -4976,6 +4990,7 @@ dependencies = [
  "tower 0.5.2",
  "tower-layer",
  "tower-service",
+ "tracing",
 ]
 
 [[package]]

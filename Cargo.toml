@@ -60,14 +60,14 @@ thiserror = { version = "2.0.11" }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1" }
 tokio-util = { version = "0.7", features = ["codec", "net"] }
-axum = { version = "0.8" }
+tower-http = {version = "0.6", features=["trace"]}
+axum = { version = "0.8" , features = ["macros"]}
 tracing = { version = "0.1" }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time", "json"] }
 validator = { version = "0.20.0", features = ["derive"] }
 uuid = { version = "1.17", features = ["v4", "serde"] }
 url = {version = "2.5", features = ["serde"]}
 xxhash-rust = { version = "0.8", features = ["xxh3", "const_xxh3"] }
-
 
 [profile.dev.package]
 insta.opt-level = 3
