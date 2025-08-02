@@ -9,8 +9,13 @@ members = [
     "lib/llm",
     "lib/runtime",
     "lib/tokens",
-    "lib/bindings/c",
     "lib/engines/*",
+    # TODO: Remove lib/bindings/c
+    "lib/bindings/c",
+    # TODO: Add lib/runtime/examples/* and lib/bindings/python
+    # for a single cargo build/test command from root directory.
+    #"lib/bindings/python",
+    #"lib/runtime/examples/*",
 ]
 resolver = "3"
 

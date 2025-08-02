@@ -57,12 +57,7 @@ jobs:
       with:
         key: ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}
         path: |
-          ~/.cargo/bin/
-          ~/.cargo/registry/index/
-          ~/.cargo/registry/cache/
-          ~/.cargo/git/db/
           ~/.cache/sccache/
-          ~/.rustup/
           ${{ matrix.dir }}/target/
         restore-keys: |
           ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-${{ matrix.dir }}-
