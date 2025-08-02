@@ -41,22 +41,41 @@ jobs:
       matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
     permissions:
       contents: read
+    env:
+      RUSTC_WRAPPER: "sccache"
+      # CACHE_VERSION is arbitrary and is used to invalidate the cache.
+      CACHE_VERSION: "1"
     steps:
     - uses: actions/checkout@v4
     - name: Set up system dependencies
       run: |
         sudo apt-get update -y
         sudo apt-get install -y protobuf-compiler
-    - name: Cache Cargo Registry
-      uses: actions/cache@v3
+
+    - name: Cache Cargo Artifacts
+      uses: actions/cache@v4
       with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ github.head_ref || github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
-    - name: Cache Cargo Tools
-      uses: actions/cache@v3
-      with:
-        path: ~/.cargo/bin
-        key: ${{ runner.os }}-cargo-tools-${{ github.head_ref || github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
+        key: ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-${{ github.job }}-${{ hashFiles('**/Cargo.toml', '**/Cargo.lock') }}
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          ~/.cache/sccache/
+          ~/.rustup/
+          target/
+        restore-keys: |
+          ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-${{ github.job }}
+          ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}
+    - name: Install sccache
+      run: |
+        SCCACHE_VERSION="0.10.0"
+        SCCACHE_FILE="sccache-v${SCCACHE_VERSION}-$(uname -m)-unknown-linux-musl"
+        SCCACHE_URL="https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/${SCCACHE_FILE}.tar.gz"
+        curl -L "${SCCACHE_URL}" | tar xz
+        mv ${SCCACHE_FILE}/sccache /usr/local/bin/sccache
+        chmod +x /usr/local/bin/sccache
+
     - name: Install Rust in dev environment
       # Install Rust only to run GitHub Local Actions in (dev environment) using the `ACT` environment variable.
       # See act usage: https://nektosact.com/introduction.html
@@ -90,3 +109,7 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+
+    - name: Run sccache stat for check
+      shell: bash
+      run: sccache --show-stats
