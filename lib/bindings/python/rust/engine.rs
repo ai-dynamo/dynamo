@@ -15,6 +15,7 @@
 
 use std::sync::Arc;
 
+use super::context::PyContext;
 use pyo3::prelude::*;
 use pyo3_async_runtimes::TaskLocals;
 use pythonize::{depythonize, pythonize};
@@ -163,6 +164,7 @@ where
 
         let generator = self.generator.clone();
         let event_loop = self.event_loop.clone();
+        let ctx_python = ctx.clone();
 
         // Acquiring the GIL is similar to acquiring a standard lock/mutex
         // Performing this in an tokio async task could block the thread for an undefined amount of time
@@ -177,7 +179,10 @@ where
         let stream = tokio::task::spawn_blocking(move || {
             Python::with_gil(|py| {
                 let py_request = pythonize(py, &request)?;
-                let gen = generator.call1(py, (py_request,))?;
+                let py_ctx = Py::new(py, PyContext::new(ctx_python.clone()))?;
+
+                let gen = generator.call1(py, (py_request, py_ctx))?;
+
                 let locals = TaskLocals::new(event_loop.bind(py).clone());
                 pyo3_async_runtimes::tokio::into_stream_with_locals_v1(locals, gen.into_bound(py))
             })
