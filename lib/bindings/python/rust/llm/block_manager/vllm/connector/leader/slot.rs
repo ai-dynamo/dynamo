@@ -510,11 +510,13 @@ impl Slot for VllmConnectorSlot {
             .sequence()
             .blocks()
             .iter()
-            .skip(num_computed_blocks)
             .map(|b| b.sequence_hash())
             .collect::<Vec<_>>();
 
-        tracing::debug!("matching against {} block hashes", sequence_hashes.len());
+        // we start matching non-device blocks after the device blocks
+        let search_offset = num_computed_blocks;
+
+        tracing::debug!("matching against {} block hashes", sequence_hashes[search_offset..].len());
 
         // we should do this opportunistically after this operation is done
         // ideally it was triggered by the match_sequence_hashes_blocking calls directly
@@ -526,9 +528,6 @@ impl Slot for VllmConnectorSlot {
         // if let Some(disk) = self.block_manager.disk() {
         //     disk.touch_blocks_blocking(&sequence_hashes)?;
         // }
-
-        // we start matching non-device blocks after the device blocks
-        let search_offset = num_computed_blocks;
 
         let mut host_blocks = self
             .block_manager
@@ -565,6 +564,11 @@ impl Slot for VllmConnectorSlot {
 
         // early exit if we did not match any blocks
         if num_matched_blocks == 0 {
+            return Ok(());
+        }
+
+        // early exit if we need to onboard 0 blocks
+        if (num_computed_blocks + num_matched_blocks) * block_size == self.sequence().total_tokens() {
             return Ok(());
         }
 
@@ -885,6 +889,19 @@ impl LocalTransferEngine {
         }
     }
 
+    // build an adapted TaskTracker:
+    // https://docs.rs/tokio-util/latest/tokio_util/task/task_tracker/struct.TaskTracker.html
+    //
+    // this should track completions via atomic counters using the dynamo prometheus metrics
+    // - critical_tasks: labels - success, failure, cancelled
+    //
+    // should spawn any task/future that returns either any task that can be converted to a
+    // Result<CompletionStatus, String> where CompletionStatus is an enum with Ok and Cancelled.
+    // anyhow::Result<()> can be considered non-cancellable and coerced to Ok(CompletionStatus::Ok)
+    // tasks allowed to cancel should return a CompletionStatus.
+    //
+    // This should be a composable unit that we can layer on specialized types of critical tasks
+    // with their own sets of custom metrics.
     async fn execute(&mut self, cancellation_token: CancellationToken) -> anyhow::Result<()> {
         loop {
             tokio::select! {
