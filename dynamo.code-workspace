@@ -5,10 +5,6 @@
         }
     ],
     "settings": {
-        "python.analysis.extraPaths": [
-            "dynamo/lib/bindings/python/src",
-            "vllm/vllm",
-        ],
         "rust-analyzer.linkedProjects": [
             "Cargo.toml",
             "launch/dynamo-run/Cargo.toml",
