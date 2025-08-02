@@ -211,19 +211,13 @@ The KV-aware routing arguments:
 
 ### Request Migration
 
-In a [Distributed System](#distributed-system), a request may fail due to connectivity issues between the HTTP Server and the Worker Engine.
+In a [Distributed System](#distributed-system), you can enable [request migration](../architecture/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
 
-The HTTP Server will automatically track which Worker Engines are having connectivity issues with it and avoid routing new requests to the Engines with known connectivity issues.
-
-For ongoing requests, there is a `--migration-limit` flag which can be set on the Worker Engines that tells the HTTP Server how many times a request can be migrated to another Engine should there be a loss of connectivity to the current Engine.
-
-For example,
 ```bash
-dynamo-run in=dyn://... out=vllm ... --migration-limit=3
+dynamo-run in=dyn://... out=<engine> ... --migration-limit=3
 ```
-indicates a request to this model may be migrated up to 3 times to another Engine, before failing the request, should the HTTP Server detects a connectivity issue to the current Engine.
 
-The migrated request will continue responding to the original request, allowing for a seamless transition between Engines, and a reduced overall request failure rate at the HTTP Server for enhanced user experience.
+This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../architecture/request_migration.md) documentation for details on how this works.
 
 ## Full usage details
 
