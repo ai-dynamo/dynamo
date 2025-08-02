@@ -222,9 +222,9 @@ export DEPLOYMENT_FILE=disagg.yaml
 kubectl apply -f $DEPLOYMENT_FILE -n $NAMESPACE
 ```
 
-#### Using Custom Images
+#### Using Custom Dynamo Frameworks Image for TensorRT-LLM
 
-To use a custom TensorRT-LLM image, you can update the deployment file using yq:
+To use a custom dynamo frameworks image for TensorRT-LLM, you can update the deployment file using yq:
 
 ```bash
 export DEPLOYMENT_FILE=disagg.yaml

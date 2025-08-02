@@ -108,9 +108,9 @@ export DEPLOYMENT_FILE=<your-template>.yaml
 kubectl apply -f $DEPLOYMENT_FILE
 ```
 
-### 4. Using Custom Images
+### 4. Using Custom Dynamo Frameworks Image for SGLang
 
-To use a custom SGLang image, you can update the deployment file using yq:
+To use a custom dynamo frameworks image for SGLang, you can update the deployment file using yq:
 
 ```bash
 export DEPLOYMENT_FILE=<your-template>.yaml

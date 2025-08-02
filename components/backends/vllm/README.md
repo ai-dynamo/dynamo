@@ -190,9 +190,9 @@ export DEPLOYMENT_FILE=agg.yaml
 kubectl apply -f $DEPLOYMENT_FILE -n $NAMESPACE
 ```
 
-#### Using Custom Images
+#### Using Custom Dynamo Frameworks Image for vLLM
 
-To use a custom vLLM image, you can update the deployment file using yq:
+To use a custom dynamo frameworks image for vLLM, you can update the deployment file using yq:
 
 ```bash
 export DEPLOYMENT_FILE=deploy/agg.yaml
