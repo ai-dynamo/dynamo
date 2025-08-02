@@ -104,7 +104,19 @@ args:
 
 ### 3. Deploy
 ```bash
-kubectl apply -f <your-template>.yaml
+export DEPLOYMENT_FILE=agg.yaml
+kubectl apply -f $DEPLOYMENT_FILE
+```
+
+### 4. Using Custom Dynamo Frameworks Image for SGLang
+
+To use a custom dynamo frameworks image for SGLang, you can update the deployment file using yq:
+
+```bash
+export DEPLOYMENT_FILE=agg.yaml
+export FRAMEWORK_RUNTIME_IMAGE=<sglang-image>
+
+yq '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE  > $DEPLOYMENT_FILE.generated
 ```
 
 ## Model Configuration
