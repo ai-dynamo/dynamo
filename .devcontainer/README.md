@@ -27,9 +27,9 @@ limitations under the License.
 
 ## Quick Start
 
-There are two ways to build the development container image:
+### There are two ways to build the development container image:
 
-### Method 1: Slow Build (better-tested, more reliable)
+#### Method 1: Slow Build (better-tested, more reliable)
 Build from your current source code:
 
 ```bash
@@ -40,7 +40,7 @@ The container will be built and give certain file permissions to your local uid 
 
 > Note: Currently local-dev is only implemented for --framework VLLM
 
-### Method 2: Fast Build (Depends on CI reliability)
+#### Method 2: Fast Build (Depends on CI reliability)
 Use a pre-built CI image from GitLab registry:
 
 1. **Find your current Git SHA:**
@@ -53,30 +53,26 @@ Use a pre-built CI image from GitLab registry:
 
 3. **Find your SHA:** Search for your commit SHA (e.g., `e61f1c8a40dafa7780d4983e545cc1eb09e9d2ee`)
 
-4. **Copy the full container URL:** Hover over the clipboard icon to get the complete URL (e.g., `gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:e61f1c8a40dafa7780d4983e545cc1eb09e9d2ee-29598585-vllm-amd64`)
+4. **Copy the full container URL.** Hover over the clipboard icon to get the complete URL (e.g., `gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:e61f1c8a40dafa7780d4983e545cc1eb09e9d2ee-29598585-vllm-amd64`)
 
 5. **Build the dev image:**
+Below is an illustration, using the SHA you found in step 3.
    ```bash
    .devcontainer/build-dev-image.sh gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:e61f1c8a40dafa7780d4983e545cc1eb09e9d2ee-29598585-vllm-amd64
    ```
 
    This creates a development image called `dynamo:latest-vllm-local-dev`
 
-**Trade-offs:**
-- **Method 1:** Slower but well-tested and reliable
-- **Method 2:** Faster but depends on CI system availability and may not be available for all commits
-
-2. Install Dev Containers extension in your IDE
+### Install Dev Containers extension in your IDE
 
 **VS Code:**
 - Install [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) from Microsoft marketplace
 
 **Cursor:**
 - Press `Cmd+Shift+X` (Mac) or `Ctrl+Shift+X` (Linux/Windows) to open Extensions
-- Search for "Dev Containers" and install the one by **Anysphere**
-- Do not download the version from Microsoft as it is not compatible with Cursor
+- Search for "Dev Containers" and install the one by **Anysphere** (Do not download the version from Microsoft as it is not compatible with Cursor)
 
-3. Open Dynamo folder in your IDE
+Now open Dynamo folder in your IDE:
 - Press `Cmd+Shift+P` (Mac) or `Ctrl+Shift+P` (Linux/Windows)
 - Select "Dev Containers: Open Folder in Container"
 
@@ -87,7 +83,7 @@ Optional: If you want to mount your Hugging Face cache, go to `.devcontainer` an
 ```
 Make sure HF_HOME is sourced in your .bashrc or .zshenv and your vscode default terminal is set properly.
 
-4. Wait for Initialization
+Now wait for Initialization:
 - The container will mount your local code
 - `post-create.sh` will build the project and configure the environment
 
@@ -119,11 +115,8 @@ cd /home/ubuntu/dynamo/lib/bindings/python && maturin develop
 Development Environment:
 - Rust and Python toolchains
 - GPU acceleration
-- VS Code extensions for Rust and Python
-- Persistent build cache in `.build/` directory enables fast incremental builds (only changed files are recompiled)
-
-`cargo build --locked --profile dev` to re-build
-
+- VS Code or Cursor extensions for Rust and Python
+- Persistent build cache in `.build/` directory enables fast incremental builds (only changed files are recompiled) via `cargo build --locked --profile dev`
 - Edits to files are propogated to local repo due to the volume mount
 - SSH and GPG agent passthrough orchestrated by devcontainer
 
@@ -131,7 +124,7 @@ File Structure:
 - Local dynamo repo mounts to `/home/ubuntu/dynamo`
 - Python venv in `/opt/dynamo/venv`
 - Build artifacts in `dynamo/.build/target`
-- Hugging Face cache preserved between sessions (Mounting local path `HF_HOME` at `/home/ubuntu/.cache/huggingface`)
+- Hugging Face cache preserved between sessions (either mounting your host .cache to the container, or your `HF_HOME` to `/home/ubuntu/.cache/huggingface`)
 - Bash memory preserved between sessions at `/home/ubuntu/.commandhistory` using docker volume `dynamo-bashhistory`
 - Precommit peeserved between sessions at `/home/ubuntu/.cache/precommit` using docker volume `dynamo-precommit-cache`
 
@@ -185,6 +178,8 @@ ssh-add ~/.ssh/id_rsa
 
 Verify access by running `ssh -T git@github.com` in both host and container.
 
+## Troubleshooting
+
 ### Environment Variables Not Set in Container?
 
 If your environment variables are not being set in your devcontainer (e.g., `echo $HF_TOKEN` returns empty), and these variables are defined in your `~/.bashrc`, there are two ways to ensure they are properly sourced:
@@ -196,8 +191,6 @@ Note: If both `~/.bash_profile` and `~/.profile` exist, bash will only read `~/.
 
 
 See VS Code Dev Containers [documentation](https://code.visualstudio.com/docs/devcontainers/containers) for more details.
-
-## Troubleshooting
 
 ### Volume Corruption Issues
 
@@ -211,8 +204,6 @@ docker volume rm dynamo-bashhistory dynamo-precommit-cache
 
 # Or remove all volumes (use with caution)
 docker volume prune
-
-# Rebuild: ./container/build.sh --target local-dev
 ```
 
 **Note:** This resets bash history and pre-commit cache, but preserves your source code.
@@ -227,7 +218,7 @@ If you start experiencing permission problems (e.g., "Permission denied" errors)
 
 ```bash
 # Replace <user> with your actual username
-cd <your dynamo directory>
+cd <your dynamo directory at your host machine (not docker)>
 sudo chown -R <user>:<user> .
 ```
 
@@ -241,7 +232,7 @@ If `cargo clean` doesn't resolve the issue, you can manually remove the build di
 
 ```bash
 # Replace <user> with your actual username
-sudo rm -rf /home/<user>/dynamo/.build/target
+sudo rm -rf $HOME/dynamo/.build/target
 ```
 
 This forces a complete rebuild of all Rust artifacts.
