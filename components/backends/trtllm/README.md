@@ -218,7 +218,7 @@ Export the NAMESPACE  you used in your Dynamo Cloud Installation.
 ```bash
 cd dynamo
 cd components/backends/trtllm/deploy
-export DEPLOYMENT_FILE=disagg.yaml
+export DEPLOYMENT_FILE=agg.yaml
 kubectl apply -f $DEPLOYMENT_FILE -n $NAMESPACE
 ```
 
@@ -227,7 +227,7 @@ kubectl apply -f $DEPLOYMENT_FILE -n $NAMESPACE
 To use a custom dynamo frameworks image for TensorRT-LLM, you can update the deployment file using yq:
 
 ```bash
-export DEPLOYMENT_FILE=disagg.yaml
+export DEPLOYMENT_FILE=agg.yaml
 export FRAMEWORK_RUNTIME_IMAGE=<trtllm-image>
 
 yq '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE  > $DEPLOYMENT_FILE.generated

@@ -195,7 +195,7 @@ kubectl apply -f $DEPLOYMENT_FILE -n $NAMESPACE
 To use a custom dynamo frameworks image for vLLM, you can update the deployment file using yq:
 
 ```bash
-export DEPLOYMENT_FILE=deploy/agg.yaml
+export DEPLOYMENT_FILE=agg.yaml
 export FRAMEWORK_RUNTIME_IMAGE=<vllm-image>
 
 yq '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE  > $DEPLOYMENT_FILE.generated
