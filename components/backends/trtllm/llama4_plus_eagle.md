@@ -34,6 +34,12 @@ For advanced control over how requests are routed between prefill and decode wor
   * Built with a version of TensorRT-LLM based on the 0.21 release [Link](https://github.com/NVIDIA/TensorRT-LLM/tree/release/0.21)
 * If you need to download model weights off huggingface, make sure you run the command `huggingface-cli login` and have access to the necessary gated models.
 
+## Eagle3-one-model
+* Eagle3-one-model (`eagle3_one_model=True`) config is added in `engine_configs/llama4/eagle_one_model`. Build dynamo with the latest commit `66f299a` in TRTLLM 1.0.0.rc2 [Link](https://github.com/NVIDIA/TensorRT-LLM/commits/v1.0.0rc2/).
+* The configs in `engine_configs/llama4/eagle_one_model` are tested with 8xH100 cluster. Be sure to change the `NUM_GPUS_PER_NODE` accordingly or change TP/EP size in config. 1 8xH100 node for aggregated .yml file, 2 8xH100 for prefill/decode .yml file.
+* The current `./multinode/start_frontend_services.sh` may got ran `NUM_GPUS_PER_NODE` times depending on how srun/mpi is launched, beware that the frontend service only needs to be ran once.
+* Eagle3-one-model appends the eagle3 layer at the end of the TRTLLM engine, instead of sending base/draft requests between 2 engines. Visit TRTLLM for more information.
+
 
 ## Setup
 
@@ -77,3 +83,17 @@ export DECODE_ENGINE_CONFIG="/mnt/engine_configs/llama4/eagle/eagle_decode.yaml"
 ## Example Request
 
 See [here](./multinode/multinode-examples.md#example-request) to learn how to send a request to the deployment.
+
+```
+curl localhost:8000/v1/chat/completions -H "Content-Type: application/json" -d '{
+        "model": "nvidia/Llama-4-Maverick-17B-128E-Instruct-FP8",
+        "messages": [{"role": "user", "content": "Why is NVIDIA a great company?"}],
+        "max_tokens": 1024
+    }' -w "\n"
+
+
+# output:
+{"id":"cmpl-3e87ea5c-010e-4dd2-bcc4-3298ebd845a8","choices":[{"text":"NVIDIA is considered a great company for several reasons:\n\n1. **Technological Innovation**: NVIDIA is a leader in the field of graphics processing units (GPUs) and has been at the forefront of technological innovation.
+...
+and the broader tech industry.\n\nThese factors combined have contributed to NVIDIA's status as a great company in the technology sector.","index":0,"logprobs":null,"finish_reason":"stop"}],"created":1753329671,"model":"nvidia/Llama-4-Maverick-17B-128E-Instruct-FP8","system_fingerprint":null,"object":"text_completion","usage":{"prompt_tokens":16,"completion_tokens":562,"total_tokens":578,"prompt_tokens_details":null,"completion_tokens_details":null}}
+```

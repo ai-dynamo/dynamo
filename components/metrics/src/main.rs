@@ -173,6 +173,7 @@ async fn app(runtime: Runtime) -> Result<()> {
     let namespace_clone = namespace.clone();
     let metrics_collector_clone = metrics_collector.clone();
 
+    // Note: Subscribing to KVHitRateEvent for illustration purposes. They're not used in production.
     // Spawn a task to handle KV hit rate events
     tokio::spawn(async move {
         match namespace_clone.subscribe(kv_hit_rate_subject).await {

@@ -31,10 +31,10 @@ helm repo add nvidia https://helm.ngc.nvidia.com/nvidia --username='$oauthtoken'
 
 ```bash
 # Fetch the CRDs helm chart
-helm fetch https://helm.ngc.nvidia.com/nvidia/charts/dynamo-crds-v${RELEASE_VERSION}.tgz
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-crds-${RELEASE_VERSION}.tgz
 
 # Fetch the platform helm chart
-helm fetch https://helm.ngc.nvidia.com/nvidia/charts/dynamo-platform-v${RELEASE_VERSION}.tgz
+helm fetch https://helm.ngc.nvidia.com/nvidia/ai-dynamo/charts/dynamo-platform-${RELEASE_VERSION}.tgz
 ```
 
 ### Install Dynamo Cloud
@@ -42,7 +42,7 @@ helm fetch https://helm.ngc.nvidia.com/nvidia/charts/dynamo-platform-v${RELEASE_
 **Step 1: Install Custom Resource Definitions (CRDs)**
 
 ```bash
-helm install dynamo-crds dynamo-crds-v${RELEASE_VERSION}.tgz \
+helm install dynamo-crds dynamo-crds-${RELEASE_VERSION}.tgz \
   --namespace default \
   --wait \
   --atomic
@@ -53,7 +53,7 @@ helm install dynamo-crds dynamo-crds-v${RELEASE_VERSION}.tgz \
 ```bash
 kubectl create namespace ${NAMESPACE}
 
-helm install dynamo-platform dynamo-platform-v${RELEASE_VERSION}.tgz --namespace ${NAMESPACE}
+helm install dynamo-platform dynamo-platform-${RELEASE_VERSION}.tgz --namespace ${NAMESPACE}
 ```
 
 ## 2. Installing Dynamo Cloud from Source
@@ -64,13 +64,10 @@ Use this approach when developing or customizing Dynamo as a contributor, or usi
 
 Ensure you have the source code checked out and are in the `dynamo` directory:
 
-```bash
-cd deploy/cloud/helm/
-```
 
 ### Set Environment Variables
 
-Our examples use the `nvcr.io` but you can setup your own values if you use another docker registry.
+Our examples use the [`nvcr.io`](https://nvcr.io/nvidia/ai-dynamo/) but you can setup your own values if you use another docker registry.
 
 ```bash
 export NAMESPACE=dynamo-cloud # or whatever you prefer.
@@ -79,14 +76,35 @@ export DOCKER_USERNAME='$oauthtoken'  # your-username if not using nvcr.io
 export DOCKER_PASSWORD=YOUR_NGC_CLI_API_KEY  # your-password if not using nvcr.io
 ```
 
+### Pick the Dynamo Inference Image
+
+Export the tag of the Dynamo Runtime Image.
+If you are using a pre-defined release:
+
 ```bash
-export IMAGE_TAG=RELEASE_VERSION # i.e. 0.3.2 - the release you are using or your-image-tag of you have built your own Dynamo image.
-# The  Nvidia Cloud Operator image will be pulled from the `$DOCKER_SERVER/dynamo-operator:$IMAGE_TAG`.
+export IMAGE_TAG=RELEASE_VERSION # i.e. 0.3.2 - the release you are using
 ```
 
-The operator image will be pulled from `$DOCKER_SERVER/dynamo-operator:$IMAGE_TAG`.
+Or build your own image first and tag it with IMAGE_TAG
+
+```bash
+export IMAGE_TAG=<your-pick>
+./container/build.sh
+docker tag dynamo:latest-vllm <your-registry>/dynamo-base:$IMAGE_TAG
+docker login <your-registry>
+docker push <your-registry>/dynamo-base:latest-vllm
+```
 
 ### Install Dynamo Cloud
+
+You need to build and push the Dynamo Cloud Operator Image by running
+
+```bash
+cd deploy/cloud/operator
+earthly --push +docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+```
+
+The  Nvidia Cloud Operator image will be pulled from the `$DOCKER_SERVER/dynamo-operator:$IMAGE_TAG`.
 
 You could run the `deploy.sh` or use the manual commands under Step 1 and Step 2.
 
@@ -164,19 +182,6 @@ We provide a script to uninstall CRDs should you need a clean start.
 
 ## Explore Examples
 
-Pick your deployment destination.
-
-If local
-
-```bash
-export DYNAMO_CLOUD=http://localhost:8080
-```
-
-If kubernetes
-```bash
-export DYNAMO_CLOUD=https://dynamo-cloud.nvidia.com
-```
-
 If deploying to Kubernetes, create a Kubernetes secret containing your sensitive values if needed:
 
 ```bash
@@ -187,3 +192,4 @@ kubectl create secret generic hf-token-secret \
 ```
 
 Follow the [Examples](../../examples/README.md)
+For more details on how to create your own deployments follow [Create Deployment Guide](create_deployment.md)

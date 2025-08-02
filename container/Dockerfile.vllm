@@ -10,12 +10,15 @@ ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 ARG RELEASE_BUILD
 ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
-ARG VLLM_REF="059d4cd"
 
-# After this commit deepgemm API changed
-# 1.0.0 -> 2.0.0
-ARG DEEPGEMM_REF="03d0be3"
-ARG FLASHINF_REF="1d72ed4"
+# Make sure to update the dependency version in pyproject.toml when updating this
+ARG VLLM_REF="v0.10.0"
+ARG TORCH_BACKEND="cu128"
+
+# Match 0.10.0 vLLM release
+# https://github.com/vllm-project/vllm/releases/tag/v0.10.0
+ARG DEEPGEMM_REF="1876566"
+ARG FLASHINF_REF="v0.2.8rc1"
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -38,9 +41,10 @@ ARG ARCH_ALT=x86_64
 
 FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS base
 
-# Redeclare ARCH and ARCH_ALT so they're available in this stage
+# Redeclare ARCH, ARCH_ALT, TORCH_BACKEND so they're available in this stage
 ARG ARCH
 ARG ARCH_ALT
+ARG TORCH_BACKEND
 
 USER root
 ARG PYTHON_VERSION=3.12
@@ -52,6 +56,10 @@ RUN apt-get update -y && \
     meson \
     ninja-build \
     pybind11-dev \
+    # These headers are missing with the hpcx installer, required
+    # by UCX to find RDMA devices
+    libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
+    libnuma-dev librdmacm-dev ibverbs-providers \
     # Rust build dependencies
 	clang \
     libclang-dev \
@@ -68,16 +76,19 @@ RUN apt-get update -y && \
     automake \
     libtool \
     net-tools \
-    # These headers are missing with the hpcx installer, required
-    # by UCX to find RDMA devices
-    libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
-    libnuma-dev librdmacm-dev ibverbs-providers \
     # For Prometheus
     curl tar ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 ARG NIXL_UCX_REF=v1.19.x
-ARG NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
+ARG NIXL_REF=0.4.1
+
+ENV NIXL_SRC_DIR=/opt/nixl
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ARG ARCH_ALT
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+ENV LD_LIBRARY_PATH=$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:$LD_LIBRARY_PATH
 
 WORKDIR /workspace
 
@@ -121,24 +132,19 @@ WORKDIR /workspace
 ### NIXL SETUP ###
 # Clone nixl source
 # TEMP: disable gds backend for arm64
-RUN git clone "https://github.com/ai-dynamo/nixl.git" /opt/nixl && \
-    cd /opt/nixl && \
+RUN git clone "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
+    cd ${NIXL_SRC_DIR} && \
     git checkout ${NIXL_REF} && \
     if [ "$ARCH" = "arm64" ]; then \
-        cd /opt/nixl && \
-        mkdir build && \
-        meson setup build/ --buildtype=release --prefix=/usr/local/nixl -Ddisable_gds_backend=true -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
-        cd build/ && \
-        ninja && \
-        ninja install; \
+        nixl_build_args="-Ddisable_gds_backend=true"; \
     else \
-        cd /opt/nixl && \
-        mkdir build && \
-        meson setup build/ --buildtype=release --prefix=/usr/local/nixl && \
-        cd build/ && \
-        ninja && \
-        ninja install; \
-    fi
+        nixl_build_args=""; \
+    fi && \
+    mkdir build && \
+    meson setup build/ --buildtype=release --prefix=$NIXL_PREFIX $nixl_build_args && \
+    cd build/ && \
+    ninja && \
+    ninja install;
 
 ### NATS & ETCD SETUP ###
 ENV ETCD_VERSION="v3.5.21"
@@ -166,11 +172,10 @@ ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 # TODO: Move gds_path selection based on arch into NIXL build
 # TEMP: disable gds backend for arm64
 RUN if [ "$ARCH" = "arm64" ]; then \
-        cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl \
-        --config-settings=setup-args="-Ddisable_gds_backend=true" \
-        --config-settings=setup-args="-Dgds_path=/usr/local/cuda/targets/sbsa-linux"; \
+        cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl \
+        --config-settings=setup-args="-Ddisable_gds_backend=true"; \
     else \
-        cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl; \
+        cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl; \
     fi && \
     # Install the wheel
     # TODO: Move NIXL wheel install to the wheel_builder stage
@@ -186,13 +191,13 @@ ARG MAX_JOBS=16
 ENV MAX_JOBS=$MAX_JOBS
 ENV CUDA_HOME=/usr/local/cuda
 
-# TODO - split vllm, DeepEP, DeepGeMM, PPLX installs
-# Should be able to select how you want your build to go
 RUN --mount=type=bind,source=./container/deps/,target=/tmp/deps \
     --mount=type=cache,target=/root/.cache/uv \
-    cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
-    chmod +x /tmp/install_vllm.sh && \
-    /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt --deepgemm-ref $DEEPGEMM_REF --flashinf-ref $FLASHINF_REF
+        # TODO - split vllm, DeepEP, DeepGeMM, PPLX installs
+        # Should be able to select how you want your build to go
+        cp /tmp/deps/vllm/install_vllm.sh /tmp/install_vllm.sh && \
+        chmod +x /tmp/install_vllm.sh && \
+        /tmp/install_vllm.sh --editable --vllm-ref $VLLM_REF --max-jobs $MAX_JOBS --arch $ARCH --installation-dir /opt --deepgemm-ref $DEEPGEMM_REF --flashinf-ref $FLASHINF_REF --torch-backend $TORCH_BACKEND;
 
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
@@ -282,7 +287,7 @@ RUN uv pip install maturin[patchelf]
 
 USER $USERNAME
 ENV HOME=/home/$USERNAME
-ENV PYTHONPATH=$HOME/dynamo/deploy/sdk/src:$PYTHONPATH:$HOME/dynamo/components/planner/src:$PYTHONPATH
+ENV PYTHONPATH=$PYTHONPATH:$HOME/dynamo/components/planner/src:$PYTHONPATH
 ENV CARGO_TARGET_DIR=$HOME/dynamo/.build/target
 WORKDIR $HOME
 
@@ -313,6 +318,9 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 # Use build arg RELEASE_BUILD = true to generate wheels for Python 3.10, 3.11 and 3.12.
 ARG RELEASE_BUILD
 
+# Keep in sync with the base image.
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+
 WORKDIR /workspace
 
 RUN yum update -y \
@@ -329,8 +337,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 
 COPY --from=base $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=base $CARGO_HOME $CARGO_HOME
-# NIXL path default is NIXL_PREFIX=/opt/nvidia/nvda_nixl
-COPY --from=base /usr/local/nixl /opt/nvidia/nvda_nixl
+COPY --from=base $NIXL_PREFIX $NIXL_PREFIX
 COPY --from=base /workspace /workspace
 COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
 ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
@@ -342,13 +349,11 @@ COPY LICENSE /workspace/
 COPY Cargo.toml /workspace/
 COPY Cargo.lock /workspace/
 COPY rust-toolchain.toml /workspace/
-COPY hatch_build.py /workspace/
 
 # Copy source code
 COPY lib/ /workspace/lib/
 COPY components /workspace/components
 COPY launch /workspace/launch
-COPY deploy/sdk /workspace/deploy/sdk
 
 RUN cargo build \
 	--release \
@@ -378,11 +383,7 @@ ENV CARGO_TARGET_DIR=/workspace/target
 WORKDIR /workspace
 
 COPY --from=wheel_builder /workspace /workspace
-COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
-ARG ARCH_ALT
-ENV LD_LIBRARY_PATH=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu:\
-/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugin:\
-$LD_LIBRARY_PATH
+COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 
 # Copy Cargo cache to avoid re-downloading dependencies
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
@@ -390,22 +391,11 @@ COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 # Copy rest of the code
 COPY . /workspace
 
-# Build C bindings, creates lib/bindings/c/include
-#
-# TODO: In theory the 'cargo build' in earlier stage covers this, we "just" need to copy the
-# `lib/bindings/c/include` folder that build.rs generated across.
-# I couldn't get that to work, hence TODO.
-RUN cd /workspace/lib/bindings/c && cargo build --release --locked
-
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
     mkdir /opt/dynamo/bindings/lib && \
     cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
-    cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
-    cp -r lib/bindings/c/include /opt/dynamo/bindings/.  && \
-    cp target/release/dynamo-run /usr/local/bin && \
-    cp target/release/metrics /usr/local/bin && \
-    cp target/release/mock_worker /usr/local/bin
+    cp target/release/metrics /usr/local/bin
 
 RUN uv pip install /workspace/dist/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/dist/ai_dynamo*any.whl
@@ -437,20 +427,30 @@ ENV DYNAMO_HOME=/workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
 
+ARG ARCH_ALT
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+
 # Install build-essential and python3-dev as apt dependencies
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential \
         python3-dev \
+        # jq and curl for polling various endpoints and health checks
+        jq \
+        curl \
+        # For debugging
+        vim \
+        # Libraries required by UCX to find RDMA devices
+        libibverbs1 rdma-core ibverbs-utils libibumad3 \
+        libnuma1 librdmacm1 ibverbs-providers \
         # JIT Kernel Compilation, flashinfer
         ninja-build \
         g++ \
         cuda-toolkit-12-8 && \
     rm -rf /var/lib/apt/lists/*
 
-### COPY BINDINGS ###
-# Copy all bindings (wheels, lib, include) from ci_minimum
-COPY --from=ci_minimum /opt/dynamo/bindings /opt/dynamo/bindings
 ### COPY NATS & ETCD ###
 # Copy nats and etcd from base image
 COPY --from=base /usr/bin/nats-server /usr/bin/nats-server
@@ -459,34 +459,32 @@ ENV PATH=/usr/local/bin/etcd/:$PATH
 
 # Copy UCX from base image as plugin for NIXL
 # Copy NIXL source from wheel_builder image
+# Copy dynamo wheels for gitlab artifacts
 COPY --from=base /usr/local/ucx /usr/local/ucx
-COPY --from=wheel_builder /opt/nvidia/nvda_nixl /opt/nvidia/nvda_nixl
+COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
+COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 
 # Copies vllm, DeepEP, DeepGEMM, PPLX repos (all editable installs) and nvshmem binaries
 COPY --from=base /opt/vllm /opt/vllm
-ARG ARCH_ALT
+
 ENV LD_LIBRARY_PATH=\
 /opt/vllm/tools/ep_kernels/ep_kernels_workspace/nvshmem_install/lib:\
-/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu:\
-/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugin:\
+$NIXL_LIB_DIR:\
+$NIXL_PLUGIN_DIR:\
 /usr/local/ucx/lib:\
 /usr/local/ucx/lib/ucx:\
 $LD_LIBRARY_PATH
 
-
 # Copy entire venv
-# Theres a lot of stuff we'd have to re-compile
-# Think its better to just copy
+# Theres a lot of stuff we'd have to re-compile (for arm64)
+# TODO: use pip ai-dynamo[vllm] in venv to replicate end user environment
+# Copy metrics binary from wheel_builder image, not part of ai-dynamo wheel
+COPY --from=ci_minimum /workspace/target/release/metrics /usr/local/bin/metrics
 COPY --from=ci_minimum ${VIRTUAL_ENV} ${VIRTUAL_ENV}
 
-# Once UX refactor is merged
-# Python components will have been pip installed and packaged in wheel
-# Can remove these files
-COPY components/ /workspace/components/
-COPY tests/ /workspace/tests/
-COPY examples/ /workspace/examples/
-COPY deploy/ /workspace/deploy/
-COPY benchmarks/ /workspace/benchmarks/
+# Keep everything from ci_minimum for mypy and other pre-merge tests
+# TODO: Remove this once we have a functional CI image built on top of the runtime image
+COPY --from=ci_minimum /workspace/ /workspace/
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \

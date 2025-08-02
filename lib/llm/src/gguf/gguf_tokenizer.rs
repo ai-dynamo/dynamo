@@ -27,8 +27,7 @@
 
 // https://github.com/huggingface/transformers/blob/8685b3c5d2dd2550527773d2a02499495a759e31/src/transformers/convert_slow_tokenizer.py
 
-use std::collections::HashMap;
-
+use ahash::AHashMap;
 use anyhow::Result;
 use itertools::Itertools;
 use tokenizers::{
@@ -236,7 +235,8 @@ fn bpe_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind, AddedTokens
         })
         .collect::<Vec<_>>();
 
-    let mut vocab = HashMap::new();
+    // Use ahash::AHashMap so that we satisfy Into<AHashMap<_>> bounds
+    let mut vocab: AHashMap<String, u32> = AHashMap::new();
     for (i, token) in p.tokens.iter().enumerate() {
         #[allow(clippy::cast_possible_truncation)]
         vocab.insert(token.clone(), i as u32);
@@ -266,7 +266,10 @@ fn bpe_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind, AddedTokens
         false, true, true,
     )));
     if add_bos_token.is_some_and(|x| x) {
-        let mut special_toks = HashMap::new();
+        // Use ahash::AHashMap so that we satisfy Into<AHashMap<_>> bounds
+        let mut special_toks: AHashMap<String, processors::template::SpecialToken> =
+            AHashMap::new();
+
         special_toks.insert(
             p.tokens[bos as usize].clone(),
             template::SpecialToken::new(
