@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from typing import Any, Dict
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -39,9 +39,45 @@ def k8s_api(mock_custom_api, mock_config):
     return KubernetesAPI()
 
 
+@pytest.fixture
+def k8s_api_with_namespace(mock_custom_api, mock_config):
+    return KubernetesAPI(k8s_namespace="test-namespace")
+
+
+def test_kubernetes_api_init_with_namespace(mock_custom_api, mock_config):
+    """Test KubernetesAPI initialization with custom namespace"""
+    api = KubernetesAPI(k8s_namespace="custom-namespace")
+    assert api.current_namespace == "custom-namespace"
+
+
+def test_kubernetes_api_init_without_namespace(mock_custom_api, mock_config):
+    """Test KubernetesAPI initialization without custom namespace"""
+    api = KubernetesAPI()
+    # Should use the default namespace logic
+    assert api.current_namespace == "default"
+
+
+def test_get_graph_deployment_from_name(k8s_api, mock_custom_api):
+    """Test _get_graph_deployment_from_name method"""
+    mock_deployment = {"metadata": {"name": "test-deployment"}}
+    mock_custom_api.get_namespaced_custom_object.return_value = mock_deployment
+
+    result = k8s_api._get_graph_deployment_from_name("test-deployment")
+
+    assert result == mock_deployment
+    mock_custom_api.get_namespaced_custom_object.assert_called_once_with(
+        group="nvidia.com",
+        version="v1alpha1",
+        namespace=k8s_api.current_namespace,
+        plural="dynamographdeployments",
+        name="test-deployment",
+    )
+
+
 @pytest.mark.asyncio
-async def test_wait_for_graph_deployment_ready_success(k8s_api, mock_custom_api):
-    # Mock the get_graph_deployment response
+async def test_is_deployment_ready_true(k8s_api, mock_custom_api):
+    """Test is_deployment_ready method when deployment is ready"""
+    # Mock the _get_graph_deployment_from_name response
     mock_deployment: Dict[str, Any] = {
         "status": {
             "conditions": [
@@ -49,22 +85,18 @@ async def test_wait_for_graph_deployment_ready_success(k8s_api, mock_custom_api)
             ]
         }
     }
-    k8s_api.get_graph_deployment = AsyncMock(return_value=mock_deployment)
 
-    # Test with minimal attempts and delay for faster testing
-    await k8s_api.wait_for_graph_deployment_ready(
-        "test-deployment", max_attempts=2, delay_seconds=0.1
-    )
-
-    # Verify get_graph_deployment was called
-    k8s_api.get_graph_deployment.assert_called_once_with(
-        "test-deployment", k8s_api.current_namespace
-    )
+    # Mock the method on the instance
+    with patch.object(
+        k8s_api, "_get_graph_deployment_from_name", return_value=mock_deployment
+    ):
+        result = await k8s_api.is_deployment_ready("test-deployment")
+        assert result is True
 
 
 @pytest.mark.asyncio
-async def test_wait_for_graph_deployment_ready_timeout(k8s_api, mock_custom_api):
-    # Mock the get_graph_deployment response with not ready status
+async def test_is_deployment_ready_false(k8s_api, mock_custom_api):
+    """Test is_deployment_ready method when deployment is not ready"""
     mock_deployment: Dict[str, Any] = {
         "status": {
             "conditions": [
@@ -76,54 +108,115 @@ async def test_wait_for_graph_deployment_ready_timeout(k8s_api, mock_custom_api)
             ]
         }
     }
-    k8s_api.get_graph_deployment = AsyncMock(return_value=mock_deployment)
 
-    # Test with minimal attempts and delay for faster testing
-    with pytest.raises(TimeoutError) as exc_info:
+    # Mock the method on the instance
+    with patch.object(
+        k8s_api, "_get_graph_deployment_from_name", return_value=mock_deployment
+    ):
+        result = await k8s_api.is_deployment_ready("test-deployment")
+        assert result is False
+
+
+@pytest.mark.asyncio
+async def test_is_deployment_ready_not_found(k8s_api, mock_custom_api):
+    """Test is_deployment_ready method when deployment is not found"""
+    # Mock the method on the instance
+    with patch.object(k8s_api, "_get_graph_deployment_from_name", return_value=None):
+        with pytest.raises(ValueError) as exc_info:
+            await k8s_api.is_deployment_ready("test-deployment")
+
+        assert "not found" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_wait_for_graph_deployment_ready_success(k8s_api, mock_custom_api):
+    """Test wait_for_graph_deployment_ready when deployment becomes ready"""
+    # Mock the _get_graph_deployment_from_name response
+    mock_deployment: Dict[str, Any] = {
+        "status": {
+            "conditions": [
+                {"type": "Ready", "status": "True", "message": "Deployment is ready"}
+            ]
+        }
+    }
+
+    # Mock the method on the instance
+    with patch.object(
+        k8s_api, "_get_graph_deployment_from_name", return_value=mock_deployment
+    ):
+        # Test with minimal attempts and delay for faster testing
         await k8s_api.wait_for_graph_deployment_ready(
             "test-deployment", max_attempts=2, delay_seconds=0.1
         )
 
-    assert "is not ready after" in str(exc_info.value)
-    assert k8s_api.get_graph_deployment.call_count == 2
+
+@pytest.mark.asyncio
+async def test_wait_for_graph_deployment_ready_timeout(k8s_api, mock_custom_api):
+    """Test wait_for_graph_deployment_ready when deployment times out"""
+    # Mock the _get_graph_deployment_from_name response with not ready status
+    mock_deployment: Dict[str, Any] = {
+        "status": {
+            "conditions": [
+                {
+                    "type": "Ready",
+                    "status": "False",
+                    "message": "Deployment is not ready",
+                }
+            ]
+        }
+    }
+
+    # Mock the method on the instance
+    with patch.object(
+        k8s_api, "_get_graph_deployment_from_name", return_value=mock_deployment
+    ):
+        # Test with minimal attempts and delay for faster testing
+        with pytest.raises(TimeoutError) as exc_info:
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment", max_attempts=2, delay_seconds=0.1
+            )
+
+        assert "is not ready after" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
 async def test_wait_for_graph_deployment_not_found(k8s_api, mock_custom_api):
-    # Mock the get_graph_deployment response to return None
-    k8s_api.get_graph_deployment = AsyncMock(return_value=None)
+    """Test wait_for_graph_deployment_ready when deployment is not found"""
+    # Mock the _get_graph_deployment_from_name response to return None
+    with patch.object(k8s_api, "_get_graph_deployment_from_name", return_value=None):
+        # Test with minimal attempts and delay for faster testing
+        with pytest.raises(ValueError) as exc_info:
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment", max_attempts=2, delay_seconds=0.1
+            )
 
-    # Test with minimal attempts and delay for faster testing
-    with pytest.raises(ValueError) as exc_info:
-        await k8s_api.wait_for_graph_deployment_ready(
-            "test-deployment", max_attempts=2, delay_seconds=0.1
-        )
-
-    assert "not found" in str(exc_info.value)
-    assert k8s_api.get_graph_deployment.call_count == 1
+        assert "not found" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
 async def test_wait_for_graph_deployment_no_conditions(k8s_api, mock_custom_api):
-    # Mock the get_graph_deployment response with no conditions
+    """Test wait_for_graph_deployment_ready when deployment has no conditions"""
+    # Mock the _get_graph_deployment_from_name response with no conditions
     mock_deployment: Dict[str, Any] = {"status": {}}
-    k8s_api.get_graph_deployment = AsyncMock(return_value=mock_deployment)
 
-    # Test with minimal attempts and delay for faster testing
-    with pytest.raises(TimeoutError) as exc_info:
-        await k8s_api.wait_for_graph_deployment_ready(
-            "test-deployment", max_attempts=2, delay_seconds=0.1
-        )
+    with patch.object(
+        k8s_api, "_get_graph_deployment_from_name", return_value=mock_deployment
+    ):
+        # Test with minimal attempts and delay for faster testing
+        with pytest.raises(TimeoutError) as exc_info:
+            await k8s_api.wait_for_graph_deployment_ready(
+                "test-deployment", max_attempts=2, delay_seconds=0.1
+            )
 
-    assert "is not ready after" in str(exc_info.value)
-    assert k8s_api.get_graph_deployment.call_count == 2
+        assert "is not ready after" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
 async def test_wait_for_graph_deployment_ready_on_second_attempt(
     k8s_api, mock_custom_api
 ):
-    # Mock the get_graph_deployment response to return not ready first, then ready
+    """Test wait_for_graph_deployment_ready when deployment becomes ready on second attempt"""
+    # Mock the _get_graph_deployment_from_name response to return not ready first, then ready
     mock_deployment_not_ready: Dict[str, Any] = {
         "status": {
             "conditions": [
@@ -142,13 +235,13 @@ async def test_wait_for_graph_deployment_ready_on_second_attempt(
             ]
         }
     }
-    k8s_api.get_graph_deployment = AsyncMock(
-        side_effect=[mock_deployment_not_ready, mock_deployment_ready]
-    )
 
-    # Test with minimal attempts and delay for faster testing
-    await k8s_api.wait_for_graph_deployment_ready(
-        "test-deployment", max_attempts=2, delay_seconds=0.1
-    )
-
-    assert k8s_api.get_graph_deployment.call_count == 2
+    with patch.object(
+        k8s_api,
+        "_get_graph_deployment_from_name",
+        side_effect=[mock_deployment_not_ready, mock_deployment_ready],
+    ):
+        # Test with minimal attempts and delay for faster testing
+        await k8s_api.wait_for_graph_deployment_ready(
+            "test-deployment", max_attempts=2, delay_seconds=0.1
+        )

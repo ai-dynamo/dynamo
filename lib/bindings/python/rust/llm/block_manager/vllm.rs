@@ -29,6 +29,7 @@ use crate::llm::block_manager::VllmBlockManager;
 use crate::to_pyerr;
 
 mod block_list;
+mod connector;
 mod request;
 mod slot;
 
@@ -45,6 +46,10 @@ fn _vllm_integration(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<BlockState>()?;
     m.add_class::<BlockStates>()?;
     m.add_class::<SlotUpdate>()?;
+
+    m.add_class::<connector::worker::KvConnectorWorker>()?;
+    m.add_class::<connector::leader::KvConnectorLeader>()?;
+    m.add_class::<connector::SchedulerOutput>()?;
     Ok(())
 }
 
@@ -543,13 +548,28 @@ impl<R: RequestKey> SlotManager<R> {
 
     #[tracing::instrument(level = "debug", skip(self), fields(request_id = %request_id))]
     pub fn drop_slot(&mut self, request_id: &R) {
-        if self.slots.remove(request_id).is_none() {
-            // Request ID may not be found if the client aborts the request.
-            tracing::debug!(
-                request_id,
-                "request id {} not found in the slot manager during drop",
-                request_id
-            );
+        match self.slots.remove(request_id) {
+            Some(slot) => {
+                let isl = slot.num_tokens(SlotPosition::Prefill);
+                let isl_device = slot.num_blocks_cached_from_device() * self.block_size;
+                let isl_host = slot.num_blocks_cached_from_host() * self.block_size;
+                let isl_disk = slot.num_blocks_cached_from_disk() * self.block_size;
+                tracing::info!(
+                    request_id, "request complete isl: {} - cache hits: device: {}, host: {}, disk: {} - prefilled: {}",
+                    isl,
+                    isl_device,
+                    isl_host,
+                    isl_disk,
+                    isl - (isl_device + isl_host + isl_disk)
+                );
+            }
+            None => {
+                tracing::debug!(
+                    request_id,
+                    "request id {} not found in the slot manager during drop",
+                    request_id
+                );
+            }
         }
     }
 

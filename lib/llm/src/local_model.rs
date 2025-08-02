@@ -47,6 +47,7 @@ pub struct LocalModelBuilder {
     kv_cache_block_size: u32,
     http_port: u16,
     migration_limit: u32,
+    is_mocker: bool,
 }
 
 impl Default for LocalModelBuilder {
@@ -62,6 +63,7 @@ impl Default for LocalModelBuilder {
             template_file: Default::default(),
             router_config: Default::default(),
             migration_limit: Default::default(),
+            is_mocker: Default::default(),
         }
     }
 }
@@ -119,6 +121,11 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn is_mocker(&mut self, is_mocker: bool) -> &mut Self {
+        self.is_mocker = is_mocker;
+        self
+    }
+
     /// Make an LLM ready for use:
     /// - Download it from Hugging Face (and NGC in future) if necessary
     /// - Resolve the path
@@ -169,7 +176,7 @@ impl LocalModelBuilder {
         let relative_path = model_path.trim_start_matches(HF_SCHEME);
         let full_path = if is_hf_repo {
             // HF download if necessary
-            super::hub::from_hf(relative_path).await?
+            super::hub::from_hf(relative_path, self.is_mocker).await?
         } else {
             fs::canonicalize(relative_path)?
         };

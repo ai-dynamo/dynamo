@@ -27,9 +27,19 @@ const IGNORED: [&str; 5] = [
 
 const HF_TOKEN_ENV_VAR: &str = "HF_TOKEN";
 
+/// Checks if a file is a model weight file
+fn is_weight_file(filename: &str) -> bool {
+    filename.ends_with(".bin")
+        || filename.ends_with(".safetensors")
+        || filename.ends_with(".h5")
+        || filename.ends_with(".msgpack")
+        || filename.ends_with(".ckpt.index")
+}
+
 /// Attempt to download a model from Hugging Face
 /// Returns the directory it is in
-pub async fn from_hf(name: impl AsRef<Path>) -> anyhow::Result<PathBuf> {
+/// If ignore_weights is true, model weight files will be skipped
+pub async fn from_hf(name: impl AsRef<Path>, ignore_weights: bool) -> anyhow::Result<PathBuf> {
     let name = name.as_ref();
     let token = env::var(HF_TOKEN_ENV_VAR).ok();
     let api = ApiBuilder::new()
@@ -66,6 +76,11 @@ pub async fn from_hf(name: impl AsRef<Path>) -> anyhow::Result<PathBuf> {
             continue;
         }
 
+        // If ignore_weights is true, skip weight files
+        if ignore_weights && is_weight_file(&sib.rfilename) {
+            continue;
+        }
+
         match repo.get(&sib.rfilename).await {
             Ok(path) => {
                 p = path;
@@ -83,8 +98,14 @@ pub async fn from_hf(name: impl AsRef<Path>) -> anyhow::Result<PathBuf> {
     }
 
     if !files_downloaded {
+        let file_type = if ignore_weights {
+            "non-weight"
+        } else {
+            "valid"
+        };
         return Err(anyhow::anyhow!(
-            "No valid files found for model '{}'.",
+            "No {} files found for model '{}'.",
+            file_type,
             model_name
         ));
     }

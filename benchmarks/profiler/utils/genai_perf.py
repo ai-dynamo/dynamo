@@ -34,7 +34,7 @@ def _get_common_genai_perf_cmd(
     artifact_dir,
     seed=100,
     model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    port=8000,
+    base_url="http://localhost:8000",
 ):
     return [
         "genai-perf",
@@ -49,7 +49,7 @@ def _get_common_genai_perf_cmd(
         "/v1/chat/completions",
         "--streaming",
         "--url",
-        f"http://localhost:{port}",
+        base_url,
         "--extra-inputs",
         "ignore_eos:true",
         "--extra-inputs",
@@ -69,13 +69,13 @@ def get_prefill_genai_perf_cmd(
     seed=100,
     model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
     osl=5,
-    port=8000,
+    base_url="http://localhost:8000",
 ):
     return _get_common_genai_perf_cmd(
         artifact_dir,
         seed,
         model,
-        port,
+        base_url,
     ) + [
         "--synthetic-input-tokens-mean",
         str(isl),
@@ -103,13 +103,13 @@ def get_decode_genai_perf_cmd(
     num_request,
     seed=100,
     model="deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
-    port=8000,
+    base_url="http://localhost:8000",
 ):
     return _get_common_genai_perf_cmd(
         artifact_dir,
         seed,
         model,
-        port,
+        base_url,
     ) + [
         "--synthetic-input-tokens-mean",
         str(isl),
@@ -146,11 +146,15 @@ def get_gap_result(artifact_dir: str) -> dict:
         return json.load(f)
 
 
-def benchmark_prefill(isl, genai_perf_artifact_dir, model_name, port):
+def benchmark_prefill(
+    isl, genai_perf_artifact_dir, model_name, base_url="http://localhost:8000"
+):
     logger.info(f"Running genai-perf with isl {isl}")
     genai_perf_cmd = get_prefill_genai_perf_cmd(
-        isl, genai_perf_artifact_dir, model=model_name, port=port
+        isl, genai_perf_artifact_dir, model=model_name, base_url=base_url
     )
+    print(f"genai-perf cmd: {genai_perf_cmd}")
+    # import pdb; pdb.set_trace()
     gap_process = subprocess.Popen(
         genai_perf_cmd,
         stdout=subprocess.PIPE,
@@ -169,12 +173,20 @@ def benchmark_prefill(isl, genai_perf_artifact_dir, model_name, port):
         return None
 
 
-def benchmark_decode(isl, osl, num_request, genai_perf_artifact_dir, model_name, port):
+def benchmark_decode(
+    isl,
+    osl,
+    num_request,
+    genai_perf_artifact_dir,
+    model_name,
+    base_url="http://localhost:8000",
+):
     logger.info(f"Profiling decode with num_request {num_request}...")
 
     # first warm-up the engine by pre-computing all prefill tokens
     # we use the same random seed to make sure the prompt is the same
     seed = random.randint(0, 1000000)
+
     genai_perf_cmd = get_decode_genai_perf_cmd(
         isl,
         osl,
@@ -182,7 +194,7 @@ def benchmark_decode(isl, osl, num_request, genai_perf_artifact_dir, model_name,
         num_request,
         seed=seed,
         model=model_name,
-        port=port,
+        base_url=base_url,
     )
     gap_process = subprocess.Popen(
         genai_perf_cmd,
@@ -199,7 +211,7 @@ def benchmark_decode(isl, osl, num_request, genai_perf_artifact_dir, model_name,
         num_request,
         seed=seed,
         model=model_name,
-        port=port,
+        base_url=base_url,
     )
     gap_process = subprocess.Popen(
         genai_perf_cmd,

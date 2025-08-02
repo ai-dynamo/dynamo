@@ -28,23 +28,24 @@ speculative_config:
   decoding_type: Eagle
   max_draft_len: 1
   pytorch_weights_path: nvidia/Llama-4-Maverick-17B-128E-Eagle3
-  eagle3_one_model: False
+  eagle3_one_model: false
 
 kv_cache_config:
   free_gpu_memory_fraction: 0.5
   enable_block_reuse: false
+  dtype: fp8
 
-use_cuda_graph: true
-cuda_graph_padding_enabled: true
-cuda_graph_batch_sizes:
-- 1
-- 2
-- 4
-- 8
-- 16
-- 32
-- 64
-- 128
-- 256
+cuda_graph_config:
+  enable_padding: true
+  batch_sizes:
+  - 1
+  - 2
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  - 128
+  - 256
+
 print_iter_log: true
-kv_cache_dtype: fp8

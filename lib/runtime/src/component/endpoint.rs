@@ -69,6 +69,9 @@ impl EndpointConfigBuilder {
         // acquire the registry lock
         let registry = endpoint.drt().component_registry.inner.lock().await;
 
+        // Add metrics to the handler. The endpoint provides additional information to the handler.
+        handler.add_metrics(&endpoint)?;
+
         // get the group
         let group = registry
             .services
@@ -110,7 +113,11 @@ impl EndpointConfigBuilder {
             .map_err(|e| anyhow::anyhow!("Failed to build push endpoint: {e}"))?;
 
         // launch in primary runtime
-        let task = tokio::spawn(push_endpoint.start(service_endpoint));
+        let task = tokio::spawn(push_endpoint.start(
+            service_endpoint,
+            endpoint.name.clone(),
+            endpoint.drt().system_health.clone(),
+        ));
 
         // make the components service endpoint discovery in etcd
 

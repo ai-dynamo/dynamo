@@ -13,55 +13,69 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
 import logging
 import subprocess
 import tempfile
 
 import yaml
 
-from dynamo.sdk import service
-from dynamo.sdk.lib.config import ServiceConfig
-from dynamo.sdk.lib.image import DYNAMO_IMAGE
+from dynamo.planner.config import ServiceConfig
+from dynamo.planner.defaults import SLAPlannerDefaults
+from dynamo.runtime import DistributedRuntime, dynamo_worker
 
 logger = logging.getLogger(__name__)
 
 
-@service(
-    dynamo={
-        "namespace": "dynamo",
-    },
-    workers=1,
-    image=DYNAMO_IMAGE,
-)
-class Prometheus:
-    def __init__(self):
-        """Initialize Frontend service with HTTP server and model configuration."""
-        self.config = ServiceConfig.get_parsed_config("Prometheus")
-        self.process = None
+@dynamo_worker(static=False)
+async def worker(runtime: DistributedRuntime):
+    """Initialize and run Prometheus server with Dynamo config."""
+    config = ServiceConfig.get_parsed_config("Prometheus")
 
-        logger.info(f"Prometheus config: {self.config}")
+    logger.info(f"Prometheus config: {config}")
 
-        self.start_prometheus_server()
+    await start_prometheus_server(config)
 
-    def start_prometheus_server(self):
-        logger.info("Starting prometheus server...")
 
-        self.temp_file = tempfile.NamedTemporaryFile(
-            mode="w", suffix=".yml", delete=False
-        )
-        yaml.dump(self.config, self.temp_file)
-        self.temp_file.close()
-        config_path = self.temp_file.name
+async def start_prometheus_server(config):
+    logger.info("Starting prometheus server...")
 
-        cmd = [
-            "prometheus",
-            f"--config.file={config_path}",
-        ]
+    temp_file = tempfile.NamedTemporaryFile(mode="w", suffix=".yml", delete=False)
+    yaml.dump(config, temp_file)
+    temp_file.close()
+    config_path = temp_file.name
 
-        logger.info(f"Prometheus cmd: {cmd}")
+    prometheus_port = SLAPlannerDefaults.port
+    cmd = [
+        "prometheus",
+        f"--config.file={config_path}",
+        f"--web.listen-address=0.0.0.0:{prometheus_port}",
+    ]
 
-        self.process = subprocess.Popen(
-            cmd,
-            stdout=None,
-            stderr=None,
-        )
+    logger.info(f"Prometheus cmd: {cmd}")
+
+    process = subprocess.Popen(
+        cmd,
+        stdout=None,
+        stderr=None,
+    )
+
+    # Keep the worker running
+    try:
+        while True:
+            await asyncio.sleep(1)
+            if process.poll() is not None:
+                logger.error("Prometheus process died")
+                break
+    except asyncio.CancelledError:
+        logger.info("Shutting down Prometheus...")
+        process.terminate()
+        process.wait()
+        raise
+
+
+if __name__ == "__main__":
+    # The dynamo_worker decorator handles runtime setup
+    import asyncio
+
+    asyncio.run(worker())

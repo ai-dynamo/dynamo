@@ -31,10 +31,10 @@ use crate::{
     kv_router::{
         approx::ApproxKvIndexer,
         indexer::{
-            compute_block_hash_for_seq, KvIndexer, KvIndexerInterface, KvRouterError,
-            OverlapScores, RouterEvent,
+            compute_block_hash_for_seq, compute_seq_hash_for_block, KvIndexer, KvIndexerInterface,
+            KvRouterError, OverlapScores, RouterEvent,
         },
-        metrics_aggregator::EndpointCollector,
+        // metrics_aggregator::EndpointCollector,
         protocols::{LocalBlockHash, RouterRequest, RouterResponse, WorkerSelectionResult},
         scheduler::{KvScheduler, KvSchedulerError, SchedulingRequest},
         scoring::ProcessedEndpoints,
@@ -43,6 +43,7 @@ use crate::{
     protocols::common::llm_backend::LLMEngineOutput,
 };
 
+use dynamo_runtime::component::Instance;
 use dynamo_runtime::traits::events::EventSubscriber;
 
 // [gluo TODO] shouldn't need to be public
@@ -55,7 +56,7 @@ pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 pub trait WorkerSelector {
     fn select_worker(
         &self,
-        workers: &ProcessedEndpoints,
+        workers: &[Instance],
         request: &SchedulingRequest,
         block_size: u32,
     ) -> Result<WorkerSelectionResult, KvSchedulerError>;
@@ -70,7 +71,8 @@ pub struct KvRouterConfig {
 
     pub use_kv_events: bool,
 
-    // note: this is not actually used for now
+    // TODO: this is not actually used for now
+    // Would need this (along with total kv blocks) to trigger AllWorkersBusy error for e.g. rate-limiting
     pub max_num_batched_tokens: u32,
 }
 
@@ -151,8 +153,16 @@ impl KvRouter {
             .primary_lease()
             .expect("Cannot KV route static workers")
             .primary_token();
-        let metrics_aggregator =
-            EndpointCollector::new(component.clone(), cancellation_token.clone()).await;
+
+        let generate_endpoint = component.endpoint("generate");
+        let client = generate_endpoint.client().await?;
+
+        let instances_rx = match client.instance_source.as_ref() {
+            InstanceSource::Dynamic(rx) => rx.clone(),
+            InstanceSource::Static => {
+                panic!("Expected dynamic instance source for KV routing");
+            }
+        };
 
         let indexer = if use_kv_events {
             Indexer::KvIndexer(KvIndexer::new(cancellation_token.clone(), block_size))
@@ -168,7 +178,7 @@ impl KvRouter {
         let scheduler = KvScheduler::start(
             component.namespace().clone(),
             block_size,
-            metrics_aggregator.endpoints_watcher(),
+            instances_rx,
             selector,
         )
         .await?;
@@ -191,7 +201,7 @@ impl KvRouter {
                         }
                     };
                     if let Err(e) = kv_events_tx.send(event).await {
-                        tracing::debug!(
+                        tracing::warn!(
                             "failed to send kv event to indexer; shutting down: {:?}",
                             e
                         );
@@ -222,25 +232,25 @@ impl KvRouter {
         let _guard = self.find_best_match_mutex.lock().await;
 
         let isl_tokens = tokens.len();
-        let block_size = self.block_size;
 
-        let local_block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
-        let overlap_scores = self.indexer.find_matches(local_block_hashes).await?;
+        let block_hashes = compute_block_hash_for_seq(tokens, self.block_size);
+        let seq_hashes = compute_seq_hash_for_block(&block_hashes);
+
+        let overlap_scores = self.indexer.find_matches(block_hashes.clone()).await?;
 
         let best_worker_id = self
             .scheduler
             .schedule(
                 context_id.to_string(),
                 isl_tokens,
-                block_size,
-                tokens,
+                seq_hashes.clone(),
                 overlap_scores.clone(),
             )
             .await?;
 
         if let Indexer::ApproxKvIndexer(ref indexer) = self.indexer {
             indexer
-                .process_routing_decision_for_request(tokens, best_worker_id)
+                .process_routing_decision(best_worker_id, block_hashes, seq_hashes)
                 .await
                 .unwrap();
         };
@@ -253,9 +263,9 @@ impl KvRouter {
         Ok((best_worker_id, overlap_amount))
     }
 
-    /// Push tokens to a specific request's sequence
-    pub async fn push(&self, request_id: &String, tokens: &[u32]) {
-        self.scheduler.push(request_id, tokens).await
+    /// Free all blocks associated with a request
+    pub async fn mark_prefill_completed(&self, request_id: &String) {
+        self.scheduler.mark_prefill_completed(request_id).await
     }
 
     /// Free all blocks associated with a request
@@ -313,68 +323,45 @@ impl AsyncEngine<SingleIn<PreprocessedRequest>, ManyOut<Annotated<LLMEngineOutpu
             InstanceSource::Dynamic(_) => {
                 // Extract context ID for request tracking
                 let context_id = request.context().id().to_string();
-
                 let (instance_id, overlap_amount) = self
                     .chooser
                     .find_best_match(&context_id, &request.token_ids)
                     .await?;
+                let query_instance_id = request.has_annotation("query_instance_id");
+                // Extract context information before moving the request
+                let stream_context = request.context().clone();
                 // Update the request with the estimated prefix hit blocks
                 let (mut backend_input, context) = request.into_parts();
-                let isl = backend_input.token_ids.len();
                 backend_input.estimated_prefix_hit_num_blocks = Some(overlap_amount);
                 let updated_request = context.map(|_| backend_input);
 
-                // Get the response stream from the worker
-                let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
+                // if request has the annotation "query_instance_id", for example
+                // curl -d '{... ,"nvext": { "annotations": ["query_instance_id"]}}'
+                // request will not be routed to worker immediately
+                if query_instance_id {
+                    let instance_id_str = instance_id.to_string();
+                    let response =
+                        Annotated::from_annotation("worker_instance_id", &instance_id_str)?;
+                    let stream = stream::iter(vec![response]);
+                    return Ok(ResponseStream::new(Box::pin(stream), stream_context));
+                }
 
-                // Wrap the stream to track tokens
+                let mut response_stream = self.inner.direct(updated_request, instance_id).await?;
                 let stream_context = response_stream.context();
                 let chooser = self.chooser.clone();
-                let request_id = context_id.clone();
-                let block_size = chooser.block_size() as usize;
 
                 let wrapped_stream = Box::pin(async_stream::stream! {
-                    let mut accumulated_tokens = Vec::new();
-                    let mut total_output_length = 0usize;
-                    let mut last_block_index = (isl.saturating_sub(1)) / block_size;
-                    let mut first_push_done = false;
+                    if let Some(first_item) = response_stream.next().await {
+                        chooser.mark_prefill_completed(&context_id).await;
+                        yield first_item;
+                    }
 
                     while let Some(item) = response_stream.next().await {
-                        // Track tokens if they exist in the response
-                        let Some(ref output) = item.data else {
-                            yield item;
-                            continue;
-                        };
-                        if output.token_ids.is_empty() {
-                            yield item;
-                            continue;
-                        }
-
-                        // Add tokens to accumulator
-                        accumulated_tokens.extend_from_slice(&output.token_ids);
-                        total_output_length += output.token_ids.len();
-
-                        // Always push for the first generated token (to mark prefill done)
-                        // or when we've moved to a new block
-                        let current_block_index = (isl + total_output_length).saturating_sub(1) / block_size;
-                        let should_push = (!first_push_done && total_output_length >= 1) ||
-                                      (first_push_done && current_block_index > last_block_index);
-
-                        if should_push {
-                            chooser.push(&request_id, &accumulated_tokens).await;
-                            accumulated_tokens.clear();
-                            last_block_index = current_block_index;
-                            if !first_push_done {
-                                first_push_done = true;
-                            }
-                        }
-
                         yield item;
                     }
 
-                    chooser.free(&request_id).await;
+                    chooser.free(&context_id).await;
                 });
-
                 Ok(ResponseStream::new(wrapped_stream, stream_context))
             }
         }

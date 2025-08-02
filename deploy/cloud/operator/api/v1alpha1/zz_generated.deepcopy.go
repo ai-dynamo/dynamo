@@ -250,7 +250,11 @@ func (in *DynamoComponentDeploymentSharedSpec) DeepCopyInto(out *DynamoComponent
 			(*out)[key] = val
 		}
 	}
-	in.Ingress.DeepCopyInto(&out.Ingress)
+	if in.Ingress != nil {
+		in, out := &in.Ingress, &out.Ingress
+		*out = new(IngressSpec)
+		(*in).DeepCopyInto(*out)
+	}
 	if in.ExtraPodMetadata != nil {
 		in, out := &in.ExtraPodMetadata, &out.ExtraPodMetadata
 		*out = new(common.ExtraPodMetadata)

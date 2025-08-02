@@ -43,7 +43,15 @@ FROM ${BASE_IMAGE}:${BASE_IMAGE_TAG} AS build
 # Redeclare ARCH and ARCH_ALT so they're available in this build stage
 ARG ARCH
 ARG ARCH_ALT
-ARG NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
+
+ARG NIXL_UCX_REF=v1.19.x
+ARG NIXL_REF=0.4.1
+
+ENV NIXL_SRC_DIR=/opt/nixl
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+ENV LD_LIBRARY_PATH=$NIXL_LIB_DIR:$NIXL_PLUGIN_DIR:$LD_LIBRARY_PATH
 
 USER root
 
@@ -57,62 +65,66 @@ RUN apt update -y && \
     tmux \
     vim \
     ## NIXL dependencies
+    cmake \
     meson \
-    ninja-build
+    ninja-build \
+    pybind11-dev \
+    # These headers are missing with the hpcx installer, required
+    # by UCX to find RDMA devices
+    libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
+    libnuma-dev librdmacm-dev ibverbs-providers
 
 ### UCX EFA Setup ###
-RUN rm -rf /opt/hpcx/ucx
-RUN rm -rf /usr/local/ucx
-RUN cd /usr/local/src && \
+RUN rm -rf /opt/hpcx/ucx && \
+    rm -rf /usr/local/ucx && \
+    echo "Building UCX with reference $NIXL_UCX_REF" && \
+    cd /usr/local/src &&                            \
     git clone https://github.com/openucx/ucx.git && \
-    cd ucx &&                   \
-    git checkout v1.19.x &&     \
-    ./autogen.sh && ./configure \
-    --prefix=/usr/local/ucx     \
-    --enable-shared             \
-    --disable-static            \
-    --disable-doxygen-doc       \
-    --enable-optimizations      \
-    --enable-cma                \
-    --enable-devel-headers      \
-    --with-cuda=/usr/local/cuda \
-    --with-verbs                \
-    --with-efa                  \
-    --with-dm                   \
-    --with-gdrcopy=/usr/local   \
-    --enable-mt &&              \
-    make -j &&                  \
-    make -j install-strip &&    \
+    cd ucx &&                                       \
+    git checkout $NIXL_UCX_REF &&                   \
+    ./autogen.sh && ./configure                     \
+    --prefix=/usr/local/ucx                         \
+    --enable-shared                                 \
+    --disable-static                                \
+    --disable-doxygen-doc                           \
+    --enable-optimizations                          \
+    --enable-cma                                    \
+    --enable-devel-headers                          \
+    --with-cuda=/usr/local/cuda                     \
+    --with-verbs                                    \
+    --with-efa                                      \
+    --with-dm                                       \
+    --with-gdrcopy=/usr/local                       \
+    --enable-mt &&                                  \
+    make -j &&                                      \
+    make -j install-strip &&                        \
     ldconfig
 
-ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:$LD_LIBRARY_PATH
+ENV LD_LIBRARY_PATH=\
+/usr/lib:/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+$LD_LIBRARY_PATH
 ENV CPATH=/usr/include:$CPATH
 ENV PATH=/usr/bin:$PATH
 ENV PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
 SHELL ["/bin/bash", "-c"]
 
-# NIXL SETUP
-# Clone nixl source, and checkout the nixl ref
-RUN git clone "https://github.com/ai-dynamo/nixl.git" /opt/nixl && \
-    cd /opt/nixl && \
-    git checkout ${NIXL_REF}
-RUN if [ "$ARCH" = "arm64" ]; then \
-        cd /opt/nixl && \
-        mkdir build && \
-        meson setup build/ --prefix=/usr/local/nixl -Dgds_path=/usr/local/cuda/targets/sbsa-linux && \
-        cd build/ && \
-        ninja && \
-        ninja install; \
+### NIXL SETUP ###
+# Clone nixl source
+# TEMP: disable gds backend for arm64
+RUN git clone "https://github.com/ai-dynamo/nixl.git" ${NIXL_SRC_DIR} && \
+    cd ${NIXL_SRC_DIR} && \
+    git checkout ${NIXL_REF} && \
+    if [ "$ARCH" = "arm64" ]; then \
+        nixl_build_args="-Ddisable_gds_backend=true"; \
     else \
-        cd /opt/nixl && \
-        mkdir build && \
-        meson setup build/ --prefix=/usr/local/nixl && \
-        cd build/ && \
-        ninja && \
-        ninja install; \
-    fi
-
-ENV NIXL_PREFIX=/usr/local/nixl
+        nixl_build_args=""; \
+    fi && \
+    mkdir build && \
+    meson setup build/ --buildtype=release --prefix=$NIXL_PREFIX $nixl_build_args && \
+    cd build/ && \
+    ninja && \
+    ninja install;
 
 # nats
 RUN wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-${ARCH}.deb && \
@@ -210,11 +222,17 @@ RUN mkdir /opt/dynamo && \
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 
 # Install NIXL Python module
-RUN cd /opt/nixl && uv build . --out-dir /workspace/wheels/nixl
-
-# Install the wheel
-# TODO: Move NIXL wheel install to the wheel_builder stage
-RUN uv pip install /workspace/wheels/nixl/*.whl
+# TODO: Move gds_path selection based on arch into NIXL build
+# TEMP: disable gds backend for arm64
+RUN if [ "$ARCH" = "arm64" ]; then \
+        cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl \
+        --config-settings=setup-args="-Ddisable_gds_backend=true"; \
+    else \
+        cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheels/nixl; \
+    fi && \
+    # Install the wheel
+    # TODO: Move NIXL wheel install to the wheel_builder stage
+    uv pip install /workspace/wheels/nixl/*.whl
 
 ###################################
 ####### WHEEL BUILD STAGE #########
@@ -231,6 +249,9 @@ ARG CARGO_BUILD_JOBS
 # which might exceed the number of opened files limit.
 ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 
+# Keep in sync with the base image.
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+
 WORKDIR /workspace
 
 RUN yum update -y \
@@ -246,9 +267,9 @@ ENV RUSTUP_HOME=/usr/local/rustup \
 
 COPY --from=build $RUSTUP_HOME $RUSTUP_HOME
 COPY --from=build $CARGO_HOME $CARGO_HOME
+COPY --from=build $NIXL_PREFIX $NIXL_PREFIX
 COPY --from=build /workspace /workspace
 COPY --from=build $VIRTUAL_ENV $VIRTUAL_ENV
-COPY --from=build /usr/local/nixl /opt/nvidia/nvda_nixl
 ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
 
 # Copy configuration files
@@ -258,13 +279,11 @@ COPY LICENSE /workspace/
 COPY Cargo.toml /workspace/
 COPY Cargo.lock /workspace/
 COPY rust-toolchain.toml /workspace/
-COPY hatch_build.py /workspace/
 
 # Copy source code
 COPY lib/ /workspace/lib/
 COPY components /workspace/components
 COPY launch /workspace/launch
-COPY deploy/sdk /workspace/deploy/sdk
 
 RUN cargo build \
 	--release \
@@ -296,18 +315,11 @@ COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 # Copy rest of the code
 COPY . /workspace
 
-# Build C bindings, creates lib/bindings/c/include
-RUN cd /workspace/lib/bindings/c && cargo build --release --locked
-
 # Package the bindings
 RUN mkdir -p /opt/dynamo/bindings/wheels && \
     mkdir /opt/dynamo/bindings/lib && \
     cp dist/ai_dynamo*cp312*.whl /opt/dynamo/bindings/wheels/. && \
-    cp target/release/libdynamo_llm_capi.so /opt/dynamo/bindings/lib/. && \
-    cp -r lib/bindings/c/include /opt/dynamo/bindings/.  && \
-    cp target/release/dynamo-run /usr/local/bin && \
-    cp target/release/metrics /usr/local/bin && \
-    cp target/release/mock_worker /usr/local/bin
+    cp target/release/metrics /usr/local/bin
 
 # Install wheels
 RUN . /opt/dynamo/venv/bin/activate && \
@@ -320,9 +332,6 @@ RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
     pip install dist/ai_dynamo*any.whl
 
 ENV DYNAMO_HOME=/workspace
-
-ARG ARCH_ALT
-ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:$LD_LIBRARY_PATH
 
 # Use UCX for TRTLLM KV Cache Transfer
 ARG TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL
@@ -371,6 +380,14 @@ RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential \
         python3-dev \
+        # jq and curl for polling various endpoints and health checks
+        jq \
+        curl \
+        # For debugging
+        vim \
+        # Libraries required by UCX to find RDMA devices
+        libibverbs1 rdma-core ibverbs-utils libibumad3 \
+        libnuma1 librdmacm1 ibverbs-providers \
         openssh-client \
         openssh-server && \
     rm -rf /var/lib/apt/lists/*
@@ -383,9 +400,9 @@ COPY --from=build /usr/bin/nats-server /usr/bin/nats-server
 COPY --from=build /usr/local/bin/etcd/ /usr/local/bin/etcd/
 
 # Copy UCX from build image as plugin for NIXL
+# Copy NIXL source from wheel_builder image
 COPY --from=build /usr/local/ucx /usr/local/ucx
-# Copy NIXL source from build image (required for NIXL plugins)
-COPY --from=build /usr/local/nixl /usr/local/nixl
+COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 # Copy OpenMPI from build image
 COPY --from=build /opt/hpcx/ompi /opt/hpcx/ompi
 # Copy NUMA library from build image
@@ -451,8 +468,18 @@ COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATT
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-*-linux-gnu.so /usr/local/lib/python3.12/dist-packages/
 
 # Setup environment variables
-ENV NIXL_PLUGIN_DIR=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins
-ENV LD_LIBRARY_PATH=/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu:/usr/local/nixl/lib/${ARCH_ALT}-linux-gnu/plugins:/usr/local/ucx/lib:/opt/hpcx/ompi/lib:$LD_LIBRARY_PATH
+ARG ARCH_ALT
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+
+ENV LD_LIBRARY_PATH=\
+$NIXL_LIB_DIR:\
+$NIXL_PLUGIN_DIR:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+/opt/hpcx/ompi/lib:\
+$LD_LIBRARY_PATH
 ENV PATH=/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
 ENV OPAL_PREFIX=/opt/hpcx/ompi
 
@@ -462,8 +489,10 @@ ARG TENSORRTLLM_PIP_WHEEL="tensorrt-llm"
 ARG TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
 
 # Copy Dynamo wheels into wheelhouse
+# Copy metrics binary from wheel_builder image, not part of ai-dynamo wheel
 COPY --from=dev /workspace/wheels/nixl/*.whl wheelhouse/
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
+COPY --from=dev /workspace/target/release/metrics /usr/local/bin/metrics
 
 # NOTE: If a package (tensorrt_llm) exists on both --index-url and --extra-index-url,
 # uv will prioritize the --extra-index-url, unless --index-strategy unsafe-best-match

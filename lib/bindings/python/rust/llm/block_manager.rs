@@ -59,7 +59,7 @@ type VllmController = Arc<
 #[derive(Clone)]
 pub struct BlockManager {
     inner: VllmBlockManager,
-    _rt: Arc<tokio::runtime::Runtime>,
+    drt: DistributedRuntime,
     _controller: Option<VllmController>,
 }
 
@@ -67,12 +67,13 @@ pub struct BlockManager {
 #[pymethods]
 impl BlockManager {
     #[new]
-    #[pyo3(signature = (worker_id, leader = None, page_size = 32, num_device_blocks = None))]
+    #[pyo3(signature = (worker_id, leader = None, page_size = 32, num_device_blocks = None, disable_device_pool = false))]
     fn new(
         worker_id: u64,
         leader: Option<distributed::KvbmLeader>,
         page_size: usize,
         num_device_blocks: Option<usize>,
+        disable_device_pool: bool,
     ) -> PyResult<Self> {
         let cancel_token = CancellationToken::new();
         let mut config = dynamo_llm::block_manager::KvBlockManagerConfig::builder().runtime(
@@ -91,16 +92,18 @@ impl BlockManager {
 
         config = config.model(model_config.build().map_err(to_pyerr)?);
 
-        let (leader, rt) = if let Some(leader) = leader {
+        let (leader, drt) = if let Some(leader) = leader {
             let (leader, rt) = leader.dissolve();
 
-            config = config.device_layout(
-                dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
-                    .num_blocks(leader.num_device_blocks())
-                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
-                    .build()
-                    .map_err(to_pyerr)?,
-            );
+            if !disable_device_pool {
+                config = config.device_layout(
+                    dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
+                        .num_blocks(leader.num_device_blocks())
+                        .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+                        .build()
+                        .map_err(to_pyerr)?,
+                );
+            }
 
             if leader.num_host_blocks() > 0 {
                 tracing::info!("Using {} host blocks", leader.num_host_blocks());
@@ -152,16 +155,19 @@ impl BlockManager {
                     .map_err(to_pyerr)?,
             );
 
-            (
-                None,
-                Arc::new(
-                    tokio::runtime::Builder::new_multi_thread()
-                        .enable_all()
-                        .build()
-                        .map_err(to_pyerr)?,
-                ),
-            )
+            unimplemented!("construct a drt or get one from args")
+            // (
+            //     None,
+            //     Arc::new(
+            //         tokio::runtime::Builder::new_multi_thread()
+            //             .enable_all()
+            //             .build()
+            //             .map_err(to_pyerr)?,
+            //     ),
+            // )
         };
+
+        let rt = drt.inner().runtime().primary();
 
         let config = config.build().map_err(to_pyerr)?;
         Ok(BlockManager {
@@ -177,7 +183,7 @@ impl BlockManager {
                     .await
                 })
                 .map_err(to_pyerr)?,
-            _rt: rt,
+            drt,
             _controller: None,
         })
     }
@@ -194,7 +200,10 @@ impl BlockManager {
 
         let block_manager = self.inner.clone();
         let controller = self
-            ._rt
+            .drt
+            .inner()
+            .runtime()
+            .primary()
             .block_on(controller::Controller::new(
                 block_manager,
                 component.inner.clone(),

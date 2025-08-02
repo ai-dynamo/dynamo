@@ -212,33 +212,56 @@ impl ZmqActiveMessageLeader {
 
                     let mut pending_messages = pending_messages.lock().await;
                     // TODO: Should we error if we can't find the pending message?
-                    if let std::collections::hash_map::Entry::Occupied(mut entry) =
-                        pending_messages.entry(id)
-                    {
-                        entry.get_mut().remaining_workers -= 1;
-                        tracing::debug!(
-                            "ZmqActiveMessageLeader: Received ACK for message with id: {}. There are {} remaining workers.",
-                            id,
-                            entry.get().remaining_workers
-                        );
-                        // If all workers have ACKed, notify the completion indicator.
-                        if entry.get().remaining_workers == 0 {
-                            let e = entry.remove();
+                    // if let std::collections::hash_map::Entry::Occupied(mut entry) =
+                    //     pending_messages.entry(id)
+                    // {
+                    //     entry.get_mut().remaining_workers -= 1;
+                    //     tracing::debug!(
+                    //         "ZmqActiveMessageLeader: Received ACK for message with id: {}. There are {} remaining workers.",
+                    //         id,
+                    //         entry.get().remaining_workers
+                    //     );
+                    //     // If all workers have ACKed, notify the completion indicator.
+                    //     if entry.get().remaining_workers == 0 {
+                    //         let e = entry.remove();
+                    //         tracing::debug!(
+                    //             "ZmqActiveMessageLeader: Message with id: {} completed.",
+                    //             id
+                    //         );
+                    //         // It's possible that the receiver has already been dropped,
+                    //         // so ignore any send error here.
+                    //         let _ = e.completion_indicator.send(());
+                    //     }
+                    // }
+
+                    match pending_messages.entry(id) {
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            let pending_message = entry.get_mut();
+                            debug_assert!(pending_message.remaining_workers > 0);
+                            pending_message.remaining_workers -= 1;
                             tracing::debug!(
-                                "ZmqActiveMessageLeader: Message with id: {} completed.",
-                                id
+                                "ZmqActiveMessageLeader: Received ACK for message with id: {}. There are {} remaining workers.",
+                                id,
+                                pending_message.remaining_workers
                             );
-                            // It's possible that the receiver has already been dropped,
-                            // so ignore any send error here.
-                            let _ = e.completion_indicator.send(());
+                            if pending_message.remaining_workers == 0 {
+                                let e = entry.remove();
+                                tracing::debug!("ZmqActiveMessageLeader: Message with id: {} completed.", id);
+                                let _ = e.completion_indicator.send(());
+                            }
+                        }
+                        std::collections::hash_map::Entry::Vacant(_) => {
+                            tracing::error!("Received ACK for unknown message with id: {}", id);
                         }
                     }
                 }
                 _ = cancel_token.cancelled() => {
+                    tracing::info!("ZmqActiveMessageLeader: Pull worker cancelled.");
                     break;
                 }
             }
         }
+        tracing::info!("ZmqActiveMessageLeader: Pull worker exiting.");
         Ok(())
     }
 }

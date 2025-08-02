@@ -23,11 +23,11 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
-use crate::tokens::TokenBlockSequence;
+use crate::tokens::{SequenceHash, TokenBlockSequence};
 
 use crate::kv_router::indexer::{
-    compute_block_hash_for_seq, KvIndexerInterface, KvRouterError, OverlapScores, RadixTree,
-    WorkerId,
+    compute_block_hash_for_seq, DumpRequest, KvIndexerInterface, KvRouterError, OverlapScores,
+    RadixTree, WorkerId,
 };
 use crate::kv_router::protocols::{
     ExternalSequenceBlockHash, KvCacheEvent, KvCacheEventData, KvCacheRemoveData, KvCacheStoreData,
@@ -172,6 +172,8 @@ pub struct ApproxKvIndexer {
     route_tx: mpsc::Sender<RouterResult>,
     /// A sender for remove worker requests.
     remove_worker_tx: mpsc::Sender<WorkerId>,
+    /// A sender for dump requests.
+    dump_tx: mpsc::Sender<DumpRequest>,
     /// A handle to the background task managing the KV store.
     task: OnceLock<std::thread::JoinHandle<()>>,
     /// The size of the KV block this indexer can handle.
@@ -183,6 +185,7 @@ impl ApproxKvIndexer {
         let (match_tx, mut match_rx) = mpsc::channel::<MatchRequest>(2048);
         let (route_tx, mut route_rx) = mpsc::channel::<RouterResult>(2048);
         let (remove_worker_tx, mut remove_worker_rx) = mpsc::channel::<WorkerId>(16);
+        let (dump_tx, mut dump_rx) = mpsc::channel::<DumpRequest>(16);
         let cancel_clone = token.clone();
         let task = std::thread::spawn(move || {
             // create a new tokio runtime which will only perform work on a single thread
@@ -240,6 +243,10 @@ impl ApproxKvIndexer {
                         Some(worker) = remove_worker_rx.recv() => {
                             trie.remove_worker(worker);
                         }
+                        Some(dump_req) = dump_rx.recv() => {
+                            let events = trie.dump_tree_as_events();
+                            let _ = dump_req.resp.send(events);
+                        }
 
                         _ = expiry_fut => {
                             let expired = timer_manager.pop_expired();
@@ -278,6 +285,7 @@ impl ApproxKvIndexer {
             match_tx,
             route_tx,
             remove_worker_tx,
+            dump_tx,
             task: once,
             kv_block_size,
         }
@@ -287,6 +295,26 @@ impl ApproxKvIndexer {
         self.kv_block_size
     }
 
+    /// Core function to process a routing decision with pre-computed hashes
+    pub async fn process_routing_decision(
+        &self,
+        worker_id: WorkerId,
+        local_hashes: Vec<LocalBlockHash>,
+        sequence_hashes: Vec<SequenceHash>,
+    ) -> Result<(), KvRouterError> {
+        self.route_tx
+            .send(RouterResult {
+                worker_id,
+                local_hashes,
+                sequence_hashes,
+            })
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
+
+        Ok(())
+    }
+
+    /// Wrapper function that computes hashes from tokens and calls the core function
     pub async fn process_routing_decision_for_request(
         &self,
         tokens: &[u32],
@@ -301,16 +329,8 @@ impl ApproxKvIndexer {
             .map(|b| b.sequence_hash())
             .collect::<Vec<_>>();
 
-        self.route_tx
-            .send(RouterResult {
-                worker_id,
-                local_hashes,
-                sequence_hashes,
-            })
+        self.process_routing_decision(worker_id, local_hashes, sequence_hashes)
             .await
-            .map_err(|_| KvRouterError::IndexerDroppedRequest)?;
-
-        Ok(())
     }
 }
 
@@ -353,6 +373,20 @@ impl KvIndexerInterface for ApproxKvIndexer {
 
     async fn remove_worker(&mut self, worker: WorkerId) {
         self.remove_worker_tx.send(worker).await.unwrap();
+    }
+
+    async fn dump_events(&self) -> Result<Vec<RouterEvent>, KvRouterError> {
+        let (resp_tx, resp_rx) = oneshot::channel();
+        let dump_req = DumpRequest { resp: resp_tx };
+
+        if let Err(e) = self.dump_tx.send(dump_req).await {
+            tracing::error!("Failed to send dump request: {:?}", e);
+            return Err(KvRouterError::IndexerOffline);
+        }
+
+        resp_rx
+            .await
+            .map_err(|_| KvRouterError::IndexerDroppedRequest)
     }
 
     fn shutdown(&mut self) {

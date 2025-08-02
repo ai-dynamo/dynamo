@@ -20,8 +20,6 @@
 package v1alpha1
 
 import (
-	"fmt"
-
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -85,20 +83,6 @@ func (s *DynamoGraphDeployment) GetSpec() any {
 
 func (s *DynamoGraphDeployment) SetSpec(spec any) {
 	s.Spec = spec.(DynamoGraphDeploymentSpec)
-}
-
-func (s *DynamoGraphDeployment) SetEndpointStatus(isSecured bool, endpointHost string) {
-	protocol := "http"
-	if isSecured {
-		protocol = "https"
-	}
-	s.AddStatusCondition(metav1.Condition{
-		Type:               "EndpointExposed",
-		Status:             metav1.ConditionTrue,
-		Reason:             "EndpointExposed",
-		Message:            fmt.Sprintf("%s://%s", protocol, endpointHost),
-		LastTransitionTime: metav1.Now(),
-	})
 }
 
 func (s *DynamoGraphDeployment) AddStatusCondition(condition metav1.Condition) {
