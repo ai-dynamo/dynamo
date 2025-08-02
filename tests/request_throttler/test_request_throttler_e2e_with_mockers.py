@@ -50,8 +50,6 @@ class RequestThrottlerTestFrontend(ManagedProcess):
             str(request_throttle_duration_ms // 1000),
             "--max-workers-busy-queue-depth",
             str(max_queue_depth),
-            "--namespace",
-            "test-namespace",
         ]
 
         # Force fixed namespace for coordination
@@ -127,51 +125,6 @@ async def publish_all_workers_busy_event(nats_url: str = "nats://localhost:4222"
 
     finally:
         await nc.close()
-
-
-async def send_test_request(
-    url: str, expect_success: bool = True, max_retries: int = 4
-) -> tuple[int, str]:
-    """Send a request with exponential backoff retry for system readiness"""
-    payload = {
-        "model": MODEL_NAME,
-        "messages": [{"role": "user", "content": "Hello, how are you?"}],
-        "stream": False,
-        "max_tokens": 5,
-    }
-
-    wait_time = 1  # Start with 1 second
-
-    for attempt in range(max_retries + 1):
-        await asyncio.sleep(wait_time)
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    url, json=payload, timeout=aiohttp.ClientTimeout(total=10)
-                ) as response:
-                    text = await response.text()
-                    if response.status == 200:
-                        logger.info(f"Request succeeded on attempt {attempt + 1}")
-                        return response.status, text
-                    else:
-                        logger.warning(
-                            f"Attempt {attempt + 1} failed with status {response.status}: {text}"
-                        )
-        except Exception as e:
-            logger.warning(f"Attempt {attempt + 1} failed with error: {e}")
-
-        if attempt < max_retries:
-            wait_time *= 2  # Double the wait time (exponential backoff)
-
-    # If we get here, all retries failed
-    return 404, "Failed after all retries"
-
-
-async def wait_for_request_throttle_to_clear(duration_seconds: float):
-    """Wait for request throttling to clear with some buffer"""
-    wait_time = duration_seconds + 0.5  # Add 500ms buffer
-    logger.info(f"Waiting {wait_time} seconds for request throttling to clear...")
-    await asyncio.sleep(wait_time)
 
 
 @pytest.mark.pre_merge
@@ -283,3 +236,48 @@ async def test_request_throttler_e2e(request, runtime_services):
 
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)
+
+
+async def send_test_request(
+    url: str, expect_success: bool = True, max_retries: int = 4
+) -> tuple[int, str]:
+    """Send a request with exponential backoff retry for system readiness"""
+    payload = {
+        "model": MODEL_NAME,
+        "messages": [{"role": "user", "content": "Hello, how are you?"}],
+        "stream": False,
+        "max_tokens": 5,
+    }
+
+    wait_time = 1  # Start with 1 second
+
+    for attempt in range(max_retries + 1):
+        await asyncio.sleep(wait_time)
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url, json=payload, timeout=aiohttp.ClientTimeout(total=10)
+                ) as response:
+                    text = await response.text()
+                    if response.status == 200:
+                        logger.info(f"Request succeeded on attempt {attempt + 1}")
+                        return response.status, text
+                    else:
+                        logger.warning(
+                            f"Attempt {attempt + 1} failed with status {response.status}: {text}"
+                        )
+        except Exception as e:
+            logger.warning(f"Attempt {attempt + 1} failed with error: {e}")
+
+        if attempt < max_retries:
+            wait_time *= 2  # Double the wait time (exponential backoff)
+
+    # If we get here, all retries failed
+    return 404, "Failed after all retries"
+
+
+async def wait_for_request_throttle_to_clear(duration_seconds: float):
+    """Wait for request throttling to clear with some buffer"""
+    wait_time = duration_seconds + 0.5  # Add 500ms buffer
+    logger.info(f"Waiting {wait_time} seconds for request throttling to clear...")
+    await asyncio.sleep(wait_time)

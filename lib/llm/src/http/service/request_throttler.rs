@@ -85,31 +85,31 @@ use std::{
 /// Request throttling state that can be shared across request handlers
 #[derive(Debug, Clone)]
 pub struct ThrottlingState {
-    rate_limit_start: Option<Instant>,
-    rate_limit_duration: Duration,
+    request_throttling_start: Option<Instant>,
+    request_throttling_duration: Duration,
 }
 
 impl Default for ThrottlingState {
     fn default() -> Self {
         Self {
-            rate_limit_start: None,
-            rate_limit_duration: Duration::from_secs(5),
+            request_throttling_start: None,
+            request_throttling_duration: Duration::from_secs(5),
         }
     }
 }
 
 impl ThrottlingState {
-    pub fn new(rate_limit_duration: Duration) -> Self {
+    pub fn new(request_throttling_duration: Duration) -> Self {
         ThrottlingState {
-            rate_limit_duration,
+            request_throttling_duration,
             ..Self::default()
         }
     }
 
     /// Check if state is currently request throttled
     pub fn is_throttled(&self) -> bool {
-        match self.rate_limit_start {
-            Some(start_time) => start_time.elapsed() < self.rate_limit_duration,
+        match self.request_throttling_start {
+            Some(start_time) => start_time.elapsed() < self.request_throttling_duration,
             None => false,
         }
     }
@@ -117,26 +117,26 @@ impl ThrottlingState {
     /// Set request throttling state to true and record the start time
     pub fn set_throttling(&mut self) {
         let now = Instant::now();
-        self.rate_limit_start = Some(now);
+        self.request_throttling_start = Some(now);
     }
 
     /// Set request throttling state to false and clear the start time
     pub fn clear_throttling(&mut self) {
-        self.rate_limit_start = None;
+        self.request_throttling_start = None;
     }
 }
 
 #[derive(Clone)]
 pub struct HttpServiceRequestThrottler {
     is_enabled: bool,
-    rate_limit_state: Arc<RwLock<ThrottlingState>>,
+    request_throttling_state: Arc<RwLock<ThrottlingState>>,
 }
 
 impl HttpServiceRequestThrottler {
     pub fn new(all_workers_busy_rejection_time_window: Option<Duration>) -> Self {
         Self {
             is_enabled: all_workers_busy_rejection_time_window.is_some(),
-            rate_limit_state: Arc::new(RwLock::new(
+            request_throttling_state: Arc::new(RwLock::new(
                 all_workers_busy_rejection_time_window
                     .map(ThrottlingState::new)
                     .unwrap_or_default(),
@@ -150,7 +150,7 @@ impl HttpServiceRequestThrottler {
             return false;
         }
 
-        let state = self.rate_limit_state.read().unwrap();
+        let state = self.request_throttling_state.read().unwrap();
         state.is_throttled()
     }
 
@@ -168,8 +168,13 @@ impl HttpServiceRequestThrottler {
             return Ok(());
         }
 
-        let rate_limit_duration = { self.rate_limit_state.read().unwrap().rate_limit_duration };
-        let rate_limiter = self.rate_limit_state.clone();
+        let request_throttling_duration = {
+            self.request_throttling_state
+                .read()
+                .unwrap()
+                .request_throttling_duration
+        };
+        let request_throttling_state = self.request_throttling_state.clone();
 
         tokio::spawn(async move {
             let mut all_workers_busy_event_rx = match namespace
@@ -204,15 +209,15 @@ impl HttpServiceRequestThrottler {
                         );
 
                         {
-                            let mut state = rate_limiter.write().unwrap();
+                            let mut state = request_throttling_state.write().unwrap();
                             state.set_throttling();
                         };
 
-                        sleep.as_mut().reset(tokio::time::Instant::now() + rate_limit_duration);
+                        sleep.as_mut().reset(tokio::time::Instant::now() + request_throttling_duration);
                     }
                     _ = &mut sleep => {
                         {
-                            let mut state = rate_limiter.write().unwrap();
+                            let mut state = request_throttling_state.write().unwrap();
                             state.clear_throttling();
                         }
                         sleep.as_mut().reset(tokio::time::Instant::now() + Duration::MAX);
@@ -226,6 +231,18 @@ impl HttpServiceRequestThrottler {
         });
         Ok(())
     }
+
+    /// Test helper to manually trigger the throttling
+    /// This should only be used in tests to simulate throttling without NATS events
+    #[doc(hidden)]
+    pub fn trigger_throttler_for_test(&self) {
+        if !self.is_enabled {
+            return;
+        }
+
+        let mut state = self.request_throttling_state.write().unwrap();
+        state.set_throttling();
+    }
 }
 
 #[cfg(test)]
@@ -237,16 +254,16 @@ mod tests {
     #[test]
     fn test_request_throttling_state_default() {
         let state = ThrottlingState::default();
-        assert_eq!(state.rate_limit_start, None);
-        assert_eq!(state.rate_limit_duration, Duration::from_secs(5));
+        assert_eq!(state.request_throttling_start, None);
+        assert_eq!(state.request_throttling_duration, Duration::from_secs(5));
     }
 
     #[test]
     fn test_request_throttling_state_new() {
         let duration = Duration::from_secs(10);
         let state = ThrottlingState::new(duration);
-        assert_eq!(state.rate_limit_start, None);
-        assert_eq!(state.rate_limit_duration, duration);
+        assert_eq!(state.request_throttling_start, None);
+        assert_eq!(state.request_throttling_duration, duration);
     }
 
     #[test]
@@ -281,7 +298,7 @@ mod tests {
 
         state.clear_throttling();
         assert!(!state.is_throttled());
-        assert_eq!(state.rate_limit_start, None);
+        assert_eq!(state.request_throttling_start, None);
     }
 
     #[test]
@@ -291,10 +308,10 @@ mod tests {
         assert!(throttling_service.is_enabled);
         assert_eq!(
             throttling_service
-                .rate_limit_state
+                .request_throttling_state
                 .read()
                 .unwrap()
-                .rate_limit_duration,
+                .request_throttling_duration,
             duration
         );
     }
@@ -305,69 +322,69 @@ mod tests {
         assert!(!throttling_service.is_enabled);
         assert_eq!(
             throttling_service
-                .rate_limit_state
+                .request_throttling_state
                 .read()
                 .unwrap()
-                .rate_limit_duration,
+                .request_throttling_duration,
             Duration::from_secs(5)
         );
     }
 
     #[test]
     fn test_http_service_request_throttler_is_not_request_throttled_when_disabled() {
-        let rate_limiter = HttpServiceRequestThrottler::new(None);
-        assert!(!rate_limiter.is_throttled());
+        let request_throttler = HttpServiceRequestThrottler::new(None);
+        assert!(!request_throttler.is_throttled());
     }
 
     #[test]
     fn test_http_service_request_throttler_is_not_request_throttled_when_enabled_and_not_set() {
-        let rate_limiter = HttpServiceRequestThrottler::new(Some(Duration::from_secs(5)));
-        assert!(!rate_limiter.is_throttled());
+        let request_throttler = HttpServiceRequestThrottler::new(Some(Duration::from_secs(5)));
+        assert!(!request_throttler.is_throttled());
     }
 
     #[test]
     fn test_http_service_request_throttler_is_request_throttled_when_enabled_and_set() {
-        let rate_limiter = HttpServiceRequestThrottler::new(Some(Duration::from_secs(5)));
+        let request_throttler = HttpServiceRequestThrottler::new(Some(Duration::from_secs(5)));
         {
-            let mut state = rate_limiter.rate_limit_state.write().unwrap();
+            let mut state = request_throttler.request_throttling_state.write().unwrap();
             state.set_throttling();
         }
-        assert!(rate_limiter.is_throttled());
+        assert!(request_throttler.is_throttled());
     }
 
     #[tokio::test]
     async fn test_http_service_request_throttler_is_request_throttled_after_expiry() {
-        let rate_limiter = HttpServiceRequestThrottler::new(Some(Duration::from_millis(10)));
+        let request_throttler = HttpServiceRequestThrottler::new(Some(Duration::from_millis(10)));
         {
-            let mut state = rate_limiter.rate_limit_state.write().unwrap();
+            let mut state = request_throttler.request_throttling_state.write().unwrap();
             state.set_throttling();
         }
-        assert!(rate_limiter.is_throttled());
+        assert!(request_throttler.is_throttled());
 
         // Wait for the request throttling to expire
         sleep(Duration::from_millis(21)).await;
-        assert!(!rate_limiter.is_throttled());
+        assert!(!request_throttler.is_throttled());
     }
 
     #[tokio::test]
     async fn test_http_service_updates_request_throttling_duration() {
-        let rate_limiter = HttpServiceRequestThrottler::new(Some(Duration::from_secs(1)));
+        let request_throttler = HttpServiceRequestThrottler::new(Some(Duration::from_secs(1)));
         {
-            let mut state = rate_limiter.rate_limit_state.write().unwrap();
+            let mut state = request_throttler.request_throttling_state.write().unwrap();
             state.set_throttling();
         }
-        assert!(rate_limiter.is_throttled());
+        assert!(request_throttler.is_throttled());
 
         sleep(Duration::from_millis(550)).await;
 
         {
-            let mut state = rate_limiter.rate_limit_state.write().unwrap();
+            let mut state = request_throttler.request_throttling_state.write().unwrap();
             state.set_throttling();
         }
-        assert!(rate_limiter.is_throttled());
+        assert!(request_throttler.is_throttled());
 
         sleep(Duration::from_millis(550)).await;
 
-        assert!(rate_limiter.is_throttled());
+        assert!(request_throttler.is_throttled());
     }
 }
