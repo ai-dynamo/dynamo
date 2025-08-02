@@ -18,7 +18,7 @@ use axum::{
     Json, Router,
 };
 use dynamo_runtime::{
-    pipeline::{AsyncEngineContextProvider, Context},
+    pipeline::{AsyncEngineContext, AsyncEngineContextProvider, Context},
     protocols::annotated::AnnotationsProvider,
 };
 use futures::{stream, StreamExt};
@@ -155,6 +155,54 @@ fn get_or_create_request_id(primary: Option<&str>, headers: &HeaderMap) -> Strin
     uuid.to_string()
 }
 
+// A RAII guard to ensure that the context is stopped when the request is dropped by client.
+// Request fututures are dropped in axum when the client disconnects.
+// https://github.com/tokio-rs/axum/discussions/1094
+// may be defused to prevent stopping the context and send a control message via
+// stop_generating
+struct CtxDropGuard {
+    ctx: Arc<dyn AsyncEngineContext>,
+    issue_stop_generating: bool,
+    verbose: bool,
+}
+
+impl CtxDropGuard {
+    fn new(ctx: Arc<dyn AsyncEngineContext>) -> Self {
+        CtxDropGuard {
+            ctx,
+            issue_stop_generating: true,
+            verbose: true,
+        }
+    }
+    // request succeeded, no need to stop generating
+    // takes ownership
+    fn defuse(&mut self) {
+        self.issue_stop_generating = false;
+        self.verbose = false;
+    }
+
+    // no-op, moves the guard to a thread.
+    fn mute(&mut self) {
+        self.verbose = false;
+    }
+}
+
+impl Drop for CtxDropGuard {
+    fn drop(&mut self) {
+        if self.issue_stop_generating {
+            self.ctx.stop_generating();
+            if self.verbose {
+                tracing::info!("Stopping generation for request_id: {}", self.ctx.id());
+            } else {
+                tracing::trace!(
+                    "Stopping generation or end of successful request_id: {}",
+                    self.ctx.id()
+                );
+            }
+        }
+    }
+}
+
 /// OpenAI Completions Request Handler
 ///
 /// This method will handle the incoming request for the `/v1/completions endpoint`. The endpoint is a "source"
@@ -232,7 +280,7 @@ async fn completions(
         state
             .metrics_clone()
             .create_inflight_guard(model, Endpoint::Completions, streaming);
-
+    let mut drop_guard = CtxDropGuard::new(request.context().clone());
     let mut response_collector = state.metrics_clone().create_response_collector(model);
 
     // prepare to process any annotations
@@ -269,6 +317,7 @@ async fn completions(
 
     if streaming {
         let stream = stream.map(move |response| {
+            drop_guard.mute();
             process_event_converter(EventConverter::from(response), &mut response_collector)
         });
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
@@ -294,6 +343,7 @@ async fn completions(
             })?;
 
         inflight_guard.mark_ok();
+        drop_guard.defuse();
         Ok(Json(response).into_response())
     }
 }
@@ -332,6 +382,8 @@ async fn embeddings(
     // todo - inherit request_id from distributed trace details
     let request = Context::with_id(request, request_id.clone());
 
+    let mut drop_guard = CtxDropGuard::new(request.context().clone());
+
     // issue the generate call on the engine
     let stream = engine
         .generate(request)
@@ -352,6 +404,7 @@ async fn embeddings(
         })?;
 
     inflight.mark_ok();
+    drop_guard.defuse();
     Ok(Json(response).into_response())
 }
 
@@ -438,6 +491,7 @@ async fn chat_completions(
         req.inner.stream = Some(true);
         req
     });
+    let mut drop_guard = CtxDropGuard::new(request.context().clone());
 
     // todo - make the protocols be optional for model name
     // todo - when optional, if none, apply a default
@@ -494,6 +548,7 @@ async fn chat_completions(
         stream_handle.arm();
 
         let stream = stream.map(move |response| {
+            drop_guard.mute();
             process_event_converter(EventConverter::from(response), &mut response_collector)
         });
         let stream = monitor_for_disconnects(stream, ctx, inflight_guard, stream_handle);
@@ -522,6 +577,7 @@ async fn chat_completions(
             })?;
 
         inflight_guard.mark_ok();
+        drop_guard.defuse();
         Ok(Json(response).into_response())
     }
 }
