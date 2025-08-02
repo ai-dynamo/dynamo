@@ -61,6 +61,12 @@ jobs:
         path: ~/.cargo/bin
         key: ${{ runner.os }}-cargo-tools-${{ github.head_ref || github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
 
+    - name: Cache sccache directory
+      uses: actions/cache@v3
+      with:
+        path: ~/.sccache # Or the custom path where sccache stores its cache
+        key: ${{ runner.os }}-sccache-${{ hashFiles('**/Cargo.lock') }} # Adjust key as needed
+
     - name: Install Rust in dev environment
       # Install Rust only to run GitHub Local Actions in (dev environment) using the `ACT` environment variable.
       # See act usage: https://nektosact.com/introduction.html
@@ -74,7 +80,7 @@ jobs:
       run: rustup component add rustfmt clippy
 
     - name: Install sccache
-      run: cargo install sccache
+      run: RUSTC_WRAPPER="" cargo install sccache
 
     - name: Run Cargo Check
       working-directory: ${{ matrix.dir }}
