@@ -63,7 +63,7 @@ jobs:
           ~/.cargo/git/db/
           ~/.cache/sccache/
           ~/.rustup/
-          target/
+          ${{ matrix.dir }}/target/
         restore-keys: |
           ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-${{ matrix.dir }}-
           ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-
