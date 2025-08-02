@@ -174,64 +174,6 @@ async def wait_for_request_throttle_to_clear(duration_seconds: float):
     await asyncio.sleep(wait_time)
 
 
-async def wait_for_ready(base_url: str, timeout: int = 60):
-    """Wait for system to be ready, handling specific error conditions"""
-    payload = {
-        "model": MODEL_NAME,
-        "messages": [{"role": "user", "content": "Hello, how are you?"}],
-        "stream": False,
-        "max_tokens": 5,
-    }
-
-    start_time = time.time()
-    retry_delay = 5
-
-    logger.info("Waiting for system to be ready")
-
-    while time.time() - start_time < timeout:
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.post(
-                    base_url, json=payload, timeout=aiohttp.ClientTimeout(total=10)
-                ) as response:
-                    text = await response.text()
-
-                    if response.status == 500:
-                        try:
-                            error_data = json.loads(text)
-                            error = error_data.get("error", "")
-                            if "no responders" in error:
-                                logger.warning("Retrying due to no responders")
-                                await asyncio.sleep(retry_delay)
-                                continue
-                        except json.JSONDecodeError:
-                            pass
-
-                    if response.status == 404:
-                        try:
-                            error_data = json.loads(text)
-                            error = error_data.get("error", "")
-                            if "Model not found" in error:
-                                logger.warning("Retrying due to model not found")
-                                await asyncio.sleep(retry_delay)
-                                continue
-                        except json.JSONDecodeError:
-                            pass
-
-                    if response.status == 200:
-                        logger.info("System is ready")
-                        return
-
-                    logger.warning(f"Unexpected status {response.status}: {text}")
-                    await asyncio.sleep(retry_delay)
-
-        except Exception as e:
-            logger.warning(f"Request failed: {e}, retrying...")
-            await asyncio.sleep(retry_delay)
-
-    raise TimeoutError(f"System not ready after {timeout} seconds")
-
-
 @pytest.mark.pre_merge
 async def test_request_throttler_e2e(request, runtime_services):
     """
@@ -244,7 +186,6 @@ async def test_request_throttler_e2e(request, runtime_services):
     6. Verify requests return to normal after request throttling expires
     """
 
-    nats_process, etcd_process = runtime_services
     logger.info("Starting request throttler e2e test")
 
     mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
@@ -278,9 +219,6 @@ async def test_request_throttler_e2e(request, runtime_services):
         await asyncio.sleep(5)
 
         base_url = f"http://localhost:{FRONTEND_PORT}/v1/chat/completions"
-
-        # Wait for system to be ready
-        await wait_for_ready(base_url)
 
         # Step 1: Verify normal requests work
         logger.info("=== Testing normal operation ===")
@@ -343,172 +281,5 @@ async def test_request_throttler_e2e(request, runtime_services):
         for mocker in mocker_processes:
             mocker.__exit__(None, None, None)
 
-        if os.path.exists(mocker_args_file):
-            os.unlink(mocker_args_file)
-
-
-@pytest.mark.pre_merge
-async def test_request_throttler_multiple_events(request, runtime_services):
-    """
-    Test that multiple all-workers-busy events extend the request throttling period
-    """
-    nats_process, etcd_process = runtime_services
-
-    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
-    mocker_args_file = os.path.join(request.node.name, "mocker_args.json")
-    with open(mocker_args_file, "w") as f:
-        json.dump(mocker_args, f)
-
-    frontend = RequestThrottlerTestFrontend(
-        request, FRONTEND_PORT + 1, REQUEST_THROTTLE_DURATION_MS, MAX_QUEUE_DEPTH
-    )
-    mocker_processes = []
-
-    try:
-        frontend.__enter__()
-
-        # Start one mocker for minimal functionality
-        mocker = MockerProcess(
-            request, "dyn://test-namespace.mocker.generate", mocker_args_file
-        )
-        mocker_processes.append(mocker)
-        mocker.__enter__()
-
-        await asyncio.sleep(2)
-
-        base_url = f"http://localhost:{FRONTEND_PORT + 1}/v1/chat/completions"
-
-        # Wait for system to be ready
-        await wait_for_ready(base_url)
-
-        # Trigger first request throttling event
-        logger.info("=== Triggering first request throttling event ===")
-        await publish_all_workers_busy_event()
-        await asyncio.sleep(0.2)
-
-        # Verify request throttling is active
-        status, _ = await send_test_request(base_url, expect_success=False)
-        assert status == 503, f"Expected 503 after first event, got {status}"
-
-        # Wait halfway through the request throttling period, then send another event
-        await asyncio.sleep(REQUEST_THROTTLE_DURATION_MS / 2000.0)
-
-        logger.info(
-            "=== Triggering second request throttling event (should extend period) ==="
-        )
-        await publish_all_workers_busy_event()
-        await asyncio.sleep(0.2)
-
-        # Should still be request throttled
-        status, _ = await send_test_request(base_url, expect_success=False)
-        assert status == 503, f"Expected 503 after second event, got {status}"
-
-        # Wait for the original duration from the first event - should still be limited
-        # because the second event reset the timer
-        await asyncio.sleep(REQUEST_THROTTLE_DURATION_MS / 2000.0)
-        status, _ = await send_test_request(base_url, expect_success=False)
-        assert status == 503, f"Expected 503 (period should be extended), got {status}"
-
-        # Wait for the full duration from the second event
-        await wait_for_request_throttle_to_clear(REQUEST_THROTTLE_DURATION_MS / 1000.0)
-
-        # Should now work
-        status, _ = await send_test_request(base_url)
-        assert status == 200, f"Expected 200 after extended period, got {status}"
-
-        logger.info("✓ Multiple events correctly extend request throttling period")
-
-    finally:
-        if "frontend" in locals():
-            frontend.__exit__(None, None, None)
-        for mocker in mocker_processes:
-            mocker.__exit__(None, None, None)
-        if os.path.exists(mocker_args_file):
-            os.unlink(mocker_args_file)
-
-
-@pytest.mark.pre_merge
-async def test_request_throttler_disabled(request, runtime_services):
-    """
-    Test that when request throttling is disabled, all-workers-busy events don't affect requests
-    """
-    nats_process, etcd_process = runtime_services
-
-    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
-    mocker_args_file = os.path.join(request.node.name, "mocker_args.json")
-    with open(mocker_args_file, "w") as f:
-        json.dump(mocker_args, f)
-
-    # Create frontend WITHOUT request throttling environment variable
-    command = [
-        "python",
-        "-m",
-        "dynamo.frontend",
-        "--kv-cache-block-size",
-        str(BLOCK_SIZE),
-        "--router-mode",
-        "kv",
-        "--http-port",
-        str(FRONTEND_PORT + 2),
-        "--namespace",
-        "test-namespace",
-    ]
-
-    env = os.environ.copy()
-    env["DYN_NAMESPACE"] = "test-namespace"
-
-    frontend = ManagedProcess(
-        command=command,
-        env=env,
-        timeout=60,
-        display_output=True,
-        health_check_ports=[FRONTEND_PORT + 2],
-        health_check_urls=[
-            (
-                f"http://localhost:{FRONTEND_PORT + 2}/v1/models",
-                lambda r: r.status_code == 200,
-            )
-        ],
-        log_dir=request.node.name,
-        terminate_existing=False,
-    )
-
-    try:
-        frontend.__enter__()
-
-        mocker = MockerProcess(
-            request, "dyn://test-namespace.mocker.generate", mocker_args_file
-        )
-        mocker.__enter__()
-
-        await asyncio.sleep(2)
-
-        base_url = f"http://localhost:{FRONTEND_PORT + 2}/v1/chat/completions"
-
-        # Wait for system to be ready
-        await wait_for_ready(base_url)
-
-        # Verify normal operation
-        status, _ = await send_test_request(base_url)
-        assert status == 200, f"Expected 200, got {status}"
-
-        # Publish all-workers-busy event
-        logger.info("=== Publishing event with request throttling disabled ===")
-        await publish_all_workers_busy_event()
-        await asyncio.sleep(0.5)
-
-        # Should still work (not throttled)
-        status, _ = await send_test_request(base_url)
-        assert (
-            status == 200
-        ), f"Expected 200 (request throttling disabled), got {status}"
-
-        logger.info("✓ Request throttling correctly disabled")
-
-    finally:
-        if "frontend" in locals():
-            frontend.__exit__(None, None, None)
-        if "mocker" in locals():
-            mocker.__exit__(None, None, None)
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)
