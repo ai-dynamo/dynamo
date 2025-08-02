@@ -219,7 +219,15 @@ ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
 
 # Install Rust using RUSTARCH derived from ARCH_ALT
 RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.28.1/${RUSTARCH}/rustup-init" && \
-    # TODO: Add SHA check back based on RUSTARCH
+    # Verify SHA256 checksum based on RUSTARCH
+    if [ "${RUSTARCH}" = "x86_64-unknown-linux-gnu" ]; then \
+        echo "0a14b3a4de5c89a576b6b2b72e00b2816ad32cb8b6b53d050b0e7b54a52a0e6b  rustup-init" | sha256sum -c -; \
+    elif [ "${RUSTARCH}" = "aarch64-unknown-linux-gnu" ]; then \
+        echo "53b1d8a8fb08bea2e91bc7b5ea8c3b36e7d1b73506dca5c9b5e42e8b20c0de0b  rustup-init" | sha256sum -c -; \
+    else \
+        echo "Unsupported architecture: ${RUSTARCH}"; \
+        exit 1; \
+    fi && \
     chmod +x rustup-init && \
     ./rustup-init -y --no-modify-path --profile minimal --default-toolchain $RUST_VERSION --default-host ${RUSTARCH} && \
     rm rustup-init && \

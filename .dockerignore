@@ -39,3 +39,4 @@
 .dockerignore
 **/target/*
 **/*safetensors
+container/Dockerfile*
