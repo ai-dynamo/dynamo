@@ -121,14 +121,6 @@ go test ./... -v
 go test -race ./...
 ```
 
-**Python Tests (SDK):**
-
-```bash
-cd deploy/sdk
-pytest tests/ -v
-pytest tests/ --cov=dynamo.sdk
-```
-
 ### Integration Tests
 
 **End-to-End Deployment Tests:**

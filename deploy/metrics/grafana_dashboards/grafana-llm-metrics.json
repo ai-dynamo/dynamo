@@ -26,7 +26,13 @@
     "distributed under the License is distributed on an \"AS IS\" BASIS,",
     "WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.",
     "See the License for the specific language governing permissions and",
-    "limitations under the License."
+    "limitations under the License.",
+    "",
+    "DEPRECATION NOTICE:",
+    "This dashboard uses deprecated llm_kv_* metrics (llm_kv_blocks_active, llm_kv_blocks_total, llm_kv_hit_rate_percent)",
+    "that are part of the deprecated metrics aggregation service. These metrics will be removed in a future release.",
+    "Please migrate to the new MetricsRegistry system which provides dynamo_* metrics instead.",
+    "See docs/guides/metrics.md for migration guidance."
   ],
   "editable": true,
   "fiscalYearStartMonth": 0,

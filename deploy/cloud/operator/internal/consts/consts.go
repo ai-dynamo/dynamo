@@ -1,5 +1,7 @@
 package consts
 
+import "time"
+
 const (
 	HPACPUDefaultAverageUtilization = 80
 
@@ -17,6 +19,8 @@ const (
 
 	KubeLabelDynamoSelector = "nvidia.com/selector"
 
+	KubeAnnotationEnableGrove = "nvidia.com/enable-grove"
+
 	KubeLabelDynamoComponent            = "nvidia.com/dynamo-component"
 	KubeLabelDynamoNamespace            = "nvidia.com/dynamo-namespace"
 	KubeLabelDynamoDeploymentTargetType = "nvidia.com/dynamo-deployment-target-type"
@@ -33,4 +37,8 @@ const (
 	ComponentTypePlanner      = "planner"
 	ComponentTypeMain         = "main"
 	PlannerServiceAccountName = "planner-serviceaccount"
+
+	DefaultIngressSuffix = "local"
+
+	DefaultGroveTerminationDelay = 15 * time.Minute
 )

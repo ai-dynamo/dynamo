@@ -36,50 +36,24 @@
 
 use crate::kv_router::indexer::OverlapScores;
 use crate::kv_router::indexer::WorkerId;
-use crate::tokens::blocks::UniqueBlock;
-use crate::tokens::TokenBlockSequence;
+use crate::tokens::SequenceHash;
 use derive_getters::Getters;
 use std::collections::{HashMap, HashSet};
 use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
-use uuid;
 
 // TODO: use the common request_id if it exists in the repo
 pub type RequestId = String;
 
-/// Create unique blocks from a TokenBlockSequence
-fn create_unique_blocks_from_sequence(
-    tokens: &TokenBlockSequence,
-    uuid: Option<uuid::Uuid>,
-    block_size: usize,
-) -> Vec<UniqueBlock> {
-    let mut unique_blocks: Vec<UniqueBlock> = tokens
-        .blocks()
-        .iter()
-        .map(|block| UniqueBlock::FullBlock(block.sequence_hash()))
-        .collect();
-
-    // Only push the partial block if tokens count isn't a multiple of block_size
-    if tokens.total_tokens() % block_size != 0 {
-        unique_blocks.push(match uuid {
-            Some(uuid) => UniqueBlock::PartialBlock(uuid),
-            None => UniqueBlock::default(),
-        });
-    }
-    unique_blocks
-}
-
 /// A multi-request sequence manager that handles multiple active sequences with shared KV cache
 #[derive(Debug, Getters)]
 pub struct ActiveSequences {
-    active_seqs: HashMap<RequestId, TokenBlockSequence>,
-
-    partial_blocks: HashMap<RequestId, UniqueBlock>,
+    active_seqs: HashMap<RequestId, Vec<SequenceHash>>,
 
     prefill_tokens: HashMap<RequestId, usize>,
 
-    unique_blocks: HashMap<UniqueBlock, HashSet<RequestId>>,
+    unique_blocks: HashMap<SequenceHash, HashSet<RequestId>>,
 
     #[getter(copy)]
     block_size: usize,
@@ -99,7 +73,6 @@ impl ActiveSequences {
 
         Self {
             active_seqs: HashMap::new(),
-            partial_blocks: HashMap::new(),
             prefill_tokens: HashMap::new(),
             unique_blocks: HashMap::new(),
             block_size,
@@ -108,24 +81,20 @@ impl ActiveSequences {
         }
     }
 
-    fn add_block(&mut self, request_id: RequestId, block: &UniqueBlock) {
+    fn add_block(&mut self, request_id: RequestId, block: &SequenceHash) {
         let is_new_block = !self.unique_blocks.contains_key(block);
 
         self.unique_blocks
-            .entry(block.clone())
+            .entry(*block)
             .or_default()
             .insert(request_id.clone());
 
         if is_new_block {
             self.active_blocks += 1;
         }
-
-        if matches!(block, UniqueBlock::PartialBlock(_)) {
-            self.partial_blocks.insert(request_id, block.clone());
-        };
     }
 
-    fn remove_block(&mut self, request_id: &RequestId, block: &UniqueBlock) {
+    fn remove_block(&mut self, request_id: &RequestId, block: &SequenceHash) {
         let Some(request_ids) = self.unique_blocks.get_mut(block) else {
             panic!("Cannot remove a block that does not exist.")
         };
@@ -142,17 +111,16 @@ impl ActiveSequences {
     pub fn add_request(
         &mut self,
         request_id: RequestId,
-        token_sequence: TokenBlockSequence,
+        token_sequence: Vec<SequenceHash>,
+        isl: usize,
         overlap: u32,
     ) -> usize {
-        let prefill_tokens = self.new_tokens(&token_sequence, overlap);
+        let prefill_tokens = self.new_tokens(isl, overlap);
         self.prefill_tokens
             .insert(request_id.clone(), prefill_tokens);
         self.active_tokens += prefill_tokens;
 
-        let blocks = create_unique_blocks_from_sequence(&token_sequence, None, self.block_size);
-
-        for block in &blocks {
+        for block in &token_sequence {
             self.add_block(request_id.clone(), block);
         }
 
@@ -161,30 +129,35 @@ impl ActiveSequences {
         self.active_blocks
     }
 
-    pub fn new_tokens(&self, token_sequence: &TokenBlockSequence, overlap: u32) -> usize {
-        let input_tokens = token_sequence.total_tokens();
-        input_tokens
-            .checked_sub((overlap as usize) * self.block_size)
-            .unwrap_or_else(|| {
-                panic!("prefill_tokens < 0 with overlap {overlap} and ISL {input_tokens}")
-            })
+    /// Mark prefill as completed for a request, removing it from prefill_tokens tracking
+    pub fn mark_prefill_completed(&mut self, request_id: &RequestId) {
+        if let Some(tokens) = self.prefill_tokens.remove(request_id) {
+            self.active_tokens = self
+                .active_tokens
+                .checked_sub(tokens.saturating_sub(1)) // Keep 1 token for decoding
+                .expect("active_tokens underflow");
+        }
+    }
+
+    pub fn new_tokens(&self, isl: usize, overlap: u32) -> usize {
+        isl.checked_sub((overlap as usize) * self.block_size)
+            .unwrap_or_else(|| panic!("prefill_tokens < 0 with overlap {overlap} and ISL {isl}"))
     }
 
     pub fn potential_blocks_and_tokens(
         &self,
-        token_sequence: &TokenBlockSequence,
+        token_sequence: &[SequenceHash],
+        isl: usize,
         overlap: u32,
     ) -> (usize, usize) {
         let potential_blocks = self.new_blocks(token_sequence) + self.active_blocks;
-        let potential_tokens = self.new_tokens(token_sequence, overlap) + self.active_tokens;
+        let potential_tokens = self.new_tokens(isl, overlap) + self.active_tokens;
         (potential_blocks, potential_tokens)
     }
 
     /// Match a request against existing blocks and return the number of new blocks that would be added
-    pub fn new_blocks(&self, token_sequence: &TokenBlockSequence) -> usize {
-        let blocks = create_unique_blocks_from_sequence(token_sequence, None, self.block_size);
-
-        blocks
+    pub fn new_blocks(&self, token_sequence: &[SequenceHash]) -> usize {
+        token_sequence
             .iter()
             .filter(|block| !self.unique_blocks.contains_key(block))
             .count()
@@ -192,7 +165,7 @@ impl ActiveSequences {
 
     /// Return the total number of blocks that would be used if the token sequence was added
     /// This is the sum of new blocks that would be added plus the current active blocks
-    pub fn potential_blocks(&self, token_sequence: &TokenBlockSequence) -> usize {
+    pub fn potential_blocks(&self, token_sequence: &[SequenceHash]) -> usize {
         self.new_blocks(token_sequence) + self.active_blocks
     }
 
@@ -209,108 +182,47 @@ impl ActiveSequences {
             return 0;
         };
 
-        let blocks = create_unique_blocks_from_sequence(token_seq, None, self.block_size);
-        for block in blocks {
-            if matches!(block, UniqueBlock::FullBlock(_)) {
-                self.remove_block(request_id, &block);
-            }
-        }
-        if let Some(partial_block) = self.partial_blocks.remove(request_id) {
-            self.remove_block(request_id, &partial_block);
+        for block in token_seq.clone() {
+            self.remove_block(request_id, &block)
         }
 
         self.active_seqs.remove(request_id).unwrap();
 
         self.active_blocks
     }
-
-    /// Push tokens to a specific request's sequence
-    pub fn push(&mut self, request_id: &RequestId, tokens: &[u32]) -> usize {
-        if let Some(prefill_tokens) = self.prefill_tokens.get(request_id).cloned() {
-            self.prefill_tokens.remove(request_id);
-            // decoding has one active token
-            self.active_tokens = self
-                .active_tokens
-                .checked_sub(prefill_tokens)
-                .expect("active_tokens < 0")
-                + 1;
-        };
-
-        // Collect operations to perform after releasing the borrow
-        let mut blocks_to_remove = Vec::new();
-        let mut blocks_to_add = Vec::new();
-
-        {
-            let token_seq = self
-                .active_seqs
-                .get_mut(request_id)
-                .expect("Request ID not found for token push");
-
-            for &token in tokens {
-                token_seq.append(token).expect("Token push failed.");
-
-                // Guard: skip if we didn't cross a block boundary
-                if token_seq.total_tokens() % self.block_size != 1 {
-                    continue;
-                }
-
-                let last_seq_hash = token_seq
-                    .last_complete_block()
-                    .map(|block| block.sequence_hash());
-
-                // Queue operations for later
-                if let Some(partial_block) = self.partial_blocks.get(request_id).cloned() {
-                    blocks_to_remove.push(partial_block);
-                }
-                if let Some(full_block) = last_seq_hash {
-                    blocks_to_add.push(UniqueBlock::FullBlock(full_block));
-                }
-
-                blocks_to_add.push(UniqueBlock::default());
-            }
-        } // token_seq borrow is dropped here
-
-        // Now perform all the queued operations
-        for block in blocks_to_remove {
-            self.remove_block(request_id, &block);
-        }
-
-        for block in blocks_to_add {
-            self.add_block(request_id.clone(), &block);
-        }
-
-        self.active_blocks
-    }
 }
 
-#[derive(Debug)]
 enum UpdateSequences {
     AddRequest {
         request_id: RequestId,
-        token_sequence: TokenBlockSequence,
+        token_sequence: Vec<SequenceHash>,
+        isl: usize,
         overlap: u32,
     },
     Free {
         request_id: RequestId,
     },
-    Push {
+    MarkPrefillCompleted {
         request_id: RequestId,
-        tokens: Vec<u32>, // Changed from token: u32
     },
     NewBlocks {
-        token_sequence: Arc<TokenBlockSequence>,
+        token_sequence: Arc<Vec<SequenceHash>>,
         resp_tx: mpsc::SyncSender<usize>,
     },
     PotentialBlocks {
-        token_sequence: Arc<TokenBlockSequence>,
+        token_sequence: Arc<Vec<SequenceHash>>,
         resp_tx: mpsc::SyncSender<usize>,
     },
     PotentialBlocksAndTokens {
-        token_sequence: Arc<TokenBlockSequence>,
+        token_sequence: Arc<Vec<SequenceHash>>,
+        isl: usize,
         overlap: u32,
         resp_tx: mpsc::SyncSender<(usize, usize)>,
     },
     ActiveBlocks {
+        resp_tx: mpsc::SyncSender<usize>,
+    },
+    ActiveTokens {
         resp_tx: mpsc::SyncSender<usize>,
     },
     Shutdown,
@@ -357,15 +269,16 @@ impl ActiveSequencesMultiWorker {
                     UpdateSequences::AddRequest {
                         request_id,
                         token_sequence,
+                        isl,
                         overlap,
                     } => {
-                        active_sequences.add_request(request_id, token_sequence, overlap);
+                        active_sequences.add_request(request_id, token_sequence, isl, overlap);
                     }
                     UpdateSequences::Free { request_id } => {
                         active_sequences.free(&request_id);
                     }
-                    UpdateSequences::Push { request_id, tokens } => {
-                        active_sequences.push(&request_id, &tokens); // Changed to pass tokens slice
+                    UpdateSequences::MarkPrefillCompleted { request_id } => {
+                        active_sequences.mark_prefill_completed(&request_id);
                     }
                     UpdateSequences::NewBlocks {
                         token_sequence,
@@ -383,16 +296,24 @@ impl ActiveSequencesMultiWorker {
                     }
                     UpdateSequences::PotentialBlocksAndTokens {
                         token_sequence,
+                        isl,
                         overlap,
                         resp_tx,
                     } => {
-                        let potential_tokens =
-                            active_sequences.potential_blocks_and_tokens(&token_sequence, overlap);
+                        let potential_tokens = active_sequences.potential_blocks_and_tokens(
+                            &token_sequence,
+                            isl,
+                            overlap,
+                        );
                         let _ = resp_tx.send(potential_tokens);
                     }
                     UpdateSequences::ActiveBlocks { resp_tx } => {
                         let active_blocks = active_sequences.active_blocks();
                         let _ = resp_tx.send(active_blocks);
+                    }
+                    UpdateSequences::ActiveTokens { resp_tx } => {
+                        let active_tokens = active_sequences.active_tokens();
+                        let _ = resp_tx.send(active_tokens);
                     }
                     UpdateSequences::Shutdown => {
                         break;
@@ -443,7 +364,8 @@ impl ActiveSequencesMultiWorker {
     pub fn add_request(
         &mut self,
         request_id: RequestId,
-        token_sequence: TokenBlockSequence,
+        token_sequence: Vec<SequenceHash>,
+        isl: usize,
         overlap: u32,
         worker_id: WorkerId,
     ) {
@@ -457,6 +379,7 @@ impl ActiveSequencesMultiWorker {
             .send(UpdateSequences::AddRequest {
                 request_id,
                 token_sequence,
+                isl,
                 overlap,
             })
             .expect("Failed to send add_request command to worker");
@@ -478,18 +401,19 @@ impl ActiveSequencesMultiWorker {
         self.request_to_worker.remove(request_id);
     }
 
-    pub fn push(&mut self, request_id: &RequestId, tokens: &[u32]) {
+    /// Mark prefill as completed for a request
+    pub fn mark_prefill_completed(&mut self, request_id: &RequestId) {
         let worker_id = self
             .request_to_worker
             .get(request_id)
             .copied()
             .expect("Request ID not found in request_to_worker mapping");
+
         self.senders[&worker_id]
-            .send(UpdateSequences::Push {
+            .send(UpdateSequences::MarkPrefillCompleted {
                 request_id: request_id.clone(),
-                tokens: tokens.to_vec(), // Convert to Vec
             })
-            .expect("Failed to send push command to worker");
+            .expect("Failed to send mark_prefill_completed command to worker");
     }
 
     /// Get the number of workers
@@ -500,8 +424,8 @@ impl ActiveSequencesMultiWorker {
     /// Generic method to query all workers with a given command
     fn query_workers(
         &self,
-        token_sequence: Option<TokenBlockSequence>,
-        command_fn: impl Fn(Option<Arc<TokenBlockSequence>>, mpsc::SyncSender<usize>) -> UpdateSequences,
+        token_sequence: Option<Vec<SequenceHash>>,
+        command_fn: impl Fn(Option<Arc<Vec<SequenceHash>>>, mpsc::SyncSender<usize>) -> UpdateSequences,
     ) -> HashMap<WorkerId, usize> {
         let mut results = HashMap::new();
         let token_sequence_shared = token_sequence.map(Arc::new);
@@ -528,7 +452,7 @@ impl ActiveSequencesMultiWorker {
     }
 
     /// Query all workers for the number of new blocks that would be added by a token sequence
-    pub fn new_blocks(&self, token_sequence: TokenBlockSequence) -> HashMap<WorkerId, usize> {
+    pub fn new_blocks(&self, token_sequence: Vec<SequenceHash>) -> HashMap<WorkerId, usize> {
         self.query_workers(Some(token_sequence), |ts, resp_tx| match ts {
             Some(ts) => UpdateSequences::NewBlocks {
                 token_sequence: ts,
@@ -539,7 +463,7 @@ impl ActiveSequencesMultiWorker {
     }
 
     /// Query all workers for the total number of blocks (new + active) that would be used by a token sequence
-    pub fn potential_blocks(&self, token_sequence: TokenBlockSequence) -> HashMap<WorkerId, usize> {
+    pub fn potential_blocks(&self, token_sequence: Vec<SequenceHash>) -> HashMap<WorkerId, usize> {
         self.query_workers(Some(token_sequence), |ts, resp_tx| match ts {
             Some(ts) => UpdateSequences::PotentialBlocks {
                 token_sequence: ts,
@@ -552,7 +476,8 @@ impl ActiveSequencesMultiWorker {
     /// Query all workers for the potential tokens (new + active) that would be used by a token sequence with overlap
     pub fn potential_blocks_and_tokens(
         &self,
-        token_sequence: TokenBlockSequence,
+        token_sequence: Vec<SequenceHash>,
+        isl: usize,
         overlaps: OverlapScores,
     ) -> (HashMap<WorkerId, usize>, HashMap<WorkerId, usize>) {
         let mut potential_blocks = HashMap::new();
@@ -568,6 +493,7 @@ impl ActiveSequencesMultiWorker {
             sender
                 .send(UpdateSequences::PotentialBlocksAndTokens {
                     token_sequence: token_sequence_shared.clone(),
+                    isl,
                     overlap: overlaps.scores.get(worker_id).copied().unwrap_or(0),
                     resp_tx,
                 })
@@ -590,6 +516,11 @@ impl ActiveSequencesMultiWorker {
     pub fn active_blocks(&self) -> HashMap<WorkerId, usize> {
         self.query_workers(None, |_, resp_tx| UpdateSequences::ActiveBlocks { resp_tx })
     }
+
+    /// Query all workers for their current number of active tokens
+    pub fn active_tokens(&self) -> HashMap<WorkerId, usize> {
+        self.query_workers(None, |_, resp_tx| UpdateSequences::ActiveTokens { resp_tx })
+    }
 }
 
 impl Drop for ActiveSequencesMultiWorker {
@@ -609,91 +540,102 @@ impl Drop for ActiveSequencesMultiWorker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tokens::Tokens;
 
     #[test]
-    fn test_shared_sequence_manager_operations() {
-        let block_size = 4;
-        let mut manager = ActiveSequences::new(block_size);
-        let to_sequence =
-            |tokens: Vec<u32>| Tokens::from(tokens).into_sequence(block_size as u32, None);
-
-        // Step 1: Add request 0 with tokens [0, 1, 2], then push 3 and 4
-        manager.add_request("0".to_string(), to_sequence(vec![0, 1, 2]), 0);
-        manager.push(&"0".to_string(), &[3, 4]); // Push both tokens at once
-        assert_eq!(manager.active_tokens(), 1);
-        assert_eq!(manager.active_blocks(), 2);
-        assert_eq!(manager.partial_blocks.len(), 1);
-
-        // Step 2: Add request 1 with tokens [0, 1, 2, 3, 4, 5, 6]
-        manager.add_request("1".to_string(), to_sequence(vec![0, 1, 2, 3, 4, 5, 6]), 1);
-        assert_eq!(manager.active_tokens(), 1 + 3);
-        assert_eq!(manager.active_blocks(), 3);
-
-        // Check that only one key is FullBlock with both requests sharing it
-        let mut full_block_count = 0;
-        let mut shared_block_requests = None;
-        for (block, requests) in &manager.unique_blocks {
-            if let UniqueBlock::FullBlock(_) = block {
-                full_block_count += 1;
-                if requests.len() == 2 {
-                    shared_block_requests = Some(requests.clone());
-                }
-            }
-        }
-        assert_eq!(full_block_count, 1);
-        assert!(shared_block_requests.is_some());
-        let shared_requests = shared_block_requests.unwrap();
-        assert!(shared_requests.contains("0"));
-        assert!(shared_requests.contains("1"));
-
-        let new_blocks = manager.new_blocks(&to_sequence(vec![0, 1, 2, 3, 4, 5]));
-        assert_eq!(new_blocks, 1);
-
-        // Step 3: Free request 1
-        manager.free(&"1".to_string());
-        assert_eq!(manager.active_blocks(), 2);
-
-        // Step 4: Free request 0
-        manager.free(&"0".to_string());
-        assert_eq!(manager.active_tokens(), 0);
-        assert_eq!(manager.active_blocks(), 0);
-        assert_eq!(manager.unique_blocks.len(), 0);
-        assert_eq!(manager.partial_blocks.len(), 0);
-        assert_eq!(manager.active_seqs.len(), 0);
-    }
-
-    #[test]
-    fn test_active_sequences_multi_worker() {
-        let block_size = 4;
+    fn test_multi_worker_block_sharing() {
+        // Create multi-worker sequence manager with 3 workers
+        let block_size = 4; // arbitrary block size
         let worker_ids = vec![0, 1, 2];
-        let mut manager = ActiveSequencesMultiWorker::new(block_size, worker_ids);
-        let to_sequence =
-            |tokens: Vec<u32>| Tokens::from(tokens).into_sequence(block_size as u32, None);
+        let mut seq_manager = ActiveSequencesMultiWorker::new(block_size, worker_ids);
 
-        // Send request [0, 1, 2, 3] to worker 0
-        manager.add_request("req0".to_string(), to_sequence(vec![0, 1, 2, 3]), 0, 0);
+        // Add requests to each worker
+        // Worker 0: sequence [0, 1, 2]
+        seq_manager.add_request(
+            "request_0".to_string(),
+            vec![0, 1, 2],
+            12, // ISL (3 blocks * 4 block_size)
+            0,  // no overlap
+            0,  // worker_id
+        );
 
-        // Send request [0, 1, 2] to worker 1, then push 3 and 4
-        manager.add_request("req1".to_string(), to_sequence(vec![0, 1, 2]), 0, 1);
-        manager.push(&"req1".to_string(), &[3, 4]); // Push both tokens at once
+        // Worker 1: sequence [3, 4]
+        seq_manager.add_request(
+            "request_1".to_string(),
+            vec![3, 4],
+            8, // ISL (2 blocks * 4 block_size)
+            0, // no overlap
+            1, // worker_id
+        );
 
-        // Send request [0, 1, 2] to worker 2
-        manager.add_request("req2".to_string(), to_sequence(vec![0, 1, 2]), 0, 2);
+        // Worker 2: sequence [0, 1, 2, 3]
+        seq_manager.add_request(
+            "request_2".to_string(),
+            vec![0, 1, 2, 3],
+            16, // ISL (4 blocks * 4 block_size)
+            0,  // no overlap
+            2,  // worker_id
+        );
 
-        // Check new_blocks on tokens [0, 1, 2, 3, 4]
-        let new_blocks_map = manager.new_blocks(to_sequence(vec![0, 1, 2, 3, 4]));
+        // Verify active tokens after adding requests
+        let tokens_after_add = seq_manager.active_tokens();
+        assert_eq!(
+            tokens_after_add[&0], 12,
+            "Worker 0 should have 12 active tokens"
+        );
+        assert_eq!(
+            tokens_after_add[&1], 8,
+            "Worker 1 should have 8 active tokens"
+        );
+        assert_eq!(
+            tokens_after_add[&2], 16,
+            "Worker 2 should have 16 active tokens"
+        );
 
-        assert_eq!(new_blocks_map[&0], 1); // Worker 0 would have 1 new block
-        assert_eq!(new_blocks_map[&1], 1); // Worker 1 would have 1 new block
-        assert_eq!(new_blocks_map[&2], 2); // Worker 2 would have 2 new blocks
+        // Test potential blocks for sequence [0, 1]
+        let potential_blocks = seq_manager.potential_blocks(vec![0, 1]);
 
-        manager.update_workers(vec![0, 1]);
-        manager.update_workers(vec![0, 1, 3]);
+        // Worker 0 should return 3 (already has blocks 0, 1, 2, so no new blocks needed for [0, 1])
+        assert_eq!(
+            potential_blocks[&0], 3,
+            "Worker 0 should have 3 potential blocks"
+        );
 
-        let new_blocks_map = manager.new_blocks(to_sequence(vec![0, 1, 2, 3, 4]));
+        // Worker 1 should return 4 (has blocks 3, 4, would need to add blocks 0, 1)
+        assert_eq!(
+            potential_blocks[&1], 4,
+            "Worker 1 should have 4 potential blocks"
+        );
 
-        assert_eq!(new_blocks_map.len(), 3);
-        assert_eq!(new_blocks_map[&3], 2);
+        // Worker 2 should return 4 (already has blocks 0, 1, 2, 3, so no new blocks needed for [0, 1])
+        assert_eq!(
+            potential_blocks[&2], 4,
+            "Worker 2 should have 4 potential blocks"
+        );
+
+        // Free all original requests
+        seq_manager.free(&"request_0".to_string());
+        seq_manager.free(&"request_1".to_string());
+        seq_manager.free(&"request_2".to_string());
+
+        // Verify active blocks are zero for all workers
+        let active_blocks = seq_manager.active_blocks();
+        assert_eq!(active_blocks[&0], 0, "Worker 0 should have 0 active blocks");
+        assert_eq!(active_blocks[&1], 0, "Worker 1 should have 0 active blocks");
+        assert_eq!(active_blocks[&2], 0, "Worker 2 should have 0 active blocks");
+
+        // Verify active tokens are zero for all workers
+        let final_tokens = seq_manager.active_tokens();
+        assert_eq!(
+            final_tokens[&0], 0,
+            "Worker 0 should have 0 active tokens after freeing all"
+        );
+        assert_eq!(
+            final_tokens[&1], 0,
+            "Worker 1 should have 0 active tokens after freeing all"
+        );
+        assert_eq!(
+            final_tokens[&2], 0,
+            "Worker 2 should have 0 active tokens after freeing all"
+        );
     }
 }

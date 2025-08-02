@@ -19,7 +19,7 @@ use futures::stream::StreamExt;
 use futures::{Stream, TryStreamExt};
 
 use super::*;
-
+use crate::metrics::MetricsRegistry;
 use crate::traits::events::{EventPublisher, EventSubscriber};
 
 #[async_trait]
@@ -78,6 +78,16 @@ impl EventSubscriber for Namespace {
     }
 }
 
+impl MetricsRegistry for Namespace {
+    fn basename(&self) -> String {
+        self.name.clone()
+    }
+
+    fn parent_hierarchy(&self) -> Vec<String> {
+        vec![self.drt().basename()]
+    }
+}
+
 #[cfg(feature = "integration")]
 #[cfg(test)]
 mod tests {
@@ -89,8 +99,8 @@ mod tests {
     async fn test_publish() {
         let rt = Runtime::from_current().unwrap();
         let dtr = DistributedRuntime::from_settings(rt.clone()).await.unwrap();
-        let ns = dtr.namespace("test".to_string()).unwrap();
-        ns.publish("test", &"test".to_string()).await.unwrap();
+        let ns = dtr.namespace("test_namespace_publish".to_string()).unwrap();
+        ns.publish("test_event", &"test".to_string()).await.unwrap();
         rt.shutdown();
     }
 
@@ -98,13 +108,15 @@ mod tests {
     async fn test_subscribe() {
         let rt = Runtime::from_current().unwrap();
         let dtr = DistributedRuntime::from_settings(rt.clone()).await.unwrap();
-        let ns = dtr.namespace("test".to_string()).unwrap();
+        let ns = dtr
+            .namespace("test_namespace_subscribe".to_string())
+            .unwrap();
 
         // Create a subscriber
-        let mut subscriber = ns.subscribe("test").await.unwrap();
+        let mut subscriber = ns.subscribe("test_event").await.unwrap();
 
         // Publish a message
-        ns.publish("test", &"test_message".to_string())
+        ns.publish("test_event", &"test_message".to_string())
             .await
             .unwrap();
 

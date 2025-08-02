@@ -31,3 +31,14 @@ impl RuntimeProvider for DistributedRuntime {
         &self.runtime
     }
 }
+
+// This implementation is required because:
+// 1. MetricsRegistry has a supertrait bound: `MetricsRegistry: Send + Sync + DistributedRuntimeProvider`
+// 2. DistributedRuntime implements MetricsRegistry (in distributed.rs)
+// 3. Therefore, DistributedRuntime must implement DistributedRuntimeProvider to satisfy the trait bound
+// 4. This enables DistributedRuntime to serve as both a provider (of itself) and a metrics registry
+impl DistributedRuntimeProvider for DistributedRuntime {
+    fn drt(&self) -> &DistributedRuntime {
+        self
+    }
+}

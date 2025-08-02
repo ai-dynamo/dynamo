@@ -15,16 +15,16 @@
 
 __all__ = [
     "CircusController",
-    "LocalConnector",
     "PlannerConnector",
     "KubernetesConnector",
     "LoadPlannerDefaults",
     "SLAPlannerDefaults",
+    "ServiceConfig",
 ]
 
 # Import the classes
 from dynamo.planner.circusd import CircusController
+from dynamo.planner.config import ServiceConfig
 from dynamo.planner.defaults import LoadPlannerDefaults, SLAPlannerDefaults
 from dynamo.planner.kubernetes_connector import KubernetesConnector
-from dynamo.planner.local_connector import LocalConnector
 from dynamo.planner.planner_connector import PlannerConnector

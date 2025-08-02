@@ -36,13 +36,14 @@ docker login <CONTAINER_REGISTRY>
 #### 🛠️ Build and push images for the Dynamo Cloud platform components
 
 [One-time Action]
-You should build the images for the Dynamo Cloud Platform.
+You should build the image(s) for the Dynamo Cloud Platform.
 If you are a **👤 Dynamo User** you would do this step once.
 
 ```bash
 export DOCKER_SERVER=<your-docker-server>
 export IMAGE_TAG=<TAG>
-earthly --push +all-docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
+cd deploy/cloud/operator
+earthly --push +docker --DOCKER_SERVER=$DOCKER_SERVER --IMAGE_TAG=$IMAGE_TAG
 ```
 
 If you are a **🧑‍💻 Dynamo Contributor** you would have to rebuild the dynamo platform images as the code evolves. To do so please look at the [Cloud Guide](../../../docs/guides/dynamo_deploy/dynamo_cloud.md).

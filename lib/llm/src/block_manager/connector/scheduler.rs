@@ -83,7 +83,6 @@ impl TransferSchedulerClient {
 pub struct WorkerSchedulerClient {
     slots: HashMap<String, WorkerSchedulerClientSlot>,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    cancel_token: CancellationToken,
     iteration: u64,
     iteration_complete: bool,
     layers_complete: u32,
@@ -97,7 +96,6 @@ impl WorkerSchedulerClient {
         Self {
             slots: HashMap::new(),
             scheduler_tx,
-            cancel_token: CancellationToken::new(),
             iteration: 0,
             iteration_complete: true,
             layers_complete: 0,

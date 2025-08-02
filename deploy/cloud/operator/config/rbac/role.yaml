@@ -99,6 +99,18 @@ rules:
   - update
   - watch
 - apiGroups:
+  - grove.io
+  resources:
+  - podgangsets
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
   - leaderworkerset.x-k8s.io
   resources:
   - leaderworkersets

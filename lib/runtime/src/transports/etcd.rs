@@ -616,7 +616,7 @@ mod tests {
     fn test_ectd_client() {
         let rt = Runtime::from_settings().unwrap();
         let rt_clone = rt.clone();
-        let config = DistributedConfig::from_settings();
+        let config = DistributedConfig::from_settings(false);
 
         rt_clone.primary().block_on(async move {
             let drt = DistributedRuntime::new(rt, config).await.unwrap();
@@ -628,8 +628,11 @@ mod tests {
         let key = "__integration_test_key";
         let value = b"test_value";
 
-        let client = drt.etcd_client();
-        let lease_id = drt.primary_lease().id();
+        let client = drt.etcd_client().expect("etcd client should be available");
+        let lease_id = drt
+            .primary_lease()
+            .expect("primary lease should be available")
+            .id();
 
         // Create the key
         let result = client
