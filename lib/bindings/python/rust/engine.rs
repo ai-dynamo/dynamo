@@ -134,6 +134,9 @@ enum ResponseProcessingError {
     #[error("python exception: {0}")]
     PythonException(String),
 
+    #[error("python generator exit: {0}")]
+    PyGeneratorExit(String),
+
     #[error("deserialize error: {0}")]
     DeserializeError(String),
 
@@ -225,6 +228,9 @@ where
                                 let msg = format!("critical error: invalid response object from python async generator; application-logic-mismatch: {}", e);
                                 msg
                             }
+                            ResponseProcessingError::PyGeneratorExit(_) => {
+                                "Stream ended before generation completed".to_string()
+                            }
                             ResponseProcessingError::PythonException(e) => {
                                 let msg = format!("a python exception was caught while processing the async generator: {}", e);
                                 msg
@@ -276,8 +282,16 @@ where
 {
     let item = item.map_err(|e| {
         println!();
-        Python::with_gil(|py| e.display(py));
-        ResponseProcessingError::PythonException(e.to_string())
+        let mut is_py_generator_exit = false;
+        Python::with_gil(|py| {
+            e.display(py);
+            is_py_generator_exit = e.is_instance_of::<pyo3::exceptions::PyGeneratorExit>(py);
+        });
+        if is_py_generator_exit {
+            ResponseProcessingError::PyGeneratorExit(e.to_string())
+        } else {
+            ResponseProcessingError::PythonException(e.to_string())
+        }
     })?;
     let response = tokio::task::spawn_blocking(move || {
         Python::with_gil(|py| depythonize::<Resp>(&item.into_bound(py)))
