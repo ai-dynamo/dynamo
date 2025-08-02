@@ -70,7 +70,7 @@ fi
 if [ "$mode" = "prefill" ]; then
     if [ "$cmd" = "dynamo" ]; then
         # H100 dynamo prefill command
-        python3 components/worker.py \
+        python3 -m dynamo.sglang.worker \
             --model-path /model/ \
             --served-model-name deepseek-ai/DeepSeek-R1 \
             --skip-tokenizer-init \
@@ -131,7 +131,7 @@ if [ "$mode" = "prefill" ]; then
 elif [ "$mode" = "decode" ]; then
     if [ "$cmd" = "dynamo" ]; then
         # H100 dynamo decode command
-        python3 components/decode_worker.py \
+        python3 -m dynamo.sglang.decode_worker \
             --model-path /model/ \
             --served-model-name deepseek-ai/DeepSeek-R1 \
             --skip-tokenizer-init \

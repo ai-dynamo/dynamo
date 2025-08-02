@@ -94,12 +94,6 @@ cd $DYNAMO_ROOT/components/backends/sglang
 
 ### Aggregated Serving with KV Routing
 
-> [!NOTE]
-> The current implementation of `components/backends/sglang/src/dynamo/sglang/worker/main.py` publishes _placeholder_ engine metrics to keep the Dynamo KV-router happy. Real-time metrics will be surfaced directly from the SGLang engine once the following pull requests are merged:
-> • Dynamo: [ai-dynamo/dynamo #1465](https://github.com/ai-dynamo/dynamo/pull/1465) – _feat: receive kvmetrics from sglang scheduler_.
->
-> After these are in, the TODOs in `main.py` will be resolved and the placeholder logic removed.
-
 ```bash
 cd $DYNAMO_ROOT/components/backends/sglang
 ./launch/agg_router.sh

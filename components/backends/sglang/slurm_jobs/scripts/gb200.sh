@@ -86,7 +86,7 @@ if [ "$mode" = "prefill" ]; then
         SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
         SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
         PYTHONUNBUFFERED=1 \
-        python3 components/worker.py \
+        python3 -m dynamo.sglang.worker \
             --served-model-name deepseek-ai/DeepSeek-R1 \
             --model-path /model/ \
             --skip-tokenizer-init \
@@ -188,7 +188,7 @@ elif [ "$mode" = "decode" ]; then
         SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
         SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
         PYTHONUNBUFFERED=1 \
-        python3 components/decode_worker.py \
+        python3 -m dynamo.sglang.decode_worker \
             --served-model-name deepseek-ai/DeepSeek-R1 \
             --model-path /model/ \
             --skip-tokenizer-init \
