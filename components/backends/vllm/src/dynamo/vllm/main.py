@@ -28,6 +28,22 @@ configure_dynamo_logging()
 logger = logging.getLogger(__name__)
 
 
+def setup_lmcache_environment():
+    """Setup LMCache environment variables for KV cache offloading"""
+    # LMCache configuration for matching logic
+    lmcache_config = {
+        "LMCACHE_CHUNK_SIZE": "256",  # Token chunk size
+        "LMCACHE_LOCAL_CPU": "True",  # Enable CPU memory backend
+        "LMCACHE_MAX_LOCAL_CPU_SIZE": "20",  # CPU memory limit in GB
+    }
+
+    # Set environment variables
+    for key, value in lmcache_config.items():
+        if key not in os.environ:  # Only set if not already configured
+            os.environ[key] = value
+            logger.info(f"Set LMCache environment variable: {key}={value}")
+
+
 async def graceful_shutdown(runtime):
     """
     By calling `runtime.shutdown()`, the endpoints will immediately be unavailable.
@@ -70,6 +86,17 @@ def setup_vllm_engine(config, stat_logger=None):
     os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
     engine_args = config.engine_args
+
+    # KV transfer config is now handled by args.py based on ENABLE_LMCACHE env var
+    # Check if LMCache is enabled
+    enable_lmcache = os.getenv("ENABLE_LMCACHE", "0").lower() in ("1", "true", "yes")
+
+    if enable_lmcache:
+        setup_lmcache_environment()
+        logger.info("LMCache enabled for VllmWorker")
+    else:
+        logger.info("LMCache is disabled")
+
     # Load default sampling params from `generation_config.json`
     default_sampling_params = (
         engine_args.create_model_config().get_diff_sampling_param()
@@ -90,7 +117,10 @@ def setup_vllm_engine(config, stat_logger=None):
         disable_log_requests=engine_args.disable_log_requests,
         disable_log_stats=engine_args.disable_log_stats,
     )
-    logger.info(f"VllmWorker for {config.model} has been initialized")
+    if enable_lmcache:
+        logger.info(f"VllmWorker for {config.model} has been initialized with LMCache")
+    else:
+        logger.info(f"VllmWorker for {config.model} has been initialized")
     return engine_client, vllm_config, default_sampling_params
 
 
@@ -98,7 +128,6 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
     """
     Instantiate and serve
     """
-
     component = runtime.namespace(config.namespace).component(config.component)
     await component.create_service()
 
