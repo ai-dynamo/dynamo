@@ -70,7 +70,7 @@ jobs:
     - name: Install sccache
       run: |
         SCCACHE_VERSION="0.10.0"
-        SCCACHE_FILE="sccache-dist-v${SCCACHE_VERSION}-$(uname -m)-unknown-linux-musl"
+        SCCACHE_FILE="sccache-v${SCCACHE_VERSION}-$(uname -m)-unknown-linux-musl"
         SCCACHE_URL="https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/${SCCACHE_FILE}.tar.gz"
         curl -L "${SCCACHE_URL}" | tar xz
         mv ${SCCACHE_FILE}/sccache /usr/local/bin/sccache
