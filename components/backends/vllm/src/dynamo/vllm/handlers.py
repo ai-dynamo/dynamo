@@ -106,6 +106,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     async def generate(self, request):
         request_id = str(uuid.uuid4().hex)
+        logger.debug(f"New Request ID: {request_id}")
 
         prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
 
@@ -164,6 +165,8 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
     async def generate(self, request):
         request_id = request["request_id"]
+        logger.debug(f"New Prefill Request ID: {request_id}")
+
         prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
         sampling_params = msgspec.convert(request["sampling_params"], SamplingParams)
 
