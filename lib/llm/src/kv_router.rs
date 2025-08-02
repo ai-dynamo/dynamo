@@ -50,6 +50,7 @@ use dynamo_runtime::traits::events::EventSubscriber;
 // this should be discovered from the component
 pub const KV_EVENT_SUBJECT: &str = "kv_events";
 pub const KV_HIT_RATE_SUBJECT: &str = "kv-hit-rate";
+pub const KV_ALL_WORKERS_BUSY_SUBJECT: &str = "kv-all-workers-busy";
 pub const KV_METRICS_ENDPOINT: &str = "load_metrics";
 
 /// A trait that users can implement to define custom selection logic
@@ -74,6 +75,8 @@ pub struct KvRouterConfig {
     // TODO: this is not actually used for now
     // Would need this (along with total kv blocks) to trigger AllWorkersBusy error for e.g. rate-limiting
     pub max_num_batched_tokens: u32,
+
+    pub max_workers_busy_queue_depth: usize,
 }
 
 impl Default for KvRouterConfig {
@@ -83,6 +86,7 @@ impl Default for KvRouterConfig {
             router_temperature: 0.0,
             use_kv_events: true,
             max_num_batched_tokens: 8192,
+            max_workers_busy_queue_depth: 5,
         }
     }
 }
@@ -95,6 +99,7 @@ impl KvRouterConfig {
         temperature: Option<f64>,
         use_kv_events: Option<bool>,
         max_num_batched_tokens: Option<u32>,
+        max_workers_busy_queue_depth: Option<usize>,
     ) -> Self {
         let default = Self::default();
         Self {
@@ -103,6 +108,8 @@ impl KvRouterConfig {
             use_kv_events: use_kv_events.unwrap_or(default.use_kv_events),
             max_num_batched_tokens: max_num_batched_tokens
                 .unwrap_or(default.max_num_batched_tokens),
+            max_workers_busy_queue_depth: max_workers_busy_queue_depth
+                .unwrap_or(default.max_workers_busy_queue_depth),
         }
     }
 }
@@ -147,6 +154,7 @@ impl KvRouter {
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         use_kv_events: bool,
+        max_workers_busy_queue_depth: usize,
     ) -> Result<Self> {
         let cancellation_token = component
             .drt()
@@ -180,6 +188,7 @@ impl KvRouter {
             block_size,
             instances_rx,
             selector,
+            max_workers_busy_queue_depth,
         )
         .await?;
 

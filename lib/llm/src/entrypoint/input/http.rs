@@ -7,31 +7,44 @@ use crate::{
     discovery::{ModelManager, ModelWatcher, MODEL_ROOT_PATH},
     engines::StreamingEngineAdapter,
     entrypoint::{input::common, EngineConfig},
-    http::service::service_v2,
+    http::service::{request_throttler::HttpServiceRequestThrottler, service_v2},
     kv_router::KvRouterConfig,
-    types::{
-        openai::chat_completions::{
-            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-        },
-        openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+    types::openai::{
+        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
+        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
-use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::transports::etcd;
+use dynamo_runtime::{pipeline::RouterMode, CancellationToken};
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
 /// Build and run an HTTP service
 pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Result<()> {
+    let all_workers_busy_rejection_time_window = engine_config
+        .local_model()
+        .all_workers_busy_rejection_time_window();
     let http_service = service_v2::HttpService::builder()
         .port(engine_config.local_model().http_port())
         .enable_chat_endpoints(true)
         .enable_cmpl_endpoints(true)
         .enable_embeddings_endpoints(true)
         .with_request_template(engine_config.local_model().request_template())
+        .with_all_workers_busy_rejection_time_window(all_workers_busy_rejection_time_window)
         .build()?;
     match engine_config {
         EngineConfig::Dynamic(_) => {
             let distributed_runtime = DistributedRuntime::from_settings(runtime.clone()).await?;
+            let request_throttler = http_service.request_throttler_clone();
+            if all_workers_busy_rejection_time_window.is_some() {
+                if let Err(e) = start_request_throttler_monitoring(
+                    &distributed_runtime,
+                    &engine_config,
+                    &request_throttler,
+                    runtime.primary_token(),
+                ) {
+                    tracing::error!(%e, "failed to start request throttler monitoring");
+                }
+            }
             match distributed_runtime.etcd_client() {
                 Some(etcd_client) => {
                     let router_config = engine_config.local_model().router_config();
@@ -108,5 +121,23 @@ async fn run_watcher(
     let _watcher_task = tokio::spawn(async move {
         watch_obj.watch(receiver).await;
     });
+    Ok(())
+}
+
+/// Starts the request throttler monitoring for the given namespace.
+/// This is used to monitor the request throttler for the given namespace and start the request throttling if the all workers busy event is received.
+fn start_request_throttler_monitoring(
+    runtime: &DistributedRuntime,
+    engine_config: &EngineConfig,
+    request_throttler: &HttpServiceRequestThrottler,
+    cancellation_token: CancellationToken,
+) -> anyhow::Result<()> {
+    let namespace = engine_config.local_model().endpoint_id().namespace.clone();
+    let namespace = runtime.namespace(namespace)?;
+    tracing::info!(
+        "Starting request throttler monitoring for namespace={}",
+        namespace.name()
+    );
+    request_throttler.start_monitoring(namespace, cancellation_token)?;
     Ok(())
 }
