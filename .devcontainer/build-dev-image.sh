@@ -135,7 +135,7 @@ echo "Converting '$CI_BASE_IMAGE' to '$DEV_IMAGE' (Rust $RUST_VERSION)"
 
 # Create a temporary Dockerfile
 TEMP_DOCKERFILE=$(mktemp)
-trap "rm -f $TEMP_DOCKERFILE" EXIT
+trap 'rm -f $TEMP_DOCKERFILE' EXIT
 
 cat > "$TEMP_DOCKERFILE" << EOF
 FROM $CI_BASE_IMAGE

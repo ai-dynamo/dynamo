@@ -51,7 +51,7 @@ retry() {
     return 0
 }
 
-set -xe
+set -eux
 
 # Changing permission to match local user since volume mounts default to root ownership
 # Note: sudo is used here because the volume mount may have root ownership

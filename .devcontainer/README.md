@@ -20,76 +20,91 @@ limitations under the License.
 > Warning: Dev Containers (aka `devcontainers`) is an experimental feature and we are not testing in CI. Please submit any feedback using the issues on GitHub.
 
 ## Prerequisites
+
+Before you begin, ensure you have the following installed:
+
 - [Docker](https://docs.docker.com/get-started/get-docker/) installed and configured on your host system
 - IDEs: Both VS Code and Cursor have Dev Containers extensions
 - Appropriate NVIDIA drivers (compatible with CUDA 12.8)
 - For models that require authentication, set your Hugging Face token env var `HF_TOKEN` in your local startup (.bashrc, .zshrc or .profile file). Many models do not require this token.
 
-## Quick Start
+## Quick Start Guide
 
-### There are two ways to build the development container image:
+Follow these steps to get your NVIDIA Dynamo development environment up and running:
 
-#### Method 1: Slow Build (better-tested, more reliable)
-Build from your current source code:
+### Step 1: Choose Your Build Method
+
+You have two options for building the development container image:
+
+**Option A: Build from scratch from the source**
+- This is a reliable method
+- This will take quite a while because it needs to download and install all the dependencies from scratch.
+- Note that currently, `local-dev` is only implemented for --framework VLLM
 
 ```bash
 ./container/build.sh --target local-dev
 ```
 
-The container will be built and give certain file permissions to your local uid and gid.
+**Option B: Fast Build (Experimental)**
+- Uses pre-built CI images from a Docker registry
+- Generally much faster
 
-> Note: Currently local-dev is only implemented for --framework VLLM
-
-#### Method 2: Fast Build (Depends on CI reliability)
-Use a pre-built CI image from GitLab registry:
-
-1. **Find your current Git SHA:**
+1. Find your current Git SHA:
    ```bash
    git rev-parse HEAD
    ```
 
-2. **Search the GitLab registry -- you must be on the company VPN:**
-   Go to https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/85325
+2. Search the Docker registry:
+   For example, it may be: https://gitlab-master.nvidia.com/dl/ai-dynamo/dynamo/container_registry/85325
 
-3. **Find your SHA:** Search for your commit SHA (e.g., `e61f1c8a40dafa7780d4983e545cc1eb09e9d2ee`)
+3. Find your image by putting in the SHA (for example, `e61f1c8a40dafa7780d4983e545cc1eb09e9d2ee`)
 
-4. **Copy the full container URL.** Hover over the clipboard icon to get the complete URL (e.g., `gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:e61f1c8a40dafa7780d4983e545cc1eb09e9d2ee-29598585-vllm-amd64`)
+4. Copy the full container URL: Hover over the clipboard icon to get the complete URL (e.g., `gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:e61f1c8a40dafa7780d4983e545cc1eb09e9d2ee-29598585-vllm-amd64`)
 
-5. **Build the dev image:**
-Below is an illustration, using the SHA you found in step 3.
+5. Build the dev image (using the SHA you found in step 3):
    ```bash
    .devcontainer/build-dev-image.sh gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:e61f1c8a40dafa7780d4983e545cc1eb09e9d2ee-29598585-vllm-amd64
    ```
 
    This creates a development image called `dynamo:latest-vllm-local-dev`
 
-### Install Dev Containers extension in your IDE
+### Step 2: Install Dev Containers Extension
 
-**VS Code:**
+**For VS Code:**
 - Install [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers) from Microsoft marketplace
 
-**Cursor:**
+**For Cursor:**
 - Press `Cmd+Shift+X` (Mac) or `Ctrl+Shift+X` (Linux/Windows) to open Extensions
 - Search for "Dev Containers" and install the one by **Anysphere** (Do not download the version from Microsoft as it is not compatible with Cursor)
 
-Now open Dynamo folder in your IDE:
-- Press `Cmd+Shift+P` (Mac) or `Ctrl+Shift+P` (Linux/Windows)
-- Select "Dev Containers: Open Folder in Container"
+### Step 3: Launch the Development Environment
 
-Optional: If you want to mount your Hugging Face cache, go to `.devcontainer` and uncomment in the mounts section:
+1. Open `dynamo` folder in your IDE
+2. Press `Cmd+Shift+P` (Mac) or `Ctrl+Shift+P` (Linux/Windows)
+3. Select "Dev Containers: Open Folder in Container", select your `dynamo` folder and open.
 
-```json
-// "source=${localEnv:HF_HOME},target=/home/ubuntu/.cache/huggingface,type=bind", // Uncomment to enable HF Cache Mount. Make sure to set HF_HOME env var in you .bashrc
-```
-Make sure HF_HOME is sourced in your .bashrc or .zshenv and your vscode default terminal is set properly.
+### Step 4: Optional - Mount Hugging Face Cache
 
-Now wait for Initialization:
-- The container will mount your local code
-- `post-create.sh` will build the project and configure the environment
+If you want to mount your Hugging Face cache for faster model loading:
+
+1. Go to `.devcontainer` folder
+2. Uncomment this line in the mounts section:
+   ```json
+   // "source=${localEnv:HF_HOME},target=/home/ubuntu/.cache/huggingface,type=bind", // Uncomment to enable HF Cache Mount. Make sure to set HF_HOME env var in you .bashrc
+   ```
+3. Make sure HF_HOME is sourced in your .bashrc or .zshenv and your IDE default terminal is set properly
+
+### Step 5: Wait for Initialization
+
+The container will automatically:
+- Mount your local code to `/home/ubuntu/dynamo`
+- Run `post-create.sh` to build the project and configure the environment
 
 If `post-create.sh` fails, you can try to debug or [submit](https://github.com/ai-dynamo/dynamo/issues) an issue on GitHub.
 
 ## Development Flow
+
+### Building Rust Code
 
 If you make changes to Rust code and want to compile, use [cargo build](https://doc.rust-lang.org/cargo/commands/cargo-build.html). This will update Rust binaries such as dynamo-run.
 
@@ -105,6 +120,8 @@ $ cargo metadata --format-version=1 | jq -r '.target_directory'
 
 Before pushing code to GitHub, remember to run `cargo fmt` and `cargo clippy`
 
+### Updating Python Bindings
+
 If you make changes to Rust code and want to propagate to Python bindings then can use [maturin](https://www.maturin.rs/#usage) (pre-installed). This will update the Python bindings with your new Rust changes.
 
 ```bash
@@ -117,7 +134,7 @@ Development Environment:
 - GPU acceleration
 - VS Code or Cursor extensions for Rust and Python
 - Persistent build cache in `.build/` directory enables fast incremental builds (only changed files are recompiled) via `cargo build --locked --profile dev`
-- Edits to files are propogated to local repo due to the volume mount
+- Edits to files are propagated to local repo due to the volume mount
 - SSH and GPG agent passthrough orchestrated by devcontainer
 
 File Structure:
