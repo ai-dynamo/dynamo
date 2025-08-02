@@ -2,24 +2,12 @@
 
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 # This script takes an existing pre-blt image from CI and turns it into a dev image.
 # It will be tagged as the same image but with -dev suffix.
 #
 # Usage: ./build-dev-image.sh [OPTIONS] <ci-image-name>
-# Example: ./build-dev-image.sh --update gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:66231cf0977716a60dc082c344f7e81a245929f3-32632154-vllm-amd64
+# Example: ./build-dev-image.sh gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:66231cf0977716a60dc082c344f7e81a245929f3-32632154-vllm-amd64
 # Result: Creates dynamo:latest-vllm-dev
 
 set -euo pipefail
@@ -51,21 +39,11 @@ OPTIONS:
 
 ARGUMENTS:
     ci-image-name                The name of the CI image to convert
-                                 (e.g., dynamo:latest-vllm or gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:latest-vllm)
+                                 (e.g. gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:66231cf0977716a60dc082c344f7e81a245929f3-32632154-vllm-amd64-dev)
 
 EXAMPLES:
-    $0 dynamo:latest-vllm
+    $0 gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:66231cf0977716a60dc082c344f7e81a245929f3-32632154-vllm-amd64-dev
         Creates: dynamo:latest-vllm-dev
-
-    $0 dynamo:latest-vllm
-        Creates: dynamo:latest-vllm-dev
-        Also tags: dynamo:latest-vllm-local-dev
-
-    $0 --no-latest-tag dynamo:latest-vllm
-        Creates: dynamo:latest-vllm-dev (no additional tagging)
-
-    $0 gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo:latest-vllm
-        Creates: dynamo:latest-vllm-dev (strips GitLab registry prefix)
 
 DESCRIPTION:
     This script takes an existing pre-built image from CI and converts it into a
@@ -193,7 +171,7 @@ RUN echo "ubuntu ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/ubuntu && \\
 
 # Copy and chmod. Run as the normal uid/gid of the user (not ubuntu) to make sure
 # the permissions are the same between the host and the container.
-COPY $SCRIPT_DIR/install-dev-tools.sh /tmp/install-dev-tools.sh
+COPY $SCRIPT_DIR/_build-dev-image-helper.sh /tmp/install-dev-tools.sh
 RUN chmod +x /tmp/install-dev-tools.sh && RUST_VERSION=$RUST_VERSION UID=$(id -u) GID=$(id -g) /tmp/install-dev-tools.sh
 
 # Set up development environment
