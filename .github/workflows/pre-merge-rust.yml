@@ -52,15 +52,25 @@ jobs:
         sudo apt-get update -y
         sudo apt-get install -y protobuf-compiler
 
-    - name: Cache Cargo Build Artifacts
+    - name: Cache Sccache for Cargo Builds
       uses: actions/cache@v4
       with:
         key: ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}
-        path: |
-          ~/.cache/sccache/
+        path: ~/.cache/sccache/
         restore-keys: |
           ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-${{ matrix.dir }}-
           ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-
+
+    # ex: cargo-deny
+    - name: Cache Cargo Tools
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin
+        key: ${{ runner.os }}-cargo-tools-${{ github.head_ref || github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-tools-${{ github.head_ref || github.ref_name }}-
+          ${{ runner.os }}-cargo-tools-
+
     - name: Install sccache
       run: |
         SCCACHE_VERSION="0.10.0"
