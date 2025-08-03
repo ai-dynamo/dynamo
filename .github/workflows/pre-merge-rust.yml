@@ -82,10 +82,6 @@ jobs:
         echo "$HOME/.cargo/bin" >> $GITHUB_PATH
     - name: Set up Rust Toolchain Components
       run: rustup component add rustfmt clippy
-    - name: Run Cargo Check
-      working-directory: ${{ matrix.dir }}
-      run: cargo check --locked
-      timeout-minutes: 5
     - name: Verify Code Formatting
       working-directory: ${{ matrix.dir }}
       run: cargo fmt -- --check
@@ -97,6 +93,9 @@ jobs:
       run: |
         cargo-deny --version || cargo install cargo-deny@0.16.4
         cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config ${{ github.workspace }}/deny.toml
+    - name: Run Cargo Build
+      working-directory: ${{ matrix.dir }}
+      run: cargo build --locked
     - name: Run Doc Tests
       working-directory: ${{ matrix.dir }}
       run: cargo doc --no-deps && cargo test --locked --doc
