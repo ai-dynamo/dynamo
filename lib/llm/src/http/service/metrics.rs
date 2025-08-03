@@ -13,7 +13,7 @@ pub use prometheus::Registry;
 use super::RouteDoc;
 
 /// Metric prefix for all HTTP service metrics
-pub const FRONTEND_METRIC_PREFIX: &str = "dynamo_frontend_removeme";
+pub const FRONTEND_METRIC_PREFIX: &str = "dynamo_frontend";
 
 /// Value for the `status` label in the request counter for successful requests
 pub const REQUEST_STATUS_SUCCESS: &str = "success";
