@@ -57,12 +57,6 @@ jobs:
 
     - name: Set up system dependencies
       run: |
-        # Ensure cache directory exists and is accessible
-        sudo mkdir -p /var/cache/apt
-        sudo chmod 755 /var/cache/apt
-        sudo mkdir -p /var/lib/apt
-        sudo chmod 755 /var/lib/apt
-
         sudo apt-get update -y
         sudo apt-get install -y protobuf-compiler
 
