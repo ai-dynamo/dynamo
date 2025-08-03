@@ -52,7 +52,7 @@ impl<In: PipelineIO, Out: PipelineIO + AsyncEngineContextProvider> Sink<Out> for
         let mut sinks = self.sinks.lock().unwrap();
         let tx = sinks
             .remove(ctx.id())
-            .ok_or(PipelineError::DetatchedStreamReceiver)
+            .ok_or(PipelineError::DetachedStreamReceiver)
             .inspect_err(|_| {
                 ctx.stop_generating();
             })?;
@@ -60,7 +60,7 @@ impl<In: PipelineIO, Out: PipelineIO + AsyncEngineContextProvider> Sink<Out> for
 
         Ok(tx
             .send(data)
-            .map_err(|_| PipelineError::DetatchedStreamReceiver)
+            .map_err(|_| PipelineError::DetachedStreamReceiver)
             .inspect_err(|_| {
                 ctx.stop_generating();
             })?)
@@ -76,7 +76,7 @@ impl<In: PipelineIO + Sync, Out: PipelineIO> AsyncEngine<In, Out, Error> for Fro
             sinks.insert(request.id().to_string(), tx);
         }
         self.on_next(request, private::Token {}).await?;
-        Ok(rx.await.map_err(|_| PipelineError::DetatchedStreamSender)?)
+        Ok(rx.await.map_err(|_| PipelineError::DetachedStreamSender)?)
     }
 }
 
