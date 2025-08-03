@@ -52,13 +52,12 @@ jobs:
         sudo apt-get update -y
         sudo apt-get install -y protobuf-compiler
 
-    - name: Cache Cargo Artifacts
+    - name: Cache Cargo Build Artifacts
       uses: actions/cache@v4
       with:
         key: ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}
         path: |
           ~/.cache/sccache/
-          ${{ matrix.dir }}/target/
         restore-keys: |
           ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-${{ matrix.dir }}-
           ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-
