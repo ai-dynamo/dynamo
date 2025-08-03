@@ -45,16 +45,6 @@ jobs:
       RUSTC_WRAPPER: "sccache"
     steps:
     - uses: actions/checkout@v4
-
-    - name: Cache apt packages
-      uses: actions/cache@v4
-      with:
-        path: |
-          /var/cache/apt
-          /var/lib/apt
-        key: ${{ runner.os }}-apt-${{ hashFiles('.github/workflows/pre-merge-rust.yml') }}
-        restore-keys: ${{ runner.os }}-apt-
-
     - name: Set up system dependencies
       run: |
         sudo apt-get update -y
