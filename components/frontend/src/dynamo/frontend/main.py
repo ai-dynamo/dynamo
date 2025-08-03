@@ -83,6 +83,12 @@ def parse_args():
         dest="use_kv_events",
         help=" KV Router. Disable KV events.",
     )
+    parser.add_argument(
+        "--endpoint-id",
+        type=str,
+        default="dynamo",
+        help="Endpoint ID to use for the frontend namespace (e.g. 'dyn://namespace.component.endpoint').",
+    )
     parser.set_defaults(use_kv_events=True)
 
     return parser.parse_args()
@@ -112,6 +118,7 @@ async def async_main():
         "kv_cache_block_size": flags.kv_cache_block_size,
         "router_config": RouterConfig(router_mode, kv_router_config),
         "all_workers_busy_rejection_time_window": flags.all_workers_busy_rejection_time_window,
+        "endpoint_id": flags.endpoint_id,
     }
 
     # out=dyn

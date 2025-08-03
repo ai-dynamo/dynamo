@@ -50,6 +50,8 @@ class RequestThrottlerTestFrontend(ManagedProcess):
             str(request_throttle_duration_ms // 1000),
             "--max-workers-busy-queue-depth",
             str(max_queue_depth),
+            "--endpoint-id",
+            "test-namespace",
         ]
 
         # Force fixed namespace for coordination
