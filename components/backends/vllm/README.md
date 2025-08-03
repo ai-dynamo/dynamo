@@ -180,14 +180,40 @@ For Kubernetes deployment, YAML manifests are provided in the `deploy/` director
 
 #### Deploy to Kubernetes
 
-Example with disagg:
+Use the following command to deploy the deployment file.
+
+First, create a secret for the HuggingFace token.
+```bash
+export HF_TOKEN=your_hf_token
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN=${HF_TOKEN} \
+  -n ${NAMESPACE}
+```
+
+Then, deploy the model using the deployment file.
+
 Export the NAMESPACE  you used in your Dynamo Cloud Installation.
 
 ```bash
-cd dynamo
-cd components/backends/vllm/deploy
-kubectl apply -f disagg.yaml -n $NAMESPACE
+cd <dynamo-source-root>/components/backends/vllm/deploy
+export DEPLOYMENT_FILE=agg.yaml
+
+kubectl apply -f $DEPLOYMENT_FILE -n $NAMESPACE
 ```
+
+#### Using Custom Dynamo Frameworks Image for vLLM
+
+To use a custom dynamo frameworks image for vLLM, you can update the deployment file using yq:
+
+```bash
+export DEPLOYMENT_FILE=agg.yaml
+export FRAMEWORK_RUNTIME_IMAGE=<vllm-image>
+
+yq '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE  > $DEPLOYMENT_FILE.generated
+kubectl apply -f $DEPLOYMENT_FILE.generated -n $NAMESPACE
+```
+
+#### Configuration Options
 
 To change `DYN_LOG` level, edit the yaml file by adding
 

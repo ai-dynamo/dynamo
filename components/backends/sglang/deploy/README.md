@@ -103,8 +103,34 @@ args:
 ```
 
 ### 3. Deploy
+
+Use the following command to deploy the deployment file.
+
+First, create a secret for the HuggingFace token.
 ```bash
-kubectl apply -f <your-template>.yaml
+export HF_TOKEN=your_hf_token
+kubectl create secret generic hf-token-secret \
+  --from-literal=HF_TOKEN=${HF_TOKEN} \
+  -n ${NAMESPACE}
+```
+
+Then, deploy the model using the deployment file.
+
+```bash
+export DEPLOYMENT_FILE=agg.yaml
+kubectl apply -f $DEPLOYMENT_FILE -n ${NAMESPACE}
+```
+
+### 4. Using Custom Dynamo Frameworks Image for SGLang
+
+To use a custom dynamo frameworks image for SGLang, you can update the deployment file using yq:
+
+```bash
+export DEPLOYMENT_FILE=agg.yaml
+export FRAMEWORK_RUNTIME_IMAGE=<sglang-image>
+
+yq '.spec.services.[].extraPodSpec.mainContainer.image = env(FRAMEWORK_RUNTIME_IMAGE)' $DEPLOYMENT_FILE  > $DEPLOYMENT_FILE.generated
+kubectl apply -f $DEPLOYMENT_FILE.generated -n $NAMESPACE
 ```
 
 ## Model Configuration
