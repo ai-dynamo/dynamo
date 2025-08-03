@@ -54,8 +54,8 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ~/.cache/sccache/
-        key: ${{ runner.os }}-sccache-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: ${{ runner.os }}-sccache-
+        key: ${{ runner.os }}-sccache-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-sccache-${{ matrix.dir }}-
 
     # TODO: Consider single target/ directory for all subdirectories/crates instead.
     - name: Cache cargo artifacts
@@ -66,9 +66,9 @@ jobs:
           ~/.cargo/registry/index/
           ~/.cargo/registry/cache/
           ~/.cargo/git/db/
-          {{ matrix.dir }}/target/
-        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: ${{ runner.os }}-cargo-
+          ${{ matrix.dir }}/target/
+        key: ${{ runner.os }}-cargo-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-${{ matrix.dir }}-
 
     - name: Install sccache
       run: |
