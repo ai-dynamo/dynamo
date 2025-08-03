@@ -43,8 +43,6 @@ jobs:
       contents: read
     env:
       RUSTC_WRAPPER: "sccache"
-      # CACHE_VERSION is arbitrary and is used to invalidate the cache.
-      CACHE_VERSION: "1"
     steps:
     - uses: actions/checkout@v4
     - name: Set up system dependencies
@@ -52,24 +50,25 @@ jobs:
         sudo apt-get update -y
         sudo apt-get install -y protobuf-compiler
 
-    - name: Cache Sccache for Cargo Builds
+    - name: Cache sccache artifacts
       uses: actions/cache@v4
       with:
-        key: ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}
         path: ~/.cache/sccache/
-        restore-keys: |
-          ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-${{ matrix.dir }}-
-          ${{ runner.os }}-${{ github.workflow }}-${{ env.CACHE_VERSION }}-
+        key: ${{ runner.os }}-sccache-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-sccache-
 
-    # ex: cargo-deny
-    - name: Cache Cargo Tools
+    # TODO: Consider single target/ directory for all subdirectories/crates instead.
+    - name: Cache cargo artifacts
       uses: actions/cache@v4
       with:
-        path: ~/.cargo/bin
-        key: ${{ runner.os }}-cargo-tools-${{ github.head_ref || github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-cargo-tools-${{ github.head_ref || github.ref_name }}-
-          ${{ runner.os }}-cargo-tools-
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          {{ matrix.dir }}/target/
+        key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-
 
     - name: Install sccache
       run: |
