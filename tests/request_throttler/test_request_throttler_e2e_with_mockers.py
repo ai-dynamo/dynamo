@@ -51,16 +51,11 @@ class RequestThrottlerTestFrontend(ManagedProcess):
             "--max-workers-busy-queue-depth",
             str(max_queue_depth),
             "--endpoint-id",
-            "test-namespace",
+            "dyn://test-namespace.frontend.generate",
         ]
-
-        # Force fixed namespace for coordination
-        env = os.environ.copy()
-        env["DYN_NAMESPACE"] = "test-namespace"
 
         super().__init__(
             command=command,
-            env=env,
             timeout=60,
             display_output=True,
             health_check_ports=[frontend_port],
@@ -93,12 +88,8 @@ class MockerProcess(ManagedProcess):
             endpoint,
         ]
 
-        env = os.environ.copy()
-        env["DYN_NAMESPACE"] = "test-namespace"
-
         super().__init__(
             command=command,
-            env=env,
             timeout=60,
             display_output=True,
             health_check_ports=[],
