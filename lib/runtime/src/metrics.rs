@@ -32,7 +32,6 @@ pub const USE_AUTO_LABELS: bool = true;
 // Prometheus imports
 use prometheus::Encoder;
 
-// REMOVEME: Demonstrate iterative build caching
 fn build_metric_name(metric_name: &str) -> String {
     format!("dynamo_component_{}", metric_name)
 }
