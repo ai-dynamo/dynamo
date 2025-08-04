@@ -7,7 +7,7 @@ LMCache is a high-performance KV cache layer that supercharges LLM serving by en
 This document describes how LMCache is integrated into Dynamo's vLLM backend to provide enhanced performance and memory efficiency.
 
 ### Key Benefits
-- **Reduced Time to First Token (TTFT)**: Eliminates redundant prefill computations and brings 25% TTFT reduction
+- **Reduced Time to First Token (TTFT)**: Eliminates redundant prefill computations
 - **Memory Offloading**: Intelligent KV cache placement across CPU/GPU/storage tiers
 - **Improved Throughput**: Reduced GPU memory pressure enables higher batch sizes
 
