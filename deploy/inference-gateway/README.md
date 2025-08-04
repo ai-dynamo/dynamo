@@ -71,9 +71,9 @@ kubectl get gateway inference-gateway -n my-model
 
 3. **Deploy model**
 
-Follow the steps in [model deployment](../../components/backends/vllm/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../components/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
+Follow the steps in [model deployment](../../components/backends/vllm/deploy/README.md) to deploy `Qwen/Qwen3-0.6B` model in aggregate mode using [agg.yaml](../../components/backends/vllm/deploy/agg.yaml) in `my-model` kubernetes namespace.
 
-sample commands to deploy model:
+Sample commands to deploy model:
 ```bash
 cd <dynamo-source-root>/components/backends/vllm/deploy
 kubectl apply -f agg.yaml -n my-model
