@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Environment variables with defaults
-export MODEL_PATH=${MODEL_PATH:-"orangina"}
-export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"orangina"}
+export MODEL_PATH=${MODEL_PATH:-"gpt_oss"}
+export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"gpt-oss-120b"}
 export DISAGGREGATION_STRATEGY=${DISAGGREGATION_STRATEGY:-"prefill_first"}
-export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"engine_configs/orangina/prefill.yaml"}
-export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"engine_configs/orangina/decode.yaml"}
+export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"engine_configs/gpt_oss/prefill.yaml"}
+export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"engine_configs/gpt_oss/decode.yaml"}
 
 # run clear_namespace
 python3 utils/clear_namespace.py --namespace dynamo

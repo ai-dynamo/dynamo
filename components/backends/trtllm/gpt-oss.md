@@ -5,11 +5,11 @@ SPDX-License-Identifier: Apache-2.0
 
 # Running gpt-oss-120b Disaggregated with TensorRT-LLM
 
-Dynamo supports TensorRT-LLM's disaggregated serving implementation for gpt-oss-120b (internally codenamed "orangina")! This guide demonstrates how to deploy gpt-oss-120b using disaggregated prefill/decode serving on a single B200 node with 8 GPUs. In this example, we will run 1 prefill worker on 4 GPUs and 1 decode worker on 4 GPUs.
+Dynamo supports disaggregated serving of gpt-oss-120b with TensorRT-LLM. This guide demonstrates how to deploy gpt-oss-120b using disaggregated prefill/decode serving on a single B200 node with 8 GPUs. In this example, we will run 1 prefill worker on 4 GPUs and 1 decode worker on 4 GPUs.
 
 ## Overview
 
-This deployment uses TensorRT-LLM's disaggregated serving architecture where:
+This deployment uses disaggregated serving in TensorRT-LLM where:
 - **Prefill Worker**: Processes input prompts efficiently using 4 GPUs with tensor parallelism
 - **Decode Worker**: Generates output tokens using 4 GPUs, optimized for token generation throughput
 - **Frontend**: Provides OpenAI-compatible API endpoint with round-robin routing
@@ -27,14 +27,15 @@ The disaggregated approach optimizes for both low-latency (maximizing tokens per
 
 ## Instructions
 
-### 1. Pull the GPT-OSS Container
+### 1. Pull the gpt-oss Container
 
 > [!IMPORTANT]
 > **PLACEHOLDER**: The official gpt-oss-120b container URL will be provided upon release.
 
 ```bash
 # PLACEHOLDER: Replace with actual container URL when available
-docker pull <PLACEHOLDER_GPT_OSS_CONTAINER_URL>
+export $DYNAMO_CONTAINER_IMAGE=<PLACEHOLDER_GPT_OSS_CONTAINER_URL>
+docker pull $DYNAMO_CONTAINER_IMAGE
 ```
 
 ### 2. (Alternative) Build the Dynamo TensorRT-LLM Container from Source
@@ -54,6 +55,8 @@ cd $DYNAMO_ROOT
     --tensorrtllm-git-url ssh://git@gitlab-master.nvidia.com:12051/ftp/tekit.git \
     --tag dynamo-trtllm-gpt-oss \
     --no-cache
+
+export $DYNAMO_CONTAINER_IMAGE=dynamo-trtllm-gpt-oss
 ```
 
 ### 3. Download the Model
@@ -106,7 +109,7 @@ docker run \
     -e HF_TOKEN=$HF_TOKEN \
     -e TRTLLM_ENABLE_PDL=1 \
     -e TRT_LLM_DISABLE_LOAD_WEIGHTS_IN_PARALLEL=True \
-    <PLACEHOLDER_B200_X64_CONTAINER_URL>  # Use appropriate container for your architecture
+    $DYNAMO_CONTAINER_IMAGE
 ```
 
 This command:
@@ -127,7 +130,7 @@ cd /workspace/dynamo/components/backends/trtllm
 
 The deployment uses two configuration files for prefill and decode workers:
 
-#### Prefill Configuration (`engine_configs/orangina/prefill.yaml`)
+#### Prefill Configuration (`engine_configs/gpt_oss/prefill.yaml`)
 - `tensor_parallel_size: 4` - Uses 4 GPUs for tensor parallelism
 - `moe_expert_parallel_size: 4` - Expert parallelism across 4 GPUs
 - `enable_attention_dp: false` - Attention data parallelism disabled
@@ -141,7 +144,7 @@ The deployment uses two configuration files for prefill and decode workers:
 - `cache_transceiver_config.backend: ucx` - Uses UCX for efficient KV cache transfer
 - `cuda_graph_config.max_batch_size: 32` - Maximum batch size for CUDA graphs
 
-#### Decode Configuration (`engine_configs/orangina/decode.yaml`)
+#### Decode Configuration (`engine_configs/gpt_oss/decode.yaml`)
 - `tensor_parallel_size: 4` - Decode worker uses 4 GPUs
 - `moe_expert_parallel_size: 4` - Expert parallelism across 4 GPUs
 - `enable_attention_dp: true` - Attention data parallelism enabled
@@ -161,7 +164,7 @@ You can use the provided launch script or run the components manually:
 #### Option A: Using the Launch Script
 
 ```bash
-./launch/orangina_disagg.sh
+./launch/gpt_oss_disagg.sh
 ```
 
 #### Option B: Manual Launch
@@ -180,7 +183,7 @@ python3 -m dynamo.frontend --router-mode round-robin --http-port 8000 &
 CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
   --model-path /model \
   --served-model-name gpt-oss-120b \
-  --extra-engine-args engine_configs/orangina/prefill.yaml \
+  --extra-engine-args engine_configs/gpt_oss/prefill.yaml \
   --disaggregation-mode prefill \
   --disaggregation-strategy prefill_first &
 ```
@@ -190,7 +193,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
 CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --model-path /model \
   --served-model-name gpt-oss-120b \
-  --extra-engine-args engine_configs/orangina/decode.yaml \
+  --extra-engine-args engine_configs/gpt_oss/decode.yaml \
   --disaggregation-mode decode \
   --disaggregation-strategy prefill_first
 ```
@@ -218,20 +221,8 @@ The server exposes a standard OpenAI-compatible API endpoint that accepts JSON r
 ## Benchmarking
 
 > [!IMPORTANT]
-> **PLACEHOLDER**: A dedicated benchmarking script for gpt-oss-120b will be provided.
+> **PLACEHOLDER**: Include genai-perf script
 
-To benchmark the deployment performance:
-
-```bash
-# PLACEHOLDER: Replace with actual benchmarking script path
-./benchmarks/<PLACEHOLDER_GPT_OSS_BENCHMARK_SCRIPT>.sh
-```
-
-The benchmarking script will measure:
-- Prefill throughput (tokens/second)
-- Decode throughput (tokens/second)
-- End-to-end latency
-- Resource utilization across workers
 
 ## Architecture Overview
 
@@ -239,11 +230,11 @@ The disaggregated architecture separates prefill and decode phases:
 
 ```mermaid
 flowchart TD
-    Client["Users/Clients<br/>(HTTP)"] --> Frontend["Frontend<br/>Round-Robin Router<br/>(Port 8000)"]
+    Client["Users/Clients<br/>(HTTP)"] --> Frontend["Frontend<br/>Round-Robin Router"]
     Frontend --> Prefill["Prefill Worker<br/>(GPUs 0-3)"]
     Frontend --> Decode["Decode Worker<br/>(GPUs 4-7)"]
 
-    Prefill -.->|KV Cache Transfer<br/>via UCX| Decode
+    Prefill -.->|KV Cache Transfer<br/>via NIXL| Decode
 ```
 
 ## Key Features
