@@ -28,7 +28,7 @@ class SGLangProcess(ManagedProcess):
 
     def __init__(self, script_name, request):
         self.port = 8000
-        sglang_dir = "/workspace/examples/sglang"
+        sglang_dir = "/workspace/components/backends/sglang"
         script_path = os.path.join(sglang_dir, "launch", script_name)
 
         # Verify script exists
