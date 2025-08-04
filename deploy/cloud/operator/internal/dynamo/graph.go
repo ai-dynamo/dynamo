@@ -735,7 +735,7 @@ func GenerateGrovePodGangSet(
 		}
 		if isMultinode {
 			scalingGroups = append(scalingGroups, grovev1alpha1.PodCliqueScalingGroupConfig{
-				Name:        serviceName + "-sg",
+				Name:        strings.ToLower(serviceName) + "-sg",
 				CliqueNames: cliqueNames,
 				Replicas:    component.Replicas,
 			})

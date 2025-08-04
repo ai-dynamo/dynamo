@@ -3385,7 +3385,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									},
 								},
 							},
-							"worker": {
+							"Worker": {
 								DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
 									ExtraPodMetadata: &common.ExtraPodMetadata{
 										Annotations: map[string]string{
