@@ -36,9 +36,8 @@ echo "🔧 Starting dynamo disaggregated serving without LMCache..."
 
 python -m dynamo.frontend &
 
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model $MODEL_URL --enforce-eager&
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model $MODEL_URL&
 
 CUDA_VISIBLE_DEVICES=1 python3 -m dynamo.vllm \
     --model $MODEL_URL \
-    --enforce-eager \
     --is-prefill-worker

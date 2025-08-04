@@ -34,4 +34,4 @@ echo "🔧 Starting dynamo worker without LMCache..."
 
 
 python -m dynamo.frontend &
-python3 -m dynamo.vllm --model $MODEL_URL --enforce-eager
+python3 -m dynamo.vllm --model $MODEL_URL

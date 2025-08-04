@@ -8,4 +8,4 @@ trap 'echo Cleaning up...; kill 0' EXIT
 python -m dynamo.frontend &
 
 # run worker
-python -m dynamo.vllm  --model Qwen/Qwen3-0.6B --enforce-eager
+python -m dynamo.vllm  --model Qwen/Qwen3-0.6B
