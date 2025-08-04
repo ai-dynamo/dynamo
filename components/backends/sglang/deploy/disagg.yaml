@@ -45,7 +45,7 @@ spec:
             - "python3 -m dynamo.sglang.utils.clear_namespace --namespace sglang-disagg && python3 -m dynamo.frontend --http-port=8000"
     SGLangDecodeWorker:
       envFromSecret: hf-token-secret
-      livenessProbe:        
+      livenessProbe:
         httpGet:
           path: /live
           port: 9090
@@ -109,7 +109,7 @@ spec:
             - "nixl"
     SGLangPrefillWorker:
       envFromSecret: hf-token-secret
-      livenessProbe:        
+      livenessProbe:
         httpGet:
           path: /live
           port: 9090
