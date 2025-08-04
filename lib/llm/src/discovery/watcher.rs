@@ -21,6 +21,7 @@ use crate::{
     backend::Backend,
     kv_router::{KvPushRouter, KvRouterConfig},
     migration::Migration,
+    model_type::ModelInput,
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest, PreprocessedRequest},
     protocols::common::llm_backend::{EmbeddingsEngineOutput, LLMEngineOutput},
     protocols::openai::chat_completions::{
@@ -280,7 +281,7 @@ impl ModelWatcher {
             }
         };
 
-         if model_entry.model_type.supports_backend() {
+         if model_entry.model_type.supports_backend() || ((model_entry.model_type.supports_chat() || model_entry.model_type.supports_completion()) && model_entry.model_input == ModelInput::Tokens) {
             // A Backend model expects pre-processed requests meaning it's up to us whether we
             // handle Chat or Completions requests, so handle both.
 
