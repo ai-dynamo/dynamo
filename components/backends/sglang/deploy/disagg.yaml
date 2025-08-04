@@ -56,7 +56,7 @@ spec:
         exec:
         httpGet:
           path: /health
-          port: 8000
+          port: 9090
         periodSeconds: 10
         timeoutSeconds: 30
         failureThreshold: 60
@@ -66,7 +66,7 @@ spec:
       resources:
         requests:
           cpu: "10"
-          memory: "40Gi"
+          memory: "20Gi"
           gpu: "1"
         limits:
           cpu: "32"
@@ -120,7 +120,7 @@ spec:
         exec:
         httpGet:
           path: /health
-          port: 8000
+          port: 9090
         periodSeconds: 10
         timeoutSeconds: 30
         failureThreshold: 60
@@ -130,7 +130,7 @@ spec:
       resources:
         requests:
           cpu: "10"
-          memory: "40Gi"
+          memory: "20Gi"
           gpu: "1"
         limits:
           cpu: "32"
