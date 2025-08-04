@@ -106,7 +106,11 @@ class Planner:
             if self.prefill_client is None:
                 self.prefill_client = (
                     await self.runtime.namespace(self.namespace)
-                    .component(WORKER_COMPONENT_NAMES[self.args.backend].prefill_worker)
+                    .component(
+                        WORKER_COMPONENT_NAMES[
+                            self.args.backend
+                        ].prefill_worker_component_name
+                    )
                     .endpoint(
                         WORKER_COMPONENT_NAMES[
                             self.args.backend
@@ -127,7 +131,11 @@ class Planner:
             if self.workers_client is None:
                 self.workers_client = (
                     await self.runtime.namespace(self.namespace)
-                    .component(WORKER_COMPONENT_NAMES[self.args.backend].decode_worker)
+                    .component(
+                        WORKER_COMPONENT_NAMES[
+                            self.args.backend
+                        ].decode_worker_component_name
+                    )
                     .endpoint(
                         WORKER_COMPONENT_NAMES[self.args.backend].decode_worker_endpoint
                     )
@@ -300,8 +308,12 @@ class Planner:
 
         if not self.args.no_operation:
             target_replicas = {
-                WORKER_COMPONENT_NAMES[self.args.backend].prefill_worker: next_num_p,
-                WORKER_COMPONENT_NAMES[self.args.backend].decode_worker: next_num_d,
+                WORKER_COMPONENT_NAMES[
+                    self.args.backend
+                ].prefill_worker_k8s_name: next_num_p,
+                WORKER_COMPONENT_NAMES[
+                    self.args.backend
+                ].decode_worker_k8s_name: next_num_d,
             }
             await self.connector.set_component_replicas(target_replicas, blocking=False)
 

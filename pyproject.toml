@@ -15,7 +15,7 @@
 
 [project]
 name = "ai-dynamo"
-version = "0.3.2"
+version = "0.4.0"
 description = "Distributed Inference Framework"
 readme = "README.md"
 authors = [
@@ -25,7 +25,7 @@ license = { text = "Apache-2.0" }
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = [
-    "ai-dynamo-runtime==0.3.2",
+    "ai-dynamo-runtime==0.4.0",
     "pytest>=8.3.4",
     "types-psutil>=7.0.0.20250218",
     "kubernetes>=32.0.1,<33.0.0",
@@ -66,17 +66,14 @@ trtllm =[
 
 vllm = [
     "uvloop",
-    "nixl",
+    "nixl<=0.4.1",
     "vllm==0.10.0",
 ]
 
 sglang = [
     "uvloop",
-    "nixl",
-    "sglang[runtime_common]==0.4.9.post1",
-    "einops",
-    "sgl-kernel==0.2.4",
-    "sentencepiece",
+    "nixl<=0.4.1",
+    "sglang[all]==0.4.9.post6",
 ]
 
 llama_cpp = [
@@ -149,6 +146,7 @@ addopts = [
     "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
+    "--ignore-glob=components/backends/sglang/src/dynamo/sglang/common/*",
     # FIXME: Get relative/generic blob paths to work here
 ]
 xfail_strict = true

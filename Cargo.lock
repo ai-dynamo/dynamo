@@ -1847,7 +1847,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-llamacpp"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "async-stream",
  "dynamo-llm",
@@ -1859,7 +1859,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-engine-mistralrs"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-llm"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "ahash",
  "akin",
@@ -1954,7 +1954,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-run"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-openai",
@@ -1983,7 +1983,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-runtime"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -2039,7 +2039,7 @@ dependencies = [
 
 [[package]]
 name = "dynamo-tokens"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "bytemuck",
  "derive-getters",
@@ -3808,7 +3808,7 @@ checksum = "d750af042f7ef4f724306de029d18836c26c1765a54a6a3f094cbd23a7267ffa"
 
 [[package]]
 name = "libdynamo_llm"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "async-once-cell",
@@ -4105,7 +4105,7 @@ dependencies = [
 
 [[package]]
 name = "metrics"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "axum 0.6.20",
  "clap 4.5.40",
@@ -4561,9 +4561,9 @@ dependencies = [
 
 [[package]]
 name = "nixl-sys"
-version = "0.4.0"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "97f621270fd1ed8af5a8028a1945e6f7e612a38836ce82b720fe54222739df3c"
+checksum = "743ed1038b386b75451f9e0bba37cb2e3eea75873635268337d6531be99c9303"
 dependencies = [
  "bindgen 0.71.1",
  "cc",
@@ -5921,7 +5921,7 @@ dependencies = [
 
 [[package]]
 name = "router"
-version = "0.3.2"
+version = "0.4.0"
 dependencies = [
  "clap 4.5.40",
  "dynamo-llm",

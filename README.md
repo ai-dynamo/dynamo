@@ -115,11 +115,11 @@ Dynamo provides a simple way to spin up a local set of inference components incl
 
 ```
 # Start an OpenAI compatible HTTP server, a pre-processor (prompt templating and tokenization) and a router:
-python -m dynamo.frontend [--http-port 8080]
+python -m dynamo.frontend --http-port 8080
 
 # Start the SGLang engine, connecting to NATS and etcd to receive requests. You can run several of these,
 # both for the same model and for multiple models. The frontend node will discover them.
-python -m dynamo.sglang.worker deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+python -m dynamo.sglang.worker --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B --skip-tokenizer-init
 ```
 
 #### Send a Request
@@ -168,12 +168,15 @@ To specify which GPUs to use set environment variable `CUDA_VISIBLE_DEVICES`.
 ## SGLang
 
 ```
+# Install libnuma
+apt install -y libnuma-dev
+
 uv pip install ai-dynamo[sglang]
 ```
 
 Run the backend/worker like this:
 ```
-python -m dynamo.sglang.worker --help    #Note the '.worker' in the module path for SGLang
+python -m dynamo.sglang.worker --help
 ```
 
 You can pass any sglang flags directly to this worker, see https://docs.sglang.ai/backend/server_arguments.html . See there to use multiple GPUs.
@@ -203,7 +206,7 @@ sudo apt-get -y install libopenmpi-dev
 
 ### After installing the pre-requisites above, install Dynamo
 ```
-uv pip install --upgrade pip setuptools && uv pip install ai-dynamo[trtllm]
+uv pip install ai-dynamo[trtllm]
 ```
 
 Run the backend/worker like this:
@@ -273,9 +276,12 @@ maturin develop --uv
 ```
 cd $PROJECT_ROOT
 uv pip install .
+# For development, use
+export PYTHONPATH="${PYTHONPATH}:$(pwd)/components/frontend/src:$(pwd)/components/planner/src:$(pwd)/components/backends/vllm/src:$(pwd)/components/backends/sglang/src:$(pwd)/components/backends/trtllm/src:$(pwd)/components/backends/llama_cpp/src:$(pwd)/components/backends/mocker/src"
 ```
 
-Note editable (`-e`) does not work because the `dynamo` package is split over multiple directories, one per backend.
+> [!Note]
+> Editable (`-e`) does not work because the `dynamo` package is split over multiple directories, one per backend.
 
 You should now be able to run `python -m dynamo.frontend`.
 

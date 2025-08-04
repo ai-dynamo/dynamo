@@ -96,7 +96,7 @@ TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
 # TODO: Remove the version specification from here and use the ai-dynamo[trtllm] package.
 # Need to update the Dockerfile.tensorrt_llm to use the ai-dynamo[trtllm] package.
-DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.0.0rc0"
+DEFAULT_TENSORRTLLM_PIP_WHEEL="tensorrt-llm==1.0.0rc4"
 TENSORRTLLM_PIP_WHEEL=""
 
 
@@ -113,7 +113,7 @@ NONE_BASE_IMAGE_TAG="24.04"
 SGLANG_BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
 SGLANG_BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
 
-NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
+NIXL_REF=0.4.1
 NIXL_UCX_EFA_REF=7ec95b95e524a87e81cac92f5ca8523e3966b16b
 
 NO_CACHE=""
@@ -389,8 +389,6 @@ ARCH="amd64"
 if [[ "$PLATFORM" == *"linux/arm64"* ]]; then
     ARCH="arm64"
     BUILD_ARGS+=" --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64 "
-    # TEMP: Pin to nixl 0.3.1 for arm build, since 0.4.0 fails
-    NIXL_REF=3503658e71143b56f9d5b1b440d84a94b9c41af8
 fi
 
 # Update DOCKERFILE if framework is VLLM

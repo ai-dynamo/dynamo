@@ -38,4 +38,4 @@ tracing = { workspace = true }
 # TODO: Update axum to 0.8
 axum = { version = "0.6" }
 clap = { version = "4.5", features = ["derive", "env"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12.22", default-features = false, features = ["json", "rustls-tls"] }

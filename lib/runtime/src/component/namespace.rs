@@ -99,8 +99,8 @@ mod tests {
     async fn test_publish() {
         let rt = Runtime::from_current().unwrap();
         let dtr = DistributedRuntime::from_settings(rt.clone()).await.unwrap();
-        let ns = dtr.namespace("test".to_string()).unwrap();
-        ns.publish("test", &"test".to_string()).await.unwrap();
+        let ns = dtr.namespace("test_namespace_publish".to_string()).unwrap();
+        ns.publish("test_event", &"test".to_string()).await.unwrap();
         rt.shutdown();
     }
 
@@ -108,13 +108,15 @@ mod tests {
     async fn test_subscribe() {
         let rt = Runtime::from_current().unwrap();
         let dtr = DistributedRuntime::from_settings(rt.clone()).await.unwrap();
-        let ns = dtr.namespace("test".to_string()).unwrap();
+        let ns = dtr
+            .namespace("test_namespace_subscribe".to_string())
+            .unwrap();
 
         // Create a subscriber
-        let mut subscriber = ns.subscribe("test").await.unwrap();
+        let mut subscriber = ns.subscribe("test_event").await.unwrap();
 
         // Publish a message
-        ns.publish("test", &"test_message".to_string())
+        ns.publish("test_event", &"test_message".to_string())
             .await
             .unwrap();
 

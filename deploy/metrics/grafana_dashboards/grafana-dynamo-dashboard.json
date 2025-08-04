@@ -27,7 +27,7 @@
         "type": "prometheus",
         "uid": "P1809F7CD0C75ACF3"
       },
-      "description": "nv_llm_http_service_requests_total (1m)",
+      "description": "dynamo_frontend_requests_total (1m)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -106,7 +106,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "rate(nv_llm_http_service_requests_total[30s])",
+          "expr": "rate(dynamo_frontend_requests_total[30s])",
           "legendFormat": "{{request_type}}, {{status}},",
           "range": true,
           "refId": "A"
@@ -120,7 +120,7 @@
         "type": "prometheus",
         "uid": "P1809F7CD0C75ACF3"
       },
-      "description": "nv_llm_http_service_time_to_first_token_seconds (sum/count)",
+      "description": "dynamo_frontend_time_to_first_token_seconds (sum/count)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -199,7 +199,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "1000*(nv_llm_http_service_time_to_first_token_seconds_sum/nv_llm_http_service_time_to_first_token_seconds_count)",
+          "expr": "1000*(dynamo_frontend_time_to_first_token_seconds_sum/dynamo_frontend_time_to_first_token_seconds_count)",
           "legendFormat": "{{model}}",
           "range": true,
           "refId": "A"
@@ -213,7 +213,7 @@
         "type": "prometheus",
         "uid": "P1809F7CD0C75ACF3"
       },
-      "description": "nv_llm_http_service_inter_token_latency_seconds (sum/count)",
+      "description": "dynamo_frontend_inter_token_latency_seconds (sum/count)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -292,7 +292,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "1000*(nv_llm_http_service_inter_token_latency_seconds_sum/nv_llm_http_service_inter_token_latency_seconds_count)",
+          "expr": "1000*(dynamo_frontend_inter_token_latency_seconds_sum/dynamo_frontend_inter_token_latency_seconds_count)",
           "legendFormat": "{{model}}",
           "range": true,
           "refId": "A"
@@ -306,7 +306,7 @@
         "type": "prometheus",
         "uid": "P1809F7CD0C75ACF3"
       },
-      "description": "nv_llm_http_service_request_duration (sum/count)",
+      "description": "dynamo_frontend_request_duration (sum/count)",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -385,7 +385,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "1000*(nv_llm_http_service_request_duration_seconds_sum / nv_llm_http_service_request_duration_seconds_count)",
+          "expr": "1000*(dynamo_frontend_request_duration_seconds_sum / dynamo_frontend_request_duration_seconds_count)",
           "legendFormat": "{{model}}",
           "range": true,
           "refId": "A"
@@ -399,7 +399,7 @@
         "type": "prometheus",
         "uid": "P1809F7CD0C75ACF3"
       },
-      "description": "The length is the number of tokens. nv_llm_http_service_input_sequence_tokens",
+      "description": "The length is the number of tokens. dynamo_frontend_input_sequence_tokens",
       "fieldConfig": {
         "defaults": {
           "color": {
@@ -478,7 +478,7 @@
       "targets": [
         {
           "editorMode": "code",
-          "expr": "nv_llm_http_service_input_sequence_tokens_sum / nv_llm_http_service_input_sequence_tokens_count",
+          "expr": "dynamo_frontend_input_sequence_tokens_sum / dynamo_frontend_input_sequence_tokens_count",
           "legendFormat": "ISL",
           "range": true,
           "refId": "A"
@@ -489,7 +489,7 @@
             "uid": "P1809F7CD0C75ACF3"
           },
           "editorMode": "code",
-          "expr": "nv_llm_http_service_output_sequence_tokens_sum / nv_llm_http_service_output_sequence_tokens_count",
+          "expr": "dynamo_frontend_output_sequence_tokens_sum / dynamo_frontend_output_sequence_tokens_count",
           "hide": false,
           "instant": false,
           "legendFormat": "OSL",

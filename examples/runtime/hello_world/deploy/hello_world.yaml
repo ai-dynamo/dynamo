@@ -38,7 +38,7 @@ spec:
           memory: "2Gi"
       extraPodSpec:
         mainContainer:
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:helloworld
+          image: my-registry/dynamo:my-tag
           workingDir: /workspace/examples/runtime/hello_world/
           command:
             - /bin/sh
@@ -77,7 +77,7 @@ spec:
           memory: "4Gi"
       extraPodSpec:
         mainContainer:
-          image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:helloworld
+          image: my-registry/dynamo:my-tag
           workingDir: /workspace/examples/runtime/hello_world/
           command:
             - /bin/sh

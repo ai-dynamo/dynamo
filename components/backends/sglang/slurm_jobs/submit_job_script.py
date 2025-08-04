@@ -86,7 +86,7 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     parser.add_argument("--config-dir", required=True, help="Config directory path")
     parser.add_argument("--container-image", required=True, help="Container image")
     parser.add_argument(
-        "--time-limit", default="01:00:00", help="Time limit (HH:MM:SS)"
+        "--time-limit", default="04:00:00", help="Time limit (HH:MM:SS)"
     )
     parser.add_argument(
         "--prefill-nodes", type=int, default=2, help="Number of prefill nodes"
@@ -99,6 +99,20 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     )
     parser.add_argument(
         "--network-interface", default="eth3", help="Network interface to use"
+    )
+    parser.add_argument(
+        "--gpu-type", choices=["h100", "gb200"], default="h100", help="GPU type to use"
+    )
+    parser.add_argument(
+        "--use-sglang-commands",
+        action="store_true",
+        default=False,
+        help="Use SGLang commands instead of Dynamo",
+    )
+    parser.add_argument(
+        "--partition",
+        default="batch",
+        help="SLURM partition to use",
     )
     return parser.parse_args(args)
 
@@ -120,6 +134,9 @@ def main(input_args: list[str] | None = None):
         "container_image": args.container_image,
         "gpus_per_node": args.gpus_per_node,
         "network_interface": args.network_interface,
+        "gpu_type": args.gpu_type,
+        "use_sglang_commands": args.use_sglang_commands,
+        "partition": args.partition,
     }
 
     with tempfile.NamedTemporaryFile(mode="w", suffix=".sh") as temp_file:
