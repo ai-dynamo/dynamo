@@ -45,7 +45,6 @@ Use the provided launch script for quick setup:
 This will:
 1. Start the dynamo frontend
 2. Launch a single vLLM worker with LMCache enabled
-3. Disable prefix caching (`--no-enable-prefix-caching`) to rely on LMCache
 
 ### Architecture for Aggregated Mode
 
