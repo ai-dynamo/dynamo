@@ -38,3 +38,6 @@ cuda_graph_config:
   max_batch_size: 256
 
 print_iter_log: true
+
+cache_transceiver_config:
+  backend: default
