@@ -43,11 +43,11 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ### Large Scale P/D and WideEP Features
 
-| Feature            | SGLang | Notes                                                                 |
-|--------------------|--------|-----------------------------------------------------------------------|
-| **WideEP**         | ✅/🚧 | Full support on H100s/GB200 WIP [PR](https://github.com/sgl-project/sglang/pull/7556)                                     |
-| **DP Rank Routing**| 🚧    | Direct routing supported. Process per DP rank is not supported        |
-| **GB200 Support**  | 🚧    | WIP [PR](https://github.com/sgl-project/sglang/pull/7556) |
+| Feature             | SGLang | Notes                                                        |
+|---------------------|--------|--------------------------------------------------------------|
+| **WideEP**          | ✅     | Full support on H100s/GB200                                  |
+| **DP Rank Routing** | 🚧     | Direct routing supported. Dynamo KV router does not router to DP worker |
+| **GB200 Support**   | ✅     |                                                              |
 
 
 ## Quick Start
@@ -94,12 +94,6 @@ cd $DYNAMO_ROOT/components/backends/sglang
 
 ### Aggregated Serving with KV Routing
 
-> [!NOTE]
-> The current implementation of `components/backends/sglang/src/dynamo/sglang/worker/main.py` publishes _placeholder_ engine metrics to keep the Dynamo KV-router happy. Real-time metrics will be surfaced directly from the SGLang engine once the following pull requests are merged:
-> • Dynamo: [ai-dynamo/dynamo #1465](https://github.com/ai-dynamo/dynamo/pull/1465) – _feat: receive kvmetrics from sglang scheduler_.
->
-> After these are in, the TODOs in `main.py` will be resolved and the placeholder logic removed.
-
 ```bash
 cd $DYNAMO_ROOT/components/backends/sglang
 ./launch/agg_router.sh
@@ -143,25 +137,19 @@ When using MoE models, you can also use the our implementation of the native SGL
 
 ## Request Migration
 
-In a [Distributed System](#distributed-system), a request may fail due to connectivity issues between the Frontend and the Backend.
+You can enable [request migration](../../../docs/architecture/request_migration.md) to handle worker failures gracefully. Use the `--migration-limit` flag to specify how many times a request can be migrated to another worker:
 
-The Frontend will automatically track which Backends are having connectivity issues with it and avoid routing new requests to the Backends with known connectivity issues.
-
-For ongoing requests, there is a `--migration-limit` flag which can be set on the Backend that tells the Frontend how many times a request can be migrated to another Backend should there be a loss of connectivity to the current Backend.
-
-For example,
 ```bash
 python3 -m dynamo.sglang ... --migration-limit=3
 ```
-indicates a request to this model may be migrated up to 3 times to another Backend, before failing the request, should the Frontend detects a connectivity issue to the current Backend.
 
-The migrated request will continue responding to the original request, allowing for a seamless transition between Backends, and a reduced overall request failure rate at the Frontend for enhanced user experience.
+This allows a request to be migrated up to 3 times before failing. See the [Request Migration Architecture](../../../docs/architecture/request_migration.md) documentation for details on how this works.
 
 ## Advanced Examples
 
 Below we provide a selected list of advanced examples. Please open up an issue if you'd like to see a specific example!
 
-### Run on multi-node
+### Run a multi-node sized model
 - **[Run a multi-node model](docs/multinode-examples.md)**
 
 ### Large scale P/D disaggregation with WideEP
