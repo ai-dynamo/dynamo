@@ -516,6 +516,7 @@ const (
 type Backend interface {
 	GenerateCommandAndArgs(componentType string, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType) ([]string, []string)
 	MergeArgs(defaultArgs, userArgs []string, multinode bool, role Role, componentType string, numberOfNodes int32, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType) []string
+	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType)
 }
 
 // BackendFactory creates backend instances based on the framework type
@@ -605,6 +606,7 @@ func GenerateBasePodSpec(
 	isMultinode := numberOfNodes > 1
 	container.Command = mergeContainerCommand(cmd, container.Command)
 	container.Args = backend.MergeArgs(args, container.Args, isMultinode, role, component.ComponentType, numberOfNodes, component, multinodeDeploymentType)
+	backend.UpdateContainer(&container, numberOfNodes, role, component, multinodeDeploymentType)
 
 	resourcesConfig, err := controller_common.GetResourcesConfig(component.Resources)
 	if err != nil {

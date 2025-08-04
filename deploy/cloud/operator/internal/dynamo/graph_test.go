@@ -2980,6 +2980,30 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									ExtraPodSpec: &common.ExtraPodSpec{
 										MainContainer: &corev1.Container{
 											Image: "worker-image",
+											StartupProbe: &corev1.Probe{
+												ProbeHandler: corev1.ProbeHandler{
+													HTTPGet: &corev1.HTTPGetAction{
+														Path: "/startup",
+														Port: intstr.FromInt(8080),
+													},
+												},
+											},
+										},
+									},
+									ReadinessProbe: &corev1.Probe{
+										ProbeHandler: corev1.ProbeHandler{
+											HTTPGet: &corev1.HTTPGetAction{
+												Path: "/ready",
+												Port: intstr.FromInt(8080),
+											},
+										},
+									},
+									LivenessProbe: &corev1.Probe{
+										ProbeHandler: corev1.ProbeHandler{
+											HTTPGet: &corev1.HTTPGetAction{
+												Path: "/health",
+												Port: intstr.FromInt(8080),
+											},
 										},
 									},
 									Resources: &common.Resources{
@@ -3168,6 +3192,30 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:      commonconsts.KubeValueNameSharedMemory,
 														MountPath: "/dev/shm",
+													},
+												},
+												ReadinessProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/ready",
+															Port: intstr.FromInt(8080),
+														},
+													},
+												},
+												LivenessProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/health",
+															Port: intstr.FromInt(8080),
+														},
+													},
+												},
+												StartupProbe: &corev1.Probe{
+													ProbeHandler: corev1.ProbeHandler{
+														HTTPGet: &corev1.HTTPGetAction{
+															Path: "/startup",
+															Port: intstr.FromInt(8080),
+														},
 													},
 												},
 											},

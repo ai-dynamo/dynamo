@@ -7,6 +7,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
+	corev1 "k8s.io/api/core/v1"
 	ptr "k8s.io/utils/ptr"
 )
 
@@ -81,6 +82,15 @@ func (b *VLLMBackend) MergeArgs(defaultArgs, userArgs []string, multinode bool, 
 		}
 	}
 	return userArgs
+}
+
+func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType consts.MultinodeDeploymentType) {
+	if numberOfNodes > 1 && role == RoleWorker {
+		// we need to remove probes for multinode worker (that runs ray start --block)
+		container.LivenessProbe = nil
+		container.ReadinessProbe = nil
+		container.StartupProbe = nil
+	}
 }
 
 func buildVLLMArgs(
