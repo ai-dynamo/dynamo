@@ -27,7 +27,7 @@ enable_autotuner: false
 speculative_config:
   decoding_type: Eagle
   max_draft_len: 1
-  pytorch_weights_path: nvidia/Llama-4-Maverick-17B-128E-Eagle3
+  speculative_model_dir: nvidia/Llama-4-Maverick-17B-128E-Eagle3
   eagle3_one_model: false
 
 kv_cache_config:
