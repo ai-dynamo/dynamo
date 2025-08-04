@@ -13,32 +13,19 @@ export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"engine_configs/orangina/decode.
 python3 utils/clear_namespace.py --namespace dynamo
 
 # run frontend
-python3 -m dynamo.frontend --router-mode round-robin --http-port 8000
+python3 -m dynamo.frontend --router-mode round-robin --http-port 8000 &
 
+# With tensor_parallel_size=4, each worker needs 4 GPUs
 # run prefill worker
-CUDA_VISIBLE_DEVICES=0,1 python3 -m dynamo.trtllm \
+CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$PREFILL_ENGINE_ARGS" \
   --disaggregation-mode prefill \
   --disaggregation-strategy "$DISAGGREGATION_STRATEGY" &
 
-# run decode workers
-CUDA_VISIBLE_DEVICES=2,3 python3 -m dynamo.trtllm \
-  --model-path "$MODEL_PATH" \
-  --served-model-name "$SERVED_MODEL_NAME" \
-  --extra-engine-args "$DECODE_ENGINE_ARGS" \
-  --disaggregation-mode decode \
-  --disaggregation-strategy "$DISAGGREGATION_STRATEGY" &
-
-CUDA_VISIBLE_DEVICES=4,5 python3 -m dynamo.trtllm \
-  --model-path "$MODEL_PATH" \
-  --served-model-name "$SERVED_MODEL_NAME" \
-  --extra-engine-args "$DECODE_ENGINE_ARGS" \
-  --disaggregation-mode decode \
-  --disaggregation-strategy "$DISAGGREGATION_STRATEGY" &
-
-CUDA_VISIBLE_DEVICES=6,7 python3 -m dynamo.trtllm \
+# run decode worker
+CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --model-path "$MODEL_PATH" \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$DECODE_ENGINE_ARGS" \
