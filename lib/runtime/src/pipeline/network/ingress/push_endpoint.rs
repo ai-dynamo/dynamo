@@ -23,7 +23,7 @@ use anyhow::Result;
 use async_nats::service::endpoint::Endpoint;
 use derive_builder::Builder;
 use std::collections::HashMap;
-use tokio::sync::Mutex;
+use std::sync::Mutex;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -54,7 +54,7 @@ impl PushEndpoint {
 
         system_health
             .lock()
-            .await
+            .unwrap()
             .set_endpoint_health_status(endpoint_name.clone(), HealthStatus::Ready);
 
         loop {
@@ -113,7 +113,7 @@ impl PushEndpoint {
 
         system_health
             .lock()
-            .await
+            .unwrap()
             .set_endpoint_health_status(endpoint_name.clone(), HealthStatus::NotReady);
 
         // await for all inflight requests to complete

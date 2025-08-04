@@ -173,7 +173,7 @@ pub struct DistributedRuntime {
     instance_sources: Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
 
     // Health Status
-    system_health: Arc<Mutex<SystemHealth>>,
+    system_health: Arc<std::sync::Mutex<SystemHealth>>,
 
     // This map associates metric prefixes with their corresponding Prometheus registries.
     prometheus_registries_by_prefix: Arc<std::sync::Mutex<HashMap<String, prometheus::Registry>>>,
