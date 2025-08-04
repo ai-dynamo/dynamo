@@ -61,7 +61,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | Feature            | TensorRT-LLM | Notes                                                                 |
 |--------------------|--------------|-----------------------------------------------------------------------|
 | **WideEP**         | ✅           |                                                                 |
-| **DP Rank Routing**| ✅           |                                                                 |
+| **Attention DP**   | ✅           |                                                                 |
 | **GB200 Support**  | ✅           |                                                                 |
 
 ## Quick Start
