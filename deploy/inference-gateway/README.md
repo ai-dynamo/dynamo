@@ -79,7 +79,7 @@ cd <dynamo-source-root>/components/backends/vllm/deploy
 kubectl apply -f agg.yaml -n my-model
 ```
 
-4. **Install dynamo gaie helm chart**
+4. **Install Dynamo GAIE helm chart**
 
 The Inference Gateway is configured through the `inference-gateway-resources.yaml` file.
 
