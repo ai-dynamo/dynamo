@@ -38,7 +38,19 @@ const (
 	ComponentTypeMain         = "main"
 	PlannerServiceAccountName = "planner-serviceaccount"
 
+	// DynamoConfig componentType values
+	ComponentTypeWorker        = "worker"        // Aggregated serving workers
+	ComponentTypePrefillWorker = "prefillWorker" // Disaggregated prefill workers
+	ComponentTypeDecodeWorker  = "decodeWorker"  // Disaggregated decode workers
+
 	DefaultIngressSuffix = "local"
 
 	DefaultGroveTerminationDelay = 15 * time.Minute
+)
+
+type MultinodeDeploymentType string
+
+const (
+	MultinodeDeploymentTypeGrove MultinodeDeploymentType = "grove"
+	MultinodeDeploymentTypeLWS   MultinodeDeploymentType = "lws"
 )

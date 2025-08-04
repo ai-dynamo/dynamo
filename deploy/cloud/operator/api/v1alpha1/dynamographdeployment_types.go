@@ -40,6 +40,10 @@ type DynamoGraphDeploymentSpec struct {
 	// Environment variables to be set in the deployment
 	// +kubebuilder:validation:Optional
 	Envs []corev1.EnvVar `json:"envs,omitempty"`
+	// BackendFramework specifies the backend framework (e.g., "sglang", "vllm")
+	// +kubebuilder:validation:Enum=sglang;vllm
+	// +kubebuilder:default=vllm
+	BackendFramework string `json:"backendFramework,omitempty"`
 }
 
 // DynamoGraphDeploymentStatus defines the observed state of DynamoGraphDeployment.

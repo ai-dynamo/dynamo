@@ -42,6 +42,11 @@ type DynamoComponentDeploymentSpec struct {
 	// contains the tag of the DynamoComponent: for example, "my_package:MyService"
 	DynamoTag string `json:"dynamoTag,omitempty"`
 
+	// BackendFramework specifies the backend framework (e.g., "sglang", "vllm")
+	// +kubebuilder:validation:Enum=sglang;vllm
+	// +kubebuilder:default=vllm
+	BackendFramework string `json:"backendFramework,omitempty"`
+
 	DynamoComponentDeploymentSharedSpec `json:",inline"`
 }
 
@@ -72,6 +77,11 @@ type DynamoComponentDeploymentSharedSpec struct {
 	RunMode          *RunMode                   `json:"runMode,omitempty"`
 	ExternalServices map[string]ExternalService `json:"externalServices,omitempty"`
 
+	// DynamoConfig provides an alternative way to generate container specifications
+	// without manually specifying command/args. Can be used for both single-node and multinode deployments.
+	// If present, the operator will generate command/args and translate to extraPodSpec for backward compatibility.
+	DynamoConfig *DynamoConfig `json:"dynamoConfig,omitempty"`
+
 	Ingress *IngressSpec `json:"ingress,omitempty"`
 
 	// +optional
@@ -87,6 +97,33 @@ type DynamoComponentDeploymentSharedSpec struct {
 type RunMode struct {
 	Standalone *bool `json:"standalone,omitempty"`
 }
+
+// DynamoConfig provides a declarative way to generate container specifications
+// Can be used for both single-node and multinode deployments as an alternative to manual extraPodSpec
+type DynamoConfig struct {
+	// NumberOfNodes determines deployment type for this service:
+	// - 1: Single-node deployment (simple pod)
+	// - >1: Multinode deployment (leader + workers with Grove)
+	NumberOfNodes *int32 `json:"numberOfNodes,omitempty"`
+	// TensorParallelSize defines the tensor parallel size for this role
+	TensorParallelSize *int32 `json:"tensorParallelSize,omitempty"`
+	// DataParallelSize defines the data parallel size for this role
+	DataParallelSize *int32 `json:"dataParallelSize,omitempty"`
+
+	// Flexible flag-based configuration system
+	// FlagOverrides allows overriding specific default flags with custom values
+	// Key is the flag name (without --), value is the flag value
+	// Set value to null to completely remove a default flag
+	// Example: {"mem-fraction-static": "0.9", "enable-deepep-moe": "true", "decode-log-interval": null}
+	FlagOverrides map[string]*string `json:"flagOverrides,omitempty"`
+
+	// ExtraArgs contains additional arguments to append to the command
+	// These are added after all default flags and overrides
+	ExtraArgs []string `json:"extraArgs,omitempty"`
+}
+
+// Note: Removed complex SGLangConfig and VLLMConfig structs in favor of flexible
+// flag-based configuration using FlagOverrides and ExtraArgs for maximum flexibility
 
 type ExternalService struct {
 	DeploymentSelectorKey   string `json:"deploymentSelectorKey,omitempty"`
@@ -194,12 +231,4 @@ func (s *DynamoComponentDeployment) SetDynamoDeploymentConfig(config []byte) {
 		Name:  commonconsts.DynamoDeploymentConfigEnvVar,
 		Value: string(config),
 	})
-}
-
-// GetImage returns the docker image of the DynamoComponent
-func (s *DynamoComponentDeployment) GetImage() string {
-	if s.Spec.ExtraPodSpec != nil && s.Spec.ExtraPodSpec.MainContainer != nil {
-		return s.Spec.ExtraPodSpec.MainContainer.Image
-	}
-	return ""
 }

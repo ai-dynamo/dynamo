@@ -147,6 +147,7 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		deployment := &v1alpha1.DynamoComponentDeployment{}
 		deployment.Spec.DynamoComponentDeploymentSharedSpec = component.DynamoComponentDeploymentSharedSpec
 		deployment.Name = GetDynamoComponentName(parentDynamoGraphDeployment, componentName)
+		deployment.Spec.BackendFramework = parentDynamoGraphDeployment.Spec.BackendFramework
 		deployment.Namespace = parentDynamoGraphDeployment.Namespace
 		deployment.Spec.ServiceName = componentName
 		dynamoNamespace := GetDefaultDynamoNamespace(ctx, parentDynamoGraphDeployment)
@@ -311,121 +312,12 @@ type SecretsRetriever interface {
 	GetSecrets(namespace, registry string) ([]string, error)
 }
 
-func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.DynamoGraphDeployment, controllerConfig controller_common.Config, secretsRetriever SecretsRetriever) (*grovev1alpha1.PodGangSet, error) {
-	gangSet := &grovev1alpha1.PodGangSet{}
-	gangSet.Name = dynamoDeployment.Name
-	gangSet.Namespace = dynamoDeployment.Namespace
-	gangSet.Spec.Replicas = 1
-	if controllerConfig.Grove.TerminationDelay > 0 {
-		gangSet.Spec.Template.TerminationDelay = &metav1.Duration{Duration: controllerConfig.Grove.TerminationDelay}
+// getNumberOfNodes extracts the NumberOfNodes from DynamoConfig
+func getNumberOfNodes(dynamoConfig *v1alpha1.DynamoConfig) int32 {
+	if dynamoConfig != nil && dynamoConfig.NumberOfNodes != nil {
+		return *dynamoConfig.NumberOfNodes
 	}
-	for componentName, component := range dynamoDeployment.Spec.Services {
-		container := corev1.Container{
-			Name:           "main",
-			LivenessProbe:  component.LivenessProbe,
-			ReadinessProbe: component.ReadinessProbe,
-			Env:            component.Envs,
-			Ports: []corev1.ContainerPort{
-				{
-					Protocol:      corev1.ProtocolTCP,
-					Name:          commonconsts.DynamoContainerPortName,
-					ContainerPort: int32(commonconsts.DynamoServicePort),
-				},
-				{
-					Protocol:      corev1.ProtocolTCP,
-					Name:          commonconsts.DynamoHealthPortName,
-					ContainerPort: int32(commonconsts.DynamoHealthPort),
-				},
-			},
-		}
-		resourcesConfig, err := controller_common.GetResourcesConfig(component.Resources)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get resources config: %w", err)
-		}
-		container.Resources = *resourcesConfig
-		if component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil {
-			// merge the extraPodSpec from the parent deployment with the extraPodSpec from the service
-			err := mergo.Merge(&container, *component.ExtraPodSpec.MainContainer.DeepCopy(), mergo.WithOverride)
-			if err != nil {
-				return nil, fmt.Errorf("failed to merge extraPodSpec: %w", err)
-			}
-		}
-		// retrieve the image pull secrets for the container
-		imagePullSecrets := []corev1.LocalObjectReference{}
-		if secretsRetriever != nil {
-			secretsName, err := secretsRetriever.GetSecrets(dynamoDeployment.Namespace, container.Image)
-			if err != nil {
-				return nil, fmt.Errorf("failed to get secrets for component %s and image %s: %w", componentName, container.Image, err)
-			}
-			for _, secretName := range secretsName {
-				imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{
-					Name: secretName,
-				})
-			}
-		}
-		// merge the envs from the parent deployment with the envs from the service
-		if len(dynamoDeployment.Spec.Envs) > 0 {
-			container.Env = MergeEnvs(dynamoDeployment.Spec.Envs, container.Env)
-		}
-		container.Env = append(container.Env, corev1.EnvVar{
-			Name:  commonconsts.EnvDynamoServicePort,
-			Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
-		})
-		if controllerConfig.NatsAddress != "" {
-			container.Env = append(container.Env, corev1.EnvVar{
-				Name:  "NATS_SERVER",
-				Value: controllerConfig.NatsAddress,
-			})
-		}
-		if controllerConfig.EtcdAddress != "" {
-			container.Env = append(container.Env, corev1.EnvVar{
-				Name:  "ETCD_ENDPOINTS",
-				Value: controllerConfig.EtcdAddress,
-			})
-		}
-		if component.EnvFromSecret != nil {
-			container.EnvFrom = append(container.EnvFrom, corev1.EnvFromSource{
-				SecretRef: &corev1.SecretEnvSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: *component.EnvFromSecret},
-				},
-			})
-		}
-		gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, &grovev1alpha1.PodCliqueTemplateSpec{
-			Name: strings.ToLower(componentName),
-			Labels: map[string]string{
-				commonconsts.KubeLabelDynamoSelector: GetDynamoComponentName(dynamoDeployment, componentName),
-			},
-			Spec: grovev1alpha1.PodCliqueSpec{
-				RoleName: strings.ToLower(componentName),
-				Replicas: func() int32 {
-					if component.Replicas != nil {
-						return *component.Replicas
-					}
-					return 1
-				}(),
-				PodSpec: corev1.PodSpec{
-					Containers:       []corev1.Container{container},
-					ImagePullSecrets: imagePullSecrets,
-				},
-			},
-		})
-		if component.PVC != nil {
-			cliqueIndex := len(gangSet.Spec.Template.Cliques) - 1
-			gangSet.Spec.Template.Cliques[cliqueIndex].Spec.PodSpec.Volumes = append(gangSet.Spec.Template.Cliques[cliqueIndex].Spec.PodSpec.Volumes, corev1.Volume{
-				Name: *component.PVC.Name,
-				VolumeSource: corev1.VolumeSource{
-					PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
-						ClaimName: *component.PVC.Name,
-					},
-				},
-			})
-			gangSet.Spec.Template.Cliques[cliqueIndex].Spec.PodSpec.Containers[0].VolumeMounts = append(gangSet.Spec.Template.Cliques[cliqueIndex].Spec.PodSpec.Containers[0].VolumeMounts, corev1.VolumeMount{
-				Name:      *component.PVC.Name,
-				MountPath: *component.PVC.MountPoint,
-			})
-		}
-	}
-	return gangSet, nil
+	return 1 // Default to single node
 }
 
 func GenerateComponentService(ctx context.Context, componentName, componentNamespace string) (*corev1.Service, error) {
@@ -567,4 +459,337 @@ func GenerateDefaultIngressSpec(dynamoDeployment *v1alpha1.DynamoGraphDeployment
 		res.VirtualServiceGateway = &ingressConfig.VirtualServiceGateway
 	}
 	return res
+}
+
+// Helper: mergeContainerCommand returns userCmd if specified, else defaultCmd
+func mergeContainerCommand(defaultCmd, userCmd []string) []string {
+	if len(userCmd) > 0 {
+		return userCmd
+	}
+	return defaultCmd
+}
+
+// Define Role enum for leader/worker/main
+// Use this type everywhere instead of string for role
+
+type Role string
+
+const (
+	RoleLeader Role = "leader"
+	RoleWorker Role = "worker"
+	RoleMain   Role = "main"
+)
+
+// Update ServiceRole struct for expandRolesForService
+
+type ServiceRole struct {
+	Name     string
+	Role     Role
+	Replicas int32
+}
+
+// Update expandRolesForService to use Role
+func expandRolesForService(serviceName string, serviceReplicas *int32, numberOfNodes int32) []ServiceRole {
+	var roles []ServiceRole
+	if numberOfNodes > 1 {
+		roles = append(roles, ServiceRole{Name: serviceName + "-ldr", Role: RoleLeader, Replicas: 1})
+		roles = append(roles, ServiceRole{Name: serviceName + "-wkr", Role: RoleWorker, Replicas: numberOfNodes - 1})
+	} else {
+		roles = append(roles, ServiceRole{Name: serviceName, Role: RoleMain, Replicas: *serviceReplicas})
+	}
+	return roles
+}
+
+// Define BackendFramework enum for sglang, vllm, trtllm
+
+type BackendFramework string
+
+const (
+	BackendFrameworkSGLang BackendFramework = "sglang"
+	BackendFrameworkVLLM   BackendFramework = "vllm"
+	BackendFrameworkTRTLLM BackendFramework = "trtllm"
+)
+
+// Backend interface for modular backend logic
+// Each backend (SGLang, VLLM, etc.) implements this interface
+type Backend interface {
+	GenerateCommandAndArgs(componentType string, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType) ([]string, []string)
+	MergeArgs(defaultArgs, userArgs []string, multinode bool, role Role, componentType string, numberOfNodes int32, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType) []string
+}
+
+// BackendFactory creates backend instances based on the framework type
+func BackendFactory(backendFramework BackendFramework) Backend {
+	switch backendFramework {
+	case BackendFrameworkSGLang:
+		return &SGLangBackend{}
+	case BackendFrameworkVLLM:
+		return &VLLMBackend{}
+	case BackendFrameworkTRTLLM:
+		return nil // Not implemented yet
+	default:
+		return nil
+	}
+}
+
+// addStandardEnvVars adds the standard environment variables that are common to both Grove and Controller
+func addStandardEnvVars(container *corev1.Container, controllerConfig controller_common.Config) {
+	container.Env = append(container.Env, corev1.EnvVar{
+		Name:  commonconsts.EnvDynamoServicePort,
+		Value: fmt.Sprintf("%d", commonconsts.DynamoServicePort),
+	})
+
+	if controllerConfig.NatsAddress != "" {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "NATS_SERVER",
+			Value: controllerConfig.NatsAddress,
+		})
+	}
+
+	if controllerConfig.EtcdAddress != "" {
+		container.Env = append(container.Env, corev1.EnvVar{
+			Name:  "ETCD_ENDPOINTS",
+			Value: controllerConfig.EtcdAddress,
+		})
+	}
+}
+
+// GenerateBasePodSpec creates a basic PodSpec with common logic shared between controller and grove
+// Includes standard environment variables (DYNAMO_PORT, NATS_SERVER, ETCD_ENDPOINTS)
+// Deployment-specific environment merging should be handled by the caller
+func GenerateBasePodSpec(
+	component *v1alpha1.DynamoComponentDeploymentOverridesSpec,
+	backendFramework BackendFramework,
+	secretsRetriever SecretsRetriever,
+	namespace string,
+	role Role,
+	numberOfNodes int32,
+	controllerConfig controller_common.Config,
+	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
+) (corev1.PodSpec, error) {
+	container := corev1.Container{
+		Name:           "main",
+		LivenessProbe:  component.LivenessProbe,
+		ReadinessProbe: component.ReadinessProbe,
+		Env:            component.Envs,
+		Ports: []corev1.ContainerPort{
+			{
+				Protocol:      corev1.ProtocolTCP,
+				Name:          commonconsts.DynamoContainerPortName,
+				ContainerPort: int32(commonconsts.DynamoServicePort),
+			},
+			{
+				Protocol:      corev1.ProtocolTCP,
+				Name:          commonconsts.DynamoHealthPortName,
+				ContainerPort: int32(commonconsts.DynamoHealthPort),
+			},
+		},
+	}
+	backend := BackendFactory(backendFramework)
+	if backend == nil {
+		return corev1.PodSpec{}, fmt.Errorf("unsupported backend framework: %s", backendFramework)
+	}
+	cmd, args := backend.GenerateCommandAndArgs(component.ComponentType, numberOfNodes, role, component, multinodeDeploymentType)
+
+	if component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil {
+		main := component.ExtraPodSpec.MainContainer.DeepCopy()
+		if main != nil {
+			// merge the extraPodSpec from the parent deployment with the extraPodSpec from the service
+			err := mergo.Merge(&container, *main, mergo.WithOverride)
+			if err != nil {
+				return corev1.PodSpec{}, fmt.Errorf("failed to merge extraPodSpec: %w", err)
+			}
+			container.Env = MergeEnvs(component.Envs, container.Env)
+		}
+	}
+	isMultinode := numberOfNodes > 1
+	container.Command = mergeContainerCommand(cmd, container.Command)
+	container.Args = backend.MergeArgs(args, container.Args, isMultinode, role, component.ComponentType, numberOfNodes, component, multinodeDeploymentType)
+
+	resourcesConfig, err := controller_common.GetResourcesConfig(component.Resources)
+	if err != nil {
+		return corev1.PodSpec{}, fmt.Errorf("failed to get resources config: %w", err)
+	}
+	if resourcesConfig != nil {
+		container.Resources = *resourcesConfig
+	}
+	imagePullSecrets := []corev1.LocalObjectReference{}
+	if secretsRetriever != nil && component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil && component.ExtraPodSpec.MainContainer.Image != "" {
+		secretsName, err := secretsRetriever.GetSecrets(namespace, component.ExtraPodSpec.MainContainer.Image)
+		if err == nil {
+			for _, secretName := range secretsName {
+				imagePullSecrets = append(imagePullSecrets, corev1.LocalObjectReference{Name: secretName})
+			}
+		}
+	}
+	if component.EnvFromSecret != nil {
+		container.EnvFrom = append(container.EnvFrom, corev1.EnvFromSource{
+			SecretRef: &corev1.SecretEnvSource{
+				LocalObjectReference: corev1.LocalObjectReference{Name: *component.EnvFromSecret},
+			},
+		})
+	}
+
+	// Add standard environment variables (shared between Grove and Controller)
+	// This happens before any deployment-specific merging in the wrappers
+	addStandardEnvVars(&container, controllerConfig)
+
+	var volumes []corev1.Volume
+	if component.PVC != nil {
+		volumes = append(volumes, corev1.Volume{
+			Name: *component.PVC.Name,
+			VolumeSource: corev1.VolumeSource{
+				PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+					ClaimName: *component.PVC.Name,
+				},
+			},
+		})
+		container.VolumeMounts = append(container.VolumeMounts, corev1.VolumeMount{
+			Name:      *component.PVC.Name,
+			MountPath: *component.PVC.MountPoint,
+		})
+	}
+	var podSpec corev1.PodSpec
+	if component.ExtraPodSpec != nil && component.ExtraPodSpec.PodSpec != nil {
+		podSpec = *component.ExtraPodSpec.PodSpec.DeepCopy()
+	}
+	podSpec.Containers = append(podSpec.Containers, container)
+	podSpec.Volumes = append(podSpec.Volumes, volumes...)
+	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, imagePullSecrets...)
+	return podSpec, nil
+}
+
+// GeneratePodSpecForComponent creates a PodSpec for Grove deployments (simplified wrapper)
+func GeneratePodSpecForComponent(
+	component *v1alpha1.DynamoComponentDeploymentOverridesSpec,
+	backendFramework BackendFramework,
+	secretsRetriever SecretsRetriever,
+	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
+	role Role,
+	numberOfNodes int32,
+	controllerConfig controller_common.Config,
+	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
+) (corev1.PodSpec, error) {
+	if len(dynamoDeployment.Spec.Envs) > 0 {
+		component.Envs = MergeEnvs(dynamoDeployment.Spec.Envs, component.Envs)
+	}
+	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Namespace, role, numberOfNodes, controllerConfig, multinodeDeploymentType)
+	if err != nil {
+		return corev1.PodSpec{}, err
+	}
+	return podSpec, nil
+}
+
+// GenerateGrovePodGangSet generates a Grove PodGangSet for the given deployment, supporting both single-node and multinode cases.
+func GenerateGrovePodGangSet(
+	ctx context.Context,
+	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
+	controllerConfig controller_common.Config,
+	secretsRetriever SecretsRetriever,
+) (*grovev1alpha1.PodGangSet, error) {
+	gangSet := &grovev1alpha1.PodGangSet{}
+	gangSet.Name = dynamoDeployment.Name
+	gangSet.Namespace = dynamoDeployment.Namespace
+	gangSet.Spec.Replicas = 1
+	if controllerConfig.Grove.TerminationDelay > 0 {
+		gangSet.Spec.Template.TerminationDelay = &metav1.Duration{Duration: controllerConfig.Grove.TerminationDelay}
+	}
+	backendFramework := getBackendFramework(dynamoDeployment)
+	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
+	for serviceName, component := range dynamoDeployment.Spec.Services {
+		numberOfNodes := getNumberOfNodes(component.DynamoConfig)
+		isMultinode := numberOfNodes > 1
+		roles := expandRolesForService(serviceName, component.Replicas, numberOfNodes)
+		var cliqueNames []string
+		for _, r := range roles {
+			podSpec, err := GeneratePodSpecForComponent(
+				component,
+				backendFramework,
+				secretsRetriever,
+				dynamoDeployment,
+				r.Role,
+				numberOfNodes,
+				controllerConfig,
+				commonconsts.MultinodeDeploymentTypeGrove,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", r.Name, err)
+			}
+			clique := &grovev1alpha1.PodCliqueTemplateSpec{
+				Name: strings.ToLower(string(r.Name)),
+				Labels: map[string]string{
+					commonconsts.KubeLabelDynamoSelector: GetDynamoComponentName(dynamoDeployment, string(r.Name)),
+				},
+				Spec: grovev1alpha1.PodCliqueSpec{
+					RoleName: strings.ToLower(string(r.Name)),
+					Replicas: r.Replicas,
+					PodSpec:  podSpec,
+				},
+			}
+			if component.ExtraPodMetadata != nil {
+				// merge the extraPodMetadata from the parent deployment with the extraPodMetadata from the service
+				mergo.Merge(&clique.Annotations, component.ExtraPodMetadata.Annotations, mergo.WithOverride)
+				mergo.Merge(&clique.Labels, component.ExtraPodMetadata.Labels, mergo.WithOverride)
+			}
+			gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, clique)
+			cliqueNames = append(cliqueNames, strings.ToLower(string(r.Name)))
+		}
+		if isMultinode {
+			scalingGroups = append(scalingGroups, grovev1alpha1.PodCliqueScalingGroupConfig{
+				Name:        serviceName + "-sg",
+				CliqueNames: cliqueNames,
+				Replicas:    component.Replicas,
+			})
+		}
+	}
+	if len(scalingGroups) > 0 {
+		gangSet.Spec.Template.PodCliqueScalingGroupConfigs = scalingGroups
+	}
+	return gangSet, nil
+}
+
+func getBackendFramework(dynamoDeployment *v1alpha1.DynamoGraphDeployment) BackendFramework {
+	if dynamoDeployment.Spec.BackendFramework != "" {
+		return BackendFramework(dynamoDeployment.Spec.BackendFramework)
+	}
+	return BackendFrameworkVLLM
+}
+
+// ConvertDynamoComponentDeploymentToSpec converts a DynamoComponentDeployment to our component spec interface
+// This is a helper for the controller to use our backend logic
+func ConvertDynamoComponentDeploymentToSpec(dynComponent *v1alpha1.DynamoComponentDeployment) *v1alpha1.DynamoComponentDeploymentOverridesSpec {
+	return &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+		DynamoComponentDeploymentSharedSpec: *dynComponent.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy(),
+	}
+}
+
+// GenerateBasePodSpecForController generates a PodSpec using backend logic for controller usage
+// This preserves the base pod generation while allowing controller-specific enhancements
+func GenerateBasePodSpecForController(
+	dynComponent *v1alpha1.DynamoComponentDeployment,
+	secretsRetriever SecretsRetriever,
+	controllerConfig controller_common.Config,
+	role Role,
+	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
+) (corev1.PodSpec, error) {
+	// Convert to our interface
+	componentSpec := ConvertDynamoComponentDeploymentToSpec(dynComponent)
+
+	numberOfNodes := getNumberOfNodes(dynComponent.Spec.DynamoComponentDeploymentSharedSpec.DynamoConfig)
+
+	// Generate base PodSpec with standard env vars using merged component envs
+	podSpec, err := GenerateBasePodSpec(
+		componentSpec,
+		BackendFramework(dynComponent.Spec.BackendFramework),
+		secretsRetriever,
+		dynComponent.Namespace,
+		role,
+		numberOfNodes,
+		controllerConfig,
+		multinodeDeploymentType,
+	)
+	if err != nil {
+		return corev1.PodSpec{}, err
+	}
+
+	return podSpec, nil
 }

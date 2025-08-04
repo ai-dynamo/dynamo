@@ -404,10 +404,36 @@ spec:
                     minReplicas:
                       type: integer
                   type: object
+                backendFramework:
+                  default: vllm
+                  enum:
+                    - sglang
+                    - vllm
+                  type: string
                 componentType:
                   type: string
                 dynamoComponent:
                   type: string
+                dynamoConfig:
+                  properties:
+                    dataParallelSize:
+                      format: int32
+                      type: integer
+                    extraArgs:
+                      items:
+                        type: string
+                      type: array
+                    flagOverrides:
+                      additionalProperties:
+                        type: string
+                      type: object
+                    numberOfNodes:
+                      format: int32
+                      type: integer
+                    tensorParallelSize:
+                      format: int32
+                      type: integer
+                  type: object
                 dynamoNamespace:
                   type: string
                 dynamoTag:

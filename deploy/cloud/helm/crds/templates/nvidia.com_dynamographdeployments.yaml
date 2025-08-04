@@ -44,6 +44,12 @@ spec:
               type: object
             spec:
               properties:
+                backendFramework:
+                  default: vllm
+                  enum:
+                    - sglang
+                    - vllm
+                  type: string
                 dynamoGraph:
                   type: string
                 envs:
@@ -465,6 +471,26 @@ spec:
                         type: object
                       componentType:
                         type: string
+                      dynamoConfig:
+                        properties:
+                          dataParallelSize:
+                            format: int32
+                            type: integer
+                          extraArgs:
+                            items:
+                              type: string
+                            type: array
+                          flagOverrides:
+                            additionalProperties:
+                              type: string
+                            type: object
+                          numberOfNodes:
+                            format: int32
+                            type: integer
+                          tensorParallelSize:
+                            format: int32
+                            type: integer
+                        type: object
                       dynamoNamespace:
                         type: string
                       envFromSecret:
