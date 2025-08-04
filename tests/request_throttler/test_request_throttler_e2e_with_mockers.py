@@ -22,7 +22,7 @@ NUM_MOCKERS = 2
 BLOCK_SIZE = 16
 SPEEDUP_RATIO = 10.0
 FRONTEND_PORT = 8091
-REQUEST_THROTTLE_DURATION_MS = 2000  # 2 seconds for faster testing, this is the duration of the request throttling window
+REQUEST_THROTTLE_DURATION_MS = 5000  # 5 seconds for faster testing, this is the duration of the request throttling window
 MAX_QUEUE_DEPTH = 1  # Low threshold for easier testing
 
 
@@ -168,7 +168,7 @@ async def test_request_throttler_e2e(request, runtime_services):
 
         # Step 1: Verify normal requests work
         logger.info("=== Testing normal operation ===")
-        status, response = await send_test_request(base_url)
+        status, response = await send_test_request(base_url, expect_success=True)
         assert status == 200, f"Expected 200, got {status}. Response: {response}"
         logger.info("✓ Normal request successful")
 
@@ -177,11 +177,13 @@ async def test_request_throttler_e2e(request, runtime_services):
         await publish_all_workers_busy_event()
 
         # Give the request throttler time to process the event
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.5)
 
         # Step 3: Verify requests now get 503 responses
         logger.info("=== Testing request throttling active ===")
-        status, response = await send_test_request(base_url, expect_success=False)
+        status, response = await send_test_request(
+            base_url, expect_success=False, max_retries=0
+        )
         assert (
             status == 503
         ), f"Expected 503 (request throttled), got {status}. Response: {response}"
@@ -189,7 +191,9 @@ async def test_request_throttler_e2e(request, runtime_services):
 
         # Step 4: Send multiple requests to ensure consistent request throttling
         for i in range(3):
-            status, _ = await send_test_request(base_url, expect_success=False)
+            status, _ = await send_test_request(
+                base_url, expect_success=False, max_retries=0
+            )
             assert status == 503, f"Request {i+1}: Expected 503, got {status}"
             await asyncio.sleep(0.1)  # Small delay between requests
         logger.info("✓ Multiple requests consistently request throttled")
@@ -230,6 +234,89 @@ async def test_request_throttler_e2e(request, runtime_services):
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)
 
+@pytest.mark.pre_merge
+async def test_request_throttler_disabled(request, runtime_services):
+    """
+    Test that when request throttling is disabled, all-workers-busy events don't affect requests
+    """
+    nats_process, etcd_process = runtime_services
+
+    mocker_args = {"speedup_ratio": SPEEDUP_RATIO, "block_size": BLOCK_SIZE}
+    mocker_args_file = os.path.join(request.node.name, "mocker_args.json")
+    with open(mocker_args_file, "w") as f:
+        json.dump(mocker_args, f)
+
+    # Create frontend WITHOUT request throttling environment variable
+    command = [
+        "python",
+        "-m",
+        "dynamo.frontend",
+        "--kv-cache-block-size",
+        str(BLOCK_SIZE),
+        "--router-mode",
+        "kv",
+        "--http-port",
+        str(FRONTEND_PORT + 2),
+        "--endpoint-id",
+        "dyn://test-namespace.frontend.generate",
+    ]
+
+    env = os.environ.copy()
+    env["DYN_NAMESPACE"] = "test-namespace"
+
+    frontend = ManagedProcess(
+        command=command,
+        env=env,
+        timeout=60,
+        display_output=True,
+        health_check_ports=[FRONTEND_PORT + 2],
+        health_check_urls=[
+            (
+                f"http://localhost:{FRONTEND_PORT + 2}/v1/models",
+                lambda r: r.status_code == 200,
+            )
+        ],
+        log_dir=request.node.name,
+        terminate_existing=False,
+    )
+
+    try:
+        frontend.__enter__()
+
+        mocker = MockerProcess(
+            request, "dyn://test-namespace.mocker.generate", mocker_args_file
+        )
+        mocker.__enter__()
+
+        await asyncio.sleep(2)
+
+        base_url = f"http://localhost:{FRONTEND_PORT + 2}/v1/chat/completions"
+
+        # Verify normal operation
+        status, _ = await send_test_request(base_url)
+        assert status == 200, f"Expected 200, got {status}"
+
+        # Publish all-workers-busy event
+        logger.info("=== Publishing event with request throttling disabled ===")
+        await publish_all_workers_busy_event()
+        await asyncio.sleep(0.5)
+
+        # Should still work (not throttled)
+        status, _ = await send_test_request(base_url)
+        assert (
+            status == 200
+        ), f"Expected 200 (request throttling disabled), got {status}"
+
+        logger.info("✓ Request throttling correctly disabled")
+
+    finally:
+        if "frontend" in locals():
+            frontend.__exit__(None, None, None)
+        if "mocker" in locals():
+            mocker.__exit__(None, None, None)
+        if os.path.exists(mocker_args_file):
+            os.unlink(mocker_args_file)
+
 
 async def send_test_request(
     url: str, expect_success: bool = True, max_retries: int = 4
@@ -243,6 +330,8 @@ async def send_test_request(
     }
 
     wait_time = 1  # Start with 1 second
+    last_status = 404
+    last_response = "No attempts made"
 
     for attempt in range(max_retries + 1):
         await asyncio.sleep(wait_time)
@@ -252,6 +341,9 @@ async def send_test_request(
                     url, json=payload, timeout=aiohttp.ClientTimeout(total=10)
                 ) as response:
                     text = await response.text()
+                    last_status = response.status
+                    last_response = text
+
                     if response.status == 200:
                         logger.info(f"Request succeeded on attempt {attempt + 1}")
                         return response.status, text
@@ -265,8 +357,8 @@ async def send_test_request(
         if attempt < max_retries:
             wait_time *= 2  # Double the wait time (exponential backoff)
 
-    # If we get here, all retries failed
-    return 404, "Failed after all retries"
+    # Return the last status and response
+    return last_status, last_response
 
 
 async def wait_for_request_throttle_to_clear(duration_seconds: float):
