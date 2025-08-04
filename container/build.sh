@@ -91,6 +91,7 @@ TENSORRTLLM_PIP_WHEEL_DIR="/tmp/trtllm_wheel/"
 DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT="69e9f6d48944b2ae0124ff57aa59340aa4dfae15"
 TRTLLM_COMMIT=""
 TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL="0"
+TRTLLM_GIT_URL=""
 
 # TensorRT-LLM PyPI index URL
 TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
@@ -182,6 +183,14 @@ get_options() {
         --tensorrtllm-index-url)
             if [ "$2" ]; then
                 TENSORRTLLM_INDEX_URL=$2
+                shift
+            else
+                missing_requirement "$1"
+            fi
+            ;;
+        --tensorrtllm-git-url)
+            if [ "$2" ]; then
+                TRTLLM_GIT_URL=$2
                 shift
             else
                 missing_requirement "$1"
@@ -360,6 +369,7 @@ show_help() {
     echo "  [--use-default-experimental-tensorrtllm-commit] Use the default experimental commit (${DEFAULT_EXPERIMENTAL_TRTLLM_COMMIT}) to build TensorRT-LLM. This is a flag (no argument). Do not combine with --tensorrtllm-commit or --tensorrtllm-pip-wheel."
     echo "  [--tensorrtllm-pip-wheel tensorrtllm pip wheel on artifactory]"
     echo "  [--tensorrtllm-index-url tensorrtllm PyPI index URL if providing the wheel from artifactory]"
+    echo "  [--tensorrtllm-git-url tensorrtllm git repository URL for cloning]"
     echo "  [--build-arg additional build args to pass to docker build]"
     echo "  [--cache-from cache location to start from]"
     echo "  [--cache-to location where to cache the build output]"
@@ -489,7 +499,11 @@ if [[ $FRAMEWORK == "TENSORRTLLM" ]]; then
         echo "Checking for TensorRT-LLM wheel in ${TENSORRTLLM_PIP_WHEEL_DIR}"
         if ! check_wheel_file "${TENSORRTLLM_PIP_WHEEL_DIR}" "${ARCH}_${TRTLLM_COMMIT}"; then
             echo "WARN: Valid trtllm wheel file not found in ${TENSORRTLLM_PIP_WHEEL_DIR}, attempting to build from source"
-            if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_REF}; then
+            GIT_URL_ARG=""
+            if [ -n "${TRTLLM_GIT_URL}" ]; then
+                GIT_URL_ARG="-u ${TRTLLM_GIT_URL}"
+            fi
+            if ! env -i ${SOURCE_DIR}/build_trtllm_wheel.sh -o ${TENSORRTLLM_PIP_WHEEL_DIR} -c ${TRTLLM_COMMIT} -a ${ARCH} -n ${NIXL_REF} ${GIT_URL_ARG}; then
                 error "ERROR: Failed to build TensorRT-LLM wheel"
             fi
         fi
