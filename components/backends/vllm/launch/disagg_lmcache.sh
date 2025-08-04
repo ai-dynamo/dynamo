@@ -8,7 +8,7 @@ trap 'echo Cleaning up...; kill 0' EXIT
 python -m dynamo.frontend --router-mode kv &
 
 # run decode worker on GPU 0, without enabling LMCache
-CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --no-enable-prefix-caching &
+CUDA_VISIBLE_DEVICES=0 python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager &
 
 # wait for decode worker to initialize
 sleep 20
