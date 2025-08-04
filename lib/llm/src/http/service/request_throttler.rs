@@ -82,6 +82,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// A far future duration that is supposedly far enough in the future that it will never be reached.
+const FAR_FUTURE: Duration = Duration::from_secs(10 * 365 * 24 * 60 * 60); // 10 years
+
 /// Request throttling state that can be shared across request handlers
 #[derive(Debug, Clone)]
 pub struct ThrottlingState {
@@ -220,7 +223,8 @@ impl HttpServiceRequestThrottler {
                             let mut state = request_throttling_state.write().unwrap();
                             state.clear_throttling();
                         }
-                        sleep.as_mut().reset(tokio::time::Instant::now() + Duration::MAX);
+                        // Reset the sleep to a far future duration
+                        sleep.as_mut().reset(tokio::time::Instant::now() + FAR_FUTURE);
                     }
                     _ = cancellation_token.cancelled() => {
                         tracing::debug!("Throttling service monitoring task shutting down");
