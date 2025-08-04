@@ -115,11 +115,11 @@ Dynamo provides a simple way to spin up a local set of inference components incl
 
 ```
 # Start an OpenAI compatible HTTP server, a pre-processor (prompt templating and tokenization) and a router:
-python -m dynamo.frontend [--http-port 8080]
+python -m dynamo.frontend --http-port 8080
 
 # Start the SGLang engine, connecting to NATS and etcd to receive requests. You can run several of these,
 # both for the same model and for multiple models. The frontend node will discover them.
-python -m dynamo.sglang.worker deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+python -m dynamo.sglang.worker --model deepseek-ai/DeepSeek-R1-Distill-Llama-8B --skip-tokenizer-init
 ```
 
 #### Send a Request

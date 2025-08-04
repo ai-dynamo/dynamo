@@ -62,9 +62,3 @@ To enable NIXL for KV cache transfer in disaggregated serving:
    See [client](./README.md#client) section to learn how to send the request to deployment.
 
 **Important:** Ensure that ETCD and NATS services are running before starting the service.
-
-The container will automatically configure the appropriate environment variables (`TRTLLM_USE_NIXL_KVCACHE=1`) when built with the NIXL flag. The same container image can be used to use UCX for KV cache transfer.
-```bash
-unset TRTLLM_USE_NIXL_KVCACHE
-export TRTLLM_USE_UCX_KVCACHE=1
-```
