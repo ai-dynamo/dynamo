@@ -63,7 +63,6 @@ import (
 const (
 	DefaultClusterName                                   = "default"
 	DefaultServiceAccountName                            = "default"
-	KubeValueNameSharedMemory                            = "shared-memory"
 	KubeAnnotationDeploymentStrategy                     = "nvidia.com/deployment-strategy"
 	KubeAnnotationEnableStealingTrafficDebugMode         = "nvidia.com/enable-stealing-traffic-debug-mode"
 	KubeAnnotationEnableDebugMode                        = "nvidia.com/enable-debug-mode"

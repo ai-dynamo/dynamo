@@ -46,6 +46,7 @@ const (
 	DefaultIngressSuffix = "local"
 
 	DefaultGroveTerminationDelay = 15 * time.Minute
+	KubeValueNameSharedMemory    = "shared-memory"
 )
 
 type MultinodeDeploymentType string

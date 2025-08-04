@@ -29,7 +29,6 @@ import (
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/dynamo/common"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/controller_common"
 	"github.com/google/go-cmp/cmp"
@@ -1315,6 +1314,17 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									RoleName: "frontend",
 									Replicas: 1,
 									PodSpec: corev1.PodSpec{
+										Volumes: []corev1.Volume{
+											{
+												Name: "shared-memory",
+												VolumeSource: corev1.VolumeSource{
+													EmptyDir: &corev1.EmptyDirVolumeSource{
+														Medium:    corev1.StorageMediumMemory,
+														SizeLimit: resource.NewQuantity(536870912, resource.BinarySI),
+													},
+												},
+											},
+										},
 										TerminationGracePeriodSeconds: ptr.To(int64(10)),
 										ImagePullSecrets: []corev1.LocalObjectReference{
 											{
@@ -1392,6 +1402,12 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("1"),
 													},
 												},
+												VolumeMounts: []corev1.VolumeMount{
+													{
+														Name:      "shared-memory",
+														MountPath: "/dev/shm",
+													},
+												},
 												Ports: []corev1.ContainerPort{
 													{
 														Protocol:      corev1.ProtocolTCP,
@@ -1424,6 +1440,15 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 														ClaimName: "planner-pvc",
+													},
+												},
+											},
+											{
+												Name: "shared-memory",
+												VolumeSource: corev1.VolumeSource{
+													EmptyDir: &corev1.EmptyDirVolumeSource{
+														Medium:    corev1.StorageMediumMemory,
+														SizeLimit: resource.NewQuantity(536870912, resource.BinarySI),
 													},
 												},
 											},
@@ -1503,6 +1528,10 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:      "planner-pvc",
 														MountPath: "/planner",
+													},
+													{
+														Name:      "shared-memory",
+														MountPath: "/dev/shm",
 													},
 												},
 												Ports: []corev1.ContainerPort{
@@ -1757,6 +1786,17 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									RoleName: "worker-ldr",
 									Replicas: 1,
 									PodSpec: corev1.PodSpec{
+										Volumes: []corev1.Volume{
+											{
+												Name: "shared-memory",
+												VolumeSource: corev1.VolumeSource{
+													EmptyDir: &corev1.EmptyDirVolumeSource{
+														Medium:    corev1.StorageMediumMemory,
+														SizeLimit: resource.NewQuantity(1*1024*1024*1024, resource.BinarySI),
+													},
+												},
+											},
+										},
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -1813,6 +1853,12 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
 													},
 												},
+												VolumeMounts: []corev1.VolumeMount{
+													{
+														Name:      commonconsts.KubeValueNameSharedMemory,
+														MountPath: "/dev/shm",
+													},
+												},
 											},
 										},
 									},
@@ -1833,6 +1879,17 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									RoleName: "worker-wkr",
 									Replicas: 2,
 									PodSpec: corev1.PodSpec{
+										Volumes: []corev1.Volume{
+											{
+												Name: "shared-memory",
+												VolumeSource: corev1.VolumeSource{
+													EmptyDir: &corev1.EmptyDirVolumeSource{
+														Medium:    corev1.StorageMediumMemory,
+														SizeLimit: resource.NewQuantity(1*1024*1024*1024, resource.BinarySI),
+													},
+												},
+											},
+										},
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -1889,6 +1946,12 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
 													},
 												},
+												VolumeMounts: []corev1.VolumeMount{
+													{
+														Name:      commonconsts.KubeValueNameSharedMemory,
+														MountPath: "/dev/shm",
+													},
+												},
 											},
 										},
 									},
@@ -1903,6 +1966,17 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									RoleName: "frontend",
 									Replicas: 1,
 									PodSpec: corev1.PodSpec{
+										Volumes: []corev1.Volume{
+											{
+												Name: "shared-memory",
+												VolumeSource: corev1.VolumeSource{
+													EmptyDir: &corev1.EmptyDirVolumeSource{
+														Medium:    corev1.StorageMediumMemory,
+														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+													},
+												},
+											},
+										},
 										ImagePullSecrets: []corev1.LocalObjectReference{
 											{
 												Name: "frontend-secret",
@@ -1992,6 +2066,12 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														ContainerPort: int32(commonconsts.DynamoHealthPort),
 													},
 												},
+												VolumeMounts: []corev1.VolumeMount{
+													{
+														Name:      commonconsts.KubeValueNameSharedMemory,
+														MountPath: "/dev/shm",
+													},
+												},
 											},
 										},
 									},
@@ -2012,6 +2092,15 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 														ClaimName: "planner-pvc",
+													},
+												},
+											},
+											{
+												Name: "shared-memory",
+												VolumeSource: corev1.VolumeSource{
+													EmptyDir: &corev1.EmptyDirVolumeSource{
+														Medium:    corev1.StorageMediumMemory,
+														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
 													},
 												},
 											},
@@ -2091,6 +2180,10 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:      "planner-pvc",
 														MountPath: "/planner",
+													},
+													{
+														Name:      "shared-memory",
+														MountPath: "/dev/shm",
 													},
 												},
 												Ports: []corev1.ContainerPort{
@@ -2352,6 +2445,17 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									RoleName: "worker-ldr",
 									Replicas: 1,
 									PodSpec: corev1.PodSpec{
+										Volumes: []corev1.Volume{
+											{
+												Name: "shared-memory",
+												VolumeSource: corev1.VolumeSource{
+													EmptyDir: &corev1.EmptyDirVolumeSource{
+														Medium:    corev1.StorageMediumMemory,
+														SizeLimit: resource.NewQuantity(1*1024*1024*1024, resource.BinarySI),
+													},
+												},
+											},
+										},
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -2408,6 +2512,12 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
 													},
 												},
+												VolumeMounts: []corev1.VolumeMount{
+													{
+														Name:      commonconsts.KubeValueNameSharedMemory,
+														MountPath: "/dev/shm",
+													},
+												},
 											},
 										},
 									},
@@ -2428,6 +2538,17 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									RoleName: "worker-wkr",
 									Replicas: 2,
 									PodSpec: corev1.PodSpec{
+										Volumes: []corev1.Volume{
+											{
+												Name: "shared-memory",
+												VolumeSource: corev1.VolumeSource{
+													EmptyDir: &corev1.EmptyDirVolumeSource{
+														Medium:    corev1.StorageMediumMemory,
+														SizeLimit: resource.NewQuantity(1*1024*1024*1024, resource.BinarySI),
+													},
+												},
+											},
+										},
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -2484,6 +2605,12 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
 													},
 												},
+												VolumeMounts: []corev1.VolumeMount{
+													{
+														Name:      commonconsts.KubeValueNameSharedMemory,
+														MountPath: "/dev/shm",
+													},
+												},
 											},
 										},
 									},
@@ -2498,6 +2625,17 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									RoleName: "frontend",
 									Replicas: 1,
 									PodSpec: corev1.PodSpec{
+										Volumes: []corev1.Volume{
+											{
+												Name: "shared-memory",
+												VolumeSource: corev1.VolumeSource{
+													EmptyDir: &corev1.EmptyDirVolumeSource{
+														Medium:    corev1.StorageMediumMemory,
+														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+													},
+												},
+											},
+										},
 										ImagePullSecrets: []corev1.LocalObjectReference{
 											{
 												Name: "frontend-secret",
@@ -2587,6 +2725,12 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														ContainerPort: int32(commonconsts.DynamoHealthPort),
 													},
 												},
+												VolumeMounts: []corev1.VolumeMount{
+													{
+														Name:      commonconsts.KubeValueNameSharedMemory,
+														MountPath: "/dev/shm",
+													},
+												},
 											},
 										},
 									},
@@ -2607,6 +2751,15 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 														ClaimName: "planner-pvc",
+													},
+												},
+											},
+											{
+												Name: "shared-memory",
+												VolumeSource: corev1.VolumeSource{
+													EmptyDir: &corev1.EmptyDirVolumeSource{
+														Medium:    corev1.StorageMediumMemory,
+														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
 													},
 												},
 											},
@@ -2686,6 +2839,10 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:      "planner-pvc",
 														MountPath: "/planner",
+													},
+													{
+														Name:      "shared-memory",
+														MountPath: "/dev/shm",
 													},
 												},
 												Ports: []corev1.ContainerPort{
@@ -2940,6 +3097,17 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									RoleName: "worker-ldr",
 									Replicas: 1,
 									PodSpec: corev1.PodSpec{
+										Volumes: []corev1.Volume{
+											{
+												Name: "shared-memory",
+												VolumeSource: corev1.VolumeSource{
+													EmptyDir: &corev1.EmptyDirVolumeSource{
+														Medium:    corev1.StorageMediumMemory,
+														SizeLimit: resource.NewQuantity(1*1024*1024*1024, resource.BinarySI),
+													},
+												},
+											},
+										},
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -2996,6 +3164,12 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
 													},
 												},
+												VolumeMounts: []corev1.VolumeMount{
+													{
+														Name:      commonconsts.KubeValueNameSharedMemory,
+														MountPath: "/dev/shm",
+													},
+												},
 											},
 										},
 									},
@@ -3016,6 +3190,17 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									RoleName: "worker-wkr",
 									Replicas: 2,
 									PodSpec: corev1.PodSpec{
+										Volumes: []corev1.Volume{
+											{
+												Name: "shared-memory",
+												VolumeSource: corev1.VolumeSource{
+													EmptyDir: &corev1.EmptyDirVolumeSource{
+														Medium:    corev1.StorageMediumMemory,
+														SizeLimit: resource.NewQuantity(1*1024*1024*1024, resource.BinarySI),
+													},
+												},
+											},
+										},
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -3072,6 +3257,12 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
 													},
 												},
+												VolumeMounts: []corev1.VolumeMount{
+													{
+														Name:      commonconsts.KubeValueNameSharedMemory,
+														MountPath: "/dev/shm",
+													},
+												},
 											},
 										},
 									},
@@ -3086,6 +3277,17 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									RoleName: "frontend",
 									Replicas: 1,
 									PodSpec: corev1.PodSpec{
+										Volumes: []corev1.Volume{
+											{
+												Name: "shared-memory",
+												VolumeSource: corev1.VolumeSource{
+													EmptyDir: &corev1.EmptyDirVolumeSource{
+														Medium:    corev1.StorageMediumMemory,
+														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+													},
+												},
+											},
+										},
 										ImagePullSecrets: []corev1.LocalObjectReference{
 											{
 												Name: "frontend-secret",
@@ -3175,6 +3377,12 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														ContainerPort: int32(commonconsts.DynamoHealthPort),
 													},
 												},
+												VolumeMounts: []corev1.VolumeMount{
+													{
+														Name:      commonconsts.KubeValueNameSharedMemory,
+														MountPath: "/dev/shm",
+													},
+												},
 											},
 										},
 									},
@@ -3195,6 +3403,15 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 														ClaimName: "planner-pvc",
+													},
+												},
+											},
+											{
+												Name: "shared-memory",
+												VolumeSource: corev1.VolumeSource{
+													EmptyDir: &corev1.EmptyDirVolumeSource{
+														Medium:    corev1.StorageMediumMemory,
+														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
 													},
 												},
 											},
@@ -3274,6 +3491,10 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:      "planner-pvc",
 														MountPath: "/planner",
+													},
+													{
+														Name:      "shared-memory",
+														MountPath: "/dev/shm",
 													},
 												},
 												Ports: []corev1.ContainerPort{
@@ -3535,6 +3756,17 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									RoleName: "worker-ldr",
 									Replicas: 1,
 									PodSpec: corev1.PodSpec{
+										Volumes: []corev1.Volume{
+											{
+												Name: "shared-memory",
+												VolumeSource: corev1.VolumeSource{
+													EmptyDir: &corev1.EmptyDirVolumeSource{
+														Medium:    corev1.StorageMediumMemory,
+														SizeLimit: resource.NewQuantity(1*1024*1024*1024, resource.BinarySI),
+													},
+												},
+											},
+										},
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -3591,6 +3823,12 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
 													},
 												},
+												VolumeMounts: []corev1.VolumeMount{
+													{
+														Name:      commonconsts.KubeValueNameSharedMemory,
+														MountPath: "/dev/shm",
+													},
+												},
 											},
 										},
 									},
@@ -3611,6 +3849,17 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									RoleName: "worker-wkr",
 									Replicas: 2,
 									PodSpec: corev1.PodSpec{
+										Volumes: []corev1.Volume{
+											{
+												Name: "shared-memory",
+												VolumeSource: corev1.VolumeSource{
+													EmptyDir: &corev1.EmptyDirVolumeSource{
+														Medium:    corev1.StorageMediumMemory,
+														SizeLimit: resource.NewQuantity(1*1024*1024*1024, resource.BinarySI),
+													},
+												},
+											},
+										},
 										Containers: []corev1.Container{
 											{
 												Name:  "main",
@@ -3667,6 +3916,12 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														corev1.ResourceName("nvidia.com/gpu"): resource.MustParse("2"),
 													},
 												},
+												VolumeMounts: []corev1.VolumeMount{
+													{
+														Name:      commonconsts.KubeValueNameSharedMemory,
+														MountPath: "/dev/shm",
+													},
+												},
 											},
 										},
 									},
@@ -3681,6 +3936,17 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									RoleName: "frontend",
 									Replicas: 1,
 									PodSpec: corev1.PodSpec{
+										Volumes: []corev1.Volume{
+											{
+												Name: "shared-memory",
+												VolumeSource: corev1.VolumeSource{
+													EmptyDir: &corev1.EmptyDirVolumeSource{
+														Medium:    corev1.StorageMediumMemory,
+														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
+													},
+												},
+											},
+										},
 										ImagePullSecrets: []corev1.LocalObjectReference{
 											{
 												Name: "frontend-secret",
@@ -3770,6 +4036,12 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														ContainerPort: int32(commonconsts.DynamoHealthPort),
 													},
 												},
+												VolumeMounts: []corev1.VolumeMount{
+													{
+														Name:      commonconsts.KubeValueNameSharedMemory,
+														MountPath: "/dev/shm",
+													},
+												},
 											},
 										},
 									},
@@ -3790,6 +4062,15 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 												VolumeSource: corev1.VolumeSource{
 													PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
 														ClaimName: "planner-pvc",
+													},
+												},
+											},
+											{
+												Name: "shared-memory",
+												VolumeSource: corev1.VolumeSource{
+													EmptyDir: &corev1.EmptyDirVolumeSource{
+														Medium:    corev1.StorageMediumMemory,
+														SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI),
 													},
 												},
 											},
@@ -3869,6 +4150,10 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													{
 														Name:      "planner-pvc",
 														MountPath: "/planner",
+													},
+													{
+														Name:      "shared-memory",
+														MountPath: "/dev/shm",
 													},
 												},
 												Ports: []corev1.ContainerPort{
@@ -4046,7 +4331,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 				tt.role,
 				tt.numberOfNodes,
 				controllerConfig,
-				consts.MultinodeDeploymentTypeGrove,
+				commonconsts.MultinodeDeploymentTypeGrove,
 			)
 
 			if tt.expectError {
@@ -4184,7 +4469,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 				tt.role,
 				tt.numberOfNodes,
 				controllerConfig,
-				consts.MultinodeDeploymentTypeGrove,
+				commonconsts.MultinodeDeploymentTypeGrove,
 			)
 
 			if tt.expectError {
@@ -4273,7 +4558,7 @@ func TestGeneratePodSpecForComponent_UnsupportedBackend(t *testing.T) {
 				RoleMain,
 				1,
 				controllerConfig,
-				consts.MultinodeDeploymentTypeGrove,
+				commonconsts.MultinodeDeploymentTypeGrove,
 			)
 
 			if tt.expectError {

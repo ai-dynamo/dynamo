@@ -27,6 +27,7 @@ import (
 
 	istioNetworking "istio.io/api/networking/v1beta1"
 
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -648,6 +649,9 @@ func GenerateBasePodSpec(
 			MountPath: *component.PVC.MountPoint,
 		})
 	}
+	shmVolume, shmVolumeMount := generateSharedMemoryVolumeAndMount(isMultinode, &container.Resources)
+	volumes = append(volumes, shmVolume)
+	container.VolumeMounts = append(container.VolumeMounts, shmVolumeMount)
 	var podSpec corev1.PodSpec
 	if component.ExtraPodSpec != nil && component.ExtraPodSpec.PodSpec != nil {
 		podSpec = *component.ExtraPodSpec.PodSpec.DeepCopy()
@@ -792,4 +796,45 @@ func GenerateBasePodSpecForController(
 	}
 
 	return podSpec, nil
+}
+
+func generateSharedMemoryVolumeAndMount(isMultinode bool, resources *corev1.ResourceRequirements) (corev1.Volume, corev1.VolumeMount) {
+	sharedMemorySizeLimit := resource.MustParse("512Mi")
+	// Check if we have memory limits to work with
+	memoryLimit := resources.Limits[corev1.ResourceMemory]
+	if !memoryLimit.IsZero() {
+		// Use 1/4 of memory limit
+		calculatedSize := resource.NewQuantity(memoryLimit.Value()/4, resource.BinarySI)
+		// Apply bounds: minimum 512Mi, maximum 8Gi
+		minSize := resource.MustParse("512Mi")
+		maxSize := resource.MustParse("8Gi")
+
+		if calculatedSize.Cmp(minSize) > 0 && calculatedSize.Cmp(maxSize) < 0 {
+			sharedMemorySizeLimit = *calculatedSize
+		} else if calculatedSize.Cmp(maxSize) >= 0 {
+			sharedMemorySizeLimit = maxSize // Cap at maximum
+		}
+		// If calculatedSize < minSize, keep the 512Mi base
+	}
+	// For multinode, ensure we have at least 1Gi
+	if isMultinode {
+		minMultinodeSize := resource.MustParse("1Gi")
+		if sharedMemorySizeLimit.Cmp(minMultinodeSize) < 0 {
+			sharedMemorySizeLimit = minMultinodeSize
+		}
+	}
+	volume := corev1.Volume{
+		Name: commonconsts.KubeValueNameSharedMemory,
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{
+				Medium:    corev1.StorageMediumMemory,
+				SizeLimit: &sharedMemorySizeLimit,
+			},
+		},
+	}
+	volumeMount := corev1.VolumeMount{
+		Name:      commonconsts.KubeValueNameSharedMemory,
+		MountPath: "/dev/shm",
+	}
+	return volume, volumeMount
 }

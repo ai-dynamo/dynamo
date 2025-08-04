@@ -922,6 +922,17 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 							Spec: corev1.PodSpec{
 								SchedulerName:                 "volcano",
 								TerminationGracePeriodSeconds: ptr.To(int64(10)),
+								Volumes: []corev1.Volume{
+									{
+										Name: "shared-memory",
+										VolumeSource: corev1.VolumeSource{
+											EmptyDir: &corev1.EmptyDirVolumeSource{
+												Medium:    corev1.StorageMediumMemory,
+												SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI), // 512Mi default (calculated from memory limit)
+											},
+										},
+									},
+								},
 								Containers: []corev1.Container{
 									{
 										Name:    "main",
@@ -935,6 +946,12 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 											},
 											{
 												Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoHealthPortName, ContainerPort: commonconsts.DynamoHealthPort,
+											},
+										},
+										VolumeMounts: []corev1.VolumeMount{
+											{
+												Name:      "shared-memory",
+												MountPath: "/dev/shm",
 											},
 										},
 										Resources: corev1.ResourceRequirements{
@@ -967,6 +984,17 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 							Spec: corev1.PodSpec{
 								TerminationGracePeriodSeconds: ptr.To(int64(10)),
 								SchedulerName:                 "volcano",
+								Volumes: []corev1.Volume{
+									{
+										Name: "shared-memory",
+										VolumeSource: corev1.VolumeSource{
+											EmptyDir: &corev1.EmptyDirVolumeSource{
+												Medium:    corev1.StorageMediumMemory,
+												SizeLimit: resource.NewQuantity(512*1024*1024, resource.BinarySI), // 512Mi default (calculated from memory limit)
+											},
+										},
+									},
+								},
 								Containers: []corev1.Container{
 									{
 										Name:    "main",
@@ -977,6 +1005,12 @@ func TestDynamoComponentDeploymentReconciler_generateLeaderWorkerSet(t *testing.
 										Ports: []corev1.ContainerPort{{Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoServicePortName, ContainerPort: commonconsts.DynamoServicePort}, {
 											Protocol: corev1.ProtocolTCP, Name: commonconsts.DynamoHealthPortName, ContainerPort: commonconsts.DynamoHealthPort,
 										}},
+										VolumeMounts: []corev1.VolumeMount{
+											{
+												Name:      "shared-memory",
+												MountPath: "/dev/shm",
+											},
+										},
 										Resources: corev1.ResourceRequirements{
 											Limits: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
 											Requests: corev1.ResourceList{
