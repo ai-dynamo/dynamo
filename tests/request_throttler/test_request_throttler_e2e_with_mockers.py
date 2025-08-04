@@ -234,6 +234,7 @@ async def test_request_throttler_e2e(request, runtime_services):
         if os.path.exists(mocker_args_file):
             os.unlink(mocker_args_file)
 
+
 @pytest.mark.pre_merge
 async def test_request_throttler_disabled(request, runtime_services):
     """
