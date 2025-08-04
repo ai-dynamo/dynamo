@@ -281,7 +281,7 @@ impl TryFrom<common::StreamingCompletionResponse> for async_openai::types::Choic
 /// Implements `ValidateRequest` for `NvCreateCompletionRequest`,
 /// allowing us to validate the data.
 impl ValidateRequest for NvCreateCompletionRequest {
-    fn validate(&self) -> Result<(), anyhow::Error> {
+    fn validate_fields(&self) -> Result<(), anyhow::Error> {
         validate::validate_model(&self.inner.model)?;
         validate::validate_prompt(&self.inner.prompt)?;
         validate::validate_suffix(self.inner.suffix.as_deref())?;
@@ -302,5 +302,71 @@ impl ValidateRequest for NvCreateCompletionRequest {
         // none for seed
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_openai::types::CreateCompletionRequestArgs;
+
+    #[test]
+    fn test_validate_request_basic_valid() {
+        let request = CreateCompletionRequestArgs::default()
+            .model("gpt-3.5-turbo")
+            .prompt("Test prompt")
+            .build()
+            .unwrap();
+
+        let nv_request = NvCreateCompletionRequest {
+            inner: request,
+            nvext: None,
+        };
+
+        let result = nv_request.validate_fields();
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_validate_request_basic_invalid() {
+        let request = CreateCompletionRequestArgs::default()
+            .model("") // Invalid empty model - should trigger validate::validate_model error
+            .prompt("Test prompt")
+            .build()
+            .unwrap();
+
+        let nv_request = NvCreateCompletionRequest {
+            inner: request,
+            nvext: None,
+        };
+
+        let result = nv_request.validate_fields();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_validate_request_calls_all_validation_functions() {
+        let request = CreateCompletionRequestArgs::default()
+            .model("gpt-3.5-turbo")
+            .prompt("Test prompt")
+            .temperature(0.7)
+            .top_p(0.9)
+            .frequency_penalty(0.1)
+            .presence_penalty(0.1)
+            .max_tokens(100u32)
+            .n(1)
+            .logprobs(5)
+            .suffix("test suffix")
+            .build()
+            .unwrap();
+
+        let nv_request = NvCreateCompletionRequest {
+            inner: request,
+            nvext: None,
+        };
+
+        // This should succeed and exercise all validation paths
+        let result = nv_request.validate_fields();
+        assert!(result.is_ok());
     }
 }
