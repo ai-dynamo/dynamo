@@ -286,13 +286,31 @@ def setup_prefill_node(
     """
     Setup the prefill node.
     """
-    if not use_sglang_commands:
-        if rank == 0:
-            setup_head_prefill_node(prefill_host_ip)
-        else:
-            logging.info(f"Setting up child prefill node: {rank}")
-            if not wait_for_etcd(f"http://{prefill_host_ip}:{ETCD_CLIENT_PORT}"):
-                raise RuntimeError("Failed to connect to etcd")
+    if rank == 0:
+        logging.info(f"Setting up host prefill node: {rank}")
+        logging.info(f"Starting nats server on node {rank} with IP {prefill_host_ip}")
+
+        nats_process = run_command("nats-server -js", background=True)
+        if not nats_process:
+            raise RuntimeError("Failed to start nats-server")
+
+        etcd_cmd = (
+            f"etcd --listen-client-urls {ETCD_LISTEN_ADDR}:{ETCD_CLIENT_PORT} "
+            f"--advertise-client-urls {ETCD_LISTEN_ADDR}:{ETCD_CLIENT_PORT} "
+            f"--listen-peer-urls {ETCD_LISTEN_ADDR}:{ETCD_PEER_PORT} "
+            f"--initial-cluster default=http://{prefill_host_ip}:{ETCD_PEER_PORT}"
+        )
+
+        etcd_process = run_command(etcd_cmd, background=True)
+        if not etcd_process:
+            raise RuntimeError("Failed to start etcd")
+
+        ingress_process = run_command(
+            "python3 -m dynamo.frontend --http-port=8000 &", background=True
+        )
+        if not ingress_process:
+            raise RuntimeError("Failed to start ingress")
+
     else:
         logging.info("Using SGLang servers. No need to setup etcd or nats")
 
@@ -327,8 +345,34 @@ def setup_decode_node(
         if not wait_for_etcd(f"http://{prefill_host_ip}:{ETCD_CLIENT_PORT}"):
             raise RuntimeError("Failed to connect to etcd")
 
-    # Setup environment variables for GPU script
-    setup_env_vars_for_gpu_script(decode_host_ip, rank, total_gpus, total_nodes)
+    dynamo_cmd = (
+        "python3 -m dynamo.sglang.decode_worker "
+        "--model-path /model/ "
+        "--served-model-name deepseek-ai/DeepSeek-R1 "
+        "--skip-tokenizer-init "
+        "--disaggregation-mode decode "
+        "--disaggregation-transfer-backend nixl "
+        "--disaggregation-bootstrap-port 30001 "
+        f"--dist-init-addr {decode_host_ip}:{DIST_INIT_PORT} "
+        f"--nnodes {total_nodes} "
+        f"--node-rank {rank} "
+        f"--tp-size {total_gpus} "
+        f"--dp-size {total_gpus} "
+        "--enable-dp-attention "
+        "--decode-log-interval 1 "
+        "--enable-deepep-moe "
+        "--page-size 1 "
+        "--trust-remote-code "
+        "--moe-dense-tp-size 1 "
+        "--enable-dp-lm-head "
+        "--disable-radix-cache "
+        "--watchdog-timeout 1000000 "
+        "--enable-two-batch-overlap "
+        "--deepep-mode low_latency "
+        "--mem-fraction-static 0.835 "
+        "--ep-num-redundant-experts 32 "
+        "--cuda-graph-bs 128 "
+    )
 
     # Use appropriate GPU script instead of generating command directly
     cmd_to_run = get_gpu_command("decode", use_sglang_commands, gpu_type)
