@@ -380,6 +380,18 @@ ARG ARCH_ALT
 ENV DYNAMO_HOME=/workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+ENV LD_LIBRARY_PATH=\
+$NIXL_LIB_DIR:\
+$NIXL_PLUGIN_DIR:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+/opt/hpcx/ompi/lib:\
+$LD_LIBRARY_PATH
+ENV PATH=/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
+ENV OPAL_PREFIX=/opt/hpcx/ompi
 
 # Install apt dependencies
 # openssh-client, openssh-server are needed for OpenMPI
@@ -474,21 +486,6 @@ COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn /usr/local/
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-*-linux-gnu.so /usr/local/lib/python3.12/dist-packages/
 
-# Setup environment variables
-ARG ARCH_ALT
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
-
-ENV LD_LIBRARY_PATH=\
-$NIXL_LIB_DIR:\
-$NIXL_PLUGIN_DIR:\
-/usr/local/ucx/lib:\
-/usr/local/ucx/lib/ucx:\
-/opt/hpcx/ompi/lib:\
-$LD_LIBRARY_PATH
-ENV PATH=/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
-ENV OPAL_PREFIX=/opt/hpcx/ompi
 
 # Install TensorRT-LLM (same as in build stage)
 ARG HAS_TRTLLM_CONTEXT=0
