@@ -32,3 +32,6 @@ speculative_config:
 kv_cache_config:
   free_gpu_memory_fraction: 0.5
   enable_block_reuse: false
+
+cache_transceiver_config:
+  backend: default
