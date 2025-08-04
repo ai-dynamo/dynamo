@@ -88,14 +88,14 @@ docker pull nvcr.io/nvidia/ai-dynamo/sglang-runtime:0.3.2
 ### Aggregated Serving
 
 ```bash
-cd $DYNAMO_ROOT/components/backends/sglang
+cd $DYNAMO_HOME/components/backends/sglang
 ./launch/agg.sh
 ```
 
 ### Aggregated Serving with KV Routing
 
 ```bash
-cd $DYNAMO_ROOT/components/backends/sglang
+cd $DYNAMO_HOME/components/backends/sglang
 ./launch/agg_router.sh
 ```
 
@@ -119,7 +119,7 @@ Because Dynamo has a discovery mechanism, we do not use a load balancer. Instead
 > Disaggregated serving in SGLang currently requires each worker to have the same tensor parallel size [unless you are using an MLA based model](https://github.com/sgl-project/sglang/pull/5922)
 
 ```bash
-cd $DYNAMO_ROOT/components/backends/sglang
+cd $DYNAMO_HOME/components/backends/sglang
 ./launch/disagg.sh
 ```
 
@@ -129,11 +129,31 @@ You can use this configuration to test out disaggregated serving with dp attenti
 
 ```bash
 # note this will require 4 GPUs
-cd $DYNAMO_ROOT/components/backends/sglang
+cd $DYNAMO_HOME/components/backends/sglang
 ./launch/disagg_dp_attn.sh
 ```
 
 When using MoE models, you can also use the our implementation of the native SGLang endpoints to record expert distribution data. The `disagg_dp_attn.sh` script automatically sets up the SGLang HTTP server, the environment variable that controls the expert distribution recording directory, and sets up the expert distribution recording mode to `stat`. You can learn more about expert parallelism load balancing [here](docs/expert-distribution-eplb.md).
+
+### Testing the Deployment
+
+Send a test request to verify your deployment:
+
+```bash
+curl localhost:8000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "messages": [
+    {
+        "role": "user",
+        "content": "In the heart of Eldoria, an ancient land of boundless magic and mysterious creatures, lies the long-forgotten city of Aeloria. Once a beacon of knowledge and power, Aeloria was buried beneath the shifting sands of time, lost to the world for centuries. You are an intrepid explorer, known for your unparalleled curiosity and courage, who has stumbled upon an ancient map hinting at ests that Aeloria holds a secret so profound that it has the potential to reshape the very fabric of reality. Your journey will take you through treacherous deserts, enchanted forests, and across perilous mountain ranges. Your Task: Character Background: Develop a detailed background for your character. Describe their motivations for seeking out Aeloria, their skills and weaknesses, and any personal connections to the ancient city or its legends. Are they driven by a quest for knowledge, a search for lost familt clue is hidden."
+    }
+    ],
+    "stream": false,
+    "max_tokens": 30
+  }'
+```
 
 ## Request Migration
 
