@@ -206,7 +206,9 @@ def setup_prefill_node(
         if not etcd_process:
             raise RuntimeError("Failed to start etcd")
 
-        ingress_process = run_command("python3 -m dynamo.frontend --http-port=8000 &", background=True)
+        ingress_process = run_command(
+            "python3 -m dynamo.frontend --http-port=8000 &", background=True
+        )
         if not ingress_process:
             raise RuntimeError("Failed to start ingress")
 
