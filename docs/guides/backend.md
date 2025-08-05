@@ -109,3 +109,31 @@ Example 4: Multiple component in a pipeline.
 
 In the P/D disaggregated setup you would have `deepseek-distill-llama8b.prefill.generate` (possibly multiple instances of this) and `deepseek-distill-llama8b.decode.generate`.
 
+## Migrate Ongoing Requests
+
+A Python worker may need to be shut down promptly, for example when the node running the worker is to be reclaimed and there isn't enough time to complete all ongoing requests before the shutdown deadline.
+
+In such cases, you can signal incomplete responses by raising a `GeneratorExit` exception in your generate loop. This will immediately close the response stream, signaling to the frontend that the stream is incomplete. With request migration enabled (see the [`migration_limit`](../architecture/request_migration.md) parameter), the frontend will automatically migrate the partially completed request to another worker instance, if available, to be completed.
+
+> [!WARNING]
+> We will update the `GeneratorExit` exception to a new Dynamo exception. Please expect minor code breaking change in the near future.
+
+Here's an example of how to implement this in your `RequestHandler`:
+
+```python
+class RequestHandler:
+
+    async def generate(self, request):
+        """Generate response, with support for request migration"""
+        for result in self.engine.generate_streaming(request):
+            # Check if we need to migrate before yielding each token
+            if is_shutting_down():
+                # Raising GeneratorExit closes the stream and triggers migration
+                raise GeneratorExit("Worker shutting down, migrating request")
+
+            yield result
+```
+
+When `GeneratorExit` is raised, the frontend receives the incomplete response and can seamlessly continue generation on another available worker instance, preserving the user experience even during worker shutdowns.
+
+For more information about how request migration works, see the [Request Migration Architecture](../architecture/request_migration.md) documentation.

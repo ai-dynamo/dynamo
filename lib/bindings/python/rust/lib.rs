@@ -484,11 +484,12 @@ impl Component {
 
 #[pymethods]
 impl Endpoint {
-    #[pyo3(signature = (generator))]
+    #[pyo3(signature = (generator, graceful_shutdown = true))]
     fn serve_endpoint<'p>(
         &self,
         py: Python<'p>,
         generator: PyObject,
+        graceful_shutdown: Option<bool>,
     ) -> PyResult<Bound<'p, PyAny>> {
         let engine = Arc::new(engine::PythonAsyncEngine::new(
             generator,
@@ -496,8 +497,13 @@ impl Endpoint {
         )?);
         let ingress = JsonServerStreamingIngress::for_engine(engine).map_err(to_pyerr)?;
         let builder = self.inner.endpoint_builder().handler(ingress);
+        let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            builder.start().await.map_err(to_pyerr)?;
+            builder
+                .graceful_shutdown(graceful_shutdown)
+                .start()
+                .await
+                .map_err(to_pyerr)?;
             Ok(())
         })
     }

@@ -27,6 +27,10 @@ limitations under the License.
 
 High-throughput, low-latency inference framework designed for serving generative AI and reasoning models in multi-node distributed environments.
 
+## Latest News
+
+* [08/05] Deploy `openai/gpt-oss-120b` with disaggregated serving on NVIDIA Blackwell GPUs using Dynamo [➡️ link](./components/backends/trtllm/gpt-oss.md)
+
 ## The Era of Multi-GPU, Multi-Node
 
 <p align="center">
