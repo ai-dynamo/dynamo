@@ -56,7 +56,7 @@ To enable NIXL for KV cache transfer in disaggregated serving:
    See [run container](./README.md#run-container) section to learn how to start the container image built in previous step.
 
 3. **Start the disaggregated service:**
-   See [disaggregated serving](./README.md#disaggregated-serving) to see how to start the deployment.
+   See [disaggregated serving](./README.md) to see how to start the deployment.
 
 4. **Send the request:**
    See [client](./README.md#client) section to learn how to send the request to deployment.

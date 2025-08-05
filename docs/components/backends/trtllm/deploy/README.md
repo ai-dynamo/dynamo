@@ -81,7 +81,7 @@ extraPodSpec:
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Cloud Platform installed** - See [Quickstart Guide](../../../../docs/guides/dynamo_deploy/quickstart.md)
+1. **Dynamo Cloud Platform installed** - See [Quickstart Guide](../../../../guides/dynamo_deploy/quickstart.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for TensorRT-LLM runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
@@ -132,7 +132,7 @@ args:
 
 ### 3. Deploy
 
-See the [Create Deployment Guide](../../../../docs/guides/dynamo_deploy/create_deployment.md) to learn how to deploy the deployment file.
+See the [Create Deployment Guide](../../../../guides/dynamo_deploy/create_deployment.md) to learn how to deploy the deployment file.
 
 First, create a secret for the HuggingFace token.
 ```bash
@@ -209,10 +209,6 @@ envs:
     value: "prefill_first"
 ```
 
-## Testing the Deployment
-
-Send a test request to verify your deployment. See the [client section](../../../../components/backends/llm/README.md#client) for detailed instructions.
-
 **Note:** For multi-node deployments, target the node running `python3 -m dynamo.frontend <args>`.
 
 ## Model Configuration
@@ -245,7 +241,7 @@ For detailed configuration instructions, see the [KV cache transfer guide](../kv
 
 ## Request Migration
 
-You can enable [request migration](../../../../docs/architecture/request_migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
+You can enable request migration to handle worker failures gracefully by adding the migration limit argument to worker configurations:
 
 ```yaml
 args:
@@ -258,18 +254,20 @@ args:
 
 ## Benchmarking
 
-To benchmark your deployment with GenAI-Perf, see this utility script: [perf.sh](../../../../benchmarks/llm/perf.sh)
-
+To benchmark your deployment with GenAI-Perf, see this utility script:
+```bash
+{REPO_ROOT}/benchmarks/llm/perf.sh
+```
 Configure the `model` name and `host` based on your deployment.
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/guides/dynamo_deploy/create_deployment.md)
-- **Quickstart**: [Deployment Quickstart](../../../../docs/guides/dynamo_deploy/quickstart.md)
-- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/guides/dynamo_deploy/dynamo_cloud.md)
-- **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
-- **Architecture Docs**: [Disaggregated Serving](../../../../docs/architecture/disagg_serving.md), [KV-Aware Routing](../../../../docs/architecture/kv_cache_routing.md)
-- **Multinode Deployment**: [Multinode Examples](../multinode/multinode-examples.md)
+- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../guides/dynamo_deploy/create_deployment.md)
+- **Quickstart**: [Deployment Quickstart](../../../../guides/dynamo_deploy/quickstart.md)
+- **Platform Setup**: [Dynamo Cloud Installation](../../../../guides/dynamo_deploy/dynamo_cloud.md)
+- **Examples**: [Deployment Examples](../../../../examples/README.md)
+- **Architecture Docs**: [Disaggregated Serving](../../../../architecture/disagg_serving.md), [KV-Aware Routing](../../../../architecture/kv_cache_routing.md)
+- **Multinode Deployment**: [Multinode Examples](../multinode-examples.md)
 - **Speculative Decoding**: [Llama 4 + Eagle Guide](../llama4_plus_eagle.md)
 - **Kubernetes CRDs**: [Custom Resources Documentation](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
 
@@ -285,4 +283,4 @@ Common issues and solutions:
 6. **Git LFS issues**: Ensure git-lfs is installed before building containers
 7. **ARM deployment**: Use `--platform linux/arm64` when building on ARM machines
 
-For additional support, refer to the [deployment troubleshooting guide](../../../../docs/guides/dynamo_deploy/quickstart.md#troubleshooting).
+For additional support, refer to the [deployment troubleshooting guide](../../../../guides/dynamo_deploy/quickstart.md).
