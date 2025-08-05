@@ -88,9 +88,13 @@ impl DistributedRuntime {
         };
         let starting_health_status = config.starting_health_status.clone();
         let use_endpoint_health_status = config.use_endpoint_health_status.clone();
-        let system_health = Arc::new(Mutex::new(SystemHealth::new(
+        let health_endpoint_path = config.system_health_path.clone();
+        let live_endpoint_path = config.system_live_path.clone();
+        let system_health = Arc::new(std::sync::Mutex::new(SystemHealth::new(
             starting_health_status,
             use_endpoint_health_status,
+            health_endpoint_path,
+            live_endpoint_path,
         )));
 
         let distributed_runtime = Self {
