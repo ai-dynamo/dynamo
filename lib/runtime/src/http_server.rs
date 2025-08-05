@@ -130,8 +130,20 @@ pub async fn spawn_http_server(
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
     // Create HTTP server state with the provided metrics registry
     let server_state = Arc::new(HttpServerState::new(drt)?);
-    let health_path = server_state.drt().system_health.lock().unwrap().health_path.clone();
-    let live_path = server_state.drt().system_health.lock().unwrap().live_path.clone();
+    let health_path = server_state
+        .drt()
+        .system_health
+        .lock()
+        .unwrap()
+        .health_path
+        .clone();
+    let live_path = server_state
+        .drt()
+        .system_health
+        .lock()
+        .unwrap()
+        .live_path
+        .clone();
 
     // Initialize the start time
     server_state
@@ -218,7 +230,12 @@ async fn health_handler(
     route: &'static str,       // Used for tracing only
     trace_parent: TraceParent, // Used for tracing only
 ) -> impl IntoResponse {
-    let (mut healthy, endpoints) = state.drt().system_health.lock().unwrap().get_health_status();
+    let (mut healthy, endpoints) = state
+        .drt()
+        .system_health
+        .lock()
+        .unwrap()
+        .get_health_status();
     let uptime = match state.uptime() {
         Ok(uptime_state) => Some(uptime_state),
         Err(e) => {
