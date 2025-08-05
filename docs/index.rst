@@ -32,7 +32,55 @@ The NVIDIA Dynamo Platform is a high-performance, low-latency inference framewor
 
 Quick Start
 -----------------
-Follow the :doc:`Quick Guide to install Dynamo Platform <guides/dynamo_deploy/quickstart>`.
+
+Local Deployment
+~~~~~~~~~~~~~~~~
+
+Get started with Dynamo locally in just a few commands:
+
+**1. Install Dynamo**
+
+.. code-block:: bash
+
+   # Install uv (recommended Python package manager)
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   
+   # Create virtual environment and install Dynamo
+   uv venv venv
+   source venv/bin/activate
+   uv pip install "ai-dynamo[sglang]"  # or [vllm], [trtllm]
+
+**2. Start etcd/NATS** 
+
+.. code-block:: bash
+
+   # Start etcd and NATS using Docker Compose
+   docker compose -f deploy/docker-compose.yml up -d
+
+**3. Run Dynamo**
+
+.. code-block:: bash
+
+   # Start the OpenAI compatible frontend
+   python -m dynamo.frontend
+   
+   # In another terminal, start an SGLang worker
+   python -m dynamo.sglang.worker deepseek-ai/DeepSeek-R1-Distill-Llama-8B
+
+**4. Test your deployment**
+
+.. code-block:: bash
+
+   curl localhost:8080/v1/chat/completions \
+     -H "Content-Type: application/json" \
+     -d '{"model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", 
+          "messages": [{"role": "user", "content": "Hello!"}], 
+          "max_tokens": 50}'
+
+Kubernetes Deployment  
+~~~~~~~~~~~~~~~~~~~~~
+
+For deployments on Kubernetes, follow the :doc:`Dynamo Platform Quickstart Guide <guides/dynamo_deploy/quickstart>`.
 
 
 Dive in: Examples

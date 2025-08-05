@@ -43,11 +43,11 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 ### Large Scale P/D and WideEP Features
 
-| Feature            | SGLang | Notes                                                                 |
-|--------------------|--------|-----------------------------------------------------------------------|
-| **WideEP**         | ✅/🚧 | Full support on H100s/GB200 WIP [PR](https://github.com/sgl-project/sglang/pull/7556)                                     |
-| **DP Rank Routing**| 🚧    | Direct routing supported. Process per DP rank is not supported        |
-| **GB200 Support**  | 🚧    | WIP [PR](https://github.com/sgl-project/sglang/pull/7556) |
+| Feature             | SGLang | Notes                                                        |
+|---------------------|--------|--------------------------------------------------------------|
+| **WideEP**          | ✅     | Full support on H100s/GB200                                  |
+| **DP Rank Routing** | 🚧     | Direct routing supported. Dynamo KV router does not router to DP worker |
+| **GB200 Support**   | ✅     |                                                              |
 
 
 ## Quick Start
