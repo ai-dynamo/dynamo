@@ -59,7 +59,8 @@ impl EndpointConfigBuilder {
     }
 
     pub async fn start(self) -> Result<()> {
-        let (endpoint, lease, handler, stats_handler, graceful_shutdown) = self.build_internal()?.dissolve();
+        let (endpoint, lease, handler, stats_handler, graceful_shutdown) =
+            self.build_internal()?.dissolve();
         let lease = lease.or(endpoint.drt().primary_lease());
         let lease_id = lease.as_ref().map(|l| l.id()).unwrap_or(0);
 
