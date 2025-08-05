@@ -138,6 +138,6 @@ impl ModelRuntimeConfig {
     }
 
     fn get_engine_specific(&self, key: &str) -> PyResult<Option<String>> {
-        Ok(self.inner.get_engine_specific(key).map_err(to_pyerr)?)
+        self.inner.get_engine_specific(key).map_err(to_pyerr)
     }
 }

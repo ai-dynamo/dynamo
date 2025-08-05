@@ -225,7 +225,7 @@ fn register_runtime_config<'p>(
 
         // Publish the card
         card_store
-            .publish(model_card::ROOT_PATH, None, &model_slug.to_string(), &mut card)
+            .publish(model_card::ROOT_PATH, None, model_slug.as_ref(), &mut card)
             .await
             .map_err(to_pyerr)?;
 

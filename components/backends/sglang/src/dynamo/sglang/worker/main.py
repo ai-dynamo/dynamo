@@ -15,6 +15,7 @@ import zmq
 from sglang.srt.server_args import ServerArgs
 from sglang.srt.utils import get_ip, get_zmq_socket
 
+from dynamo._core import Endpoint
 from dynamo.llm import (
     ForwardPassMetrics,
     KvStats,
@@ -24,7 +25,9 @@ from dynamo.llm import (
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
     register_llm,
+    register_runtime_config,
 )
+from dynamo.llm.model_card import ModelRuntimeConfig
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 from dynamo.sglang.common import (
@@ -364,10 +367,58 @@ async def init(
     _ = ZmqKvEventPublisher(component=component, config=zmq_config)
 
     tasks = [endpoint.serve_endpoint(handler.generate)]
-
+    tasks.append(
+        register_runtime_config_once_engine_ready(
+            endpoint, engine, server_args.served_model_name
+        )
+    )
     tasks.extend(setup_native_endpoints(server_args, component, handler))
 
     await asyncio.gather(*tasks)
+
+
+async def register_runtime_config_once_engine_ready(
+    endpoint: Endpoint, engine: sgl.Engine, model_name: str
+):
+    max_retries = 3
+    retry_delay = 2
+
+    for attempt in range(max_retries):
+        try:
+            server_info = engine.get_server_info()
+
+            runtime_config = ModelRuntimeConfig()
+
+            # Use actual computed values from SGLang engine
+            if server_info.get("max_total_num_tokens") is not None:
+                runtime_config.with_total_kv_blocks(server_info["max_total_num_tokens"])
+
+            if server_info.get("max_running_requests") is not None:
+                runtime_config.with_max_num_seqs(server_info["max_running_requests"])
+
+            if server_info.get("mem_fraction_static") is not None:
+                gpu_mem_percentage = int(server_info["mem_fraction_static"] * 100)
+                runtime_config.with_gpu_memory_utilization(gpu_mem_percentage)
+
+            # Register the runtime config
+            await register_runtime_config(endpoint, model_name, runtime_config)
+
+            logging.info(
+                f"Published runtime config for SGLang decode worker: {model_name}"
+            )
+            return  # Successfully published runtime config, exit loop
+
+        except Exception as e:
+            logging.warning(
+                f"Attempt {attempt + 1}/{max_retries} failed to publish runtime config: {e}"
+            )
+            if attempt < max_retries - 1:
+                await asyncio.sleep(retry_delay)
+                retry_delay *= 2
+            else:
+                logging.error(
+                    f"Failed to publish runtime config after {max_retries} attempts"
+                )
 
 
 def main():
