@@ -206,7 +206,9 @@ def setup_prefill_node(
         if not etcd_process:
             raise RuntimeError("Failed to start etcd")
 
-        ingress_process = run_command("dynamo run in=http out=dyn", background=True)
+        ingress_process = run_command(
+            "python3 -m dynamo.frontend --http-port=8000 &", background=True
+        )
         if not ingress_process:
             raise RuntimeError("Failed to start ingress")
 
@@ -291,7 +293,7 @@ def setup_decode_node(
         "--deepep-mode low_latency "
         "--mem-fraction-static 0.835 "
         "--ep-num-redundant-experts 32 "
-        "--cuda-graph-bs 256 "
+        "--cuda-graph-bs 128 "
     )
 
     return run_command(dynamo_cmd)

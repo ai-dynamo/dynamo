@@ -54,8 +54,7 @@ echo "Decode host IP address: $DECODE_HOST_IP"
 ENROOT_ARGS="\
     --container-image=${CONTAINER_IMAGE} \
     --no-container-entrypoint \
-    --container-mount-home \
-    --no-container-remap-root \
+    --no-container-mount-home \
     --container-mounts=${MODEL_DIR}:/model/,${CONFIG_DIR}:/configs/,${SCRIPT_DIR}:/scripts/,${OUTPUT_DIR}:/outputs/,${LOG_DIR}:/logs/ \
 "
 

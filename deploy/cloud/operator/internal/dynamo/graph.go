@@ -167,7 +167,9 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
 		if component.ComponentType == commonconsts.ComponentTypePlanner {
 			if deployment.Spec.ExtraPodSpec == nil {
-				deployment.Spec.ExtraPodSpec = &common.ExtraPodSpec{}
+				deployment.Spec.ExtraPodSpec = &common.ExtraPodSpec{
+					PodSpec: &corev1.PodSpec{},
+				}
 			}
 			deployment.Spec.ExtraPodSpec.ServiceAccountName = commonconsts.PlannerServiceAccountName
 		}
