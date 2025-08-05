@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
+# Global LMCache configuration - initialize once on module import
+ENABLE_LMCACHE = os.getenv("ENABLE_LMCACHE", "0").lower() in ("1", "true", "yes")
+
 
 class Config:
     """Command line parameters or defaults"""
@@ -209,11 +212,8 @@ def overwrite_args(config):
 
     dp_rank = config.engine_args.data_parallel_rank or 0
 
-    # Check if LMCache should be enabled
-    enable_lmcache = os.getenv("ENABLE_LMCACHE", "0").lower() in ("1", "true", "yes")
-
     # Set kv_transfer_config based on LMCache setting
-    if enable_lmcache:
+    if ENABLE_LMCACHE:
         if config.is_prefill_worker:
             # Prefill worker use LMCache with disaggregated serving (MultiConnector) for disaggregated serving
             kv_transfer_config = KVTransferConfig(

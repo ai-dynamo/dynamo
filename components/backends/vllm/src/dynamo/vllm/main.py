@@ -7,9 +7,6 @@ import os
 import signal
 
 import uvloop
-from vllm.distributed.kv_events import ZmqEventPublisher
-from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine.async_llm import AsyncLLM
 
 from dynamo.llm import (
     ModelType,
@@ -19,8 +16,17 @@ from dynamo.llm import (
 )
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
+from vllm.distributed.kv_events import ZmqEventPublisher
+from vllm.usage.usage_lib import UsageContext
+from vllm.v1.engine.async_llm import AsyncLLM
 
-from .args import Config, configure_ports_with_etcd, overwrite_args, parse_args
+from .args import (
+    ENABLE_LMCACHE,
+    Config,
+    configure_ports_with_etcd,
+    overwrite_args,
+    parse_args,
+)
 from .handlers import DecodeWorkerHandler, PrefillWorkerHandler
 from .publisher import StatLoggerFactory
 
@@ -88,10 +94,7 @@ def setup_vllm_engine(config, stat_logger=None):
     engine_args = config.engine_args
 
     # KV transfer config is now handled by args.py based on ENABLE_LMCACHE env var
-    # Check if LMCache is enabled
-    enable_lmcache = os.getenv("ENABLE_LMCACHE", "0").lower() in ("1", "true", "yes")
-
-    if enable_lmcache:
+    if ENABLE_LMCACHE:
         setup_lmcache_environment()
         logger.info("LMCache enabled for VllmWorker")
     else:
@@ -117,7 +120,7 @@ def setup_vllm_engine(config, stat_logger=None):
         disable_log_requests=engine_args.disable_log_requests,
         disable_log_stats=engine_args.disable_log_stats,
     )
-    if enable_lmcache:
+    if ENABLE_LMCACHE:
         logger.info(f"VllmWorker for {config.model} has been initialized with LMCache")
     else:
         logger.info(f"VllmWorker for {config.model} has been initialized")
