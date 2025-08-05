@@ -119,10 +119,10 @@ class Publisher:
         self.kv_block_size = kv_block_size
         self.max_window_size = None
 
-        # WRN: Adding backward compatibility.
-        # The "window_size" field was added to the KV event only recently, so some TRTLLM versions might not include this parameter.
-        # This flag ensures that slightly older versions of TRTLLM can still work with KV routing.
-        self.events_contain_window_size = False
+        # The first few kv events from the model engine are always "created" type events.
+        # Use these events to capture the max_window_size of the model.
+        # When the first event that is not a "created" type is received, the publisher will set this to False to stop processing "created" type events.
+        self.processing_initial_created_events = True
 
         # Needed by the events and metrics publishers
         self.metrics_publisher = None
@@ -295,18 +295,14 @@ class Publisher:
         events = self.engine.llm.get_kv_cache_events_async(timeout=5)
         async for event in events:
             logging.debug(f"KV cache event received: {event}")
-            event_id = event["event_id"]
-            self.update_max_window_size(event)
-
             # drop the events that is not emitted from the global attention layer.
-            if (
-                self.events_contain_window_size
-                and event["window_size"] != self.max_window_size
-            ):
+            if self.should_drop_event(event):
                 continue
 
+            event_id = event["event_id"]
             data = event["data"]
             if data["type"] == "stored":
+                self.processing_initial_created_events = False
                 parent_hash = _to_signed_i64(data["parent_hash"])
                 token_ids = []
                 num_block_tokens = []
@@ -347,6 +343,7 @@ class Publisher:
                     parent_hash,
                 )
             elif data["type"] == "removed":
+                self.processing_initial_created_events = False
                 block_hashes = []
                 for block_hash in data["block_hashes"]:
                     block_hash = _to_signed_i64(block_hash)
@@ -362,6 +359,9 @@ class Publisher:
                     f"publish removed event: event_id: {event_id}, block_hashes: {block_hashes}"
                 )
                 self.kv_event_publisher.publish_removed(event_id, block_hashes)
+            elif data["type"] == "created" and self.processing_initial_created_events:
+                self.update_max_window_size(event)
+
         return True
 
     def start(self):
@@ -411,14 +411,21 @@ class Publisher:
 
     def update_max_window_size(self, event):
         if "window_size" in event:
-            self.events_contain_window_size = True
-
             window_size = event["window_size"]
             if self.max_window_size is None or window_size > self.max_window_size:
                 self.max_window_size = window_size
                 logging.debug(
                     f"kv events max_window_size has been updated to {self.max_window_size}"
                 )
+
+    def should_drop_event(self, event):
+        if "window_size" not in event or self.processing_initial_created_events:
+            return False
+
+        if event["window_size"] != self.max_window_size:
+            return True
+
+        return False
 
 
 @asynccontextmanager
