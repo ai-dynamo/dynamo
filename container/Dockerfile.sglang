@@ -415,14 +415,8 @@ ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 COPY --from=base /usr/local/ucx /usr/local/ucx
 COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 
-# Copy CUDA development tools (nvcc, headers, dependencies, etc.) from base devel image
-COPY --from=base /usr/local/cuda/bin/nvcc /usr/local/cuda/bin/nvcc
-COPY --from=base /usr/local/cuda/bin/cudafe++ /usr/local/cuda/bin/cudafe++
-COPY --from=base /usr/local/cuda/bin/ptxas /usr/local/cuda/bin/ptxas
-COPY --from=base /usr/local/cuda/bin/fatbinary /usr/local/cuda/bin/fatbinary
-COPY --from=base /usr/local/cuda/include/ /usr/local/cuda/include/
-COPY --from=base /usr/local/cuda/nvvm /usr/local/cuda/nvvm
-COPY --from=base /usr/local/cuda/lib64/libcudart.so* /usr/local/cuda/lib64/
+# Copy CUDA development tools (nvcc, headers, etc.) from base devel image
+COPY --from=base /usr/local/cuda/ /usr/local/cuda/
 
 ENV LD_LIBRARY_PATH=\
 $NIXL_LIB_DIR:\
