@@ -19,11 +19,15 @@ use dynamo_runtime::{
         network::egress::push_router::RouterMode as RsRouterMode, EngineStream, ManyOut, SingleIn,
     },
     protocols::annotated::Annotated as RsAnnotated,
+    slug::Slug,
+    storage::key_value_store::{EtcdStorage, KeyValueStoreManager},
     traits::DistributedRuntimeProvider,
 };
 
-use dynamo_llm::{self as llm_rs};
+use dynamo_llm::{self as llm_rs, model_card};
 use dynamo_llm::{entrypoint::RouterConfig, kv_router::KvRouterConfig};
+
+use crate::llm::model_card::ModelRuntimeConfig;
 
 #[pyclass(eq, eq_int)]
 #[derive(Clone, Debug, PartialEq)]
@@ -63,6 +67,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
+    m.add_function(wrap_pyfunction!(register_runtime_config, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
 
@@ -82,6 +87,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<llm::entrypoint::KvRouterConfig>()?;
     m.add_class::<llm::kv::WorkerMetricsPublisher>()?;
     m.add_class::<llm::model_card::ModelDeploymentCard>()?;
+    m.add_class::<llm::model_card::ModelRuntimeConfig>()?;
     m.add_class::<llm::preprocessor::OAIChatPreprocessor>()?;
     m.add_class::<llm::backend::Backend>()?;
     m.add_class::<llm::kv::OverlapScores>()?;
@@ -173,6 +179,60 @@ fn register_llm<'p>(
             .await
             .map_err(to_pyerr)?;
 
+        Ok(())
+    })
+}
+
+#[pyfunction]
+fn register_runtime_config<'p>(
+    py: Python<'p>,
+    endpoint: Endpoint,
+    model_identifier: &str,
+    runtime_config: ModelRuntimeConfig,
+) -> PyResult<Bound<'p, PyAny>> {
+    let model_identifier = model_identifier.to_string();
+    let runtime_config = runtime_config.inner.clone();
+    let endpoint = endpoint.inner.clone();
+
+    pyo3_async_runtimes::tokio::future_into_py(py, async move {
+        // Get etcd client from endpoint
+        let Some(etcd_client) = endpoint.drt().etcd_client() else {
+            return Err(anyhow::anyhow!(
+                "Cannot update runtime config on static endpoint"
+            ))
+            .map_err(to_pyerr);
+        };
+
+        // Create storage manager
+        let kvstore = EtcdStorage::new(etcd_client.clone());
+        let card_store = KeyValueStoreManager::new(Box::new(kvstore));
+
+        // Generate the model slug - this should match what register_llm used
+        // The register_llm function uses the model_name (or model_path if no model_name)
+        // and then calls card.set_name() which sets both display_name and service_name
+        let model_slug = Slug::slugify(&model_identifier);
+
+        // Get existing card
+        let mut card = card_store
+            .load::<llm_rs::model_card::ModelDeploymentCard>(model_card::ROOT_PATH, &model_slug)
+            .await
+            .map_err(to_pyerr)?
+            .ok_or_else(|| anyhow::anyhow!("Cannot find model card"))
+            .map_err(to_pyerr)?;
+
+        // Update the card
+        card.register_runtime_config(runtime_config);
+
+        // Publish the card
+        card_store
+            .publish(model_card::ROOT_PATH, None, &model_slug.to_string(), &mut card)
+            .await
+            .map_err(to_pyerr)?;
+
+        tracing::info!(
+            "Successfully updated runtime config for model card: {}",
+            model_slug
+        );
         Ok(())
     })
 }

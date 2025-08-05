@@ -438,6 +438,12 @@ class ModelDeploymentCard:
 
     ...
 
+class ModelRuntimeConfig:
+    """
+    A model runtime configuration is a collection of runtime information
+    """
+    ...
+
 class OAIChatPreprocessor:
     """
     A preprocessor for OpenAI chat completions
@@ -831,6 +837,10 @@ class KvRouterConfig:
 
 async def register_llm(model_type: ModelType, endpoint: Endpoint, model_path: str, model_name: Optional[str] = None, context_length: Optional[int] = None, kv_cache_block_size: Optional[int] = None, router_mode: Optional[RouterMode] = None) -> None:
     """Attach the model at path to the given endpoint, and advertise it as model_type"""
+    ...
+
+async def register_runtime_config(endpoint: Endpoint, model_identifier: str, runtime_config: ModelRuntimeConfig) -> None:
+    """Register runtime configuration with the model card"""
     ...
 
 class EngineConfig:

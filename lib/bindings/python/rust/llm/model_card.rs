@@ -15,6 +15,7 @@
 
 use super::*;
 use llm_rs::model_card::model::ModelDeploymentCard as RsModelDeploymentCard;
+use llm_rs::model_card::runtime_config::ModelRuntimeConfig as RsModelRuntimeConfig;
 
 #[pyclass]
 #[derive(Clone)]
@@ -45,5 +46,98 @@ impl ModelDeploymentCard {
     fn to_json_str(&self) -> PyResult<String> {
         let json = self.inner.to_json().map_err(to_pyerr)?;
         Ok(json)
+    }
+
+    fn register_runtime_config(&mut self, runtime_config: ModelRuntimeConfig) {
+        self.inner.register_runtime_config(runtime_config.inner);
+    }
+
+    #[getter]
+    fn runtime_config(&self) -> Option<ModelRuntimeConfig> {
+        self.inner
+            .runtime_config()
+            .map(|config| ModelRuntimeConfig {
+                inner: config.clone(),
+            })
+    }
+
+    #[getter]
+    fn total_kv_blocks(&self) -> Option<u64> {
+        self.inner.total_kv_blocks()
+    }
+
+    #[getter]
+    fn max_num_seqs(&self) -> Option<u64> {
+        self.inner.max_num_seqs()
+    }
+
+    #[getter]
+    fn gpu_memory_utilization(&self) -> Option<u64> {
+        self.inner.gpu_memory_utilization()
+    }
+}
+
+#[pyclass]
+#[derive(Clone)]
+pub struct ModelRuntimeConfig {
+    pub(crate) inner: RsModelRuntimeConfig,
+}
+
+#[pymethods]
+impl ModelRuntimeConfig {
+    #[new]
+    fn new() -> Self {
+        Self {
+            inner: RsModelRuntimeConfig::new(),
+        }
+    }
+
+    fn with_total_kv_blocks(&mut self, total_kv_blocks: u64) {
+        self.inner.with_total_kv_blocks(total_kv_blocks);
+    }
+
+    fn with_max_num_seqs(&mut self, max_num_seqs: u64) {
+        self.inner.with_max_num_seqs(max_num_seqs);
+    }
+
+    fn with_gpu_memory_utilization(&mut self, gpu_memory_utilization: u64) {
+        self.inner
+            .with_gpu_memory_utilization(gpu_memory_utilization);
+    }
+
+    fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {
+        let value: serde_json::Value = serde_json::from_str(&value).map_err(to_pyerr)?;
+        self.inner
+            .set_engine_specific(key, value)
+            .map_err(to_pyerr)?;
+        Ok(())
+    }
+
+    #[getter]
+    fn total_kv_blocks(&self) -> Option<u64> {
+        self.inner.total_kv_blocks
+    }
+
+    #[getter]
+    fn max_num_seqs(&self) -> Option<u64> {
+        self.inner.max_num_seqs
+    }
+
+    #[getter]
+    fn gpu_memory_utilization(&self) -> Option<u64> {
+        self.inner.gpu_memory_utilization
+    }
+
+    #[getter]
+    fn runtime_data(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let dict = PyDict::new(py);
+        for (key, value) in self.inner.runtime_data.clone() {
+            dict.set_item(key, value.to_string())?;
+        }
+        Ok(dict.into())
+    }
+
+    fn get_engine_specific(&self, key: &str) -> PyResult<Option<String>> {
+        Ok(self.inner.get_engine_specific(key).map_err(to_pyerr)?)
     }
 }

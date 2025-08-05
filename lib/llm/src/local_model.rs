@@ -16,6 +16,7 @@ use dynamo_runtime::{
 
 use crate::discovery::ModelEntry;
 use crate::entrypoint::RouterConfig;
+use crate::model_card::runtime_config::ModelRuntimeConfig;
 use crate::model_card::{self, ModelDeploymentCard};
 use crate::model_type::ModelType;
 use crate::request_template::RequestTemplate;
@@ -48,6 +49,7 @@ pub struct LocalModelBuilder {
     http_port: u16,
     migration_limit: u32,
     is_mocker: bool,
+    runtime_config: ModelRuntimeConfig,
 }
 
 impl Default for LocalModelBuilder {
@@ -64,6 +66,7 @@ impl Default for LocalModelBuilder {
             router_config: Default::default(),
             migration_limit: Default::default(),
             is_mocker: Default::default(),
+            runtime_config: Default::default(),
         }
     }
 }
@@ -123,6 +126,11 @@ impl LocalModelBuilder {
 
     pub fn is_mocker(&mut self, is_mocker: bool) -> &mut Self {
         self.is_mocker = is_mocker;
+        self
+    }
+
+    pub fn runtime_config(&mut self, runtime_config: ModelRuntimeConfig) -> &mut Self {
+        self.runtime_config = runtime_config;
         self
     }
 
@@ -321,6 +329,25 @@ impl LocalModel {
                 None, // use primary lease
             )
             .await
+    }
+
+    pub async fn register_runtime_config(
+        &mut self,
+        endpoint: &Endpoint,
+        runtime_config: ModelRuntimeConfig,
+    ) -> anyhow::Result<()> {
+        self.card.register_runtime_config(runtime_config);
+
+        // Update the card in etcd if we're attached
+        if let Some(etcd_client) = endpoint.drt().etcd_client() {
+            let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
+            let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
+            let key = self.card.slug().to_string();
+            card_store
+                .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
+                .await?;
+        }
+        Ok(())
     }
 
     /// Ensure that each component serves only one model.

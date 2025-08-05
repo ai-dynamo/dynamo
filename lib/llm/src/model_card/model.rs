@@ -13,7 +13,6 @@
 //! - Prompt formatter settings (PromptFormatterArtifact)
 //! - Various metadata like revision, publish time, etc.
 
-use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -23,11 +22,12 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned, transports::nats};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 use url::Url;
 
 use crate::gguf::{Content, ContentConfig, ModelConfigLike};
+use crate::model_card::runtime_config::ModelRuntimeConfig;
 use crate::protocols::TokenIdType;
 
 /// If a model deployment card hasn't been refreshed in this much time the worker is likely gone
@@ -133,10 +133,10 @@ pub struct ModelDeploymentCard {
     /// connection to the current worker.
     pub migration_limit: u32,
 
-    /// Runtime-initialized configuration data that is known during model initialization
-    /// and does not change over the runtime. Examples: total_kv_blocks, model parameters, etc.
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub runtime_data: HashMap<String, serde_json::Value>,
+    /// Runtime configuration data that is computed during initialization
+    /// but remains constant during the worker session
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_config: Option<ModelRuntimeConfig>,
 }
 
 impl ModelDeploymentCard {
@@ -240,35 +240,38 @@ impl ModelDeploymentCard {
         }
     }
 
-    /// Register runtime data for the model
-    ///
-    /// This is used to store configuration data that is known during model initialization
-    /// and does not change over the runtime. Examples: total_kv_blocks, model parameters, etc.
-    pub fn register_runtime_data<T: Serialize>(&mut self, key: &str, value: T) {
-        self.runtime_data
-            .insert(key.to_string(), serde_json::to_value(value).unwrap());
+    /// Register runtime configuration data that was computed during engine initialization
+    pub fn register_runtime_config(&mut self, runtime_config: ModelRuntimeConfig) {
+        self.runtime_config = Some(runtime_config);
     }
 
-    /// Get runtime data for the model
-    pub fn get_runtime_data<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
-        self.runtime_data
-            .get(key)
-            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    /// Update an existing runtime config or create a new one if none exists
+    pub fn update_runtime_config<F>(&mut self, updater: F)
+    where
+        F: FnOnce(&mut ModelRuntimeConfig),
+    {
+        let mut config = self.runtime_config.take().unwrap_or_default();
+        updater(&mut config);
+        self.runtime_config = Some(config);
     }
 
-    /// Check if runtime data exists for a given key
-    pub fn has_runtime_data(&self, key: &str) -> bool {
-        self.runtime_data.contains_key(key)
+    pub fn runtime_config(&self) -> Option<&ModelRuntimeConfig> {
+        self.runtime_config.as_ref()
     }
 
-    /// Get the total number of KV blocks
+    /// Get total number of KV blocks
     pub fn total_kv_blocks(&self) -> Option<u64> {
-        self.get_runtime_data("total_kv_blocks")
+        self.runtime_config.as_ref()?.total_kv_blocks
     }
 
-    /// Register the total number of KV blocks
-    pub fn register_total_kv_blocks(&mut self, total_kv_blocks: u64) {
-        self.register_runtime_data("total_kv_blocks", total_kv_blocks);
+    /// Get maximum number of sequences that can be batched together
+    pub fn max_num_seqs(&self) -> Option<u64> {
+        self.runtime_config.as_ref()?.max_num_seqs
+    }
+
+    /// Get GPU memory utilization percentage configured
+    pub fn gpu_memory_utilization(&self) -> Option<u64> {
+        self.runtime_config.as_ref()?.gpu_memory_utilization
     }
 
     /// Move the files this MDC uses into the NATS object store.
