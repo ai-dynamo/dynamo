@@ -27,6 +27,9 @@ keywords.workspace = true
 [dependencies]
 derive-getters = { workspace = true }
 xxhash-rust = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }
+serde = { workspace = true }
 
 bytemuck = "1.22"
 rayon = "1"
