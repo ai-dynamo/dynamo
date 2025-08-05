@@ -490,7 +490,11 @@ impl Endpoint {
         let builder = self.inner.endpoint_builder().handler(ingress);
         let graceful_shutdown = graceful_shutdown.unwrap_or(true);
         pyo3_async_runtimes::tokio::future_into_py(py, async move {
-            builder.graceful_shutdown(graceful_shutdown).start().await.map_err(to_pyerr)?;
+            builder
+                .graceful_shutdown(graceful_shutdown)
+                .start()
+                .await
+                .map_err(to_pyerr)?;
             Ok(())
         })
     }

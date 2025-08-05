@@ -146,9 +146,6 @@ async def init(runtime: DistributedRuntime, config: Config):
     )
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
-        print(f"Migration limit: {config.migration_limit}")
-        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         await register_llm(
             ModelType.Backend,
             generate_endpoint,
