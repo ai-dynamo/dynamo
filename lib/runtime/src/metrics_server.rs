@@ -209,6 +209,7 @@ pub async fn spawn_metrics_server(
             tracing::error!("Metrics server error: {}", e);
         }
     });
+
     Ok((actual_address, handle))
 }
 
@@ -252,7 +253,9 @@ async fn metrics_handler(state: Arc<MetricsServerState>) -> impl IntoResponse {
     // Update the uptime gauge with current value
     state.update_uptime_gauge();
 
-    // Get metrics from the registry
+    state.drt().execute_metrics_callbacks("");
+
+    // Get all metrics from DistributedRuntime (top-level)
     match state.drt().prometheus_metrics_fmt() {
         Ok(response) => (StatusCode::OK, response),
         Err(e) => {
@@ -299,10 +302,10 @@ mod tests {
         let cancel_token = CancellationToken::new();
         let cancel_token_for_server = cancel_token.clone();
 
-        // Test basic HTTP server lifecycle without DistributedRuntime
+        // Test basic system server (HTTP) lifecycle without DistributedRuntime
         let app = Router::new().route("/test", get(|| async { (StatusCode::OK, "test") }));
 
-        // start HTTP server
+        // start system server (HTTP)
         let server_handle = tokio::spawn(async move {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let _ = axum::serve(listener, app)
@@ -320,7 +323,7 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
         assert!(
             result.is_ok(),
-            "HTTP server should shut down when cancel token is cancelled"
+            "System server (HTTP) should shut down when cancel token is cancelled"
         );
     }
 
@@ -339,12 +342,18 @@ mod tests {
         let response = runtime_metrics.drt().prometheus_metrics_fmt().unwrap();
         println!("Full metrics response:\n{}", response);
 
+        // Filter out NATS client metrics for comparison
+        let filtered_response: String = response
+            .lines()
+            .filter(|line| !line.contains("nats_client"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
         let expected = "\
 # HELP dynamo_component_dynamo_uptime_seconds Total uptime of the DistributedRuntime in seconds
 # TYPE dynamo_component_dynamo_uptime_seconds gauge
-dynamo_component_dynamo_uptime_seconds 42
-";
-        assert_eq!(response, expected);
+dynamo_component_dynamo_uptime_seconds 42";
+        assert_eq!(filtered_response, expected);
     }
 
     #[cfg(feature = "integration")]
@@ -607,14 +616,14 @@ dynamo_component_dynamo_uptime_seconds 42
     #[cfg(feature = "integration")]
     #[tokio::test]
     async fn test_http_server_basic_functionality() {
-        // Test basic HTTP server functionality without requiring etcd
+        // Test basic system server (HTTP) functionality without requiring etcd
         let cancel_token = CancellationToken::new();
         let cancel_token_for_server = cancel_token.clone();
 
-        // Test basic HTTP server lifecycle
+        // Test basic system server (HTTP) lifecycle
         let app = Router::new().route("/test", get(|| async { (StatusCode::OK, "test") }));
 
-        // start HTTP server
+        // start system server (HTTP)
         let server_handle = tokio::spawn(async move {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let _ = axum::serve(listener, app)
@@ -632,7 +641,7 @@ dynamo_component_dynamo_uptime_seconds 42
         let result = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
         assert!(
             result.is_ok(),
-            "HTTP server should shut down when cancel token is cancelled"
+            "System server (HTTP) should shut down when cancel token is cancelled"
         );
     }
 }

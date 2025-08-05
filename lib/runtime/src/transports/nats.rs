@@ -28,13 +28,16 @@
 //! - `NATS_AUTH_CREDENTIALS_FILE`: the path to the credentials file
 //!
 //! Note: `NATS_AUTH_USERNAME` and `NATS_AUTH_PASSWORD` must be used together.
-use crate::Result;
+use crate::{metrics::MetricsRegistry, Result};
 
 use async_nats::{client, jetstream, Subscriber};
 use bytes::Bytes;
 use derive_builder::Builder;
 use futures::{StreamExt, TryStreamExt};
+use prometheus::{Counter, Gauge, Histogram, HistogramOpts, IntCounter, IntGauge, Opts, Registry};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
 use tokio::fs::File as TokioFile;
 use tokio::io::AsyncRead;
 use tokio::time;
@@ -66,6 +69,25 @@ impl Client {
     /// Returns a reference to the underlying [`async_nats::jetstream::Context`] instance
     pub fn jetstream(&self) -> &jetstream::Context {
         &self.js_ctx
+    }
+
+    /// Add Prometheus metrics for this NATS client
+    pub fn add_metrics(&self, drt: &crate::DistributedRuntime) -> Result<NatsClientMetrics> {
+        let nats_metrics = NatsClientMetrics::new(drt)?;
+        //nats_metrics.copy_from_nats_client_stats(&self.client);
+
+        // Create a callback that updates the metrics when called
+        let nats_metrics_arc = std::sync::Arc::new(nats_metrics.clone());
+
+        let nats_metrics_clone = nats_metrics_arc.clone();
+        let client_clone = self.client.clone();
+        drt.add_metrics_callback("", move |_runtime| {
+            // Use the cloned client directly
+            nats_metrics_clone.copy_from_nats_client_stats(&client_clone);
+            Ok("".to_string())
+        });
+
+        Ok(nats_metrics)
     }
 
     /// host:port of NATS
@@ -486,6 +508,97 @@ impl NatsQueue {
         } else {
             Err(anyhow::anyhow!("Client not connected"))
         }
+    }
+}
+
+/// Prometheus metrics that mirror the NATS client statistics
+#[derive(Debug, Clone)]
+pub struct NatsClientMetrics {
+    /// Number of bytes received (excluding protocol overhead)
+    pub in_bytes: std::sync::Arc<IntGauge>,
+    /// Number of bytes sent (excluding protocol overhead)
+    pub out_bytes: std::sync::Arc<IntGauge>,
+    /// Number of messages received
+    pub in_messages: std::sync::Arc<IntGauge>,
+    /// Number of messages sent
+    pub out_messages: std::sync::Arc<IntGauge>,
+    /// Number of times connection was established
+    pub connects: std::sync::Arc<IntGauge>,
+    /// Current connection state (0 = disconnected, 1 = connected, 2 = reconnecting)
+    pub connection_state: std::sync::Arc<IntGauge>,
+}
+
+impl NatsClientMetrics {
+    /// Create a new instance of NATS client metrics using a DistributedRuntime's Prometheus constructors
+    pub fn new(drt: &crate::DistributedRuntime) -> Result<Self> {
+        let in_bytes = Arc::new(drt.create_intgauge(
+            "nats_client_in_bytes",
+            "Total number of bytes received by NATS client",
+            &[],
+        )?);
+        let out_bytes = Arc::new(drt.create_intgauge(
+            "nats_client_out_bytes",
+            "Total number of bytes sent by NATS client",
+            &[],
+        )?);
+        let in_messages = Arc::new(drt.create_intgauge(
+            "nats_client_in_messages",
+            "Total number of messages received by NATS client",
+            &[],
+        )?);
+        let out_messages = Arc::new(drt.create_intgauge(
+            "nats_client_out_messages",
+            "Total number of messages sent by NATS client",
+            &[],
+        )?);
+        let connects = Arc::new(drt.create_intgauge(
+            "nats_client_connects",
+            "Total number of connections established by NATS client",
+            &[],
+        )?);
+        let connection_state = Arc::new(drt.create_intgauge(
+            "nats_client_connection_state",
+            "Current connection state of NATS client (0=disconnected, 1=connected, 2=reconnecting)",
+            &[],
+        )?);
+
+        Ok(Self {
+            in_bytes,
+            out_bytes,
+            in_messages,
+            out_messages,
+            connects,
+            connection_state,
+        })
+    }
+
+    /// Copy statistics from a NATS client to these Prometheus metrics
+    pub fn copy_from_nats_client_stats(&self, client: &client::Client) {
+        let stats = client.statistics();
+
+        // Get current values from the client statistics
+        let in_bytes = stats.in_bytes.load(Ordering::Relaxed);
+        let out_bytes = stats.out_bytes.load(Ordering::Relaxed);
+        let in_messages = stats.in_messages.load(Ordering::Relaxed);
+        let out_messages = stats.out_messages.load(Ordering::Relaxed);
+        let connects = stats.connects.load(Ordering::Relaxed);
+
+        // Get connection state
+        let connection_state = match format!("{:?}", client.connection_state()).as_str() {
+            "Connected" => 1,
+            "Connecting" => 2,
+            "Disconnected" => 0,
+            _ => 0, // Default to disconnected for unknown states
+        };
+
+        // Update Prometheus metrics
+        // Using gauges allows us to set absolute values directly
+        self.in_bytes.set(in_bytes as i64);
+        self.out_bytes.set(out_bytes as i64);
+        self.in_messages.set(in_messages as i64);
+        self.out_messages.set(out_messages as i64);
+        self.connects.set(connects as i64);
+        self.connection_state.set(connection_state);
     }
 }
 

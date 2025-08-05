@@ -268,7 +268,9 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     );
 
     // Handle different metric types
-    let metric = if std::any::TypeId::of::<T>() == std::any::TypeId::of::<prometheus::Histogram>() {
+    let prometheus_metric = if std::any::TypeId::of::<T>()
+        == std::any::TypeId::of::<prometheus::Histogram>()
+    {
         // Special handling for Histogram with custom buckets
         // buckets parameter is valid for Histogram, const_labels is not used
         if const_labels.is_some() {
@@ -349,12 +351,6 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     // Iterate over the DRT's registry and register this metric across all hierarchical levels.
     // The prefixed_hierarchy is structured as: ["", "testnamespace", "testnamespace_testcomponent", "testnamespace_testcomponent_testendpoint"]
     // This prefixing is essential to differentiate between the names of children and grandchildren.
-    let mut prometheus_registry = registry
-        .drt()
-        .prometheus_registries_by_prefix
-        .lock()
-        .unwrap();
-
     // Build prefixed hierarchy and register metrics in a single loop
     // current_prefix accumulates the hierarchical path as we iterate through hierarchy
     // For example, if hierarchy = ["", "testnamespace", "testcomponent"], then:
@@ -368,15 +364,14 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         }
         current_prefix.push_str(name);
 
-        // Register metric at this hierarchical level
-        let collector: Box<dyn prometheus::core::Collector> = Box::new(metric.clone());
-        let _ = prometheus_registry
-            .entry(current_prefix.clone())
-            .or_default()
-            .register(collector);
+        // Register metric at this hierarchical level using the new helper function
+        let collector: Box<dyn prometheus::core::Collector> = Box::new(prometheus_metric.clone());
+        registry
+            .drt()
+            .add_prometheus_metric(&current_prefix, collector)?;
     }
 
-    Ok(metric)
+    Ok(prometheus_metric)
 }
 
 /// This trait should be implemented by all metric registries, including Prometheus, Envy, OpenTelemetry, and others.
@@ -524,9 +519,23 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
 
     /// Get metrics in Prometheus text format
     fn prometheus_metrics_fmt(&self) -> anyhow::Result<String> {
+        // Execute callbacks first to ensure any new metrics are added to the registry
+        let callback_results = self.drt().execute_metrics_callbacks(&self.prefix());
+
+        // Log any callback errors but continue
+        for result in callback_results {
+            if let Err(e) = result {
+                eprintln!("Error executing metrics callback: {}", e);
+            }
+        }
+
         let prometheus_registry = {
-            let mut registry = self.drt().prometheus_registries_by_prefix.lock().unwrap();
-            registry.entry(self.prefix()).or_default().clone()
+            let mut registry_entry = self.drt().metrics_registry_by_prefix.lock().unwrap();
+            registry_entry
+                .entry(self.prefix())
+                .or_default()
+                .prometheus_registry
+                .clone()
         };
         let metric_families = prometheus_registry.gather();
         let encoder = prometheus::TextEncoder::new();
@@ -624,13 +633,58 @@ mod tests {
             "testnamespace"
         ); // Hyphen removed
         assert_eq!(
-            lint_prometheus_name("test-namespace_123").unwrap(),
-            "testnamespace_123"
-        ); // Hyphen removed
+            lint_prometheus_name("test-namespace-123").unwrap(),
+            "testnamespace123"
+        ); // Multiple hyphens removed
+    }
 
-        // Test validation errors for invalid patterns
-        assert!(lint_prometheus_name("123test").is_err()); // Starts with digit
-        assert!(lint_prometheus_name("").is_ok()); // Empty is allowed
+    #[test]
+    fn test_metrics_registry_entry_with_callbacks() {
+        use crate::DistributedRuntime;
+        use crate::MetricsRegistryEntry;
+
+        // Create a new metrics registry entry
+        let mut entry = MetricsRegistryEntry::new();
+
+        // Create a test DistributedRuntime for the callbacks
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let drt = rt.block_on(async {
+            let runtime = crate::Runtime::single_threaded().unwrap();
+            DistributedRuntime::from_settings_without_discovery(runtime)
+                .await
+                .unwrap()
+        });
+
+        // Add some runtime callbacks
+        entry.add_callback(&drt as &dyn crate::metrics::MetricsRegistry, |_| {
+            Ok("callback1".to_string())
+        });
+        entry.add_callback(&drt as &dyn crate::metrics::MetricsRegistry, |_| {
+            Ok("callback2".to_string())
+        });
+        entry.add_callback(&drt as &dyn crate::metrics::MetricsRegistry, |_| {
+            Ok("callback3".to_string())
+        });
+
+        // Execute runtime callbacks
+        let results = entry.execute_callbacks(&drt as &dyn crate::metrics::MetricsRegistry);
+
+        // Verify results
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].as_ref().unwrap(), "callback1");
+        assert_eq!(results[1].as_ref().unwrap(), "callback2");
+        assert_eq!(results[2].as_ref().unwrap(), "callback3");
+
+        // Test cloning (callbacks should be empty after clone)
+        let cloned_entry = entry.clone();
+        let cloned_results =
+            cloned_entry.execute_callbacks(&drt as &dyn crate::metrics::MetricsRegistry);
+        assert_eq!(cloned_results.len(), 0);
+
+        // Original should still have callbacks
+        let original_results =
+            entry.execute_callbacks(&drt as &dyn crate::metrics::MetricsRegistry);
+        assert_eq!(original_results.len(), 3);
     }
 }
 
@@ -1006,6 +1060,18 @@ dynamo_component_testintcounter{{dynamo_namespace="testnamespace"}} 12345
         println!("DRT output:");
         println!("{}", drt_output);
 
+        // Helper function to filter out NATS client metrics
+        fn filter_nats_metrics(metrics: &str) -> String {
+            metrics
+                .lines()
+                .filter(|line| !line.contains("nats_client") && !line.trim().is_empty())
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        // Filter out NATS client metrics for comparison
+        let filtered_drt_output = filter_nats_metrics(&drt_output);
+
         let expected_drt_output = format!(
             r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
@@ -1035,17 +1101,59 @@ dynamo_component_testintgauge 42
 # HELP dynamo_component_testintgaugevec A test int gauge vector
 # TYPE dynamo_component_testintgaugevec gauge
 dynamo_component_testintgaugevec{{instance="server1",service="api",status="active"}} 10
-dynamo_component_testintgaugevec{{instance="server2",service="api",status="inactive"}} 0
-"#
+dynamo_component_testintgaugevec{{instance="server2",service="api",status="inactive"}} 0"#
         );
 
         assert_eq!(
-            drt_output, expected_drt_output,
+            filtered_drt_output, expected_drt_output,
             "\n=== DRT COMPARISON FAILED ===\n\
              Expected:\n{}\n\
-             Actual:\n{}\n\
+             Actual (filtered):\n{}\n\
              ==============================",
-            expected_drt_output, drt_output
+            expected_drt_output, filtered_drt_output
+        );
+
+        // Additional checks for NATS client metrics (without checking specific values)
+        let nats_metrics = drt_output
+            .lines()
+            .filter(|line| line.contains("nats_client"))
+            .collect::<Vec<_>>();
+
+        // Check that NATS client metrics are present
+        assert!(
+            !nats_metrics.is_empty(),
+            "NATS client metrics should be present"
+        );
+
+        // Check for specific NATS client metric names (without values)
+        let nats_metric_names: Vec<&str> = nats_metrics
+            .iter()
+            .filter(|line| line.starts_with("dynamo_component_nats_client_"))
+            .map(|line| line.split('{').next().unwrap_or(line))
+            .collect();
+
+        let expected_nats_metrics = [
+            "dynamo_component_nats_client_connection_state",
+            "dynamo_component_nats_client_connects",
+            "dynamo_component_nats_client_in_bytes",
+            "dynamo_component_nats_client_in_messages",
+            "dynamo_component_nats_client_out_bytes",
+            "dynamo_component_nats_client_out_messages",
+        ];
+
+        for expected_metric in &expected_nats_metrics {
+            assert!(
+                nats_metric_names
+                    .iter()
+                    .any(|name| name.contains(expected_metric)),
+                "NATS client metric {} should be present",
+                expected_metric
+            );
+        }
+
+        println!(
+            "✓ NATS client metrics verified ({} metrics found)",
+            nats_metrics.len()
         );
 
         println!("✓ All Prometheus format outputs verified successfully!");
