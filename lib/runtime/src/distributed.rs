@@ -77,7 +77,7 @@ impl DistributedRuntime {
             })
             .await??;
 
-        // Start HTTP server for health and metrics if enabled in configuration
+        // Start System server for health and metrics if enabled in configuration
         let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
         // IMPORTANT: We must extract cancel_token from runtime BEFORE moving runtime into the struct below.
         // This is because after moving, runtime is no longer accessible in this scope (ownership rules).
@@ -98,7 +98,7 @@ impl DistributedRuntime {
             etcd_client,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
-            http_server: Arc::new(OnceLock::new()),
+            sys_server: Arc::new(OnceLock::new()),
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
@@ -109,13 +109,13 @@ impl DistributedRuntime {
             system_health,
         };
 
-        // Start HTTP server if enabled
+        // Start System server if enabled
         if let Some(cancel_token) = cancel_token {
             let host = config.system_host.clone();
             let port = config.system_port;
 
-            // Start HTTP server (it spawns its own task internally)
-            match crate::http_server::spawn_http_server(
+            // Start System server (it spawns its own task internally)
+            match crate::sys_server::spawn_sys_server(
                 &host,
                 port,
                 cancel_token,
@@ -124,24 +124,23 @@ impl DistributedRuntime {
             .await
             {
                 Ok((addr, handle)) => {
-                    tracing::info!("HTTP server started successfully on {}", addr);
+                    tracing::info!("System server started successfully on {}", addr);
 
-                    // Store HTTP server information
-                    let http_server_info =
-                        crate::http_server::HttpServerInfo::new(addr, Some(handle));
+                    // Store System server information
+                    let sys_server_info = crate::sys_server::SysServerInfo::new(addr, Some(handle));
 
-                    // Initialize the http_server field
+                    // Initialize the sys_server field (sys_server is a OnceLock)
                     distributed_runtime
-                        .http_server
-                        .set(Arc::new(http_server_info))
-                        .expect("HTTP server info should only be set once");
+                        .sys_server
+                        .set(Arc::new(sys_server_info))
+                        .expect("System server info should only be set once");
                 }
                 Err(e) => {
-                    tracing::error!("HTTP server startup failed: {}", e);
+                    tracing::error!("System server startup failed: {}", e);
                 }
             }
         } else {
-            tracing::debug!("Health and metrics HTTP server is disabled via DYN_SYSTEM_ENABLED");
+            tracing::debug!("Health and metrics System server is disabled via DYN_SYSTEM_ENABLED");
         }
 
         Ok(distributed_runtime)
@@ -222,9 +221,9 @@ impl DistributedRuntime {
         self.nats_client.clone()
     }
 
-    /// Get HTTP server information if available
-    pub fn http_server_info(&self) -> Option<Arc<crate::http_server::HttpServerInfo>> {
-        self.http_server.get().cloned()
+    /// Get System server information if available
+    pub fn sys_server_info(&self) -> Option<Arc<crate::sys_server::SysServerInfo>> {
+        self.sys_server.get().cloned()
     }
 
     // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers

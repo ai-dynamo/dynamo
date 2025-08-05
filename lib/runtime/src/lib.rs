@@ -36,8 +36,8 @@ pub use config::RuntimeConfig;
 pub mod component;
 pub mod discovery;
 pub mod engine;
-pub mod http_server;
-pub use http_server::HttpServerInfo;
+pub mod sys_server;
+pub use sys_server::SysServerInfo;
 pub mod logging;
 pub mod metrics;
 pub mod pipeline;
@@ -151,7 +151,7 @@ pub struct DistributedRuntime {
     etcd_client: Option<transports::etcd::Client>,
     nats_client: transports::nats::Client,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
-    http_server: Arc<OnceLock<Arc<http_server::HttpServerInfo>>>,
+    sys_server: Arc<OnceLock<Arc<sys_server::SysServerInfo>>>,
 
     // local registry for components
     // the registry allows us to use share runtime resources across instances of the same component object.
