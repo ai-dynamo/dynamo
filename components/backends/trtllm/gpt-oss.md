@@ -76,7 +76,7 @@ docker run \
     --rm \
     --network host \
     --volume $MODEL_PATH:/model \
-    --volume $PWD:/workspace/dynamo \
+    --volume $PWD:/workspace \
     --shm-size=10G \
     --ulimit memlock=-1 \
     --ulimit stack=67108864 \
