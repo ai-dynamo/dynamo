@@ -21,5 +21,19 @@
    :maxdepth: 2
    :hidden:
 
-   guides/README.md
    runtime/README.md
+   API/nixl_connect/connector.md
+   API/nixl_connect/descriptor.md
+   API/nixl_connect/device.md
+   API/nixl_connect/device_kind.md
+   API/nixl_connect/operation_status.md
+   API/nixl_connect/rdma_metadata.md
+   API/nixl_connect/readable_operation.md
+   API/nixl_connect/writable_operation.md
+   API/nixl_connect/read_operation.md
+   API/nixl_connect/write_operation.md
+   components/backends/sglang/README.md
+   components/router/README.md
+   examples/README.md
+   guides/dynamo_deploy/create_deployment.md
+   guides/dynamo_deploy/sla_planner_deployment.md
