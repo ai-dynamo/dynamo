@@ -5,7 +5,7 @@ SPDX-License-Identifier: Apache-2.0
 
 # Running gpt-oss-120b Disaggregated with TensorRT-LLM
 
-Dynamo supports disaggregated serving of gpt-oss-120b with TensorRT-LLM. This guide demonstrates how to deploy gpt-oss-120b using disaggregated prefill/decode serving on a single B200 node with 8 GPUs. In this example, we will run 1 prefill worker on 4 GPUs and 1 decode worker on 4 GPUs.
+Dynamo supports disaggregated serving of gpt-oss-120b with TensorRT-LLM. This guide demonstrates how to deploy gpt-oss-120b using disaggregated prefill/decode serving on a single B200 node with 8 GPUs, running 1 prefill worker on 4 GPUs and 1 decode worker on 4 GPUs.
 
 ## Overview
 
@@ -27,26 +27,29 @@ The disaggregated approach optimizes for both low-latency (maximizing tokens per
 
 ## Instructions
 
-### 1. Pull the gpt-oss Container
+### 1. Get the Dynamo Container
+
+You can either pull a pre-built container or build from source. Both options provide the same Dynamo container with TensorRT-LLM backend support for gpt-oss-120b.
+
+#### Option A: Pull Pre-built Container
 
 > [!IMPORTANT]
 > **PLACEHOLDER**: The official gpt-oss-120b container URL will be provided upon release.
 
 ```bash
 # PLACEHOLDER: Replace with actual container URL when available
-export $DYNAMO_CONTAINER_IMAGE="gitlab-master.nvidia.com/dl/ai-dynamo/dynamo-ci/jothomson:orangina-dynamo-release-aarch64"
+export DYNAMO_CONTAINER_IMAGE="gitlab-master.nvidia.com/dl/ai-dynamo/dynamo-ci/jothomson:orangina-dynamo-release-aarch64"
 docker pull $DYNAMO_CONTAINER_IMAGE
 ```
 
-### 2. (Alternative) Build the Dynamo TensorRT-LLM Container from Source
+#### Option B: Build from Source
 
-If you prefer to build from source or need custom modifications, use the provided build scripts:
+If you prefer to build from source or need custom modifications:
 
 > [!IMPORTANT]
 > **PLACEHOLDER**: Update to public commit hash and remove URL for release.
 
-
-#### 2a. ARM
+**For ARM64 (B200/GH200):**
 ```bash
 cd $DYNAMO_ROOT
 
@@ -61,18 +64,24 @@ docker build --platform linux/arm64 -f container/Dockerfile.tensorrt_llm_prebuil
 export DYNAMO_CONTAINER_IMAGE=gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo-ci/jothomson:orangina-dynamo-release-aarch64
 ```
 
-#### 2b. x86
-
+**For x86_64:**
 ```bash
-docker build -f container/Dockerfile.tensorrt_llm_prebuilt . --build-arg BASE_IMAGE <base_image> --build-arg BASE_IMAGE_TAG <image_tag> -t orangina-dynamo
+# Navigate to the Dynamo repository root
+cd $DYNAMO_ROOT
+
+# Replace <base_image> and <image_tag> with appropriate TensorRT-LLM base image values
+docker build -f container/Dockerfile.tensorrt_llm_prebuilt . \
+  --build-arg BASE_IMAGE=<base_image> \
+  --build-arg BASE_IMAGE_TAG=<image_tag> \
+  -t orangina-dynamo
 
 export DYNAMO_CONTAINER_IMAGE=orangina-dynamo
 ```
 
 
-### 3. Download the Model
+### 2. Download the Model
 
-#### Step 3a: Requesting Access to Model
+#### Step 2a: Requesting Access to Model
 
 > [!IMPORTANT]
 > **PLACEHOLDER**: Model access details will be updated upon release.
@@ -81,7 +90,7 @@ Access to gpt-oss-120b model checkpoints must be requested through the [HuggingF
 
 A HuggingFace account is required to accept the license agreement, and you will need to [create a HuggingFace access token](https://huggingface.co/settings/tokens) to download the model weights.
 
-#### Step 3b: Setting your HuggingFace Token
+#### Step 2b: Setting your HuggingFace Token
 
 Set your HuggingFace token as an environment variable:
 
@@ -89,7 +98,7 @@ Set your HuggingFace token as an environment variable:
 export HF_TOKEN="hf_YOUR_ACTUAL_TOKEN_HERE"
 ```
 
-#### Step 3c: Download the Model
+#### Step 2c: Download the Model
 
 ```bash
 # PLACEHOLDER: Replace with actual HuggingFace model path
@@ -104,7 +113,7 @@ huggingface-cli download $MODEL_PATH --local-dir /path/to/gpt-oss-120b
 export MODEL_PATH=/home/scratch.nealv_sw/models/omodel/orangina-120b-final-weights_vv1
 ```
 
-### 4. Run the Container
+### 3. Run the Container
 
 Launch the Dynamo TensorRT-LLM container with the necessary configurations:
 
@@ -115,6 +124,7 @@ docker run \
     --rm \
     --network host \
     --volume $MODEL_PATH:/model \
+    --volume $PWD:/workspace/dynamo \
     --shm-size=10G \
     --ulimit memlock=-1 \
     --ulimit stack=67108864 \
@@ -132,47 +142,52 @@ This command:
 - Allows container to interact with host's IPC resources for optimal performance (`--ipc=host`)
 - Runs the container in interactive mode (`-it`)
 - Sets up shared memory and stack limits for optimal performance
-- Mounts your model directory and cache directory to avoid re-downloading
+- Mounts your model directory into the container at `/model`
+- Mounts the current Dynamo workspace into the container at `/workspace/dynamo`
 - Enables [PDL](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#programmatic-dependent-launch-and-synchronization) and disables parallel weight loading
 - Sets HuggingFace token as environment variable in the container
 
 Inside the container, navigate to the TensorRT-LLM backend directory:
 ```bash
-cd components/backends/trtllm
+cd /workspace/dynamo/components/backends/trtllm
 ```
 
-### 5. Understanding the Configuration Files
+### 4. Understanding the Configuration
 
-The deployment uses two configuration files for prefill and decode workers:
+The deployment uses configuration files and command-line arguments to control behavior:
 
-#### Prefill Configuration (`engine_configs/gpt_oss/prefill.yaml`)
-- `tensor_parallel_size: 4` - Uses 4 GPUs for tensor parallelism
-- `moe_expert_parallel_size: 4` - Expert parallelism across 4 GPUs
-- `enable_attention_dp: false` - Attention data parallelism disabled
-- `max_num_tokens: 16384` - Maximum tokens for prefill processing
-- `enable_chunked_prefill: true` - Enables efficient chunked prefill
-- `disable_overlap_scheduler: true` - Disables overlapping for prefill worker
-- `backend: pytorch` - Uses PyTorch backend for model execution
-- `trust_remote_code: true` - Allows loading custom model code
-- `free_gpu_memory_fraction: 0.8` - Allocates 80% of GPU memory for KV cache
-- `moe_config.backend: CUTLASS` - Uses optimized CUTLASS kernels for MoE
+#### Configuration Files
+
+**Prefill Configuration (`engine_configs/gpt_oss/prefill.yaml`)**:
+- `enable_attention_dp: false` - Attention data parallelism disabled for prefill
+- `enable_chunked_prefill: true` - Enables efficient chunked prefill processing
+- `moe_config.backend: CUTLASS` - Uses optimized CUTLASS kernels for MoE layers
 - `cache_transceiver_config.backend: ucx` - Uses UCX for efficient KV cache transfer
 - `cuda_graph_config.max_batch_size: 32` - Maximum batch size for CUDA graphs
 
-#### Decode Configuration (`engine_configs/gpt_oss/decode.yaml`)
-- `tensor_parallel_size: 4` - Decode worker uses 4 GPUs
-- `moe_expert_parallel_size: 4` - Expert parallelism across 4 GPUs
-- `enable_attention_dp: true` - Attention data parallelism enabled
+**Decode Configuration (`engine_configs/gpt_oss/decode.yaml`)**:
+- `enable_attention_dp: true` - Attention data parallelism enabled for decode
 - `disable_overlap_scheduler: false` - Enables overlapping for decode efficiency
-- `backend: pytorch` - Uses PyTorch backend for model execution
-- `trust_remote_code: true` - Allows loading custom model code
-- `free_gpu_memory_fraction: 0.8` - Allocates 80% of GPU memory for KV cache
-- `moe_config.backend: CUTLASS` - Uses optimized CUTLASS kernels for MoE
+- `moe_config.backend: CUTLASS` - Uses optimized CUTLASS kernels for MoE layers
 - `cache_transceiver_config.backend: ucx` - Uses UCX for efficient KV cache transfer
 - `cuda_graph_config.max_batch_size: 128` - Maximum batch size for CUDA graphs
-- `max_num_tokens: 16384` - Maximum tokens for decode processing
 
-### 6. Launch the Deployment
+#### Command-Line Arguments
+
+Both workers receive these key arguments:
+- `--tensor-parallel-size 4` - Uses 4 GPUs for tensor parallelism
+- `--expert-parallel-size 4` - Expert parallelism across 4 GPUs
+- `--free-gpu-memory-fraction 0.9` - Allocates 90% of GPU memory
+
+Prefill-specific arguments:
+- `--max-num-tokens 20000` - Maximum tokens for prefill processing
+- `--max-batch-size 32` - Maximum batch size for prefill
+
+Decode-specific arguments:
+- `--max-num-tokens 16384` - Maximum tokens for decode processing
+- `--max-batch-size 128` - Maximum batch size for decode
+
+### 5. Launch the Deployment
 
 You can use the provided launch script or run the components manually:
 
@@ -223,7 +238,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --expert-parallel-size 4
 ```
 
-### 7. Test the Deployment
+### 6. Test the Deployment
 
 Send a test request to verify the deployment:
 
@@ -245,33 +260,70 @@ The server exposes a standard OpenAI-compatible API endpoint that accepts JSON r
 
 ## Benchmarking
 
+### Performance Testing with GenAI-Perf
+
+The Dynamo container includes [GenAI-Perf](https://docs.nvidia.com/deeplearning/triton-inference-server/user-guide/docs/perf_analyzer/genai-perf/README.html), NVIDIA's tool for benchmarking generative AI models. This tool helps measure throughput, latency, and other performance metrics for your deployment.
+
+**Run the following benchmark from inside the container** (after completing the deployment steps above):
+
 ```bash
+# Create a directory for benchmark results
+mkdir -p /tmp/benchmark-results
+
+# Run the benchmark - this command tests the deployment with high-concurrency synthetic workload
 genai-perf profile \
-    --model orangina \
-    --tokenizer /scratch/omodel/orangina-120b-final-weights_vv1  \
+    --model gpt-oss-120b \
+    --tokenizer /model \
     --endpoint-type chat \
     --endpoint /v1/chat/completions \
     --streaming \
     --url localhost:8000 \
-    --synthetic-input-tokens-mean 1000 \
+    --synthetic-input-tokens-mean 32000 \
     --synthetic-input-tokens-stddev 0 \
-    --output-tokens-mean 2000 \
+    --output-tokens-mean 256 \
     --output-tokens-stddev 0 \
-    --extra-inputs max_tokens:2000 \
-    --extra-inputs min_tokens:2000 \
+    --extra-inputs max_tokens:256 \
+    --extra-inputs min_tokens:256 \
     --extra-inputs ignore_eos:true \
     --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
-    --concurrency 2048 \
+    --concurrency 256 \
     --request-count 6144 \
     --warmup-request-count 1000 \
     --num-dataset-entries 8000 \
     --random-seed 100 \
-    --artifact-dir /scratch/orangina/genai/artifacts/trtllm-base-1k-2k \
+    --artifact-dir /tmp/benchmark-results \
     -- \
     -v \
     --max-threads 500 \
     -H 'Authorization: Bearer NOT USED' \
     -H 'Accept: text/event-stream'
+```
+
+### What This Benchmark Does
+
+This command:
+- **Tests chat completions** with streaming responses against the disaggregated deployment
+- **Simulates high load** with 256 concurrent requests and 6144 total requests
+- **Uses long context inputs** (32K tokens) to test prefill performance
+- **Generates consistent outputs** (256 tokens) to measure decode throughput
+- **Includes warmup period** (1000 requests) to stabilize performance metrics
+- **Saves detailed results** to `/tmp/benchmark-results` for analysis
+
+Key parameters you can adjust:
+- `--concurrency`: Number of simultaneous requests (impacts GPU utilization)
+- `--synthetic-input-tokens-mean`: Average input length (tests prefill capacity)
+- `--output-tokens-mean`: Average output length (tests decode throughput)
+- `--request-count`: Total number of requests for the benchmark
+
+### Installing GenAI-Perf Outside the Container
+
+If you prefer to run benchmarks from outside the container:
+
+```bash
+# Install GenAI-Perf
+pip install genai-perf
+
+# Then run the same benchmark command, adjusting the tokenizer path if needed
 ```
 
 ## Architecture Overview
@@ -284,7 +336,7 @@ flowchart TD
     Frontend --> Prefill["Prefill Worker<br/>(GPUs 0-3)"]
     Frontend --> Decode["Decode Worker<br/>(GPUs 4-7)"]
 
-    Prefill -.->|KV Cache Transfer<br/>via NIXL| Decode
+    Prefill -.->|KV Cache Transfer<br/>via UCX| Decode
 ```
 
 ## Key Features
@@ -299,8 +351,8 @@ flowchart TD
 ### Common Issues
 
 1. **CUDA Out-of-Memory Errors**
-   - Reduce `max_num_tokens` in configuration files (currently set to 16384)
-   - Adjust `free_gpu_memory_fraction` in kv_cache_config to a lower value (e.g., 0.7, currently 0.8)
+   - Reduce `--max-num-tokens` in the launch commands (currently 20000 for prefill, 16384 for decode)
+   - Lower `--free-gpu-memory-fraction` from 0.9 to 0.8 or 0.7
    - Ensure model checkpoints are compatible with the expected format
 
 2. **Workers Not Connecting**
@@ -310,8 +362,9 @@ flowchart TD
    - Check that no other processes are using the assigned GPUs
 
 3. **Performance Issues**
-   - Monitor GPU utilization with `nvidia-smi` while the server is running
+   - Monitor GPU utilization with `nvidia-smi` while the deployment is running
    - Check worker logs for bottlenecks or errors
+   - Ensure that batch sizes in manual commands match those in configuration files
    - Adjust chunked prefill settings based on your workload
    - For connection issues, ensure port 8000 is not being used by another application
 
@@ -325,4 +378,4 @@ flowchart TD
 - **Production Deployment**: For multi-node deployments, see the [Multi-node Guide](../../examples/basics/multinode/README.md)
 - **Advanced Configuration**: Explore TensorRT-LLM engine building options for further optimization
 - **Monitoring**: Set up Prometheus and Grafana for production monitoring
-- **Performance Benchmarking**: Use the provided benchmarking scripts to measure and optimize your deployment
+- **Performance Benchmarking**: Use GenAI-Perf to measure and optimize your deployment performance
