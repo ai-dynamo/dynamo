@@ -21,6 +21,7 @@ max_num_tokens: 1024
 # 8704 = 8192 ISL + 512 OSL
 max_seq_len: 8704
 disable_overlap_scheduler: true
+enable_autotuner: false
 
 # Enable Speculative Decoding in the model engine
 speculative_config:

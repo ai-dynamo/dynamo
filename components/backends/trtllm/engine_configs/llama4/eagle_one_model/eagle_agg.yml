@@ -19,6 +19,7 @@ moe_expert_parallel_size: 8
 max_batch_size: 8
 max_num_tokens: 4096
 disable_overlap_scheduler: true # disable_overlap_scheduler is having acc issue on both aggregated and disaggregated serving
+enable_autotuner: false
 
 # Enable Speculative Decoding in the model engine
 speculative_config:
