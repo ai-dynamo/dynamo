@@ -133,7 +133,7 @@ impl DistributedRuntime {
                     // Store System server information
                     let sys_server_info = crate::sys_server::SysServerInfo::new(addr, Some(handle));
 
-                    // Initialize the sys_server field (sys_server is a OnceLock)
+                    // Initialize the sys_server field
                     distributed_runtime
                         .sys_server
                         .set(Arc::new(sys_server_info))
