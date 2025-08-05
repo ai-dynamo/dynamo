@@ -226,14 +226,14 @@ impl TraceParent {
         }
 
         // Validate UUID format
-        let x_dynamo_request_id = x_dynamo_request_id
-            .filter(|id| uuid::Uuid::parse_str(id).is_ok());
+        let x_dynamo_request_id =
+            x_dynamo_request_id.filter(|id| uuid::Uuid::parse_str(id).is_ok());
         TraceParent {
             trace_id,
             parent_id,
             tracestate,
             x_request_id,
-            x_dynamo_request_id
+            x_dynamo_request_id,
         }
     }
 }
