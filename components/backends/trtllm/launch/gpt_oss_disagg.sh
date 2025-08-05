@@ -9,6 +9,9 @@ export DISAGGREGATION_STRATEGY=${DISAGGREGATION_STRATEGY:-"prefill_first"}
 export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"engine_configs/gpt_oss/prefill.yaml"}
 export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"engine_configs/gpt_oss/decode.yaml"}
 
+set -e
+trap 'echo Cleaning up...; kill 0' EXIT
+
 # run clear_namespace
 python3 utils/clear_namespace.py --namespace dynamo
 
