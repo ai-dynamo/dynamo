@@ -133,6 +133,7 @@ pub trait ExternallyManagedDeviceSlot: Slot {
     fn append_mutable_device_blocks(&mut self, block_ids: &[BlockId]) -> Result<(), SlotError>;
 }
 
+#[derive(Debug)]
 pub struct ConnectorSlotManager<R: RequestKey> {
     slots: Mutex<HashMap<R, Arc<Mutex<VllmConnectorSlot>>>>,
     block_manager: VllmBlockManager,

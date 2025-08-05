@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 pub mod slot;
+pub mod recorder;
 
 use super::*;
 use dynamo_runtime::DistributedRuntime;
@@ -41,30 +42,50 @@ impl From<SlotError> for PyErr {
 use dynamo_llm::recorder::Recorder;
 use tokio_util::sync::CancellationToken;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct MatchedTokensEvent {
-    request_id: String,
-    request_num_tokens: usize,
-    num_computed_tokens: usize,
-    num_matched_tokens: usize,
-    has_matched: bool,
+
+pub trait Leader: Send + Sync + std::fmt::Debug {
+    fn get_num_new_matched_tokens(
+        &self,
+        request_id: String,
+        request_num_tokens: usize,
+        num_computed_tokens: usize,
+    ) -> PyResult<(usize, bool)>;
+
+    fn update_state_after_alloc(
+        &mut self,
+        request_id: String,
+        block_ids: Vec<BlockId>,
+        num_external_tokens: usize,
+    ) -> PyResult<()>;
+
+    fn build_connector_metadata(
+        &mut self,
+        scheduler_output: SchedulerOutput,
+    ) -> PyResult<Vec<u8>>;
+
+    fn request_finished(
+        &mut self,
+        request_id: String,
+        block_ids: Vec<BlockId>,
+    ) -> PyResult<bool>;
+
+    fn has_slot(&self, request_id: String) -> bool;
+
+    fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> PyResult<()>;
 }
 
-#[pyclass]
+#[derive(Debug)]
 pub struct KvConnectorLeader {
     slot_manager: ConnectorSlotManager<String>,
     block_size: usize,
     inflight_requests: HashSet<String>,
     onboarding_slots: HashSet<String>,
     iteration_counter: u64,
-    recorder: Option<Recorder<MatchedTokensEvent>>,
 }
 
-#[pymethods]
+
 impl KvConnectorLeader {
-    #[new]
-    #[pyo3(signature = (worker_id, drt, block_manager, leader))]
-    pub fn new(
+    fn new(
         worker_id: String,
         drt: PyDistributedRuntime,
         block_manager: PyBlockManager,
@@ -84,37 +105,17 @@ impl KvConnectorLeader {
         // if we need a drt, get it from here
         let drt = drt.inner().clone();
 
-        let enable_kvbm_record = std::env::var("ENABLE_KVBM_RECORD")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
-
-        let recorder = if enable_kvbm_record {
-            let token = CancellationToken::new();
-            let output_path = "/tmp/records.jsonl";
-            tracing::info!("recording events to {}", output_path);
-
-            // Create recorder synchronously using pyo3 async runtime
-            let runtime = pyo3_async_runtimes::tokio::get_runtime();
-            let recorder_result = runtime.block_on(async {
-                // TODO: using Some(2) for testing - quick shutdown of the recorder
-                // Should be None or a larger number
-                Recorder::new(token, &output_path, None, Some(2), None).await
-            }).unwrap();
-            Some(recorder_result)
-        } else {
-            None
-        };
-
         Self {
             slot_manager: ConnectorSlotManager::new(block_manager.clone(), leader, drt.clone()),
             block_size,
             inflight_requests: HashSet::new(),
             onboarding_slots: HashSet::new(),
             iteration_counter: 0,
-            recorder,
         }
     }
+}
 
+impl Leader for KvConnectorLeader {
     /// Match the tokens in the request with the available block pools.
     /// Note: the necessary details of the request are captured prior to this call. For vllm,
     /// we make a create slot call prior to this call, so a slot is guaranteed to exist.
@@ -122,7 +123,7 @@ impl KvConnectorLeader {
     /// To align with the connector interface, we must ensure that if no blocks are matched, we return (0, false).
     /// In our implementation, if we match any block, we return (num_matched_tokens, true).
     #[tracing::instrument(level = "debug", skip(self, request_num_tokens, num_computed_tokens))]
-    pub fn get_num_new_matched_tokens(
+    fn get_num_new_matched_tokens(
         &self,
         request_id: String,
         request_num_tokens: usize,
@@ -161,34 +162,8 @@ impl KvConnectorLeader {
                 "scheduling onboarding for {} external tokens",
                 num_external_tokens
             );
-            if let Some(recorder) = &self.recorder {
-                let event_tx = recorder.event_sender();
-                let runtime = pyo3_async_runtimes::tokio::get_runtime();
-                let _ = runtime.block_on(async {
-                    event_tx.send(MatchedTokensEvent {
-                        request_id: request_id,
-                        request_num_tokens: request_num_tokens,
-                        num_computed_tokens: num_computed_tokens,
-                        num_matched_tokens: num_external_tokens,
-                        has_matched: true,
-                    }).await
-                });
-            }
             Ok((num_external_tokens, true))
         } else {
-            if let Some(recorder) = &self.recorder {
-                let event_tx = recorder.event_sender();
-                let runtime = pyo3_async_runtimes::tokio::get_runtime();
-                let _ = runtime.block_on(async {
-                    event_tx.send(MatchedTokensEvent {
-                        request_id: request_id,
-                        request_num_tokens: request_num_tokens,
-                        num_computed_tokens: num_computed_tokens,
-                        num_matched_tokens: 0,
-                        has_matched: false,
-                    }).await
-                });
-            }
             Ok((0, false))
         }
     }
@@ -199,7 +174,7 @@ impl KvConnectorLeader {
     /// Note: vLLM will not provide any scheduler output data for requests that are onboarding. it is entirely
     /// on the connector's implementation to handle this case.
     #[tracing::instrument(level = "debug", skip_all, fields(request_id))]
-    pub fn update_state_after_alloc(
+    fn update_state_after_alloc(
         &mut self,
         request_id: String,
         block_ids: Vec<BlockId>,
@@ -233,7 +208,7 @@ impl KvConnectorLeader {
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    pub fn build_connector_metadata(
+    fn build_connector_metadata(
         &mut self,
         scheduler_output: SchedulerOutput,
     ) -> PyResult<Vec<u8>> {
@@ -380,18 +355,93 @@ impl KvConnectorLeader {
         }
     }
 
-    pub fn has_slot(&self, request_id: String) -> bool {
+    fn has_slot(&self, request_id: String) -> bool {
         self.slot_manager.has_slot(&request_id)
     }
 
     /// Create a new slot for the given request ID.
     /// This is used to create a new slot for the request.
-    pub fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> PyResult<()> {
+    fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> PyResult<()> {
         self.slot_manager
             .create_slot(&request.request_id, tokens, request.salt_hash)?;
 
         self.inflight_requests.insert(request.request_id);
 
         Ok(())
+    }
+}
+
+#[pyclass]
+pub struct PyKvConnectorLeader {
+    connector_leader: Box<dyn Leader>,
+}
+
+#[pymethods]
+impl PyKvConnectorLeader {
+    #[new]
+    #[pyo3(signature = (worker_id, drt, block_manager, leader))]
+    pub fn new(
+        worker_id: String,
+        drt: PyDistributedRuntime,
+        block_manager: PyBlockManager,
+        leader: PyKvbmLeader,
+    ) -> Self {
+        let enable_kvbm_record = std::env::var("ENABLE_KVBM_RECORD")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        let connector_leader: Box<dyn Leader> = if enable_kvbm_record {
+            Box::new(recorder::KvConnectorLeaderRecorder::new(
+                worker_id,
+                drt,
+                block_manager,
+                leader,
+            ))
+        } else {
+            Box::new(KvConnectorLeader::new(
+                worker_id,
+                drt,
+                block_manager,
+                leader,
+            ))
+        };
+        Self { connector_leader }
+    }
+
+    fn get_num_new_matched_tokens(
+        &self,
+        request_id: String,
+        request_num_tokens: usize,
+        num_computed_tokens: usize,
+    ) -> PyResult<(usize, bool)> {
+        self.connector_leader.get_num_new_matched_tokens(request_id, request_num_tokens, num_computed_tokens)
+    }
+
+    fn update_state_after_alloc(
+        &mut self,
+        request_id: String,
+        block_ids: Vec<BlockId>,
+        num_external_tokens: usize,
+    ) -> PyResult<()> {
+        self.connector_leader.update_state_after_alloc(request_id, block_ids, num_external_tokens)
+    }
+
+    fn build_connector_metadata(
+        &mut self,
+        scheduler_output: SchedulerOutput,
+    ) -> PyResult<Vec<u8>> {
+        self.connector_leader.build_connector_metadata(scheduler_output)
+    }
+
+    fn request_finished(&mut self, request_id: &str, block_ids: Vec<BlockId>) -> PyResult<bool> {
+        self.connector_leader.request_finished(request_id.to_string(), block_ids)
+    }
+
+    fn has_slot(&self, request_id: &str) -> bool {
+        self.connector_leader.has_slot(request_id.to_string())
+    }
+
+    fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> PyResult<()> {
+        self.connector_leader.create_slot(request, tokens)
     }
 }
