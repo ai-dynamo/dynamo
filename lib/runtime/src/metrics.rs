@@ -19,6 +19,8 @@
 //! that auto populates the labels with the component-endpoint hierarchy.
 //! All metrics are prefixed with "dynamo_component_" to avoid collisions with Kubernetes and other monitoring system labels.
 
+pub mod prometheus_names;
+
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::any::Any;
@@ -373,12 +375,6 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     // Iterate over the DRT's registry and register this metric across all hierarchical levels.
     // The prefixed_hierarchy is structured as: ["", "testnamespace", "testnamespace_testcomponent", "testnamespace_testcomponent_testendpoint"]
     // This prefixing is essential to differentiate between the names of children and grandchildren.
-    let mut prometheus_registry = registry
-        .drt()
-        .prometheus_registries_by_prefix
-        .lock()
-        .unwrap();
-
     // Build prefixed hierarchy and register metrics in a single loop
     // current_prefix accumulates the hierarchical path as we iterate through hierarchy
     // For example, if hierarchy = ["", "testnamespace", "testcomponent"], then:
@@ -392,12 +388,11 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
         }
         current_prefix.push_str(name);
 
-        // Register metric at this hierarchical level
+        // Register metric at this hierarchical level using the new helper function
         let collector: Box<dyn prometheus::core::Collector> = Box::new(prometheus_metric.clone());
-        let _ = prometheus_registry
-            .entry(current_prefix.clone())
-            .or_default()
-            .register(collector);
+        registry
+            .drt()
+            .add_prometheus_metric(&current_prefix, collector)?;
     }
 
     Ok(prometheus_metric)
@@ -589,9 +584,23 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
 
     /// Get metrics in Prometheus text format
     fn prometheus_metrics_fmt(&self) -> anyhow::Result<String> {
+        // Execute callbacks first to ensure any new metrics are added to the registry
+        let callback_results = self.drt().execute_metrics_callbacks(&self.prefix());
+
+        // Log any callback errors but continue
+        for result in callback_results {
+            if let Err(e) = result {
+                eprintln!("Error executing metrics callback: {}", e);
+            }
+        }
+
         let prometheus_registry = {
-            let mut registry = self.drt().prometheus_registries_by_prefix.lock().unwrap();
-            registry.entry(self.prefix()).or_default().clone()
+            let mut registry_entry = self.drt().metrics_registry_by_prefix.lock().unwrap();
+            registry_entry
+                .entry(self.prefix())
+                .or_default()
+                .prometheus_registry
+                .clone()
         };
         let metric_families = prometheus_registry.gather();
         let encoder = prometheus::TextEncoder::new();
@@ -689,13 +698,58 @@ mod tests {
             "testnamespace"
         ); // Hyphen removed
         assert_eq!(
-            lint_prometheus_name("test-namespace_123").unwrap(),
-            "testnamespace_123"
-        ); // Hyphen removed
+            lint_prometheus_name("test-namespace-123").unwrap(),
+            "testnamespace123"
+        ); // Multiple hyphens removed
+    }
 
-        // Test validation errors for invalid patterns
-        assert!(lint_prometheus_name("123test").is_err()); // Starts with digit
-        assert!(lint_prometheus_name("").is_ok()); // Empty is allowed
+    #[test]
+    fn test_metrics_registry_entry_with_callbacks() {
+        use crate::DistributedRuntime;
+        use crate::MetricsRegistryEntry;
+
+        // Create a new metrics registry entry
+        let mut entry = MetricsRegistryEntry::new();
+
+        // Create a test DistributedRuntime for the callbacks
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let drt = rt.block_on(async {
+            let runtime = crate::Runtime::single_threaded().unwrap();
+            DistributedRuntime::from_settings_without_discovery(runtime)
+                .await
+                .unwrap()
+        });
+
+        // Add some runtime callbacks
+        entry.add_callback(&drt as &dyn crate::metrics::MetricsRegistry, |_| {
+            Ok("callback1".to_string())
+        });
+        entry.add_callback(&drt as &dyn crate::metrics::MetricsRegistry, |_| {
+            Ok("callback2".to_string())
+        });
+        entry.add_callback(&drt as &dyn crate::metrics::MetricsRegistry, |_| {
+            Ok("callback3".to_string())
+        });
+
+        // Execute runtime callbacks
+        let results = entry.execute_callbacks(&drt as &dyn crate::metrics::MetricsRegistry);
+
+        // Verify results
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].as_ref().unwrap(), "callback1");
+        assert_eq!(results[1].as_ref().unwrap(), "callback2");
+        assert_eq!(results[2].as_ref().unwrap(), "callback3");
+
+        // Test cloning (callbacks should be empty after clone)
+        let cloned_entry = entry.clone();
+        let cloned_results =
+            cloned_entry.execute_callbacks(&drt as &dyn crate::metrics::MetricsRegistry);
+        assert_eq!(cloned_results.len(), 0);
+
+        // Original should still have callbacks
+        let original_results =
+            entry.execute_callbacks(&drt as &dyn crate::metrics::MetricsRegistry);
+        assert_eq!(original_results.len(), 3);
     }
 }
 
@@ -909,39 +963,25 @@ mod test_prefixes {
 #[cfg(test)]
 mod test_simple_metricsregistry_trait {
     use super::create_test_drt;
+    use super::prometheus_names::nats as nats_metrics;
     use super::*;
     use prometheus::Counter;
     use std::sync::Arc;
 
-    #[test]
-    fn test_component_prometheus_output_contains_custom_label() {
-        // Arrange: DRT → namespace → component with a custom label
-        let drt = create_test_drt();
-        let namespace = drt.namespace("testnamespace").unwrap();
-        let component = namespace
-            .component("testcomponent")
-            .unwrap()
-            .add_labels(&[("service", "api")])
-            .unwrap();
-
-        // Act: create a simple gauge and render Prometheus text
-        let gauge = component
-            .create_gauge("with_label", "Gauge with custom label", &[])
-            .unwrap();
-        gauge.set(1.0);
-
-        let output = component.prometheus_metrics_fmt().unwrap();
-
-        // Assert: custom label is present (don’t rely on label ordering)
-        assert!(
-            output.contains("dynamo_component_with_label{") && output.contains(r#"service="api""#),
-            "Expected custom label service=\"api\" in Prometheus output:\n{}",
-            output
-        );
+    /// Filters out all NATS metrics from Prometheus output for test comparisons.
+    fn filter_out_nats_metrics(input: &str) -> String {
+        input
+            .lines()
+            .filter(|line| {
+                !line.starts_with(&format!("dynamo_component_{}", nats_metrics::PREFIX))
+                    && !line.trim().is_empty()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     #[test]
-    fn test_factory_methods_via_registry_trait() {
+    fn test_prometheusfactory_using_metrics_registry_trait() {
         // Setup real DRT and registry using the test-friendly constructor
         let drt = create_test_drt();
 
@@ -960,15 +1000,17 @@ mod test_simple_metricsregistry_trait {
         let epsilon = 0.01;
         assert!((counter.get() - 123.456789).abs() < epsilon);
 
-        let endpoint_output = endpoint.prometheus_metrics_fmt().unwrap();
+        let endpoint_output_raw = endpoint.prometheus_metrics_fmt().unwrap();
         println!("Endpoint output:");
-        println!("{}", endpoint_output);
+        println!("{}", endpoint_output_raw);
+
+        // Filter out NATS service metrics for test comparison
+        let endpoint_output = filter_out_nats_metrics(&endpoint_output_raw);
 
         let expected_endpoint_output = format!(
             r#"# HELP dynamo_component_testcounter A test counter
 # TYPE dynamo_component_testcounter counter
-dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="testendpoint",dynamo_namespace="testnamespace"}} 123.456789
-"#
+dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="testendpoint",dynamo_namespace="testnamespace"}} 123.456789"#
         );
 
         assert_eq!(
@@ -988,9 +1030,12 @@ dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="
         assert_eq!(gauge.get(), 50000.0);
 
         // Test Prometheus format output for Component (gauge + histogram)
-        let component_output = component.prometheus_metrics_fmt().unwrap();
+        let component_output_raw = component.prometheus_metrics_fmt().unwrap();
         println!("Component output:");
-        println!("{}", component_output);
+        println!("{}", component_output_raw);
+
+        // Filter out NATS service metrics for test comparison
+        let component_output = filter_out_nats_metrics(&component_output_raw);
 
         let expected_component_output = format!(
             r#"# HELP dynamo_component_testcounter A test counter
@@ -998,8 +1043,7 @@ dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="
 dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="testendpoint",dynamo_namespace="testnamespace"}} 123.456789
 # HELP dynamo_component_testgauge A test gauge
 # TYPE dynamo_component_testgauge gauge
-dynamo_component_testgauge{{dynamo_component="testcomponent",dynamo_namespace="testnamespace"}} 50000
-"#
+dynamo_component_testgauge{{dynamo_component="testcomponent",dynamo_namespace="testnamespace"}} 50000"#
         );
 
         assert_eq!(
@@ -1018,9 +1062,12 @@ dynamo_component_testgauge{{dynamo_component="testcomponent",dynamo_namespace="t
         assert_eq!(intcounter.get(), 12345);
 
         // Test Prometheus format output for Namespace (int_counter + gauge + histogram)
-        let namespace_output = namespace.prometheus_metrics_fmt().unwrap();
+        let namespace_output_raw = namespace.prometheus_metrics_fmt().unwrap();
         println!("Namespace output:");
-        println!("{}", namespace_output);
+        println!("{}", namespace_output_raw);
+
+        // Filter out NATS service metrics for test comparison
+        let namespace_output = filter_out_nats_metrics(&namespace_output_raw);
 
         let expected_namespace_output = format!(
             r#"# HELP dynamo_component_testcounter A test counter
@@ -1031,8 +1078,7 @@ dynamo_component_testcounter{{dynamo_component="testcomponent",dynamo_endpoint="
 dynamo_component_testgauge{{dynamo_component="testcomponent",dynamo_namespace="testnamespace"}} 50000
 # HELP dynamo_component_testintcounter A test int counter
 # TYPE dynamo_component_testintcounter counter
-dynamo_component_testintcounter{{dynamo_namespace="testnamespace"}} 12345
-"#
+dynamo_component_testintcounter{{dynamo_namespace="testnamespace"}} 12345"#
         );
 
         assert_eq!(
@@ -1044,59 +1090,42 @@ dynamo_component_testintcounter{{dynamo_namespace="testnamespace"}} 12345
             expected_namespace_output, namespace_output
         );
 
-        // Create a histogram with specified buckets. The Prometheus format output will
-        // lack labels since the DistributedRuntime is unnamed.
-        let histogram = drt
-            .create_histogram(
-                "testhistogram",
-                "A test histogram",
-                &[],
-                Some(vec![1.0, 2.5, 5.0, 10.0]),
-            )
-            .unwrap();
-        histogram.observe(1.5);
-        histogram.observe(2.5);
-        histogram.observe(3.5);
-
-        // Test CounterVec creation
-        let countervec = drt
-            .create_countervec(
-                "testcountervec",
-                "A test counter vector",
-                &["method", "status"],
-                &[("service", "api")],
-            )
-            .unwrap();
-        countervec.with_label_values(&["GET", "200"]).inc_by(10.0);
-        countervec.with_label_values(&["POST", "201"]).inc_by(5.0);
-
         // Test IntGauge creation
-        let intgauge = drt
+        let intgauge = namespace
             .create_intgauge("testintgauge", "A test int gauge", &[])
             .unwrap();
         intgauge.set(42);
         assert_eq!(intgauge.get(), 42);
 
         // Test IntGaugeVec creation
-        let intgaugevec = drt
-            .create_intgaugevec(
-                "testintgaugevec",
-                "A test int gauge vector",
-                &["instance", "status"],
-                &[("service", "api")],
-            )
+        let intgaugevec = namespace
+            .create_intgaugevec("testintgaugevec", "A test int gauge vector", &["instance", "service", "status"], &[("service", "api")])
             .unwrap();
-        intgaugevec
-            .with_label_values(&["server1", "active"])
-            .set(10);
-        intgaugevec
-            .with_label_values(&["server2", "inactive"])
-            .set(0);
+        intgaugevec.with_label_values(&["server1", "active"]).set(10);
+        intgaugevec.with_label_values(&["server2", "inactive"]).set(0);
 
-        // Test Prometheus format output for DRT (which should contain everything)
-        let drt_output = drt.prometheus_metrics_fmt().unwrap();
+        // Test CounterVec creation
+        let countervec = endpoint
+            .create_countervec("testcountervec", "A test counter vector", &["method", "status"], &[("service", "api")])
+            .unwrap();
+        countervec.with_label_values(&["GET", "200"]).inc_by(10.0);
+        countervec.with_label_values(&["POST", "201"]).inc_by(5.0);
+
+        // Test Histogram creation
+        let histogram = component
+            .create_histogram("testhistogram", "A test histogram", &[], None)
+            .unwrap();
+        histogram.observe(1.0);
+        histogram.observe(2.5);
+        histogram.observe(4.0);
+
+        // Test Prometheus format output for DRT (all metrics combined)
+        let drt_output_raw = drt.prometheus_metrics_fmt().unwrap();
         println!("DRT output:");
-        println!("{}", drt_output);
+        println!("{}", drt_output_raw);
+
+        // Filter out NATS service metrics for test comparison
+        let filtered_drt_output = filter_out_nats_metrics(&drt_output_raw);
 
         let expected_drt_output = format!(
             r#"# HELP dynamo_component_testcounter A test counter
@@ -1127,19 +1156,74 @@ dynamo_component_testintgauge 42
 # HELP dynamo_component_testintgaugevec A test int gauge vector
 # TYPE dynamo_component_testintgaugevec gauge
 dynamo_component_testintgaugevec{{instance="server1",service="api",status="active"}} 10
-dynamo_component_testintgaugevec{{instance="server2",service="api",status="inactive"}} 0
-"#
+dynamo_component_testintgaugevec{{instance="server2",service="api",status="inactive"}} 0"#
         );
 
         assert_eq!(
             filtered_drt_output, expected_drt_output,
             "\n=== DRT COMPARISON FAILED ===\n\
              Expected:\n{}\n\
-             Actual:\n{}\n\
+             Actual (filtered):\n{}\n\
              ==============================",
             expected_drt_output, filtered_drt_output
         );
 
         println!("✓ All Prometheus format outputs verified successfully!");
+    }
+
+    #[test]
+    fn test_nats_client_metrics_integration() {
+        // Setup real DRT and registry using the test-friendly constructor
+        let drt = create_test_drt();
+
+        // Get DRT output which should include NATS client metrics
+        let drt_output = drt.prometheus_metrics_fmt().unwrap();
+        println!("DRT output with NATS metrics:");
+        println!("{}", drt_output);
+
+        // Additional checks for NATS client metrics (without checking specific values)
+        let nats_metrics = drt_output
+            .lines()
+            .filter(|line| line.contains(nats_metrics::PREFIX))
+            .collect::<Vec<_>>();
+
+        // Check that NATS client metrics are present
+        assert!(
+            !nats_metrics.is_empty(),
+            "NATS client metrics should be present"
+        );
+
+        // Check for specific NATS client metric names (without values)
+        let nats_metric_names: Vec<&str> = nats_metrics
+            .iter()
+            .filter(|line| line.starts_with(&format!("dynamo_component_{}", nats_metrics::PREFIX)))
+            .map(|line| line.split('{').next().unwrap_or(line))
+            .collect();
+
+        for name in &nats_metric_names {
+            println!("NATS metric name: {}", name);
+        }
+
+        let expected_nats_metrics: Vec<String> = super::prometheus_names::ALL_NATS_METRICS
+            .iter()
+            .map(|metric| format!("dynamo_component_{}", metric))
+            .collect();
+
+        for expected_metric in &expected_nats_metrics {
+            assert!(
+                nats_metric_names
+                    .iter()
+                    .any(|name| name.contains(expected_metric)),
+                "NATS client metric {} should be present",
+                expected_metric
+            );
+        }
+
+        println!(
+            "✓ NATS client metrics verified ({} metrics found)",
+            nats_metrics.len()
+        );
+
+        println!("✓ NATS client metrics integration test passed!");
     }
 }

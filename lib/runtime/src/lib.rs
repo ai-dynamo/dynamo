@@ -147,6 +147,63 @@ impl SystemHealth {
     }
 }
 
+/// Structure to hold Prometheus registries and associated callbacks for a given prefix
+pub struct MetricsRegistryEntry {
+    /// The Prometheus registry for this prefix
+    pub prometheus_registry: prometheus::Registry,
+    /// List of function callbacks that receive a reference to any MetricsRegistry
+    pub runtime_callbacks: Vec<
+        Box<dyn Fn(&dyn crate::metrics::MetricsRegistry) -> anyhow::Result<String> + Send + Sync>,
+    >,
+}
+
+impl MetricsRegistryEntry {
+    /// Create a new metrics registry entry with an empty registry and no callbacks
+    pub fn new() -> Self {
+        Self {
+            prometheus_registry: prometheus::Registry::new(),
+            runtime_callbacks: Vec::new(),
+        }
+    }
+
+    /// Add a callback function that receives a reference to any MetricsRegistry
+    pub fn add_callback<F>(&mut self, _runtime: &dyn crate::metrics::MetricsRegistry, callback: F)
+    where
+        F: Fn(&dyn crate::metrics::MetricsRegistry) -> anyhow::Result<String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        self.runtime_callbacks.push(Box::new(callback));
+    }
+
+    /// Execute all runtime callbacks and return their results
+    pub fn execute_callbacks(
+        &self,
+        runtime: &dyn crate::metrics::MetricsRegistry,
+    ) -> Vec<anyhow::Result<String>> {
+        self.runtime_callbacks
+            .iter()
+            .map(|callback| callback(runtime))
+            .collect()
+    }
+}
+
+impl Default for MetricsRegistryEntry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for MetricsRegistryEntry {
+    fn clone(&self) -> Self {
+        Self {
+            prometheus_registry: self.prometheus_registry.clone(),
+            runtime_callbacks: Vec::new(), // Callbacks cannot be cloned, so we start with an empty list
+        }
+    }
+}
+
 /// Distributed [Runtime] which provides access to shared resources across the cluster, this includes
 /// communication protocols and transports.
 #[derive(Clone)]
@@ -176,8 +233,8 @@ pub struct DistributedRuntime {
     // Health Status
     system_health: Arc<std::sync::Mutex<SystemHealth>>,
 
-    // This map associates metric prefixes with their corresponding Prometheus registries.
-    prometheus_registries_by_prefix: Arc<std::sync::Mutex<HashMap<String, prometheus::Registry>>>,
+    // This map associates metric prefixes with their corresponding Prometheus registries and callbacks.
+    metrics_registry_by_prefix: Arc<std::sync::Mutex<HashMap<String, MetricsRegistryEntry>>>,
 
     // Additional labels for metrics
     labels: Vec<(String, String)>,

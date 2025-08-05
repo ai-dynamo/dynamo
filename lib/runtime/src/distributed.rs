@@ -97,13 +97,21 @@ impl DistributedRuntime {
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
-            prometheus_registries_by_prefix: Arc::new(std::sync::Mutex::new(HashMap::<
+            metrics_registry_by_prefix: Arc::new(std::sync::Mutex::new(HashMap::<
                 String,
-                prometheus::Registry,
+                crate::MetricsRegistryEntry,
             >::new())),
             system_health,
             labels: Vec::new(),
         };
+
+        // Register NATS client metrics after creation
+        if let Err(e) = distributed_runtime
+            .nats_client()
+            .register_metrics(&distributed_runtime)
+        {
+            tracing::warn!("Failed to register NATS client metrics: {}", e);
+        }
 
         // Start system status server if enabled
         if let Some(cancel_token) = cancel_token {
@@ -239,6 +247,94 @@ impl DistributedRuntime {
 
     pub fn instance_sources(&self) -> Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>> {
         self.instance_sources.clone()
+    }
+
+
+
+    /// Add a Prometheus metric to a specific prefix's registry
+    pub fn add_prometheus_metric(
+        &self,
+        prefix: &str,
+        prometheus_metric: Box<dyn prometheus::core::Collector>,
+    ) -> anyhow::Result<()> {
+        let mut registries = self.metrics_registry_by_prefix.lock().unwrap();
+        let entry = registries.entry(prefix.to_string()).or_default();
+        entry.prometheus_registry.register(prometheus_metric)?;
+        Ok(())
+    }
+
+    /// Add a callback function to a metrics registry for the given prefix
+    pub fn add_metrics_callback<F>(&self, prefix: &str, callback: F)
+    where
+        F: Fn(&dyn crate::metrics::MetricsRegistry) -> anyhow::Result<String>
+            + Send
+            + Sync
+            + 'static,
+    {
+        let mut registries = self.metrics_registry_by_prefix.lock().unwrap();
+        registries
+            .entry(prefix.to_string())
+            .or_default()
+            .add_callback(self as &dyn crate::metrics::MetricsRegistry, callback);
+    }
+
+    /// Execute all callbacks for a given prefix and return their results
+    pub fn execute_metrics_callbacks(&self, prefix: &str) -> Vec<anyhow::Result<String>> {
+        let registries = self.metrics_registry_by_prefix.lock().unwrap();
+        if let Some(entry) = registries.get(prefix) {
+            entry.execute_callbacks(self as &dyn crate::metrics::MetricsRegistry)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Get all registered prefixes. Private because it is only used for testing.
+    fn get_metrics_prefixes(&self) -> Vec<String> {
+        let registries = self.metrics_registry_by_prefix.lock().unwrap();
+        registries.keys().cloned().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_metrics_registry_methods() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let drt = rt.block_on(async {
+            let runtime = Runtime::single_threaded().unwrap();
+            DistributedRuntime::from_settings_without_discovery(runtime)
+                .await
+                .unwrap()
+        });
+
+        // Test adding callbacks
+        drt.add_metrics_callback("test_prefix", |_| Ok("test_callback".to_string()));
+        drt.add_metrics_callback("test_prefix", |_| Ok("test_callback2".to_string()));
+
+        // Test executing callbacks
+        let results = drt.execute_metrics_callbacks("test_prefix");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].as_ref().unwrap(), "test_callback");
+        assert_eq!(results[1].as_ref().unwrap(), "test_callback2");
+
+        // Test getting prefixes
+        let prefixes = drt.get_metrics_prefixes();
+        assert!(prefixes.contains(&"test_prefix".to_string()));
+
+        // Test non-existent prefix
+        let empty_results = drt.execute_metrics_callbacks("non_existent");
+        assert_eq!(empty_results.len(), 0);
+
+        // Test adding a Prometheus metric
+        let counter = prometheus::Counter::new("test_counter", "A test counter").unwrap();
+        drt.add_prometheus_metric("test_prefix", Box::new(counter.clone()))
+            .unwrap();
+
+        // Verify the metric was added by checking if the prefix exists
+        let prefixes = drt.get_metrics_prefixes();
+        assert!(prefixes.contains(&"test_prefix".to_string()));
     }
 }
 

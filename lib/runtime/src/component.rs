@@ -30,7 +30,10 @@
 //! TODO: Top-level Overview of Endpoints/Functions
 
 use crate::{
-    config::HealthStatus, discovery::Lease, metrics::MetricsRegistry, service::ServiceSet,
+    config::HealthStatus,
+    discovery::Lease,
+    metrics::{prometheus_names, MetricsRegistry},
+    service::ServiceSet,
     transports::etcd::EtcdPath,
 };
 
@@ -262,12 +265,56 @@ impl Component {
         Ok(out)
     }
 
+    /// Scrape user defined stats (embedded in data field of ServiceInfo)
     pub async fn scrape_stats(&self, timeout: Duration) -> Result<ServiceSet> {
         let service_name = self.service_name();
         let service_client = self.drt().service_client();
         service_client
             .collect_services(&service_name, timeout)
             .await
+    }
+
+    /// Register Prometheus metrics for this component's service stats
+    pub fn register_metrics(&self) -> Result<crate::service::ComponentSystemStatusNatsMetrics> {
+        let component_metrics =
+            crate::service::ComponentSystemStatusNatsMetrics::from_component(self)?;
+
+        // Create a callback that scrapes stats and updates metrics when called
+        let metrics_clone = component_metrics.clone();
+        let component_clone = self.clone();
+        let prefix = self.prefix();
+        let service_name = self.service_name();
+        let prefix_for_closure = prefix.clone();
+        self.drt().add_metrics_callback(&prefix, move |_runtime| {
+            println!(
+                "[DEBUG]CALLING  metrics callback for component: {}, prefix:{}",
+                service_name, prefix_for_closure
+            );
+            // Use tokio::runtime::Handle to run async code in the callback
+            let handle = tokio::runtime::Handle::try_current();
+            if let Ok(handle) = handle {
+                let metrics_ref = metrics_clone.clone();
+                let comp_ref = component_clone.clone();
+                handle.spawn(async move {
+                    let timeout = std::time::Duration::from_millis(500);
+                    match comp_ref.scrape_stats(timeout).await {
+                        Ok(service_set) => {
+                            metrics_ref.update_from_service_set(&service_set);
+                        }
+                        Err(err) => {
+                            tracing::warn!(
+                                "Failed to scrape stats for component '{}': {}",
+                                comp_ref.service_name(),
+                                err
+                            );
+                        }
+                    }
+                });
+            }
+            Ok("".to_string())
+        });
+
+        Ok(component_metrics)
     }
 
     /// TODO
@@ -520,11 +567,13 @@ impl Namespace {
 
     /// Create a [`Component`] in the namespace who's endpoints can be discovered with etcd
     pub fn component(&self, name: impl Into<String>) -> Result<Component> {
-        Ok(ComponentBuilder::from_runtime(self.runtime.clone())
+        let component = ComponentBuilder::from_runtime(self.runtime.clone())
             .name(name)
             .namespace(self.clone())
             .is_static(self.is_static)
-            .build()?)
+            .build()?;
+        component.register_metrics()?; // register a callback to scrape stats and update metrics
+        Ok(component)
     }
 
     /// Create a [`Namespace`] in the parent namespace
