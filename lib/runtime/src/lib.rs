@@ -38,6 +38,7 @@ pub mod discovery;
 pub mod engine;
 pub mod http_server;
 pub use http_server::HttpServerInfo;
+pub mod instances;
 pub mod logging;
 pub mod metrics;
 pub mod pipeline;
