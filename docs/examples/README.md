@@ -45,9 +45,15 @@ Consult the examples below for the CRs for your specific inference backend.
 
 [View SGLang k8s](/components/backends/sglang/deploy/README.md)
 
+<<<<<<< HEAD
 [View vLLM K8s](/components/backends/vllm/deploy/README.md)
 
 [View TRTLLM k8s](/components/backends/trtllm/deploy/README.md)
+=======
+[View vLLM K8s](../../components/backends/vllm/README.md#kubernetes-deployment)
+
+[View TRTLLM k8s](../components/backends/trtllm/README.md#kubernetes-deployment)
+>>>>>>> 66f63dd1 (fixes)
 
 **Note 1** Example Image
 
