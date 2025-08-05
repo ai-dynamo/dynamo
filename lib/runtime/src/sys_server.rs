@@ -128,7 +128,7 @@ pub async fn spawn_sys_server(
     cancel_token: CancellationToken,
     drt: Arc<crate::DistributedRuntime>,
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
-    // Create HTTP server state with the provided metrics registry
+    // Create System server state with the provided metrics registry
     let server_state = Arc::new(SysServerState::new(drt)?);
     let health_path = server_state
         .drt()
