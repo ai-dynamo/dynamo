@@ -19,7 +19,7 @@ SGLang allows you to deploy multi-node sized models by adding in the `dist-init-
 Node 1: Run HTTP ingress, processor, and 8 shards of the prefill worker
 ```bash
 # run ingress
-dynamo run in=http out=dyn &
+python3 -m dynamo.frontend --http-port=8000 &
 # run prefill worker
 python3 -m dynamo.sglang.worker \
   --model-path /model/ \
@@ -102,7 +102,7 @@ SGLang typically requires a warmup period to ensure the DeepGEMM kernels are loa
 curl ${HEAD_PREFILL_NODE_IP}:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+    "model": "deepseek-ai/DeepSeek-R1",
     "messages": [
     {
         "role": "user",

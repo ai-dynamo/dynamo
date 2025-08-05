@@ -65,6 +65,7 @@ jobs:
             - 'container/Dockerfile.sglang-deepep'
             - 'components/backends/sglang/**'
             - 'container/build.sh'
+            - 'tests/serve/test_sglang.py'
     - name: Check if Validation Workflow has run
       id: check_workflow
       uses: actions/github-script@v6

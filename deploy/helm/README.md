@@ -34,6 +34,7 @@ Here is how you would install a VLLM inference backend example.
 
 ```bash
 helm upgrade --install dynamo-graph ./deploy/helm/chart -n dynamo-cloud -f ./components/backends/vllm/deploy/agg.yaml
+```
 
 ### Installation using Grove
 
