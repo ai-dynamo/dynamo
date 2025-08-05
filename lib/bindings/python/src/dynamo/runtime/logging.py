@@ -202,7 +202,7 @@ def get_bool_env_var(name: str, default: str = "false") -> bool:
 
     if (value not in truthy_values) and (value not in falsy_values):
         logging.warning(
-            f"The environment variable {name} has an unrecognized value={value!r}, treating as false"
+            f"The environment variable {name} has an unrecognized value={value}, treating as false"
         )
 
     return value in truthy_values
