@@ -70,7 +70,7 @@ docker build -f container/Dockerfile.tensorrt_llm_prebuilt . \
 ```bash
 export MODEL_PATH=<LOCAL_MODEL_DIRECTORY>
 
-huggingface-cli download openai/gpt-oss-120b --local-dir $MODEL_PATH
+huggingface-cli download openai/gpt-oss-120b --exclude "original/*" --exclude "metal/*" --local-dir $MODEL_PATH
 ```
 
 ### 3. Run the Container
