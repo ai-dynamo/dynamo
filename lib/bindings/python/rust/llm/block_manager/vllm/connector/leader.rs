@@ -28,6 +28,8 @@ use std::{
     sync::{Arc, Mutex},
 };
 use tokio::sync::mpsc;
+use tokio;
+use pyo3_async_runtimes;
 
 type VllmLocality = Logical<DistributedLeaderWorkerResources>;
 
@@ -35,6 +37,17 @@ impl From<SlotError> for PyErr {
     fn from(err: SlotError) -> Self {
         to_pyerr(err)
     }
+}
+use dynamo_llm::recorder::Recorder;
+use tokio_util::sync::CancellationToken;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MatchedTokensEvent {
+    request_id: String,
+    request_num_tokens: usize,
+    num_computed_tokens: usize,
+    num_matched_tokens: usize,
+    has_matched: bool,
 }
 
 #[pyclass]
@@ -44,6 +57,7 @@ pub struct KvConnectorLeader {
     inflight_requests: HashSet<String>,
     onboarding_slots: HashSet<String>,
     iteration_counter: u64,
+    recorder: Option<Recorder<MatchedTokensEvent>>,
 }
 
 #[pymethods]
@@ -70,12 +84,34 @@ impl KvConnectorLeader {
         // if we need a drt, get it from here
         let drt = drt.inner().clone();
 
+        let enable_kvbm_record = std::env::var("ENABLE_KVBM_RECORD")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        let recorder = if enable_kvbm_record {
+            let token = CancellationToken::new();
+            let output_path = "/tmp/records.jsonl";
+            tracing::info!("recording events to {}", output_path);
+
+            // Create recorder synchronously using pyo3 async runtime
+            let runtime = pyo3_async_runtimes::tokio::get_runtime();
+            let recorder_result = runtime.block_on(async {
+                // TODO: using Some(2) for testing - quick shutdown of the recorder
+                // Should be None or a larger number
+                Recorder::new(token, &output_path, None, Some(2), None).await
+            }).unwrap();
+            Some(recorder_result)
+        } else {
+            None
+        };
+
         Self {
             slot_manager: ConnectorSlotManager::new(block_manager.clone(), leader, drt.clone()),
             block_size,
             inflight_requests: HashSet::new(),
             onboarding_slots: HashSet::new(),
             iteration_counter: 0,
+            recorder,
         }
     }
 
@@ -125,8 +161,34 @@ impl KvConnectorLeader {
                 "scheduling onboarding for {} external tokens",
                 num_external_tokens
             );
+            if let Some(recorder) = &self.recorder {
+                let event_tx = recorder.event_sender();
+                let runtime = pyo3_async_runtimes::tokio::get_runtime();
+                let _ = runtime.block_on(async {
+                    event_tx.send(MatchedTokensEvent {
+                        request_id: request_id,
+                        request_num_tokens: request_num_tokens,
+                        num_computed_tokens: num_computed_tokens,
+                        num_matched_tokens: num_external_tokens,
+                        has_matched: true,
+                    }).await
+                });
+            }
             Ok((num_external_tokens, true))
         } else {
+            if let Some(recorder) = &self.recorder {
+                let event_tx = recorder.event_sender();
+                let runtime = pyo3_async_runtimes::tokio::get_runtime();
+                let _ = runtime.block_on(async {
+                    event_tx.send(MatchedTokensEvent {
+                        request_id: request_id,
+                        request_num_tokens: request_num_tokens,
+                        num_computed_tokens: num_computed_tokens,
+                        num_matched_tokens: 0,
+                        has_matched: false,
+                    }).await
+                });
+            }
             Ok((0, false))
         }
     }
