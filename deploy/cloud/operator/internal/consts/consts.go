@@ -37,11 +37,7 @@ const (
 	ComponentTypePlanner      = "planner"
 	ComponentTypeMain         = "main"
 	PlannerServiceAccountName = "planner-serviceaccount"
-
-	// DynamoConfig componentType values
-	ComponentTypeWorker        = "worker"        // Aggregated serving workers
-	ComponentTypePrefillWorker = "prefillWorker" // Disaggregated prefill workers
-	ComponentTypeDecodeWorker  = "decodeWorker"  // Disaggregated decode workers
+	ComponentTypeWorker       = "worker"
 
 	DefaultIngressSuffix = "local"
 

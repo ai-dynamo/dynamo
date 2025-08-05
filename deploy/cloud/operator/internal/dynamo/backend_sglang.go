@@ -2,90 +2,81 @@ package dynamo
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
-	ptr "k8s.io/utils/ptr"
 )
 
 type SGLangBackend struct{}
 
-func (b *SGLangBackend) GenerateCommandAndArgs(componentType string, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType consts.MultinodeDeploymentType) ([]string, []string) {
-	cmd := []string{"/bin/sh", "-c"}
-	args := buildSGLangArgs(numberOfNodes, role, component.DynamoConfig, multinodeDeploymentType)
-	var argStr string
-	// Note: componentType parameter is used to generate different commands for different component types.
-	// It's the caller's responsibility to ensure componentType matches component.ComponentType if needed.
-	switch componentType {
-	case commonconsts.ComponentTypeMain:
-		argStr = "python3 -m dynamo.frontend --http-port=8000"
-	case commonconsts.ComponentTypeWorker:
-		argStr = fmt.Sprintf("python3 -m dynamo.sglang.worker %s", strings.Join(args, " "))
-	case commonconsts.ComponentTypeDecodeWorker:
-		argStr = fmt.Sprintf("python3 -m dynamo.sglang.decode_worker %s", strings.Join(args, " "))
-	default:
-		argStr = fmt.Sprintf("python3 -m dynamo.sglang.worker %s", strings.Join(args, " "))
+func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType) {
+	// For single node, nothing to do
+	if numberOfNodes <= 1 {
+		return
 	}
-	return cmd, []string{argStr}
+
+	// Generate the flags to add
+	flags := b.getMultinodeFlags(numberOfNodes, role, multinodeDeploymentType)
+	if flags == "" {
+		return
+	}
+
+	// Flatten all args into a single command and inject flags
+	if len(container.Args) > 0 {
+		fullCommand := strings.Join(container.Args, " ")
+		modifiedCommand := b.injectFlagsIntoPythonCommand(fullCommand, flags)
+		container.Args = []string{modifiedCommand}
+	}
 }
 
-func (b *SGLangBackend) MergeArgs(defaultArgs, userArgs []string, multinode bool, role Role, componentType string, numberOfNodes int32, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType consts.MultinodeDeploymentType) []string {
-	if len(userArgs) == 0 {
-		return defaultArgs
-	}
-	if !multinode {
-		return userArgs
-	}
-	multiArgs := buildSGLangArgs(numberOfNodes, role, component.DynamoConfig, multinodeDeploymentType)
-	return []string{strings.Join(append(userArgs, multiArgs...), " ")}
-}
+// getMultinodeFlags returns the multinode flags as a single string
+func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, multinodeDeploymentType commonconsts.MultinodeDeploymentType) string {
+	var distInitAddr, nodeRank string
 
-func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType consts.MultinodeDeploymentType) {
-	// do nothing
-}
+	// Determine dist-init-addr
+	if multinodeDeploymentType == commonconsts.MultinodeDeploymentTypeGrove {
+		distInitAddr = "${GROVE_HEADLESS_SERVICE}:29500"
+	} else {
+		distInitAddr = "${LWS_LEADER_ADDRESS}:29500"
+	}
 
-func buildSGLangArgs(
-	numberOfNodes int32,
-	role Role,
-	dynamoConfig *v1alpha1.DynamoConfig,
-	multinodeDeploymentType consts.MultinodeDeploymentType,
-) []string {
-	baseFlags := map[string]*string{}
-	// Set distributed flags for multinode
-	if numberOfNodes > 1 {
-		if multinodeDeploymentType == consts.MultinodeDeploymentTypeGrove {
-			baseFlags["dist-init-addr"] = ptr.To("${GROVE_HEADLESS_SERVICE}:29500")
+	// Determine node-rank
+	if role == RoleLeader {
+		nodeRank = "0"
+	} else {
+		if multinodeDeploymentType == commonconsts.MultinodeDeploymentTypeGrove {
+			nodeRank = "$((GROVE_PCLQ_POD_INDEX + 1))"
 		} else {
-			baseFlags["dist-init-addr"] = ptr.To("${LWS_LEADER_ADDRESS}:29500")
-		}
-		baseFlags["nnodes"] = ptr.To(fmt.Sprintf("%d", numberOfNodes))
-		if role == RoleLeader {
-			baseFlags["node-rank"] = ptr.To("0")
-		} else {
-			if multinodeDeploymentType == consts.MultinodeDeploymentTypeGrove {
-				baseFlags["node-rank"] = ptr.To("$((GROVE_PCLQ_POD_INDEX + 1))")
-			} else {
-				// todo : add node rank for LWS
-			}
+			// todo: add node rank for LWS
+			nodeRank = "1"
 		}
 	}
-	// Set defaults from config
-	if dynamoConfig != nil {
-		if dynamoConfig.TensorParallelSize != nil {
-			baseFlags["tp-size"] = ptr.To(fmt.Sprintf("%d", *dynamoConfig.TensorParallelSize))
+
+	return fmt.Sprintf("--dist-init-addr %s --nnodes %d --node-rank %s", distInitAddr, numberOfNodes, nodeRank)
+}
+
+// injectFlagsIntoPythonCommand finds python sglang commands and adds flags after them
+func (b *SGLangBackend) injectFlagsIntoPythonCommand(arg, flags string) string {
+	// Regex to match python commands that contain sglang
+	// Matches: python, python3, python3.11, etc. followed by sglang-related modules
+	pattern := `(python[0-9.]*\s+[^|&;]*sglang[^|&;]*?)(\s|$|[|&;])`
+
+	re := regexp.MustCompile(pattern)
+
+	// Replace with the command + flags + whatever comes after
+	result := re.ReplaceAllStringFunc(arg, func(match string) string {
+		// Extract the python command part and the delimiter
+		submatches := re.FindStringSubmatch(match)
+		if len(submatches) >= 3 {
+			pythonCmd := submatches[1]
+			delimiter := submatches[2]
+			return pythonCmd + " " + flags + delimiter
 		}
-		if dynamoConfig.DataParallelSize != nil {
-			baseFlags["dp-size"] = ptr.To(fmt.Sprintf("%d", *dynamoConfig.DataParallelSize))
-		}
-	}
-	var flagOverrides map[string]*string
-	var extraArgs []string
-	if dynamoConfig != nil {
-		flagOverrides = dynamoConfig.FlagOverrides
-		extraArgs = dynamoConfig.ExtraArgs
-	}
-	return applyFlagOverridesAndExtraArgs(baseFlags, flagOverrides, extraArgs)
+		return match
+	})
+
+	return result
 }

@@ -414,26 +414,6 @@ spec:
                   type: string
                 dynamoComponent:
                   type: string
-                dynamoConfig:
-                  properties:
-                    dataParallelSize:
-                      format: int32
-                      type: integer
-                    extraArgs:
-                      items:
-                        type: string
-                      type: array
-                    flagOverrides:
-                      additionalProperties:
-                        type: string
-                      type: object
-                    numberOfNodes:
-                      format: int32
-                      type: integer
-                    tensorParallelSize:
-                      format: int32
-                      type: integer
-                  type: object
                 dynamoNamespace:
                   type: string
                 dynamoTag:
@@ -5065,6 +5045,8 @@ spec:
                           type: string
                         memory:
                           type: string
+                        nodes:
+                          type: string
                       type: object
                     requests:
                       properties:
@@ -5077,6 +5059,8 @@ spec:
                         gpu:
                           type: string
                         memory:
+                          type: string
+                        nodes:
                           type: string
                       type: object
                   type: object

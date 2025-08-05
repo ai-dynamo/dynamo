@@ -5,112 +5,42 @@ import (
 	"strings"
 
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
-	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
-	ptr "k8s.io/utils/ptr"
 )
 
 type VLLMBackend struct{}
 
-func (b *VLLMBackend) GenerateCommandAndArgs(componentType string, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType consts.MultinodeDeploymentType) ([]string, []string) {
-	cmd := []string{"/bin/sh", "-c"}
-	args := buildVLLMArgs(component.DynamoConfig)
-	var argStr string
-	// Note: componentType parameter is used to generate different commands for different component types.
-	// It's the caller's responsibility to ensure componentType matches component.ComponentType if needed.
-	switch componentType {
-	case commonconsts.ComponentTypeMain:
-		argStr = "python3 -m dynamo.frontend --http-port 8000"
-	case commonconsts.ComponentTypeWorker:
-		if numberOfNodes == 1 {
-			argStr = fmt.Sprintf("python3 -m dynamo.vllm %s", strings.Join(args, " "))
-		} else if role == RoleWorker {
-			if multinodeDeploymentType == consts.MultinodeDeploymentTypeGrove {
-				argStr = "ray start --address=${GROVE_HEADLESS_SERVICE}:6379 --block"
-			} else {
-				argStr = "ray start --address=${LWS_LEADER_ADDRESS}:6379 --block"
-			}
-		} else {
-			argStr = fmt.Sprintf("ray start --head --port=6379 && python3 -m dynamo.vllm %s", strings.Join(args, " "))
-		}
-	case commonconsts.ComponentTypePrefillWorker:
-		if numberOfNodes == 1 {
-			argStr = fmt.Sprintf("python3 -m dynamo.vllm --is-prefill-worker %s", strings.Join(args, " "))
-		} else if role == RoleWorker {
-			if multinodeDeploymentType == consts.MultinodeDeploymentTypeGrove {
-				argStr = "ray start --address=${GROVE_HEADLESS_SERVICE}:6379 --block"
-			} else {
-				argStr = "ray start --address=${LWS_LEADER_ADDRESS}:6379 --block"
-			}
-		} else {
-			argStr = fmt.Sprintf("ray start --head --port=6379 && python3 -m dynamo.vllm --is-prefill-worker %s", strings.Join(args, " "))
-		}
-	case commonconsts.ComponentTypeDecodeWorker:
-		if numberOfNodes == 1 {
-			argStr = fmt.Sprintf("python3 -m dynamo.vllm %s", strings.Join(args, " "))
-		} else if role == RoleWorker {
-			if multinodeDeploymentType == consts.MultinodeDeploymentTypeGrove {
-				argStr = "ray start --address=${GROVE_HEADLESS_SERVICE}:6379 --block"
-			} else {
-				argStr = "ray start --address=${LWS_LEADER_ADDRESS}:6379 --block"
-			}
-		} else {
-			argStr = fmt.Sprintf("ray start --head --port=6379 && python3 -m dynamo.vllm %s", strings.Join(args, " "))
-		}
-	default:
-		argStr = fmt.Sprintf("python3 -m dynamo.vllm %s", strings.Join(args, " "))
-	}
-	return cmd, []string{argStr}
-}
+func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType) {
+	isMultinode := numberOfNodes > 1
 
-func (b *VLLMBackend) MergeArgs(defaultArgs, userArgs []string, multinode bool, role Role, componentType string, numberOfNodes int32, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType consts.MultinodeDeploymentType) []string {
-	if len(userArgs) == 0 {
-		return defaultArgs
-	}
-	if multinode {
-		multiArgs := buildVLLMArgs(component.DynamoConfig)
-		switch role {
-		case RoleLeader:
-			return []string{fmt.Sprintf("ray start --head --port=6379 && %s", strings.Join(append(userArgs, multiArgs...), " "))}
-		case RoleWorker:
-			if multinodeDeploymentType == consts.MultinodeDeploymentTypeGrove {
-				return []string{"ray start --address=${GROVE_HEADLESS_SERVICE}:6379 --block"}
-			} else {
-				return []string{"ray start --address=${LWS_LEADER_ADDRESS}:6379 --block"}
-			}
-		}
-	}
-	return userArgs
-}
+	if isMultinode {
+		// Apply multinode-specific argument modifications
+		updateVLLMMultinodeArgs(container, role, multinodeDeploymentType)
 
-func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType consts.MultinodeDeploymentType) {
-	if numberOfNodes > 1 && role == RoleWorker {
-		// we need to remove probes for multinode worker (that runs ray start --block)
-		container.LivenessProbe = nil
-		container.ReadinessProbe = nil
-		container.StartupProbe = nil
+		// Remove probes for multinode worker (that runs ray start --block)
+		if role == RoleWorker {
+			container.LivenessProbe = nil
+			container.ReadinessProbe = nil
+			container.StartupProbe = nil
+		}
 	}
 }
 
-func buildVLLMArgs(
-	dynamoConfig *v1alpha1.DynamoConfig,
-) []string {
-	baseFlags := map[string]*string{}
-	// Set defaults from config
-	if dynamoConfig != nil {
-		if dynamoConfig.TensorParallelSize != nil {
-			baseFlags["tensor-parallel-size"] = ptr.To(fmt.Sprintf("%d", *dynamoConfig.TensorParallelSize))
+// updateVLLMMultinodeArgs applies Ray-specific modifications for multinode deployments
+func updateVLLMMultinodeArgs(container *corev1.Container, role Role, multinodeDeploymentType commonconsts.MultinodeDeploymentType) {
+	switch role {
+	case RoleLeader:
+		if len(container.Args) > 0 {
+			// Prepend ray start --head command to existing args
+			container.Args = []string{fmt.Sprintf("ray start --head --port=6379 && %s", strings.Join(container.Args, " "))}
 		}
-		if dynamoConfig.DataParallelSize != nil {
-			baseFlags["data-parallel-size"] = ptr.To(fmt.Sprintf("%d", *dynamoConfig.DataParallelSize))
+	case RoleWorker:
+		// Worker nodes only run Ray, completely replace args
+		if multinodeDeploymentType == commonconsts.MultinodeDeploymentTypeGrove {
+			container.Args = []string{"ray start --address=${GROVE_HEADLESS_SERVICE}:6379 --block"}
+		} else {
+			container.Args = []string{"ray start --address=${LWS_LEADER_ADDRESS}:6379 --block"}
 		}
 	}
-	var flagOverrides map[string]*string
-	var extraArgs []string
-	if dynamoConfig != nil {
-		flagOverrides = dynamoConfig.FlagOverrides
-		extraArgs = dynamoConfig.ExtraArgs
-	}
-	return applyFlagOverridesAndExtraArgs(baseFlags, flagOverrides, extraArgs)
 }

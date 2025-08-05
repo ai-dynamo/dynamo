@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -50,13 +51,6 @@ type DynamoConfig struct {
 	ComponentType string `yaml:"component_type,omitempty"`
 }
 
-type Resources struct {
-	CPU    *string           `yaml:"cpu,omitempty" json:"cpu,omitempty"`
-	Memory *string           `yaml:"memory,omitempty" json:"memory,omitempty"`
-	GPU    *string           `yaml:"gpu,omitempty" json:"gpu,omitempty"`
-	Custom map[string]string `yaml:"custom,omitempty" json:"custom,omitempty"`
-}
-
 type Traffic struct {
 	Timeout int `yaml:"timeout"`
 }
@@ -82,6 +76,13 @@ type ServiceConfig struct {
 	Name         string              `yaml:"name"`
 	Dependencies []map[string]string `yaml:"dependencies,omitempty"`
 	Config       Config              `yaml:"config"`
+}
+
+type Resources struct {
+	CPU    *string           `yaml:"cpu,omitempty" json:"cpu,omitempty"`
+	Memory *string           `yaml:"memory,omitempty" json:"memory,omitempty"`
+	GPU    *string           `yaml:"gpu,omitempty" json:"gpu,omitempty"`
+	Custom map[string]string `yaml:"custom,omitempty" json:"custom,omitempty"`
 }
 
 type DynDeploymentConfig = map[string]*DynDeploymentServiceConfig
@@ -313,10 +314,17 @@ type SecretsRetriever interface {
 	GetSecrets(namespace, registry string) ([]string, error)
 }
 
-// getNumberOfNodes extracts the NumberOfNodes from DynamoConfig
-func getNumberOfNodes(dynamoConfig *v1alpha1.DynamoConfig) int32 {
-	if dynamoConfig != nil && dynamoConfig.NumberOfNodes != nil {
-		return *dynamoConfig.NumberOfNodes
+// getNumberOfNodes extracts the numberOfNodes from resources.nodes
+func getNumberOfNodes(resources *common.Resources) int32 {
+	if resources != nil && resources.Requests != nil && resources.Requests.Nodes != "" {
+		if nodes, err := strconv.ParseInt(resources.Requests.Nodes, 10, 32); err == nil {
+			return int32(nodes)
+		}
+	}
+	if resources != nil && resources.Limits != nil && resources.Limits.Nodes != "" {
+		if nodes, err := strconv.ParseInt(resources.Limits.Nodes, 10, 32); err == nil {
+			return int32(nodes)
+		}
 	}
 	return 1 // Default to single node
 }
@@ -514,9 +522,14 @@ const (
 // Backend interface for modular backend logic
 // Each backend (SGLang, VLLM, etc.) implements this interface
 type Backend interface {
-	GenerateCommandAndArgs(componentType string, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType) ([]string, []string)
-	MergeArgs(defaultArgs, userArgs []string, multinode bool, role Role, componentType string, numberOfNodes int32, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType) []string
 	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType)
+}
+
+// NoopBackend does no processing - used for non-worker components like frontend, planner, router
+type NoopBackend struct{}
+
+func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType) {
+	// No-op: frontend, planner, router, etc. don't need backend-specific processing
 }
 
 // BackendFactory creates backend instances based on the framework type
@@ -528,9 +541,16 @@ func BackendFactory(backendFramework BackendFramework) Backend {
 		return &VLLMBackend{}
 	case BackendFrameworkTRTLLM:
 		return nil // Not implemented yet
+	case BackendFrameworkNoop:
+		return &NoopBackend{}
 	default:
 		return nil
 	}
+}
+
+// isWorkerComponent checks if a component is a worker that needs backend framework detection
+func isWorkerComponent(componentType string) bool {
+	return componentType == commonconsts.ComponentTypeWorker
 }
 
 // addStandardEnvVars adds the standard environment variables that are common to both Grove and Controller
@@ -586,12 +606,7 @@ func GenerateBasePodSpec(
 			},
 		},
 	}
-	backend := BackendFactory(backendFramework)
-	if backend == nil {
-		return corev1.PodSpec{}, fmt.Errorf("unsupported backend framework: %s", backendFramework)
-	}
-	cmd, args := backend.GenerateCommandAndArgs(component.ComponentType, numberOfNodes, role, component, multinodeDeploymentType)
-
+	// First merge the mainContainer from extraPodSpec to get the base command and args
 	if component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil {
 		main := component.ExtraPodSpec.MainContainer.DeepCopy()
 		if main != nil {
@@ -603,9 +618,12 @@ func GenerateBasePodSpec(
 			container.Env = MergeEnvs(component.Envs, container.Env)
 		}
 	}
-	isMultinode := numberOfNodes > 1
-	container.Command = mergeContainerCommand(cmd, container.Command)
-	container.Args = backend.MergeArgs(args, container.Args, isMultinode, role, component.ComponentType, numberOfNodes, component, multinodeDeploymentType)
+
+	// Apply backend-specific container modifications
+	backend := BackendFactory(backendFramework)
+	if backend == nil {
+		return corev1.PodSpec{}, fmt.Errorf("unsupported backend framework: %s", backendFramework)
+	}
 	backend.UpdateContainer(&container, numberOfNodes, role, component, multinodeDeploymentType)
 
 	resourcesConfig, err := controller_common.GetResourcesConfig(component.Resources)
@@ -632,8 +650,6 @@ func GenerateBasePodSpec(
 		})
 	}
 
-	// Add standard environment variables (shared between Grove and Controller)
-	// This happens before any deployment-specific merging in the wrappers
 	addStandardEnvVars(&container, controllerConfig)
 
 	var volumes []corev1.Volume
@@ -651,7 +667,7 @@ func GenerateBasePodSpec(
 			MountPath: *component.PVC.MountPoint,
 		})
 	}
-	shmVolume, shmVolumeMount := generateSharedMemoryVolumeAndMount(isMultinode, &container.Resources)
+	shmVolume, shmVolumeMount := generateSharedMemoryVolumeAndMount(&container.Resources)
 	volumes = append(volumes, shmVolume)
 	container.VolumeMounts = append(container.VolumeMounts, shmVolumeMount)
 	var podSpec corev1.PodSpec
@@ -699,10 +715,15 @@ func GenerateGrovePodGangSet(
 	if controllerConfig.Grove.TerminationDelay > 0 {
 		gangSet.Spec.Template.TerminationDelay = &metav1.Duration{Duration: controllerConfig.Grove.TerminationDelay}
 	}
-	backendFramework := getBackendFramework(dynamoDeployment)
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
 	for serviceName, component := range dynamoDeployment.Spec.Services {
-		numberOfNodes := getNumberOfNodes(component.DynamoConfig)
+		// Determine backend framework using hybrid approach
+		backendFramework, err := getBackendFrameworkFromComponent(component, dynamoDeployment)
+		if err != nil {
+			return nil, fmt.Errorf("failed to determine backend framework for service %s: %w", serviceName, err)
+		}
+
+		numberOfNodes := getNumberOfNodes(component.Resources)
 		isMultinode := numberOfNodes > 1
 		roles := expandRolesForService(serviceName, component.Replicas, numberOfNodes)
 		var cliqueNames []string
@@ -753,11 +774,122 @@ func GenerateGrovePodGangSet(
 	return gangSet, nil
 }
 
-func getBackendFramework(dynamoDeployment *v1alpha1.DynamoGraphDeployment) BackendFramework {
-	if dynamoDeployment.Spec.BackendFramework != "" {
-		return BackendFramework(dynamoDeployment.Spec.BackendFramework)
+// detectBackendFrameworkFromArgs detects the backend framework from command/args
+func detectBackendFrameworkFromArgs(command []string, args []string) (BackendFramework, error) {
+	// Combine command and args to search through all parts
+	allParts := append(command, args...)
+	fullCommand := strings.Join(allParts, " ")
+
+	// Pattern to match python -m dynamo.{backend}.something
+	patterns := map[BackendFramework]*regexp.Regexp{
+		BackendFrameworkVLLM:   regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.vllm[^|&;]*`),
+		BackendFrameworkSGLang: regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.sglang[^|&;]*`),
+		BackendFrameworkTRTLLM: regexp.MustCompile(`python[0-9.]*\s+[^|&;]*-m\s+[^|&;]*dynamo\.trtllm[^|&;]*`),
 	}
-	return BackendFrameworkVLLM
+
+	var detected []BackendFramework
+	for framework, pattern := range patterns {
+		if pattern.MatchString(fullCommand) {
+			detected = append(detected, framework)
+		}
+	}
+
+	if len(detected) == 0 {
+		return "", fmt.Errorf("no backend framework detected from command: %q", fullCommand)
+	}
+
+	if len(detected) > 1 {
+		return "", fmt.Errorf("multiple backend frameworks detected from command: %v in %q", detected, fullCommand)
+	}
+
+	return detected[0], nil
+}
+
+// BackendFrameworkNoop represents no backend processing needed
+const BackendFrameworkNoop BackendFramework = "noop"
+
+// determineBackendFramework is the core logic for hybrid backend framework detection
+// Takes extracted parameters and applies the detection logic
+func determineBackendFramework(
+	componentType string,
+	command []string,
+	args []string,
+	explicitBackendFramework string,
+) (BackendFramework, error) {
+	// Check if this is a worker component - if not, use noop backend
+	if !isWorkerComponent(componentType) {
+		return BackendFrameworkNoop, nil
+	}
+
+	// Worker component - apply backend framework detection
+	var detectedFramework BackendFramework
+	var detectionError error
+
+	// Try to detect from command/args
+	if len(command) > 0 || len(args) > 0 {
+		detected, err := detectBackendFrameworkFromArgs(command, args)
+		if err == nil {
+			detectedFramework = detected
+		} else {
+			detectionError = err
+		}
+	}
+
+	// Get explicit framework
+	var explicitFramework BackendFramework
+	if explicitBackendFramework != "" {
+		explicitFramework = BackendFramework(explicitBackendFramework)
+	}
+
+	// Validate consistency if both detected and explicit exist
+	if detectedFramework != "" && explicitFramework != "" && detectedFramework != explicitFramework {
+		return "", fmt.Errorf("backend framework mismatch: detected %q from command but explicitly configured as %q",
+			detectedFramework, explicitFramework)
+	}
+
+	// Return in order of preference: detected > explicit > error
+	if detectedFramework != "" {
+		return detectedFramework, nil
+	}
+
+	if explicitFramework != "" {
+		return explicitFramework, nil
+	}
+
+	// If we couldn't detect and no explicit config, return error
+	if detectionError != nil {
+		return "", fmt.Errorf("could not determine backend framework: %w", detectionError)
+	}
+
+	// No command/args to detect from and no explicit config
+	return "", fmt.Errorf("backend framework must be specified explicitly or detectable from command/args")
+}
+
+// getBackendFrameworkFromComponent attempts to determine backend framework using hybrid approach:
+// 1. Check if component is a worker - if not, return noop
+// 2. For workers: try to detect from command/args, fall back to explicit config
+// 3. Return error if worker has neither detection nor explicit config
+// Also validates consistency between detected and explicit if both exist
+func getBackendFrameworkFromComponent(
+	component *v1alpha1.DynamoComponentDeploymentOverridesSpec,
+	dynamoDeployment *v1alpha1.DynamoGraphDeployment,
+) (BackendFramework, error) {
+	// Extract command/args from component
+	var command, args []string
+	if component.ExtraPodSpec != nil && component.ExtraPodSpec.MainContainer != nil {
+		command = component.ExtraPodSpec.MainContainer.Command
+		args = component.ExtraPodSpec.MainContainer.Args
+	}
+
+	// Extract explicit backend framework from deployment
+	explicitBackendFramework := dynamoDeployment.Spec.BackendFramework
+
+	return determineBackendFramework(
+		component.ComponentType,
+		command,
+		args,
+		explicitBackendFramework,
+	)
 }
 
 // ConvertDynamoComponentDeploymentToSpec converts a DynamoComponentDeployment to our component spec interface
@@ -766,6 +898,26 @@ func ConvertDynamoComponentDeploymentToSpec(dynComponent *v1alpha1.DynamoCompone
 	return &v1alpha1.DynamoComponentDeploymentOverridesSpec{
 		DynamoComponentDeploymentSharedSpec: *dynComponent.Spec.DynamoComponentDeploymentSharedSpec.DeepCopy(),
 	}
+}
+
+// getBackendFrameworkFromDynamoComponent determines backend framework for a DynamoComponentDeployment
+func getBackendFrameworkFromDynamoComponent(dynComponent *v1alpha1.DynamoComponentDeployment) (BackendFramework, error) {
+	// Extract command/args from component
+	var command, args []string
+	if dynComponent.Spec.ExtraPodSpec != nil && dynComponent.Spec.ExtraPodSpec.MainContainer != nil {
+		command = dynComponent.Spec.ExtraPodSpec.MainContainer.Command
+		args = dynComponent.Spec.ExtraPodSpec.MainContainer.Args
+	}
+
+	// Extract explicit backend framework
+	explicitBackendFramework := dynComponent.Spec.BackendFramework
+
+	return determineBackendFramework(
+		dynComponent.Spec.ComponentType,
+		command,
+		args,
+		explicitBackendFramework,
+	)
 }
 
 // GenerateBasePodSpecForController generates a PodSpec using backend logic for controller usage
@@ -780,12 +932,18 @@ func GenerateBasePodSpecForController(
 	// Convert to our interface
 	componentSpec := ConvertDynamoComponentDeploymentToSpec(dynComponent)
 
-	numberOfNodes := getNumberOfNodes(dynComponent.Spec.DynamoComponentDeploymentSharedSpec.DynamoConfig)
+	numberOfNodes := getNumberOfNodes(dynComponent.Spec.DynamoComponentDeploymentSharedSpec.Resources)
+
+	// Determine backend framework using hybrid approach
+	backendFramework, err := getBackendFrameworkFromDynamoComponent(dynComponent)
+	if err != nil {
+		return corev1.PodSpec{}, fmt.Errorf("failed to determine backend framework: %w", err)
+	}
 
 	// Generate base PodSpec with standard env vars using merged component envs
 	podSpec, err := GenerateBasePodSpec(
 		componentSpec,
-		BackendFramework(dynComponent.Spec.BackendFramework),
+		backendFramework,
 		secretsRetriever,
 		dynComponent.Namespace,
 		role,
@@ -800,7 +958,7 @@ func GenerateBasePodSpecForController(
 	return podSpec, nil
 }
 
-func generateSharedMemoryVolumeAndMount(isMultinode bool, resources *corev1.ResourceRequirements) (corev1.Volume, corev1.VolumeMount) {
+func generateSharedMemoryVolumeAndMount(resources *corev1.ResourceRequirements) (corev1.Volume, corev1.VolumeMount) {
 	sharedMemorySizeLimit := resource.MustParse("512Mi")
 	// Check if we have memory limits to work with
 	memoryLimit := resources.Limits[corev1.ResourceMemory]
@@ -817,13 +975,6 @@ func generateSharedMemoryVolumeAndMount(isMultinode bool, resources *corev1.Reso
 			sharedMemorySizeLimit = maxSize // Cap at maximum
 		}
 		// If calculatedSize < minSize, keep the 512Mi base
-	}
-	// For multinode, ensure we have at least 1Gi
-	if isMultinode {
-		minMultinodeSize := resource.MustParse("1Gi")
-		if sharedMemorySizeLimit.Cmp(minMultinodeSize) < 0 {
-			sharedMemorySizeLimit = minMultinodeSize
-		}
 	}
 	volume := corev1.Volume{
 		Name: commonconsts.KubeValueNameSharedMemory,
