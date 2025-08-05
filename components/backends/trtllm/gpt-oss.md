@@ -81,36 +81,10 @@ export DYNAMO_CONTAINER_IMAGE=orangina-dynamo
 
 ### 2. Download the Model
 
-#### Step 2a: Requesting Access to Model
-
-> [!IMPORTANT]
-> **PLACEHOLDER**: Model access details will be updated upon release.
-
-Access to gpt-oss-120b model checkpoints must be requested through the [HuggingFace Model page](https://huggingface.co/<PLACEHOLDER_HUGGINGFACE_GPT_OSS_120B_PATH>). The approval process is not automatic and could take a day or more.
-
-A HuggingFace account is required to accept the license agreement, and you will need to [create a HuggingFace access token](https://huggingface.co/settings/tokens) to download the model weights.
-
-#### Step 2b: Setting your HuggingFace Token
-
-Set your HuggingFace token as an environment variable:
-
 ```bash
-export HF_TOKEN="hf_YOUR_ACTUAL_TOKEN_HERE"
-```
+export MODEL_PATH=<LOCAL_MODEL_DIRECTORY>
 
-#### Step 2c: Download the Model
-
-```bash
-# PLACEHOLDER: Replace with actual HuggingFace model path
-export MODEL_PATH=<PLACEHOLDER_HUGGINGFACE_GPT_OSS_120B_PATH>
-
-# Download the model (ensure you have sufficient disk space ~240GB)
-huggingface-cli download $MODEL_PATH --local-dir /path/to/gpt-oss-120b
-```
-
-```bash
-# /tmp/ngc-cli/ngc registry model download-version "lhjt5vgezcyq/openai/orangina-open-weight-model-pre-release-random-weight:v3"
-export MODEL_PATH=/home/scratch.nealv_sw/models/omodel/orangina-120b-final-weights_vv1
+huggingface-cli download openai/gpt-oss-120b --include "original/*" --local-dir $MODEL_PATH
 ```
 
 ### 3. Run the Container
