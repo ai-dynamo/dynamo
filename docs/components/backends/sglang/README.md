@@ -55,7 +55,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 Below we provide a guide that lets you run all of our the common deployment patterns on a single node.
 ### Start NATS and ETCD in the background
 
-Start using [Docker Compose](../../../deploy/docker-compose.yml)
+Start using Docker Compose
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
