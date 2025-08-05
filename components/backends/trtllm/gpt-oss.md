@@ -25,6 +25,13 @@ The disaggregated approach optimizes for both low-latency (maximizing tokens per
 - HuggingFace account and [access token](https://huggingface.co/settings/tokens)
 - [HuggingFace CLI](https://huggingface.co/docs/huggingface_hub/en/guides/cli)
 
+
+Ensure that the `etcd` and `nats` services are running with the following command:
+
+```bash
+docker compose -f deploy/docker-compose.yml up
+```
+
 ## Instructions
 
 ### 1. Build the Container
@@ -66,6 +73,10 @@ export MODEL_PATH=<LOCAL_MODEL_DIRECTORY>
 huggingface-cli download openai/gpt-oss-120b --include "original/*" --local-dir $MODEL_PATH
 ```
 
+```bash
+export MODEL_PATH=/home/scratch.nealv_sw/models/omodel/orangina-120b-final-weights_vv1/
+```
+
 ### 3. Run the Container
 
 Launch the Dynamo TensorRT-LLM container with the necessary configurations:
@@ -99,11 +110,6 @@ This command:
 - Mounts the current Dynamo workspace into the container at `/workspace/dynamo`
 - Enables [PDL](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#programmatic-dependent-launch-and-synchronization) and disables parallel weight loading
 - Sets HuggingFace token as environment variable in the container
-
-Inside the container, navigate to the TensorRT-LLM backend directory:
-```bash
-cd /workspace/dynamo/components/backends/trtllm
-```
 
 ### 4. Understanding the Configuration
 
@@ -147,6 +153,7 @@ You can use the provided launch script or run the components manually:
 #### Option A: Using the Launch Script
 
 ```bash
+cd /workspace/dynamo/components/backends/trtllm
 ./launch/gpt_oss_disagg.sh
 ```
 
@@ -154,6 +161,8 @@ You can use the provided launch script or run the components manually:
 
 1. **Clear namespace and start frontend**:
 ```bash
+cd /workspace/dynamo/components/backends/trtllm
+
 # Clear any existing deployments
 python3 utils/clear_namespace.py --namespace dynamo
 
@@ -206,6 +215,18 @@ curl -X POST http://localhost:8000/v1/chat/completions \
     ],
     "stream": false,
     "max_tokens": 200
+  }'
+```
+
+
+```bash
+curl -X POST http://localhost:8000/v1/responses \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gpt-oss-120b",
+    "input": "Explain the concept of disaggregated serving in LLM inference in 3 sentences.",
+    "max_output_tokens": 200,
+    "stream": false
   }'
 ```
 
