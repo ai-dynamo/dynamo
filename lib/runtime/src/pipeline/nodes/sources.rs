@@ -85,7 +85,7 @@ pub struct SegmentSource<In: PipelineIO, Out: PipelineIO> {
 //         let mut sinks = self.sinks.lock().unwrap();
 //         let tx = sinks
 //             .remove(context.id())
-//             .ok_or(PipelineError::DetatchedStreamReceiver)
+//             .ok_or(PipelineError::DetachedStreamReceiver)
 //             .map_err(|e| {
 //                 data.context().stop_generating();
 //                 e
@@ -94,7 +94,7 @@ pub struct SegmentSource<In: PipelineIO, Out: PipelineIO> {
 
 //         let ctx = data.context();
 //         tx.send(data)
-//             .map_err(|_| PipelineError::DetatchedStreamReceiver)
+//             .map_err(|_| PipelineError::DetachedStreamReceiver)
 //             .map_err(|e| {
 //                 ctx.stop_generating();
 //                 e
@@ -121,7 +121,7 @@ pub struct SegmentSource<In: PipelineIO, Out: PipelineIO> {
 //             sinks.insert(request.id().to_string(), tx);
 //         }
 //         self.on_next(request, private::Token {}).await?;
-//         rx.await.map_err(|_| PipelineError::DetatchedStreamSender)
+//         rx.await.map_err(|_| PipelineError::DetachedStreamSender)
 //     }
 // }
 
@@ -161,7 +161,7 @@ pub struct SegmentSource<In: PipelineIO, Out: PipelineIO> {
 //         let mut sinks = self.sinks.lock().unwrap();
 //         let tx = sinks
 //             .remove(context.id())
-//             .ok_or(PipelineError::DetatchedStreamReceiver)
+//             .ok_or(PipelineError::DetachedStreamReceiver)
 //             .map_err(|e| {
 //                 data.context().stop_generating();
 //                 e
@@ -170,7 +170,7 @@ pub struct SegmentSource<In: PipelineIO, Out: PipelineIO> {
 
 //         let ctx = data.context();
 //         tx.send(data)
-//             .map_err(|_| PipelineError::DetatchedStreamReceiver)
+//             .map_err(|_| PipelineError::DetachedStreamReceiver)
 //             .map_err(|e| {
 //                 ctx.stop_generating();
 //                 e
@@ -197,7 +197,7 @@ pub struct SegmentSource<In: PipelineIO, Out: PipelineIO> {
 //             sinks.insert(request.id().to_string(), tx);
 //         }
 //         self.on_next(request, private::Token {}).await?;
-//         rx.await.map_err(|_| PipelineError::DetatchedStreamSender)
+//         rx.await.map_err(|_| PipelineError::DetachedStreamSender)
 //     }
 // }
 
