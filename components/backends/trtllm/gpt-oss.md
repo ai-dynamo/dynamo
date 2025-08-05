@@ -70,7 +70,7 @@ docker build -f container/Dockerfile.tensorrt_llm_prebuilt . \
 ```bash
 export MODEL_PATH=<LOCAL_MODEL_DIRECTORY>
 
-huggingface-cli download openai/gpt-oss-120b --include "original/*" --local-dir $MODEL_PATH
+huggingface-cli download openai/gpt-oss-120b --local-dir $MODEL_PATH
 ```
 
 ### 3. Run the Container
@@ -149,7 +149,7 @@ You can use the provided launch script or run the components manually:
 #### Option A: Using the Launch Script
 
 ```bash
-cd /workspace/dynamo/components/backends/trtllm
+cd /workspace/components/backends/trtllm
 ./launch/gpt_oss_disagg.sh
 ```
 
