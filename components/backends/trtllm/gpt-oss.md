@@ -34,7 +34,7 @@ The disaggregated approach optimizes for both low-latency (maximizing tokens per
 
 ```bash
 # PLACEHOLDER: Replace with actual container URL when available
-export $DYNAMO_CONTAINER_IMAGE=<PLACEHOLDER_GPT_OSS_CONTAINER_URL>
+export $DYNAMO_CONTAINER_IMAGE="gitlab-master.nvidia.com/dl/ai-dynamo/dynamo-ci/jothomson:orangina-dynamo-release-aarch64"
 docker pull $DYNAMO_CONTAINER_IMAGE
 ```
 
@@ -45,19 +45,30 @@ If you prefer to build from source or need custom modifications, use the provide
 > [!IMPORTANT]
 > **PLACEHOLDER**: Update to public commit hash and remove URL for release.
 
+
+#### 2a. ARM
 ```bash
 cd $DYNAMO_ROOT
 
 # Build the container with a specific TensorRT-LLM commit
-./container/build.sh \
-    --framework TENSORRTLLM \
-    --tensorrtllm-commit f2867f9ec2c5547886e6364ab7860515094e7587 \
-    --tensorrtllm-git-url ssh://git@gitlab-master.nvidia.com:12051/ftp/tekit.git \
-    --tag dynamo-trtllm-gpt-oss \
-    --no-cache
+docker build --platform linux/arm64 -f container/Dockerfile.tensorrt_llm_prebuilt . \
+  --build-arg BASE_IMAGE=urm.nvidia.com/sw-tensorrt-docker/tensorrt-llm-staging/release \
+  --build-arg BASE_IMAGE_TAG=sbsa-ngc-release-torch_skip-5c7cb1d-user_zhanruis_create_ngc_image-590 \
+  --build-arg ARCH=arm64 \
+  --build-arg ARCH_ALT=aarch64 \
+  -t gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo-ci/jothomson:orangina-dynamo-release-aarch64
 
-export $DYNAMO_CONTAINER_IMAGE=dynamo-trtllm-gpt-oss
+export DYNAMO_CONTAINER_IMAGE=gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo-ci/jothomson:orangina-dynamo-release-aarch64
 ```
+
+#### 2b. x86
+
+```bash
+docker build -f container/Dockerfile.tensorrt_llm_prebuilt . --build-arg BASE_IMAGE <base_image> --build-arg BASE_IMAGE_TAG <image_tag> -t orangina-dynamo
+
+export DYNAMO_CONTAINER_IMAGE=orangina-dynamo
+```
+
 
 ### 3. Download the Model
 
@@ -88,6 +99,11 @@ export MODEL_PATH=<PLACEHOLDER_HUGGINGFACE_GPT_OSS_120B_PATH>
 huggingface-cli download $MODEL_PATH --local-dir /path/to/gpt-oss-120b
 ```
 
+```bash
+# /tmp/ngc-cli/ngc registry model download-version "lhjt5vgezcyq/openai/orangina-open-weight-model-pre-release-random-weight:v3"
+export MODEL_PATH=/home/scratch.nealv_sw/models/omodel/orangina-120b-final-weights_vv1
+```
+
 ### 4. Run the Container
 
 Launch the Dynamo TensorRT-LLM container with the necessary configurations:
@@ -98,8 +114,7 @@ docker run \
     -it \
     --rm \
     --network host \
-    --volume /path/to/gpt-oss-120b:/model \
-    --volume ~/.cache:/root/.cache:rw \
+    --volume $MODEL_PATH:/model \
     --shm-size=10G \
     --ulimit memlock=-1 \
     --ulimit stack=67108864 \
@@ -123,7 +138,7 @@ This command:
 
 Inside the container, navigate to the TensorRT-LLM backend directory:
 ```bash
-cd /workspace/dynamo/components/backends/trtllm
+cd components/backends/trtllm
 ```
 
 ### 5. Understanding the Configuration Files
@@ -185,7 +200,12 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
   --served-model-name gpt-oss-120b \
   --extra-engine-args engine_configs/gpt_oss/prefill.yaml \
   --disaggregation-mode prefill \
-  --disaggregation-strategy prefill_first &
+  --disaggregation-strategy prefill_first \
+  --max-num-tokens 20000 \
+  --max-batch-size 32 \
+  --free-gpu-memory-fraction 0.9 \
+  --tensor-parallel-size 4 \
+  --expert-parallel-size 4 &
 ```
 
 3. **Launch decode worker**:
@@ -195,7 +215,12 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --served-model-name gpt-oss-120b \
   --extra-engine-args engine_configs/gpt_oss/decode.yaml \
   --disaggregation-mode decode \
-  --disaggregation-strategy prefill_first
+  --disaggregation-strategy prefill_first \
+  --max-num-tokens 16384 \
+  --max-batch-size 128 \
+  --free-gpu-memory-fraction 0.9 \
+  --tensor-parallel-size 4 \
+  --expert-parallel-size 4
 ```
 
 ### 7. Test the Deployment
@@ -220,9 +245,34 @@ The server exposes a standard OpenAI-compatible API endpoint that accepts JSON r
 
 ## Benchmarking
 
-> [!IMPORTANT]
-> **PLACEHOLDER**: Include genai-perf script
-
+```bash
+genai-perf profile \
+    --model orangina \
+    --tokenizer /scratch/omodel/orangina-120b-final-weights_vv1  \
+    --endpoint-type chat \
+    --endpoint /v1/chat/completions \
+    --streaming \
+    --url localhost:8000 \
+    --synthetic-input-tokens-mean 1000 \
+    --synthetic-input-tokens-stddev 0 \
+    --output-tokens-mean 2000 \
+    --output-tokens-stddev 0 \
+    --extra-inputs max_tokens:2000 \
+    --extra-inputs min_tokens:2000 \
+    --extra-inputs ignore_eos:true \
+    --extra-inputs "{\"nvext\":{\"ignore_eos\":true}}" \
+    --concurrency 2048 \
+    --request-count 6144 \
+    --warmup-request-count 1000 \
+    --num-dataset-entries 8000 \
+    --random-seed 100 \
+    --artifact-dir /scratch/orangina/genai/artifacts/trtllm-base-1k-2k \
+    -- \
+    -v \
+    --max-threads 500 \
+    -H 'Authorization: Bearer NOT USED' \
+    -H 'Accept: text/event-stream'
+```
 
 ## Architecture Overview
 

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 # Environment variables with defaults
-export MODEL_PATH=${MODEL_PATH:-"gpt_oss"}
+export MODEL_PATH=${MODEL_PATH:-"/model"}
 export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"gpt-oss-120b"}
 export DISAGGREGATION_STRATEGY=${DISAGGREGATION_STRATEGY:-"prefill_first"}
 export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"engine_configs/gpt_oss/prefill.yaml"}
@@ -22,7 +22,12 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$PREFILL_ENGINE_ARGS" \
   --disaggregation-mode prefill \
-  --disaggregation-strategy "$DISAGGREGATION_STRATEGY" &
+  --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
+  --max-num-tokens 20000 \
+  --max-batch-size 32 \
+  --free-gpu-memory-fraction 0.9 \
+  --tensor-parallel-size 4 \
+  --expert-parallel-size 4 &
 
 # run decode worker
 CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
@@ -30,4 +35,9 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args "$DECODE_ENGINE_ARGS" \
   --disaggregation-mode decode \
-  --disaggregation-strategy "$DISAGGREGATION_STRATEGY"
+  --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
+  --max-num-tokens 16384 \
+  --max-batch-size 128 \
+  --free-gpu-memory-fraction 0.9 \
+  --tensor-parallel-size 4 \
+  --expert-parallel-size 4
