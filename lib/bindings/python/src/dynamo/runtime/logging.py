@@ -192,6 +192,7 @@ def configure_vllm_logging(dyn_level: int):
         json.dump(vllm_config, f)
         os.environ["VLLM_LOGGING_CONFIG_PATH"] = f.name
 
+
 def get_bool_env_var(name: str, default: str = "false") -> bool:
     value = os.getenv(name, default)
     value = value.lower()
