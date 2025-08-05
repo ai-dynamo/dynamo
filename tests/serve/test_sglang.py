@@ -28,7 +28,7 @@ class SGLangProcess(ManagedProcess):
 
     def __init__(self, script_name, request):
         self.port = 8000
-        sglang_dir = "/workspace/examples/sglang"
+        sglang_dir = "/workspace/components/backends/sglang"
         script_path = os.path.join(sglang_dir, "launch", script_name)
 
         # Verify script exists
@@ -165,6 +165,9 @@ def test_sglang_disagg_dp_attention(request, runtime_services):
             },
             timeout=120,
         )
+
+        # TODO: Once this is enabled, we can test out the rest of the HTTP endpoints around
+        # flush_cache and expert distribution recording
 
         assert response.status_code == 200
         result = response.json()
