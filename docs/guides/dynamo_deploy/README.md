@@ -29,11 +29,11 @@ Dynamo Cloud acts as an orchestration layer between the end user and Kubernetes,
 
 We provide a Custom Resource YAML file for many examples under the components/backends/{engine}/deploy folders. Consult the examples below for the CRs for a specific inference backend.
 
-[View SGLang K8s](../../components/backends/sglang/deploy/README.md)
+[View SGLang K8s](/components/backends/sglang/deploy/README.md)
 
-[View vLLM K8s](../../components/backends/vllm/deploy/README.md)
+[View vLLM K8s](/components/backends/vllm/deploy/README.md)
 
-[View TRT-LLM K8s](../../components/backends/trtllm/deploy/README.md)
+[View TRT-LLM K8s](/components/backends/trtllm/deploy/README.md)
 
 ### Deploying a particular example
 
@@ -99,14 +99,3 @@ Additional Resources:
 - [Port Forward Documentation](https://kubernetes.io/docs/tasks/access-application-cluster/port-forward-access-application-cluster/)
 - [Examples Deployment Guide](../../examples/README.md#deploying-a-particular-example)
 
-
-## Manual Deployment with Helm Charts
-
-Users who need more control over their deployments can use the manual deployment path (`deploy/helm/`):
-
-- Used for manually deploying inference graphs to Kubernetes
-- Contains Helm charts and configurations for deploying individual inference pipelines
-- Provides full control over deployment parameters
-- Requires manual management of infrastructure components
-- Documentation:
-  - [Helm Deployment Guide](../../../deploy/helm/README.md): detailed instructions for manual deployment
