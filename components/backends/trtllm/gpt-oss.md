@@ -65,15 +65,7 @@ docker build -f container/Dockerfile.tensorrt_llm_prebuilt . \
   -t $DYNAMO_CONTAINER_IMAGE
 ```
 
-### 2. Download the Model
-
-```bash
-export MODEL_PATH=<LOCAL_MODEL_DIRECTORY>
-
-huggingface-cli download openai/gpt-oss-120b --local-dir $MODEL_PATH
-```
-
-### 3. Run the Container
+### 2. Run the Container
 
 Launch the Dynamo TensorRT-LLM container with the necessary configurations:
 
@@ -107,7 +99,7 @@ This command:
 - Enables [PDL](https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#programmatic-dependent-launch-and-synchronization) and disables parallel weight loading
 - Sets HuggingFace token as environment variable in the container
 
-### 4. Understanding the Configuration
+### 3. Understanding the Configuration
 
 The deployment uses configuration files and command-line arguments to control behavior:
 
@@ -142,7 +134,7 @@ Decode-specific arguments:
 - `--max-num-tokens 16384` - Maximum tokens for decode processing
 - `--max-batch-size 128` - Maximum batch size for decode
 
-### 5. Launch the Deployment
+### 4. Launch the Deployment
 
 You can use the provided launch script or run the components manually:
 
@@ -169,8 +161,8 @@ python3 -m dynamo.frontend --router-mode round-robin --http-port 8000 &
 2. **Launch prefill worker**:
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
-  --model-path /model \
-  --served-model-name gpt-oss-120b \
+  --model-path openai/gpt-oss-120b \
+  --served-model-name openai/gpt-oss-120b \
   --extra-engine-args engine_configs/gpt_oss/prefill.yaml \
   --disaggregation-mode prefill \
   --disaggregation-strategy prefill_first \
@@ -184,8 +176,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
 3. **Launch decode worker**:
 ```bash
 CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
-  --model-path /model \
-  --served-model-name gpt-oss-120b \
+  --model-path openai/gpt-oss-120b \
+  --served-model-name openai/gpt-oss-120b \
   --extra-engine-args engine_configs/gpt_oss/decode.yaml \
   --disaggregation-mode decode \
   --disaggregation-strategy prefill_first \
@@ -196,7 +188,7 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --expert-parallel-size 4
 ```
 
-### 6. Test the Deployment
+### 5. Test the Deployment
 
 Send a test request to verify the deployment:
 
@@ -204,7 +196,7 @@ Send a test request to verify the deployment:
 curl -X POST http://localhost:8000/v1/responses \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-oss-120b",
+    "model": "openai/gpt-oss-120b",
     "input": "Explain the concept of disaggregated serving in LLM inference in 3 sentences.",
     "max_output_tokens": 200,
     "stream": false
@@ -227,8 +219,8 @@ mkdir -p /tmp/benchmark-results
 
 # Run the benchmark - this command tests the deployment with high-concurrency synthetic workload
 genai-perf profile \
-    --model gpt-oss-120b \
-    --tokenizer /model \
+    --model openai/gpt-oss-120b \
+    --tokenizer openai/gpt-oss-120b \
     --endpoint-type chat \
     --endpoint /v1/chat/completions \
     --streaming \
