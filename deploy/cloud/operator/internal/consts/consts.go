@@ -43,6 +43,10 @@ const (
 
 	DefaultGroveTerminationDelay = 15 * time.Minute
 	KubeValueNameSharedMemory    = "shared-memory"
+
+	// Grove multinode role suffixes
+	GroveRoleSuffixLeader = "ldr"
+	GroveRoleSuffixWorker = "wkr"
 )
 
 type MultinodeDeploymentType string

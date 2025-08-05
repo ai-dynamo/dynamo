@@ -1763,7 +1763,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 						TerminationDelay: &metav1.Duration{Duration: 15 * time.Minute},
 						PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
 							{
-								Name: "worker-sg",
+								Name: "worker",
 								CliqueNames: []string{
 									"worker-ldr",
 									"worker-wkr",
@@ -1807,7 +1807,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"python3 -m dynamo.sglang.worker --dist-init-addr ${GROVE_HEADLESS_SERVICE}:29500 --nnodes 3 --node-rank 0 --custom-flag custom-value",
+													"python3 -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 3 --node-rank 0 --custom-flag custom-value",
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -1900,7 +1900,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"python3 -m dynamo.sglang.worker --dist-init-addr ${GROVE_HEADLESS_SERVICE}:29500 --nnodes 3 --node-rank $((GROVE_PCLQ_POD_INDEX + 1)) --custom-flag custom-value",
+													"python3 -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 3 --node-rank $((GROVE_PCLQ_POD_INDEX + 1)) --custom-flag custom-value",
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -2439,7 +2439,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 						TerminationDelay: &metav1.Duration{Duration: 15 * time.Minute},
 						PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
 							{
-								Name: "worker-sg",
+								Name: "worker",
 								CliqueNames: []string{
 									"worker-ldr",
 									"worker-wkr",
@@ -2536,30 +2536,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 														MountPath: "/dev/shm",
 													},
 												},
-												ReadinessProbe: &corev1.Probe{
-													ProbeHandler: corev1.ProbeHandler{
-														HTTPGet: &corev1.HTTPGetAction{
-															Path: "/ready",
-															Port: intstr.FromInt(8080),
-														},
-													},
-												},
-												LivenessProbe: &corev1.Probe{
-													ProbeHandler: corev1.ProbeHandler{
-														HTTPGet: &corev1.HTTPGetAction{
-															Path: "/health",
-															Port: intstr.FromInt(8080),
-														},
-													},
-												},
-												StartupProbe: &corev1.Probe{
-													ProbeHandler: corev1.ProbeHandler{
-														HTTPGet: &corev1.HTTPGetAction{
-															Path: "/startup",
-															Port: intstr.FromInt(8080),
-														},
-													},
-												},
+												ReadinessProbe: nil,
+												LivenessProbe:  nil,
+												StartupProbe:   nil,
 											},
 										},
 									},
@@ -2600,7 +2579,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"ray start --address=${GROVE_HEADLESS_SERVICE}:6379 --block",
+													"ray start --address=${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-ldr-0.${GROVE_HEADLESS_SERVICE}:6379 --block",
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -3188,7 +3167,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 			role:              RoleWorker,
 			numberOfNodes:     3,
 			expectError:       false,
-			expectContains:    []string{"ray start --address=${GROVE_HEADLESS_SERVICE}:6379 --block"},
+			expectContains:    []string{"ray start --address=${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-ldr-0.${GROVE_HEADLESS_SERVICE}:6379 --block"},
 			expectNotContains: []string{"python3 -m dynamo.vllm"},
 		},
 		{

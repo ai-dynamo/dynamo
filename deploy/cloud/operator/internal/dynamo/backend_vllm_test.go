@@ -45,6 +45,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			multinodeDeploymentType: consts.MultinodeDeploymentTypeGrove,
 			initialArgs:             []string{"python3", "-m", "dynamo.vllm", "--model", "test"},
 			expectContains:          []string{"ray start --head --port=6379 &&", "python3", "-m", "dynamo.vllm", "--model", "test"},
+			expectProbesRemoved:     true,
 		},
 		{
 			name:                    "multinode worker replaces args with ray start --block",
@@ -53,7 +54,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			component:               &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
 			multinodeDeploymentType: consts.MultinodeDeploymentTypeGrove,
 			initialArgs:             []string{"python3", "-m", "dynamo.vllm", "--model", "test"},
-			expectedArgs:            []string{"ray start --address=${GROVE_HEADLESS_SERVICE}:6379 --block"},
+			expectedArgs:            []string{"ray start --address=${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-ldr-0.${GROVE_HEADLESS_SERVICE}:6379 --block"},
 			expectProbesRemoved:     true,
 		},
 		{
@@ -155,7 +156,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			role:                    RoleWorker,
 			multinodeDeploymentType: consts.MultinodeDeploymentTypeGrove,
 			initialArgs:             []string{"python3", "-m", "dynamo.vllm"},
-			expectedArgs:            []string{"ray start --address=${GROVE_HEADLESS_SERVICE}:6379 --block"},
+			expectedArgs:            []string{"ray start --address=${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-ldr-0.${GROVE_HEADLESS_SERVICE}:6379 --block"},
 		},
 		{
 			name:                    "worker with LWS deployment",

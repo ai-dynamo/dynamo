@@ -18,6 +18,13 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		return
 	}
 
+	// Remove probes for multinode leader and worker
+	if role == RoleLeader || role == RoleWorker {
+		container.LivenessProbe = nil
+		container.ReadinessProbe = nil
+		container.StartupProbe = nil
+	}
+
 	// Generate the flags to add
 	flags := b.getMultinodeFlags(numberOfNodes, role, multinodeDeploymentType)
 	if flags == "" {
@@ -38,7 +45,8 @@ func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, multin
 
 	// Determine dist-init-addr
 	if multinodeDeploymentType == commonconsts.MultinodeDeploymentTypeGrove {
-		distInitAddr = "${GROVE_HEADLESS_SERVICE}:29500"
+		leaderHostname := generateGroveLeaderHostname()
+		distInitAddr = fmt.Sprintf("%s:29500", leaderHostname)
 	} else {
 		distInitAddr = "${LWS_LEADER_ADDRESS}:29500"
 	}

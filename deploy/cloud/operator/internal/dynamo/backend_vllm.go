@@ -18,8 +18,8 @@ func (b *VLLMBackend) UpdateContainer(container *corev1.Container, numberOfNodes
 		// Apply multinode-specific argument modifications
 		updateVLLMMultinodeArgs(container, role, multinodeDeploymentType)
 
-		// Remove probes for multinode worker (that runs ray start --block)
-		if role == RoleWorker {
+		// Remove probes for multinode worker and leader
+		if role == RoleWorker || role == RoleLeader {
 			container.LivenessProbe = nil
 			container.ReadinessProbe = nil
 			container.StartupProbe = nil
@@ -38,7 +38,8 @@ func updateVLLMMultinodeArgs(container *corev1.Container, role Role, multinodeDe
 	case RoleWorker:
 		// Worker nodes only run Ray, completely replace args
 		if multinodeDeploymentType == commonconsts.MultinodeDeploymentTypeGrove {
-			container.Args = []string{"ray start --address=${GROVE_HEADLESS_SERVICE}:6379 --block"}
+			leaderHostname := generateGroveLeaderHostname()
+			container.Args = []string{fmt.Sprintf("ray start --address=%s:6379 --block", leaderHostname)}
 		} else {
 			container.Args = []string{"ray start --address=${LWS_LEADER_ADDRESS}:6379 --block"}
 		}

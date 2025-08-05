@@ -501,8 +501,8 @@ type ServiceRole struct {
 func expandRolesForService(serviceName string, serviceReplicas *int32, numberOfNodes int32) []ServiceRole {
 	var roles []ServiceRole
 	if numberOfNodes > 1 {
-		roles = append(roles, ServiceRole{Name: serviceName + "-ldr", Role: RoleLeader, Replicas: 1})
-		roles = append(roles, ServiceRole{Name: serviceName + "-wkr", Role: RoleWorker, Replicas: numberOfNodes - 1})
+		roles = append(roles, ServiceRole{Name: serviceName + "-" + commonconsts.GroveRoleSuffixLeader, Role: RoleLeader, Replicas: 1})
+		roles = append(roles, ServiceRole{Name: serviceName + "-" + commonconsts.GroveRoleSuffixWorker, Role: RoleWorker, Replicas: numberOfNodes - 1})
 	} else {
 		roles = append(roles, ServiceRole{Name: serviceName, Role: RoleMain, Replicas: *serviceReplicas})
 	}
@@ -762,7 +762,7 @@ func GenerateGrovePodGangSet(
 		}
 		if isMultinode {
 			scalingGroups = append(scalingGroups, grovev1alpha1.PodCliqueScalingGroupConfig{
-				Name:        strings.ToLower(serviceName) + "-sg",
+				Name:        strings.ToLower(serviceName),
 				CliqueNames: cliqueNames,
 				Replicas:    component.Replicas,
 			})
