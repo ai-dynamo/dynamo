@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 async def graceful_shutdown(runtime):
     """
     Shutdown dynamo distributed runtime.
-    The endpoints will be immediately invalidate so no new requests will be accepted.
+    The endpoints will be immediately invalidated so no new requests will be accepted.
     For endpoints served with graceful_shutdown=True, the serving function will wait until all in-flight requests are finished.
     For endpoints served with graceful_shutdown=False, the serving function will return immediately.
     """
