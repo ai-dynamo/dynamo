@@ -17,7 +17,16 @@ limitations under the License.
 
 # Dynamo Examples
 
-This directory contains practical examples demonstrating how to deploy and use Dynamo for distributed LLM inference. Each example includes setup instructions, configuration files, and explanations to help you understand different deployment patterns and use cases.
+## Framework Support
+
+The /examples directory shows how Dynamo broadly works using various inference engines.
+
+If you want to see advanced, framework-specific deployment patterns and best practices, check out the [Components Workflows](../components/backends/) directory:
+- **[vLLM](../components/backends/vllm/)** – vLLM-specific deployment and configuration
+- **[SGLang](../components/backends/sglang/)** – SGLang integration examples and workflows
+- **[TensorRT-LLM](../components/backends/trtllm/)** – TensorRT-LLM workflows and optimizations
+
+This directory contains practical examples & tutorials demonstrating how to deploy and use Dynamo for distributed LLM inference. Each example includes setup instructions, configuration files, and explanations to help you understand different deployment patterns and use cases.
 
 > **Want to see a specific example?**
 > Open a [GitHub issue](https://github.com/ai-dynamo/dynamo/issues) to request an example you'd like to see, or [open a pull request](https://github.com/ai-dynamo/dynamo/pulls) if you'd like to contribute your own!
@@ -67,12 +76,3 @@ Before running any examples, ensure you have:
 - **CUDA-compatible GPU** - For LLM inference (except hello_world, which is non-GPU aware)
 - **Python 3.9++** - For client scripts and utilities
 - **Kubernetes cluster** - For any cloud deployment/K8s examples
-
-## Framework Support
-
-These examples show how Dynamo broadly works using major inference engines.
-
-If you want to see advanced, framework-specific deployment patterns and best practices, check out the [Components Workflows](../components/backends/) directory:
-- **[vLLM](../components/backends/vllm/)** – vLLM-specific deployment and configuration
-- **[SGLang](../components/backends/sglang/)** – SGLang integration examples and workflows
-- **[TensorRT-LLM](../components/backends/trtllm/)** – TensorRT-LLM workflows and optimizations
