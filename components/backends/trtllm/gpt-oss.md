@@ -37,7 +37,7 @@ docker compose -f deploy/docker-compose.yml up
 ### 1. Pull the Container
 
 ```bash
-export DYNAMO_CONTAINER_IMAGE="nvcr.io/nvidia/ai-dynamo/tensorrtllm-gpt-oss:0.4.0"
+export DYNAMO_CONTAINER_IMAGE="nvcr.io/nvidia/ai-dynamo/tensorrtllm-gpt-oss:latest"
 
 docker pull $DYNAMO_CONTAINER_IMAGE
 ```
