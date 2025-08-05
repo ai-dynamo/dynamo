@@ -3,7 +3,7 @@
 
 use crate::model_card::model::ModelDeploymentCard;
 use anyhow::{Context, Result};
-use std::path::{Path, PathBuf};
+use std::{collections::HashMap, path::{Path, PathBuf}};
 
 use crate::model_card::model::{ModelInfoType, PromptFormatterArtifact, TokenizerKind};
 
@@ -93,6 +93,7 @@ impl ModelDeploymentCard {
             context_length,
             kv_cache_block_size: 0,
             migration_limit: 0,
+            runtime_data: HashMap::new(),
         })
     }
 
@@ -133,6 +134,7 @@ impl ModelDeploymentCard {
             context_length,
             kv_cache_block_size: 0, // set later
             migration_limit: 0,
+            runtime_data: HashMap::new(),
         })
     }
 }

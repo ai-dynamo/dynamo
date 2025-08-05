@@ -13,6 +13,7 @@
 //! - Prompt formatter settings (PromptFormatterArtifact)
 //! - Various metadata like revision, publish time, etc.
 
+use std::collections::HashMap;
 use std::fmt;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -22,7 +23,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use derive_builder::Builder;
 use dynamo_runtime::{slug::Slug, storage::key_value_store::Versioned, transports::nats};
-use serde::{Deserialize, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use tokenizers::Tokenizer as HfTokenizer;
 use url::Url;
 
@@ -131,6 +132,11 @@ pub struct ModelDeploymentCard {
     /// How many times a request can be migrated to another worker if the HTTP server lost
     /// connection to the current worker.
     pub migration_limit: u32,
+
+    /// Runtime-initialized configuration data that is known during model initialization
+    /// and does not change over the runtime. Examples: total_kv_blocks, model parameters, etc.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub runtime_data: HashMap<String, serde_json::Value>,
 }
 
 impl ModelDeploymentCard {
@@ -232,6 +238,37 @@ impl ModelDeploymentCard {
             Some(info) => info.is_gguf(),
             None => false,
         }
+    }
+
+    /// Register runtime data for the model
+    ///
+    /// This is used to store configuration data that is known during model initialization
+    /// and does not change over the runtime. Examples: total_kv_blocks, model parameters, etc.
+    pub fn register_runtime_data<T: Serialize>(&mut self, key: &str, value: T) {
+        self.runtime_data
+            .insert(key.to_string(), serde_json::to_value(value).unwrap());
+    }
+
+    /// Get runtime data for the model
+    pub fn get_runtime_data<T: DeserializeOwned>(&self, key: &str) -> Option<T> {
+        self.runtime_data
+            .get(key)
+            .and_then(|v| serde_json::from_value(v.clone()).ok())
+    }
+
+    /// Check if runtime data exists for a given key
+    pub fn has_runtime_data(&self, key: &str) -> bool {
+        self.runtime_data.contains_key(key)
+    }
+
+    /// Get the total number of KV blocks
+    pub fn total_kv_blocks(&self) -> Option<u64> {
+        self.get_runtime_data("total_kv_blocks")
+    }
+
+    /// Register the total number of KV blocks
+    pub fn register_total_kv_blocks(&mut self, total_kv_blocks: u64) {
+        self.register_runtime_data("total_kv_blocks", total_kv_blocks);
     }
 
     /// Move the files this MDC uses into the NATS object store.

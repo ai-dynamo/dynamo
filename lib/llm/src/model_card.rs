@@ -3,6 +3,7 @@
 
 pub mod create;
 pub mod model;
+pub mod runtime_config;
 pub use model::ModelDeploymentCard;
 
 /// Identify model deployment cards in the key-value store
