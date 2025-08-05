@@ -73,10 +73,6 @@ export MODEL_PATH=<LOCAL_MODEL_DIRECTORY>
 huggingface-cli download openai/gpt-oss-120b --include "original/*" --local-dir $MODEL_PATH
 ```
 
-```bash
-export MODEL_PATH=/home/scratch.nealv_sw/models/omodel/orangina-120b-final-weights_vv1/
-```
-
 ### 3. Run the Container
 
 Launch the Dynamo TensorRT-LLM container with the necessary configurations:
@@ -203,21 +199,6 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
 ### 6. Test the Deployment
 
 Send a test request to verify the deployment:
-
-```bash
-curl -X POST http://localhost:8000/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "gpt-oss-120b",
-    "messages": [
-      {"role": "system", "content": "You are a helpful assistant."},
-      {"role": "user", "content": "Explain the concept of disaggregated serving in LLM inference."}
-    ],
-    "stream": false,
-    "max_tokens": 200
-  }'
-```
-
 
 ```bash
 curl -X POST http://localhost:8000/v1/responses \
