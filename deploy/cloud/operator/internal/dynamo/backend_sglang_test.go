@@ -36,7 +36,7 @@ func TestSGLangBackend_DirectFlagInjection(t *testing.T) {
 			role:                    RoleLeader,
 			multinodeDeploymentType: consts.MultinodeDeploymentTypeGrove,
 			initialArgs:             []string{"python -m dynamo.sglang.worker"},
-			expectedArgs:            []string{"python -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 2 --node-rank 0"},
+			expectedArgs:            []string{"python -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 2 --node-rank 0"},
 			description:             "Should add multinode flags directly to python command",
 		},
 		{
@@ -45,7 +45,7 @@ func TestSGLangBackend_DirectFlagInjection(t *testing.T) {
 			role:                    RoleLeader,
 			multinodeDeploymentType: consts.MultinodeDeploymentTypeGrove,
 			initialArgs:             []string{"echo blah | wc -l && python -m dynamo.sglang.worker && ls -al"},
-			expectedArgs:            []string{"echo blah | wc -l && python -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 2 --node-rank 0 && ls -al"},
+			expectedArgs:            []string{"echo blah | wc -l && python -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 2 --node-rank 0 && ls -al"},
 			description:             "Should add flags only to python command, not other commands",
 		},
 		{
@@ -54,7 +54,7 @@ func TestSGLangBackend_DirectFlagInjection(t *testing.T) {
 			role:                    RoleWorker,
 			multinodeDeploymentType: consts.MultinodeDeploymentTypeGrove,
 			initialArgs:             []string{"python -m dynamo.sglang.worker"},
-			expectedArgs:            []string{"python -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 3 --node-rank $((GROVE_PCLQ_POD_INDEX + 1))"},
+			expectedArgs:            []string{"python -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 3 --node-rank $((GROVE_PCLQ_POD_INDEX + 1))"},
 			description:             "Worker should get correct node rank",
 		},
 		{
@@ -72,7 +72,7 @@ func TestSGLangBackend_DirectFlagInjection(t *testing.T) {
 			role:                    RoleLeader,
 			multinodeDeploymentType: consts.MultinodeDeploymentTypeGrove,
 			initialArgs:             []string{"python -m dynamo.sglang.worker | tee /tmp/log"},
-			expectedArgs:            []string{"python -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 2 --node-rank 0 | tee /tmp/log"},
+			expectedArgs:            []string{"python -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 2 --node-rank 0 | tee /tmp/log"},
 			description:             "Should insert flags before pipe operator",
 		},
 		{
@@ -81,7 +81,7 @@ func TestSGLangBackend_DirectFlagInjection(t *testing.T) {
 			role:                    RoleLeader,
 			multinodeDeploymentType: consts.MultinodeDeploymentTypeGrove,
 			initialArgs:             []string{"echo start", "python -m dynamo.sglang.worker", "echo done"},
-			expectedArgs:            []string{"echo start python -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 2 --node-rank 0 echo done"},
+			expectedArgs:            []string{"echo start python -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 2 --node-rank 0 echo done"},
 			description:             "Multiple args should be flattened and python command gets flags",
 		},
 		{
@@ -101,7 +101,7 @@ func TestSGLangBackend_DirectFlagInjection(t *testing.T) {
 				Args: append([]string{}, tt.initialArgs...),
 			}
 
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentOverridesSpec{}, tt.multinodeDeploymentType)
+			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentOverridesSpec{}, tt.multinodeDeploymentType, "test-service")
 
 			if !reflect.DeepEqual(container.Args, tt.expectedArgs) {
 				t.Errorf("UpdateContainer() args = %v, want %v", container.Args, tt.expectedArgs)
@@ -174,7 +174,7 @@ func TestSGLangBackend_ProbeRemoval(t *testing.T) {
 				StartupProbe:   startupProbe,
 			}
 
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentOverridesSpec{}, tt.multinodeDeploymentType)
+			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, &v1alpha1.DynamoComponentDeploymentOverridesSpec{}, tt.multinodeDeploymentType, "test-service")
 
 			if tt.expectProbesRemoved {
 				if container.LivenessProbe != nil {

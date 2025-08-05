@@ -12,7 +12,7 @@ import (
 
 type SGLangBackend struct{}
 
-func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType) {
+func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string) {
 	// For single node, nothing to do
 	if numberOfNodes <= 1 {
 		return
@@ -26,7 +26,7 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	}
 
 	// Generate the flags to add
-	flags := b.getMultinodeFlags(numberOfNodes, role, multinodeDeploymentType)
+	flags := b.getMultinodeFlags(numberOfNodes, role, multinodeDeploymentType, serviceName)
 	if flags == "" {
 		return
 	}
@@ -40,12 +40,12 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 }
 
 // getMultinodeFlags returns the multinode flags as a single string
-func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, multinodeDeploymentType commonconsts.MultinodeDeploymentType) string {
+func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string) string {
 	var distInitAddr, nodeRank string
 
 	// Determine dist-init-addr
 	if multinodeDeploymentType == commonconsts.MultinodeDeploymentTypeGrove {
-		leaderHostname := generateGroveLeaderHostname()
+		leaderHostname := generateGroveLeaderHostname(serviceName)
 		distInitAddr = fmt.Sprintf("%s:29500", leaderHostname)
 	} else {
 		distInitAddr = "${LWS_LEADER_ADDRESS}:29500"

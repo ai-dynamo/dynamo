@@ -1807,7 +1807,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"python3 -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 3 --node-rank 0 --custom-flag custom-value",
+													"python3 -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 3 --node-rank 0 --custom-flag custom-value",
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -1900,7 +1900,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"python3 -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 3 --node-rank $((GROVE_PCLQ_POD_INDEX + 1)) --custom-flag custom-value",
+													"python3 -m dynamo.sglang.worker --dist-init-addr ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}:29500 --nnodes 3 --node-rank $((GROVE_PCLQ_POD_INDEX + 1)) --custom-flag custom-value",
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -2579,7 +2579,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 													"-c",
 												},
 												Args: []string{
-													"ray start --address=${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-ldr-0.${GROVE_HEADLESS_SERVICE}:6379 --block",
+													"ray start --address=${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}:6379 --block",
 												},
 												Ports: []corev1.ContainerPort{
 													{
@@ -3053,6 +3053,7 @@ func TestGeneratePodSpecForComponent_SGLang(t *testing.T) {
 				tt.numberOfNodes,
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
+				"worker",
 			)
 
 			if tt.expectError {
@@ -3167,7 +3168,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 			role:              RoleWorker,
 			numberOfNodes:     3,
 			expectError:       false,
-			expectContains:    []string{"ray start --address=${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-ldr-0.${GROVE_HEADLESS_SERVICE}:6379 --block"},
+			expectContains:    []string{"ray start --address=${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-worker-ldr-0.${GROVE_HEADLESS_SERVICE}:6379 --block"},
 			expectNotContains: []string{"python3 -m dynamo.vllm"},
 		},
 		{
@@ -3202,6 +3203,7 @@ func TestGeneratePodSpecForComponent_VLLM(t *testing.T) {
 				tt.numberOfNodes,
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
+				"worker",
 			)
 
 			if tt.expectError {
@@ -3290,6 +3292,7 @@ func TestGeneratePodSpecForComponent_UnsupportedBackend(t *testing.T) {
 				1,
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
+				"worker",
 			)
 
 			if tt.expectError {

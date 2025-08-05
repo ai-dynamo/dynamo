@@ -522,13 +522,13 @@ const (
 // Backend interface for modular backend logic
 // Each backend (SGLang, VLLM, etc.) implements this interface
 type Backend interface {
-	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType)
+	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string)
 }
 
 // NoopBackend does no processing - used for non-worker components like frontend, planner, router
 type NoopBackend struct{}
 
-func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType) {
+func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string) {
 	// No-op: frontend, planner, router, etc. don't need backend-specific processing
 }
 
@@ -587,6 +587,7 @@ func GenerateBasePodSpec(
 	numberOfNodes int32,
 	controllerConfig controller_common.Config,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
+	serviceName string,
 ) (corev1.PodSpec, error) {
 	container := corev1.Container{
 		Name:           "main",
@@ -624,7 +625,7 @@ func GenerateBasePodSpec(
 	if backend == nil {
 		return corev1.PodSpec{}, fmt.Errorf("unsupported backend framework: %s", backendFramework)
 	}
-	backend.UpdateContainer(&container, numberOfNodes, role, component, multinodeDeploymentType)
+	backend.UpdateContainer(&container, numberOfNodes, role, component, multinodeDeploymentType, serviceName)
 
 	resourcesConfig, err := controller_common.GetResourcesConfig(component.Resources)
 	if err != nil {
@@ -690,11 +691,12 @@ func GeneratePodSpecForComponent(
 	numberOfNodes int32,
 	controllerConfig controller_common.Config,
 	multinodeDeploymentType commonconsts.MultinodeDeploymentType,
+	serviceName string,
 ) (corev1.PodSpec, error) {
 	if len(dynamoDeployment.Spec.Envs) > 0 {
 		component.Envs = MergeEnvs(dynamoDeployment.Spec.Envs, component.Envs)
 	}
-	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Namespace, role, numberOfNodes, controllerConfig, multinodeDeploymentType)
+	podSpec, err := GenerateBasePodSpec(component, backendFramework, secretsRetriever, dynamoDeployment.Namespace, role, numberOfNodes, controllerConfig, multinodeDeploymentType, serviceName)
 	if err != nil {
 		return corev1.PodSpec{}, err
 	}
@@ -737,6 +739,7 @@ func GenerateGrovePodGangSet(
 				numberOfNodes,
 				controllerConfig,
 				commonconsts.MultinodeDeploymentTypeGrove,
+				serviceName,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", r.Name, err)
@@ -941,6 +944,8 @@ func GenerateBasePodSpecForController(
 	}
 
 	// Generate base PodSpec with standard env vars using merged component envs
+	// For controller usage, we may not have serviceName, so use the component name as fallback
+	serviceName := dynComponent.Name
 	podSpec, err := GenerateBasePodSpec(
 		componentSpec,
 		backendFramework,
@@ -950,6 +955,7 @@ func GenerateBasePodSpecForController(
 		numberOfNodes,
 		controllerConfig,
 		multinodeDeploymentType,
+		serviceName,
 	)
 	if err != nil {
 		return corev1.PodSpec{}, err

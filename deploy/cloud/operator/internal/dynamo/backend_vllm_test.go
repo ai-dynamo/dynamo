@@ -54,7 +54,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			component:               &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
 			multinodeDeploymentType: consts.MultinodeDeploymentTypeGrove,
 			initialArgs:             []string{"python3", "-m", "dynamo.vllm", "--model", "test"},
-			expectedArgs:            []string{"ray start --address=${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-ldr-0.${GROVE_HEADLESS_SERVICE}:6379 --block"},
+			expectedArgs:            []string{"ray start --address=${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}:6379 --block"},
 			expectProbesRemoved:     true,
 		},
 		{
@@ -100,7 +100,7 @@ func TestVLLMBackend_UpdateContainer(t *testing.T) {
 			}
 
 			// Call UpdateContainer
-			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, tt.component, tt.multinodeDeploymentType)
+			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, tt.component, tt.multinodeDeploymentType, "test-service")
 
 			if tt.expectNotModified {
 				// Args should not have changed
@@ -156,7 +156,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			role:                    RoleWorker,
 			multinodeDeploymentType: consts.MultinodeDeploymentTypeGrove,
 			initialArgs:             []string{"python3", "-m", "dynamo.vllm"},
-			expectedArgs:            []string{"ray start --address=${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-ldr-0.${GROVE_HEADLESS_SERVICE}:6379 --block"},
+			expectedArgs:            []string{"ray start --address=${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE}:6379 --block"},
 		},
 		{
 			name:                    "worker with LWS deployment",
@@ -184,7 +184,7 @@ func TestUpdateVLLMMultinodeArgs(t *testing.T) {
 			}
 
 			// Call updateVLLMMultinodeArgs
-			updateVLLMMultinodeArgs(container, tt.role, tt.multinodeDeploymentType)
+			updateVLLMMultinodeArgs(container, tt.role, tt.multinodeDeploymentType, "test-service")
 
 			if tt.expectNotModified {
 				// Args should not have changed
