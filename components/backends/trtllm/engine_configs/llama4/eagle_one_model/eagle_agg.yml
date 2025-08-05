@@ -24,7 +24,7 @@ disable_overlap_scheduler: true # disable_overlap_scheduler is having acc issue 
 speculative_config:
   decoding_type: Eagle
   max_draft_len: 3
-  pytorch_weights_path: nvidia/Llama-4-Maverick-17B-128E-Eagle3
+  speculative_model_dir: nvidia/Llama-4-Maverick-17B-128E-Eagle3
   eagle3_one_model: true
 
 kv_cache_config:

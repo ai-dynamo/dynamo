@@ -21,13 +21,13 @@ max_num_tokens: 512
 # 8704 = 8192 ISL + 512 OSL
 max_seq_len: 8704
 disable_overlap_scheduler: true
-autotuner_enabled: false
+enable_autotuner: false
 
 # Enable Speculative Decoding in the model engine
 speculative_config:
   decoding_type: Eagle
   max_draft_len: 1
-  pytorch_weights_path: nvidia/Llama-4-Maverick-17B-128E-Eagle3
+  speculative_model_dir: nvidia/Llama-4-Maverick-17B-128E-Eagle3
   eagle3_one_model: false
 
 kv_cache_config:
@@ -49,3 +49,6 @@ cuda_graph_config:
   - 256
 
 print_iter_log: true
+
+cache_transceiver_config:
+  backend: default
