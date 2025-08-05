@@ -94,7 +94,8 @@ def configure_dynamo_logging(
 
     # configure inference engine loggers
     configure_vllm_logging(dyn_level)
-    configure_sglang_logging(dyn_level)
+    if not os.environ.get("DYN_SKIP_SGLANG_LOG_FORMATTING"):
+        configure_sglang_logging(dyn_level)
 
     # loggers that should be configured to ERROR
     error_loggers = ["tag"]
