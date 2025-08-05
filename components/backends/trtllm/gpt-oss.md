@@ -170,7 +170,7 @@ python3 -m dynamo.frontend --router-mode round-robin --http-port 8000 &
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
   --model-path /model \
-  --served-model-name gpt-oss-120b \
+  --served-model-name openai/gpt-oss-120b \
   --extra-engine-args engine_configs/gpt_oss/prefill.yaml \
   --disaggregation-mode prefill \
   --disaggregation-strategy prefill_first \
@@ -185,7 +185,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python3 -m dynamo.trtllm \
 ```bash
 CUDA_VISIBLE_DEVICES=4,5,6,7 python3 -m dynamo.trtllm \
   --model-path /model \
-  --served-model-name gpt-oss-120b \
+  --served-model-name openai/gpt-oss-120b \
   --extra-engine-args engine_configs/gpt_oss/decode.yaml \
   --disaggregation-mode decode \
   --disaggregation-strategy prefill_first \
@@ -204,7 +204,7 @@ Send a test request to verify the deployment:
 curl -X POST http://localhost:8000/v1/responses \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "gpt-oss-120b",
+    "model": "openai/gpt-oss-120b",
     "input": "Explain the concept of disaggregated serving in LLM inference in 3 sentences.",
     "max_output_tokens": 200,
     "stream": false
@@ -227,7 +227,7 @@ mkdir -p /tmp/benchmark-results
 
 # Run the benchmark - this command tests the deployment with high-concurrency synthetic workload
 genai-perf profile \
-    --model gpt-oss-120b \
+    --model openai/gpt-oss-120b \
     --tokenizer /model \
     --endpoint-type chat \
     --endpoint /v1/chat/completions \
