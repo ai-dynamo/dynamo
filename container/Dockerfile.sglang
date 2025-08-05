@@ -414,6 +414,9 @@ ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 COPY --from=base /usr/local/ucx /usr/local/ucx
 COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 
+# Copy CUDA development tools (nvcc, headers, etc.) from base devel image
+COPY --from=base /usr/local/cuda/ /usr/local/cuda/
+
 ENV LD_LIBRARY_PATH=\
 $NIXL_LIB_DIR:\
 $NIXL_PLUGIN_DIR:\
