@@ -18,7 +18,7 @@ use dynamo_runtime::{
 
 use crate::{
     backend::Backend,
-    engines,
+    entrypoint,
     kv_router::KvRouterConfig,
     model_type::ModelType,
     preprocessor::{OpenAIPreprocessor, PreprocessedEmbeddingRequest},
@@ -216,19 +216,21 @@ impl ModelWatcher {
                     None
                 };
 
-                let chat_engine = engines::build_chat_completions(
-                    &card,
-                    &client,
-                    self.router_mode,
-                    kv_chooser.clone(),
-                )
-                .await?;
+                let chat_engine =
+                    entrypoint::build_routed_pipeline::<
+                        NvCreateChatCompletionRequest,
+                        NvCreateChatCompletionStreamResponse,
+                    >(&card, &client, self.router_mode, kv_chooser.clone())
+                    .await?;
                 self.manager
                     .add_chat_completions_model(&model_entry.name, chat_engine)?;
 
                 let completions_engine =
-                    engines::build_completions(&card, &client, self.router_mode, kv_chooser)
-                        .await?;
+                    entrypoint::build_routed_pipeline::<
+                        NvCreateCompletionRequest,
+                        NvCreateCompletionResponse,
+                    >(&card, &client, self.router_mode, kv_chooser)
+                    .await?;
                 self.manager
                     .add_completions_model(&model_entry.name, completions_engine)?;
             }

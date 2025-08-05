@@ -6,11 +6,13 @@ use std::pin::Pin;
 use crate::{
     backend::{Backend, ExecutionContext},
     discovery::{ModelManager, ModelWatcher, MODEL_ROOT_PATH},
-    engines::{self, StreamingEngineAdapter},
-    entrypoint::EngineConfig,
+    engines::StreamingEngineAdapter,
+    entrypoint::{self, EngineConfig},
+    kv_router::{KvPushRouter, KvRouter},
+    migration::Migration,
     model_card::ModelDeploymentCard,
     preprocessor::OpenAIPreprocessor,
-    protocols::common::llm_backend::{BackendOutput, PreprocessedRequest},
+    protocols::common::llm_backend::{BackendOutput, LLMEngineOutput, PreprocessedRequest},
     request_template::RequestTemplate,
     types::{
         openai::chat_completions::{
@@ -21,10 +23,12 @@ use crate::{
     },
 };
 use dynamo_runtime::{
+    component::Client,
     distributed::DistributedConfig,
     engine::{AsyncEngineStream, Data},
     pipeline::{
-        Context, ManyOut, Operator, RouterMode, ServiceBackend, ServiceFrontend, SingleIn, Source,
+        Context, ManyOut, Operator, PushRouter, RouterMode, SegmentSource, ServiceBackend,
+        ServiceEngine, ServiceFrontend, SingleIn, Source,
     },
     DistributedRuntime, Runtime,
 };
@@ -124,9 +128,11 @@ pub async fn prepare_engine(
                 None
             };
 
-            let chat_engine =
-                engines::build_chat_completions(card, &client, router_mode, kv_chooser.clone())
-                    .await?;
+            let chat_engine = entrypoint::build_routed_pipeline::<
+                NvCreateChatCompletionRequest,
+                NvCreateChatCompletionStreamResponse,
+            >(card, &client, router_mode, kv_chooser.clone())
+            .await?;
 
             let service_name = local_model.service_name().to_string();
             tracing::info!("Static connecting to {service_name}");
@@ -202,6 +208,56 @@ where
         .link(backend.backward_edge())?
         .link(preprocessor.backward_edge())?
         .link(frontend)?)
+}
+
+pub async fn build_routed_pipeline<Req, Resp>(
+    card: &ModelDeploymentCard,
+    client: &Client,
+    router_mode: RouterMode,
+    chooser: Option<Arc<KvRouter>>,
+) -> anyhow::Result<ServiceEngine<SingleIn<Req>, ManyOut<Annotated<Resp>>>>
+where
+    Req: Data,
+    Resp: Data,
+    OpenAIPreprocessor: Operator<
+        Context<Req>,
+        Pin<Box<dyn AsyncEngineStream<Annotated<Resp>>>>,
+        Context<PreprocessedRequest>,
+        Pin<Box<dyn AsyncEngineStream<Annotated<BackendOutput>>>>,
+    >,
+{
+    let frontend = SegmentSource::<SingleIn<Req>, ManyOut<Annotated<Resp>>>::new();
+    let preprocessor = OpenAIPreprocessor::new(card.clone()).await?.into_operator();
+    let backend = Backend::from_mdc(card.clone()).await?.into_operator();
+    let migration = Migration::from_mdc(card.clone()).await?.into_operator();
+    let router = PushRouter::<PreprocessedRequest, Annotated<LLMEngineOutput>>::from_client(
+        client.clone(),
+        router_mode,
+    )
+    .await?;
+    let service_backend = match router_mode {
+        RouterMode::Random | RouterMode::RoundRobin | RouterMode::Direct(_) => {
+            ServiceBackend::from_engine(Arc::new(router))
+        }
+        RouterMode::KV => {
+            let Some(chooser) = chooser else {
+                anyhow::bail!("RouterMode::KV requires KVRouter to not be null");
+            };
+            let kv_push_router = KvPushRouter::new(router, chooser);
+            ServiceBackend::from_engine(Arc::new(kv_push_router))
+        }
+    };
+
+    let engine = frontend
+        .link(preprocessor.forward_edge())?
+        .link(backend.forward_edge())?
+        .link(migration.forward_edge())?
+        .link(service_backend)?
+        .link(migration.backward_edge())?
+        .link(backend.backward_edge())?
+        .link(preprocessor.backward_edge())?
+        .link(frontend)?;
+    Ok(engine)
 }
 
 #[cfg(test)]

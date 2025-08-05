@@ -62,6 +62,7 @@ class RequestHandler:
             if finish_reason:
                 # Don't forward the stop token
                 out = {"token_ids": [], "finish_reason": finish_reason["type"]}
+                next_total_toks = num_output_tokens_so_far
             else:
                 next_total_toks = len(res["output_ids"])
                 out = {"token_ids": res["output_ids"][num_output_tokens_so_far:]}

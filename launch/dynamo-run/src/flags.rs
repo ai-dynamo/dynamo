@@ -171,7 +171,13 @@ impl Flags {
                 }
             }
             Output::Static(_) => {
-                if self.model_name.is_none() || self.model_name.is_none() {
+                if self.model_name.is_none()
+                    || self
+                        .model_path_pos
+                        .as_ref()
+                        .or(self.model_path_flag.as_ref())
+                        .is_none()
+                {
                     anyhow::bail!(
                         "out=dyn://<path> requires --model-name and --model-path, which are the name and path on disk of the model we expect to serve."
                     );

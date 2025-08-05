@@ -128,12 +128,18 @@ def parse_args():
         help="Path to model directory on disk (e.g., /tmp/model_cache/lama3.2_1B/)",
     )
 
-    return parser.parse_args()
+    flags = parser.parse_args()
+
+    if flags.static_endpoint and (not flags.model_name or not flags.model_path):
+        parser.error("--static-endpoint requires both --model-name and --model-path")
+
+    return flags
 
 
 async def async_main():
     flags = parse_args()
     is_static = bool(flags.static_endpoint)  # true if the string has a value
+
     runtime = DistributedRuntime(asyncio.get_running_loop(), is_static)
 
     if flags.router_mode == "kv":

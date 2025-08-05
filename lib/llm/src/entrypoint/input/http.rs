@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use crate::{
     discovery::{ModelManager, ModelWatcher, MODEL_ROOT_PATH},
-    engines::{self, StreamingEngineAdapter},
-    entrypoint::{input::common, EngineConfig},
+    engines::StreamingEngineAdapter,
+    entrypoint::{self, input::common, EngineConfig},
     http::service::service_v2,
     kv_router::KvRouterConfig,
     types::openai::{
@@ -82,13 +82,18 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 None
             };
 
-            let chat_engine =
-                engines::build_chat_completions(card, &client, router_mode, kv_chooser.clone())
-                    .await?;
+            let chat_engine = entrypoint::build_routed_pipeline::<
+                NvCreateChatCompletionRequest,
+                NvCreateChatCompletionStreamResponse,
+            >(card, &client, router_mode, kv_chooser.clone())
+            .await?;
             manager.add_chat_completions_model(local_model.display_name(), chat_engine)?;
 
-            let completions_engine =
-                engines::build_completions(card, &client, router_mode, kv_chooser).await?;
+            let completions_engine = entrypoint::build_routed_pipeline::<
+                NvCreateCompletionRequest,
+                NvCreateCompletionResponse,
+            >(card, &client, router_mode, kv_chooser)
+            .await?;
             manager.add_completions_model(local_model.display_name(), completions_engine)?;
         }
         EngineConfig::StaticFull { engine, model, .. } => {
