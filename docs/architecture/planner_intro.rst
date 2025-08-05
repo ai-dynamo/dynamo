@@ -19,13 +19,13 @@ Planner
 
 The planner monitors the state of the system and adjusts workers to ensure that the system runs efficiently.
 
-Currently, the planner can scale the number of vllm workers up and down based on the kv cache load and prefill queue size:
+Currently, the planner can scale the number of vLLM workers up and down based on the kv cache load and prefill queue size:
 
 Key features include:
 
 * **Load-based scaling** that monitors KV cache utilization and prefill queue size to make scaling decisions
 * **SLA-based scaling** that uses predictive modeling and performance interpolation to proactively meet TTFT and ITL targets
-* **Multi-backend support** for both local (Circus) and Kubernetes environments
+* **Multi-backend support** for Kubernetes environments
 * **Graceful scaling** that ensures no requests are dropped during scale-down operations
 
 .. list-table::
@@ -50,9 +50,6 @@ Key features include:
    * -
      - ❌
      - SGLang
-   * -
-     - ❌
-     - llama.cpp
    * - **Serving Type**
      - ✅
      - Aggregated
