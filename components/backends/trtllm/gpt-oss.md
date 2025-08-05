@@ -27,41 +27,22 @@ The disaggregated approach optimizes for both low-latency (maximizing tokens per
 
 ## Instructions
 
-### 1. Get the Dynamo Container
+### 1. Build the Container
 
-You can either pull a pre-built container or build from source. Both options provide the same Dynamo container with TensorRT-LLM backend support for gpt-oss-120b.
-
-#### Option A: Pull Pre-built Container
-
-> [!IMPORTANT]
-> **PLACEHOLDER**: The official gpt-oss-120b container URL will be provided upon release.
-
+**For ARM64 (GB200):**
 ```bash
-# PLACEHOLDER: Replace with actual container URL when available
-export DYNAMO_CONTAINER_IMAGE="gitlab-master.nvidia.com/dl/ai-dynamo/dynamo-ci/jothomson:orangina-dynamo-release-aarch64"
-docker pull $DYNAMO_CONTAINER_IMAGE
-```
-
-#### Option B: Build from Source
-
-If you prefer to build from source or need custom modifications:
-
-> [!IMPORTANT]
-> **PLACEHOLDER**: Update to public commit hash and remove URL for release.
-
-**For ARM64 (B200/GH200):**
-```bash
+# Navigate to the Dynamo repository root
 cd $DYNAMO_ROOT
+
+export DYNAMO_CONTAINER_IMAGE=dynamo-gpt-oss-arm64
 
 # Build the container with a specific TensorRT-LLM commit
 docker build --platform linux/arm64 -f container/Dockerfile.tensorrt_llm_prebuilt . \
-  --build-arg BASE_IMAGE=urm.nvidia.com/sw-tensorrt-docker/tensorrt-llm-staging/release \
-  --build-arg BASE_IMAGE_TAG=sbsa-ngc-release-torch_skip-5c7cb1d-user_zhanruis_create_ngc_image-590 \
+  --build-arg BASE_IMAGE=nvcr.io/nvidia/tensorrt-llm/release \
+  --build-arg BASE_IMAGE_TAG=gpt-oss-dev \
   --build-arg ARCH=arm64 \
   --build-arg ARCH_ALT=aarch64 \
-  -t gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo-ci/jothomson:orangina-dynamo-release-aarch64
-
-export DYNAMO_CONTAINER_IMAGE=gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo-ci/jothomson:orangina-dynamo-release-aarch64
+  -t $DYNAMO_CONTAINER_IMAGE
 ```
 
 **For x86_64:**
@@ -69,15 +50,13 @@ export DYNAMO_CONTAINER_IMAGE=gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo-
 # Navigate to the Dynamo repository root
 cd $DYNAMO_ROOT
 
-# Replace <base_image> and <image_tag> with appropriate TensorRT-LLM base image values
+export DYNAMO_CONTAINER_IMAGE=dynamo-gpt-oss-amd64
+
 docker build -f container/Dockerfile.tensorrt_llm_prebuilt . \
-  --build-arg BASE_IMAGE=<base_image> \
-  --build-arg BASE_IMAGE_TAG=<image_tag> \
-  -t orangina-dynamo
-
-export DYNAMO_CONTAINER_IMAGE=orangina-dynamo
+  --build-arg BASE_IMAGE=nvcr.io/nvidia/tensorrt-llm/release \
+  --build-arg BASE_IMAGE_TAG=gpt-oss-dev \
+  -t $DYNAMO_CONTAINER_IMAGE
 ```
-
 
 ### 2. Download the Model
 
