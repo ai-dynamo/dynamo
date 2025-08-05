@@ -137,6 +137,10 @@ pub struct ModelDeploymentCard {
     /// but remains constant during the worker session
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime_config: Option<ModelRuntimeConfig>,
+
+    /// User-defined metadata for custom worker behavior
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_data: Option<serde_json::Value>,
 }
 
 impl ModelDeploymentCard {

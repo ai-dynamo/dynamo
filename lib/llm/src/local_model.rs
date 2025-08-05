@@ -50,6 +50,7 @@ pub struct LocalModelBuilder {
     migration_limit: u32,
     is_mocker: bool,
     runtime_config: ModelRuntimeConfig,
+    user_data: Option<serde_json::Value>,
 }
 
 impl Default for LocalModelBuilder {
@@ -67,6 +68,7 @@ impl Default for LocalModelBuilder {
             migration_limit: Default::default(),
             is_mocker: Default::default(),
             runtime_config: Default::default(),
+            user_data: Default::default(),
         }
     }
 }
@@ -134,6 +136,11 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn user_data(&mut self, user_data: Option<serde_json::Value>) -> &mut Self {
+        self.user_data = user_data;
+        self
+    }
+
     /// Make an LLM ready for use:
     /// - Download it from Hugging Face (and NGC in future) if necessary
     /// - Resolve the path
@@ -163,6 +170,7 @@ impl LocalModelBuilder {
                 self.model_name.as_deref().unwrap_or(DEFAULT_NAME),
             );
             card.migration_limit = self.migration_limit;
+            card.user_data = self.user_data.take();
             return Ok(LocalModel {
                 card,
                 full_path: PathBuf::new(),
@@ -219,6 +227,7 @@ impl LocalModelBuilder {
         }
 
         card.migration_limit = self.migration_limit;
+        card.user_data = self.user_data.take();
 
         Ok(LocalModel {
             card,

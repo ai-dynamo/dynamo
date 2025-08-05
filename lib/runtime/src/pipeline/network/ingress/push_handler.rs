@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use super::*;
+use crate::protocols::maybe_error::MaybeError;
 use prometheus::{Histogram, IntCounter, IntCounterVec, IntGauge};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -105,7 +106,7 @@ impl WorkHandlerMetrics {
 impl<T: Data, U: Data> PushWorkHandler for Ingress<SingleIn<T>, ManyOut<U>>
 where
     T: Data + for<'de> Deserialize<'de> + std::fmt::Debug,
-    U: Data + Serialize + std::fmt::Debug,
+    U: Data + Serialize + MaybeError + std::fmt::Debug,
 {
     fn add_metrics(&self, endpoint: &crate::component::Endpoint) -> Result<()> {
         // Call the Ingress-specific add_metrics implementation
@@ -220,6 +221,14 @@ where
         let mut send_complete_final = true;
         while let Some(resp) = stream.next().await {
             tracing::trace!("Sending response: {:?}", resp);
+            if let Some(err) = resp.err() {
+                const STREAM_ERR_MSG: &str = "Stream ended before generation completed";
+                if format!("{:?}", err) == STREAM_ERR_MSG {
+                    tracing::warn!(STREAM_ERR_MSG);
+                    send_complete_final = false;
+                    break;
+                }
+            }
             let resp_wrapper = NetworkStreamWrapper {
                 data: Some(resp),
                 complete_final: false,

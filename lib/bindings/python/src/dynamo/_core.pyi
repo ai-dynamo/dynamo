@@ -216,10 +216,14 @@ class Endpoint:
 
     ...
 
-    async def serve_endpoint(self, handler: RequestHandler) -> None:
+    async def serve_endpoint(self, handler: RequestHandler, graceful_shutdown: bool = True) -> None:
         """
         Serve an endpoint discoverable by all connected clients at
         `{{ namespace }}/components/{{ component_name }}/endpoints/{{ endpoint_name }}`
+
+        Args:
+            handler: The request handler function
+            graceful_shutdown: Whether to wait for inflight requests to complete during shutdown (default: True)
         """
         ...
 
