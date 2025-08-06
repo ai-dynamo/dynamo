@@ -1,3 +1,5 @@
+:orphan:
+
 # GKE Workload Identity and Artifact Registry Setup Guide
 
 This guide explains how to set up Workload Identity in GKE and configure access to Google Artifact Registry.

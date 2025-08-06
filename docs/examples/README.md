@@ -4,9 +4,9 @@
 
 Follow individual examples under components/backends/ to serve models locally.
 
-For example follow the [vLLM Backend Example](../../components/backends/vllm/README.md)
+For example follow the [vLLM Backend Example](../components/backends/vllm/README.md)
 
-For a basic GPU - unaware example see the [Hello World Example](../../examples/runtime/hello_world/README.md)
+For a basic GPU - unaware example see the [Hello World Example](../examples/runtime/hello_world/README.md)
 
 ## Deploying Examples to Kubernetes
 
@@ -19,7 +19,6 @@ If you are a **👤 Dynamo User** first follow the [Quickstart Guide](../guides/
 ### Instructions for Dynamo Contributor
 If you are a **🧑‍💻 Dynamo Contributor** you may have to rebuild the dynamo platform images as the code evolves.
 For more details read the [Cloud Guide](../guides/dynamo_deploy/dynamo_cloud.md)
-Read more on deploying Dynamo Cloud read [deploy/cloud/helm/README.md](../../deploy/cloud/helm/README.md).
 
 
 ### Deploying a particular example
@@ -43,11 +42,11 @@ You can use `kubectl delete dynamoGraphDeployment <your-dep-name> -n ${NAMESPACE
 We provide a Custom Resource yaml file for many examples under the `components/backends/<backend-name>/deploy/`folder.
 Consult the examples below for the CRs for your specific inference backend.
 
-[View SGLang k8s](/components/backends/sglang/deploy/README.md)
+[View SGLang k8s](../components/backends/sglang/README.md)
 
-[View vLLM K8s](/components/backends/vllm/deploy/README.md)
+[View vLLM K8s](../components/backends/vllm/README.md#kubernetes-deployment)
 
-[View TRTLLM k8s](/components/backends/trtllm/deploy/README.md)
+[View TRTLLM k8s](../components/backends/trtllm/deploy/README.md)
 
 **Note 1** Example Image
 
