@@ -166,10 +166,16 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		labels[commonconsts.KubeLabelDynamoComponent] = componentName
 		labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
 		if component.ComponentType == commonconsts.ComponentTypePlanner {
+			// ensure that the extraPodSpec is not nil
 			if deployment.Spec.ExtraPodSpec == nil {
 				deployment.Spec.ExtraPodSpec = &common.ExtraPodSpec{}
 			}
-			deployment.Spec.ExtraPodSpec.ServiceAccountName = commonconsts.PlannerServiceAccountName
+			// ensure that the embedded PodSpec struct is not nil
+			if deployment.Spec.ExtraPodSpec.PodSpec == nil {
+				deployment.Spec.ExtraPodSpec.PodSpec = &corev1.PodSpec{}
+			}
+			// finally set the service account name
+			deployment.Spec.ExtraPodSpec.PodSpec.ServiceAccountName = commonconsts.PlannerServiceAccountName
 		}
 		if deployment.IsMainComponent() && defaultIngressSpec != nil && deployment.Spec.Ingress == nil {
 			deployment.Spec.Ingress = defaultIngressSpec
@@ -316,6 +322,9 @@ func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.Dyn
 	gangSet.Name = dynamoDeployment.Name
 	gangSet.Namespace = dynamoDeployment.Namespace
 	gangSet.Spec.Replicas = 1
+	if controllerConfig.Grove.TerminationDelay > 0 {
+		gangSet.Spec.Template.TerminationDelay = &metav1.Duration{Duration: controllerConfig.Grove.TerminationDelay}
+	}
 	for componentName, component := range dynamoDeployment.Spec.Services {
 		container := corev1.Container{
 			Name:           "main",

@@ -40,6 +40,10 @@ pub struct EndpointConfig {
     #[educe(Debug(ignore))]
     #[builder(default, private)]
     _stats_handler: Option<EndpointStatsHandler>,
+
+    /// Whether to wait for inflight requests to complete during shutdown
+    #[builder(default = "true")]
+    graceful_shutdown: bool,
 }
 
 impl EndpointConfigBuilder {
@@ -55,7 +59,8 @@ impl EndpointConfigBuilder {
     }
 
     pub async fn start(self) -> Result<()> {
-        let (endpoint, lease, handler, stats_handler) = self.build_internal()?.dissolve();
+        let (endpoint, lease, handler, stats_handler, graceful_shutdown) =
+            self.build_internal()?.dissolve();
         let lease = lease.or(endpoint.drt().primary_lease());
         let lease_id = lease.as_ref().map(|l| l.id()).unwrap_or(0);
 
@@ -109,6 +114,7 @@ impl EndpointConfigBuilder {
         let push_endpoint = PushEndpoint::builder()
             .service_handler(handler)
             .cancellation_token(cancel_token.clone())
+            .graceful_shutdown(graceful_shutdown)
             .build()
             .map_err(|e| anyhow::anyhow!("Failed to build push endpoint: {e}"))?;
 

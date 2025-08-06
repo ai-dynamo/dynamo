@@ -158,7 +158,7 @@ where
         log::trace!(request_id, "awaiting transport handshake");
         let response_stream = response_stream_provider
             .await
-            .map_err(|_| PipelineError::DetatchedStreamReceiver)?
+            .map_err(|_| PipelineError::DetachedStreamReceiver)?
             .map_err(PipelineError::ConnectionFailed)?;
 
         // TODO: Detect end-of-stream using Server-Sent Events (SSE)

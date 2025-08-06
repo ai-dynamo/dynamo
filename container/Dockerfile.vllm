@@ -17,7 +17,9 @@ ARG TORCH_BACKEND="cu128"
 
 # Match 0.10.0 vLLM release
 # https://github.com/vllm-project/vllm/releases/tag/v0.10.0
-ARG DEEPGEMM_REF="1876566"
+# Pinned to commit before https://github.com/deepseek-ai/DeepGEMM/pull/112 for DeepGEMM which seems to break on H100:
+# "RuntimeError: Failed: CUDA runtime error csrc/jit/kernel_runtime.hpp:108 '98'"
+ARG DEEPGEMM_REF="03d0be3"
 ARG FLASHINF_REF="v0.2.8rc1"
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
@@ -81,7 +83,7 @@ RUN apt-get update -y && \
     rm -rf /var/lib/apt/lists/*
 
 ARG NIXL_UCX_REF=v1.19.x
-ARG NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
+ARG NIXL_REF=0.4.1
 
 ENV NIXL_SRC_DIR=/opt/nixl
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
@@ -437,7 +439,8 @@ RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential \
         python3-dev \
-        # Curl for polling various endpoints.
+        # jq and curl for polling various endpoints and health checks
+        jq \
         curl \
         # For debugging
         vim \

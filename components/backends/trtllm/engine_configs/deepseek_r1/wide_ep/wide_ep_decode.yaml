@@ -15,8 +15,9 @@
 backend: pytorch
 
 # WideEP related settings
-moe_backend: WideEP
-moe_load_balancer: /mnt/engine_configs/deepseek_r1/wide_ep/eplb.yaml
+moe_config:
+  backend: WIDEEP
+  load_balancer: /mnt/engine_configs/deepseek_r1/wide_ep/eplb.yaml
 
 # TP/EP/PP/DP
 tensor_parallel_size: 16
@@ -35,25 +36,31 @@ kv_cache_config:
   # With dp attention enabled: large ISL at high concurrency may need
   # free_gpu_memory_fraction low to have enough available memory.
   free_gpu_memory_fraction: 0.30
+  dtype: fp8
+
 
 # NOTE: pytorch_backend_config section flattened since: https://github.com/NVIDIA/TensorRT-LLM/pull/4603
 # NOTE: overlap_scheduler enabled by default since this commit and changed
 # config field from 'enable_overlap_scheduler' to 'disable_overlap_scheduler':
 # https://github.com/NVIDIA/TensorRT-LLM/commit/b4e5df0ee0024eda3eeb83a6ba822245a30ab428
 disable_overlap_scheduler: false
-use_cuda_graph: true
-cuda_graph_padding_enabled: true
-# NOTE: For larger max batch size, you may want to add larger cuda graph
-# batch sizes below to match.
-cuda_graph_batch_sizes:
-- 1
-- 2
-- 4
-- 8
-- 16
-- 32
-- 64
-- 128
-- 256
+cuda_graph_config:
+  enable_padding: true
+  # NOTE: For larger max batch size, you may want to
+  # add larger cuda graph batch sizes below to match.
+  batch_sizes:
+  - 1
+  - 2
+  - 4
+  - 8
+  - 16
+  - 32
+  - 64
+  - 128
+  - 256
+
+
 print_iter_log: true
-kv_cache_dtype: fp8
+
+cache_transceiver_config:
+  backend: default

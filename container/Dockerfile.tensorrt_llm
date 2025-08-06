@@ -45,7 +45,7 @@ ARG ARCH
 ARG ARCH_ALT
 
 ARG NIXL_UCX_REF=v1.19.x
-ARG NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
+ARG NIXL_REF=0.4.1
 
 ENV NIXL_SRC_DIR=/opt/nixl
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
@@ -150,6 +150,7 @@ COPY --from=trtllm_wheel . /trtllm_wheel/
 # Note: TensorRT needs to be uninstalled before installing the TRTLLM wheel
 # because there might be mismatched versions of TensorRT between the NGC PyTorch
 # and the TRTLLM wheel.
+# Locking triton version to 3.3.1 as 3.4.0 breaks tensorrt-llm 1.0.0rc4
 RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
     pip uninstall -y tensorrt && \
     if [ "$HAS_TRTLLM_CONTEXT" = "1" ]; then \
@@ -157,14 +158,19 @@ RUN [ -f /etc/pip/constraint.txt ] && : > /etc/pip/constraint.txt || true && \
         WHEEL_FILE=$(find /trtllm_wheel -name "*.whl" | head -n 1); \
         if [ -n "$WHEEL_FILE" ]; then \
             pip install "$WHEEL_FILE"; \
+            if [ "$ARCH" = "amd64" ]; then \
+                pip install "triton==3.3.1"; \
+            fi; \
         else \
             echo "No wheel file found in /trtllm_wheel directory."; \
             exit 1; \
         fi; \
     else \
-         # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
-         pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" \
-         "${TENSORRTLLM_PIP_WHEEL}" ; \
+        # Install TensorRT-LLM wheel from the provided index URL, allow dependencies from PyPI
+        pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}"; \
+        if [ "$ARCH" = "amd64" ]; then \
+            pip install "triton==3.3.1"; \
+        fi; \
     fi
 
 # Install test dependencies
@@ -332,26 +338,6 @@ RUN pip install dist/ai_dynamo_runtime*cp312*.whl  && \
     pip install dist/ai_dynamo*any.whl
 
 ENV DYNAMO_HOME=/workspace
-
-# Use UCX for TRTLLM KV Cache Transfer
-ARG TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL
-ENV TRTLLM_USE_UCX_KVCACHE=1
-
-# Create a script that sets the environment variables and source it.
-# If TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL is set to 1, unset TRTLLM_USE_UCX_KVCACHE
-# and set TRTLLM_USE_NIXL_KVCACHE to 1.
-RUN echo '#!/bin/bash' > /usr/local/bin/set_trtllm_env.sh && \
-    if [ "$TRTLLM_USE_NIXL_KVCACHE_EXPERIMENTAL" = "1" ]; then \
-        echo 'unset TRTLLM_USE_UCX_KVCACHE' >> /usr/local/bin/set_trtllm_env.sh; \
-        echo 'export TRTLLM_USE_NIXL_KVCACHE=1' >> /usr/local/bin/set_trtllm_env.sh; \
-    else \
-        echo '# TRTLLM_USE_UCX_KVCACHE should already be set to 1' >> /usr/local/bin/set_trtllm_env.sh; \
-    fi && \
-    chmod +x /usr/local/bin/set_trtllm_env.sh
-
-# Source the script in bashrc
-RUN echo 'source /usr/local/bin/set_trtllm_env.sh' >> /root/.bashrc
-
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
@@ -367,12 +353,25 @@ CMD []
 
 FROM ${RUNTIME_IMAGE}:${RUNTIME_IMAGE_TAG} AS runtime
 
+WORKDIR /workspace
+
 ARG ARCH_ALT
 
-WORKDIR /workspace
 ENV DYNAMO_HOME=/workspace
 ENV VIRTUAL_ENV=/opt/dynamo/venv
 ENV PATH="${VIRTUAL_ENV}/bin:${PATH}"
+ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
+ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
+ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
+ENV LD_LIBRARY_PATH=\
+$NIXL_LIB_DIR:\
+$NIXL_PLUGIN_DIR:\
+/usr/local/ucx/lib:\
+/usr/local/ucx/lib/ucx:\
+/opt/hpcx/ompi/lib:\
+$LD_LIBRARY_PATH
+ENV PATH=/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
+ENV OPAL_PREFIX=/opt/hpcx/ompi
 
 # Install apt dependencies
 # openssh-client, openssh-server are needed for OpenMPI
@@ -380,7 +379,8 @@ RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential \
         python3-dev \
-        # Curl for polling various endpoints.
+        # jq and curl for polling various endpoints and health checks
+        jq \
         curl \
         # For debugging
         vim \
@@ -466,21 +466,6 @@ COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn /usr/local/
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info /usr/local/lib/python3.12/dist-packages/flash_attn-${FLASH_ATTN_VER}.dist-info
 COPY --from=build /usr/local/lib/python3.12/dist-packages/flash_attn_2_cuda.cpython-312-*-linux-gnu.so /usr/local/lib/python3.12/dist-packages/
 
-# Setup environment variables
-ARG ARCH_ALT
-ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
-ENV NIXL_LIB_DIR=$NIXL_PREFIX/lib/${ARCH_ALT}-linux-gnu
-ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
-
-ENV LD_LIBRARY_PATH=\
-$NIXL_LIB_DIR:\
-$NIXL_PLUGIN_DIR:\
-/usr/local/ucx/lib:\
-/usr/local/ucx/lib/ucx:\
-/opt/hpcx/ompi/lib:\
-$LD_LIBRARY_PATH
-ENV PATH=/opt/hpcx/ompi/bin:/usr/local/bin/etcd/:/usr/local/cuda/nvvm/bin:$PATH
-ENV OPAL_PREFIX=/opt/hpcx/ompi
 
 # Install TensorRT-LLM (same as in build stage)
 ARG HAS_TRTLLM_CONTEXT=0
@@ -489,21 +474,19 @@ ARG TENSORRTLLM_INDEX_URL="https://pypi.python.org/simple"
 
 # Copy Dynamo wheels into wheelhouse
 # Copy metrics binary from wheel_builder image, not part of ai-dynamo wheel
-COPY --from=dev /workspace/wheels/nixl/*.whl wheelhouse/
-COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
+COPY --from=dev /workspace/wheels/nixl/*.whl /workspace/wheelhouse/
+COPY --from=wheel_builder /workspace/dist/*.whl /workspace/wheelhouse/
 COPY --from=dev /workspace/target/release/metrics /usr/local/bin/metrics
 
 # NOTE: If a package (tensorrt_llm) exists on both --index-url and --extra-index-url,
 # uv will prioritize the --extra-index-url, unless --index-strategy unsafe-best-match
 # is also specified. So set the configurable index as a --extra-index-url for prioritization.
-RUN uv pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" \
-    "${TENSORRTLLM_PIP_WHEEL}" && \
-    uv pip install ai-dynamo nixl --find-links wheelhouse
-
-# Setup TRTLLM environment variables, same as in dev image
-ENV TRTLLM_USE_UCX_KVCACHE=1
-COPY --from=dev /usr/local/bin/set_trtllm_env.sh /usr/local/bin/set_trtllm_env.sh
-RUN echo 'source /usr/local/bin/set_trtllm_env.sh' >> /root/.bashrc
+# locking triton version to 3.3.1 as 3.4.0 breaks tensorrt-llm 1.0.0rc4
+RUN uv pip install --extra-index-url "${TENSORRTLLM_INDEX_URL}" "${TENSORRTLLM_PIP_WHEEL}" && \
+    if [ "$ARCH" = "amd64" ]; then \
+        pip install "triton==3.3.1"; \
+    fi; \
+    uv pip install ai-dynamo nixl --find-links /workspace/wheelhouse
 
 # Copy benchmarks, backends and tests for CI
 # TODO: Remove this once we have a functional CI image built on top of the runtime image

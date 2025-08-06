@@ -26,9 +26,12 @@ disable_overlap_scheduler: true
 speculative_config:
   decoding_type: Eagle
   max_draft_len: 3
-  pytorch_weights_path: nvidia/Llama-4-Maverick-17B-128E-Eagle3
+  speculative_model_dir: nvidia/Llama-4-Maverick-17B-128E-Eagle3
   eagle3_one_model: True
 
 kv_cache_config:
   free_gpu_memory_fraction: 0.5
   enable_block_reuse: false
+
+cache_transceiver_config:
+  backend: default

@@ -61,18 +61,19 @@ Repository = "https://github.com/ai-dynamo/dynamo.git"
 [project.optional-dependencies]
 trtllm =[
     "uvloop",
-    "tensorrt-llm==1.0.0rc4"
+    "tensorrt-llm==1.0.0rc4",
+    "triton==3.3.1",  # locking triton as version 3.4.0 breaks tensorrt-llm 1.0.0rc4
 ]
 
 vllm = [
     "uvloop",
-    "nixl",
+    "nixl<=0.4.1",
     "vllm==0.10.0",
 ]
 
 sglang = [
     "uvloop",
-    "nixl",
+    "nixl<=0.4.1",
     "sglang[all]==0.4.9.post6",
 ]
 
@@ -146,6 +147,7 @@ addopts = [
     "--ignore-glob=*_inc.py",
     "--ignore-glob=*/llm/tensorrtllm*",
     "--ignore-glob=docs/*",
+    "--ignore-glob=components/backends/sglang/src/dynamo/sglang/common/*",
     # FIXME: Get relative/generic blob paths to work here
 ]
 xfail_strict = true

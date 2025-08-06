@@ -3,7 +3,7 @@
 
 use std::env;
 
-use clap::Parser;
+use clap::{CommandFactory as _, Parser};
 
 use dynamo_llm::entrypoint::input::Input;
 use dynamo_run::Output;
@@ -22,9 +22,11 @@ Example:
 - cd target/debug
 - ./dynamo-run Qwen/Qwen3-0.6B
 - OR: ./dynamo-run /data/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+
+See `docs/guides/dynamo_run.md` in the repo for full details.
 "#;
 
-const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=ENGINE_LIST|dyn [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--tensor-parallel-size=1] [--context-length=N] [--kv-cache-block-size=16] [--num-nodes=1] [--node-rank=0] [--leader-addr=127.0.0.1:9876] [--base-gpu-id=0] [--extra-engine-args=args.json] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=2.0] [--kv-gpu-cache-usage-weight=1.0] [--kv-waiting-requests-weight=1.0] [--migration-limit=0] [--verbosity (-v|-vv)]";
+const USAGE: &str = "USAGE: dynamo-run in=[http|text|dyn://<path>|batch:<folder>] out=ENGINE_LIST|auto|dyn://<path> [--http-port 8080] [--model-path <path>] [--model-name <served-model-name>] [--model-config <hf-repo>] [--context-length=N] [--kv-cache-block-size=16] [--extra-engine-args=args.json] [--static-worker] [--router-mode random|round-robin|kv] [--kv-overlap-score-weight=2.0] [--router-temperature=0.0] [--use-kv-events] [--max-num-batched-tokens=1.0] [--migration-limit=0] [--verbosity (-v|-vv)]";
 
 fn main() -> anyhow::Result<()> {
     // Set log level based on verbosity flag
@@ -71,6 +73,7 @@ async fn wrapper(runtime: dynamo_runtime::Runtime) -> anyhow::Result<()> {
         let usage = USAGE.replace("ENGINE_LIST", &engine_list);
         println!("{usage}");
         println!("{HELP}");
+        dynamo_run::Flags::command().print_long_help().unwrap();
         return Ok(());
     } else if args[0] == "--version" {
         if let Some(describe) = option_env!("VERGEN_GIT_DESCRIBE") {
@@ -134,5 +137,5 @@ fn is_in_dynamic(in_opt: &Input) -> bool {
 }
 
 fn is_out_dynamic(out_opt: &Option<Output>) -> bool {
-    matches!(out_opt, Some(Output::Dynamic))
+    matches!(out_opt, Some(Output::Auto) | Some(Output::Static(_)))
 }

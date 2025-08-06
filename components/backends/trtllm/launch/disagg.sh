@@ -10,6 +10,9 @@ export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"engine_configs/prefill.yaml"}
 export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"engine_configs/decode.yaml"}
 export PREFILL_CUDA_VISIBLE_DEVICES=${PREFILL_CUDA_VISIBLE_DEVICES:-"0"}
 export DECODE_CUDA_VISIBLE_DEVICES=${DECODE_CUDA_VISIBLE_DEVICES:-"1"}
+export MODALITY=${MODALITY:-"text"}
+# If you want to use multimodal, set MODALITY to "multimodal"
+#export MODALITY=${MODALITY:-"multimodal"}
 
 # Setup cleanup trap
 cleanup() {
@@ -33,6 +36,7 @@ CUDA_VISIBLE_DEVICES=$PREFILL_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$PREFILL_ENGINE_ARGS" \
   --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
+  --modality "$MODALITY" \
   --disaggregation-mode prefill &
 PREFILL_PID=$!
 
@@ -42,4 +46,5 @@ CUDA_VISIBLE_DEVICES=$DECODE_CUDA_VISIBLE_DEVICES python3 -m dynamo.trtllm \
   --served-model-name "$SERVED_MODEL_NAME" \
   --extra-engine-args  "$DECODE_ENGINE_ARGS" \
   --disaggregation-strategy "$DISAGGREGATION_STRATEGY" \
+  --modality "$MODALITY" \
   --disaggregation-mode decode

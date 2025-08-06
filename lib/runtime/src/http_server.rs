@@ -65,26 +65,6 @@ impl Clone for HttpServerInfo {
     }
 }
 
-pub struct HttpMetricsRegistry {
-    pub drt: Arc<crate::DistributedRuntime>,
-}
-
-impl crate::traits::DistributedRuntimeProvider for HttpMetricsRegistry {
-    fn drt(&self) -> &crate::DistributedRuntime {
-        &self.drt
-    }
-}
-
-impl MetricsRegistry for HttpMetricsRegistry {
-    fn basename(&self) -> String {
-        "http_server".to_string()
-    }
-
-    fn parent_hierarchy(&self) -> Vec<String> {
-        [self.drt().parent_hierarchy(), vec![self.drt().basename()]].concat()
-    }
-}
-
 /// HTTP server state containing metrics and uptime tracking
 pub struct HttpServerState {
     // global drt registry is for printing out the entire Prometheus format output
@@ -96,10 +76,9 @@ pub struct HttpServerState {
 impl HttpServerState {
     /// Create new HTTP server state with the provided metrics registry
     pub fn new(drt: Arc<crate::DistributedRuntime>) -> anyhow::Result<Self> {
-        let http_metrics_registry = Arc::new(HttpMetricsRegistry { drt: drt.clone() });
         // Note: This metric is created at the DRT level (no namespace), so we manually add "dynamo_" prefix
         // to maintain consistency with the project's metric naming convention
-        let uptime_gauge = http_metrics_registry.as_ref().create_gauge(
+        let uptime_gauge = drt.as_ref().create_gauge(
             "dynamo_uptime_seconds",
             "Total uptime of the DistributedRuntime in seconds",
             &[],
@@ -151,6 +130,20 @@ pub async fn spawn_http_server(
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
     // Create HTTP server state with the provided metrics registry
     let server_state = Arc::new(HttpServerState::new(drt)?);
+    let health_path = server_state
+        .drt()
+        .system_health
+        .lock()
+        .unwrap()
+        .health_path
+        .clone();
+    let live_path = server_state
+        .drt()
+        .system_health
+        .lock()
+        .unwrap()
+        .live_path
+        .clone();
 
     // Initialize the start time
     server_state
@@ -159,14 +152,14 @@ pub async fn spawn_http_server(
 
     let app = Router::new()
         .route(
-            "/health",
+            &health_path,
             get({
                 let state = Arc::clone(&server_state);
                 move |tracing_ctx| health_handler(state, "health", tracing_ctx)
             }),
         )
         .route(
-            "/live",
+            &live_path,
             get({
                 let state = Arc::clone(&server_state);
                 move |tracing_ctx| health_handler(state, "live", tracing_ctx)
@@ -237,8 +230,12 @@ async fn health_handler(
     route: &'static str,       // Used for tracing only
     trace_parent: TraceParent, // Used for tracing only
 ) -> impl IntoResponse {
-    let system_health = state.drt().system_health.lock().await;
-    let (mut healthy, endpoints) = system_health.get_health_status();
+    let (mut healthy, endpoints) = state
+        .drt()
+        .system_health
+        .lock()
+        .unwrap()
+        .get_health_status();
     let uptime = match state.uptime() {
         Ok(uptime_state) => Some(uptime_state),
         Err(e) => {
@@ -368,9 +365,9 @@ mod tests {
         println!("Full metrics response:\n{}", response);
 
         let expected = "\
-# HELP dynamo_uptime_seconds Total uptime of the DistributedRuntime in seconds
-# TYPE dynamo_uptime_seconds gauge
-dynamo_uptime_seconds{namespace=\"http_server\"} 42
+# HELP dynamo_component_dynamo_uptime_seconds Total uptime of the DistributedRuntime in seconds
+# TYPE dynamo_component_dynamo_uptime_seconds gauge
+dynamo_component_dynamo_uptime_seconds 42
 ";
         assert_eq!(response, expected);
     }
@@ -394,14 +391,26 @@ dynamo_uptime_seconds{namespace=\"http_server\"} 42
     }
 
     #[rstest]
-    #[case("ready", 200, "ready")]
-    #[case("notready", 503, "notready")]
+    #[case("ready", 200, "ready", None, None, 3)]
+    #[case("notready", 503, "notready", None, None, 3)]
+    #[case("ready", 200, "ready", Some("/custom/health"), Some("/custom/live"), 5)]
+    #[case(
+        "notready",
+        503,
+        "notready",
+        Some("/custom/health"),
+        Some("/custom/live"),
+        5
+    )]
     #[tokio::test]
     #[cfg(feature = "integration")]
     async fn test_health_endpoints(
         #[case] starting_health_status: &'static str,
         #[case] expected_status: u16,
         #[case] expected_body: &'static str,
+        #[case] custom_health_path: Option<&'static str>,
+        #[case] custom_live_path: Option<&'static str>,
+        #[case] expected_num_tests: usize,
     ) {
         use std::sync::Arc;
         use tokio::time::sleep;
@@ -415,10 +424,14 @@ dynamo_uptime_seconds{namespace=\"http_server\"} 42
 
         #[allow(clippy::redundant_closure_call)]
         temp_env::async_with_vars(
-            [(
-                "DYN_SYSTEM_STARTING_HEALTH_STATUS",
-                Some(starting_health_status),
-            )],
+            [
+                (
+                    "DYN_SYSTEM_STARTING_HEALTH_STATUS",
+                    Some(starting_health_status),
+                ),
+                ("DYN_SYSTEM_HEALTH_PATH", custom_health_path),
+                ("DYN_SYSTEM_LIVE_PATH", custom_live_path),
+            ],
             (async || {
                 let runtime = crate::Runtime::from_settings().unwrap();
                 let drt = Arc::new(
@@ -434,20 +447,30 @@ dynamo_uptime_seconds{namespace=\"http_server\"} 42
                 sleep(std::time::Duration::from_millis(1000)).await;
                 println!("[test] Server should be up, starting requests...");
                 let client = reqwest::Client::new();
-                for (path, expect_status, expect_body) in [
-                    ("/health", expected_status, expected_body),
-                    ("/live", expected_status, expected_body),
-                    ("/someRandomPathNotFoundHere", 404, "Route not found"),
-                ] {
+
+                // Prepare test cases
+                let mut test_cases = vec![];
+                if custom_health_path.is_none() {
+                    // When using default paths, test the default paths
+                    test_cases.push(("/health", expected_status, expected_body));
+                } else {
+                    // When using custom paths, default paths should not exist
+                    test_cases.push(("/health", 404, "Route not found"));
+                    test_cases.push((custom_health_path.unwrap(), expected_status, expected_body));
+                }
+                if custom_live_path.is_none() {
+                    // When using default paths, test the default paths
+                    test_cases.push(("/live", expected_status, expected_body));
+                } else {
+                    // When using custom paths, default paths should not exist
+                    test_cases.push(("/live", 404, "Route not found"));
+                    test_cases.push((custom_live_path.unwrap(), expected_status, expected_body));
+                }
+                test_cases.push(("/someRandomPathNotFoundHere", 404, "Route not found"));
+                assert_eq!(test_cases.len(), expected_num_tests);
+
+                for (path, expect_status, expect_body) in test_cases {
                     println!("[test] Sending request to {}", path);
-                    let traceparent_value =
-                        "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
-                    let tracestate_value = "vendor1=opaqueValue1,vendor2=opaqueValue2";
-                    let mut headers = reqwest::header::HeaderMap::new();
-                    headers.insert(
-                        reqwest::header::HeaderName.from_static("traceparent"),
-                        reqwest::header::HeaderValue.from_str(traceparent_value)?,
-                    );
                     let url = format!("http://{}{}", addr, path);
                     let response = client.get(&url).send().await.unwrap();
                     let status = response.status();

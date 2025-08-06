@@ -8,9 +8,19 @@
 # - Auto-discovery: Watches etcd for engine/worker registration (via `register_llm`).
 # - Pre-processor: Prompt templating and tokenization.
 # - Router, defaulting to round-robin (TODO: Add flags to enable KV routing).
+#
+# Pass `--interactive` or `-i` for text chat instead of HTTP server.
+#
+# For static mode (no etcd auto-discovery):
+# - python -m dynamo.frontend --model-name Qwen3-0.6B-Q8_0.gguf --model-path ~/llms/Qwen3-0.6B --static-endpoint dynamo.backend.generate
+# Worker example:
+# - cd lib/bindings/python/examples/hello_world
+# - python server_sglang_static.py
 
 import argparse
 import asyncio
+import os
+import re
 
 import uvloop
 
@@ -24,6 +34,36 @@ from dynamo.llm import (
     run_input,
 )
 from dynamo.runtime import DistributedRuntime
+
+
+def validate_static_endpoint(value):
+    """Validate that static-endpoint is three words separated by dots."""
+    if not re.match(
+        r"^[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*\.[a-zA-Z_][a-zA-Z0-9_]*$",
+        value,
+    ):
+        raise argparse.ArgumentTypeError(
+            f"static-endpoint must be three words separated by dots, got: {value}"
+        )
+    return value
+
+
+def validate_model_name(value):
+    """Validate that model-name is a non-empty string."""
+    if not value or not isinstance(value, str) or len(value.strip()) == 0:
+        raise argparse.ArgumentTypeError(
+            f"model-name must be a non-empty string, got: {value}"
+        )
+    return value.strip()
+
+
+def validate_model_path(value):
+    """Validate that model-path is a valid directory on disk."""
+    if not os.path.isdir(value):
+        raise argparse.ArgumentTypeError(
+            f"model-path must be a valid directory on disk, got: {value}"
+        )
+    return value
 
 
 def parse_args():
@@ -72,13 +112,35 @@ def parse_args():
         help=" KV Router. Disable KV events.",
     )
     parser.set_defaults(use_kv_events=True)
+    parser.add_argument(
+        "--static-endpoint",
+        type=validate_static_endpoint,
+        help="Static endpoint in format: word.word.word (e.g., dynamo.backend.generate)",
+    )
+    parser.add_argument(
+        "--model-name",
+        type=validate_model_name,
+        help="Model name as a string (e.g., 'Llama-3.2-1B-Instruct')",
+    )
+    parser.add_argument(
+        "--model-path",
+        type=validate_model_path,
+        help="Path to model directory on disk (e.g., /tmp/model_cache/lama3.2_1B/)",
+    )
 
-    return parser.parse_args()
+    flags = parser.parse_args()
+
+    if flags.static_endpoint and (not flags.model_name or not flags.model_path):
+        parser.error("--static-endpoint requires both --model-name and --model-path")
+
+    return flags
 
 
 async def async_main():
-    runtime = DistributedRuntime(asyncio.get_running_loop(), False)
     flags = parse_args()
+    is_static = bool(flags.static_endpoint)  # true if the string has a value
+
+    runtime = DistributedRuntime(asyncio.get_running_loop(), is_static)
 
     if flags.router_mode == "kv":
         router_mode = RouterMode.KV
@@ -100,8 +162,20 @@ async def async_main():
         "router_config": RouterConfig(router_mode, kv_router_config),
     }
 
-    # out=dyn
-    e = EntrypointArgs(EngineType.Dynamic, **kwargs)
+    if flags.static_endpoint:
+        kwargs["endpoint_id"] = flags.static_endpoint
+    if flags.model_name:
+        kwargs["model_name"] = flags.model_name
+    if flags.model_path:
+        kwargs["model_path"] = flags.model_path
+
+    if is_static:
+        # out=dyn://<static_endpoint>
+        engine_type = EngineType.Static
+    else:
+        # out=auto, most common
+        engine_type = EngineType.Dynamic
+    e = EntrypointArgs(engine_type, **kwargs)
     engine = await make_engine(runtime, e)
 
     try:

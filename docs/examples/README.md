@@ -40,9 +40,14 @@ kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
 You can use `kubectl get dynamoGraphDeployment -n ${NAMESPACE}` to view your deployment.
 You can use `kubectl delete dynamoGraphDeployment <your-dep-name> -n ${NAMESPACE}` to delete the deployment.
 
-We provide a Custom Resource yaml file for many examples under the `deploy/` folder.
-Use [VLLM YAML](../../components/backends/vllm/deploy/agg.yaml) for an example.
+We provide a Custom Resource yaml file for many examples under the `components/backends/<backend-name>/deploy/`folder.
+Consult the examples below for the CRs for your specific inference backend.
 
+[View SGLang k8s](../../components/backends/sglang/deploy/README.md)
+
+[View vLLM K8s](../../components/backends/vllm/deploy/README.md)
+
+[View TRTLLM k8s](../../components/backends/trtllm/deploy/README.md)
 
 **Note 1** Example Image
 

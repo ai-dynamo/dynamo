@@ -40,7 +40,7 @@ ARG ARCH
 ARG ARCH_ALT
 
 ARG NIXL_UCX_REF=v1.19.x
-ARG NIXL_REF=3c47a48955e6f96bd5d4fb43a9d80bb64722f8e4
+ARG NIXL_REF=0.4.1
 
 ENV NIXL_SRC_DIR=/opt/nixl
 ENV NIXL_PREFIX=/opt/nvidia/nvda_nixl
@@ -429,8 +429,9 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 RUN apt-get update && \
     DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         build-essential python3-dev libnuma-dev \
-        # Curl for polling various endpoints.
+        # jq and curl for polling various endpoints and health checks
         curl \
+        jq \
         # For debugging
         vim \
         # Libraries required by UCX to find RDMA devices
@@ -447,6 +448,16 @@ COPY --from=ci_minimum /workspace/target/release/metrics /usr/local/bin/metrics
 COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 COPY --from=base /workspace/wheels/nixl/*.whl wheelhouse/
 RUN uv pip install "ai-dynamo[sglang]" --pre --find-links wheelhouse
+
+# Common dependencies
+# TODO: Remove extra install and use pyproject.toml to define all dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
+
+# Install test dependencies
+# TODO: Remove this once we have a functional CI image built on top of the runtime image
+RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \

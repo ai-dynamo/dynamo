@@ -50,28 +50,34 @@ class BaseWorkerHandler(ABC):
         gen = self.engine_client.generate(prompt, sampling_params, request_id)
 
         num_output_tokens_so_far = 0
-        async for res in gen:
-            # res is vllm's RequestOutput
+        try:
+            async for res in gen:
+                # res is vllm's RequestOutput
 
-            # This is the expected way for a request to end.
-            # The new token ID will be eos, don't forward it.
-            if res.finished:
-                yield {"finish_reason": "stop", "token_ids": []}
-                break
+                # This is the expected way for a request to end.
+                # The new token ID will be eos, don't forward it.
+                if res.finished:
+                    yield {"finish_reason": "stop", "token_ids": []}
+                    break
 
-            if not res.outputs:
-                yield {"finish_reason": "error", "token_ids": []}
-                break
+                if not res.outputs:
+                    yield {"finish_reason": "error", "token_ids": []}
+                    break
 
-            output = res.outputs[0]
-            next_total_toks = len(output.token_ids)
-            out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
-            if output.finish_reason:
-                out["finish_reason"] = output.finish_reason
-            if output.stop_reason:
-                out["stop_reason"] = output.stop_reason
-            yield out
-            num_output_tokens_so_far = next_total_toks
+                output = res.outputs[0]
+                next_total_toks = len(output.token_ids)
+                out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+                if output.finish_reason:
+                    out["finish_reason"] = output.finish_reason
+                if output.stop_reason:
+                    out["stop_reason"] = output.stop_reason
+                yield out
+                num_output_tokens_so_far = next_total_toks
+        except asyncio.CancelledError:
+            # raise EngineShGeneratorExit when engine exits so that frontend can migrate the request
+            raise GeneratorExit(
+                "Decode engine was shut down during token generation"
+            ) from None
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
@@ -106,6 +112,7 @@ class DecodeWorkerHandler(BaseWorkerHandler):
 
     async def generate(self, request):
         request_id = str(uuid.uuid4().hex)
+        logger.debug(f"New Request ID: {request_id}")
 
         prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
 
@@ -164,21 +171,29 @@ class PrefillWorkerHandler(BaseWorkerHandler):
 
     async def generate(self, request):
         request_id = request["request_id"]
+        logger.debug(f"New Prefill Request ID: {request_id}")
+
         prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
         sampling_params = msgspec.convert(request["sampling_params"], SamplingParams)
 
         gen = self.engine_client.generate(prompt, sampling_params, request_id)
 
         # Generate only 1 token in prefill
-        async for res in gen:
-            logger.debug(f"kv transfer params: {res.kv_transfer_params}")
-            yield MyRequestOutput(
-                request_id=res.request_id,
-                prompt=res.prompt,
-                prompt_token_ids=res.prompt_token_ids,
-                prompt_logprobs=res.prompt_logprobs,
-                outputs=res.outputs,
-                finished=res.finished,
-                metrics=res.metrics,
-                kv_transfer_params=res.kv_transfer_params,
-            ).model_dump_json()
+        try:
+            async for res in gen:
+                logger.debug(f"kv transfer params: {res.kv_transfer_params}")
+                yield MyRequestOutput(
+                    request_id=res.request_id,
+                    prompt=res.prompt,
+                    prompt_token_ids=res.prompt_token_ids,
+                    prompt_logprobs=res.prompt_logprobs,
+                    outputs=res.outputs,
+                    finished=res.finished,
+                    metrics=res.metrics,
+                    kv_transfer_params=res.kv_transfer_params,
+                ).model_dump_json()
+        except asyncio.CancelledError:
+            # raise the error because we cannot migrate prefill requests
+            raise GeneratorExit(
+                "Prefill engine was shut down during token generation"
+            ) from None
