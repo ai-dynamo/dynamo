@@ -418,7 +418,25 @@ class Publisher:
                     f"kv events max_window_size has been updated to {self.max_window_size}"
                 )
 
+    # The global attention layer will emit the KV event with the max_window_size.
+    # We only want to keep the KV event that has the max_window_size to ensure
+    # the accuracy of KV routing.
+    # TRTLLM emits a "created" event at the very beginning when it creates the KV cache,
+    # so we can use the "created" event to identify the max_window_size of the global
+    # attention layer in the model engine.
     def should_drop_event(self, event):
+        # There are two cases for KV event filtering:
+        #
+        # 1. If "window_size" is NOT in the KV event:
+        #    "window_size" was added to KV events only recently, so some older versions of TRTLLM
+        #    might not include it. In this case, the publisher will assume that all events are
+        #    from the global attention layer.
+        #
+        # 2. If "window_size" is present in the KV event:
+        #    The publisher will not drop any KV events until all initial "created" KV events
+        #    have been processed in order to capture the max_window_size.
+        #    After processing all "created" events, the publisher will only accept KV events
+        #    whose window_size is equal to the max_window_size to ensure accurate routing.
         if "window_size" not in event or self.processing_initial_created_events:
             return False
 
