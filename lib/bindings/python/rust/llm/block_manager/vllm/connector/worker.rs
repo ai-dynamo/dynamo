@@ -106,7 +106,7 @@ impl KvConnectorWorker {
         // TODO: pass in the sorted (layer_name, tensor) such that the order of the list matches the order of layer execution in the model
         for (layer_name, torch_tensor) in kv_caches {
             let vllm_tensor = Arc::new(VllmTensor::new(torch_tensor).map_err(to_pyerr)?);
-            tracing::trace!("Registering KV cache layer: {layer_name}, tensor: {vllm_tensor:?}");
+            tracing::debug!("Registering KV cache layer: {layer_name}, tensor: {vllm_tensor:?}");
             self.kv_caches.insert(layer_name, vllm_tensor);
         }
 
