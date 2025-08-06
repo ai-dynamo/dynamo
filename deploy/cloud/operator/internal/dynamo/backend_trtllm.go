@@ -111,7 +111,7 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 	// Setup SSH for worker nodes
 	sshSetupCommands := []string{
-		"mkdir -p ~/.ssh /etc/ssh",
+		"mkdir -p ~/.ssh ~/.ssh/host_keys",
 		"ls -la /ssh-pk/", // Debug: list files in ssh-pk directory
 		"cp /ssh-pk/private.key ~/.ssh/id_rsa",
 		"cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub",
@@ -119,8 +119,13 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 		"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
 		"chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys",
 		"printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\n' > ~/.ssh/config",
-		"ssh-keygen -A", // Generate host keys
-		"/usr/sbin/sshd -D",
+		// Generate host keys in user writable directory
+		"ssh-keygen -t rsa -f ~/.ssh/host_keys/ssh_host_rsa_key -N ''",
+		"ssh-keygen -t ecdsa -f ~/.ssh/host_keys/ssh_host_ecdsa_key -N ''",
+		"ssh-keygen -t ed25519 -f ~/.ssh/host_keys/ssh_host_ed25519_key -N ''",
+		// Create SSH daemon config to use custom host keys location
+		"printf 'Port 22\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile ~/.ssh/authorized_keys\\n' > ~/.ssh/sshd_config",
+		"/usr/sbin/sshd -D -f ~/.ssh/sshd_config",
 	}
 
 	fullCommand := strings.Join(sshSetupCommands, " && ")

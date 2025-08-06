@@ -559,11 +559,12 @@ func TestTRTLLMBackend_setupWorkerContainer(t *testing.T) {
 			initialArgs:    []string{"some", "args"},
 			initialCommand: []string{},
 			expectedContains: []string{
-				"mkdir -p ~/.ssh /etc/ssh",
+				"mkdir -p ~/.ssh ~/.ssh/host_keys",
 				"cp /ssh-pk/private.key ~/.ssh/id_rsa",
 				"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
-				"ssh-keygen -A",
-				"/usr/sbin/sshd -D",
+				"ssh-keygen -t rsa -f ~/.ssh/host_keys/ssh_host_rsa_key",
+				"sshd_config",
+				"/usr/sbin/sshd -D -f ~/.ssh/sshd_config",
 			},
 		},
 		{
@@ -571,11 +572,12 @@ func TestTRTLLMBackend_setupWorkerContainer(t *testing.T) {
 			initialArgs:    []string{},
 			initialCommand: []string{"original", "command"},
 			expectedContains: []string{
-				"mkdir -p ~/.ssh /etc/ssh",
+				"mkdir -p ~/.ssh ~/.ssh/host_keys",
 				"cp /ssh-pk/private.key ~/.ssh/id_rsa",
 				"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
-				"ssh-keygen -A",
-				"/usr/sbin/sshd -D",
+				"ssh-keygen -t rsa -f ~/.ssh/host_keys/ssh_host_rsa_key",
+				"sshd_config",
+				"/usr/sbin/sshd -D -f ~/.ssh/sshd_config",
 			},
 		},
 	}
@@ -615,7 +617,7 @@ func TestTRTLLMBackend_setupWorkerContainer(t *testing.T) {
 				}
 
 				// Verify that the command ends with SSH daemon
-				if !strings.HasSuffix(argsStr, "/usr/sbin/sshd -D") {
+				if !strings.HasSuffix(argsStr, "/usr/sbin/sshd -D -f ~/.ssh/sshd_config") {
 					t.Errorf("setupWorkerContainer() should end with SSH daemon command, got: %s", argsStr)
 				}
 			}
