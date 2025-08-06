@@ -215,8 +215,6 @@ pub async fn spawn_http_server(
 /// Health handler
 async fn health_handler(
     state: Arc<HttpServerState>,
-    route: &'static str,       // Used for tracing only
-    trace_parent: TraceParent, // Used for tracing only
 ) -> impl IntoResponse {
     let (mut healthy, endpoints) = state
         .drt()

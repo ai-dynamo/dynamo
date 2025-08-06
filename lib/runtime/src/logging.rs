@@ -165,7 +165,6 @@ pub fn parse_traceparent(traceparent: &str) -> (Option<String>, Option<String>) 
     if pieces.len() != 4 {
         return (None, None);
     }
-    let version = pieces[0];
     let trace_id = pieces[1];
     let parent_id = pieces[2];
 
