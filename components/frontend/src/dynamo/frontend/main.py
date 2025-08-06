@@ -92,7 +92,7 @@ async def async_main():
             overlap_score_weight=flags.kv_overlap_score_weight,
             router_temperature=flags.router_temperature,
             use_kv_events=flags.use_kv_events,
-            replica_sync=flags.router_replica_sync,
+            router_replica_sync=flags.router_replica_sync,
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random
