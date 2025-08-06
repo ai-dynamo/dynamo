@@ -257,8 +257,8 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 						if volume.VolumeSource.Secret.SecretName != "ssh-keypair-secret" {
 							t.Errorf("UpdatePodSpec() SSH volume secret name = %s, want ssh-keypair-secret", volume.VolumeSource.Secret.SecretName)
 						}
-						if volume.VolumeSource.Secret.DefaultMode == nil || *volume.VolumeSource.Secret.DefaultMode != 0600 {
-							t.Errorf("UpdatePodSpec() SSH volume should have DefaultMode 0600")
+						if volume.VolumeSource.Secret.DefaultMode == nil || *volume.VolumeSource.Secret.DefaultMode != 0644 {
+							t.Errorf("UpdatePodSpec() SSH volume should have DefaultMode 0644")
 						}
 					}
 					break

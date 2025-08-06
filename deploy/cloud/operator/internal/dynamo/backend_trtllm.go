@@ -46,7 +46,7 @@ func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName:  "ssh-keypair-secret",
-					DefaultMode: func() *int32 { mode := int32(0600); return &mode }(),
+					DefaultMode: func() *int32 { mode := int32(0644); return &mode }(),
 				},
 			},
 		}
@@ -80,10 +80,12 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	// Setup SSH and run mpirun command
 	sshSetupCommands := []string{
 		"mkdir -p ~/.ssh",
+		"ls -la /ssh-pk/", // Debug: list files in ssh-pk directory
 		"cp /ssh-pk/private.key ~/.ssh/id_rsa",
 		"cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub",
 		"cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys",
 		"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
+		"chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys",
 		"echo -e \"Host *\\n    IdentityFile ~/.ssh/id_rsa\\n    StrictHostKeyChecking no\" > ~/.ssh/config",
 	}
 
@@ -110,10 +112,12 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 	// Setup SSH for worker nodes
 	sshSetupCommands := []string{
 		"mkdir -p ~/.ssh",
+		"ls -la /ssh-pk/", // Debug: list files in ssh-pk directory
 		"cp /ssh-pk/private.key ~/.ssh/id_rsa",
 		"cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub",
 		"cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys",
 		"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
+		"chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys",
 		"echo -e \"Host *\\n    IdentityFile ~/.ssh/id_rsa\\n    StrictHostKeyChecking no\" > ~/.ssh/config",
 		"# Start SSH daemon and keep container running",
 		"/usr/sbin/sshd -D",
