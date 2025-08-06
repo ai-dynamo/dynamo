@@ -116,6 +116,7 @@ pub struct HttpServiceConfig {
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
 
+    #[builder(default = "None")]
     etcd_client: Option<etcd::Client>,
 
     #[builder(default = "None")]
