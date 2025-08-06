@@ -101,7 +101,7 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	fullCommand := strings.Join(append(sshSetupCommands, mpirunCmd), " && ")
 
 	// Update container to use bash with the full command
-	container.Command = []string{"/bin/bash", "-c"}
+	container.Command = []string{"/bin/sh", "-c"}
 	container.Args = []string{fullCommand}
 }
 
@@ -122,7 +122,7 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 	fullCommand := strings.Join(sshSetupCommands, " && ")
 
 	// Update container to use bash with the SSH setup and daemon
-	container.Command = []string{"/bin/bash", "-c"}
+	container.Command = []string{"/bin/sh", "-c"}
 	container.Args = []string{fullCommand}
 }
 

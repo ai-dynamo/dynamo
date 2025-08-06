@@ -42,9 +42,8 @@ type DynamoComponentDeploymentSpec struct {
 	// contains the tag of the DynamoComponent: for example, "my_package:MyService"
 	DynamoTag string `json:"dynamoTag,omitempty"`
 
-	// BackendFramework specifies the backend framework (e.g., "sglang", "vllm")
-	// +kubebuilder:validation:Enum=sglang;vllm
-	// +kubebuilder:default=vllm
+	// BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm")
+	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
 	BackendFramework string `json:"backendFramework,omitempty"`
 
 	DynamoComponentDeploymentSharedSpec `json:",inline"`

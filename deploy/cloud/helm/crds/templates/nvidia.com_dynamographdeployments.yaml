@@ -45,10 +45,10 @@ spec:
             spec:
               properties:
                 backendFramework:
-                  default: vllm
                   enum:
                     - sglang
                     - vllm
+                    - trtllm
                   type: string
                 dynamoGraph:
                   type: string

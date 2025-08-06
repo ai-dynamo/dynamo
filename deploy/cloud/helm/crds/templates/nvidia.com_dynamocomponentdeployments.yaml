@@ -405,10 +405,10 @@ spec:
                       type: integer
                   type: object
                 backendFramework:
-                  default: vllm
                   enum:
                     - sglang
                     - vllm
+                    - trtllm
                   type: string
                 componentType:
                   type: string

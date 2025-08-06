@@ -52,7 +52,7 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 				},
 			},
 			expectedVolumeMounts:   1,
-			expectedCommand:        []string{"/bin/bash", "-c"},
+			expectedCommand:        []string{"/bin/sh", "-c"},
 			shouldContainMpirun:    true,
 			shouldContainSSHSetup:  true,
 			shouldContainSSHDaemon: false,
@@ -65,7 +65,7 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeGrove,
 			component:               &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
 			expectedVolumeMounts:    1,
-			expectedCommand:         []string{"/bin/bash", "-c"},
+			expectedCommand:         []string{"/bin/sh", "-c"},
 			shouldContainMpirun:     false,
 			shouldContainSSHSetup:   true,
 			shouldContainSSHDaemon:  true,
@@ -86,7 +86,7 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 				},
 			},
 			expectedVolumeMounts:   1,
-			expectedCommand:        []string{"/bin/bash", "-c"},
+			expectedCommand:        []string{"/bin/sh", "-c"},
 			shouldContainMpirun:    true,
 			shouldContainSSHSetup:  true,
 			shouldContainSSHDaemon: false,
@@ -514,7 +514,7 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			backend.setupLeaderContainer(container, tt.numberOfNodes, tt.multinodeDeploymentType, tt.serviceName, tt.component)
 
 			// Check that command is set correctly
-			expectedCommand := []string{"/bin/bash", "-c"}
+			expectedCommand := []string{"/bin/sh", "-c"}
 			if len(container.Command) != len(expectedCommand) {
 				t.Errorf("setupLeaderContainer() command = %v, want %v", container.Command, expectedCommand)
 			} else {
@@ -590,7 +590,7 @@ func TestTRTLLMBackend_setupWorkerContainer(t *testing.T) {
 			backend.setupWorkerContainer(container)
 
 			// Check that command is set correctly
-			expectedCommand := []string{"/bin/bash", "-c"}
+			expectedCommand := []string{"/bin/sh", "-c"}
 			if len(container.Command) != len(expectedCommand) {
 				t.Errorf("setupWorkerContainer() command = %v, want %v", container.Command, expectedCommand)
 			} else {
