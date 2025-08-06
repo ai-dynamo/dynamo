@@ -50,7 +50,8 @@ pub struct SchedulingRequest {
     pub overlaps: OverlapScores,
     pub decode_blocks: HashMap<i64, usize>,
     pub prefill_tokens: HashMap<i64, usize>,
-    resp_tx: Option<tokio::sync::oneshot::Sender<SchedulingResponse>>, // Changed to Option
+    // Option to take it out to send the response without moving the struct
+    resp_tx: Option<tokio::sync::oneshot::Sender<SchedulingResponse>>,
 }
 
 impl SchedulingRequest {
@@ -114,13 +115,22 @@ impl KvScheduler {
 
             loop {
                 // First, check for instance updates (non-blocking)
-                if instances_rx.has_changed().unwrap_or(false) {
-                    instances = instances_rx.borrow_and_update().clone();
-                    let worker_ids: Vec<i64> = instances
-                        .iter()
-                        .map(|instance| instance.instance_id)
-                        .collect();
-                    slots_clone.update_workers(worker_ids);
+                match instances_rx.has_changed() {
+                    Ok(true) => {
+                        instances = instances_rx.borrow_and_update().clone();
+                        let worker_ids: Vec<i64> = instances
+                            .iter()
+                            .map(|instance| instance.instance_id)
+                            .collect();
+                        slots_clone.update_workers(worker_ids);
+                    }
+                    Ok(false) => {
+                        // No changes, continue. This is the happy path.
+                    }
+                    Err(_) => {
+                        tracing::warn!("endpoint watch sender shutdown");
+                        break;
+                    }
                 }
 
                 // Then, wait for a new request

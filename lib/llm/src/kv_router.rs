@@ -156,9 +156,10 @@ impl KvRouter {
         component: Component,
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
-        use_kv_events: bool,
-        replica_sync: bool,
+        kv_router_config: Option<KvRouterConfig>,
     ) -> Result<Self> {
+        let kv_router_config = kv_router_config.unwrap_or_default();
+
         let cancellation_token = component
             .drt()
             .primary_lease()
@@ -175,7 +176,7 @@ impl KvRouter {
             }
         };
 
-        let indexer = if use_kv_events {
+        let indexer = if kv_router_config.use_kv_events {
             Indexer::KvIndexer(KvIndexer::new(cancellation_token.clone(), block_size))
         } else {
             // hard code 120 seconds for now
@@ -191,7 +192,7 @@ impl KvRouter {
             block_size,
             instances_rx,
             selector,
-            replica_sync,
+            kv_router_config.router_replica_sync,
         )
         .await?;
 
