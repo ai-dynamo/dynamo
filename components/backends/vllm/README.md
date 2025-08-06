@@ -35,12 +35,12 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | vLLM | Notes |
 |---------|------|-------|
-| [**Disaggregated Serving**](../../../architecture/disagg_serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../../architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP |
-| [**KV-Aware Routing**](../../../architecture/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../../architecture/sla_planner.md) | ✅ |  |
-| [**Load Based Planner**](../../../architecture/load_planner.md) | 🚧 | WIP |
-| [**KVBM**](../../../architecture/kvbm_architecture.md) | 🚧 | WIP |
+| [**Disaggregated Serving**](../../../docs/architecture/disagg_serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP |
+| [**KV-Aware Routing**](../../../docs/architecture/kv_cache_routing.md) | ✅ |  |
+| [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | ✅ |  |
+| [**Load Based Planner**](../../../docs/architecture/load_planner.md) | 🚧 | WIP |
+| [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | 🚧 | WIP |
 
 ### Large Scale P/D and WideEP Features
 
@@ -152,7 +152,7 @@ Below we provide a selected list of advanced deployments. Please open up an issu
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](deploy/README.md)
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [vLLM Kubernetes Deployment Guide](../../../docs/components/backends/vllm/deploy/README.md)
 
 ## Configuration
 

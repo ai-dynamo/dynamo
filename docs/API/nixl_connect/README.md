@@ -77,6 +77,7 @@ sequenceDiagram
     RemoteWorker -->> LocalWorker: Notify completion (unblock awaiter)
 ```
 
+
 ## Python Classes
 
   - [Connector](connector.md)
