@@ -179,10 +179,6 @@ uv pip install --requirement /tmp/requirements.txt
 RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
 uv pip install --requirement /tmp/requirements.txt
 
-#Install benchmarking dependencies
-RUN --mount=type=bind,source=./benchmarks,target=/workspace/benchmarks \
-    uv pip install /workspace/benchmarks
-
 ##################################
 ##### Wheel Build Image ##########
 ##################################
@@ -260,7 +256,8 @@ COPY . /workspace
 
 RUN uv pip install /workspace/wheelhouse/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/wheelhouse/ai_dynamo*any.whl && \
-    uv pip install /workspace/wheelhouse/nixl/nixl*.whl
+    uv pip install /workspace/wheelhouse/nixl/nixl*.whl && \
+    uv pip install /workspace/benchmarks
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
