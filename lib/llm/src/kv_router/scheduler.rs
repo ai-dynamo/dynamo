@@ -78,6 +78,7 @@ impl KvScheduler {
         block_size: u32,
         mut instances_rx: tokio::sync::watch::Receiver<Vec<Instance>>, // Changed from ProcessedEndpoints
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
+        replica_sync: bool,
     ) -> Result<Self, KvSchedulerError> {
         let selector = selector.unwrap_or(Box::new(DefaultWorkerSelector::default()));
         let mut instances: Vec<Instance> = instances_rx.borrow_and_update().clone();
@@ -101,6 +102,7 @@ impl KvScheduler {
             component,
             block_size as usize,
             worker_ids,
+            replica_sync,
         ));
 
         let slots_clone = slots.clone();

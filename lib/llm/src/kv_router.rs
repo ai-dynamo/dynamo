@@ -80,6 +80,8 @@ pub struct KvRouterConfig {
 
     pub use_kv_events: bool,
 
+    pub router_replica_sync: bool,
+
     // TODO: this is not actually used for now
     // Would need this (along with total kv blocks) to trigger AllWorkersBusy error for e.g. rate-limiting
     pub max_num_batched_tokens: u32,
@@ -91,6 +93,7 @@ impl Default for KvRouterConfig {
             overlap_score_weight: 1.0,
             router_temperature: 0.0,
             use_kv_events: true,
+            router_replica_sync: false,
             max_num_batched_tokens: 8192,
         }
     }
@@ -103,6 +106,7 @@ impl KvRouterConfig {
         overlap_score_weight: Option<f64>,
         temperature: Option<f64>,
         use_kv_events: Option<bool>,
+        replica_sync: Option<bool>,
         max_num_batched_tokens: Option<u32>,
     ) -> Self {
         let default = Self::default();
@@ -110,6 +114,7 @@ impl KvRouterConfig {
             overlap_score_weight: overlap_score_weight.unwrap_or(default.overlap_score_weight),
             router_temperature: temperature.unwrap_or(default.router_temperature),
             use_kv_events: use_kv_events.unwrap_or(default.use_kv_events),
+            router_replica_sync: replica_sync.unwrap_or(default.router_replica_sync),
             max_num_batched_tokens: max_num_batched_tokens
                 .unwrap_or(default.max_num_batched_tokens),
         }
@@ -152,6 +157,7 @@ impl KvRouter {
         block_size: u32,
         selector: Option<Box<dyn WorkerSelector + Send + Sync>>,
         use_kv_events: bool,
+        replica_sync: bool,
     ) -> Result<Self> {
         let cancellation_token = component
             .drt()
@@ -180,8 +186,14 @@ impl KvRouter {
             ))
         };
 
-        let scheduler =
-            KvScheduler::start(component.clone(), block_size, instances_rx, selector).await?;
+        let scheduler = KvScheduler::start(
+            component.clone(),
+            block_size,
+            instances_rx,
+            selector,
+            replica_sync,
+        )
+        .await?;
 
         // [gluo TODO] try subscribe_with_type::<RouterEvent>,
         // error checking below will be different.

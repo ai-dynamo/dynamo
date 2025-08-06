@@ -229,10 +229,16 @@ pub struct ActiveSequencesMultiWorker {
     block_size: usize,
     component: Component,
     router_id: Uuid,
+    replica_sync: bool,
 }
 
 impl ActiveSequencesMultiWorker {
-    pub fn new(component: Component, block_size: usize, worker_ids: Vec<WorkerId>) -> Self {
+    pub fn new(
+        component: Component,
+        block_size: usize,
+        worker_ids: Vec<WorkerId>,
+        replica_sync: bool,
+    ) -> Self {
         assert!(block_size > 1, "block_size must be greater than 1");
 
         let senders = Arc::new(DashMap::new());
@@ -255,26 +261,29 @@ impl ActiveSequencesMultiWorker {
             block_size,
             component: component.clone(),
             router_id,
+            replica_sync,
         };
 
-        // Start the subscription loop
-        let senders_clone = senders.clone();
-        let request_to_worker_clone = request_to_worker.clone();
-        let component_clone = component.clone();
-        let router_id_clone = router_id;
+        // Start the subscription loop only if replica_sync is enabled
+        if replica_sync {
+            let senders_clone = senders.clone();
+            let request_to_worker_clone = request_to_worker.clone();
+            let component_clone = component.clone();
+            let router_id_clone = router_id;
 
-        tokio::spawn(async move {
-            if let Err(e) = Self::subscribe_to_events(
-                senders_clone,
-                request_to_worker_clone,
-                component_clone,
-                router_id_clone,
-            )
-            .await
-            {
-                tracing::error!("Error in active sequences events subscription: {}", e);
-            }
-        });
+            tokio::spawn(async move {
+                if let Err(e) = Self::subscribe_to_events(
+                    senders_clone,
+                    request_to_worker_clone,
+                    component_clone,
+                    router_id_clone,
+                )
+                .await
+                {
+                    tracing::error!("Error in active sequences events subscription: {}", e);
+                }
+            });
+        }
 
         multi_worker
     }
@@ -491,20 +500,22 @@ impl ActiveSequencesMultiWorker {
             return Err(anyhow::anyhow!("Worker ID {worker_id} not found"));
         }
 
-        // Publish event
-        let event = ActiveSequenceEvent {
-            request_id: request_id.clone(),
-            worker_id,
-            data: ActiveSequenceEventData::AddRequest {
-                token_sequence: token_sequence.clone(),
-                isl,
-                overlap,
-            },
-            router_id: self.router_id,
-        };
-        self.component
-            .publish(ACTIVE_SEQUENCES_SUBJECT, &event)
-            .await?;
+        // Publish event only if replica_sync is enabled
+        if self.replica_sync {
+            let event = ActiveSequenceEvent {
+                request_id: request_id.clone(),
+                worker_id,
+                data: ActiveSequenceEventData::AddRequest {
+                    token_sequence: token_sequence.clone(),
+                    isl,
+                    overlap,
+                },
+                router_id: self.router_id,
+            };
+            self.component
+                .publish(ACTIVE_SEQUENCES_SUBJECT, &event)
+                .await?;
+        }
 
         // Update local state
         self.request_to_worker.insert(request_id.clone(), worker_id);
@@ -530,16 +541,18 @@ impl ActiveSequencesMultiWorker {
             .map(|entry| *entry)
             .ok_or_else(|| anyhow::anyhow!("Request ID not found in request_to_worker mapping"))?;
 
-        // Publish event
-        let event = ActiveSequenceEvent {
-            request_id: request_id.clone(),
-            worker_id,
-            data: ActiveSequenceEventData::Free,
-            router_id: self.router_id,
-        };
-        self.component
-            .publish(ACTIVE_SEQUENCES_SUBJECT, &event)
-            .await?;
+        // Publish event only if replica_sync is enabled
+        if self.replica_sync {
+            let event = ActiveSequenceEvent {
+                request_id: request_id.clone(),
+                worker_id,
+                data: ActiveSequenceEventData::Free,
+                router_id: self.router_id,
+            };
+            self.component
+                .publish(ACTIVE_SEQUENCES_SUBJECT, &event)
+                .await?;
+        }
 
         // Update local state
         self.senders
@@ -563,16 +576,18 @@ impl ActiveSequencesMultiWorker {
             .map(|entry| *entry)
             .ok_or_else(|| anyhow::anyhow!("Request ID not found in request_to_worker mapping"))?;
 
-        // Publish event
-        let event = ActiveSequenceEvent {
-            request_id: request_id.clone(),
-            worker_id,
-            data: ActiveSequenceEventData::MarkPrefillCompleted,
-            router_id: self.router_id,
-        };
-        self.component
-            .publish(ACTIVE_SEQUENCES_SUBJECT, &event)
-            .await?;
+        // Publish event only if replica_sync is enabled
+        if self.replica_sync {
+            let event = ActiveSequenceEvent {
+                request_id: request_id.clone(),
+                worker_id,
+                data: ActiveSequenceEventData::MarkPrefillCompleted,
+                router_id: self.router_id,
+            };
+            self.component
+                .publish(ACTIVE_SEQUENCES_SUBJECT, &event)
+                .await?;
+        }
 
         // Update local state
         self.senders
@@ -793,7 +808,7 @@ mod tests {
                 // Create multi-worker sequence manager with workers 0 and 1
                 let worker_ids = vec![0, 1];
                 let seq_manager =
-                    ActiveSequencesMultiWorker::new(component, block_size, worker_ids);
+                    ActiveSequencesMultiWorker::new(component, block_size, worker_ids, true);
 
                 // Give some time for the subscription loop to start
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
@@ -907,7 +922,7 @@ mod tests {
                 // Create multi-worker sequence manager with worker 2
                 let worker_ids = vec![2];
                 let seq_manager =
-                    ActiveSequencesMultiWorker::new(component, block_size, worker_ids);
+                    ActiveSequencesMultiWorker::new(component, block_size, worker_ids, true);
 
                 // Give some time for the subscription loop to start
                 tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
