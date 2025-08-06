@@ -74,7 +74,6 @@ pub struct Flags {
 
     /// Maximum number of batched tokens for KV routing
     /// Needed for informing the KV router
-    /// TODO: derive from vllm args
     /// NOTE: this is not actually used for now
     #[arg(long, default_value = "8192")]
     pub max_num_batched_tokens: Option<u32>,
@@ -103,7 +102,7 @@ pub struct Flags {
     #[arg(long)]
     pub context_length: Option<u32>,
 
-    /// KV cache block size (vllm only)
+    /// KV cache block size (is this used? Maybe by Python vllm worker?)
     #[arg(long)]
     pub kv_cache_block_size: Option<u32>,
 
@@ -204,6 +203,16 @@ impl Flags {
                 // nothing to check here
             }
         }
+
+        match out_opt {
+            Output::Mocker => {}
+            _ => {
+                if self.extra_engine_args.is_some() {
+                    anyhow::bail!("`--extra-engine-args` is only for the mocker engine");
+                }
+            }
+        }
+
         Ok(())
     }
 
