@@ -54,7 +54,6 @@ You can use `kubectl get dynamoGraphDeployment -n ${NAMESPACE}` to view your dep
 You can use `kubectl delete dynamoGraphDeployment <your-dep-name> -n ${NAMESPACE}` to delete the deployment.
 
 We provide a Custom Resource YAML file for many examples under the `deploy/` folder.
-Use [VLLM YAML](../../components/backends/vllm/deploy/agg.yaml) for an example.
 
 **Note 1** Example Image
 
@@ -109,4 +108,4 @@ Users who need more control over their deployments can use the manual deployment
 - Provides full control over deployment parameters
 - Requires manual management of infrastructure components
 - Documentation:
-  - [Helm Deployment Guide](../../../deploy/helm/README.md): detailed instructions for manual deployment
+  - [Helm Deployment Guide](helm_install.md): detailed instructions for manual deployment
