@@ -20,17 +20,20 @@ max_batch_size: 1
 max_num_tokens: 8192
 max_seq_len: 8192
 print_iter_log: true
-kv_cache_dtype: fp8
 disable_overlap_scheduler: true
-autotuner_enabled: false
+enable_autotuner: false
 
 # Enable Speculative Decoding in the model engine
 speculative_config:
   decoding_type: Eagle
   max_draft_len: 1
-  pytorch_weights_path: nvidia/Llama-4-Maverick-17B-128E-Eagle3
+  speculative_model_dir: nvidia/Llama-4-Maverick-17B-128E-Eagle3
   eagle3_one_model: false
 
 kv_cache_config:
   free_gpu_memory_fraction: 0.5
   enable_block_reuse: false
+  dtype: fp8
+
+cache_transceiver_config:
+  backend: default

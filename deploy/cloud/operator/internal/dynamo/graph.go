@@ -166,10 +166,16 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		labels[commonconsts.KubeLabelDynamoComponent] = componentName
 		labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
 		if component.ComponentType == commonconsts.ComponentTypePlanner {
+			// ensure that the extraPodSpec is not nil
 			if deployment.Spec.ExtraPodSpec == nil {
 				deployment.Spec.ExtraPodSpec = &common.ExtraPodSpec{}
 			}
-			deployment.Spec.ExtraPodSpec.ServiceAccountName = commonconsts.PlannerServiceAccountName
+			// ensure that the embedded PodSpec struct is not nil
+			if deployment.Spec.ExtraPodSpec.PodSpec == nil {
+				deployment.Spec.ExtraPodSpec.PodSpec = &corev1.PodSpec{}
+			}
+			// finally set the service account name
+			deployment.Spec.ExtraPodSpec.PodSpec.ServiceAccountName = commonconsts.PlannerServiceAccountName
 		}
 		if deployment.IsMainComponent() && defaultIngressSpec != nil && deployment.Spec.Ingress == nil {
 			deployment.Spec.Ingress = defaultIngressSpec

@@ -12,7 +12,14 @@ pub enum Output {
     EchoCore,
 
     /// Listen for models on nats/etcd, add/remove dynamically
-    Dynamic,
+    Auto,
+
+    /// Static remote: The dyn://namespace.component.endpoint name of a remote worker we expect to
+    /// exists. THIS DISABLES AUTO-DISCOVERY. Only this endpoint will be connected.
+    /// `--model-name and `--model-path` must also be set.
+    ///
+    /// A static remote setup avoids having to run etcd.
+    Static(String),
 
     #[cfg(feature = "mistralrs")]
     /// Run inference on a model in a GGUF file using mistralrs w/ candle
@@ -40,15 +47,11 @@ impl TryFrom<&str> for Output {
             "echo_full" => Ok(Output::EchoFull),
             "echo_core" => Ok(Output::EchoCore),
 
-            "dyn" => Ok(Output::Dynamic),
+            "dyn" | "auto" => Ok(Output::Auto),
 
-            // Deprecated, should only use `out=dyn`
             endpoint_path if endpoint_path.starts_with(ENDPOINT_SCHEME) => {
-                tracing::warn!(
-                    "out=dyn://<path> is deprecated, the path is not used. Please use 'out=dyn'"
-                );
-                //let path = endpoint_path.strip_prefix(ENDPOINT_SCHEME).unwrap();
-                Ok(Output::Dynamic)
+                let path = endpoint_path.strip_prefix(ENDPOINT_SCHEME).unwrap();
+                Ok(Output::Static(path.to_string()))
             }
 
             e => Err(anyhow::anyhow!("Invalid out= option '{e}'")),
@@ -69,7 +72,8 @@ impl fmt::Display for Output {
             Output::EchoFull => "echo_full",
             Output::EchoCore => "echo_core",
 
-            Output::Dynamic => "dyn",
+            Output::Auto => "auto",
+            Output::Static(endpoint) => &format!("{ENDPOINT_SCHEME}{endpoint}"),
         };
         write!(f, "{s}")
     }

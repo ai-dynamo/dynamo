@@ -124,6 +124,8 @@ class DecodeHandler(HandlerBase):
             # If operating under decode_first strategy, the decode handler needs to trigger
             # the prefill handler.
             response_count = 0
+            # Do not yield the prefill response directly.
+            # Instead, capture it and extract the state.
             async for res in self.remote_prefill(request):
                 prefill_response = res
                 response_count += 1
@@ -136,6 +138,7 @@ class DecodeHandler(HandlerBase):
             if prefill_response is not None and self.check_error(response_data):
                 yield response_data
                 return
+
             if prefill_response is not None and response_data is not None:
                 request["disaggregated_params"] = response_data["disaggregated_params"]
 
