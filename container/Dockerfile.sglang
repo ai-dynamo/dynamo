@@ -414,6 +414,9 @@ ENV NIXL_PLUGIN_DIR=$NIXL_LIB_DIR/plugins
 COPY --from=base /usr/local/ucx /usr/local/ucx
 COPY --from=wheel_builder $NIXL_PREFIX $NIXL_PREFIX
 
+# Copy CUDA development tools (nvcc, headers, etc.) from base devel image
+COPY --from=base /usr/local/cuda/ /usr/local/cuda/
+
 ENV LD_LIBRARY_PATH=\
 $NIXL_LIB_DIR:\
 $NIXL_PLUGIN_DIR:\
@@ -449,6 +452,16 @@ COPY --from=base /workspace/wheels/nixl/*.whl wheelhouse/
 # Install flashinfer-python pre-release version separately, then install ai-dynamo with sglang support
 RUN uv pip install "flashinfer-python==0.2.9rc2" --prerelease=allow && \
     uv pip install "ai-dynamo[sglang]" --find-links wheelhouse
+
+# Common dependencies
+# TODO: Remove extra install and use pyproject.toml to define all dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
+
+# Install test dependencies
+# TODO: Remove this once we have a functional CI image built on top of the runtime image
+RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \

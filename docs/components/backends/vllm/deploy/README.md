@@ -82,7 +82,7 @@ extraPodSpec:
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Cloud Platform installed** - See [Quickstart Guide](../../../../docs/guides/dynamo_deploy/quickstart.md)
+1. **Dynamo Cloud Platform installed** - See [Quickstart Guide](../../../../guides/dynamo_deploy/quickstart.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for vLLM runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
@@ -99,7 +99,7 @@ We have public images available on [NGC Catalog](https://catalog.ngc.nvidia.com/
 
 ### Pre-Deployment Profiling (SLA Planner Only)
 
-If using the SLA Planner deployment (`disagg_planner.yaml`), follow the [pre-deployment profiling guide](../../../../docs/architecture/pre_deployment_profiling.md) to run pre-deployment profiling. The results will be saved to the `profiling-pvc` PVC and queried by the SLA Planner.
+If using the SLA Planner deployment (`disagg_planner.yaml`), follow the [pre-deployment profiling guide](../../../../architecture/pre_deployment_profiling.md) to run pre-deployment profiling. The results will be saved to the `profiling-pvc` PVC and queried by the SLA Planner.
 
 ## Usage
 
@@ -225,7 +225,7 @@ All templates use **Qwen/Qwen3-0.6B** as the default model, but you can use any 
 
 ## Request Migration
 
-You can enable [request migration](../../../../docs/architecture/request_migration.md) to handle worker failures gracefully by adding the migration limit argument to worker configurations:
+You can enable request migration to handle worker failures gracefully by adding the migration limit argument to worker configurations:
 
 ```yaml
 args:
@@ -235,12 +235,12 @@ args:
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/guides/dynamo_deploy/create_deployment.md)
-- **Quickstart**: [Deployment Quickstart](../../../../docs/guides/dynamo_deploy/quickstart.md)
-- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/guides/dynamo_deploy/dynamo_cloud.md)
-- **SLA Planner**: [SLA Planner Deployment Guide](../../../../docs/guides/dynamo_deploy/sla_planner_deployment.md)
-- **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
-- **Architecture Docs**: [Disaggregated Serving](../../../../docs/architecture/disagg_serving.md), [KV-Aware Routing](../../../../docs/architecture/kv_cache_routing.md)
+- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../guides/dynamo_deploy/create_deployment.md)
+- **Quickstart**: [Deployment Quickstart](../../../../guides/dynamo_deploy/quickstart.md)
+- **Platform Setup**: [Dynamo Cloud Installation](../../../../guides/dynamo_deploy/dynamo_cloud.md)
+- **SLA Planner**: [SLA Planner Deployment Guide](../../../../guides/dynamo_deploy/sla_planner_deployment.md)
+- **Examples**: [Deployment Examples](../../../../examples/README.md)
+- **Architecture Docs**: [Disaggregated Serving](../../../../architecture/disagg_serving.md), [KV-Aware Routing](../../../../architecture/kv_cache_routing.md)
 
 ## Troubleshooting
 
@@ -252,4 +252,4 @@ Common issues and solutions:
 4. **Out of memory**: Increase memory limits or reduce model batch size
 5. **Port forwarding issues**: Ensure correct pod UUID in port-forward command
 
-For additional support, refer to the [deployment troubleshooting guide](../../../../docs/guides/dynamo_deploy/quickstart.md#troubleshooting).
+For additional support, refer to the [deployment troubleshooting guide](../../../../guides/dynamo_deploy/quickstart.md).

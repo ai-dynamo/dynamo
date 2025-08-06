@@ -70,7 +70,7 @@ Below we provide a guide that lets you run all of our the common deployment patt
 
 ### Start NATS and ETCD in the background
 
-Start using [Docker Compose](../../../deploy/docker-compose.yml)
+Start using Docker Compose
 
 ```bash
 docker compose -f deploy/docker-compose.yml up -d
@@ -180,26 +180,26 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 
 ### Multinode Deployment
 
-For comprehensive instructions on multinode serving, see the [multinode-examples.md](./multinode/multinode-examples.md) guide. It provides step-by-step deployment examples and configuration tips for running Dynamo with TensorRT-LLM across multiple nodes. While the walkthrough uses DeepSeek-R1 as the model, you can easily adapt the process for any supported model by updating the relevant configuration files. You can see [Llama4+eagle](./llama4_plus_eagle.md) guide to learn how to use these scripts when a single worker fits on the single node.
+For comprehensive instructions on multinode serving, see the [multinode-examples.md](../../../docs/components/backends/trtllm/multinode-examples.md) guide. It provides step-by-step deployment examples and configuration tips for running Dynamo with TensorRT-LLM across multiple nodes. While the walkthrough uses DeepSeek-R1 as the model, you can easily adapt the process for any supported model by updating the relevant configuration files. You can see [Llama4+eagle](../../../docs/components/backends/trtllm/llama4_plus_eagle.md) guide to learn how to use these scripts when a single worker fits on the single node.
 
 ### Speculative Decoding
-- **[Llama 4 Maverick Instruct + Eagle Speculative Decoding](./llama4_plus_eagle.md)**
+- **[Llama 4 Maverick Instruct + Eagle Speculative Decoding](../../../docs/components/backends/trtllm/llama4_plus_eagle.md)**
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](deploy/README.md)
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](../../../docs/components/backends/trtllm/deploy/README.md)
 
 ### Client
 
-See [client](../llm/README.md#client) section to learn how to send request to the deployment.
-
-NOTE: To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
+To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
 
 ### Benchmarking
 
 To benchmark your deployment with GenAI-Perf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](../../../benchmarks/llm/perf.sh)
-
+`model` name and `host` based on your deployment:
+```bash
+{REPO_ROOT}/benchmarks/llm/perf.sh
+```
 
 ## Disaggregation Strategy
 
@@ -216,7 +216,7 @@ DISAGGREGATION_STRATEGY="prefill_first" ./launch/disagg.sh
 
 ## KV Cache Transfer in Disaggregated Serving
 
-Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV cache transfer guide](./kv-cache-tranfer.md).
+Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV cache transfer guide](../../../docs/components/backends/trtllm/kv-cache-tranfer.md).
 
 ## Request Migration
 
@@ -236,11 +236,4 @@ The migrated request will continue responding to the original request, allowing 
 
 ## Client
 
-See the [quickstart guide](../../../examples/basics/quickstart/README.md#3-send-requests) to learn how to send request to the deployment.
-
 NOTE: To send a request to a multi-node deployment, target the node which is running `python3 -m dynamo.frontend <args>`.
-
-## Benchmarking
-
-To benchmark your deployment with GenAI-Perf, see this utility script, configuring the
-`model` name and `host` based on your deployment: [perf.sh](../../../benchmarks/llm/perf.sh)

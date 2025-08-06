@@ -38,7 +38,6 @@ Learn fundamental Dynamo concepts through these introductory examples:
 - **[Quickstart](basics/quickstart/README.md)** - Simple aggregated serving example with vLLM backend
 - **[Disaggregated Serving](basics/disaggregated_serving/README.md)** - Prefill/decode separation for enhanced performance and scalability
 - **[Multi-node](basics/multinode/README.md)** - Distributed inference across multiple nodes and GPUs
-- **[Multimodal](basics/multimodal/README.md)** - Multimodal model deployment with E/P/D disaggregated serving
 
 ## Deployment Examples
 
