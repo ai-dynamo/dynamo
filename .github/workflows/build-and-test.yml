@@ -25,13 +25,9 @@ jobs:
   build-test:
     runs-on:
         group: Fastchecker
-    strategy:
-      matrix:
-        framework:
-          - dynamo
-    name: Build and Test - ${{ matrix.framework }}
+    name: Build and Test - dynamo
     env:
-      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_${{ matrix.framework }}
+      CONTAINER_ID: test_${{ github.run_id }}_${{ github.run_attempt }}_${{ github.job }}_dynamo
       PYTEST_XML_FILE: pytest_test_report.xml
     steps:
       - name: Checkout repository
@@ -41,12 +37,12 @@ jobs:
       - name: Define Image Tag
         id: define_image_tag
         run: |
-          echo "image_tag=dynamo:latest-${{ matrix.framework }}" >> $GITHUB_OUTPUT
+          echo "image_tag=dynamo:latest-dynamo" >> $GITHUB_OUTPUT
       - name: Build image
         env:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
         run: |
-          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target dev --framework ${{ matrix.framework }}
+          ./container/build.sh --tag ${{ steps.define_image_tag.outputs.image_tag }} --target dev --framework dynamo
       - name: Start services with docker-compose
         working-directory: ./deploy
         run: |
@@ -72,7 +68,7 @@ jobs:
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: ${{ matrix.framework }}-python-test-results
+          name: dynamo-python-test-results
           if-no-files-found: error
           path: |
             ${{ env.PYTEST_XML_FILE }}

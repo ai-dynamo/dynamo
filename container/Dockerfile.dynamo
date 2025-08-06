@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ARG BASE_IMAGE="nvcr.io/nvidia/cuda-dl-base"
-# FIXME: NCCL will hang with 25.03, so use 25.01 for now
+# TODO OPS-612: NCCL will hang with 25.03, so use 25.01 for now
 # Please check https://github.com/ai-dynamo/dynamo/pull/1065
 # for details and reproducer to manually test if the image
 # can be updated to later versions.
 ARG BASE_IMAGE_TAG="25.01-cuda12.8-devel-ubuntu24.04"
-ARG RELEASE_BUILD
+ARG RELEASE_BUILD=false
 
 # Define general architecture ARGs for supporting both x86 and aarch64 builds.
 #   ARCH: Used for package suffixes (e.g., amd64, arm64)
@@ -18,9 +18,6 @@ ARG RELEASE_BUILD
 #
 # For arm64/aarch64, build with:
 #   --build-arg ARCH=arm64 --build-arg ARCH_ALT=aarch64
-#
-# NOTE: There isn't an easy way to define one of these values based on the other value
-# without adding if statements everywhere, so just define both as ARGs for now.
 #TODO OPS-592: Leverage uname -m to determine ARCH instead of passing it as an arg
 ARG ARCH=amd64
 ARG ARCH_ALT=x86_64
@@ -74,18 +71,23 @@ RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.
 RUN apt-get update -y && \
     apt-get install -y \
     # NIXL build dependencies
+    autoconf \
     cmake \
+    git \
+    libtool \
     meson \
+    net-tools \
     ninja-build \
     pybind11-dev \
-    autoconf \
-    libtool \
-    net-tools \
-    git \
     # These headers are missing with the hpcx installer, required
     # by UCX to find RDMA devices
-    libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
-    libnuma-dev librdmacm-dev ibverbs-providers \
+    ibverbs-providers \
+    ibverbs-utils \
+    libibumad-dev \
+    libibverbs-dev \
+    librdmacm-dev \
+    libnuma-dev \
+    rdma-core \
     # Rust build dependencies
     clang \
     libclang-dev \
@@ -169,6 +171,18 @@ RUN mkdir /opt/dynamo && \
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
+# Common dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+uv pip install --requirement /tmp/requirements.txt
+
+# Install test dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
+uv pip install --requirement /tmp/requirements.txt
+
+#Install benchmarking dependencies
+RUN --mount=type=bind,source=./benchmarks,target=/workspace/benchmarks \
+    uv pip install /workspace/benchmarks
+
 ##################################
 ##### Wheel Build Image ##########
 ##################################
@@ -244,19 +258,9 @@ COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 # Copy rest of the code
 COPY . /workspace
 
-# Common dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
-
-# Install test dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
-    uv pip install --requirement /tmp/requirements.txt
-
 RUN uv pip install /workspace/wheelhouse/ai_dynamo_runtime*cp312*.whl && \
     uv pip install /workspace/wheelhouse/ai_dynamo*any.whl && \
     uv pip install /workspace/wheelhouse/nixl/nixl*.whl
-
-RUN uv pip install /workspace/benchmarks
 
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
