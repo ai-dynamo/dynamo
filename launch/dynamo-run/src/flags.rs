@@ -107,6 +107,7 @@ pub struct Flags {
     #[arg(long)]
     pub kv_cache_block_size: Option<u32>,
 
+    /// Mocker engine only.
     /// Additional engine-specific arguments from a JSON file.
     /// Contains a mapping of parameter names to values.
     #[arg(long)]
