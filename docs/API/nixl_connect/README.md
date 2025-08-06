@@ -18,10 +18,9 @@ limitations under the License.
 # Dynamo NIXL Connect
 
 Dynamo connect provides utilities, targeting multimodal applications, using the NIXL-based I/O subsystem via a set of Python classes.
-The primary goal of this library to simplify the integration of NIXL-based I/O into inference applications.
 Dynamo NIXL Connect specializes in moving data between models/workers in a Dynamo Graph.
-Unlike NIXL based KV cache implementations, Dynamo NIXL Connect is intended for larger data transfer operations such as between models in multi-model graph
-where highly-specialized implementations, such as KV cache integration, cannot requirements.
+Unlike NIXL based KV cache connector, Dynamo NIXL Connect relaxes the memory registration constraints, simplifying the integration for multi-modal graphs workloads.
+This comes with some performance overheads, but for larger data transfer operations such as between models in a multi-model graph, the overhead would be marginal.
 The `dynamo.nixl_connect` library can be imported by any Dynamo container hosted application.
 
 > [!Note]
