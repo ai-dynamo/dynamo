@@ -23,7 +23,7 @@ use anyhow::Result;
 use async_nats::service::endpoint::Endpoint;
 use derive_builder::Builder;
 use std::collections::HashMap;
-use tokio::sync::Mutex;
+use std::sync::Mutex;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
@@ -31,6 +31,8 @@ use tokio_util::sync::CancellationToken;
 pub struct PushEndpoint {
     pub service_handler: Arc<dyn PushWorkHandler>,
     pub cancellation_token: CancellationToken,
+    #[builder(default = "true")]
+    pub graceful_shutdown: bool,
 }
 
 /// version of crate
@@ -54,7 +56,7 @@ impl PushEndpoint {
 
         system_health
             .lock()
-            .await
+            .unwrap()
             .set_endpoint_health_status(endpoint_name.clone(), HealthStatus::Ready);
 
         loop {
@@ -113,18 +115,22 @@ impl PushEndpoint {
 
         system_health
             .lock()
-            .await
+            .unwrap()
             .set_endpoint_health_status(endpoint_name.clone(), HealthStatus::NotReady);
 
-        // await for all inflight requests to complete
-        tracing::info!(
-            "Waiting for {} inflight requests to complete",
-            inflight.load(Ordering::SeqCst)
-        );
-        while inflight.load(Ordering::SeqCst) > 0 {
-            notify.notified().await;
+        // await for all inflight requests to complete if graceful shutdown
+        if self.graceful_shutdown {
+            tracing::info!(
+                "Waiting for {} inflight requests to complete",
+                inflight.load(Ordering::SeqCst)
+            );
+            while inflight.load(Ordering::SeqCst) > 0 {
+                notify.notified().await;
+            }
+            tracing::info!("All inflight requests completed");
+        } else {
+            tracing::info!("Skipping graceful shutdown, not waiting for inflight requests");
         }
-        tracing::info!("All inflight requests completed");
 
         Ok(())
     }

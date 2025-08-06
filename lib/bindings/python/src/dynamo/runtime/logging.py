@@ -93,8 +93,10 @@ def configure_dynamo_logging(
     dyn_level = log_level_mapping(dyn_var)
 
     # configure inference engine loggers
-    configure_vllm_logging(dyn_level)
-    configure_sglang_logging(dyn_level)
+    if not get_bool_env_var("DYN_SKIP_VLLM_LOG_FORMATTING"):
+        configure_vllm_logging(dyn_level)
+    if not get_bool_env_var("DYN_SKIP_SGLANG_LOG_FORMATTING"):
+        configure_sglang_logging(dyn_level)
 
     # loggers that should be configured to ERROR
     error_loggers = ["tag"]
@@ -189,3 +191,18 @@ def configure_vllm_logging(dyn_level: int):
     with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
         json.dump(vllm_config, f)
         os.environ["VLLM_LOGGING_CONFIG_PATH"] = f.name
+
+
+def get_bool_env_var(name: str, default: str = "false") -> bool:
+    value = os.getenv(name, default)
+    value = value.lower()
+
+    truthy_values = ("true", "1")
+    falsy_values = ("false", "0")
+
+    if (value not in truthy_values) and (value not in falsy_values):
+        logging.warning(
+            f"The environment variable {name} has an unrecognized value={value}, treating as false"
+        )
+
+    return value in truthy_values

@@ -67,8 +67,6 @@ docker run \
 ```bash
 # run ingress
 python3 -m dynamo.frontend --http-port=8000 &
-# optionally run the http server that allows you to flush the kv cache for all workers (see benchmarking section below)
-python3 utils/sgl_http_server.py --ns dynamo &
 # run prefill worker
 SGLANG_DEEPEP_NUM_MAX_DISPATCH_TOKENS_PER_RANK=2048 \
 MC_TE_METRIC=true \
@@ -82,7 +80,7 @@ NCCL_CUMEM_ENABLE=1 \
 SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
 SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
 PYTHONUNBUFFERED=1 \
-python3 components/worker.py \
+python3 -m dynamo.sglang.worker \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --model-path /model/ \
   --skip-tokenizer-init \
@@ -90,7 +88,6 @@ python3 components/worker.py \
   --disaggregation-mode prefill \
   --dist-init-addr ${HEAD_PREFILL_NODE_IP}:29500 \
   --disaggregation-bootstrap-port 30001 \
-  --disaggregation-transfer-backend nixl \
   --nnodes 2 \
   --node-rank 0 \
   --tp-size 8 \
@@ -134,7 +131,7 @@ NCCL_CUMEM_ENABLE=1 \
 SGLANG_USE_MESSAGE_QUEUE_BROADCASTER=0 \
 SGL_DISABLE_TP_MEMORY_INBALANCE_CHECK=1 \
 PYTHONUNBUFFERED=1 \
-python3 components/decode_worker.py \
+python3 -m dynamo.sglang.decode_worker \
   --served-model-name deepseek-ai/DeepSeek-R1 \
   --model-path /model/ \
   --skip-tokenizer-init \

@@ -36,3 +36,6 @@ disable_overlap_scheduler: true
 speculative_config:
   decoding_type: MTP
   num_nextn_predict_layers: 1
+
+cache_transceiver_config:
+  backend: default
