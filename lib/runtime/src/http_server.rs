@@ -213,9 +213,7 @@ pub async fn spawn_http_server(
 }
 
 /// Health handler
-async fn health_handler(
-    state: Arc<HttpServerState>,
-) -> impl IntoResponse {
+async fn health_handler(state: Arc<HttpServerState>) -> impl IntoResponse {
     let (mut healthy, endpoints) = state
         .drt()
         .system_health
