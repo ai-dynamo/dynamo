@@ -30,10 +30,10 @@ logger = logging.getLogger(__name__)
 
 async def graceful_shutdown(runtime):
     """
-    By calling `runtime.shutdown()`, the endpoints will immediately be unavailable.
-    However, in-flight requests will still be processed until they are finished.
-    After all in-flight requests are finished, the `serve_endpoint` functions will return
-    and the engine will be shutdown by Python's garbage collector.
+    Shutdown dynamo distributed runtime.
+    The endpoints will be immediately invalidated so no new requests will be accepted.
+    For endpoints served with graceful_shutdown=True, the serving function will wait until all in-flight requests are finished.
+    For endpoints served with graceful_shutdown=False, the serving function will return immediately.
     """
     logging.info("Received shutdown signal, shutting down DistributedRuntime")
     runtime.shutdown()
@@ -113,7 +113,11 @@ async def init_prefill(runtime: DistributedRuntime, config: Config):
 
     try:
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(handler.generate),
+            # for prefill, we want to shutdown the engine after all prefill requests are finished because
+            #     (temp reason): we don't support re-routing prefill requests
+            #     (long-term reason): prefill engine should pull from a global queue so there is
+            #                         only a few in-flight requests that can be quickly finished
+            generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=True),
             clear_endpoint.serve_endpoint(handler.clear_kv_blocks),
         )
     except Exception as e:
@@ -140,16 +144,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         .endpoint("generate")
         .client()
     )
-
-    if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
-        await register_llm(
-            ModelType.Backend,
-            generate_endpoint,
-            config.model,
-            config.served_model_name,
-            kv_cache_block_size=config.engine_args.block_size,
-            migration_limit=config.migration_limit,
-        )
 
     factory = StatLoggerFactory(component, config.engine_args.data_parallel_rank or 0)
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(
@@ -186,9 +180,21 @@ async def init(runtime: DistributedRuntime, config: Config):
 
         handler.kv_publisher = kv_publisher
 
+    if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
+        await register_llm(
+            ModelType.Backend,
+            generate_endpoint,
+            config.model,
+            config.served_model_name,
+            kv_cache_block_size=config.engine_args.block_size,
+            migration_limit=config.migration_limit,
+        )
+
     try:
         await asyncio.gather(
-            generate_endpoint.serve_endpoint(handler.generate),
+            # for decode, we want to transfer the in-flight requests to other decode engines,
+            # because waiting them to finish can take a long time for long OSLs
+            generate_endpoint.serve_endpoint(handler.generate, graceful_shutdown=False),
             clear_endpoint.serve_endpoint(handler.clear_kv_blocks),
         )
     except Exception as e:

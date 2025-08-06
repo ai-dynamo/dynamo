@@ -131,6 +131,10 @@ pub struct ModelDeploymentCard {
     /// How many times a request can be migrated to another worker if the HTTP server lost
     /// connection to the current worker.
     pub migration_limit: u32,
+
+    /// User-defined metadata for custom worker behavior
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_data: Option<serde_json::Value>,
 }
 
 impl ModelDeploymentCard {

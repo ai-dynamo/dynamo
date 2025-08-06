@@ -38,6 +38,7 @@ pub mod discovery;
 pub mod engine;
 pub mod http_server;
 pub use http_server::HttpServerInfo;
+pub mod instances;
 pub mod logging;
 pub mod metrics;
 pub mod pipeline;
@@ -87,12 +88,16 @@ pub struct SystemHealth {
     system_health: HealthStatus,
     endpoint_health: HashMap<String, HealthStatus>,
     use_endpoint_health_status: Vec<String>,
+    health_path: String,
+    live_path: String,
 }
 
 impl SystemHealth {
     pub fn new(
         starting_health_status: HealthStatus,
         use_endpoint_health_status: Vec<String>,
+        health_path: String,
+        live_path: String,
     ) -> Self {
         let mut endpoint_health = HashMap::new();
         for endpoint in &use_endpoint_health_status {
@@ -102,6 +107,8 @@ impl SystemHealth {
             system_health: starting_health_status,
             endpoint_health,
             use_endpoint_health_status,
+            health_path,
+            live_path,
         }
     }
     pub fn set_health_status(&mut self, status: HealthStatus) {
@@ -167,7 +174,7 @@ pub struct DistributedRuntime {
     instance_sources: Arc<Mutex<HashMap<Endpoint, Weak<InstanceSource>>>>,
 
     // Health Status
-    system_health: Arc<Mutex<SystemHealth>>,
+    system_health: Arc<std::sync::Mutex<SystemHealth>>,
 
     // This map associates metric prefixes with their corresponding Prometheus registries.
     prometheus_registries_by_prefix: Arc<std::sync::Mutex<HashMap<String, prometheus::Registry>>>,

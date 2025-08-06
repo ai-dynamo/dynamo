@@ -22,10 +22,10 @@ spec:
         httpGet:
           path: /health
           port: 8000
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
+        initialDelaySeconds: 20
+        periodSeconds: 5
+        timeoutSeconds: 5
+        failureThreshold: 3
       readinessProbe:
         exec:
           command:
@@ -190,7 +190,7 @@ spec:
             - /bin/sh
             - -c
           args:
-            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B 2>&1 | tee /tmp/vllm.log"
+            - "python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --migration-limit=3 2>&1 | tee /tmp/vllm.log"
     VllmPrefillWorker:
       dynamoNamespace: vllm-disagg-planner
       envFromSecret: hf-token-secret
@@ -240,4 +240,4 @@ spec:
             - /bin/sh
             - -c
           args:
-            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker 2>&1 | tee /tmp/vllm.log
+            - python3 -m dynamo.vllm --model Qwen/Qwen3-0.6B --is-prefill-worker --migration-limit=3 2>&1 | tee /tmp/vllm.log
