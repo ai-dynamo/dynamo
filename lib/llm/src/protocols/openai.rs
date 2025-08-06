@@ -87,7 +87,7 @@ impl<T: OpenAISamplingOptionsProvider> SamplingOptionsProvider for T {
                 temperature = None;
             }
         }
-        
+
         let mut guided_decoding = None;
         if let Some(nvext) = self.nvext() {
             let guided_decoding_backend = nvext.guided_decoding_backend.clone();
@@ -95,23 +95,22 @@ impl<T: OpenAISamplingOptionsProvider> SamplingOptionsProvider for T {
             let guided_regex = nvext.guided_regex.clone();
             let guided_grammar = nvext.guided_grammar.clone();
             let guided_choice = nvext.guided_choice.clone();
-            
+
             match common::GuidedDecodingOptions::from_optional(
-                guided_json, 
-                guided_regex, 
-                guided_choice, 
+                guided_json,
+                guided_regex,
+                guided_choice,
                 guided_grammar,
-                guided_decoding_backend
+                guided_decoding_backend,
             ) {
                 Ok(options) => guided_decoding = options,
                 Err(e) => {
                     // Handle the validation error (log, return error, etc.)
                     tracing::error!("Invalid guided decoding options: {}", e);
-                    return Err(e); 
+                    return Err(e);
                 }
             }
         }
-
 
         Ok(common::SamplingOptions {
             n: None,
@@ -170,4 +169,3 @@ pub trait DeltaGeneratorExt<ResponseType: Send + Sync + 'static + std::fmt::Debu
     /// Gets the current prompt token count (Input Sequence Length).
     fn get_isl(&self) -> Option<u32>;
 }
-

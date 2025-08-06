@@ -166,10 +166,19 @@ mod tests {
         assert_eq!(nv_ext.top_k, Some(10));
         assert_eq!(nv_ext.repetition_penalty, Some(1.5));
         assert_eq!(nv_ext.greed_sampling, Some(true));
-        assert_eq!(nv_ext.guided_json, Some(serde_json::json!({"type": "object"})));
+        assert_eq!(
+            nv_ext.guided_json,
+            Some(serde_json::json!({"type": "object"}))
+        );
         assert_eq!(nv_ext.guided_regex, Some("^[0-9]+$".to_string()));
-        assert_eq!(nv_ext.guided_grammar, Some("S -> 'a' S 'b' | 'c'".to_string()));
-        assert_eq!(nv_ext.guided_choice, Some(vec!["choice1".to_string(), "choice2".to_string()]));
+        assert_eq!(
+            nv_ext.guided_grammar,
+            Some("S -> 'a' S 'b' | 'c'".to_string())
+        );
+        assert_eq!(
+            nv_ext.guided_choice,
+            Some(vec!["choice1".to_string(), "choice2".to_string()])
+        );
         assert_eq!(nv_ext.guided_decoding_backend, Some("xgrammar".to_string()));
         // Validate the built struct
         assert!(nv_ext.validate().is_ok());

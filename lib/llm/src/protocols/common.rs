@@ -663,12 +663,13 @@ mod tests {
     }
 
     #[test]
-    
+
     fn test_guided_decoding_options_new_and_exclusive() {
         // Only JSON set
         let json_val = serde_json::json!({"type": "object"});
         let backend = Some("xgrammar".to_string());
-        let opts = GuidedDecodingOptions::new(Some(json_val.clone()), None, None, None, backend.clone());
+        let opts =
+            GuidedDecodingOptions::new(Some(json_val.clone()), None, None, None, backend.clone());
         assert!(opts.is_ok());
         let opts = opts.unwrap();
         assert_eq!(opts.json, Some(json_val));
@@ -775,7 +776,13 @@ mod tests {
         assert_eq!(val.choice, Some(vec![]));
 
         // Choice set with non-empty vector
-        let opts = GuidedDecodingOptions::from_optional(None, None, Some(vec!["A".to_string()]), None, None);
+        let opts = GuidedDecodingOptions::from_optional(
+            None,
+            None,
+            Some(vec!["A".to_string()]),
+            None,
+            None,
+        );
         assert!(opts.is_ok());
         let val = opts.unwrap();
         assert!(val.is_some());
