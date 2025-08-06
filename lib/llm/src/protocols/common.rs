@@ -329,6 +329,96 @@ pub struct SamplingOptions {
 
     /// The seed to use when sampling
     pub seed: Option<i64>,
+
+    /// Guided Decoding Options
+    pub guided_decoding: Option<GuidedDecodingOptions>,
+}
+
+/// Guided Decoding Options
+///
+/// Only one of `json`, `regex`, `choice`, or `grammar` should be set.
+#[derive(Serialize, Deserialize, Debug, Clone, Default)]
+pub struct GuidedDecodingOptions {
+    /// If specified, the output will follow the JSON schema. Can be a string, an object, or null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub json: Option<serde_json::Value>,
+
+    /// If specified, the output will follow the regex pattern. Can be a string or null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub regex: Option<String>,
+
+    /// If specified, the output will be exactly one of the choices.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub choice: Option<Vec<String>>,
+
+    /// If specified, the output will follow the context-free grammar. Can be a string or null.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub grammar: Option<String>,
+
+    /// If specified, the backend to use for guided decoding, can be backends like xgrammar or custom guided decoding backend
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
+}
+
+impl GuidedDecodingOptions {
+    /// Creates a new GuidedDecodingOptions and validates it
+    pub fn new(
+        json: Option<serde_json::Value>,
+        regex: Option<String>,
+        choice: Option<Vec<String>>,
+        grammar: Option<String>,
+        backend: Option<String>,
+    ) -> Result<Self> {
+        let instance = Self {
+            json,
+            regex,
+            choice,
+            grammar,
+            backend,
+        };
+        instance.validate_exclusive()?;
+        Ok(instance)
+    }
+
+    /// Constructs a `GuidedDecodingOptions` if any of the main guiding fields are set.
+    pub fn from_optional(
+        json: Option<serde_json::Value>,
+        regex: Option<String>,
+        choice: Option<Vec<String>>,
+        grammar: Option<String>,
+        backend: Option<String>,
+    ) -> Result<Option<Self>> {
+        if json.is_none() && regex.is_none() && choice.is_none() && grammar.is_none() {
+            return Ok(None);
+        }
+        let instance = Self::new(json, regex, choice, grammar, backend)?;
+        Ok(Some(instance))
+    }
+
+    // Keep validate_exclusive as private since it's now called automatically
+    fn validate_exclusive(&self) -> Result<()> {
+        let mut guide_count = 0;
+        if self.json.is_some() {
+            guide_count += 1;
+        }
+        if self.regex.is_some() {
+            guide_count += 1;
+        }
+        if self.choice.as_ref().map_or(false, |v| !v.is_empty()) {
+            guide_count += 1;
+        }
+        if self.grammar.is_some() {
+            guide_count += 1;
+        }
+        if guide_count > 1 {
+            Err(anyhow::anyhow!(
+                "Only one of json, regex, choice, or grammar can be set, but multiple are specified: {:?}",
+                self
+            ))
+        } else {
+            Ok(())
+        }
+    }
 }
 
 impl SamplingOptions {
@@ -570,5 +660,126 @@ mod tests {
         } else {
             panic!("Expected a Completion variant");
         }
+    }
+
+    #[test]
+    
+    fn test_guided_decoding_options_new_and_exclusive() {
+        // Only JSON set
+        let json_val = serde_json::json!({"type": "object"});
+        let backend = Some("xgrammar".to_string());
+        let opts = GuidedDecodingOptions::new(Some(json_val.clone()), None, None, None, backend.clone());
+        assert!(opts.is_ok());
+        let opts = opts.unwrap();
+        assert_eq!(opts.json, Some(json_val));
+        assert!(opts.regex.is_none());
+        assert!(opts.choice.is_none());
+        assert!(opts.grammar.is_none());
+        assert_eq!(opts.backend, backend);
+
+        // Only regex set
+        let regex = Some(r"\d+".to_string());
+        let opts = GuidedDecodingOptions::new(None, regex.clone(), None, None, None);
+        assert!(opts.is_ok());
+        let opts = opts.unwrap();
+        assert_eq!(opts.regex, regex);
+        assert!(opts.json.is_none());
+        assert!(opts.choice.is_none());
+        assert!(opts.grammar.is_none());
+
+        // Only choice set
+        let choice = Some(vec!["A".to_string(), "B".to_string()]);
+        let opts = GuidedDecodingOptions::new(None, None, choice.clone(), None, None);
+        assert!(opts.is_ok());
+        let opts = opts.unwrap();
+        assert_eq!(opts.choice, choice);
+        assert!(opts.json.is_none());
+        assert!(opts.regex.is_none());
+        assert!(opts.grammar.is_none());
+
+        // Only grammar set
+        let grammar = Some("root ::= 'yes' | 'no'".to_string());
+        let opts = GuidedDecodingOptions::new(None, None, None, grammar.clone(), None);
+        assert!(opts.is_ok());
+        let opts = opts.unwrap();
+        assert_eq!(opts.grammar, grammar);
+        assert!(opts.json.is_none());
+        assert!(opts.regex.is_none());
+        assert!(opts.choice.is_none());
+
+        // Multiple fields set (should error)
+        let opts = GuidedDecodingOptions::new(
+            Some(serde_json::json!({})),
+            Some(r"\d+".to_string()),
+            None,
+            None,
+            None,
+        );
+        assert!(opts.is_err());
+
+        let opts = GuidedDecodingOptions::new(
+            None,
+            Some(r"\d+".to_string()),
+            Some(vec!["A".to_string()]),
+            None,
+            None,
+        );
+        assert!(opts.is_err());
+
+        let opts = GuidedDecodingOptions::new(
+            Some(serde_json::json!({})),
+            None,
+            Some(vec!["A".to_string()]),
+            Some("root ::= 'yes'".to_string()),
+            None,
+        );
+        assert!(opts.is_err());
+
+        // All fields None (should be ok, but not useful)
+        let opts = GuidedDecodingOptions::new(None, None, None, None, None);
+        assert!(opts.is_ok());
+    }
+
+    #[test]
+    fn test_guided_decoding_options_from_optional() {
+        // All None returns Ok(None)
+        let opts = GuidedDecodingOptions::from_optional(None, None, None, None, None);
+        assert!(opts.is_ok());
+        assert!(opts.unwrap().is_none());
+
+        // Only one set returns Ok(Some)
+        let regex = Some(r"\w+".to_string());
+        let opts = GuidedDecodingOptions::from_optional(None, regex.clone(), None, None, None);
+        assert!(opts.is_ok());
+        let val = opts.unwrap();
+        assert!(val.is_some());
+        let val = val.unwrap();
+        assert_eq!(val.regex, regex);
+
+        // Multiple set returns Err
+        let opts = GuidedDecodingOptions::from_optional(
+            Some(serde_json::json!({})),
+            Some(r"\d+".to_string()),
+            None,
+            None,
+            None,
+        );
+        assert!(opts.is_err());
+
+        // Choice set but empty vector should not count as set
+        let opts = GuidedDecodingOptions::from_optional(None, None, Some(vec![]), None, None);
+        assert!(opts.is_ok());
+        let val = opts.unwrap();
+        assert!(val.is_some());
+        let val = val.unwrap();
+        assert_eq!(val.choice, Some(vec![]));
+
+        // Choice set with non-empty vector
+        let opts = GuidedDecodingOptions::from_optional(None, None, Some(vec!["A".to_string()]), None, None);
+        assert!(opts.is_ok());
+        let val = opts.unwrap();
+        assert!(val.is_some());
+        let val = val.unwrap();
+        assert_eq!(val.choice, Some(vec!["A".to_string()]));
     }
 }
