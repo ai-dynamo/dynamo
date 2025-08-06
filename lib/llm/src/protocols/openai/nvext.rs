@@ -63,7 +63,7 @@ pub struct NvExt {
     pub annotations: Option<Vec<String>>,
 
     /// Guided Decoding Options
-    /// If specified, the output will be exactly one of the choices.
+    /// If specified, the output will be a JSON object. Can be a string, an object, or null.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[builder(default, setter(strip_option))]
     pub guided_json: Option<serde_json::Value>,
