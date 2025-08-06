@@ -44,6 +44,9 @@
    guides/dynamo_deploy/create_deployment.md
    guides/dynamo_deploy/sla_planner_deployment.md
    guides/dynamo_deploy/helm_install.md
+   guides/dynamo_deploy/gke_setup.md
+   guides/dynamo_deploy/README.md
+   guides/dynamo_run.md
    components/backends/vllm/README.md
    components/backends/trtllm/README.md
    components/backends/trtllm/deploy/README.md

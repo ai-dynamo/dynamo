@@ -64,27 +64,6 @@ sequenceDiagram
     RemoteWorker -->> LocalWorker: Notify completion (unblock awaiter)
 ```
 
-## Examples
-
-### Generic Example
-
-In the diagram below, Local creates a [`WritableOperation`](writable_operation.md) intended to receive data from Remote.
-Local then sends metadata about the requested RDMA operation to Remote.
-Remote then uses the metadata to create a [`WriteOperation`](write_operation.md) which will perform the GPU Direct RDMA memory transfer from Remote's GPU memory to Local's GPU memory.
-
-```mermaid
----
-title: Write Operation Between Two Workers
----
-flowchart LR
-  c1[Remote] --"3: .begin_write()"--- WriteOperation
-  WriteOperation e1@=="4: GPU Direct RDMA"==> WritableOperation
-  WritableOperation --"1: .create_writable()"--- c2[Local]
-  c2 e2@--"2: RDMA Metadata via HTTP"--> c1
-  e1@{ animate: true; }
-  e2@{ animate: true; }
-```
-
 ## Python Classes
 
   - [Connector](connector.md)

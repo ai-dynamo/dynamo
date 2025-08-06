@@ -27,7 +27,7 @@ The NVIDIA Dynamo Platform is a high-performance, low-latency inference framewor
    - `Dynamo README <https://github.com/ai-dynamo/dynamo/blob/main/README.md>`_
    - `Architecture and features doc <https://github.com/ai-dynamo/dynamo/blob/main/docs/architecture/>`_
    - `Usage guides <https://github.com/ai-dynamo/dynamo/tree/main/docs/guides>`_
-   - `Dynamo examples repo <https://github.com/ai-dynamo/examples>`_
+   - `Dynamo examples repo <https://github.com/ai-dynamo/dynamo/tree/main/examples>`_
 
 
 Quick Start
@@ -139,6 +139,7 @@ The examples below assume you build the latest image yourself from source. If us
 .. toctree::
    :hidden:
    :caption: Using Dynamo
+
    Writing Python Workers in Dynamo <guides/backend.md>
    Disaggregation and Performance Tuning <guides/disagg_perf_tuning.md>
    Working with Dynamo Kubernetes Operator <guides/dynamo_deploy/dynamo_operator.md>
@@ -150,6 +151,7 @@ The examples below assume you build the latest image yourself from source. If us
    Dynamo Deploy Quickstart <guides/dynamo_deploy/quickstart.md>
    Dynamo Cloud Kubernetes Platform <guides/dynamo_deploy/dynamo_cloud.md>
    Manual Helm Deployment <guides/dynamo_deploy/helm_install.md>
+   Minikube Setup Guide <guides/dynamo_deploy/minikube.md>
    Model Caching with Fluid <guides/dynamo_deploy/model_caching_with_fluid.md>
 
 .. toctree::
@@ -167,7 +169,7 @@ The examples below assume you build the latest image yourself from source. If us
    :hidden:
    :caption: Reference
 
-   
+
    Glossary <dynamo_glossary.md>
    NIXL Connect API <API/nixl_connect/README.md>
    KVBM Reading <architecture/kvbm_reading.md>
