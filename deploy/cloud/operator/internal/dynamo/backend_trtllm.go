@@ -103,7 +103,7 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	// Build mpirun command with explicit SSH configuration
 	// Wrap the entire command (trtllm-llmapi-launch + original command) in sh -c for proper shell interpretation
 	wrappedCommand := fmt.Sprintf("bash -c 'source /opt/dynamo/venv/bin/activate && trtllm-llmapi-launch %s'", originalCommand)
-	mpirunCmd := fmt.Sprintf("mpirun --oversubscribe -n %d -H %s --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" %s",
+	mpirunCmd := fmt.Sprintf("mpirun --oversubscribe -n %d -H %s --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" %s",
 		totalGPUs,
 		workerHosts,
 		wrappedCommand)
