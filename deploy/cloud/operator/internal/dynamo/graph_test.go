@@ -1777,6 +1777,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 								Replicas: ptr.To(int32(5)),
 							},
 						},
+						StartupType: ptr.To(grovev1alpha1.CliqueStartupTypeExplicit),
 						Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
 							{
 								Name: "worker-ldr",
@@ -1883,8 +1884,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									"nvidia.com/annotation2": "annotation2",
 								},
 								Spec: grovev1alpha1.PodCliqueSpec{
-									RoleName: "worker-wkr",
-									Replicas: 2,
+									RoleName:    "worker-wkr",
+									Replicas:    2,
+									StartsAfter: []string{"worker-ldr"},
 									PodSpec: corev1.PodSpec{
 										Volumes: []corev1.Volume{
 											{
@@ -2456,6 +2458,7 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 								Replicas: ptr.To(int32(5)),
 							},
 						},
+						StartupType: ptr.To(grovev1alpha1.CliqueStartupTypeExplicit),
 						Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
 							{
 								Name: "worker-ldr",
@@ -2565,8 +2568,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 									"nvidia.com/annotation2": "annotation2",
 								},
 								Spec: grovev1alpha1.PodCliqueSpec{
-									RoleName: "worker-wkr",
-									Replicas: 2,
+									RoleName:    "worker-wkr",
+									Replicas:    2,
+									StartsAfter: []string{"worker-ldr"},
 									PodSpec: corev1.PodSpec{
 										Volumes: []corev1.Volume{
 											{
@@ -3798,6 +3802,355 @@ func TestGetBackendFrameworkFromComponent(t *testing.T) {
 
 			if result != tt.expected {
 				t.Errorf("getBackendFrameworkFromComponent() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestApplyCliqueStartupDependencies(t *testing.T) {
+	tests := []struct {
+		name              string
+		roles             []ServiceRole
+		backendFramework  BackendFramework
+		numberOfNodes     int32
+		expectedDeps      map[string][]string // clique name -> expected StartsAfter dependencies
+		expectStartupType bool
+	}{
+		{
+			name: "vllm_multinode_applies_dependencies",
+			roles: []ServiceRole{
+				{Name: "service-ldr", Role: RoleLeader, Replicas: 1},
+				{Name: "service-wkr", Role: RoleWorker, Replicas: 2},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			numberOfNodes:    3,
+			expectedDeps: map[string][]string{
+				"service-ldr": nil,
+				"service-wkr": {"service-ldr"},
+			},
+			expectStartupType: true,
+		},
+		{
+			name: "sglang_multinode_applies_dependencies",
+			roles: []ServiceRole{
+				{Name: "service-ldr", Role: RoleLeader, Replicas: 1},
+				{Name: "service-wkr", Role: RoleWorker, Replicas: 2},
+			},
+			backendFramework: BackendFrameworkSGLang,
+			numberOfNodes:    3,
+			expectedDeps: map[string][]string{
+				"service-ldr": nil,
+				"service-wkr": {"service-ldr"},
+			},
+			expectStartupType: true,
+		},
+		{
+			name: "trtllm_multinode_applies_dependencies",
+			roles: []ServiceRole{
+				{Name: "service-ldr", Role: RoleLeader, Replicas: 1},
+				{Name: "service-wkr", Role: RoleWorker, Replicas: 2},
+			},
+			backendFramework: BackendFrameworkTRTLLM,
+			numberOfNodes:    3,
+			expectedDeps: map[string][]string{
+				"service-ldr": {"service-wkr"},
+				"service-wkr": nil,
+			},
+			expectStartupType: true,
+		},
+		{
+			name: "single_node_no_dependencies",
+			roles: []ServiceRole{
+				{Name: "service", Role: RoleMain, Replicas: 1},
+			},
+			backendFramework: BackendFrameworkVLLM,
+			numberOfNodes:    1,
+			expectedDeps: map[string][]string{
+				"service": nil,
+			},
+			expectStartupType: false,
+		},
+		{
+			name: "noop_backend_no_dependencies",
+			roles: []ServiceRole{
+				{Name: "service-ldr", Role: RoleLeader, Replicas: 1},
+				{Name: "service-wkr", Role: RoleWorker, Replicas: 2},
+			},
+			backendFramework: BackendFrameworkNoop,
+			numberOfNodes:    3,
+			expectedDeps: map[string][]string{
+				"service-ldr": nil,
+				"service-wkr": nil,
+			},
+			expectStartupType: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Create a PodGangSet with cliques matching the roles
+			gangSet := &grovev1alpha1.PodGangSet{
+				Spec: grovev1alpha1.PodGangSetSpec{
+					Template: grovev1alpha1.PodGangSetTemplateSpec{
+						Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{},
+					},
+				},
+			}
+
+			// Add cliques for each role
+			for _, role := range tt.roles {
+				clique := &grovev1alpha1.PodCliqueTemplateSpec{
+					Name: strings.ToLower(role.Name),
+					Spec: grovev1alpha1.PodCliqueSpec{
+						RoleName: strings.ToLower(role.Name),
+						Replicas: role.Replicas,
+					},
+				}
+				gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, clique)
+			}
+
+			// Apply dependencies
+			applyCliqueStartupDependencies(gangSet, tt.roles, tt.backendFramework, tt.numberOfNodes)
+
+			// Verify StartupType
+			if tt.expectStartupType {
+				if gangSet.Spec.Template.StartupType == nil || *gangSet.Spec.Template.StartupType != grovev1alpha1.CliqueStartupTypeExplicit {
+					t.Errorf("Expected StartupType to be CliqueStartupTypeExplicit, got %v", gangSet.Spec.Template.StartupType)
+				}
+			} else {
+				if gangSet.Spec.Template.StartupType != nil {
+					t.Errorf("Expected StartupType to be nil, got %v", *gangSet.Spec.Template.StartupType)
+				}
+			}
+
+			// Verify dependencies for each clique
+			for _, clique := range gangSet.Spec.Template.Cliques {
+				expectedDeps, exists := tt.expectedDeps[clique.Name]
+				if !exists {
+					t.Errorf("Unexpected clique %s", clique.Name)
+					continue
+				}
+
+				if !reflect.DeepEqual(clique.Spec.StartsAfter, expectedDeps) {
+					t.Errorf("Clique %s: expected StartsAfter %v, got %v", clique.Name, expectedDeps, clique.Spec.StartsAfter)
+				}
+			}
+		})
+	}
+}
+
+func TestGetCliqueStartupDependencies(t *testing.T) {
+	tests := []struct {
+		name              string
+		role              Role
+		backendFramework  BackendFramework
+		leaderCliqueName  string
+		workerCliqueNames []string
+		expected          []string
+	}{
+		{
+			name:              "vllm_worker_depends_on_leader",
+			role:              RoleWorker,
+			backendFramework:  BackendFrameworkVLLM,
+			leaderCliqueName:  "service-ldr",
+			workerCliqueNames: []string{"service-wkr"},
+			expected:          []string{"service-ldr"},
+		},
+		{
+			name:              "vllm_leader_has_no_dependencies",
+			role:              RoleLeader,
+			backendFramework:  BackendFrameworkVLLM,
+			leaderCliqueName:  "service-ldr",
+			workerCliqueNames: []string{"service-wkr"},
+			expected:          nil,
+		},
+		{
+			name:              "sglang_worker_depends_on_leader",
+			role:              RoleWorker,
+			backendFramework:  BackendFrameworkSGLang,
+			leaderCliqueName:  "service-ldr",
+			workerCliqueNames: []string{"service-wkr"},
+			expected:          []string{"service-ldr"},
+		},
+		{
+			name:              "sglang_leader_has_no_dependencies",
+			role:              RoleLeader,
+			backendFramework:  BackendFrameworkSGLang,
+			leaderCliqueName:  "service-ldr",
+			workerCliqueNames: []string{"service-wkr"},
+			expected:          nil,
+		},
+		{
+			name:              "trtllm_leader_depends_on_workers",
+			role:              RoleLeader,
+			backendFramework:  BackendFrameworkTRTLLM,
+			leaderCliqueName:  "service-ldr",
+			workerCliqueNames: []string{"service-wkr1", "service-wkr2"},
+			expected:          []string{"service-wkr1", "service-wkr2"},
+		},
+		{
+			name:              "trtllm_worker_has_no_dependencies",
+			role:              RoleWorker,
+			backendFramework:  BackendFrameworkTRTLLM,
+			leaderCliqueName:  "service-ldr",
+			workerCliqueNames: []string{"service-wkr"},
+			expected:          nil,
+		},
+		{
+			name:              "noop_backend_has_no_dependencies",
+			role:              RoleWorker,
+			backendFramework:  BackendFrameworkNoop,
+			leaderCliqueName:  "service-ldr",
+			workerCliqueNames: []string{"service-wkr"},
+			expected:          nil,
+		},
+		{
+			name:              "main_role_has_no_dependencies",
+			role:              RoleMain,
+			backendFramework:  BackendFrameworkVLLM,
+			leaderCliqueName:  "",
+			workerCliqueNames: nil,
+			expected:          nil,
+		},
+		{
+			name:              "worker_with_empty_leader_name",
+			role:              RoleWorker,
+			backendFramework:  BackendFrameworkVLLM,
+			leaderCliqueName:  "",
+			workerCliqueNames: []string{"service-wkr"},
+			expected:          nil,
+		},
+		{
+			name:              "leader_with_empty_worker_names",
+			role:              RoleLeader,
+			backendFramework:  BackendFrameworkTRTLLM,
+			leaderCliqueName:  "service-ldr",
+			workerCliqueNames: nil,
+			expected:          nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := getCliqueStartupDependencies(
+				tt.role,
+				tt.backendFramework,
+				tt.leaderCliqueName,
+				tt.workerCliqueNames,
+			)
+
+			if !reflect.DeepEqual(result, tt.expected) {
+				t.Errorf("getCliqueStartupDependencies() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestGenerateGrovePodGangSet_StartsAfterDependencies(t *testing.T) {
+	secretsRetriever := &mockSecretsRetriever{}
+
+	tests := []struct {
+		name             string
+		backendFramework string
+		expectedDeps     map[string][]string // clique name -> expected StartsAfter dependencies
+	}{
+		{
+			name:             "vllm_worker_starts_after_leader",
+			backendFramework: string(BackendFrameworkVLLM),
+			expectedDeps: map[string][]string{
+				"main-wkr": {"main-ldr"}, // worker starts after leader
+				"main-ldr": nil,          // leader has no dependencies
+			},
+		},
+		{
+			name:             "sglang_worker_starts_after_leader",
+			backendFramework: string(BackendFrameworkSGLang),
+			expectedDeps: map[string][]string{
+				"main-wkr": {"main-ldr"}, // worker starts after leader
+				"main-ldr": nil,          // leader has no dependencies
+			},
+		},
+		{
+			name:             "trtllm_leader_starts_after_worker",
+			backendFramework: string(BackendFrameworkTRTLLM),
+			expectedDeps: map[string][]string{
+				"main-ldr": {"main-wkr"}, // leader starts after worker
+				"main-wkr": nil,          // worker has no dependencies
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dynamoDeployment := &v1alpha1.DynamoGraphDeployment{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-deployment",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.DynamoGraphDeploymentSpec{
+					BackendFramework: tt.backendFramework,
+					Services: map[string]*v1alpha1.DynamoComponentDeploymentOverridesSpec{
+						"main": {
+							DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+								ComponentType: "worker", // Must be worker to trigger backend detection
+								Replicas:      ptr.To(int32(1)),
+								Resources: &common.Resources{
+									Requests: &common.ResourceItem{
+										GPU:   "1", // 1 GPU per node
+										Nodes: "2", // Set to 2 nodes to trigger multinode
+									},
+								},
+							},
+						},
+					},
+				},
+			}
+
+			controllerConfig := controller_common.Config{
+				EtcdAddress: "etcd-address",
+				NatsAddress: "nats-address",
+			}
+
+			got, err := GenerateGrovePodGangSet(context.Background(), dynamoDeployment, controllerConfig, secretsRetriever)
+			if err != nil {
+				t.Errorf("GenerateGrovePodGangSet() error = %v", err)
+				return
+			}
+
+			// Verify that StartupType is set to Explicit
+			if got.Spec.Template.StartupType == nil || *got.Spec.Template.StartupType != grovev1alpha1.CliqueStartupTypeExplicit {
+				t.Errorf("Expected StartupType to be CliqueStartupTypeExplicit, got %v", got.Spec.Template.StartupType)
+			}
+
+			// Verify StartsAfter dependencies for each clique
+			cliqueMap := make(map[string]*grovev1alpha1.PodCliqueTemplateSpec)
+			for _, clique := range got.Spec.Template.Cliques {
+				cliqueMap[clique.Name] = clique
+			}
+
+			for cliqueName, expectedDeps := range tt.expectedDeps {
+				clique, exists := cliqueMap[cliqueName]
+				if !exists {
+					t.Errorf("Expected clique %s not found", cliqueName)
+					continue
+				}
+
+				if expectedDeps == nil {
+					if len(clique.Spec.StartsAfter) != 0 {
+						t.Errorf("Clique %s should have no StartsAfter dependencies, but has %v", cliqueName, clique.Spec.StartsAfter)
+					}
+				} else {
+					if len(clique.Spec.StartsAfter) != len(expectedDeps) {
+						t.Errorf("Clique %s expected %d StartsAfter dependencies, got %d", cliqueName, len(expectedDeps), len(clique.Spec.StartsAfter))
+						continue
+					}
+
+					for i, expectedDep := range expectedDeps {
+						if i >= len(clique.Spec.StartsAfter) || clique.Spec.StartsAfter[i] != expectedDep {
+							t.Errorf("Clique %s expected StartsAfter[%d] = %s, got %v", cliqueName, i, expectedDep, clique.Spec.StartsAfter)
+						}
+					}
+				}
 			}
 		})
 	}

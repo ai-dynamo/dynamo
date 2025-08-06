@@ -329,6 +329,95 @@ func getNumberOfNodes(resources *common.Resources) int32 {
 	return 1 // Default to single node
 }
 
+// applyCliqueStartupDependencies configures StartsAfter dependencies for cliques in a PodGangSet
+// based on the backend framework and multinode deployment patterns.
+//
+// Rules:
+// - For VLLM and SGLang: worker cliques start after leader clique
+// - For TRTLLM: leader clique starts after worker cliques
+// - Only applies to multinode deployments (numberOfNodes > 1)
+// - Sets the PodGangSet StartupType to Explicit if any dependencies are configured
+func applyCliqueStartupDependencies(
+	gangSet *grovev1alpha1.PodGangSet,
+	roles []ServiceRole,
+	backendFramework BackendFramework,
+	numberOfNodes int32,
+) {
+	if numberOfNodes <= 1 {
+		return // No dependencies for single-node deployments
+	}
+
+	// Build maps of leader and worker clique names
+	var leaderCliqueName string
+	var workerCliqueNames []string
+
+	for _, r := range roles {
+		cliqueName := strings.ToLower(string(r.Name))
+		switch r.Role {
+		case RoleLeader:
+			leaderCliqueName = cliqueName
+		case RoleWorker:
+			workerCliqueNames = append(workerCliqueNames, cliqueName)
+		}
+	}
+
+	// Apply dependencies to cliques
+	hasDependencies := false
+	for _, clique := range gangSet.Spec.Template.Cliques {
+		// Find the corresponding role for this clique
+		var cliqueRole Role
+		for _, r := range roles {
+			if strings.ToLower(string(r.Name)) == clique.Name {
+				cliqueRole = r.Role
+				break
+			}
+		}
+
+		// Determine dependencies for this clique
+		startsAfter := getCliqueStartupDependencies(cliqueRole, backendFramework, leaderCliqueName, workerCliqueNames)
+		if len(startsAfter) > 0 {
+			clique.Spec.StartsAfter = startsAfter
+			hasDependencies = true
+		}
+	}
+
+	// Set explicit startup type if we have any dependencies
+	if hasDependencies {
+		explicitStartupType := grovev1alpha1.CliqueStartupTypeExplicit
+		gangSet.Spec.Template.StartupType = &explicitStartupType
+	}
+}
+
+// getCliqueStartupDependencies determines the StartsAfter dependencies for a clique
+// based on its role, backend framework, and available leader/worker clique names.
+//
+// Rules:
+// - For VLLM and SGLang: worker cliques start after leader clique
+// - For TRTLLM: leader clique starts after worker cliques
+// - For other backends or single-node deployments: no dependencies
+func getCliqueStartupDependencies(
+	role Role,
+	backendFramework BackendFramework,
+	leaderCliqueName string,
+	workerCliqueNames []string,
+) []string {
+	switch backendFramework {
+	case BackendFrameworkVLLM, BackendFrameworkSGLang:
+		// For vllm and sglang: worker cliques start after leader clique
+		if role == RoleWorker && leaderCliqueName != "" {
+			return []string{leaderCliqueName}
+		}
+	case BackendFrameworkTRTLLM:
+		// For trtllm: leader clique starts after worker cliques
+		if role == RoleLeader && len(workerCliqueNames) > 0 {
+			return workerCliqueNames
+		}
+	}
+
+	// No dependencies for other cases
+	return nil
+}
+
 func GenerateComponentService(ctx context.Context, componentName, componentNamespace string) (*corev1.Service, error) {
 	service := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
@@ -726,6 +815,7 @@ func GenerateGrovePodGangSet(
 	if controllerConfig.Grove.TerminationDelay > 0 {
 		gangSet.Spec.Template.TerminationDelay = &metav1.Duration{Duration: controllerConfig.Grove.TerminationDelay}
 	}
+
 	var scalingGroups []grovev1alpha1.PodCliqueScalingGroupConfig
 	for serviceName, component := range dynamoDeployment.Spec.Services {
 		// Determine backend framework using hybrid approach
@@ -738,6 +828,7 @@ func GenerateGrovePodGangSet(
 		isMultinode := numberOfNodes > 1
 		roles := expandRolesForService(serviceName, component.Replicas, numberOfNodes)
 		var cliqueNames []string
+
 		for _, r := range roles {
 			podSpec, err := GeneratePodSpecForComponent(
 				component,
@@ -753,6 +844,7 @@ func GenerateGrovePodGangSet(
 			if err != nil {
 				return nil, fmt.Errorf("failed to generate podSpec for role %s: %w", r.Name, err)
 			}
+
 			clique := &grovev1alpha1.PodCliqueTemplateSpec{
 				Name: strings.ToLower(string(r.Name)),
 				Labels: map[string]string{
@@ -764,6 +856,7 @@ func GenerateGrovePodGangSet(
 					PodSpec:  podSpec,
 				},
 			}
+
 			if component.ExtraPodMetadata != nil {
 				// merge the extraPodMetadata from the parent deployment with the extraPodMetadata from the service
 				mergo.Merge(&clique.Annotations, component.ExtraPodMetadata.Annotations, mergo.WithOverride)
@@ -772,6 +865,10 @@ func GenerateGrovePodGangSet(
 			gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, clique)
 			cliqueNames = append(cliqueNames, strings.ToLower(string(r.Name)))
 		}
+
+		// Apply startup dependencies for this service
+		applyCliqueStartupDependencies(gangSet, roles, backendFramework, numberOfNodes)
+
 		if isMultinode {
 			scalingGroups = append(scalingGroups, grovev1alpha1.PodCliqueScalingGroupConfig{
 				Name:        strings.ToLower(serviceName),
@@ -783,6 +880,7 @@ func GenerateGrovePodGangSet(
 	if len(scalingGroups) > 0 {
 		gangSet.Spec.Template.PodCliqueScalingGroupConfigs = scalingGroups
 	}
+
 	return gangSet, nil
 }
 
