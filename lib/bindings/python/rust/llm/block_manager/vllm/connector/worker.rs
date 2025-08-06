@@ -96,25 +96,25 @@ impl KvConnectorWorker {
         page_size: usize,
         device_id: usize,
         dtype_width_bytes: usize,
-        kv_caches: HashMap<String, Py<PyAny>>,
+        kv_caches: Vec<(String, Py<PyAny>)>,
     ) -> PyResult<()> {
         if self.kvbm_worker.get().is_some() {
             tracing::warn!("kvbm worker already registered");
             return Err(to_pyerr(anyhow::anyhow!("kvbm worker already registered")));
         }
 
-        // TODO: pass in the sorted (layer_name, tensor) such that the order of the list matches the order of layer execution in the model
+        // Process kv_caches in layer execution order (already sorted by layer index)
+        let mut vllm_tensors = Vec::new();
         for (layer_name, torch_tensor) in kv_caches {
             let vllm_tensor = Arc::new(VllmTensor::new(torch_tensor).map_err(to_pyerr)?);
             tracing::trace!("Registering KV cache layer: {layer_name}, tensor: {vllm_tensor:?}");
-            self.kv_caches.insert(layer_name, vllm_tensor);
-        }
 
-        let vllm_tensors: Vec<Arc<dyn TorchTensor>> = self
-            .kv_caches
-            .values()
-            .map(|tensor| tensor.clone() as Arc<dyn TorchTensor>)
-            .collect();
+            // Store for later lookup by name
+            self.kv_caches.insert(layer_name, vllm_tensor.clone());
+
+            // Build ordered tensor list for worker config
+            vllm_tensors.push(vllm_tensor as Arc<dyn TorchTensor>);
+        }
 
         let config = KvbmWorkerConfig::builder()
             .drt(self.drt.clone())

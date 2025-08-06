@@ -517,7 +517,10 @@ impl Slot for VllmConnectorSlot {
         // we start matching non-device blocks after the device blocks
         let search_offset = num_computed_blocks;
 
-        tracing::debug!("matching against {} block hashes", sequence_hashes[search_offset..].len());
+        tracing::debug!(
+            "matching against {} block hashes",
+            sequence_hashes[search_offset..].len()
+        );
 
         // we should do this opportunistically after this operation is done
         // ideally it was triggered by the match_sequence_hashes_blocking calls directly
@@ -569,7 +572,8 @@ impl Slot for VllmConnectorSlot {
         }
 
         // early exit if we need to onboard 0 blocks
-        if (num_computed_blocks + num_matched_blocks) * block_size == self.sequence().total_tokens() {
+        if (num_computed_blocks + num_matched_blocks) * block_size == self.sequence().total_tokens()
+        {
             return Ok(());
         }
 
@@ -684,8 +688,8 @@ impl ExternallyManagedDeviceSlot for VllmConnectorSlot {
     fn advance_computed_position(&mut self, num_tokens: usize) -> Result<(), SlotError> {
         if self.current_position + num_tokens > self.sequence().total_tokens() {
             return Err(SlotError::InvalidOperation(format!(
-                "cannot advance computed position by {num_tokens} tokens, total tokens is {}",
-                self.sequence().total_tokens()
+                "cannot advance computed position from {} by {num_tokens} tokens, total tokens is {}",
+                self.current_position, self.sequence().total_tokens()
             )));
         }
 
