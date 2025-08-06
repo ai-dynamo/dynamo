@@ -53,8 +53,6 @@ kubectl apply -f components/backends/vllm/deploy/agg.yaml -n ${NAMESPACE}
 You can use `kubectl get dynamoGraphDeployment -n ${NAMESPACE}` to view your deployment.
 You can use `kubectl delete dynamoGraphDeployment <your-dep-name> -n ${NAMESPACE}` to delete the deployment.
 
-We provide a Custom Resource YAML file for many examples under the `deploy/` folder.
-
 **Note 1** Example Image
 
 The examples use a prebuilt image from the `nvcr.io` registry.
