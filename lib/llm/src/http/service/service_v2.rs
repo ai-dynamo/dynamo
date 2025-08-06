@@ -9,6 +9,7 @@ use super::metrics;
 use super::Metrics;
 use super::RouteDoc;
 use crate::discovery::ModelManager;
+use crate::http::service::request_throttler::HttpServiceRequestThrottler;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
@@ -21,22 +22,29 @@ pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
     etcd_client: Option<etcd::Client>,
+    request_throttler: HttpServiceRequestThrottler,
 }
 
 impl State {
-    pub fn new(manager: Arc<ModelManager>) -> Self {
+    pub fn new(manager: Arc<ModelManager>, request_throttler: HttpServiceRequestThrottler) -> Self {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
             etcd_client: None,
+            request_throttler,
         }
     }
 
-    pub fn new_with_etcd(manager: Arc<ModelManager>, etcd_client: Option<etcd::Client>) -> Self {
+    pub fn new_with_etcd(
+        manager: Arc<ModelManager>,
+        etcd_client: Option<etcd::Client>,
+        request_throttler: HttpServiceRequestThrottler,
+    ) -> Self {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
             etcd_client,
+            request_throttler,
         }
     }
 
@@ -49,8 +57,16 @@ impl State {
         Arc::as_ref(&self.manager)
     }
 
+    pub fn request_throttler(&self) -> &HttpServiceRequestThrottler {
+        &self.request_throttler
+    }
+
     pub fn manager_clone(&self) -> Arc<ModelManager> {
         self.manager.clone()
+    }
+
+    pub fn request_throttler_clone(&self) -> HttpServiceRequestThrottler {
+        self.request_throttler.clone()
     }
 
     pub fn etcd_client(&self) -> Option<&etcd::Client> {
@@ -102,6 +118,9 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "None")]
     etcd_client: Option<etcd::Client>,
+
+    #[builder(default = "None")]
+    all_workers_busy_rejection_time_window: Option<u64>,
 }
 
 impl HttpService {
@@ -115,6 +134,10 @@ impl HttpService {
 
     pub fn state(&self) -> &State {
         Arc::as_ref(&self.state)
+    }
+
+    pub fn request_throttler_clone(&self) -> HttpServiceRequestThrottler {
+        self.state().request_throttler_clone()
     }
 
     pub fn model_manager(&self) -> &ModelManager {
@@ -173,7 +196,17 @@ impl HttpServiceConfigBuilder {
         let config: HttpServiceConfig = self.build_internal()?;
 
         let model_manager = Arc::new(ModelManager::new());
-        let state = Arc::new(State::new_with_etcd(model_manager, config.etcd_client));
+        let request_throttler = HttpServiceRequestThrottler::new(
+            config
+                .all_workers_busy_rejection_time_window
+                .map(Duration::from_secs),
+        );
+
+        let state = Arc::new(State::new_with_etcd(
+            model_manager,
+            config.etcd_client,
+            request_throttler,
+        ));
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -241,6 +274,14 @@ impl HttpServiceConfigBuilder {
 
     pub fn with_request_template(mut self, request_template: Option<RequestTemplate>) -> Self {
         self.request_template = Some(request_template);
+        self
+    }
+
+    pub fn with_all_workers_busy_rejection_time_window(
+        mut self,
+        all_workers_busy_rejection_time_window: Option<u64>,
+    ) -> Self {
+        self.all_workers_busy_rejection_time_window = Some(all_workers_busy_rejection_time_window);
         self
     }
 

@@ -100,16 +100,34 @@ def parse_args():
         help="KV Router: Temperature for worker sampling via softmax. Higher values promote more randomness, and 0 fallbacks to deterministic.",
     )
     parser.add_argument(
+        "--max-workers-busy-queue-depth",
+        type=int,
+        default=5,
+        help="KV Router: Maximum number of waiting requests to be queued up before broadcasting all workers busy event.",
+    )
+    parser.add_argument(
         "--kv-events",
         action="store_true",
         dest="use_kv_events",
         help=" KV Router: Whether to use KV events to maintain the view of cached blocks. If false, would use ApproxKvRouter for predicting block creation / deletion based only on incoming requests at a timer.",
     )
     parser.add_argument(
+        "--all-workers-busy-rejection-time-window",
+        type=int,
+        default=10,
+        help="All workers busy rejection time window in seconds.",
+    )
+    parser.add_argument(
         "--no-kv-events",
         action="store_false",
         dest="use_kv_events",
         help=" KV Router. Disable KV events.",
+    )
+    parser.add_argument(
+        "--endpoint-id",
+        type=str,
+        default="dynamo",
+        help="Endpoint ID to use for the frontend namespace (e.g. 'dyn://namespace.component.endpoint').",
     )
     parser.set_defaults(use_kv_events=True)
     parser.add_argument(
@@ -148,6 +166,7 @@ async def async_main():
             overlap_score_weight=flags.kv_overlap_score_weight,
             router_temperature=flags.router_temperature,
             use_kv_events=flags.use_kv_events,
+            max_workers_busy_queue_depth=flags.max_workers_busy_queue_depth,
         )
     elif flags.router_mode == "random":
         router_mode = RouterMode.Random
@@ -160,6 +179,8 @@ async def async_main():
         "http_port": flags.http_port,
         "kv_cache_block_size": flags.kv_cache_block_size,
         "router_config": RouterConfig(router_mode, kv_router_config),
+        "all_workers_busy_rejection_time_window": flags.all_workers_busy_rejection_time_window,
+        "endpoint_id": flags.endpoint_id,
     }
 
     if flags.static_endpoint:

@@ -171,6 +171,9 @@ def pytest_collection_modifyitems(config, items):
             elif "router" in str(item.path):
                 item.fixturenames = list(item.fixturenames)
                 item.fixturenames.append("predownload_tokenizers")
+            elif "request_throttler" in str(item.path):
+                item.fixturenames = list(item.fixturenames)
+                item.fixturenames.append("predownload_tokenizers")
 
 
 class EtcdServer(ManagedProcess):

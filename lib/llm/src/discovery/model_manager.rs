@@ -213,11 +213,13 @@ impl ModelManager {
         kv_router_config: Option<KvRouterConfig>,
     ) -> anyhow::Result<Arc<KvRouter>> {
         let selector = Box::new(DefaultWorkerSelector::new(kv_router_config));
+        let kv_router_config = kv_router_config.unwrap_or_default();
         let chooser = KvRouter::new(
             component.clone(),
             kv_cache_block_size,
             Some(selector),
-            kv_router_config.unwrap_or_default().use_kv_events,
+            kv_router_config.use_kv_events,
+            kv_router_config.max_workers_busy_queue_depth,
         )
         .await?;
         let new_kv_chooser = Arc::new(chooser);

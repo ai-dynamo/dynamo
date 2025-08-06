@@ -35,13 +35,19 @@ pub struct KvRouterConfig {
 #[pymethods]
 impl KvRouterConfig {
     #[new]
-    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true))]
-    fn new(overlap_score_weight: f64, router_temperature: f64, use_kv_events: bool) -> Self {
+    #[pyo3(signature = (overlap_score_weight=1.0, router_temperature=0.0, use_kv_events=true, max_workers_busy_queue_depth=5))]
+    fn new(
+        overlap_score_weight: f64,
+        router_temperature: f64,
+        use_kv_events: bool,
+        max_workers_busy_queue_depth: usize,
+    ) -> Self {
         KvRouterConfig {
             inner: RsKvRouterConfig {
                 overlap_score_weight,
                 router_temperature,
                 use_kv_events,
+                max_workers_busy_queue_depth,
                 ..Default::default()
             },
         }
@@ -90,13 +96,27 @@ pub(crate) struct EntrypointArgs {
     kv_cache_block_size: Option<u32>,
     http_port: Option<u16>,
     extra_engine_args: Option<PathBuf>,
+    all_workers_busy_rejection_time_window: Option<u64>,
 }
 
 #[pymethods]
 impl EntrypointArgs {
     #[allow(clippy::too_many_arguments)]
     #[new]
-    #[pyo3(signature = (engine_type, model_path=None, model_name=None, model_config=None, endpoint_id=None, context_length=None, template_file=None, router_config=None, kv_cache_block_size=None, http_port=None, extra_engine_args=None))]
+    #[pyo3(signature = (
+        engine_type,
+        model_path=None,
+        model_name=None,
+        model_config=None,
+        endpoint_id=None,
+        context_length=None,
+        template_file=None,
+        router_config=None,
+        kv_cache_block_size=None,
+        http_port=None,
+        extra_engine_args=None,
+        all_workers_busy_rejection_time_window=None
+    ))]
     pub fn new(
         engine_type: EngineType,
         model_path: Option<PathBuf>,
@@ -109,6 +129,7 @@ impl EntrypointArgs {
         kv_cache_block_size: Option<u32>,
         http_port: Option<u16>,
         extra_engine_args: Option<PathBuf>,
+        all_workers_busy_rejection_time_window: Option<u64>,
     ) -> PyResult<Self> {
         let endpoint_id_obj: Option<EndpointId> = match endpoint_id {
             Some(eid) => Some(eid.parse().map_err(|_| {
@@ -130,6 +151,7 @@ impl EntrypointArgs {
             kv_cache_block_size,
             http_port,
             extra_engine_args,
+            all_workers_busy_rejection_time_window,
         })
     }
 }
@@ -158,6 +180,7 @@ pub fn make_engine<'p>(
         .kv_cache_block_size(args.kv_cache_block_size)
         .router_config(args.router_config.clone().map(|rc| rc.into()))
         .http_port(args.http_port)
+        .all_workers_busy_rejection_time_window(args.all_workers_busy_rejection_time_window)
         .is_mocker(matches!(args.engine_type, EngineType::Mocker));
     pyo3_async_runtimes::tokio::future_into_py(py, async move {
         let local_model = builder.build().await.map_err(to_pyerr)?;
