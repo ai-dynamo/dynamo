@@ -44,13 +44,13 @@ Get started with Dynamo locally in just a few commands:
 
    # Install uv (recommended Python package manager)
    curl -LsSf https://astral.sh/uv/install.sh | sh
-   
+
    # Create virtual environment and install Dynamo
    uv venv venv
    source venv/bin/activate
    uv pip install "ai-dynamo[sglang]"  # or [vllm], [trtllm]
 
-**2. Start etcd/NATS** 
+**2. Start etcd/NATS**
 
 .. code-block:: bash
 
@@ -63,7 +63,7 @@ Get started with Dynamo locally in just a few commands:
 
    # Start the OpenAI compatible frontend
    python -m dynamo.frontend
-   
+
    # In another terminal, start an SGLang worker
    python -m dynamo.sglang.worker deepseek-ai/DeepSeek-R1-Distill-Llama-8B
 
@@ -73,11 +73,11 @@ Get started with Dynamo locally in just a few commands:
 
    curl localhost:8080/v1/chat/completions \
      -H "Content-Type: application/json" \
-     -d '{"model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B", 
-          "messages": [{"role": "user", "content": "Hello!"}], 
+     -d '{"model": "deepseek-ai/DeepSeek-R1-Distill-Llama-8B",
+          "messages": [{"role": "user", "content": "Hello!"}],
           "max_tokens": 50}'
 
-Kubernetes Deployment  
+Kubernetes Deployment
 ~~~~~~~~~~~~~~~~~~~~~
 
 For deployments on Kubernetes, follow the :doc:`Dynamo Platform Quickstart Guide <guides/dynamo_deploy/quickstart>`.
@@ -149,9 +149,7 @@ The examples below assume you build the latest image yourself from source. If us
 
    Writing Python Workers in Dynamo <guides/backend.md>
    Disaggregation and Performance Tuning <guides/disagg_perf_tuning.md>
-   KV Cache Router Performance Tuning <guides/kv_router_perf_tuning.md>
    Working with Dynamo Kubernetes Operator <guides/dynamo_deploy/dynamo_operator.md>
-   Configuring Metrics for Observability <guides/metrics.md>
 
 .. toctree::
    :hidden:
@@ -159,7 +157,7 @@ The examples below assume you build the latest image yourself from source. If us
 
    Dynamo Deploy Quickstart <guides/dynamo_deploy/quickstart.md>
    Dynamo Cloud Kubernetes Platform <guides/dynamo_deploy/dynamo_cloud.md>
-   Manual Helm Deployment <deploy/helm/README.md>
+   Manual Helm Deployment <guides/dynamo_deploy/helm_install.md>
    GKE Setup Guide <guides/dynamo_deploy/gke_setup.md>
    Minikube Setup Guide <guides/dynamo_deploy/minikube.md>
    Model Caching with Fluid <guides/dynamo_deploy/model_caching_with_fluid.md>
@@ -183,6 +181,7 @@ The examples below assume you build the latest image yourself from source. If us
 
    Hello World <examples/runtime/hello_world/README.md>
    LLM Deployment Examples using VLLM <components/backends/vllm/README.md>
+   LLM Deployment Examples using SGLang <components/backends/sglang/README.md>
    Multinode Examples using SGLang <components/backends/sglang/docs/multinode-examples.md>
    LLM Deployment Examples using TensorRT-LLM <components/backends/trtllm/README.md>
 
