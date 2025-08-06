@@ -114,12 +114,14 @@
 // pub mod distributed;
 
 pub mod nixl;
+mod utils;
+
+use utils::*;
 
 use derive_getters::Getters;
 use thiserror::Error;
 
 use crate::block_manager::storage::{Storage, StorageAllocator};
-use crate::common::dtype::DType;
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
 use tracing::instrument;
@@ -156,21 +158,17 @@ pub enum LayoutError {
 /// Storage pattern for layers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum LayoutType {
-    /// All layers are contiguous in memory [n_layers, ...]
+    /// All layers are contiguous in memory [n_blocks, n_layers, outer_dim, ...]
     FullyContiguous,
-    // /// Each layer is stored separately with a common stride between blocks
-    // /// in different layers
-    // LayerContiguousWithCommonStride,
 
-    // /// Each layer is stored separately with no guaranteed stride
-    // LayerContiguousWithSeparateStride,
-
-    // /// Each page is stored separately with no guaranteed stride
-    // PageContiguousWithSeparateStride,
-
-    // /// NullLayout
-    // /// Used for testing and debugging
-    // Null,
+    /// All layers are stored separately.
+    /// If outer_contiguous is true, for each layer: [outer_dim, n_blocks, ...]
+    /// If outer_contiguous is false, for each layer: [n_blocks, outer_dim, ...]
+    /// When outer_dim is 1, these two modes are equivalent.
+    LayerSeparate {
+        /// If true, the outer dimension is contiguous. Otherwise, the block dimension is contiguous.
+        outer_contiguous: bool,
+    },
 }
 
 /// Local Memory Region
@@ -181,21 +179,33 @@ pub struct LocalMemoryRegion {
 
     #[getter(copy)]
     size: usize,
+
+    #[getter(copy)]
+    storage_type: StorageType,
 }
 
 /// Core trait for block layouts
-pub trait BlockLayout: BlockLayoutConfig + Send + Sync + std::fmt::Debug {
+pub trait BlockLayout: GenericBlockLayout {
     /// The type of storage this layout uses
     type StorageType: Storage;
+
+    /// Returns the layout type
+    fn layout_type(&self) -> LayoutType;
 
     /// Get the memory regions for all blocks and layers
     fn storage(&self) -> Vec<&Self::StorageType>;
 
     /// Get the mutable memory regions for all blocks and layers
     fn storage_mut(&mut self) -> Vec<&mut Self::StorageType>;
+}
 
+/// Generic trait for block layouts - type-erased on the [Storage] object.
+pub trait GenericBlockLayout: BlockLayoutConfig + Send + Sync {
     /// Storage type for the layout
-    fn storage_type(&self) -> StorageType;
+    fn storage_type(&self) -> &StorageType;
+
+    /// Full configuration for the layout
+    fn config(&self) -> &LayoutConfig;
 
     /// Get the memory region for a specific page [page_size, inner_dim]
     ///
@@ -215,30 +225,43 @@ pub trait BlockLayout: BlockLayoutConfig + Send + Sync + std::fmt::Debug {
 
 /// Configuration for block layouts
 pub trait BlockLayoutConfig: std::fmt::Debug {
-    /// Returns the layout type
-    fn layout_type(&self) -> LayoutType;
+    /// Returns the layout config
+    fn layout_config(&self) -> LayoutConfig;
 
     /// Returns the total number of blocks this layout manages
-    fn num_blocks(&self) -> usize;
+    fn num_blocks(&self) -> usize {
+        self.layout_config().num_blocks
+    }
 
     /// Returns the number of layers per block
-    fn num_layers(&self) -> usize;
+    fn num_layers(&self) -> usize {
+        self.layout_config().num_layers
+    }
 
     /// Returns the number of outer dimensions per block
     /// In some cases, K and V might be indexed separately, so in that example one might have 2 outer dimensions
     /// For MLA, this is 1.
     /// The location of the outer dimension in the shape of the tensor layout is defined by the layout type.
-    fn outer_dim(&self) -> usize;
+    fn outer_dim(&self) -> usize {
+        self.layout_config().outer_dim
+    }
 
     /// Returns the size of each block in bytes
-    fn page_size(&self) -> usize;
+    fn page_size(&self) -> usize {
+        self.layout_config().page_size
+    }
 
     /// Returns the inner dimension size
-    fn inner_dim(&self) -> usize;
+    fn inner_dim(&self) -> usize {
+        self.layout_config().inner_dim
+    }
+
+    /// The size of the data for a layout (pre base_offset)
+    fn layout_data_bytes(&self) -> usize;
 }
 
 /// Configuration for block layouts
-#[derive(Debug, Clone, Builder, Validate, Serialize, Deserialize)]
+#[derive(Debug, Clone, Builder, Validate, Serialize, Deserialize, PartialEq, Eq)]
 pub struct LayoutConfig {
     /// Number of blocks
     #[validate(range(min = 1))]
@@ -266,8 +289,8 @@ pub struct LayoutConfig {
     pub alignment: usize,
 
     /// Data type
-    #[builder(default = "DType::FP16")]
-    pub dtype: DType,
+    #[builder(default = "2")]
+    pub dtype_width_bytes: usize,
 }
 
 impl LayoutConfig {
@@ -275,24 +298,6 @@ impl LayoutConfig {
     pub fn builder() -> LayoutConfigBuilder {
         LayoutConfigBuilder::default()
     }
-}
-
-/// Validation function for Option<usize> to check if it's Some(power_of_2).
-fn validate_power_of_2(alignment: usize) -> Result<(), validator::ValidationError> {
-    if !alignment.is_power_of_two() {
-        // Return validation error if alignment is not a power of 2
-        return Err(validator::ValidationError::new(
-            "alignment_must_be_power_of_2",
-        ));
-    }
-    // Passes validation if alignment is a power of 2
-    Ok(())
-}
-
-/// Helper to align a value up to the nearest multiple of alignment.
-/// Alignment must be a power of 2.
-fn align_up(value: usize, alignment: usize) -> usize {
-    (value + alignment - 1) & !(alignment - 1)
 }
 
 /// Internal struct to hold calculated layout dimensions specific to FullyContiguous.
@@ -329,7 +334,7 @@ impl FullyContiguousConfig {
         config.validate()?;
 
         let alignment = config.alignment;
-        let memory_region_size = config.page_size * config.inner_dim * config.dtype.size_in_bytes();
+        let memory_region_size = config.page_size * config.inner_dim * config.dtype_width_bytes;
         let outer_dim_stride_in_bytes = memory_region_size;
         let layer_stride_in_bytes = outer_dim_stride_in_bytes * config.outer_dim;
         let natural_block_stride = config.num_layers * layer_stride_in_bytes;
@@ -363,28 +368,12 @@ impl FullyContiguousConfig {
 }
 
 impl BlockLayoutConfig for FullyContiguousConfig {
-    fn layout_type(&self) -> LayoutType {
-        LayoutType::FullyContiguous
+    fn layout_config(&self) -> LayoutConfig {
+        self.inner.clone()
     }
 
-    fn num_blocks(&self) -> usize {
-        self.inner.num_blocks
-    }
-
-    fn num_layers(&self) -> usize {
-        self.inner.num_layers
-    }
-
-    fn outer_dim(&self) -> usize {
-        self.inner.outer_dim
-    }
-
-    fn page_size(&self) -> usize {
-        self.inner.page_size
-    }
-
-    fn inner_dim(&self) -> usize {
-        self.inner.inner_dim
+    fn layout_data_bytes(&self) -> usize {
+        self.layout_data_bytes
     }
 }
 
@@ -408,7 +397,7 @@ impl<S: Storage> FullyContiguous<S> {
     /// Create a new contiguous layout using the provided configuration and pre-allocated storage.
     /// Performs validation and calculates strides/offsets.
     #[instrument(level = "debug", skip(storage), fields(config = ?config))]
-    pub fn new(config: LayoutConfig, storage: Vec<S>) -> Result<Self, LayoutError> {
+    pub fn new(config: LayoutConfig, mut storage: Vec<S>) -> Result<Self, LayoutError> {
         // Calculate dimensions, which includes validation.
         let config = FullyContiguousConfig::new(config)?;
 
@@ -417,45 +406,10 @@ impl<S: Storage> FullyContiguous<S> {
                 "FullyContiguous layout requires exactly one storage region".to_string(),
             ));
         }
-        let mut storage = storage;
         let storage = storage.remove(0);
         let storage_type = storage.storage_type();
 
-        let provided_size = storage.size();
-        let storage_addr = storage.addr();
-        let alignment = config.inner.alignment;
-
-        // Calculate base offset needed to align the start of block 0
-        let base_offset = if alignment > 1 {
-            align_up(storage_addr as usize, alignment) - storage_addr as usize
-        } else {
-            0
-        };
-
-        let total_required_size_with_offset = base_offset + config.layout_data_bytes;
-
-        tracing::debug!(
-            provided_size,
-            total_required_size_with_offset,
-            base_offset,
-            required_layout_data_bytes = config.layout_data_bytes,
-            alignment,
-            "Validating storage size with base offset and alignment"
-        );
-
-        // Validate storage size fits the configuration *with base offset and alignment*
-        if provided_size < total_required_size_with_offset {
-            tracing::warn!(
-                provided_size,
-                total_required_size_with_offset,
-                "Storage size too small for aligned layout including base offset"
-            );
-            return Err(LayoutError::InvalidConfig(format!(
-                "Storage size {} is less than required size {} (including base offset for alignment)",
-                provided_size,
-                total_required_size_with_offset
-            )));
-        }
+        let base_offset = validate_storage(&storage, &config)?;
 
         tracing::debug!(
             config.memory_region_size,
@@ -481,8 +435,8 @@ impl<S: Storage> FullyContiguous<S> {
     pub(crate) fn new_internal(
         config: FullyContiguousConfig,
         storage: S,
-        base_offset: usize,
         storage_type: StorageType,
+        base_offset: usize,
     ) -> Result<Self, LayoutError> {
         // Basic check: Ensure the storage address matches expectations based on offset if possible?
         // Maybe not strictly necessary if we trust the serialized data.
@@ -545,6 +499,10 @@ impl<S: Storage> FullyContiguous<S> {
 impl<S: Storage> BlockLayout for FullyContiguous<S> {
     type StorageType = S;
 
+    fn layout_type(&self) -> LayoutType {
+        LayoutType::FullyContiguous
+    }
+
     fn storage(&self) -> Vec<&Self::StorageType> {
         vec![&self.storage]
     }
@@ -552,9 +510,15 @@ impl<S: Storage> BlockLayout for FullyContiguous<S> {
     fn storage_mut(&mut self) -> Vec<&mut Self::StorageType> {
         vec![&mut self.storage]
     }
+}
 
-    fn storage_type(&self) -> StorageType {
-        self.storage_type.clone()
+impl<S: Storage> GenericBlockLayout for FullyContiguous<S> {
+    fn storage_type(&self) -> &StorageType {
+        &self.storage_type
+    }
+
+    fn config(&self) -> &LayoutConfig {
+        &self.config.inner
     }
 
     fn memory_region(
@@ -563,17 +527,7 @@ impl<S: Storage> BlockLayout for FullyContiguous<S> {
         layer_idx: usize,
         outer_idx: usize,
     ) -> Result<LocalMemoryRegion, LayoutError> {
-        if block_idx >= self.num_blocks() {
-            return Err(LayoutError::InvalidBlockIndex(block_idx));
-        }
-
-        if layer_idx >= self.num_layers() {
-            return Err(LayoutError::InvalidLayerIndex(layer_idx));
-        }
-
-        if outer_idx >= self.outer_dim() {
-            return Err(LayoutError::InvalidOuterIndex(outer_idx));
-        }
+        validate_indices(&self.config, block_idx, layer_idx, outer_idx)?;
 
         // Start from the aligned base address
         let aligned_start_addr = self.storage.addr() as usize + self.base_offset;
@@ -587,33 +541,267 @@ impl<S: Storage> BlockLayout for FullyContiguous<S> {
         Ok(LocalMemoryRegion {
             addr: final_addr,
             size: self.config.memory_region_size,
+            storage_type: self.storage_type,
         })
     }
 }
 
 impl<S: Storage> BlockLayoutConfig for FullyContiguous<S> {
+    fn layout_config(&self) -> LayoutConfig {
+        self.config.inner.clone()
+    }
+
+    fn layout_data_bytes(&self) -> usize {
+        self.config.layout_data_bytes
+    }
+}
+
+/// Configuration for layer-separated layouts.
+/// This is used in vLLM, where every layer has its own allocation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct LayerSeparateConfig {
+    inner: LayoutConfig,
+
+    /// Size of each contiguous memory region
+    memory_region_size: usize,
+
+    /// Stride between outer dimensions
+    outer_dim_stride_in_bytes: usize,
+
+    /// Block stride in bytes
+    block_stride_in_bytes: usize,
+
+    /// Size of the layout data itself (post base offset)
+    layout_data_bytes: usize,
+
+    /// Indicator for outer contiguous or block contiguous
+    is_outer_contiguous: bool,
+}
+
+impl LayerSeparateConfig {
+    fn new(config: LayoutConfig, is_outer_contiguous: bool) -> Result<Self, LayoutError> {
+        config.validate()?;
+
+        let alignment = config.alignment;
+        let memory_region_size = config.page_size * config.inner_dim * config.dtype_width_bytes;
+
+        let outer_dim_stride_in_bytes;
+        let block_stride_in_bytes;
+        let layout_data_bytes;
+
+        if is_outer_contiguous {
+            block_stride_in_bytes = if alignment > 1 {
+                align_up(memory_region_size, alignment)
+            } else {
+                memory_region_size
+            };
+            outer_dim_stride_in_bytes = block_stride_in_bytes * config.num_blocks;
+            layout_data_bytes = outer_dim_stride_in_bytes * config.outer_dim;
+        } else {
+            outer_dim_stride_in_bytes = memory_region_size;
+            let natural_block_stride = outer_dim_stride_in_bytes * config.outer_dim;
+            block_stride_in_bytes = if alignment > 1 {
+                align_up(natural_block_stride, alignment)
+            } else {
+                natural_block_stride
+            };
+            layout_data_bytes = block_stride_in_bytes * config.num_blocks;
+        }
+
+        Ok(Self {
+            inner: config,
+            memory_region_size,
+            outer_dim_stride_in_bytes,
+            block_stride_in_bytes,
+            layout_data_bytes,
+            is_outer_contiguous,
+        })
+    }
+
+    pub fn required_allocation_size(&self) -> usize {
+        let initial_padding = self.inner.alignment.saturating_sub(1);
+        self.layout_data_bytes + initial_padding
+    }
+}
+
+impl BlockLayoutConfig for LayerSeparateConfig {
+    fn layout_config(&self) -> LayoutConfig {
+        self.inner.clone()
+    }
+
+    fn layout_data_bytes(&self) -> usize {
+        self.layout_data_bytes
+    }
+}
+
+/// Layer-separated layout where each layer has its own allocation.
+#[derive(Debug)]
+pub struct LayerSeparate<S: Storage> {
+    /// Configuration for the layout
+    config: LayerSeparateConfig,
+
+    /// Storage for the layout
+    storages: Vec<S>,
+
+    /// Storage type for the layout
+    storage_type: StorageType,
+
+    /// Base offset from storage.addr() to the aligned start of block 0
+    base_offsets: Vec<usize>,
+}
+
+impl<S: Storage> LayerSeparate<S> {
+    /// Create a new LayerSeparate layout.
+    #[instrument(level = "debug", skip(storages), fields(config = ?config))]
+    pub fn new(
+        config: LayoutConfig,
+        storages: Vec<S>,
+        is_outer_contiguous: bool,
+    ) -> Result<Self, LayoutError> {
+        if storages.len() != config.num_layers {
+            return Err(LayoutError::InvalidConfig(
+                "LayerSeparate layout requires exactly one storage region per layer".to_string(),
+            ));
+        }
+
+        let config = LayerSeparateConfig::new(config, is_outer_contiguous)?;
+
+        let storage_type = storages[0].storage_type();
+        let mut base_offsets = Vec::new();
+        for storage in &storages {
+            let base_offset = validate_storage(storage, &config)?;
+
+            tracing::debug!(
+                config.memory_region_size,
+                config.block_stride_in_bytes,
+                config.outer_dim_stride_in_bytes,
+                alignment = config.inner.alignment,
+                base_offset,
+                "Calculated layout strides (aligned)"
+            );
+
+            base_offsets.push(base_offset);
+        }
+
+        Ok(Self {
+            config,
+            storages,
+            storage_type,
+            base_offsets,
+        })
+    }
+
+    pub(crate) fn new_internal(
+        config: LayerSeparateConfig,
+        storages: Vec<S>,
+        storage_type: StorageType,
+        base_offsets: Vec<usize>,
+    ) -> Result<Self, LayoutError> {
+        Ok(Self {
+            config,
+            storages,
+            storage_type,
+            base_offsets,
+        })
+    }
+
+    /// Allocate a new LayerSeparate layout.
+    /// `is_outer_contiguous` determines whether the outer dimension or the block dimension is contiguous.
+    /// The amount of [`Storage`]s allocated is equal to the number of layers in the config.
+    pub fn allocate(
+        config: LayoutConfig,
+        allocator: &dyn StorageAllocator<S>,
+        is_outer_contiguous: bool,
+    ) -> Result<Self, LayoutError> {
+        // Calculate total bytes needed. Propagate error if config is invalid.
+        let config = LayerSeparateConfig::new(config, is_outer_contiguous)?;
+        let bytes_to_allocate = config.required_allocation_size();
+
+        tracing::debug!(
+            bytes_to_allocate,
+            alignment = config.inner.alignment,
+            "Calculated storage size for allocation (with alignment padding)"
+        );
+
+        let mut storages = Vec::new();
+
+        for _ in 0..config.inner.num_layers {
+            let storage = allocator.allocate(bytes_to_allocate).map_err(|e| {
+                LayoutError::OperationFailed(format!("Storage allocation failed: {}", e))
+            })?;
+            storages.push(storage);
+        }
+
+        tracing::debug!(
+            allocated_size = storages[0].size(),
+            allocated_addr = storages[0].addr(),
+            "Storage allocated successfully"
+        );
+
+        // Pass the config by value as Self::new takes ownership
+        Self::new(config.inner, storages, is_outer_contiguous)
+    }
+}
+
+impl<S: Storage> GenericBlockLayout for LayerSeparate<S> {
+    fn storage_type(&self) -> &StorageType {
+        &self.storage_type
+    }
+
+    fn config(&self) -> &LayoutConfig {
+        &self.config.inner
+    }
+
+    fn memory_region(
+        &self,
+        block_idx: usize,
+        layer_idx: usize,
+        outer_idx: usize,
+    ) -> Result<LocalMemoryRegion, LayoutError> {
+        validate_indices(&self.config, block_idx, layer_idx, outer_idx)?;
+
+        // Start from the aligned base address
+        let aligned_start_addr =
+            self.storages[layer_idx].addr() as usize + self.base_offsets[layer_idx];
+
+        // Calculate offset relative to the aligned start using stored config
+        let block_offset = block_idx * self.config.block_stride_in_bytes;
+        let outer_offset = outer_idx * self.config.outer_dim_stride_in_bytes;
+        let final_addr = aligned_start_addr + block_offset + outer_offset;
+
+        Ok(LocalMemoryRegion {
+            addr: final_addr,
+            size: self.config.memory_region_size,
+            storage_type: self.storages[layer_idx].storage_type(),
+        })
+    }
+}
+
+impl<S: Storage> BlockLayout for LayerSeparate<S> {
+    type StorageType = S;
+
     fn layout_type(&self) -> LayoutType {
-        LayoutType::FullyContiguous
+        LayoutType::LayerSeparate {
+            outer_contiguous: self.config.is_outer_contiguous,
+        }
     }
 
-    fn num_blocks(&self) -> usize {
-        self.config.inner.num_blocks
+    fn storage(&self) -> Vec<&Self::StorageType> {
+        self.storages.iter().collect()
     }
 
-    fn num_layers(&self) -> usize {
-        self.config.inner.num_layers
+    fn storage_mut(&mut self) -> Vec<&mut Self::StorageType> {
+        self.storages.iter_mut().collect()
+    }
+}
+
+impl<S: Storage> BlockLayoutConfig for LayerSeparate<S> {
+    fn layout_config(&self) -> LayoutConfig {
+        self.config.inner.clone()
     }
 
-    fn outer_dim(&self) -> usize {
-        self.config.inner.outer_dim
-    }
-
-    fn page_size(&self) -> usize {
-        self.config.inner.page_size
-    }
-
-    fn inner_dim(&self) -> usize {
-        self.config.inner.inner_dim
+    fn layout_data_bytes(&self) -> usize {
+        self.config.layout_data_bytes
     }
 }
 
@@ -623,7 +811,6 @@ pub mod tests {
     use super::*;
     use crate::block_manager::storage::tests::{NullDeviceAllocator, NullDeviceStorage};
     use crate::block_manager::storage::{StorageType, SystemAllocator};
-    use crate::common::dtype::DType;
     use dynamo_runtime::logging::init as init_logging;
 
     const NUM_BLOCKS: usize = 7;
@@ -631,7 +818,7 @@ pub mod tests {
     const OUTER_DIM: usize = 2;
     const PAGE_SIZE: usize = 4;
     const INNER_DIM: usize = 13;
-    const DTYPE: DType = DType::FP32; // Example dtype
+    const DTYPE_WIDTH_BYTES: usize = 4;
 
     /// Helper function to calculate expected memory offset
     fn calculate_expected_offset(
@@ -655,7 +842,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: alignment.unwrap_or(1),
-            dtype: DTYPE,
+            dtype_width_bytes: DTYPE_WIDTH_BYTES,
         };
 
         FullyContiguous::allocate(config, &NullDeviceAllocator)
@@ -697,7 +884,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: 1,
-            dtype: DTYPE,
+            dtype_width_bytes: DTYPE_WIDTH_BYTES,
         };
         // Calculate correct size needed
         let fc_config = FullyContiguousConfig::new(config.clone()).unwrap();
@@ -836,7 +1023,7 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: 1,
-            dtype: DTYPE,
+            dtype_width_bytes: DTYPE_WIDTH_BYTES,
         };
 
         let allocator = SystemAllocator;
@@ -858,7 +1045,7 @@ pub mod tests {
 
         assert_eq!(
             layout.storage.size(),
-            NUM_BLOCKS * NUM_LAYERS * OUTER_DIM * PAGE_SIZE * INNER_DIM * DTYPE.size_in_bytes()
+            NUM_BLOCKS * NUM_LAYERS * OUTER_DIM * PAGE_SIZE * INNER_DIM * DTYPE_WIDTH_BYTES
         );
     }
 
@@ -874,11 +1061,11 @@ pub mod tests {
             page_size: PAGE_SIZE,
             inner_dim: INNER_DIM,
             alignment: ALIGNMENT,
-            dtype: DTYPE,
+            dtype_width_bytes: DTYPE_WIDTH_BYTES,
         };
 
         // Calculate expected size needed *for the data layout itself*
-        let memory_region_size = PAGE_SIZE * INNER_DIM * DTYPE.size_in_bytes();
+        let memory_region_size = PAGE_SIZE * INNER_DIM * DTYPE_WIDTH_BYTES;
         assert_eq!(memory_region_size, 208);
 
         let natural_block_stride = OUTER_DIM * NUM_LAYERS * memory_region_size;
@@ -952,5 +1139,361 @@ pub mod tests {
             aligned_block_stride as u64,
             "Stride between block 1 and 2 mismatch"
         );
+    }
+
+    // LayerSeparate Tests
+
+    /// Helper function to setup LayerSeparate layout with specified configuration
+    pub fn setup_layer_separate_layout(
+        alignment: Option<usize>,
+        is_outer_contiguous: bool,
+    ) -> Result<LayerSeparate<NullDeviceStorage>, LayoutError> {
+        let config = LayoutConfig {
+            num_blocks: NUM_BLOCKS,
+            num_layers: NUM_LAYERS,
+            outer_dim: OUTER_DIM,
+            page_size: PAGE_SIZE,
+            inner_dim: INNER_DIM,
+            alignment: alignment.unwrap_or(1),
+            dtype_width_bytes: DTYPE_WIDTH_BYTES,
+        };
+
+        // Create one storage per layer
+        let ls_config = LayerSeparateConfig::new(config.clone(), is_outer_contiguous)?;
+        let required_size = ls_config.required_allocation_size();
+        let mut storages = Vec::new();
+        for _ in 0..NUM_LAYERS {
+            storages.push(NullDeviceStorage::new(required_size as u64));
+        }
+
+        LayerSeparate::new(config, storages, is_outer_contiguous)
+    }
+
+    #[test]
+    fn test_ls_creation_success_outer_contiguous() {
+        let layout_result = setup_layer_separate_layout(None, true);
+        assert!(
+            layout_result.is_ok(),
+            "LayerSeparate creation failed: {:?}",
+            layout_result.err()
+        );
+
+        let layout = layout_result.unwrap();
+        assert_eq!(
+            layout.layout_type(),
+            LayoutType::LayerSeparate {
+                outer_contiguous: true
+            }
+        );
+    }
+
+    #[test]
+    fn test_ls_creation_success_block_contiguous() {
+        let layout_result = setup_layer_separate_layout(None, false);
+        assert!(
+            layout_result.is_ok(),
+            "LayerSeparate creation failed: {:?}",
+            layout_result.err()
+        );
+
+        let layout = layout_result.unwrap();
+        assert_eq!(
+            layout.layout_type(),
+            LayoutType::LayerSeparate {
+                outer_contiguous: false
+            }
+        );
+    }
+
+    #[test]
+    fn test_ls_creation_wrong_storage_count() {
+        let config = LayoutConfig {
+            num_blocks: NUM_BLOCKS,
+            num_layers: NUM_LAYERS,
+            outer_dim: OUTER_DIM,
+            page_size: PAGE_SIZE,
+            inner_dim: INNER_DIM,
+            alignment: 1,
+            dtype_width_bytes: DTYPE_WIDTH_BYTES,
+        };
+
+        // Create wrong number of storages (should be NUM_LAYERS, but provide NUM_LAYERS - 1)
+        let mut storages = Vec::new();
+        for _ in 0..(NUM_LAYERS - 1) {
+            storages.push(NullDeviceStorage::new(1000));
+        }
+
+        let layout_result = LayerSeparate::new(config, storages, true);
+        assert!(layout_result.is_err());
+        match layout_result.err().unwrap() {
+            LayoutError::InvalidConfig(_) => {} // Expected error
+            e => panic!("Expected InvalidConfig error, got {:?}", e),
+        }
+    }
+
+    #[test]
+    fn test_ls_accessor_methods() {
+        let layout = setup_layer_separate_layout(None, true).expect("Layout setup failed");
+
+        assert_eq!(layout.num_blocks(), NUM_BLOCKS);
+        assert_eq!(layout.num_layers(), NUM_LAYERS);
+        assert_eq!(layout.outer_dim(), OUTER_DIM);
+        assert_eq!(layout.page_size(), PAGE_SIZE);
+        assert_eq!(layout.inner_dim(), INNER_DIM);
+        assert_eq!(layout.storage().len(), NUM_LAYERS);
+        assert_eq!(layout.storage_type(), &StorageType::Null);
+    }
+
+    #[test]
+    fn test_ls_memory_region_outer_contiguous() {
+        let layout = setup_layer_separate_layout(None, true).expect("Layout setup failed");
+
+        // Test accessing different blocks within the same layer
+        let region_0_0_0 = layout.memory_region(0, 0, 0).unwrap();
+        let region_1_0_0 = layout.memory_region(1, 0, 0).unwrap();
+
+        // In outer_contiguous mode, blocks are sequential within each layer
+        let expected_block_stride = layout.config.block_stride_in_bytes;
+        assert_eq!(
+            region_1_0_0.addr - region_0_0_0.addr,
+            expected_block_stride,
+            "Block stride mismatch in outer_contiguous mode"
+        );
+
+        // Test accessing different outer dimensions
+        let region_0_0_1 = layout.memory_region(0, 0, 1).unwrap();
+        let expected_outer_stride = layout.config.outer_dim_stride_in_bytes;
+        assert_eq!(
+            region_0_0_1.addr - region_0_0_0.addr,
+            expected_outer_stride,
+            "Outer dimension stride mismatch"
+        );
+
+        // Test accessing different layers (should be in different storage)
+        let region_0_1_0 = layout.memory_region(0, 1, 0).unwrap();
+        let region_0_0_0_storage_addr = layout.storages[0].addr() as usize + layout.base_offsets[0];
+        let region_0_1_0_storage_addr = layout.storages[1].addr() as usize + layout.base_offsets[1];
+
+        assert_eq!(region_0_0_0.addr, region_0_0_0_storage_addr);
+        assert_eq!(region_0_1_0.addr, region_0_1_0_storage_addr);
+    }
+
+    #[test]
+    fn test_ls_memory_region_block_contiguous() {
+        let layout = setup_layer_separate_layout(None, false).expect("Layout setup failed");
+
+        // Test accessing different blocks within the same layer
+        let region_0_0_0 = layout.memory_region(0, 0, 0).unwrap();
+        let region_1_0_0 = layout.memory_region(1, 0, 0).unwrap();
+
+        // In block_contiguous mode, blocks have different stride calculation
+        let expected_block_stride = layout.config.block_stride_in_bytes;
+        assert_eq!(
+            region_1_0_0.addr - region_0_0_0.addr,
+            expected_block_stride,
+            "Block stride mismatch in block_contiguous mode"
+        );
+
+        // Test accessing different outer dimensions within same block
+        let region_0_0_1 = layout.memory_region(0, 0, 1).unwrap();
+        let expected_outer_stride = layout.config.outer_dim_stride_in_bytes;
+        assert_eq!(
+            region_0_0_1.addr - region_0_0_0.addr,
+            expected_outer_stride,
+            "Outer dimension stride mismatch in block_contiguous mode"
+        );
+    }
+
+    #[test]
+    fn test_ls_invalid_indices() {
+        let layout = setup_layer_separate_layout(None, true).expect("Layout setup failed");
+
+        // Test invalid block index
+        let result = layout.memory_region(NUM_BLOCKS, 0, 0);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.err().unwrap(),
+            LayoutError::InvalidBlockIndex(NUM_BLOCKS)
+        ));
+
+        // Test invalid layer index
+        let result = layout.memory_region(0, NUM_LAYERS, 0);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.err().unwrap(),
+            LayoutError::InvalidLayerIndex(NUM_LAYERS)
+        ));
+
+        // Test invalid outer index
+        let result = layout.memory_region(0, 0, OUTER_DIM);
+        assert!(result.is_err());
+        assert!(matches!(
+            result.err().unwrap(),
+            LayoutError::InvalidOuterIndex(OUTER_DIM)
+        ));
+    }
+
+    #[test]
+    fn test_ls_memory_region_size() {
+        let layout = setup_layer_separate_layout(None, true).expect("Layout setup failed");
+
+        let region = layout.memory_region(0, 0, 0).unwrap();
+        let expected_size = PAGE_SIZE * INNER_DIM * DTYPE_WIDTH_BYTES;
+
+        assert_eq!(region.size, expected_size);
+    }
+
+    #[test]
+    fn test_ls_all_blocks_layers_accessible() {
+        let layout = setup_layer_separate_layout(None, true).expect("Layout setup failed");
+
+        // Test that we can access all valid combinations of indices
+        for block_idx in 0..NUM_BLOCKS {
+            for layer_idx in 0..NUM_LAYERS {
+                for outer_idx in 0..OUTER_DIM {
+                    let result = layout.memory_region(block_idx, layer_idx, outer_idx);
+                    assert!(
+                        result.is_ok(),
+                        "Failed to access block {}, layer {}, outer {}: {:?}",
+                        block_idx,
+                        layer_idx,
+                        outer_idx,
+                        result.err()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_ls_storage_mutability() {
+        let mut layout = setup_layer_separate_layout(None, true).expect("Layout setup failed");
+
+        // Test that we can get mutable references to storage
+        let mut_storages = layout.storage_mut();
+        assert_eq!(mut_storages.len(), NUM_LAYERS);
+
+        // Verify each storage is accessible
+        for (i, storage) in mut_storages.iter().enumerate() {
+            assert!(storage.size() > 0, "Storage {} has zero size", i);
+        }
+    }
+
+    #[test]
+    fn test_ls_alignment() {
+        init_logging();
+        const ALIGNMENT: usize = 128; // Must be power of 2
+
+        let config = LayoutConfig {
+            num_blocks: NUM_BLOCKS,
+            num_layers: NUM_LAYERS,
+            outer_dim: OUTER_DIM,
+            page_size: PAGE_SIZE,
+            inner_dim: INNER_DIM,
+            alignment: ALIGNMENT,
+            dtype_width_bytes: DTYPE_WIDTH_BYTES,
+        };
+
+        // Create storages with sufficient size
+        let ls_config = LayerSeparateConfig::new(config.clone(), true).unwrap();
+        let required_size = ls_config.required_allocation_size();
+        let mut storages = Vec::new();
+        for _ in 0..NUM_LAYERS {
+            storages.push(NullDeviceStorage::new(required_size as u64));
+        }
+
+        let layout_result = LayerSeparate::new(config, storages, true);
+        assert!(
+            layout_result.is_ok(),
+            "Layout creation with alignment failed"
+        );
+
+        let layout = layout_result.unwrap();
+
+        // Check that block addresses are properly aligned within each layer
+        for layer_idx in 0..NUM_LAYERS {
+            let addr_block_0 = layout.memory_region(0, layer_idx, 0).unwrap();
+            let addr_block_1 = layout.memory_region(1, layer_idx, 0).unwrap();
+
+            // First block should be aligned
+            assert_eq!(
+                addr_block_0.addr % ALIGNMENT,
+                0,
+                "Block 0 in layer {} is not aligned",
+                layer_idx
+            );
+
+            // Subsequent blocks should maintain alignment
+            assert_eq!(
+                addr_block_1.addr % ALIGNMENT,
+                0,
+                "Block 1 in layer {} is not aligned",
+                layer_idx
+            );
+        }
+    }
+
+    #[test]
+    fn test_ls_stride_calculations_outer_contiguous() {
+        let layout = setup_layer_separate_layout(None, true).expect("Layout setup failed");
+
+        let memory_region_size = PAGE_SIZE * INNER_DIM * DTYPE_WIDTH_BYTES;
+
+        // In outer_contiguous mode:
+        // outer_dim_stride = block_stride * num_blocks
+        // block_stride = memory_region_size (aligned)
+        assert_eq!(layout.config.memory_region_size, memory_region_size);
+        assert_eq!(layout.config.block_stride_in_bytes, memory_region_size); // No alignment needed
+        assert_eq!(
+            layout.config.outer_dim_stride_in_bytes,
+            layout.config.block_stride_in_bytes * NUM_BLOCKS
+        );
+    }
+
+    #[test]
+    fn test_ls_stride_calculations_block_contiguous() {
+        let layout = setup_layer_separate_layout(None, false).expect("Layout setup failed");
+
+        let memory_region_size = PAGE_SIZE * INNER_DIM * DTYPE_WIDTH_BYTES;
+
+        // In block_contiguous mode:
+        // outer_dim_stride = memory_region_size
+        // block_stride = outer_dim_stride * outer_dim (aligned)
+        assert_eq!(layout.config.memory_region_size, memory_region_size);
+        assert_eq!(layout.config.outer_dim_stride_in_bytes, memory_region_size);
+        assert_eq!(
+            layout.config.block_stride_in_bytes,
+            memory_region_size * OUTER_DIM
+        );
+    }
+
+    #[test]
+    fn test_ls_layout_data_bytes() {
+        let layout_outer = setup_layer_separate_layout(None, true).expect("Layout setup failed");
+        let layout_block = setup_layer_separate_layout(None, false).expect("Layout setup failed");
+
+        // For outer_contiguous: layout_data_bytes = outer_dim_stride * outer_dim
+        let expected_outer = layout_outer.config.outer_dim_stride_in_bytes * OUTER_DIM;
+        assert_eq!(layout_outer.layout_data_bytes(), expected_outer);
+
+        // For block_contiguous: layout_data_bytes = block_stride * num_blocks
+        let expected_block = layout_block.config.block_stride_in_bytes * NUM_BLOCKS;
+        assert_eq!(layout_block.layout_data_bytes(), expected_block);
+    }
+
+    #[test]
+    fn test_ls_allocate() {
+        let config = LayoutConfig {
+            num_blocks: NUM_BLOCKS,
+            num_layers: NUM_LAYERS,
+            outer_dim: OUTER_DIM,
+            page_size: PAGE_SIZE,
+            inner_dim: INNER_DIM,
+            alignment: 1,
+            dtype_width_bytes: DTYPE_WIDTH_BYTES,
+        };
+
+        LayerSeparate::allocate(config, &NullDeviceAllocator, true)
+            .expect("Layout allocation failed");
     }
 }
