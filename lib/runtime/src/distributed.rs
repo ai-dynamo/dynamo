@@ -77,7 +77,7 @@ impl DistributedRuntime {
             })
             .await??;
 
-        // Start System server for health and metrics if enabled in configuration
+        // Start system metrics server for health and metrics if enabled in configuration
         let config = crate::config::RuntimeConfig::from_settings().unwrap_or_default();
         // IMPORTANT: We must extract cancel_token from runtime BEFORE moving runtime into the struct below.
         // This is because after moving, runtime is no longer accessible in this scope (ownership rules).
@@ -102,7 +102,7 @@ impl DistributedRuntime {
             etcd_client,
             nats_client,
             tcp_server: Arc::new(OnceCell::new()),
-            sys_server: Arc::new(OnceLock::new()),
+            metrics_server: Arc::new(OnceLock::new()),
             component_registry: component::Registry::new(),
             is_static,
             instance_sources: Arc::new(Mutex::new(HashMap::new())),
@@ -113,13 +113,13 @@ impl DistributedRuntime {
             system_health,
         };
 
-        // Start System server if enabled
+        // Start metrics server if enabled
         if let Some(cancel_token) = cancel_token {
             let host = config.system_host.clone();
             let port = config.system_port;
 
-            // Start System server (it spawns its own task internally)
-            match crate::sys_server::spawn_sys_server(
+            // Start metrics server (it spawns its own task internally)
+            match crate::metrics_server::spawn_metrics_server(
                 &host,
                 port,
                 cancel_token,
@@ -128,23 +128,24 @@ impl DistributedRuntime {
             .await
             {
                 Ok((addr, handle)) => {
-                    tracing::info!("System server started successfully on {}", addr);
+                    tracing::info!("Metrics server started successfully on {}", addr);
 
-                    // Store System server information
-                    let sys_server_info = crate::sys_server::SysServerInfo::new(addr, Some(handle));
+                    // Store metrics server information
+                    let metrics_server_info =
+                        crate::metrics_server::MetricsServerInfo::new(addr, Some(handle));
 
-                    // Initialize the sys_server field
+                    // Initialize the metrics_server field
                     distributed_runtime
-                        .sys_server
-                        .set(Arc::new(sys_server_info))
-                        .expect("System server info should only be set once");
+                        .metrics_server
+                        .set(Arc::new(metrics_server_info))
+                        .expect("Metrics server info should only be set once");
                 }
                 Err(e) => {
-                    tracing::error!("System server startup failed: {}", e);
+                    tracing::error!("Metrics server startup failed: {}", e);
                 }
             }
         } else {
-            tracing::debug!("Health and metrics System server is disabled via DYN_SYSTEM_ENABLED");
+            tracing::debug!("Health and metrics server is disabled via DYN_SYSTEM_ENABLED");
         }
 
         Ok(distributed_runtime)
@@ -225,9 +226,9 @@ impl DistributedRuntime {
         self.nats_client.clone()
     }
 
-    /// Get System server information if available
-    pub fn sys_server_info(&self) -> Option<Arc<crate::sys_server::SysServerInfo>> {
-        self.sys_server.get().cloned()
+    /// Get metrics server information if available
+    pub fn metrics_server_info(&self) -> Option<Arc<crate::metrics_server::MetricsServerInfo>> {
+        self.metrics_server.get().cloned()
     }
 
     // todo(ryan): deprecate this as we move to Discovery traits and Component Identifiers
