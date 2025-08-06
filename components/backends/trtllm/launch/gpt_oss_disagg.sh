@@ -4,7 +4,7 @@
 
 # Environment variables with defaults
 export MODEL_PATH=${MODEL_PATH:-"/model"}
-export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"gpt-oss-120b"}
+export SERVED_MODEL_NAME=${SERVED_MODEL_NAME:-"openai/gpt-oss-120b"}
 export DISAGGREGATION_STRATEGY=${DISAGGREGATION_STRATEGY:-"prefill_first"}
 export PREFILL_ENGINE_ARGS=${PREFILL_ENGINE_ARGS:-"engine_configs/gpt_oss/prefill.yaml"}
 export DECODE_ENGINE_ARGS=${DECODE_ENGINE_ARGS:-"engine_configs/gpt_oss/decode.yaml"}

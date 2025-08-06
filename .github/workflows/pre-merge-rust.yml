@@ -41,22 +41,44 @@ jobs:
       matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
     permissions:
       contents: read
+    env:
+      RUSTC_WRAPPER: "sccache"
     steps:
     - uses: actions/checkout@v4
     - name: Set up system dependencies
       run: |
         sudo apt-get update -y
         sudo apt-get install -y protobuf-compiler
-    - name: Cache Cargo Registry
-      uses: actions/cache@v3
+
+    - name: Cache sccache artifacts
+      uses: actions/cache@v4
       with:
-        path: ~/.cargo/registry
-        key: ${{ runner.os }}-cargo-registry-${{ github.head_ref || github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
-    - name: Cache Cargo Tools
-      uses: actions/cache@v3
+        path: ~/.cache/sccache/
+        key: ${{ runner.os }}-sccache-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-sccache-${{ matrix.dir }}-
+
+    # TODO: Consider single target/ directory for all subdirectories/crates instead.
+    - name: Cache cargo artifacts
+      uses: actions/cache@v4
       with:
-        path: ~/.cargo/bin
-        key: ${{ runner.os }}-cargo-tools-${{ github.head_ref || github.ref_name }}-${{ hashFiles('**/Cargo.lock') }}
+        path: |
+          ~/.cargo/bin/
+          ~/.cargo/registry/index/
+          ~/.cargo/registry/cache/
+          ~/.cargo/git/db/
+          ${{ matrix.dir }}/target/
+        key: ${{ runner.os }}-cargo-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: ${{ runner.os }}-cargo-${{ matrix.dir }}-
+
+    - name: Install sccache
+      run: |
+        SCCACHE_VERSION="0.10.0"
+        SCCACHE_FILE="sccache-v${SCCACHE_VERSION}-$(uname -m)-unknown-linux-musl"
+        SCCACHE_URL="https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/${SCCACHE_FILE}.tar.gz"
+        curl -L "${SCCACHE_URL}" | tar xz
+        mv ${SCCACHE_FILE}/sccache /usr/local/bin/sccache
+        chmod +x /usr/local/bin/sccache
+
     - name: Install Rust in dev environment
       # Install Rust only to run GitHub Local Actions in (dev environment) using the `ACT` environment variable.
       # See act usage: https://nektosact.com/introduction.html
@@ -68,10 +90,6 @@ jobs:
         echo "$HOME/.cargo/bin" >> $GITHUB_PATH
     - name: Set up Rust Toolchain Components
       run: rustup component add rustfmt clippy
-    - name: Run Cargo Check
-      working-directory: ${{ matrix.dir }}
-      run: cargo check --locked
-      timeout-minutes: 5
     - name: Verify Code Formatting
       working-directory: ${{ matrix.dir }}
       run: cargo fmt -- --check
@@ -83,6 +101,10 @@ jobs:
       run: |
         cargo-deny --version || cargo install cargo-deny@0.16.4
         cargo-deny --no-default-features check --hide-inclusion-graph licenses bans --config ${{ github.workspace }}/deny.toml
+    # Have an explicit step to build tests first to separate time spent on build vs execution.
+    - name: Compile Tests
+      working-directory: ${{ matrix.dir }}
+      run: cargo test --locked --no-run
     - name: Run Doc Tests
       working-directory: ${{ matrix.dir }}
       run: cargo doc --no-deps && cargo test --locked --doc
@@ -90,3 +112,7 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
+
+    - name: Run sccache stat for check
+      shell: bash
+      run: sccache --show-stats
