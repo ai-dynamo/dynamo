@@ -31,6 +31,10 @@ if [[ -n ${DISAGGREGATION_STRATEGY} ]]; then
   EXTRA_ARGS+="--disaggregation-strategy ${DISAGGREGATION_STRATEGY} "
 fi
 
+if [[ -n ${MODALITY} ]]; then
+  EXTRA_ARGS+="--modality ${MODALITY} "
+fi
+
 trtllm-llmapi-launch \
   python3 -m dynamo.trtllm \
     --model-path "${MODEL_PATH}" \
