@@ -1,4 +1,5 @@
 use super::*;
+use anyhow;
 
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,9 +109,7 @@ impl KvConnectorLeaderRecorder {
         let output_path = "/tmp/records.jsonl";
         tracing::info!("recording events to {}", output_path);
 
-        // Create recorder synchronously using pyo3 async runtime
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        let recorder = runtime.block_on(async {
+        let recorder = drt.runtime().primary().block_on(async {
             Recorder::new(token, &output_path, None, None, None).await
         }).unwrap();
 
@@ -125,7 +124,7 @@ impl KvConnectorLeaderRecorder {
         let (unbounded_tx, unbounded_rx) = mpsc::unbounded_channel();
         let recorder_tx = recorder.event_sender();
 
-        let _ = runtime.spawn(Self::forward_unbounded_to_sender(unbounded_rx, recorder_tx));
+        let _ = drt.runtime().primary().spawn(Self::forward_unbounded_to_sender(unbounded_rx, recorder_tx));
 
         Self {
             _recorder: recorder,
@@ -158,7 +157,7 @@ impl Leader for KvConnectorLeaderRecorder {
         request_id: String,
         request_num_tokens: usize,
         num_computed_tokens: usize,
-    ) -> PyResult<(usize, bool)> {
+    ) -> anyhow::Result<(usize, bool)> {
         let input_copy = GetNumNewMatchedTokensInput {
             request_id: request_id.clone(),
             request_num_tokens: request_num_tokens.clone(),
@@ -183,7 +182,7 @@ impl Leader for KvConnectorLeaderRecorder {
         request_id: String,
         block_ids: Vec<BlockId>,
         num_external_tokens: usize,
-    ) -> PyResult<()> {
+    ) -> anyhow::Result<()> {
         let input_copy = UpdateStateAfterAllocInput {
             request_id: request_id.clone(),
             block_ids: block_ids.clone(),
@@ -197,7 +196,7 @@ impl Leader for KvConnectorLeaderRecorder {
     fn build_connector_metadata(
         &mut self,
         scheduler_output: SchedulerOutput,
-    ) -> PyResult<Vec<u8>> {
+    ) -> anyhow::Result<Vec<u8>> {
         let input_copy = BuildConnectorMetaInput {
             scheduler_output: scheduler_output.clone(),
         };
@@ -210,7 +209,7 @@ impl Leader for KvConnectorLeaderRecorder {
         output
     }
 
-    fn request_finished(&mut self, request_id: String, block_ids: Vec<BlockId>) -> PyResult<bool> {
+    fn request_finished(&mut self, request_id: String, block_ids: Vec<BlockId>) -> anyhow::Result<bool> {
         let input_copy = RequestFinishedInput {
             request_id: request_id.clone(),
             block_ids: block_ids.clone(),
@@ -239,7 +238,7 @@ impl Leader for KvConnectorLeaderRecorder {
 
     /// Create a new slot for the given request ID.
     /// This is used to create a new slot for the request.
-    fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> PyResult<()> {
+    fn create_slot(&mut self, request: KvbmRequest, tokens: Vec<u32>) -> anyhow::Result<()> {
         let input_copy = CreateSlotInput {
             request: request.clone(),
             tokens: tokens.clone(),

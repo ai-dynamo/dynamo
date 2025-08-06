@@ -16,7 +16,7 @@ try:
     BlockStates = getattr(_vllm_integration, "BlockStates")
     SlotUpdate = getattr(_vllm_integration, "SlotUpdate")
 
-    KvConnectorWorker = getattr(_vllm_integration, "KvConnectorWorker")
+    KvConnectorWorker = getattr(_vllm_integration, "PyKvConnectorWorker")
     KvConnectorLeader = getattr(_vllm_integration, "PyKvConnectorLeader")
     SchedulerOutput = getattr(_vllm_integration, "SchedulerOutput")
 
