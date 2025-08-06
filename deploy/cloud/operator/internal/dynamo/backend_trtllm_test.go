@@ -559,9 +559,10 @@ func TestTRTLLMBackend_setupWorkerContainer(t *testing.T) {
 			initialArgs:    []string{"some", "args"},
 			initialCommand: []string{},
 			expectedContains: []string{
-				"mkdir -p ~/.ssh",
+				"mkdir -p ~/.ssh /etc/ssh",
 				"cp /ssh-pk/private.key ~/.ssh/id_rsa",
 				"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
+				"ssh-keygen -A",
 				"/usr/sbin/sshd -D",
 			},
 		},
@@ -570,9 +571,10 @@ func TestTRTLLMBackend_setupWorkerContainer(t *testing.T) {
 			initialArgs:    []string{},
 			initialCommand: []string{"original", "command"},
 			expectedContains: []string{
-				"mkdir -p ~/.ssh",
+				"mkdir -p ~/.ssh /etc/ssh",
 				"cp /ssh-pk/private.key ~/.ssh/id_rsa",
 				"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
+				"ssh-keygen -A",
 				"/usr/sbin/sshd -D",
 			},
 		},

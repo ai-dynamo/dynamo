@@ -111,7 +111,7 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 	// Setup SSH for worker nodes
 	sshSetupCommands := []string{
-		"mkdir -p ~/.ssh",
+		"mkdir -p ~/.ssh /etc/ssh",
 		"ls -la /ssh-pk/", // Debug: list files in ssh-pk directory
 		"cp /ssh-pk/private.key ~/.ssh/id_rsa",
 		"cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub",
@@ -119,6 +119,7 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 		"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
 		"chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys",
 		"printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\n' > ~/.ssh/config",
+		"ssh-keygen -A", // Generate host keys
 		"/usr/sbin/sshd -D",
 	}
 
