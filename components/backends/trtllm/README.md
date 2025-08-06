@@ -196,7 +196,7 @@ To send a request to a multi-node deployment, target the node which is running `
 ### Benchmarking
 
 To benchmark your deployment with GenAI-Perf, see this utility script, configuring the
-`model` name and `host` based on your deployment: 
+`model` name and `host` based on your deployment:
 ```bash
 {REPO_ROOT}/benchmarks/llm/perf.sh
 ```
