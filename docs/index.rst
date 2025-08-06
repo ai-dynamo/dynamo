@@ -139,14 +139,6 @@ The examples below assume you build the latest image yourself from source. If us
 .. toctree::
    :hidden:
    :caption: Using Dynamo
-
-   Running Inference Graphs Locally (dynamo-run) <guides/dynamo_run.md>
-   Deploying Inference Graphs <guides/dynamo_deploy/README.md>
-
-.. toctree::
-   :hidden:
-   :caption: Usage Guides
-
    Writing Python Workers in Dynamo <guides/backend.md>
    Disaggregation and Performance Tuning <guides/disagg_perf_tuning.md>
    Working with Dynamo Kubernetes Operator <guides/dynamo_deploy/dynamo_operator.md>
@@ -158,22 +150,7 @@ The examples below assume you build the latest image yourself from source. If us
    Dynamo Deploy Quickstart <guides/dynamo_deploy/quickstart.md>
    Dynamo Cloud Kubernetes Platform <guides/dynamo_deploy/dynamo_cloud.md>
    Manual Helm Deployment <guides/dynamo_deploy/helm_install.md>
-   GKE Setup Guide <guides/dynamo_deploy/gke_setup.md>
-   Minikube Setup Guide <guides/dynamo_deploy/minikube.md>
    Model Caching with Fluid <guides/dynamo_deploy/model_caching_with_fluid.md>
-
-.. toctree::
-   :hidden:
-   :caption: Benchmarking
-
-   Planner Benchmark Example <guides/planner_benchmark/README.md>
-
-
-.. toctree::
-   :hidden:
-   :caption: API
-
-   NIXL Connect API <API/nixl_connect/README.md>
 
 .. toctree::
    :hidden:
@@ -183,14 +160,16 @@ The examples below assume you build the latest image yourself from source. If us
    LLM Deployment Examples using VLLM <components/backends/vllm/README.md>
    LLM Deployment Examples using SGLang <components/backends/sglang/README.md>
    Multinode Examples using SGLang <components/backends/sglang/docs/multinode-examples.md>
+   Planner Benchmark Example <guides/planner_benchmark/README.md>
    LLM Deployment Examples using TensorRT-LLM <components/backends/trtllm/README.md>
 
 .. toctree::
    :hidden:
    :caption: Reference
 
-
+   
    Glossary <dynamo_glossary.md>
+   NIXL Connect API <API/nixl_connect/README.md>
    KVBM Reading <architecture/kvbm_reading.md>
 
 
