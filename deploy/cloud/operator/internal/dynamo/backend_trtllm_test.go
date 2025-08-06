@@ -506,6 +506,24 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			initialCommand: []string{"ignored-command"},
 			expected:       "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 2 -H ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-ldr-0.${GROVE_HEADLESS_SERVICE},${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-wkr-0.${GROVE_HEADLESS_SERVICE} --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" bash -c 'source /opt/dynamo/venv/bin/activate && trtllm-llmapi-launch launch --config test.yaml'",
 		},
+		{
+			name:                    "Leader with environment variables",
+			numberOfNodes:           2,
+			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeGrove,
+			serviceName:             "test",
+			component: &v1alpha1.DynamoComponentDeploymentOverridesSpec{
+				DynamoComponentDeploymentSharedSpec: v1alpha1.DynamoComponentDeploymentSharedSpec{
+					Resources: &common.Resources{
+						Requests: &common.ResourceItem{
+							GPU: "1",
+						},
+					},
+				},
+			},
+			initialArgs:    []string{"serve", "--model", "test"},
+			initialCommand: []string{},
+			expected:       "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 2 -H ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-ldr-0.${GROVE_HEADLESS_SERVICE},${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-wkr-0.${GROVE_HEADLESS_SERVICE} --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" -x CUDA_VISIBLE_DEVICES -x MODEL_PATH bash -c 'source /opt/dynamo/venv/bin/activate && trtllm-llmapi-launch serve --model test'",
+		},
 	}
 
 	for _, tt := range tests {
@@ -514,6 +532,14 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			container := &corev1.Container{
 				Args:    tt.initialArgs,
 				Command: tt.initialCommand,
+			}
+
+			// Add environment variables for the test case that expects them
+			if tt.name == "Leader with environment variables" {
+				container.Env = []corev1.EnvVar{
+					{Name: "CUDA_VISIBLE_DEVICES", Value: "0"},
+					{Name: "MODEL_PATH", Value: "/models/test"},
+				}
 			}
 
 			backend.setupLeaderContainer(container, tt.numberOfNodes, tt.multinodeDeploymentType, tt.serviceName, tt.component)
