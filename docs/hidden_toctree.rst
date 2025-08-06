@@ -53,7 +53,6 @@
    components/backends/trtllm/llama4_plus_eagle.md
    components/backends/trtllm/multinode-examples.md
    components/backends/trtllm/kv-cache-tranfer.md
-   components/backends/vllm/deepseek-r1.md
    components/backends/vllm/deploy/README.md
    components/backends/vllm/multi-node.md
 

@@ -103,7 +103,7 @@ Hello star!
 
 ## Deployment to Kubernetes
 
-Follow the [Quickstart Guide](../../../docs/guides/dynamo_deploy/quickstart.md) to install Dynamo Cloud.
+Follow the [Quickstart Guide](../../../guides/dynamo_deploy/quickstart.md) to install Dynamo Cloud.
 Then deploy to kubernetes using
 
 ```bash

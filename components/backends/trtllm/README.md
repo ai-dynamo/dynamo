@@ -49,12 +49,12 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | TensorRT-LLM | Notes |
 |---------|--------------|-------|
-| [**Disaggregated Serving**](../../../docs/architecture/disagg_serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
-| [**KV-Aware Routing**](../../../docs/architecture/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | 🚧 | Planned |
-| [**Load Based Planner**](../../../docs/architecture/load_planner.md) | 🚧 | Planned |
-| [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | 🚧 | Planned |
+| [**Disaggregated Serving**](../../../architecture/disagg_serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../../architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
+| [**KV-Aware Routing**](../../../architecture/kv_cache_routing.md) | ✅ |  |
+| [**SLA-Based Planner**](../../../architecture/sla_planner.md) | 🚧 | Planned |
+| [**Load Based Planner**](../../../architecture/load_planner.md) | 🚧 | Planned |
+| [**KVBM**](../../../architecture/kvbm_architecture.md) | 🚧 | Planned |
 
 ### Large Scale P/D and WideEP Features
 
@@ -180,14 +180,14 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 
 ### Multinode Deployment
 
-For comprehensive instructions on multinode serving, see the [multinode-examples.md](../../../docs/components/backends/trtllm/multinode-examples.md) guide. It provides step-by-step deployment examples and configuration tips for running Dynamo with TensorRT-LLM across multiple nodes. While the walkthrough uses DeepSeek-R1 as the model, you can easily adapt the process for any supported model by updating the relevant configuration files. You can see [Llama4+eagle](../../../docs/components/backends/trtllm/llama4_plus_eagle.md) guide to learn how to use these scripts when a single worker fits on the single node.
+For comprehensive instructions on multinode serving, see the [multinode-examples.md](../../../components/backends/trtllm/multinode-examples.md) guide. It provides step-by-step deployment examples and configuration tips for running Dynamo with TensorRT-LLM across multiple nodes. While the walkthrough uses DeepSeek-R1 as the model, you can easily adapt the process for any supported model by updating the relevant configuration files. You can see [Llama4+eagle](../../../components/backends/trtllm/llama4_plus_eagle.md) guide to learn how to use these scripts when a single worker fits on the single node.
 
 ### Speculative Decoding
-- **[Llama 4 Maverick Instruct + Eagle Speculative Decoding](../../../docs/components/backends/trtllm/llama4_plus_eagle.md)**
+- **[Llama 4 Maverick Instruct + Eagle Speculative Decoding](../../../components/backends/trtllm/llama4_plus_eagle.md)**
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](../../../docs/components/backends/trtllm/deploy/README.md)
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](../../../components/backends/trtllm/deploy/README.md)
 
 ### Client
 
@@ -216,7 +216,7 @@ DISAGGREGATION_STRATEGY="prefill_first" ./launch/disagg.sh
 
 ## KV Cache Transfer in Disaggregated Serving
 
-Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV cache transfer guide](../../../docs/components/backends/trtllm/kv-cache-tranfer.md).
+Dynamo with TensorRT-LLM supports two methods for transferring KV cache in disaggregated serving: UCX (default) and NIXL (experimental). For detailed information and configuration instructions for each method, see the [KV cache transfer guide](../../../components/backends/trtllm/kv-cache-tranfer.md).
 
 ## Request Migration
 
