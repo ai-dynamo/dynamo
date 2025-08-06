@@ -65,7 +65,7 @@ impl PushEndpoint {
         system_health
             .lock()
             .unwrap()
-	    .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::Ready);
+            .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::Ready);
 
         loop {
             let req = tokio::select! {
@@ -152,7 +152,7 @@ impl PushEndpoint {
         system_health
             .lock()
             .unwrap()
-	    .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::NotReady);
+            .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::NotReady);
 
         // await for all inflight requests to complete if graceful shutdown
         if self.graceful_shutdown {
