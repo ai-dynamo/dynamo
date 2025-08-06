@@ -94,7 +94,7 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	totalGPUs := numberOfNodes * gpusPerNode
 
 	// Build mpirun command with explicit SSH configuration
-	mpirunCmd := fmt.Sprintf("mpirun --oversubscribe -n %d -H %s --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" %s",
+	mpirunCmd := fmt.Sprintf("mpirun --oversubscribe -n %d -H %s --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" trtllm-llmapi-launch %s",
 		totalGPUs,
 		workerHosts,
 		originalCommand)
@@ -124,7 +124,7 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 		"ssh-keygen -t ecdsa -f ~/.ssh/host_keys/ssh_host_ecdsa_key -N ''",
 		"ssh-keygen -t ed25519 -f ~/.ssh/host_keys/ssh_host_ed25519_key -N ''",
 		// Create SSH daemon config to use custom host keys location and non-privileged port
-		"printf 'Port 2222\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile ~/.ssh/run/sshd.pid\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile ~/.ssh/authorized_keys\\nUsePAM no\\n' > ~/.ssh/sshd_config",
+		"printf 'Port 2222\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile ~/.ssh/run/sshd.pid\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile ~/.ssh/authorized_keys\\n' > ~/.ssh/sshd_config",
 		"/usr/sbin/sshd -D -f ~/.ssh/sshd_config",
 	}
 

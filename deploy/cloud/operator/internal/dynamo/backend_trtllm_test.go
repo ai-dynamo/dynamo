@@ -431,8 +431,7 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 		component               *v1alpha1.DynamoComponentDeploymentOverridesSpec
 		initialArgs             []string
 		initialCommand          []string
-		expectedContains        []string
-		expectedNotContains     []string
+		expected                string
 	}{
 		{
 			name:                    "Leader with args and GPU resources",
@@ -450,15 +449,7 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			},
 			initialArgs:    []string{"trtllm-llmapi-launch", "--model", "test"},
 			initialCommand: []string{},
-			expectedContains: []string{
-				"mkdir -p ~/.ssh",
-				"mpirun --oversubscribe",
-				"--mca plm_rsh_args \"-p 2222",
-				"-n 6", // 3 nodes * 2 GPUs
-				"trtllm-llmapi-launch --model test",
-				"test-service-ldr-0",
-			},
-			expectedNotContains: []string{},
+			expected:       "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 6 -H ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE},${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-wkr-0.${GROVE_HEADLESS_SERVICE},${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-wkr-1.${GROVE_HEADLESS_SERVICE} --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" trtllm-llmapi-launch trtllm-llmapi-launch --model test",
 		},
 		{
 			name:                    "Leader with command and no GPU resources",
@@ -468,15 +459,7 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			component:               &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
 			initialArgs:             []string{},
 			initialCommand:          []string{"python", "-m", "worker"},
-			expectedContains: []string{
-				"mkdir -p ~/.ssh",
-				"mpirun --oversubscribe",
-				"--mca plm_rsh_args \"-p 2222",
-				"-n 0", // no GPU resources specified
-				"python -m worker",
-				"${LWS_LEADER_ADDRESS}",
-			},
-			expectedNotContains: []string{},
+			expected:                "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 0 -H ${LWS_LEADER_ADDRESS},${LWS_WORKER_1_ADDRESS} --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" trtllm-llmapi-launch python -m worker",
 		},
 		{
 			name:                    "Leader with both command and args (args take precedence)",
@@ -494,15 +477,7 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			},
 			initialArgs:    []string{"launch", "--config", "test.yaml"},
 			initialCommand: []string{"ignored-command"},
-			expectedContains: []string{
-				"mpirun --oversubscribe",
-				"--mca plm_rsh_args \"-p 2222",
-				"-n 2", // 2 nodes * 1 GPU
-				"launch --config test.yaml",
-			},
-			expectedNotContains: []string{
-				"ignored-command",
-			},
+			expected:       "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 2 -H ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-ldr-0.${GROVE_HEADLESS_SERVICE},${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-wkr-0.${GROVE_HEADLESS_SERVICE} --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" trtllm-llmapi-launch launch --config test.yaml",
 		},
 	}
 
@@ -533,17 +508,8 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 				t.Errorf("setupLeaderContainer() should set exactly one arg, got %d", len(container.Args))
 			} else {
 				argsStr := container.Args[0]
-
-				for _, expected := range tt.expectedContains {
-					if !strings.Contains(argsStr, expected) {
-						t.Errorf("setupLeaderContainer() args should contain %q but got: %s", expected, argsStr)
-					}
-				}
-
-				for _, notExpected := range tt.expectedNotContains {
-					if strings.Contains(argsStr, notExpected) {
-						t.Errorf("setupLeaderContainer() args should not contain %q but got: %s", notExpected, argsStr)
-					}
+				if argsStr != tt.expected {
+					t.Errorf("setupLeaderContainer() args = %q, want %q", argsStr, tt.expected)
 				}
 			}
 		})
@@ -552,38 +518,22 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 
 func TestTRTLLMBackend_setupWorkerContainer(t *testing.T) {
 	tests := []struct {
-		name             string
-		initialArgs      []string
-		initialCommand   []string
-		expectedContains []string
+		name           string
+		initialArgs    []string
+		initialCommand []string
+		expected       string
 	}{
 		{
 			name:           "Worker setup with initial args",
 			initialArgs:    []string{"some", "args"},
 			initialCommand: []string{},
-			expectedContains: []string{
-				"mkdir -p ~/.ssh ~/.ssh/host_keys ~/.ssh/run",
-				"cp /ssh-pk/private.key ~/.ssh/id_rsa",
-				"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
-				"ssh-keygen -t rsa -f ~/.ssh/host_keys/ssh_host_rsa_key",
-				"Port 2222",
-				"PidFile ~/.ssh/run/sshd.pid",
-				"/usr/sbin/sshd -D -f ~/.ssh/sshd_config",
-			},
+			expected:       "mkdir -p ~/.ssh ~/.ssh/host_keys ~/.ssh/run && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && ssh-keygen -t rsa -f ~/.ssh/host_keys/ssh_host_rsa_key -N '' && ssh-keygen -t ecdsa -f ~/.ssh/host_keys/ssh_host_ecdsa_key -N '' && ssh-keygen -t ed25519 -f ~/.ssh/host_keys/ssh_host_ed25519_key -N '' && printf 'Port 2222\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile ~/.ssh/run/sshd.pid\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile ~/.ssh/authorized_keys\\n' > ~/.ssh/sshd_config && /usr/sbin/sshd -D -f ~/.ssh/sshd_config",
 		},
 		{
 			name:           "Worker setup with initial command",
 			initialArgs:    []string{},
 			initialCommand: []string{"original", "command"},
-			expectedContains: []string{
-				"mkdir -p ~/.ssh ~/.ssh/host_keys ~/.ssh/run",
-				"cp /ssh-pk/private.key ~/.ssh/id_rsa",
-				"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
-				"ssh-keygen -t rsa -f ~/.ssh/host_keys/ssh_host_rsa_key",
-				"Port 2222",
-				"PidFile ~/.ssh/run/sshd.pid",
-				"/usr/sbin/sshd -D -f ~/.ssh/sshd_config",
-			},
+			expected:       "mkdir -p ~/.ssh ~/.ssh/host_keys ~/.ssh/run && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && ssh-keygen -t rsa -f ~/.ssh/host_keys/ssh_host_rsa_key -N '' && ssh-keygen -t ecdsa -f ~/.ssh/host_keys/ssh_host_ecdsa_key -N '' && ssh-keygen -t ed25519 -f ~/.ssh/host_keys/ssh_host_ed25519_key -N '' && printf 'Port 2222\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile ~/.ssh/run/sshd.pid\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile ~/.ssh/authorized_keys\\n' > ~/.ssh/sshd_config && /usr/sbin/sshd -D -f ~/.ssh/sshd_config",
 		},
 	}
 
@@ -614,16 +564,8 @@ func TestTRTLLMBackend_setupWorkerContainer(t *testing.T) {
 				t.Errorf("setupWorkerContainer() should set exactly one arg, got %d", len(container.Args))
 			} else {
 				argsStr := container.Args[0]
-
-				for _, expected := range tt.expectedContains {
-					if !strings.Contains(argsStr, expected) {
-						t.Errorf("setupWorkerContainer() args should contain %q but got: %s", expected, argsStr)
-					}
-				}
-
-				// Verify that the command ends with SSH daemon
-				if !strings.HasSuffix(argsStr, "/usr/sbin/sshd -D -f ~/.ssh/sshd_config") {
-					t.Errorf("setupWorkerContainer() should end with SSH daemon command, got: %s", argsStr)
+				if argsStr != tt.expected {
+					t.Errorf("setupWorkerContainer() args = %q, want %q", argsStr, tt.expected)
 				}
 			}
 		})
