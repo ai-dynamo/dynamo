@@ -210,12 +210,20 @@ impl PrometheusMetricsCollector {
         let (tx, rx) = tokio::sync::oneshot::channel();
         self.shutdown_tx = Some(tx);
 
+        // Try to bind to the address first to fail early if it's not available
+        let server = match axum::Server::try_bind(&addr) {
+            Ok(server) => server,
+            Err(e) => {
+                return Err(error!(
+                    "Failed to bind to address {}: {}. The port may be in use.",
+                    addr, e
+                ));
+            }
+        };
+
         // Spawn the server in a background task
         tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind(addr)
-                .await
-                .unwrap_or_else(|_| panic!("could not bind to address: {addr}"));
-            let server = axum::serve(listener, app);
+            let server = server.serve(app.into_make_service());
 
             // Create a future that completes when shutdown signal is received
             let shutdown_future = async {

@@ -42,20 +42,14 @@ pub async fn run(
 
     let (rt_fut, card): (Pin<Box<dyn Future<Output = _> + Send + 'static>>, _) = match engine_config
     {
-        EngineConfig::StaticFull {
-            engine,
-            mut model,
-            is_static,
-        } => {
+        EngineConfig::StaticFull { engine, mut model } => {
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let ingress_chat = Ingress::<
                 Context<NvCreateChatCompletionRequest>,
                 Pin<Box<dyn AsyncEngineStream<Annotated<NvCreateChatCompletionStreamResponse>>>>,
             >::for_engine(engine)?;
 
-            if !is_static {
-                model.attach(&endpoint, ModelType::Chat).await?;
-            }
+            model.attach(&endpoint, ModelType::Chat).await?;
             let fut_chat = endpoint.endpoint_builder().handler(ingress_chat).start();
 
             (Box::pin(fut_chat), Some(model.card().clone()))
@@ -63,7 +57,6 @@ pub async fn run(
         EngineConfig::StaticCore {
             engine: inner_engine,
             mut model,
-            is_static,
         } => {
             // Pre-processing is done ingress-side, so it should be already done.
             let frontend = SegmentSource::<
@@ -81,15 +74,10 @@ pub async fn run(
                 .link(frontend)?;
             let ingress = Ingress::for_pipeline(pipeline)?;
 
-            if !is_static {
-                model.attach(&endpoint, ModelType::Backend).await?;
-            }
+            model.attach(&endpoint, ModelType::Backend).await?;
             let fut = endpoint.endpoint_builder().handler(ingress).start();
 
             (Box::pin(fut), Some(model.card().clone()))
-        }
-        EngineConfig::StaticRemote(_) => {
-            panic!("StaticRemote definitions are only for the frontend end node.");
         }
         EngineConfig::Dynamic(_) => {
             unreachable!("An endpoint input will never have a Dynamic engine");

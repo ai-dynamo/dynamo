@@ -92,7 +92,10 @@ impl MistralRsEngine {
                 None,
                 model_dir.display().to_string(),
                 vec![model_filename.to_string_lossy().into_owned()],
-                GGUFSpecificConfig::default(),
+                GGUFSpecificConfig {
+                    prompt_chunksize: None,
+                    topology: None,
+                },
                 no_kv_cache,
                 jinja_explicit,
             )

@@ -23,7 +23,6 @@ pub enum EngineType {
     Echo = 1,
     Dynamic = 2,
     Mocker = 3,
-    Static = 4,
 }
 
 #[pyclass]
@@ -179,11 +178,9 @@ async fn select_engine(
             RsEngineConfig::StaticFull {
                 model: Box::new(local_model),
                 engine: dynamo_llm::engines::make_engine_full(),
-                is_static: false,
             }
         }
         EngineType::Dynamic => RsEngineConfig::Dynamic(Box::new(local_model)),
-        EngineType::Static => RsEngineConfig::StaticRemote(Box::new(local_model)),
         EngineType::Mocker => {
             let mocker_args = if let Some(extra_args_path) = args.extra_engine_args {
                 MockEngineArgs::from_json_file(&extra_args_path).map_err(|e| {
@@ -212,7 +209,6 @@ async fn select_engine(
             RsEngineConfig::StaticCore {
                 engine,
                 model: Box::new(local_model),
-                is_static: false,
             }
         }
     };

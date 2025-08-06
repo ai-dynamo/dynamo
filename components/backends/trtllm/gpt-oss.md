@@ -34,18 +34,7 @@ docker compose -f deploy/docker-compose.yml up
 
 ## Instructions
 
-### 1. Pull the Container
-
-```bash
-export DYNAMO_CONTAINER_IMAGE="nvcr.io/nvidia/ai-dynamo/tensorrtllm-gpt-oss:latest"
-
-docker pull $DYNAMO_CONTAINER_IMAGE
-```
-
-<details>
-<summary> Building your own container </summary>
-
-If you'd like to build your own Dynamo container, use the following instructions
+### 1. Build the Container
 
 **For ARM64 (GB200):**
 ```bash
@@ -75,8 +64,6 @@ docker build -f container/Dockerfile.tensorrt_llm_prebuilt . \
   --build-arg BASE_IMAGE_TAG=gpt-oss-dev \
   -t $DYNAMO_CONTAINER_IMAGE
 ```
-
-</details>
 
 ### 2. Download the Model
 

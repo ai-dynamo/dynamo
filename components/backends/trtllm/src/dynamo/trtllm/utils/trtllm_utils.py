@@ -46,7 +46,6 @@ class Config:
             DEFAULT_DISAGGREGATION_STRATEGY
         )
         self.next_endpoint: str = ""
-        self.modality: str = "text"
 
     def __str__(self) -> str:
         return (
@@ -70,8 +69,7 @@ class Config:
             f"publish_events_and_metrics={self.publish_events_and_metrics}, "
             f"disaggregation_mode={self.disaggregation_mode}, "
             f"disaggregation_strategy={self.disaggregation_strategy}, "
-            f"next_endpoint={self.next_endpoint}, "
-            f"modality={self.modality})"
+            f"next_endpoint={self.next_endpoint})"
         )
 
 
@@ -218,13 +216,6 @@ def cmd_line_args():
         help=f"Strategy to use for disaggregation. Default: {DEFAULT_DISAGGREGATION_STRATEGY}",
     )
     parser.add_argument(
-        "--modality",
-        type=str,
-        default="text",
-        choices=["text", "multimodal"],
-        help="Modality to use for the model. Default: text. Current supported modalities are image.",
-    )
-    parser.add_argument(
         "--next-endpoint",
         type=str,
         default="",
@@ -288,6 +279,5 @@ def cmd_line_args():
     config.migration_limit = args.migration_limit
     config.extra_engine_args = args.extra_engine_args
     config.publish_events_and_metrics = args.publish_events_and_metrics
-    config.modality = args.modality
 
     return config
