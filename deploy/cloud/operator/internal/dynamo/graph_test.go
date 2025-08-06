@@ -1298,6 +1298,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 				Spec: grovev1alpha1.PodGangSetSpec{
 					Replicas: 1,
 					Template: grovev1alpha1.PodGangSetTemplateSpec{
+						HeadlessServiceConfig: &grovev1alpha1.HeadlessServiceConfig{
+							PublishNotReadyAddresses: true,
+						},
 						TerminationDelay: &metav1.Duration{Duration: 15 * time.Minute},
 						Cliques: []*grovev1alpha1.PodCliqueTemplateSpec{
 							{
@@ -1760,6 +1763,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 				Spec: grovev1alpha1.PodGangSetSpec{
 					Replicas: 1,
 					Template: grovev1alpha1.PodGangSetTemplateSpec{
+						HeadlessServiceConfig: &grovev1alpha1.HeadlessServiceConfig{
+							PublishNotReadyAddresses: true,
+						},
 						TerminationDelay: &metav1.Duration{Duration: 15 * time.Minute},
 						PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
 							{
@@ -2436,6 +2442,9 @@ func TestGenerateGrovePodGangSet(t *testing.T) {
 				Spec: grovev1alpha1.PodGangSetSpec{
 					Replicas: 1,
 					Template: grovev1alpha1.PodGangSetTemplateSpec{
+						HeadlessServiceConfig: &grovev1alpha1.HeadlessServiceConfig{
+							PublishNotReadyAddresses: true,
+						},
 						TerminationDelay: &metav1.Duration{Duration: 15 * time.Minute},
 						PodCliqueScalingGroupConfigs: []grovev1alpha1.PodCliqueScalingGroupConfig{
 							{
@@ -3268,10 +3277,9 @@ func TestGeneratePodSpecForComponent_UnsupportedBackend(t *testing.T) {
 		errorContains    string
 	}{
 		{
-			name:             "TRTLLM backend not implemented",
+			name:             "TRTLLM backend implemented",
 			backendFramework: BackendFrameworkTRTLLM,
-			expectError:      true,
-			errorContains:    "unsupported backend framework",
+			expectError:      false,
 		},
 		{
 			name:             "unknown backend",

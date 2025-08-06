@@ -39,6 +39,10 @@ func (b *SGLangBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	}
 }
 
+func (b *SGLangBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string) {
+	// do nothing
+}
+
 // getMultinodeFlags returns the multinode flags as a single string
 func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string) string {
 	var distInitAddr, nodeRank string

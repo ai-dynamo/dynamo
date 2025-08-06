@@ -523,12 +523,17 @@ const (
 // Each backend (SGLang, VLLM, etc.) implements this interface
 type Backend interface {
 	UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string)
+	UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string)
 }
 
 // NoopBackend does no processing - used for non-worker components like frontend, planner, router
 type NoopBackend struct{}
 
 func (b *NoopBackend) UpdateContainer(container *corev1.Container, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string) {
+	// No-op: frontend, planner, router, etc. don't need backend-specific processing
+}
+
+func (b *NoopBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int32, role Role, component *v1alpha1.DynamoComponentDeploymentOverridesSpec, multinodeDeploymentType commonconsts.MultinodeDeploymentType, serviceName string) {
 	// No-op: frontend, planner, router, etc. don't need backend-specific processing
 }
 
@@ -540,7 +545,7 @@ func BackendFactory(backendFramework BackendFramework) Backend {
 	case BackendFrameworkVLLM:
 		return &VLLMBackend{}
 	case BackendFrameworkTRTLLM:
-		return nil // Not implemented yet
+		return &TRTLLMBackend{}
 	case BackendFrameworkNoop:
 		return &NoopBackend{}
 	default:
@@ -678,6 +683,7 @@ func GenerateBasePodSpec(
 	podSpec.Containers = append(podSpec.Containers, container)
 	podSpec.Volumes = append(podSpec.Volumes, volumes...)
 	podSpec.ImagePullSecrets = append(podSpec.ImagePullSecrets, imagePullSecrets...)
+	backend.UpdatePodSpec(&podSpec, numberOfNodes, role, component, multinodeDeploymentType, serviceName)
 	return podSpec, nil
 }
 
@@ -714,6 +720,9 @@ func GenerateGrovePodGangSet(
 	gangSet.Name = dynamoDeployment.Name
 	gangSet.Namespace = dynamoDeployment.Namespace
 	gangSet.Spec.Replicas = 1
+	gangSet.Spec.Template.HeadlessServiceConfig = &grovev1alpha1.HeadlessServiceConfig{
+		PublishNotReadyAddresses: true,
+	}
 	if controllerConfig.Grove.TerminationDelay > 0 {
 		gangSet.Spec.Template.TerminationDelay = &metav1.Duration{Duration: controllerConfig.Grove.TerminationDelay}
 	}
