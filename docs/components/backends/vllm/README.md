@@ -36,11 +36,11 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | Feature | vLLM | Notes |
 |---------|------|-------|
 | [**Disaggregated Serving**](../../../architecture/disagg_serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP |
-| [**KV-Aware Routing**](../../../docs/architecture/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | ✅ |  |
-| [**Load Based Planner**](../../../docs/architecture/load_planner.md) | 🚧 | WIP |
-| [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | 🚧 | WIP |
+| [**Conditional Disaggregation**](../../../architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | WIP |
+| [**KV-Aware Routing**](../../../architecture/kv_cache_routing.md) | ✅ |  |
+| [**SLA-Based Planner**](../../../architecture/sla_planner.md) | ✅ |  |
+| [**Load Based Planner**](../../../architecture/load_planner.md) | 🚧 | WIP |
+| [**KVBM**](../../../architecture/kvbm_architecture.md) | 🚧 | WIP |
 
 ### Large Scale P/D and WideEP Features
 
