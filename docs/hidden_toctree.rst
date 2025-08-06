@@ -37,3 +37,11 @@
    examples/README.md
    guides/dynamo_deploy/create_deployment.md
    guides/dynamo_deploy/sla_planner_deployment.md
+   components/backends/vllm/README.md
+   components/backends/trtllm/README.md
+   components/backends/trtllm/deploy/README.md
+   components/backends/trtllm/llama4_plus_eagle.md
+   components/backends/trtllm/multinode-examples.md
+   guides/kv_router_perf_tuning.md
+   guides/metrics
+   deploy/helm/README.md
