@@ -1,1 +1,1 @@
-Please refer to [Deploying Dynamo with SGLang on SLURM](../../../../../docs/components/backends/sglang/slurm_jobs/README.md) for more details.
+Please refer to [Deploying Dynamo with SGLang on SLURM](../../../../docs/components/backends/sglang/slurm_jobs/README.md) for more details.

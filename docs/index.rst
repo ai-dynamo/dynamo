@@ -143,6 +143,7 @@ The examples below assume you build the latest image yourself from source. If us
    Writing Python Workers in Dynamo <guides/backend.md>
    Disaggregation and Performance Tuning <guides/disagg_perf_tuning.md>
    Working with Dynamo Kubernetes Operator <guides/dynamo_deploy/dynamo_operator.md>
+   Configuring Metrics for Observability <guides/metrics.md>
 
 .. toctree::
    :hidden:
