@@ -29,6 +29,13 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 	// Add SSH keypair volume mount for multinode deployments
 	b.addSSHVolumeMount(container)
 
+	// Add OpenMPI environment variable to keep FQDN hostnames
+	envVar := corev1.EnvVar{
+		Name:  "OMPI_MCA_orte_keep_fqdn_hostnames",
+		Value: "1",
+	}
+	container.Env = append(container.Env, envVar)
+
 	// Update container command based on role
 	switch role {
 	case RoleLeader:
@@ -94,10 +101,12 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	totalGPUs := numberOfNodes * gpusPerNode
 
 	// Build mpirun command with explicit SSH configuration
-	mpirunCmd := fmt.Sprintf("mpirun --oversubscribe -n %d -H %s --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" trtllm-llmapi-launch %s",
+	// Wrap the entire command (trtllm-llmapi-launch + original command) in sh -c for proper shell interpretation
+	wrappedCommand := fmt.Sprintf("sh -c 'trtllm-llmapi-launch %s'", originalCommand)
+	mpirunCmd := fmt.Sprintf("mpirun --oversubscribe -n %d -H %s --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" %s",
 		totalGPUs,
 		workerHosts,
-		originalCommand)
+		wrappedCommand)
 
 	// Combine SSH setup and mpirun command
 	fullCommand := strings.Join(append(sshSetupCommands, mpirunCmd), " && ")

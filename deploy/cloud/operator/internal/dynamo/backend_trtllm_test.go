@@ -98,7 +98,7 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			backend := &TRTLLMBackend{}
 			container := &corev1.Container{
-				Args:           []string{"trtllm-llmapi-launch", "--model", "test"},
+				Args:           []string{"python3", "--model", "test"},
 				LivenessProbe:  &corev1.Probe{},
 				ReadinessProbe: &corev1.Probe{},
 				StartupProbe:   &corev1.Probe{},
@@ -175,6 +175,26 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 					t.Errorf("UpdateContainer() should remove StartupProbe for multinode %s", tt.role)
 				}
 			}
+
+			// Check for OMPI_MCA_orte_keep_fqdn_hostnames environment variable
+			hasOMPIEnvVar := false
+			for _, envVar := range container.Env {
+				if envVar.Name == "OMPI_MCA_orte_keep_fqdn_hostnames" {
+					hasOMPIEnvVar = true
+					if envVar.Value != "1" {
+						t.Errorf("UpdateContainer() OMPI_MCA_orte_keep_fqdn_hostnames should be '1', got '%s'", envVar.Value)
+					}
+					break
+				}
+			}
+
+			if tt.numberOfNodes > 1 && !hasOMPIEnvVar {
+				t.Errorf("UpdateContainer() should add OMPI_MCA_orte_keep_fqdn_hostnames env var for multinode deployment")
+			}
+
+			if tt.numberOfNodes == 1 && hasOMPIEnvVar {
+				t.Errorf("UpdateContainer() should not add OMPI_MCA_orte_keep_fqdn_hostnames env var for single node deployment")
+			}
 		})
 	}
 }
@@ -234,6 +254,12 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 			backend := &TRTLLMBackend{}
 			podSpec := &corev1.PodSpec{
 				Volumes: tt.initialVolumes,
+				Containers: []corev1.Container{
+					{
+						Name: "main",
+						Env:  []corev1.EnvVar{},
+					},
+				},
 			}
 			component := &v1alpha1.DynamoComponentDeploymentOverridesSpec{}
 
@@ -272,6 +298,7 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 			if !tt.shouldHaveSSHVolume && hasSSHVolume {
 				t.Errorf("UpdatePodSpec() should not add SSH volume for single node deployment")
 			}
+
 		})
 	}
 }
@@ -447,9 +474,9 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 					},
 				},
 			},
-			initialArgs:    []string{"trtllm-llmapi-launch", "--model", "test"},
+			initialArgs:    []string{"python3", "--model", "test"},
 			initialCommand: []string{},
-			expected:       "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 6 -H ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE},${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-wkr-0.${GROVE_HEADLESS_SERVICE},${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-wkr-1.${GROVE_HEADLESS_SERVICE} --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" trtllm-llmapi-launch trtllm-llmapi-launch --model test",
+			expected:       "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 6 -H ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE},${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-wkr-0.${GROVE_HEADLESS_SERVICE},${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-wkr-1.${GROVE_HEADLESS_SERVICE} --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" sh -c 'trtllm-llmapi-launch python3 --model test'",
 		},
 		{
 			name:                    "Leader with command and no GPU resources",
@@ -459,7 +486,7 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			component:               &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
 			initialArgs:             []string{},
 			initialCommand:          []string{"python", "-m", "worker"},
-			expected:                "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 0 -H ${LWS_LEADER_ADDRESS},${LWS_WORKER_1_ADDRESS} --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" trtllm-llmapi-launch python -m worker",
+			expected:                "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 0 -H ${LWS_LEADER_ADDRESS},${LWS_WORKER_1_ADDRESS} --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" sh -c 'trtllm-llmapi-launch python -m worker'",
 		},
 		{
 			name:                    "Leader with both command and args (args take precedence)",
@@ -477,7 +504,7 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			},
 			initialArgs:    []string{"launch", "--config", "test.yaml"},
 			initialCommand: []string{"ignored-command"},
-			expected:       "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 2 -H ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-ldr-0.${GROVE_HEADLESS_SERVICE},${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-wkr-0.${GROVE_HEADLESS_SERVICE} --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" trtllm-llmapi-launch launch --config test.yaml",
+			expected:       "mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 2 -H ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-ldr-0.${GROVE_HEADLESS_SERVICE},${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-wkr-0.${GROVE_HEADLESS_SERVICE} --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" sh -c 'trtllm-llmapi-launch launch --config test.yaml'",
 		},
 	}
 
