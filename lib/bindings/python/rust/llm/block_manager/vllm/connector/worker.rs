@@ -28,8 +28,7 @@ pub struct KvConnectorWorker {
     connector: WorkerSchedulerClient,
     transfer_client: TransferSchedulerClient,
 
-    // request_slots: HashMap<String, WorkerSlot>,
-    kv_caches: HashMap<String, Arc<VllmTensor>>,
+    kv_cache_names: Vec<(String, Arc<VllmTensor>)>,
 
     /// Map of request id to inflight load requests
     maybe_finished_onboarding: HashSet<String>,
@@ -76,13 +75,13 @@ impl KvConnectorWorker {
             kvbm_worker: OnceLock::new(),
             connector: worker_client,
             transfer_client,
-            kv_caches: HashMap::new(),
             maybe_finished_onboarding: HashSet::new(),
             maybe_finished_offloading: HashSet::new(),
             offloading_operations: Vec::new(),
             bound: false,
             iteration: 0,
             layers_complete: 0,
+            kv_cache_names: Vec::new(),
         })
     }
 
@@ -96,25 +95,26 @@ impl KvConnectorWorker {
         page_size: usize,
         device_id: usize,
         dtype_width_bytes: usize,
-        kv_caches: HashMap<String, Py<PyAny>>,
+        kv_caches: Vec<(String, Py<PyAny>)>,
     ) -> PyResult<()> {
         if self.kvbm_worker.get().is_some() {
             tracing::warn!("kvbm worker already registered");
             return Err(to_pyerr(anyhow::anyhow!("kvbm worker already registered")));
         }
 
-        // TODO: pass in the sorted (layer_name, tensor) such that the order of the list matches the order of layer execution in the model
+        // Process kv_caches in layer execution order (already sorted by layer index)
+        let mut vllm_tensors = Vec::new();
+        let mut kv_cache_names = Vec::new();
         for (layer_name, torch_tensor) in kv_caches {
             let vllm_tensor = Arc::new(VllmTensor::new(torch_tensor).map_err(to_pyerr)?);
             tracing::debug!("Registering KV cache layer: {layer_name}, tensor: {vllm_tensor:?}");
-            self.kv_caches.insert(layer_name, vllm_tensor);
+
+            // Build ordered tensor list for worker config
+            kv_cache_names.push((layer_name, vllm_tensor.clone()));
+            vllm_tensors.push(vllm_tensor as Arc<dyn TorchTensor>);
         }
 
-        let vllm_tensors: Vec<Arc<dyn TorchTensor>> = self
-            .kv_caches
-            .values()
-            .map(|tensor| tensor.clone() as Arc<dyn TorchTensor>)
-            .collect();
+        self.kv_cache_names = kv_cache_names;
 
         let config = KvbmWorkerConfig::builder()
             .drt(self.drt.clone())
@@ -229,7 +229,7 @@ impl KvConnectorWorker {
     /// Trigger block-wise completion signals afer last layer.
     pub fn save_kv_layer(&mut self, _layer_name: String, _kv_layer: Py<PyAny>) -> PyResult<()> {
         self.layers_complete += 1;
-        if self.layers_complete == self.kv_caches.len() {
+        if self.layers_complete == self.kv_cache_names.len() {
             let offloading_operations = std::mem::take(&mut self.offloading_operations);
             for operation in offloading_operations {
                 self.connector.enqueue_request(operation);
