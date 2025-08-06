@@ -16,6 +16,7 @@ use std::{
 
 pub mod batch;
 mod common;
+pub use common::build_routed_pipeline;
 pub mod endpoint;
 pub mod http;
 pub mod text;

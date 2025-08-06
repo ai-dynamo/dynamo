@@ -145,16 +145,6 @@ async def init(runtime: DistributedRuntime, config: Config):
         .client()
     )
 
-    if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
-        await register_llm(
-            ModelType.Backend,
-            generate_endpoint,
-            config.model,
-            config.served_model_name,
-            kv_cache_block_size=config.engine_args.block_size,
-            migration_limit=config.migration_limit,
-        )
-
     factory = StatLoggerFactory(component, config.engine_args.data_parallel_rank or 0)
     engine_client, vllm_config, default_sampling_params = setup_vllm_engine(
         config, factory
@@ -189,6 +179,16 @@ async def init(runtime: DistributedRuntime, config: Config):
         logger.info(f"Reading Events from {zmq_endpoint}")
 
         handler.kv_publisher = kv_publisher
+
+    if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
+        await register_llm(
+            ModelType.Backend,
+            generate_endpoint,
+            config.model,
+            config.served_model_name,
+            kv_cache_block_size=config.engine_args.block_size,
+            migration_limit=config.migration_limit,
+        )
 
     try:
         await asyncio.gather(
