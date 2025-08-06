@@ -36,8 +36,7 @@ on:
 
 jobs:
   pre-merge-rust:
-    runs-on:
-        group: Fastchecker
+    runs-on: ubuntu-latest
     strategy:
       matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
     permissions:
@@ -50,6 +49,17 @@ jobs:
       run: |
         sudo apt-get update -y
         sudo apt-get install -y protobuf-compiler
+
+    - name: Free runner disk space
+      run: |
+        echo "Disk space before:"
+        df -h
+        rm -rf \
+          /host_usr/share/dotnet /host_usr/local/lib/android /opt/ghc \
+          /host_usr/local/share/powershell /host_usr/share/swift /host_usr/local/.ghcup \
+          /host_usr/lib/jvm /opt/hostedtoolcache
+        echo "Disk space after:"
+        df -h
 
     # TODO: Caching target/ dir handles most of the build caching improvements
     #       currently, so sccache artifacts are mostly duplicates wasting disk space.
