@@ -1,0 +1,8 @@
+{
+  "format": "Json",
+  "parallel_tool_start_token": null,
+  "parallel_tool_end_token": null,
+  "call_start_token": "<TOOLCALL>",
+  "call_end_token": "</TOOLCALL>",
+  "use_parameters_field": false
+} 
