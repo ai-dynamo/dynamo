@@ -563,7 +563,6 @@ func TestTRTLLMBackend_setupWorkerContainer(t *testing.T) {
 				"cp /ssh-pk/private.key ~/.ssh/id_rsa",
 				"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
 				"/usr/sbin/sshd -D",
-				"# Start SSH daemon and keep container running",
 			},
 		},
 		{

@@ -86,7 +86,7 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 		"cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys",
 		"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
 		"chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys",
-		"echo -e \"Host *\\n    IdentityFile ~/.ssh/id_rsa\\n    StrictHostKeyChecking no\" > ~/.ssh/config",
+		"printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\n' > ~/.ssh/config",
 	}
 
 	// Calculate total number of GPUs across all nodes
@@ -118,8 +118,7 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 		"cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys",
 		"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
 		"chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys",
-		"echo -e \"Host *\\n    IdentityFile ~/.ssh/id_rsa\\n    StrictHostKeyChecking no\" > ~/.ssh/config",
-		"# Start SSH daemon and keep container running",
+		"printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\n' > ~/.ssh/config",
 		"/usr/sbin/sshd -D",
 	}
 
