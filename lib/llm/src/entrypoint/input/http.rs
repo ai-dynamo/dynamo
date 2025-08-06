@@ -6,18 +6,16 @@ use std::sync::Arc;
 use crate::{
     discovery::{ModelManager, ModelWatcher, MODEL_ROOT_PATH},
     engines::StreamingEngineAdapter,
-    entrypoint::{input::common, EngineConfig},
+    entrypoint::{self, input::common, EngineConfig},
     http::service::service_v2,
     kv_router::KvRouterConfig,
-    types::{
-        openai::chat_completions::{
-            NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse,
-        },
-        openai::completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
+    types::openai::{
+        chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
+        completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
 };
-use dynamo_runtime::pipeline::RouterMode;
 use dynamo_runtime::transports::etcd;
+use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};
 use dynamo_runtime::{DistributedRuntime, Runtime};
 
 /// Build and run an HTTP service
@@ -55,7 +53,50 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
                 }
             }
         }
-        EngineConfig::StaticFull { engine, model } => {
+        EngineConfig::StaticRemote(local_model) => {
+            let card = local_model.card();
+            let router_mode = local_model.router_config().router_mode;
+
+            let dst_config = DistributedConfig::from_settings(true);
+            let distributed_runtime = DistributedRuntime::new(runtime.clone(), dst_config).await?;
+            let manager = http_service.model_manager();
+
+            let endpoint_id = local_model.endpoint_id();
+            let component = distributed_runtime
+                .namespace(&endpoint_id.namespace)?
+                .component(&endpoint_id.component)?;
+            let client = component.endpoint(&endpoint_id.name).client().await?;
+
+            let kv_chooser = if router_mode == RouterMode::KV {
+                Some(
+                    manager
+                        .kv_chooser_for(
+                            local_model.display_name(),
+                            &component,
+                            card.kv_cache_block_size,
+                            Some(local_model.router_config().kv_router_config),
+                        )
+                        .await?,
+                )
+            } else {
+                None
+            };
+
+            let chat_engine = entrypoint::build_routed_pipeline::<
+                NvCreateChatCompletionRequest,
+                NvCreateChatCompletionStreamResponse,
+            >(card, &client, router_mode, kv_chooser.clone())
+            .await?;
+            manager.add_chat_completions_model(local_model.display_name(), chat_engine)?;
+
+            let completions_engine = entrypoint::build_routed_pipeline::<
+                NvCreateCompletionRequest,
+                NvCreateCompletionResponse,
+            >(card, &client, router_mode, kv_chooser)
+            .await?;
+            manager.add_completions_model(local_model.display_name(), completions_engine)?;
+        }
+        EngineConfig::StaticFull { engine, model, .. } => {
             let engine = Arc::new(StreamingEngineAdapter::new(engine));
             let manager = http_service.model_manager();
             manager.add_completions_model(model.service_name(), engine.clone())?;
@@ -64,6 +105,7 @@ pub async fn run(runtime: Runtime, engine_config: EngineConfig) -> anyhow::Resul
         EngineConfig::StaticCore {
             engine: inner_engine,
             model,
+            ..
         } => {
             let manager = http_service.model_manager();
 
