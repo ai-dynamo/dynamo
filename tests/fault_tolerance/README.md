@@ -22,12 +22,34 @@ Tests worker fault tolerance with migration support using the `test_request_migr
 8. Verifies the request completes successfully despite the worker failure (with 240s timeout)
 9. Checks that the frontend logs contain "Stream disconnected... recreating stream..." indicating migration occurred
 
+### `test_request_cancellation.py`
+
+Tests request cancellation functionality across multiple API endpoints using the `test_request_cancellation_vllm` function. This test:
+
+0. Downloads the DeepSeek-R1-Distill-Llama-8B model from HuggingFace if not already cached
+1. Starts a Dynamo frontend using `python -m dynamo.frontend` with debug logging enabled
+2. Starts a single worker using `python3 -m dynamo.vllm` with specific configuration:
+   - Model: `deepseek-ai/DeepSeek-R1-Distill-Llama-8B`
+   - `--enforce-eager`, `--max-model-len 16384`, `--migration-limit 3`
+   - Debug logging enabled on port 8081
+3. Tests request cancellation across three scenarios:
+   - **Completion API**: `/v1/completions` endpoint cancellation
+   - **Chat Completion API (non-streaming)**: `/v1/chat/completions` endpoint cancellation
+   - **Chat Completion API (streaming)**: `/v1/chat/completions` with streaming cancellation
+4. For each scenario:
+   - Sends a long request with 1-second timeout to trigger cancellation
+   - Validates that cancellation messages appear in both frontend and worker logs
+   - Uses incremental log offset tracking to avoid false positives from previous tests
+5. Checks for specific cancellation patterns:
+   - Frontend log: "issued control message Kill to sender"
+   - Worker log: "finished processing python async generator stream"
+
 ## Prerequisites
 
 - vLLM backend installed (`pip install ai-dynamo-vllm`)
 - NATS and etcd services running (provided by `runtime_services` fixture)
 - Access to DeepSeek-R1-Distill-Llama-8B model (automatically downloaded from HuggingFace)
-- Sufficient GPU memory (test uses 0.45 GPU memory utilization)
+- Sufficient GPU memory
 
 ## Running the Tests
 
@@ -39,12 +61,14 @@ pytest /workspace/tests/fault_tolerance
 
 # Run specific test with verbose output
 pytest /workspace/tests/fault_tolerance/test_request_migration.py::test_request_migration_vllm -v
+pytest /workspace/tests/fault_tolerance/test_request_cancellation.py::test_request_cancellation_vllm -v
 
 # Run with specific markers
 pytest -m "e2e and vllm" /workspace/tests/fault_tolerance
 
 # Run with debug logging
 pytest /workspace/tests/fault_tolerance/test_request_migration.py::test_request_migration_vllm -v -s
+pytest /workspace/tests/fault_tolerance/test_request_cancellation.py::test_request_cancellation_vllm -v -s
 ```
 
 ## Test Markers
@@ -61,11 +85,11 @@ pytest /workspace/tests/fault_tolerance/test_request_migration.py::test_request_
 
 ## Expected Test Duration
 
-The test typically takes 2-3 minutes to complete, including:
+The tests typically take 2-3 minutes to complete each, including:
 - Model download/loading time (if not cached) - can take 1-2 minutes for first run
 - Worker startup and registration
 - Request processing and response validation
-- Worker failure simulation and migration
+- Worker failure simulation and migration (for migration test) / Request cancellation validation (for cancellation test)
 - Cleanup
 
 ## Troubleshooting
@@ -74,7 +98,9 @@ If tests fail:
 
 1. Check that NATS and etcd services are running
 2. Verify vLLM backend is properly installed
-3. Ensure sufficient GPU memory is available (test requires ~45% GPU memory)
+3. Ensure sufficient GPU memory is available
 4. Check internet connectivity for model download from HuggingFace
 5. Review test logs for specific error messages
 6. Verify that the DeepSeek-R1-Distill-Llama-8B model can be accessed
+7. For cancellation tests: Check that timeout-based cancellation is working properly and cancellation patterns appear in logs
+8. For migration tests: Verify worker process termination and stream recreation behavior
