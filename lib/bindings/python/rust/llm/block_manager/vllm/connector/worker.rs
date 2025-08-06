@@ -6,7 +6,7 @@ use dynamo_llm::block_manager::connector::scheduler::{
     Scheduler, TransferSchedulerClient, WorkerSchedulerClient,
 };
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use super::*;
@@ -42,6 +42,9 @@ pub struct KvConnectorWorker {
     bound: bool,
     iteration: u64,
     layers_complete: usize,
+
+    /// cuda events created by the python side
+    layer_events: Vec<u64>,
 }
 
 #[pymethods]
@@ -82,6 +85,7 @@ impl KvConnectorWorker {
             iteration: 0,
             layers_complete: 0,
             kv_cache_names: Vec::new(),
+            layer_events: Vec::new(),
         })
     }
 
@@ -96,6 +100,7 @@ impl KvConnectorWorker {
         device_id: usize,
         dtype_width_bytes: usize,
         kv_caches: Vec<(String, Py<PyAny>)>,
+        raw_event_handles: Vec<u64>,
     ) -> PyResult<()> {
         if self.kvbm_worker.get().is_some() {
             tracing::warn!("kvbm worker already registered");
@@ -114,7 +119,9 @@ impl KvConnectorWorker {
             vllm_tensors.push(vllm_tensor as Arc<dyn TorchTensor>);
         }
 
+        assert_eq!(kv_cache_names.len(), raw_event_handles.len());
         self.kv_cache_names = kv_cache_names;
+        self.layer_events = raw_event_handles;
 
         let config = KvbmWorkerConfig::builder()
             .drt(self.drt.clone())
@@ -231,6 +238,11 @@ impl KvConnectorWorker {
         self.layers_complete += 1;
         if self.layers_complete == self.kv_cache_names.len() {
             let offloading_operations = std::mem::take(&mut self.offloading_operations);
+
+            // block on the the completion of the last layer
+            // todo(ryan): capture the context, pass this to the scheduler to do the await on another thread
+            // or put the event on a stream and use stream waits to keep it all on device.
+            event_sync_blocking(self.layer_events[self.layers_complete - 1]);
             for operation in offloading_operations {
                 self.connector.enqueue_request(operation);
             }
@@ -320,4 +332,31 @@ impl KvConnectorWorker {
 
         (is_finished_offloading, is_finished_onboarding)
     }
+}
+
+use cudarc::driver::sys::{
+    cuCtxGetCurrent, cuEventSynchronize, cudaError_enum, CUcontext, CUevent,
+};
+use std::ptr;
+
+// todo(ryan): we will need this if we farm off the cuEventSynchronize to another thread
+fn _get_current_context() -> CUcontext {
+    let mut ctx: CUcontext = ptr::null_mut();
+    let status = unsafe { cuCtxGetCurrent(&mut ctx) };
+    assert_eq!(
+        status,
+        cudaError_enum::CUDA_SUCCESS,
+        "cuCtxGetCurrent failed"
+    );
+    assert!(!ctx.is_null(), "Torch has not set a CUDA context");
+    ctx
+}
+
+fn event_sync_blocking(event: u64) {
+    let status = unsafe { cuEventSynchronize(event as CUevent) };
+    assert_eq!(
+        status,
+        cudaError_enum::CUDA_SUCCESS,
+        "cuEventSynchronize failed"
+    );
 }
