@@ -714,13 +714,6 @@ func GenerateBasePodSpec(
 		}
 	}
 
-	// Apply backend-specific container modifications
-	backend := BackendFactory(backendFramework)
-	if backend == nil {
-		return corev1.PodSpec{}, fmt.Errorf("unsupported backend framework: %s", backendFramework)
-	}
-	backend.UpdateContainer(&container, numberOfNodes, role, component, multinodeDeploymentType, serviceName)
-
 	resourcesConfig, err := controller_common.GetResourcesConfig(component.Resources)
 	if err != nil {
 		return corev1.PodSpec{}, fmt.Errorf("failed to get resources config: %w", err)
@@ -765,6 +758,12 @@ func GenerateBasePodSpec(
 	shmVolume, shmVolumeMount := generateSharedMemoryVolumeAndMount(&container.Resources)
 	volumes = append(volumes, shmVolume)
 	container.VolumeMounts = append(container.VolumeMounts, shmVolumeMount)
+	// Apply backend-specific container modifications
+	backend := BackendFactory(backendFramework)
+	if backend == nil {
+		return corev1.PodSpec{}, fmt.Errorf("unsupported backend framework: %s", backendFramework)
+	}
+	backend.UpdateContainer(&container, numberOfNodes, role, component, multinodeDeploymentType, serviceName)
 	var podSpec corev1.PodSpec
 	if component.ExtraPodSpec != nil && component.ExtraPodSpec.PodSpec != nil {
 		podSpec = *component.ExtraPodSpec.PodSpec.DeepCopy()
