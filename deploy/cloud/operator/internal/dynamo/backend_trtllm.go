@@ -86,15 +86,15 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 		"cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys",
 		"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
 		"chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys",
-		"printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\n' > ~/.ssh/config",
+		"printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config",
 	}
 
 	// Calculate total number of GPUs across all nodes
 	gpusPerNode := getGPUsPerNode(component.Resources)
 	totalGPUs := numberOfNodes * gpusPerNode
 
-	// Build mpirun command
-	mpirunCmd := fmt.Sprintf("mpirun --oversubscribe -n %d -H %s %s",
+	// Build mpirun command with explicit SSH configuration
+	mpirunCmd := fmt.Sprintf("mpirun --oversubscribe -n %d -H %s --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" %s",
 		totalGPUs,
 		workerHosts,
 		originalCommand)
@@ -111,20 +111,20 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 	// Setup SSH for worker nodes
 	sshSetupCommands := []string{
-		"mkdir -p ~/.ssh ~/.ssh/host_keys",
+		"mkdir -p ~/.ssh ~/.ssh/host_keys ~/.ssh/run",
 		"ls -la /ssh-pk/", // Debug: list files in ssh-pk directory
 		"cp /ssh-pk/private.key ~/.ssh/id_rsa",
 		"cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub",
 		"cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys",
 		"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
 		"chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys",
-		"printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\n' > ~/.ssh/config",
+		"printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config",
 		// Generate host keys in user writable directory
 		"ssh-keygen -t rsa -f ~/.ssh/host_keys/ssh_host_rsa_key -N ''",
 		"ssh-keygen -t ecdsa -f ~/.ssh/host_keys/ssh_host_ecdsa_key -N ''",
 		"ssh-keygen -t ed25519 -f ~/.ssh/host_keys/ssh_host_ed25519_key -N ''",
-		// Create SSH daemon config to use custom host keys location
-		"printf 'Port 22\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile ~/.ssh/authorized_keys\\n' > ~/.ssh/sshd_config",
+		// Create SSH daemon config to use custom host keys location and non-privileged port
+		"printf 'Port 2222\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile ~/.ssh/run/sshd.pid\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile ~/.ssh/authorized_keys\\nUsePAM no\\n' > ~/.ssh/sshd_config",
 		"/usr/sbin/sshd -D -f ~/.ssh/sshd_config",
 	}
 

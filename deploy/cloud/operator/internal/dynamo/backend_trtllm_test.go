@@ -453,6 +453,7 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			expectedContains: []string{
 				"mkdir -p ~/.ssh",
 				"mpirun --oversubscribe",
+				"--mca plm_rsh_args \"-p 2222",
 				"-n 6", // 3 nodes * 2 GPUs
 				"trtllm-llmapi-launch --model test",
 				"test-service-ldr-0",
@@ -470,6 +471,7 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			expectedContains: []string{
 				"mkdir -p ~/.ssh",
 				"mpirun --oversubscribe",
+				"--mca plm_rsh_args \"-p 2222",
 				"-n 0", // no GPU resources specified
 				"python -m worker",
 				"${LWS_LEADER_ADDRESS}",
@@ -494,6 +496,7 @@ func TestTRTLLMBackend_setupLeaderContainer(t *testing.T) {
 			initialCommand: []string{"ignored-command"},
 			expectedContains: []string{
 				"mpirun --oversubscribe",
+				"--mca plm_rsh_args \"-p 2222",
 				"-n 2", // 2 nodes * 1 GPU
 				"launch --config test.yaml",
 			},
@@ -559,11 +562,12 @@ func TestTRTLLMBackend_setupWorkerContainer(t *testing.T) {
 			initialArgs:    []string{"some", "args"},
 			initialCommand: []string{},
 			expectedContains: []string{
-				"mkdir -p ~/.ssh ~/.ssh/host_keys",
+				"mkdir -p ~/.ssh ~/.ssh/host_keys ~/.ssh/run",
 				"cp /ssh-pk/private.key ~/.ssh/id_rsa",
 				"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
 				"ssh-keygen -t rsa -f ~/.ssh/host_keys/ssh_host_rsa_key",
-				"sshd_config",
+				"Port 2222",
+				"PidFile ~/.ssh/run/sshd.pid",
 				"/usr/sbin/sshd -D -f ~/.ssh/sshd_config",
 			},
 		},
@@ -572,11 +576,12 @@ func TestTRTLLMBackend_setupWorkerContainer(t *testing.T) {
 			initialArgs:    []string{},
 			initialCommand: []string{"original", "command"},
 			expectedContains: []string{
-				"mkdir -p ~/.ssh ~/.ssh/host_keys",
+				"mkdir -p ~/.ssh ~/.ssh/host_keys ~/.ssh/run",
 				"cp /ssh-pk/private.key ~/.ssh/id_rsa",
 				"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
 				"ssh-keygen -t rsa -f ~/.ssh/host_keys/ssh_host_rsa_key",
-				"sshd_config",
+				"Port 2222",
+				"PidFile ~/.ssh/run/sshd.pid",
 				"/usr/sbin/sshd -D -f ~/.ssh/sshd_config",
 			},
 		},
