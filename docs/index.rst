@@ -44,11 +44,7 @@ Get started with Dynamo locally in just a few commands:
 
    # Install uv (recommended Python package manager)
    curl -LsSf https://astral.sh/uv/install.sh | sh
-<<<<<<< HEAD
-   
-=======
 
->>>>>>> 167c793df4ea3877c40f90d1c8ff627c8c13f8b7
    # Create virtual environment and install Dynamo
    uv venv venv
    source venv/bin/activate
