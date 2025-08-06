@@ -449,6 +449,16 @@ COPY --from=wheel_builder /workspace/dist/*.whl wheelhouse/
 COPY --from=base /workspace/wheels/nixl/*.whl wheelhouse/
 RUN uv pip install "ai-dynamo[sglang]" --pre --find-links wheelhouse
 
+# Common dependencies
+# TODO: Remove extra install and use pyproject.toml to define all dependencies
+RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
+
+# Install test dependencies
+# TODO: Remove this once we have a functional CI image built on top of the runtime image
+RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
+    uv pip install --requirement /tmp/requirements.txt
+
 # Copy launch banner
 RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
     sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \

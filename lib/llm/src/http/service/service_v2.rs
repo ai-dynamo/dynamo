@@ -13,6 +13,7 @@ use crate::http::service::request_throttler::HttpServiceRequestThrottler;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
+use dynamo_runtime::transports::etcd;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -20,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 pub struct State {
     metrics: Arc<Metrics>,
     manager: Arc<ModelManager>,
+    etcd_client: Option<etcd::Client>,
     request_throttler: HttpServiceRequestThrottler,
 }
 
@@ -28,6 +30,20 @@ impl State {
         Self {
             manager,
             metrics: Arc::new(Metrics::default()),
+            etcd_client: None,
+            request_throttler,
+        }
+    }
+
+    pub fn new_with_etcd(
+        manager: Arc<ModelManager>,
+        etcd_client: Option<etcd::Client>,
+        request_throttler: HttpServiceRequestThrottler,
+    ) -> Self {
+        Self {
+            manager,
+            metrics: Arc::new(Metrics::default()),
+            etcd_client,
             request_throttler,
         }
     }
@@ -51,6 +67,10 @@ impl State {
 
     pub fn request_throttler_clone(&self) -> HttpServiceRequestThrottler {
         self.request_throttler.clone()
+    }
+
+    pub fn etcd_client(&self) -> Option<&etcd::Client> {
+        self.etcd_client.as_ref()
     }
 
     // TODO
@@ -95,6 +115,8 @@ pub struct HttpServiceConfig {
 
     #[builder(default = "None")]
     request_template: Option<RequestTemplate>,
+
+    etcd_client: Option<etcd::Client>,
 
     #[builder(default = "None")]
     all_workers_busy_rejection_time_window: Option<u64>,
@@ -178,7 +200,12 @@ impl HttpServiceConfigBuilder {
                 .all_workers_busy_rejection_time_window
                 .map(Duration::from_secs),
         );
-        let state = Arc::new(State::new(model_manager, request_throttler));
+
+        let state = Arc::new(State::new_with_etcd(
+            model_manager,
+            config.etcd_client,
+            request_throttler,
+        ));
 
         // enable prometheus metrics
         let registry = metrics::Registry::new();
@@ -254,6 +281,11 @@ impl HttpServiceConfigBuilder {
         all_workers_busy_rejection_time_window: Option<u64>,
     ) -> Self {
         self.all_workers_busy_rejection_time_window = Some(all_workers_busy_rejection_time_window);
+        self
+    }
+
+    pub fn with_etcd_client(mut self, etcd_client: Option<etcd::Client>) -> Self {
+        self.etcd_client = Some(etcd_client);
         self
     }
 }
