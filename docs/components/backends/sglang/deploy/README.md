@@ -74,7 +74,7 @@ extraPodSpec:
 
 Before using these templates, ensure you have:
 
-1. **Dynamo Cloud Platform installed** - See [Installing Dynamo Cloud](../../docs/guides/dynamo_deploy/dynamo_cloud.md)
+1. **Dynamo Cloud Platform installed** - See [Installing Dynamo Cloud](../../../../guides/dynamo_deploy/dynamo_cloud.md)
 2. **Kubernetes cluster with GPU support**
 3. **Container registry access** for SGLang runtime images
 4. **HuggingFace token secret** (referenced as `envFromSecret: hf-token-secret`)
@@ -144,10 +144,10 @@ All templates use **DeepSeek-R1-Distill-Llama-8B** as the default model. But you
 
 ## Further Reading
 
-- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../docs/guides/dynamo_deploy/create_deployment.md)
-- **Quickstart**: [Deployment Quickstart](../../../../docs/guides/dynamo_deploy/quickstart.md)
-- **Platform Setup**: [Dynamo Cloud Installation](../../../../docs/guides/dynamo_deploy/dynamo_cloud.md)
-- **Examples**: [Deployment Examples](../../../../docs/examples/README.md)
+- **Deployment Guide**: [Creating Kubernetes Deployments](../../../../guides/dynamo_deploy/create_deployment.md)
+- **Quickstart**: [Deployment Quickstart](../../../../guides/dynamo_deploy/quickstart.md)
+- **Platform Setup**: [Dynamo Cloud Installation](../../../../guides/dynamo_deploy/dynamo_cloud.md)
+- **Examples**: [Deployment Examples](../../../../examples/README.md)
 - **Kubernetes CRDs**: [Custom Resources Documentation](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/)
 
 ## Troubleshooting
@@ -159,4 +159,4 @@ Common issues and solutions:
 3. **Health check failures**: Review model loading logs and increase `initialDelaySeconds`
 4. **Out of memory**: Increase memory limits or reduce model batch size
 
-For additional support, refer to the [deployment troubleshooting guide](../../docs/guides/dynamo_deploy/quickstart.md#troubleshooting).
+For additional support, refer to the [deployment troubleshooting guide](../../../../guides/dynamo_deploy/quickstart.md).

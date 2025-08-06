@@ -165,10 +165,10 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 - **[Run DeepSeek-R1 on 104+ H100s](docs/dsr1-wideep-h100.md)**
 
 ### Speculative Decoding
-- **[Deploying DeepSeek-R1 with MTP - coming soon!](.)**
+- **Deploying DeepSeek-R1 with MTP - coming soon!**
 
 ### Structured Output and Tool Calling
-- **[Tool calling with Dynamo - coming soon!](.)**
+- **Tool calling with Dynamo - coming soon!**
 
 ### Supporting SGLang's native endpoints via Dynamo
 - **[HTTP Server for native SGLang endpoints](docs/sgl-http-server.md)**
@@ -178,7 +178,7 @@ Below we provide a selected list of advanced examples. Please open up an issue i
 We currently provide deployment examples for Kubernetes (coming soon!) and SLURM
 
 ## Kubernetes
-- **[Deploying Dynamo with SGLang on Kubernetes - coming soon!](.)**
+- **Deploying Dynamo with SGLang on Kubernetes - coming soon!**
 
 ## SLURM
 - **[Deploying Dynamo with SGLang on SLURM](slurm_jobs/README.md)**
