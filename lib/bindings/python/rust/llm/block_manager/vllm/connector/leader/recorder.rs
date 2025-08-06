@@ -78,7 +78,8 @@ pub struct CreateSlotOutput {
 
 #[derive(Debug)]
 pub struct KvConnectorLeaderRecorder {
-    recorder_tx: mpsc::Sender<Action>,
+    _recorder: Recorder<Action>, // Keep recorder alive
+    unbounded_tx: mpsc::UnboundedSender<Action>,
     connector_leader: Box<dyn Leader>,
 }
 
@@ -110,8 +111,7 @@ impl KvConnectorLeaderRecorder {
         // Create recorder synchronously using pyo3 async runtime
         let runtime = pyo3_async_runtimes::tokio::get_runtime();
         let recorder = runtime.block_on(async {
-            // TODO: using max 10 events for testing - quick shutdown of the recorder to flush to file
-            Recorder::new(token, &output_path, None, Some(10), None).await
+            Recorder::new(token, &output_path, None, None, None).await
         }).unwrap();
 
         let connector_leader = KvConnectorLeader {
@@ -122,9 +122,26 @@ impl KvConnectorLeaderRecorder {
             iteration_counter: 0,
         };
 
+        let (unbounded_tx, unbounded_rx) = mpsc::unbounded_channel();
+        let recorder_tx = recorder.event_sender();
+
+        let _ = runtime.spawn(Self::forward_unbounded_to_sender(unbounded_rx, recorder_tx));
+
         Self {
-            recorder_tx: recorder.event_sender(),
+            _recorder: recorder,
+            unbounded_tx,
             connector_leader: Box::new(connector_leader),
+        }
+    }
+
+    async fn forward_unbounded_to_sender<T: Send + 'static>(
+        mut unbounded_rx: mpsc::UnboundedReceiver<T>,
+        bounded_tx: mpsc::Sender<T>,
+    ) {
+        while let Some(msg) = unbounded_rx.recv().await {
+            if bounded_tx.send(msg).await.is_err() {
+                tracing::error!("Failed to send message to bounded channel");
+            }
         }
     }
 }
@@ -149,15 +166,10 @@ impl Leader for KvConnectorLeaderRecorder {
         };
         let output = self.connector_leader.get_num_new_matched_tokens(request_id, request_num_tokens, num_computed_tokens);
         let output_copy = output.as_ref().unwrap().clone();
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        let _ = runtime.block_on(async move {
-            self.recorder_tx
-            .send(Action::GetNumNewMatchedTokens(input_copy, GetNumNewMatchedTokensOutput {
+        let _ = self.unbounded_tx.send(Action::GetNumNewMatchedTokens(input_copy, GetNumNewMatchedTokensOutput {
                 num_new_matched_tokens: output_copy.0,
                 has_matched: output_copy.1,
-            }))
-            .await
-        });
+            }));
         output
     }
 
@@ -178,12 +190,7 @@ impl Leader for KvConnectorLeaderRecorder {
             num_external_tokens: num_external_tokens.clone(),
         };
         let _ = self.connector_leader.update_state_after_alloc(request_id, block_ids, num_external_tokens).unwrap();
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        let _ = runtime.block_on(async move {
-            self.recorder_tx
-                .send(Action::UpdateStateAfterAlloc(input_copy, UpdateStateAfterAllocOutput {}))
-                .await
-        });
+        let _ = self.unbounded_tx.send(Action::UpdateStateAfterAlloc(input_copy, UpdateStateAfterAllocOutput {}));
         Ok(())
     }
 
@@ -196,14 +203,10 @@ impl Leader for KvConnectorLeaderRecorder {
         };
         let output = self.connector_leader.build_connector_metadata(scheduler_output);
         let output_copy = output.as_ref().unwrap().clone();
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        let _ = runtime.block_on(async move {
-            self.recorder_tx
+        let _ = self.unbounded_tx
                 .send(Action::BuildConnectorMeta(input_copy, BuildConnectorMetaOutput {
                     metadata: output_copy,
-                }))
-                .await
-        });
+                }));
         output
     }
 
@@ -214,14 +217,10 @@ impl Leader for KvConnectorLeaderRecorder {
         };
         let output = self.connector_leader.request_finished(request_id, block_ids);
         let output_copy = output.as_ref().unwrap().clone();
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        let _ = runtime.block_on(async move {
-            self.recorder_tx
+        let _ = self.unbounded_tx
                 .send(Action::RequestFinished(input_copy, RequestFinishedOutput {
                     is_finished: output_copy,
-                }))
-                .await
-        });
+                }));
         output
     }
 
@@ -231,14 +230,10 @@ impl Leader for KvConnectorLeaderRecorder {
         };
         let output = self.connector_leader.has_slot(request_id);
         let output_copy = output.clone();
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        let _ = runtime.block_on(async move {
-            self.recorder_tx
+        let _ = self.unbounded_tx
                 .send(Action::HasSlot(input_copy, HasSlotOutput {
                     result: output_copy,
-                }))
-                .await
-        });
+                }));
         output
     }
 
@@ -250,12 +245,7 @@ impl Leader for KvConnectorLeaderRecorder {
             tokens: tokens.clone(),
         };
         let _ = self.connector_leader.create_slot(request, tokens);
-        let runtime = pyo3_async_runtimes::tokio::get_runtime();
-        let _ = runtime.block_on(async move {
-            self.recorder_tx
-                .send(Action::CreateSlot(input_copy, CreateSlotOutput {}))
-                .await
-        });
+        let _ = self.unbounded_tx.send(Action::CreateSlot(input_copy, CreateSlotOutput {}));
         Ok(())
     }
 }
