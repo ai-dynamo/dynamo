@@ -17,6 +17,7 @@ from dynamo.llm import (
     ZmqKvEventPublisherConfig,
     register_llm,
 )
+from dynamo.llm.model_card import ModelRuntimeConfig
 from dynamo.runtime import DistributedRuntime, dynamo_worker
 from dynamo.runtime.logging import configure_dynamo_logging
 
@@ -213,6 +214,22 @@ async def init(runtime: DistributedRuntime, config: Config):
         handler.kv_publisher = kv_publisher
 
     if not config.engine_args.data_parallel_rank:  # if rank is 0 or None then register
+        runtime_config = ModelRuntimeConfig()
+
+        # NOTE: These values need to be queried directly from the engine,
+        # since this will compute it if no value was set by the user
+        runtime_config.total_kv_blocks = (
+            engine_client.engine.cache_config.num_gpu_blocks
+        )
+        runtime_config.max_num_seqs = (
+            engine_client.vllm_config.scheduler_config.max_num_seqs
+        )
+
+        gpu_mem_integer = int(
+            engine_client.engine.cache_config.gpu_memory_utilization * 100
+        )
+        runtime_config.gpu_memory_utilization = gpu_mem_integer
+
         await register_llm(
             ModelType.Backend,
             generate_endpoint,
@@ -220,6 +237,7 @@ async def init(runtime: DistributedRuntime, config: Config):
             config.served_model_name,
             kv_cache_block_size=config.engine_args.block_size,
             migration_limit=config.migration_limit,
+            runtime_config=runtime_config,
         )
 
     try:

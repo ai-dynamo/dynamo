@@ -16,7 +16,7 @@ use dynamo_runtime::{
 
 use crate::discovery::ModelEntry;
 use crate::entrypoint::RouterConfig;
-use crate::model_card::{self, ModelDeploymentCard};
+use crate::model_card::{self, ModelDeploymentCard, ModelRuntimeConfig};
 use crate::model_type::ModelType;
 use crate::request_template::RequestTemplate;
 
@@ -48,6 +48,7 @@ pub struct LocalModelBuilder {
     http_port: u16,
     migration_limit: u32,
     is_mocker: bool,
+    runtime_config: ModelRuntimeConfig,
     user_data: Option<serde_json::Value>,
 }
 
@@ -65,6 +66,7 @@ impl Default for LocalModelBuilder {
             router_config: Default::default(),
             migration_limit: Default::default(),
             is_mocker: Default::default(),
+            runtime_config: Default::default(),
             user_data: Default::default(),
         }
     }
@@ -128,6 +130,11 @@ impl LocalModelBuilder {
         self
     }
 
+    pub fn runtime_config(&mut self, runtime_config: ModelRuntimeConfig) -> &mut Self {
+        self.runtime_config = runtime_config;
+        self
+    }
+
     pub fn user_data(&mut self, user_data: Option<serde_json::Value>) -> &mut Self {
         self.user_data = user_data;
         self
@@ -170,6 +177,7 @@ impl LocalModelBuilder {
                 template,
                 http_port: self.http_port,
                 router_config: self.router_config.take().unwrap_or_default(),
+                runtime_config: self.runtime_config.clone(),
             });
         }
 
@@ -228,6 +236,7 @@ impl LocalModelBuilder {
             template,
             http_port: self.http_port,
             router_config: self.router_config.take().unwrap_or_default(),
+            runtime_config: self.runtime_config.clone(),
         })
     }
 }
@@ -240,6 +249,7 @@ pub struct LocalModel {
     template: Option<RequestTemplate>,
     http_port: u16, // Only used if input is HTTP server
     router_config: RouterConfig,
+    runtime_config: ModelRuntimeConfig,
 }
 
 impl LocalModel {
@@ -269,6 +279,10 @@ impl LocalModel {
 
     pub fn router_config(&self) -> &RouterConfig {
         &self.router_config
+    }
+
+    pub fn runtime_config(&self) -> &ModelRuntimeConfig {
+        &self.runtime_config
     }
 
     pub fn is_gguf(&self) -> bool {
