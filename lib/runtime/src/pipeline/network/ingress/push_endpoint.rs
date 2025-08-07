@@ -48,9 +48,9 @@ impl PushEndpoint {
     pub async fn start(
         self,
         endpoint: Endpoint,
+	namespace: String,
         component_name: String,
         endpoint_name: String,
-        namespace: String,
         instance_id: i64,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
@@ -102,7 +102,7 @@ impl PushEndpoint {
                 let inflight_clone = inflight.clone();
                 let notify_clone = notify.clone();
 
-                // Handler headers here for tracing
+                // Handle headers here for tracing
 
                 let mut traceparent = TraceParent::default();
 

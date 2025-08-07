@@ -121,9 +121,9 @@ impl EndpointConfigBuilder {
         // launch in primary runtime
         let task = tokio::spawn(push_endpoint.start(
             service_endpoint,
+	    endpoint.component.namespace.name.clone(),
             endpoint.component.name.clone(),
             endpoint.name.clone(),
-            endpoint.component.namespace.name.clone(),
             lease_id,
             endpoint.drt().system_health.clone(),
         ));
