@@ -56,7 +56,7 @@ gen_nodes=${15}
 kind=${16}
 
 WORK_DIR=${MOUNT_DIR}
-LOG_DIR=$WORK_DIR/${kind}-${ISL}-${OSL}-$(date +%Y%m%d_%H%M%S)
+LOG_DIR=$WORK_DIR/${kind}-bm-${ISL}-${OSL}
 SCRIPTS_DIR=${WORK_DIR}/
 set_clock_cmd="bash ${SCRIPTS_DIR}/set_clock.sh"
 mkdir -p ${LOG_DIR}
