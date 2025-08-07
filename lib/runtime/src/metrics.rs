@@ -194,7 +194,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
     labels: &[(&str, &str)],
     buckets: Option<Vec<f64>>,
     const_labels: Option<&[&str]>,
-) -> anyhow::Result<Arc<T>> {
+) -> anyhow::Result<T> {
     // Validate that user-provided labels don't have duplicate keys
     let mut seen_keys = std::collections::HashSet::new();
 
@@ -376,7 +376,7 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
             .register(collector);
     }
 
-    Ok(Arc::new(metric))
+    Ok(metric)
 }
 
 /// This trait should be implemented by all metric registries, including Prometheus, Envy, OpenTelemetry, and others.
@@ -423,7 +423,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::Counter>> {
+    ) -> anyhow::Result<prometheus::Counter> {
         create_metric(self, name, description, labels, None, None)
     }
 
@@ -434,7 +434,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         description: &str,
         const_labels: &[&str],
         const_label_values: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::CounterVec>> {
+    ) -> anyhow::Result<prometheus::CounterVec> {
         create_metric(
             self,
             name,
@@ -451,7 +451,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::Gauge>> {
+    ) -> anyhow::Result<prometheus::Gauge> {
         create_metric(self, name, description, labels, None, None)
     }
 
@@ -462,7 +462,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         description: &str,
         labels: &[(&str, &str)],
         buckets: Option<Vec<f64>>,
-    ) -> anyhow::Result<Arc<prometheus::Histogram>> {
+    ) -> anyhow::Result<prometheus::Histogram> {
         create_metric(self, name, description, labels, buckets, None)
     }
 
@@ -472,7 +472,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::IntCounter>> {
+    ) -> anyhow::Result<prometheus::IntCounter> {
         create_metric(self, name, description, labels, None, None)
     }
 
@@ -483,7 +483,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         description: &str,
         const_labels: &[&str],
         const_label_values: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::IntCounterVec>> {
+    ) -> anyhow::Result<prometheus::IntCounterVec> {
         create_metric(
             self,
             name,
@@ -500,7 +500,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         name: &str,
         description: &str,
         labels: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::IntGauge>> {
+    ) -> anyhow::Result<prometheus::IntGauge> {
         create_metric(self, name, description, labels, None, None)
     }
 
@@ -511,7 +511,7 @@ pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvid
         description: &str,
         const_labels: &[&str],
         const_label_values: &[(&str, &str)],
-    ) -> anyhow::Result<Arc<prometheus::IntGaugeVec>> {
+    ) -> anyhow::Result<prometheus::IntGaugeVec> {
         create_metric(
             self,
             name,
