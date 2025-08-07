@@ -85,68 +85,6 @@ flowchart LR
   e2@{ animate: true; }
 ```
 
-### Multimodal Example
-
-In the case of the [Dynamo Multimodal Disaggregated Example](../../examples/multimodal/README.md):
-
- 1. The HTTP frontend accepts a text prompt and a URL to an image.
-
- 2. The prompt and URL are then enqueued with the Processor before being dispatched to the first available Decode Worker.
-
- 3. Decode Worker then requests a Prefill Worker to provide key-value data for the LLM powering the Decode Worker.
-
- 4. Prefill Worker then requests that the image be processed and provided as embeddings by the Encode Worker.
-
- 5. Encode Worker acquires the image, processes it, performs inference on the image using a specialized vision model, and finally provides the embeddings to Prefill Worker.
-
- 6. Prefill Worker receives the embeddings from Encode Worker and generates a key-value cache (KV$) update for Decode Worker's LLM and writes the update directly to the GPU memory reserved for the data.
-
- 7. Finally, Decode Worker performs the requested inference.
-
-```mermaid
----
-title: Multimodal Disaggregated Workflow
----
-flowchart LR
-  p0[HTTP Frontend] i0@--"text prompt"-->p1[Processor]
-  p0 i1@--"url"-->p1
-  p1 i2@--"prompt"-->dw[Decode Worker]
-  p1 i3@--"url"-->dw
-  dw i4@--"prompt"-->pw[Prefill Worker]
-  dw i5@--"url"-->pw
-  pw i6@--"url"-->ew[Encode Worker]
-  ew o0@=="image embeddings"==>pw
-  pw o1@=="kv_cache updates"==>dw
-  dw o2@--"inference results"-->p0
-
-  i0@{ animate: true; }
-  i1@{ animate: true; }
-  i2@{ animate: true; }
-  i3@{ animate: true; }
-  i4@{ animate: true; }
-  i5@{ animate: true; }
-  i6@{ animate: true; }
-  o0@{ animate: true; }
-  o1@{ animate: true; }
-  o2@{ animate: true; }
-```
-
-> [!Note]
-> In this example, it is the data transfer between the Prefill Worker and the Encode Worker that utilizes the Dynamo NIXL Connect library.
-> The KV Cache transfer between Decode Worker and Prefill Worker utilizes the NIXL base RDMA subsystem directly without using the Dynamo NIXL Connect library.
-
-#### Code Examples
-
-See [prefill_worker](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/components/prefill_worker.py#L199) or [decode_worker](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/components/decode_worker.py#L239) from our Multimodal example,
-for how they coordinate directly with the Encode Worker by creating a [`WritableOperation`](writable_operation.md),
-sending the operation's metadata via Dynamo's round-robin dispatcher, and awaiting the operation for completion before making use of the transferred data.
-
-See [encode_worker](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/components/encode_worker.py#L190) from our Multimodal example,
-for how the resulting embeddings are registered with the RDMA subsystem by creating a [`Descriptor`](descriptor.md),
-a [`WriteOperation`](write_operation.md) is created using the metadata provided by the requesting worker,
-and the worker awaits for the data transfer to complete for yielding a response.
-
-
 ## Python Classes
 
   - [Connector](connector.md)
@@ -154,7 +92,6 @@ and the worker awaits for the data transfer to complete for yielding a response.
   - [Device](device.md)
   - [ReadOperation](read_operation.md)
   - [ReadableOperation](readable_operation.md)
-  - [SerializedRequest](serialized_request.md)
   - [WritableOperation](writable_operation.md)
   - [WriteOperation](write_operation.md)
 
@@ -164,5 +101,4 @@ and the worker awaits for the data transfer to complete for yielding a response.
   - [NVIDIA Dynamo](https://developer.nvidia.com/dynamo) @ [GitHub](https://github.com/ai-dynamo/dynamo)
     - [NVIDIA Dynamo NIXL Connect](https://github.com/ai-dynamo/dynamo/tree/main/docs/runtime/nixl_connect)
   - [NVIDIA Inference Transfer Library (NIXL)](https://developer.nvidia.com/blog/introducing-nvidia-dynamo-a-low-latency-distributed-inference-framework-for-scaling-reasoning-ai-models/#nvidia_inference_transfer_library_nixl_low-latency_hardware-agnostic_communication%C2%A0) @ [GitHub](https://github.com/ai-dynamo/nixl)
-  - [Dynamo Multimodal Example](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal)
   - [NVIDIA GPU Direct](https://developer.nvidia.com/gpudirect)

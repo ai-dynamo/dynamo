@@ -67,7 +67,7 @@ Coordination and messaging support:
 
 ## Technical Implementation Details
 
-### NIXL (NVIDIA Interchange Library):
+### NIXL (NVIDIA Inference Xfer Library):
 - Enables high-speed GPU-to-GPU data transfers using NVLink/PCIe
 - Decode Worker publishes GPU metadata to ETCD for coordination
 - PrefillWorker loads metadata to establish direct communication channels

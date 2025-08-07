@@ -25,11 +25,11 @@ Dynamo provides built-in metrics capabilities through the `MetricsRegistry` trai
 
 Dynamo automatically exposes metrics with the `dynamo_` name prefixes. It also adds the following labels `dynamo_namespace`, `dynamo_component`, and `dynamo_endpoint` to indicate which component is providing the metric.
 
-**Frontend Metrics**: When using Dynamo HTTP Frontend (`--framework VLLM` or `--framework TENSORRTLLM`), these metrics are automatically exposed with the `dynamo_frontend_*` prefix and include `model` labels containing the model name. These cover request handling, token processing, and latency measurements. See the [Available Metrics section](../../deploy/metrics/README.md#available-metrics) for the complete list of frontend metrics.
+**Frontend Metrics**: When using Dynamo HTTP Frontend (`--framework VLLM` or `--framework TENSORRTLLM`), these metrics are automatically exposed with the `dynamo_frontend_*` prefix and include `model` labels containing the model name. These cover request handling, token processing, and latency measurements. See the [Available Metrics section](./metrics_deployment.md#available-metrics) for the complete list of frontend metrics.
 
-**Component Metrics**: The core Dynamo backend system automatically exposes metrics with the `dynamo_component_*` prefix for all components that use the `DistributedRuntime` framework. These include request counts, processing times, byte transfers, and system uptime metrics. See the [Available Metrics section](../../deploy/metrics/README.md#available-metrics) for the complete list of component metrics.
+**Component Metrics**: The core Dynamo backend system automatically exposes metrics with the `dynamo_component_*` prefix for all components that use the `DistributedRuntime` framework. These include request counts, processing times, byte transfers, and system uptime metrics. See the [Available Metrics section](./metrics_deployment.md#available-metrics) for the complete list of component metrics.
 
-**Specialized Component Metrics**: Components can also expose additional metrics specific to their functionality. For example, a `preprocessor` component exposes metrics with the `dynamo_preprocessor_*` prefix. See the [Available Metrics section](../../deploy/metrics/README.md#available-metrics) for details on specialized component metrics.
+**Specialized Component Metrics**: Components can also expose additional metrics specific to their functionality. For example, a `preprocessor` component exposes metrics with the `dynamo_preprocessor_*` prefix. See the [Available Metrics section](./metrics_deployment.md#available-metrics) for details on specialized component metrics.
 
 ## Coming Soon
 
@@ -49,7 +49,7 @@ This hierarchical structure allows you to create metrics at the appropriate leve
 
 ## Getting Started
 
-For a complete setup guide including Docker Compose configuration, Prometheus setup, and Grafana dashboards, see the [Getting Started section](../../deploy/metrics/README.md#getting-started) in the deploy metrics documentation.
+For a complete setup guide including Docker Compose configuration, Prometheus setup, and Grafana dashboards, see the [Getting Started section](./metrics_deployment.md#getting-started) in the metrics deployment guide.
 
 The quick start includes:
 - Docker Compose setup for Prometheus and Grafana
@@ -59,7 +59,7 @@ The quick start includes:
 
 ## Implementation Examples
 
-See [Implementation Examples](../../deploy/metrics/README.md#implementation-examples) for detailed examples of creating metrics at different hierarchy levels and using dynamic labels.
+See [Implementation Examples](./metrics_deployment.md#implementation-examples) for detailed examples of creating metrics at different hierarchy levels and using dynamic labels.
 
 ### Grafana Dashboards
 
@@ -99,5 +99,5 @@ The metrics system includes a pre-configured Grafana dashboard for visualizing s
 - [Distributed Runtime Architecture](../architecture/distributed_runtime.md)
 - [Dynamo Architecture Overview](../architecture/architecture.md)
 - [Backend Guide](backend.md)
-- [Metrics Implementation Examples](../../deploy/metrics/README.md#implementation-examples)
-- [Complete Metrics Setup Guide](../../deploy/metrics/README.md)
+- [Metrics Implementation Examples](./metrics_deployment.md#implementation-examples)
+- [Complete Metrics Setup Guide](./metrics_deployment.md)

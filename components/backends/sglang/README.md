@@ -46,7 +46,7 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 | Feature             | SGLang | Notes                                                        |
 |---------------------|--------|--------------------------------------------------------------|
 | **WideEP**          | ✅     | Full support on H100s/GB200                                  |
-| **DP Rank Routing** | 🚧     | Direct routing supported. Dynamo KV router does not router to DP worker |
+| **Attention DP**    | 🚧     | Direct routing supported. Dynamo KV router does not router to DP worker |
 | **GB200 Support**   | ✅     |                                                              |
 
 
