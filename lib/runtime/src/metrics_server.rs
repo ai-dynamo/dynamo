@@ -14,6 +14,7 @@
 // limitations under the License.
 
 use crate::config::HealthStatus;
+use crate::logging::make_request_span;
 use crate::logging::TraceParent;
 use crate::metrics::MetricsRegistry;
 use crate::traits::DistributedRuntimeProvider;
@@ -25,8 +26,8 @@ use std::sync::OnceLock;
 use std::time::Instant;
 use tokio::{net::TcpListener, task::JoinHandle};
 use tokio_util::sync::CancellationToken;
-use tracing;
-use tracing::Instrument;
+use tower_http::trace::DefaultMakeSpan;
+use tower_http::trace::TraceLayer;
 
 /// Metrics server information containing socket address and handle
 #[derive(Debug)]
@@ -155,36 +156,28 @@ pub async fn spawn_metrics_server(
             &health_path,
             get({
                 let state = Arc::clone(&server_state);
-                move |tracing_ctx| health_handler(state, "health", tracing_ctx)
+                move || health_handler(state)
             }),
         )
         .route(
             &live_path,
             get({
                 let state = Arc::clone(&server_state);
-                move |tracing_ctx| health_handler(state, "live", tracing_ctx)
+                move || health_handler(state)
             }),
         )
         .route(
             "/metrics",
             get({
                 let state = Arc::clone(&server_state);
-                move |tracing_ctx| metrics_handler(state, "metrics", tracing_ctx)
+                move || metrics_handler(state)
             }),
         )
-        .fallback(|tracing_ctx: TraceParent| {
-            async {
-                tracing::info!("[fallback handler] called");
-                (StatusCode::NOT_FOUND, "Route not found").into_response()
-            }
-            .instrument(tracing::trace_span!(
-                "fallback handler",
-                trace_id = tracing_ctx.trace_id,
-                parent_id = tracing_ctx.parent_id,
-                x_request_id = tracing_ctx.x_request_id,
-                tracestate = tracing_ctx.tracestate
-            ))
-        });
+        .fallback(|| async {
+            tracing::info!("[fallback handler] called");
+            (StatusCode::NOT_FOUND, "Route not found").into_response()
+        })
+        .layer(TraceLayer::new_for_http().make_span_with(make_request_span));
 
     let address = format!("{}:{}", host, port);
     tracing::info!("[spawn_metrics_server] binding to: {}", address);
@@ -220,16 +213,7 @@ pub async fn spawn_metrics_server(
 }
 
 /// Health handler
-#[tracing::instrument(skip_all, level="trace", fields(route= %route,
-						      trace_id = trace_parent.trace_id,
-						      parent_id = trace_parent.parent_id,
-						      x_request_id= trace_parent.x_request_id,
-						      tracestate= trace_parent.tracestate))]
-async fn health_handler(
-    state: Arc<MetricsServerState>,
-    route: &'static str,       // Used for tracing only
-    trace_parent: TraceParent, // Used for tracing only
-) -> impl IntoResponse {
+async fn health_handler(state: Arc<MetricsServerState>) -> impl IntoResponse {
     let (mut healthy, endpoints) = state
         .drt()
         .system_health
@@ -264,16 +248,7 @@ async fn health_handler(
 }
 
 /// Metrics handler with DistributedRuntime uptime
-#[tracing::instrument(skip_all, level="trace", fields(route= %route,
-						      trace_id = trace_parent.trace_id,
-						      parent_id = trace_parent.parent_id,
-						      x_request_id = trace_parent.x_request_id,
-                                                      tracestate = trace_parent.tracestate))]
-async fn metrics_handler(
-    state: Arc<MetricsServerState>,
-    route: &'static str,       // Used for tracing only
-    trace_parent: TraceParent, // Used for tracing only
-) -> impl IntoResponse {
+async fn metrics_handler(state: Arc<MetricsServerState>) -> impl IntoResponse {
     // Update the uptime gauge with current value
     state.update_uptime_gauge();
 

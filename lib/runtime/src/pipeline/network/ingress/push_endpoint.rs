@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::*;
 use crate::config::HealthStatus;
+use crate::logging::TraceParent;
 use crate::protocols::LeaseId;
 use crate::SystemHealth;
 use anyhow::Result;
@@ -26,6 +27,7 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
+use tracing::Instrument;
 
 #[derive(Builder)]
 pub struct PushEndpoint {
@@ -46,18 +48,24 @@ impl PushEndpoint {
     pub async fn start(
         self,
         endpoint: Endpoint,
+        namespace: String,
+        component_name: String,
         endpoint_name: String,
+        instance_id: i64,
         system_health: Arc<Mutex<SystemHealth>>,
     ) -> Result<()> {
         let mut endpoint = endpoint;
 
         let inflight = Arc::new(AtomicU64::new(0));
         let notify = Arc::new(Notify::new());
+        let component_name_local: Arc<String> = Arc::from(component_name);
+        let endpoint_name_local: Arc<String> = Arc::from(endpoint_name);
+        let namespace_local: Arc<String> = Arc::from(namespace);
 
         system_health
             .lock()
             .unwrap()
-            .set_endpoint_health_status(endpoint_name.clone(), HealthStatus::Ready);
+            .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::Ready);
 
         loop {
             let req = tokio::select! {
@@ -85,19 +93,47 @@ impl PushEndpoint {
                 }
 
                 let ingress = self.service_handler.clone();
-                let worker_id = "".to_string();
+                let endpoint_name: Arc<String> = Arc::clone(&endpoint_name_local);
+                let component_name: Arc<String> = Arc::clone(&component_name_local);
+                let namespace: Arc<String> = Arc::clone(&namespace_local);
 
                 // increment the inflight counter
                 inflight.fetch_add(1, Ordering::SeqCst);
                 let inflight_clone = inflight.clone();
                 let notify_clone = notify.clone();
 
+                // Handle headers here for tracing
+
+                let mut traceparent = TraceParent::default();
+
+                if let Some(headers) = req.message.headers.as_ref() {
+                    traceparent = TraceParent::from_headers(headers);
+                }
+
                 tokio::spawn(async move {
-                    tracing::trace!(worker_id, "handling new request");
-                    let result = ingress.handle_payload(req.message.payload).await;
+                    tracing::trace!(instance_id, "handling new request");
+                    let result = ingress
+                        .handle_payload(req.message.payload)
+                        .instrument(
+                            // Create span with trace ids as set
+                            // in headers.
+                            tracing::info_span!(
+                                "handle_payload",
+                                component = component_name.as_ref(),
+                                endpoint = endpoint_name.as_ref(),
+                                namespace = namespace.as_ref(),
+                                instance_id = instance_id,
+                                trace_id = traceparent.trace_id,
+                                parent_id = traceparent.parent_id,
+                                x_request_id = traceparent.x_request_id,
+                                x_dynamo_request_id = traceparent.x_dynamo_request_id,
+                                tracestate = traceparent.tracestate
+                            ),
+                        )
+                        .await;
                     match result {
                         Ok(_) => {
-                            tracing::trace!(worker_id, "request handled successfully");
+                            tracing::trace!(instance_id, "request handled successfully");
                         }
                         Err(e) => {
                             tracing::warn!("Failed to handle request: {:?}", e);
@@ -116,7 +152,7 @@ impl PushEndpoint {
         system_health
             .lock()
             .unwrap()
-            .set_endpoint_health_status(endpoint_name.clone(), HealthStatus::NotReady);
+            .set_endpoint_health_status(endpoint_name_local.as_str(), HealthStatus::NotReady);
 
         // await for all inflight requests to complete if graceful shutdown
         if self.graceful_shutdown {
