@@ -187,7 +187,7 @@ For comprehensive instructions on multinode serving, see the [multinode-examples
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](/deploy/README.md)
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](../deploy/README.md)
 
 ### Client
 
