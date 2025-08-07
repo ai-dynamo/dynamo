@@ -10,6 +10,9 @@ Cargo.toml @ai-dynamo/dynamo-rust-codeowners
 # Python Libraries
 *.py @nnshah1 @tanmayv25 @piotrm-nvidia @ptarasiewiczNV @ryanolson @grahamking @paulhendricks @biswapanda @tmonty12 @guanluo @rmccorm4 @tedzhouhk @alec-flowers @kkranen @ai-dynamo/Devops @jthomson04 @ishandhanani @PeaBrane
 
+# TensorRT-LLM backend
+/components/backends/trtllm/ @tanmayv25 @rmccorm4 @richardhuo-nv  @alec-flowers @nnshah1 @indrajit96 @krishung5 @whoisj
+
 # Container/Environments
 /container/ @rmccorm4 @tanmayv25 @richardhuo-nv @ptarasiewiczNV @ishandhanani @alec-flowers @nnshah1 @ai-dynamo/Devops
 
