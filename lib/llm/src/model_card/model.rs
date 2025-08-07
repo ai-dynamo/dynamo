@@ -244,11 +244,6 @@ impl ModelDeploymentCard {
         }
     }
 
-    /// Register runtime configuration data that was computed during engine initialization
-    pub fn register_runtime_config(&mut self, runtime_config: ModelRuntimeConfig) {
-        self.runtime_config = Some(runtime_config);
-    }
-
     /// Update an existing runtime config or create a new one if none exists
     pub fn update_runtime_config<F>(&mut self, updater: F)
     where
@@ -257,25 +252,6 @@ impl ModelDeploymentCard {
         let mut config = self.runtime_config.take().unwrap_or_default();
         updater(&mut config);
         self.runtime_config = Some(config);
-    }
-
-    pub fn runtime_config(&self) -> Option<&ModelRuntimeConfig> {
-        self.runtime_config.as_ref()
-    }
-
-    /// Get total number of KV blocks
-    pub fn total_kv_blocks(&self) -> Option<u64> {
-        self.runtime_config.as_ref()?.total_kv_blocks
-    }
-
-    /// Get maximum number of sequences that can be batched together
-    pub fn max_num_seqs(&self) -> Option<u64> {
-        self.runtime_config.as_ref()?.max_num_seqs
-    }
-
-    /// Get GPU memory utilization percentage configured
-    pub fn gpu_memory_utilization(&self) -> Option<u64> {
-        self.runtime_config.as_ref()?.gpu_memory_utilization
     }
 
     /// Move the files this MDC uses into the NATS object store.

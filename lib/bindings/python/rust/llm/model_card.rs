@@ -48,14 +48,16 @@ impl ModelDeploymentCard {
         Ok(json)
     }
 
+    #[setter]
     fn register_runtime_config(&mut self, runtime_config: ModelRuntimeConfig) {
-        self.inner.register_runtime_config(runtime_config.inner);
+        self.inner.runtime_config = Some(runtime_config.inner);
     }
 
     #[getter]
     fn runtime_config(&self) -> Option<ModelRuntimeConfig> {
         self.inner
-            .runtime_config()
+            .runtime_config
+            .as_ref()
             .map(|config| ModelRuntimeConfig {
                 inner: config.clone(),
             })
@@ -63,17 +65,29 @@ impl ModelDeploymentCard {
 
     #[getter]
     fn total_kv_blocks(&self) -> Option<u64> {
-        self.inner.total_kv_blocks()
+        self.inner
+            .runtime_config
+            .as_ref()
+            .map(|config| config.total_kv_blocks)
+            .flatten()
     }
 
     #[getter]
     fn max_num_seqs(&self) -> Option<u64> {
-        self.inner.max_num_seqs()
+        self.inner
+            .runtime_config
+            .as_ref()
+            .map(|config| config.max_num_seqs)
+            .flatten()
     }
 
     #[getter]
     fn gpu_memory_utilization(&self) -> Option<u64> {
-        self.inner.gpu_memory_utilization()
+        self.inner
+            .runtime_config
+            .as_ref()
+            .map(|config| config.gpu_memory_utilization)
+            .flatten()
     }
 }
 
@@ -92,17 +106,19 @@ impl ModelRuntimeConfig {
         }
     }
 
-    fn with_total_kv_blocks(&mut self, total_kv_blocks: u64) {
-        self.inner.with_total_kv_blocks(total_kv_blocks);
+    #[setter]
+    fn set_total_kv_blocks(&mut self, total_kv_blocks: u64) {
+        self.inner.total_kv_blocks = Some(total_kv_blocks);
     }
 
-    fn with_max_num_seqs(&mut self, max_num_seqs: u64) {
-        self.inner.with_max_num_seqs(max_num_seqs);
+    #[setter]
+    fn set_max_num_seqs(&mut self, max_num_seqs: u64) {
+        self.inner.max_num_seqs = Some(max_num_seqs);
     }
 
-    fn with_gpu_memory_utilization(&mut self, gpu_memory_utilization: u64) {
-        self.inner
-            .with_gpu_memory_utilization(gpu_memory_utilization);
+    #[setter]
+    fn set_gpu_memory_utilization(&mut self, gpu_memory_utilization: u64) {
+        self.inner.gpu_memory_utilization = Some(gpu_memory_utilization);
     }
 
     fn set_engine_specific(&mut self, key: &str, value: String) -> PyResult<()> {

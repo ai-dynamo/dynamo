@@ -230,7 +230,7 @@ fn register_runtime_config<'p>(
             .map_err(to_pyerr)?;
 
         // Update the card
-        card.register_runtime_config(runtime_config);
+        card.runtime_config = Some(runtime_config);
 
         // Publish the card
         card_store

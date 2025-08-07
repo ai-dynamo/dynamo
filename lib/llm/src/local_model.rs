@@ -345,7 +345,7 @@ impl LocalModel {
         endpoint: &Endpoint,
         runtime_config: ModelRuntimeConfig,
     ) -> anyhow::Result<()> {
-        self.card.register_runtime_config(runtime_config);
+        self.card.runtime_config = Some(runtime_config);
 
         // Update the card in etcd if we're attached
         if let Some(etcd_client) = endpoint.drt().etcd_client() {

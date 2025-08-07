@@ -391,14 +391,14 @@ async def register_runtime_config_once_engine_ready(
 
             # Use actual computed values from SGLang engine
             if server_info.get("max_total_num_tokens") is not None:
-                runtime_config.with_total_kv_blocks(server_info["max_total_num_tokens"])
+                runtime_config.total_kv_blocks = server_info["max_total_num_tokens"]
 
             if server_info.get("max_running_requests") is not None:
-                runtime_config.with_max_num_seqs(server_info["max_running_requests"])
+                runtime_config.max_num_seqs = server_info["max_running_requests"]
 
             if server_info.get("mem_fraction_static") is not None:
                 gpu_mem_percentage = int(server_info["mem_fraction_static"] * 100)
-                runtime_config.with_gpu_memory_utilization(gpu_mem_percentage)
+                runtime_config.gpu_memory_utilization = gpu_mem_percentage
 
             # Register the runtime config
             await register_runtime_config(endpoint, model_name, runtime_config)

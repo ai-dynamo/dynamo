@@ -168,17 +168,13 @@ async def init(runtime: DistributedRuntime, config: Config):
         runtime_config = ModelRuntimeConfig()
         # NOTE: This number needs to be queried directly from the engine,
         # since this will compute it if no value was set by the user
-        runtime_config.with_total_kv_blocks(
-            engine_client.engine.cache_config.num_gpu_blocks
-        )
-        runtime_config.with_max_num_seqs(
-            engine_client.vllm_config.scheduler_config.max_num_seqs
-        )
+        runtime_config.total_kv_blocks = engine_client.engine.cache_config.num_gpu_blocks
+        runtime_config.max_num_seqs = engine_client.vllm_config.scheduler_config.max_num_seqs
 
         gpu_mem_integer = int(
             engine_client.engine.cache_config.gpu_memory_utilization * 100
         )
-        runtime_config.with_gpu_memory_utilization(gpu_mem_integer)
+        runtime_config.gpu_memory_utilization = gpu_mem_integer
 
         await register_runtime_config(generate_endpoint, config.model, runtime_config)
 
