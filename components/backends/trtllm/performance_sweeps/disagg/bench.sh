@@ -8,27 +8,26 @@ trap 'echo "Error occurred at line $LINENO"; exit 1' ERR
 # 添加参数检查
 if [ "$#" -lt 6 ]; then
     echo "Error: Missing required arguments"
-    echo "Usage: $0 model_name dataset_file multi_round concurrency_list streaming log_path"
+    echo "Usage: $0 model_name multi_round concurrency_list streaming log_path total_gpus artifacts_root_dir model_path isl osl"
     exit 1
 fi
 
 
 model=$1
-dataset_file=$2
-multi_round=$3
-num_gen_servers=$4
-concurrency_list=$5
-streaming=$6
-log_path=$7
-total_gpus=$8
-artifacts_root_dir=$9
-model_path=${10}
-isl=${11}
-osl=${12}
+multi_round=$2
+num_gen_servers=$3
+concurrency_list=$4
+streaming=$5
+log_path=$6
+total_gpus=$7
+artifacts_root_dir=$8
+model_path=$9
+isl=${10}
+osl=${11}
 
 
 if [ $# -lt 12 ]; then
-  echo "Usage: $0 $model $dataset_file $multi_round $num_gen_servers $concurrency_list $streaming $log_path $total_gpus $artifacts_root_dir $model_path $isl"
+  echo "Usage: $0 $model $multi_round $num_gen_servers $concurrency_list $streaming $log_path $total_gpus $artifacts_root_dir $model_path $isl $osl"
   exit 1
 fi
 
@@ -134,6 +133,8 @@ curl -v  -w "%{http_code}" "${hostname}:${port}/v1/chat/completions" \
   "max_tokens": 30
 }'
 
+pip install genai-perf
+
 cp ${log_path}/output_workers.log ${log_path}/workers_start.log
 echo "Starting benchmark..."
 for concurrency in ${concurrency_list}; do
@@ -198,11 +199,11 @@ fi
 
 echo "Benchmark done, gracefully shutting down server and workers..."
 kill -9 $(ps aux | grep '[s]tart_server.sh' | awk '{print $2}') >/dev/null 2>&1 || true
-kill -9 $(ps aux | grep '[s]tart_worker_e2e.sh' | awk '{print $2}') >/dev/null 2>&1 || true
+kill -9 $(ps aux | grep '[s]tart_worker.sh' | awk '{print $2}') >/dev/null 2>&1 || true
 kill -9 $(ps aux | grep '[t]rtllm-serve' | awk '{print $2}') >/dev/null 2>&1 || true
-sleep 20  # 给进程一些时间来清理
+sleep 20  # Give processes some time to clean up
 
-# 检查是否还有残留进程
+# Check if there are any remaining processes
 if pgrep -f "trtllm-serve"; then
     echo "Warning: Some processes may still be running"
 else

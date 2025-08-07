@@ -149,33 +149,21 @@ PREFILL_COUNT=$(grep 'prefill_count:' "${full_logdir}/instance_config.yaml" | aw
 echo "Prefill Count: $PREFILL_COUNT"
 
 # start the prefill workers
-echo "Running Prefill Worker: 0"
-echo "Running Prefill Nodes: ${nodes[0]}"
-srun -l --container-name=${CONTAINER_NAME} \
-        --container-mounts=${container_mounts} \
-    --mpi=pmix --overlap -w ${nodes[0]} \
-    --oversubscribe \
-    --overlap \
-    --ntasks 4 \
-    --nodes 1 \
-    bash ${SCRIPTS_DIR}/disagg/start_worker_e2e.sh ${full_logdir}/prefill_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${SERVED_MODEL_NAME} ${MODEL_PATH} 'prefill' &> ${full_logdir}/output_workers.log &
-
 prefill_pids=()
-for ((i=2; i<=$PREFILL_COUNT; i++)); do
+for ((i=1; i<=PREFILL_COUNT; i++)); do
   echo "Running Prefill Worker: ${i}"
-  node_idx=$(( (i-2) % (${#nodes[@]}-1) + 1 ))  # Cycles over non-head nodes
+  node_idx=$(( (i-1) % ${#nodes[@]}))
   echo "Running Prefill Nodes: ${nodes[node_idx]}"
   srun -l --container-name=${CONTAINER_NAME} \
       --container-mounts=${container_mounts} \
-      --mpi=pmix -w ${nodes[node_idx]} \
+      --mpi=pmix --overlap -w ${nodes[node_idx]} \
       --oversubscribe \
       --overlap \
       --ntasks 4 \
       --nodes 1 \
-      bash ${SCRIPTS_DIR}/disagg/start_worker_e2e.sh ${full_logdir}/prefill_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${SERVED_MODEL_NAME} ${MODEL_PATH} 'prefill' &> ${full_logdir}/output_workers.log &
+      bash ${SCRIPTS_DIR}/disagg/start_worker.sh ${full_logdir}/prefill_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${SERVED_MODEL_NAME} ${MODEL_PATH} 'prefill' &> ${full_logdir}/output_workers.log &
   prefill_pids+=($!)
 done
-
 
 DECODE_COUNT=$(grep 'decode_count:' "${full_logdir}/instance_config.yaml" | awk '{print $2}')
 echo "Decode Count: $DECODE_COUNT"
@@ -202,17 +190,17 @@ for ((i=1; i<=DECODE_COUNT; i++)); do
       --ntasks $gen_tp_size \
       --oversubscribe \
       --overlap \
-      bash ${SCRIPTS_DIR}/disagg/start_worker_e2e.sh ${full_logdir}/decode_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${SERVED_MODEL_NAME} ${MODEL_PATH} 'decode' &> ${full_logdir}/output_workers.log &
+      bash ${SCRIPTS_DIR}/disagg/start_worker.sh ${full_logdir}/decode_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${SERVED_MODEL_NAME} ${MODEL_PATH} 'decode' &> ${full_logdir}/output_workers.log &
 done
 
 total_gpus=$((ctx_gpus + gen_gpus))
 
 # start the loadgen
-srun -l --container-image=${perf_container_image} \
+srun -l --container-name=${CONTAINER_NAME} \
         --container-mounts=${container_mounts},${artifacts_root_dir}:${artifacts_root_dir} \
         --mpi=pmix --overlap -N 1 -n 1 \
 	-w ${nodes[0]} \
-        bash ${SCRIPTS_DIR}/disagg/bench_e2e.sh ${SERVED_MODEL_NAME} ${dataset_file} ${MULTI_ROUND} ${num_gen_servers} "${concurrency_list}" ${STREAMING} ${full_logdir} ${total_gpus} ${artifacts_root_dir} ${MODEL_PATH} ${ISL} ${OSL} > ${full_logdir}/bench.log 2>&1 
+        bash ${SCRIPTS_DIR}/disagg/bench.sh ${SERVED_MODEL_NAME} ${MULTI_ROUND} ${num_gen_servers} "${concurrency_list}" ${STREAMING} ${full_logdir} ${total_gpus} ${artifacts_root_dir} ${MODEL_PATH} ${ISL} ${OSL} > ${full_logdir}/bench.log 2>&1 
 
 
 # srun -l --container-name=${CONTAINER_NAME} \
