@@ -67,8 +67,8 @@ RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.
     rm rustup-init && \
     chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
-RUN apt-get update -y && \
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+RUN apt-get update -y \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         # NIXL build dependencies
         autoconf \
         automake \
@@ -91,9 +91,9 @@ RUN apt-get update -y && \
         # Rust build dependencies
         clang \
         libclang-dev \
-        protobuf-compiler && \
-        apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+        protobuf-compiler \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
 
 # Download external dependencies in parallel for better performance
 ENV NATS_VERSION="v2.10.28"
