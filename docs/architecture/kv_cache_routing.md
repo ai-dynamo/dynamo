@@ -107,7 +107,7 @@ Further details can be found for: [TRT-LLM](https://developer.nvidia.com/blog/in
           |                  |                  |
           | Cached: 2 blocks | Cached: 5 blocks | Cached: 8 blocks
           | Prefill: 8 blks  | Prefill: 5 blks  | Prefill: 2 blks
-          | Decode: 10 blks  | Decode: 7 blks   | Decode: 9 blks
+          | Decode: 10 blks  | Decode: 5 blks   | Decode: 9 blks
           v                  v                  v
    +----------------+  +----------------+  +----------------+
    |   Worker 1     |  |   Worker 2     |  |   Worker 3     |
@@ -137,7 +137,7 @@ The router selects the worker with the lowest cost. When `router_temperature` is
 
 Example calculation with `overlap_score_weight = 1.0`:
 - Worker 1: cost = 1.0 * 8 + 10 = 18
-- **Worker 2: cost = 1.0 * 5 + 7 = 12** (selected - lowest cost)
+- **Worker 2: cost = 1.0 * 5 + 5 = 10** (selected - lowest cost)
 - Worker 3: cost = 1.0 * 2 + 9 = 11
 
 ## Events
