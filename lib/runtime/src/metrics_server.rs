@@ -71,7 +71,7 @@ pub struct MetricsServerState {
     // global drt registry is for printing out the entire Prometheus format output
     root_drt: Arc<crate::DistributedRuntime>,
     start_time: OnceLock<Instant>,
-    uptime_gauge: Arc<prometheus::Gauge>,
+    uptime_gauge: prometheus::Gauge,
 }
 
 impl MetricsServerState {
