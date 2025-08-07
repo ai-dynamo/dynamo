@@ -160,6 +160,7 @@ mod integration_tests {
                     .await
                     .map_err(|e| anyhow::anyhow!("Failed to build LocalModel: {}", e))?,
             ),
+            is_static: false,
         };
 
         Ok((distributed_runtime, engine_config))
