@@ -746,16 +746,11 @@ pub(crate) fn load_gguf(gguf_file: &Path) -> anyhow::Result<Content> {
 }
 
 fn capitalize(s: &str) -> String {
-    s.chars()
-        .enumerate()
-        .map(|(i, c)| {
-            if i == 0 {
-                c.to_uppercase().to_string()
-            } else {
-                c.to_lowercase().to_string()
-            }
-        })
-        .collect()
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => first.to_uppercase().collect::<String>() + &chars.as_str().to_lowercase(),
+    }
 }
 
 impl ModelInfoType {
