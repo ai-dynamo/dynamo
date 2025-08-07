@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use clap::ValueEnum;
+use dynamo_llm::entrypoint::input::Input;
 use dynamo_llm::entrypoint::RouterConfig;
 use dynamo_llm::kv_router::KvRouterConfig;
 use dynamo_llm::local_model::LocalModel;
@@ -73,7 +74,6 @@ pub struct Flags {
 
     /// Maximum number of batched tokens for KV routing
     /// Needed for informing the KV router
-    /// TODO: derive from vllm args
     /// NOTE: this is not actually used for now
     #[arg(long, default_value = "8192")]
     pub max_num_batched_tokens: Option<u32>,
@@ -102,10 +102,11 @@ pub struct Flags {
     #[arg(long)]
     pub context_length: Option<u32>,
 
-    /// KV cache block size (vllm only)
+    /// KV cache block size (is this used? Maybe by Python vllm worker?)
     #[arg(long)]
     pub kv_cache_block_size: Option<u32>,
 
+    /// Mocker engine only.
     /// Additional engine-specific arguments from a JSON file.
     /// Contains a mapping of parameter names to values.
     #[arg(long)]
@@ -127,6 +128,12 @@ pub struct Flags {
     #[arg(long, value_parser = clap::value_parser!(u32).range(0..1024))]
     pub migration_limit: Option<u32>,
 
+    /// Make this a static worker.
+    /// Do not connect to or advertise self on etcd.
+    /// in=dyn://x.y.z only
+    #[arg(long, default_value = "false")]
+    pub static_worker: bool,
+
     /// Everything after a `--`.
     /// These are the command line arguments to the python engine when using `pystr` or `pytok`.
     #[arg(index = 2, last = true, hide = true, allow_hyphen_values = true)]
@@ -136,9 +143,23 @@ pub struct Flags {
 impl Flags {
     /// For each Output variant, check if it would be able to run.
     /// This takes validation out of the main engine creation path.
-    pub fn validate(&self, local_model: &LocalModel, out_opt: &Output) -> anyhow::Result<()> {
+    pub fn validate(
+        &self,
+        local_model: &LocalModel,
+        in_opt: &Input,
+        out_opt: &Output,
+    ) -> anyhow::Result<()> {
+        match in_opt {
+            Input::Endpoint(_) => {}
+            _ => {
+                if self.static_worker {
+                    anyhow::bail!("'--static-worker true' only applies to in=dyn://x.y.z");
+                }
+            }
+        }
+
         match out_opt {
-            Output::Dynamic => {
+            Output::Auto => {
                 if self.context_length.is_some() {
                     anyhow::bail!("'--context-length' flag should only be used on the worker node, not on the ingress");
                 }
@@ -147,6 +168,19 @@ impl Flags {
                 }
                 if self.migration_limit.is_some() {
                     anyhow::bail!("'--migration-limit' flag should only be used on the worker node, not on the ingress");
+                }
+            }
+            Output::Static(_) => {
+                if self.model_name.is_none()
+                    || self
+                        .model_path_pos
+                        .as_ref()
+                        .or(self.model_path_flag.as_ref())
+                        .is_none()
+                {
+                    anyhow::bail!(
+                        "out=dyn://<path> requires --model-name and --model-path, which are the name and path on disk of the model we expect to serve."
+                    );
                 }
             }
             Output::EchoFull => {}
@@ -169,6 +203,16 @@ impl Flags {
                 // nothing to check here
             }
         }
+
+        match out_opt {
+            Output::Mocker => {}
+            _ => {
+                if self.extra_engine_args.is_some() {
+                    anyhow::bail!("`--extra-engine-args` is only for the mocker engine");
+                }
+            }
+        }
+
         Ok(())
     }
 

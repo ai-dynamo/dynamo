@@ -12,7 +12,7 @@ ARG RUNTIME_IMAGE="nvcr.io/nvidia/cuda"
 ARG RUNTIME_IMAGE_TAG="12.8.1-runtime-ubuntu24.04"
 
 # Make sure to update the dependency version in pyproject.toml when updating this
-ARG VLLM_REF="v0.10.0"
+ARG VLLM_REF="f4135232b9a8c4845f8961fb1cd17581c56ae2ce"
 ARG TORCH_BACKEND="cu128"
 
 # Match 0.10.0 vLLM release

@@ -41,8 +41,6 @@ jobs:
       matrix: { dir: ['.', 'lib/bindings/python', 'lib/runtime/examples'] }
     permissions:
       contents: read
-    env:
-      RUSTC_WRAPPER: "sccache"
     steps:
     - uses: actions/checkout@v4
     - name: Set up system dependencies
@@ -50,13 +48,20 @@ jobs:
         sudo apt-get update -y
         sudo apt-get install -y protobuf-compiler
 
-    - name: Cache sccache artifacts
-      uses: actions/cache@v4
-      with:
-        path: ~/.cache/sccache/
-        key: ${{ runner.os }}-sccache-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: ${{ runner.os }}-sccache-${{ matrix.dir }}-
+    - name: Free runner disk space
+      run: |
+        echo "Disk space before:"
+        df -h
+        rm -rf \
+          /host_usr/share/dotnet /host_usr/local/lib/android /opt/ghc \
+          /host_usr/local/share/powershell /host_usr/share/swift /host_usr/local/.ghcup \
+          /host_usr/lib/jvm /opt/hostedtoolcache
+        echo "Disk space after:"
+        df -h
 
+    # TODO: Caching target/ dir handles most of the build caching improvements
+    #       currently, so sccache artifacts are mostly duplicates wasting disk space.
+    #       Revisit this to see if sccache can improve current caching behavior.
     # TODO: Consider single target/ directory for all subdirectories/crates instead.
     - name: Cache cargo artifacts
       uses: actions/cache@v4
@@ -69,15 +74,6 @@ jobs:
           ${{ matrix.dir }}/target/
         key: ${{ runner.os }}-cargo-${{ matrix.dir }}-${{ hashFiles('**/Cargo.lock') }}
         restore-keys: ${{ runner.os }}-cargo-${{ matrix.dir }}-
-
-    - name: Install sccache
-      run: |
-        SCCACHE_VERSION="0.10.0"
-        SCCACHE_FILE="sccache-v${SCCACHE_VERSION}-$(uname -m)-unknown-linux-musl"
-        SCCACHE_URL="https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/${SCCACHE_FILE}.tar.gz"
-        curl -L "${SCCACHE_URL}" | tar xz
-        mv ${SCCACHE_FILE}/sccache /usr/local/bin/sccache
-        chmod +x /usr/local/bin/sccache
 
     - name: Install Rust in dev environment
       # Install Rust only to run GitHub Local Actions in (dev environment) using the `ACT` environment variable.
@@ -112,7 +108,3 @@ jobs:
       working-directory: ${{ matrix.dir }}
       # NOTE: --all-targets doesn't run doc tests
       run: cargo test --locked --all-targets
-
-    - name: Run sccache stat for check
-      shell: bash
-      run: sccache --show-stats
