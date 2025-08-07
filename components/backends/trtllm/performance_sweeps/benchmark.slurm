@@ -27,16 +27,8 @@ MULTI_ROUND="${MULTI_ROUND:-8}"
 
 # set MOUNT_DIR
 MOUNT_DIR="${MOUNT_DIR:-${PWD}}"
-
-WORK_DIR=${MOUNT_DIR}
-LOG_DIR=$WORK_DIR/${ISL}-${OSL}-$(date +%Y%m%d_%H%M%S)
-
-
 CONTAINER_NAME=disaggr-test
-SCRIPTS_DIR=${WORK_DIR}/
-set_clock_cmd="bash ${SCRIPTS_DIR}/set_clock.sh"
-mkdir -p ${LOG_DIR}
-echo "trying to submit job"
+
 
 STREAMING=true
 CTX_GPU_FRAC=0.75
@@ -61,6 +53,13 @@ eplb_num_slots=${12}
 mtp_size=${13}
 concurrency_list=${14}
 kind=${15}
+
+WORK_DIR=${MOUNT_DIR}
+LOG_DIR=$WORK_DIR/${kind}-${ISL}-${OSL}-$(date +%Y%m%d_%H%M%S)
+SCRIPTS_DIR=${WORK_DIR}/
+set_clock_cmd="bash ${SCRIPTS_DIR}/set_clock.sh"
+mkdir -p ${LOG_DIR}
+echo "trying to submit job"
 
 sub_dir=${LOG_DIR}/ctx${num_ctx_servers}_gen${num_gen_servers}_dep${gen_tp_size}_batch${gen_batch_size}_eplb${eplb_num_slots}_mtp${mtp_size}
 
