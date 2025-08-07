@@ -174,4 +174,11 @@ else
     python -m pip install -v .
 fi
 
+if [ "$ARCH" = "amd64" ]; then
+    # NOTE: PyTorch 2.8.0 compatibility issue
+    # PyTorch 2.8.0 causes "RuntimeError: operator torchvision::nms does not exist" error.
+    # Temporarily pinning to PyTorch 2.7.1 until this compatibility issue is resolved.
+    uv pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu128
+fi
+
 echo "vllm installation completed successfully"
