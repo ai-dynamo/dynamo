@@ -13,7 +13,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use anyhow::Ok;
+use anyhow::{Ok, Result};
 
 use dynamo_llm::model_card::model::{ModelDeploymentCard, PromptContextMixin};
 use dynamo_llm::preprocessor::prompt::PromptFormatter;
@@ -49,7 +49,7 @@ use std::path::PathBuf;
 ///
 /// - Returns an error if `HF_TOKEN` environment variable is not set
 /// - Returns an error if `HF_TOKEN` environment variable is empty or whitespace-only
-fn get_hf_token() -> anyhow::Result<String> {
+fn get_hf_token() -> Result<String> {
     let token = std::env::var("HF_TOKEN")
         .map_err(|_| anyhow::anyhow!("HF_TOKEN environment variable is not set"))?;
 
@@ -57,7 +57,7 @@ fn get_hf_token() -> anyhow::Result<String> {
         anyhow::bail!("HF_TOKEN environment variable is empty");
     }
 
-    std::result::Result::Ok(token)
+    Ok(token)
 }
 
 async fn make_mdc_from_repo(
