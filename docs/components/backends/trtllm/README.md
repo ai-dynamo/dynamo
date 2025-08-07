@@ -49,12 +49,12 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 
 | Feature | TensorRT-LLM | Notes |
 |---------|--------------|-------|
-| [**Disaggregated Serving**](../../../docs/architecture/disagg_serving.md) | ✅ |  |
-| [**Conditional Disaggregation**](../../../docs/architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
-| [**KV-Aware Routing**](../../../docs/architecture/kv_cache_routing.md) | ✅ |  |
-| [**SLA-Based Planner**](../../../docs/architecture/sla_planner.md) | 🚧 | Planned |
-| [**Load Based Planner**](../../../docs/architecture/load_planner.md) | 🚧 | Planned |
-| [**KVBM**](../../../docs/architecture/kvbm_architecture.md) | 🚧 | Planned |
+| [**Disaggregated Serving**](../../../architecture/disagg_serving.md) | ✅ |  |
+| [**Conditional Disaggregation**](../../../architecture/disagg_serving.md#conditional-disaggregation) | 🚧 | Not supported yet |
+| [**KV-Aware Routing**](../../../architecture/kv_cache_routing.md) | ✅ |  |
+| [**SLA-Based Planner**](../../../architecture/sla_planner.md) | 🚧 | Planned |
+| [**Load Based Planner**](../../../architecture/load_planner.md) | 🚧 | Planned |
+| [**KVBM**](../../../architecture/kvbm_architecture.md) | 🚧 | Planned |
 
 ### Large Scale P/D and WideEP Features
 
@@ -187,7 +187,7 @@ For comprehensive instructions on multinode serving, see the [multinode-examples
 
 ### Kubernetes Deployment
 
-For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](../deploy/README.md)
+For complete Kubernetes deployment instructions, configurations, and troubleshooting, see [TensorRT-LLM Kubernetes Deployment Guide](deploy/README.md)
 
 ### Client
 
