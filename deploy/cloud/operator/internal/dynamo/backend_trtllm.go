@@ -10,6 +10,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 type TRTLLMBackend struct{}
@@ -20,12 +21,24 @@ func (b *TRTLLMBackend) UpdateContainer(container *corev1.Container, numberOfNod
 		return
 	}
 
-	// Remove probes for multinode leader and worker
-	if role == RoleLeader || role == RoleWorker {
+	// Configure probes for multinode deployments
+	if role == RoleWorker {
+		// For workers: remove liveness and startup probes, set readiness to check SSH port
 		container.LivenessProbe = nil
-		container.ReadinessProbe = nil
 		container.StartupProbe = nil
+		container.ReadinessProbe = &corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				TCPSocket: &corev1.TCPSocketAction{
+					Port: intstr.FromInt(commonconsts.MpiRunSshPort),
+				},
+			},
+			InitialDelaySeconds: 20,
+			PeriodSeconds:       20,
+			TimeoutSeconds:      5,
+			FailureThreshold:    10,
+		}
 	}
+	// For leaders: leave all probes untouched
 
 	// Add SSH keypair volume mount for multinode deployments
 	b.addSSHVolumeMount(container)
@@ -94,7 +107,7 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 		"cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys",
 		"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
 		"chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys",
-		"printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config",
+		fmt.Sprintf("printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort %d\\n' > ~/.ssh/config", commonconsts.MpiRunSshPort),
 	}
 
 	// Calculate total number of GPUs across all nodes
@@ -108,9 +121,10 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	// Generate environment variable flags for mpirun
 	envVarsStr := generateEnvVarFlags(container.Env)
 
-	mpirunCmd := fmt.Sprintf("mpirun --oversubscribe -n %d -H %s --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" %s %s",
+	mpirunCmd := fmt.Sprintf("mpirun --oversubscribe -n %d -H %s --mca pml ob1 --mca plm_rsh_args \"-p %d -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" %s %s",
 		totalGPUs,
 		workerHosts,
+		commonconsts.MpiRunSshPort,
 		envVarsStr,
 		wrappedCommand)
 
@@ -133,13 +147,13 @@ func (b *TRTLLMBackend) setupWorkerContainer(container *corev1.Container) {
 		"cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys",
 		"chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys",
 		"chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys",
-		"printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config",
+		fmt.Sprintf("printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort %d\\n' > ~/.ssh/config", commonconsts.MpiRunSshPort),
 		// Generate host keys in user writable directory
 		"ssh-keygen -t rsa -f ~/.ssh/host_keys/ssh_host_rsa_key -N ''",
 		"ssh-keygen -t ecdsa -f ~/.ssh/host_keys/ssh_host_ecdsa_key -N ''",
 		"ssh-keygen -t ed25519 -f ~/.ssh/host_keys/ssh_host_ed25519_key -N ''",
 		// Create SSH daemon config to use custom host keys location and non-privileged port
-		"printf 'Port 2222\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile ~/.ssh/run/sshd.pid\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile ~/.ssh/authorized_keys\\n' > ~/.ssh/sshd_config",
+		fmt.Sprintf("printf 'Port %d\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile ~/.ssh/run/sshd.pid\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile ~/.ssh/authorized_keys\\n' > ~/.ssh/sshd_config", commonconsts.MpiRunSshPort),
 		"mkdir -p /run/sshd",
 		"/usr/sbin/sshd -D -f ~/.ssh/sshd_config",
 	}

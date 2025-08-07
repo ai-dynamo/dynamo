@@ -8,6 +8,7 @@ import (
 	"github.com/ai-dynamo/dynamo/deploy/cloud/operator/api/v1alpha1"
 	commonconsts "github.com/ai-dynamo/dynamo/deploy/cloud/operator/internal/consts"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
 func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
@@ -21,7 +22,10 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 		expectedCommand         []string
 		expectedArgs            []string
 		expectedEnv             []corev1.EnvVar
-		expectProbesRemoved     bool
+		expectLivenessRemoved   bool
+		expectReadinessRemoved  bool
+		expectStartupRemoved    bool
+		expectedReadinessProbe  *corev1.Probe
 	}{
 		{
 			name:                    "Single node - no changes",
@@ -33,7 +37,10 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 			expectedCommand:         []string{},
 			expectedArgs:            []string{"python3", "--model", "test"},
 			expectedEnv:             []corev1.EnvVar{},
-			expectProbesRemoved:     false,
+			expectLivenessRemoved:   false,
+			expectReadinessRemoved:  false,
+			expectStartupRemoved:    false,
+			expectedReadinessProbe:  nil,
 		},
 		{
 			name:                    "Multinode leader with GPU resources",
@@ -57,7 +64,10 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 			expectedEnv: []corev1.EnvVar{
 				{Name: "OMPI_MCA_orte_keep_fqdn_hostnames", Value: "1"},
 			},
-			expectProbesRemoved: true,
+			expectLivenessRemoved:  false,
+			expectReadinessRemoved: false,
+			expectStartupRemoved:   false,
+			expectedReadinessProbe: nil,
 		},
 		{
 			name:                    "Multinode worker",
@@ -73,7 +83,20 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 			expectedEnv: []corev1.EnvVar{
 				{Name: "OMPI_MCA_orte_keep_fqdn_hostnames", Value: "1"},
 			},
-			expectProbesRemoved: true,
+			expectLivenessRemoved:  true,
+			expectReadinessRemoved: false,
+			expectStartupRemoved:   true,
+			expectedReadinessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					TCPSocket: &corev1.TCPSocketAction{
+						Port: intstr.FromInt(commonconsts.MpiRunSshPort),
+					},
+				},
+				InitialDelaySeconds: 20,
+				PeriodSeconds:       20,
+				TimeoutSeconds:      5,
+				FailureThreshold:    10,
+			},
 		},
 		{
 			name:                    "Multinode leader with LWS deployment",
@@ -97,7 +120,10 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 			expectedEnv: []corev1.EnvVar{
 				{Name: "OMPI_MCA_orte_keep_fqdn_hostnames", Value: "1"},
 			},
-			expectProbesRemoved: true,
+			expectLivenessRemoved:  false,
+			expectReadinessRemoved: false,
+			expectStartupRemoved:   false,
+			expectedReadinessProbe: nil,
 		},
 	}
 
@@ -114,88 +140,145 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 			// Call UpdateContainer
 			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, tt.component, tt.multinodeDeploymentType, "test-service")
 
-			// Check volume mounts
-			if len(container.VolumeMounts) != len(tt.expectedVolumeMounts) {
-				t.Errorf("UpdateContainer() volume mounts count = %d, want %d", len(container.VolumeMounts), len(tt.expectedVolumeMounts))
-				return
-			}
-
-			for i, expectedVolumeMount := range tt.expectedVolumeMounts {
-				actualVolumeMount := container.VolumeMounts[i]
-				if actualVolumeMount.Name != expectedVolumeMount.Name {
-					t.Errorf("UpdateContainer() volume mount[%d].Name = %s, want %s", i, actualVolumeMount.Name, expectedVolumeMount.Name)
-				}
-				if actualVolumeMount.MountPath != expectedVolumeMount.MountPath {
-					t.Errorf("UpdateContainer() volume mount[%d].MountPath = %s, want %s", i, actualVolumeMount.MountPath, expectedVolumeMount.MountPath)
-				}
-				if actualVolumeMount.ReadOnly != expectedVolumeMount.ReadOnly {
-					t.Errorf("UpdateContainer() volume mount[%d].ReadOnly = %t, want %t", i, actualVolumeMount.ReadOnly, expectedVolumeMount.ReadOnly)
-				}
-			}
-
-			// Check command
-			if len(container.Command) != len(tt.expectedCommand) {
-				t.Errorf("UpdateContainer() command length = %d, want %d", len(container.Command), len(tt.expectedCommand))
-				return
-			}
-
-			for i, expectedCmd := range tt.expectedCommand {
-				if container.Command[i] != expectedCmd {
-					t.Errorf("UpdateContainer() command[%d] = %s, want %s", i, container.Command[i], expectedCmd)
-				}
-			}
-
-			// Check args
-			if len(container.Args) != len(tt.expectedArgs) {
-				t.Errorf("UpdateContainer() args length = %d, want %d", len(container.Args), len(tt.expectedArgs))
-				return
-			}
-
-			for i, expectedArg := range tt.expectedArgs {
-				if container.Args[i] != expectedArg {
-					t.Errorf("UpdateContainer() args[%d] = %s, want %s", i, container.Args[i], expectedArg)
-				}
-			}
-
-			// Check environment variables
-			if len(container.Env) != len(tt.expectedEnv) {
-				t.Errorf("UpdateContainer() env count = %d, want %d", len(container.Env), len(tt.expectedEnv))
-				return
-			}
-
-			for i, expectedEnv := range tt.expectedEnv {
-				actualEnv := container.Env[i]
-				if actualEnv.Name != expectedEnv.Name {
-					t.Errorf("UpdateContainer() env[%d].Name = %s, want %s", i, actualEnv.Name, expectedEnv.Name)
-				}
-				if actualEnv.Value != expectedEnv.Value {
-					t.Errorf("UpdateContainer() env[%d].Value = %s, want %s", i, actualEnv.Value, expectedEnv.Value)
-				}
-			}
-
-			// Check probes are removed when expected
-			if tt.expectProbesRemoved {
-				if container.LivenessProbe != nil {
-					t.Errorf("UpdateContainer() should remove LivenessProbe for multinode %s", tt.role)
-				}
-				if container.ReadinessProbe != nil {
-					t.Errorf("UpdateContainer() should remove ReadinessProbe for multinode %s", tt.role)
-				}
-				if container.StartupProbe != nil {
-					t.Errorf("UpdateContainer() should remove StartupProbe for multinode %s", tt.role)
-				}
-			} else {
-				if container.LivenessProbe == nil {
-					t.Errorf("UpdateContainer() should not remove LivenessProbe for single node")
-				}
-				if container.ReadinessProbe == nil {
-					t.Errorf("UpdateContainer() should not remove ReadinessProbe for single node")
-				}
-				if container.StartupProbe == nil {
-					t.Errorf("UpdateContainer() should not remove StartupProbe for single node")
-				}
-			}
+			// Use helper functions to validate results
+			validateVolumeMounts(t, container, tt.expectedVolumeMounts)
+			validateCommand(t, container, tt.expectedCommand)
+			validateArgs(t, container, tt.expectedArgs)
+			validateEnvironmentVariables(t, container, tt.expectedEnv)
+			validateLivenessProbe(t, container, tt.expectLivenessRemoved, tt.role)
+			validateStartupProbe(t, container, tt.expectStartupRemoved, tt.role)
+			validateReadinessProbe(t, container, tt.expectReadinessRemoved, tt.expectedReadinessProbe, tt.role)
 		})
+	}
+}
+
+// Helper functions to reduce cyclomatic complexity of the main test
+
+func validateVolumeMounts(t *testing.T, container *corev1.Container, expected []corev1.VolumeMount) {
+	if len(container.VolumeMounts) != len(expected) {
+		t.Errorf("UpdateContainer() volume mounts count = %d, want %d", len(container.VolumeMounts), len(expected))
+		return
+	}
+
+	for i, expectedVolumeMount := range expected {
+		actualVolumeMount := container.VolumeMounts[i]
+		if actualVolumeMount.Name != expectedVolumeMount.Name {
+			t.Errorf("UpdateContainer() volume mount[%d].Name = %s, want %s", i, actualVolumeMount.Name, expectedVolumeMount.Name)
+		}
+		if actualVolumeMount.MountPath != expectedVolumeMount.MountPath {
+			t.Errorf("UpdateContainer() volume mount[%d].MountPath = %s, want %s", i, actualVolumeMount.MountPath, expectedVolumeMount.MountPath)
+		}
+		if actualVolumeMount.ReadOnly != expectedVolumeMount.ReadOnly {
+			t.Errorf("UpdateContainer() volume mount[%d].ReadOnly = %t, want %t", i, actualVolumeMount.ReadOnly, expectedVolumeMount.ReadOnly)
+		}
+	}
+}
+
+func validateCommand(t *testing.T, container *corev1.Container, expected []string) {
+	if len(container.Command) != len(expected) {
+		t.Errorf("UpdateContainer() command length = %d, want %d", len(container.Command), len(expected))
+		return
+	}
+
+	for i, expectedCmd := range expected {
+		if container.Command[i] != expectedCmd {
+			t.Errorf("UpdateContainer() command[%d] = %s, want %s", i, container.Command[i], expectedCmd)
+		}
+	}
+}
+
+func validateArgs(t *testing.T, container *corev1.Container, expected []string) {
+	if len(container.Args) != len(expected) {
+		t.Errorf("UpdateContainer() args length = %d, want %d", len(container.Args), len(expected))
+		return
+	}
+
+	for i, expectedArg := range expected {
+		if container.Args[i] != expectedArg {
+			t.Errorf("UpdateContainer() args[%d] = %s, want %s", i, container.Args[i], expectedArg)
+		}
+	}
+}
+
+func validateEnvironmentVariables(t *testing.T, container *corev1.Container, expected []corev1.EnvVar) {
+	if len(container.Env) != len(expected) {
+		t.Errorf("UpdateContainer() env count = %d, want %d", len(container.Env), len(expected))
+		return
+	}
+
+	for i, expectedEnv := range expected {
+		actualEnv := container.Env[i]
+		if actualEnv.Name != expectedEnv.Name {
+			t.Errorf("UpdateContainer() env[%d].Name = %s, want %s", i, actualEnv.Name, expectedEnv.Name)
+		}
+		if actualEnv.Value != expectedEnv.Value {
+			t.Errorf("UpdateContainer() env[%d].Value = %s, want %s", i, actualEnv.Value, expectedEnv.Value)
+		}
+	}
+}
+
+func validateLivenessProbe(t *testing.T, container *corev1.Container, expectRemoved bool, role Role) {
+	if expectRemoved {
+		if container.LivenessProbe != nil {
+			t.Errorf("UpdateContainer() should remove LivenessProbe for %s", role)
+		}
+	} else {
+		if container.LivenessProbe == nil {
+			t.Errorf("UpdateContainer() should not remove LivenessProbe for %s", role)
+		}
+	}
+}
+
+func validateStartupProbe(t *testing.T, container *corev1.Container, expectRemoved bool, role Role) {
+	if expectRemoved {
+		if container.StartupProbe != nil {
+			t.Errorf("UpdateContainer() should remove StartupProbe for %s", role)
+		}
+	} else {
+		if container.StartupProbe == nil {
+			t.Errorf("UpdateContainer() should not remove StartupProbe for %s", role)
+		}
+	}
+}
+
+func validateReadinessProbe(t *testing.T, container *corev1.Container, expectRemoved bool, expected *corev1.Probe, role Role) {
+	if expectRemoved {
+		if container.ReadinessProbe != nil {
+			t.Errorf("UpdateContainer() should remove ReadinessProbe for %s", role)
+		}
+	} else if expected != nil {
+		// Check that readiness probe matches expected
+		if container.ReadinessProbe == nil {
+			t.Errorf("UpdateContainer() should set ReadinessProbe for %s", role)
+		} else {
+			validateProbeDetails(t, container.ReadinessProbe, expected)
+		}
+	} else {
+		// No specific readiness probe expected, should remain as originally set
+		if container.ReadinessProbe == nil {
+			t.Errorf("UpdateContainer() should not remove ReadinessProbe for %s", role)
+		}
+	}
+}
+
+func validateProbeDetails(t *testing.T, actual, expected *corev1.Probe) {
+	// Compare probe details
+	if actual.TCPSocket == nil {
+		t.Errorf("UpdateContainer() ReadinessProbe should have TCPSocket")
+	} else if actual.TCPSocket.Port.IntVal != expected.TCPSocket.Port.IntVal {
+		t.Errorf("UpdateContainer() ReadinessProbe port = %d, want %d", actual.TCPSocket.Port.IntVal, expected.TCPSocket.Port.IntVal)
+	}
+	if actual.InitialDelaySeconds != expected.InitialDelaySeconds {
+		t.Errorf("UpdateContainer() ReadinessProbe InitialDelaySeconds = %d, want %d", actual.InitialDelaySeconds, expected.InitialDelaySeconds)
+	}
+	if actual.PeriodSeconds != expected.PeriodSeconds {
+		t.Errorf("UpdateContainer() ReadinessProbe PeriodSeconds = %d, want %d", actual.PeriodSeconds, expected.PeriodSeconds)
+	}
+	if actual.TimeoutSeconds != expected.TimeoutSeconds {
+		t.Errorf("UpdateContainer() ReadinessProbe TimeoutSeconds = %d, want %d", actual.TimeoutSeconds, expected.TimeoutSeconds)
+	}
+	if actual.FailureThreshold != expected.FailureThreshold {
+		t.Errorf("UpdateContainer() ReadinessProbe FailureThreshold = %d, want %d", actual.FailureThreshold, expected.FailureThreshold)
 	}
 }
 

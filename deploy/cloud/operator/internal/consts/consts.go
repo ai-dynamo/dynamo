@@ -15,6 +15,8 @@ const (
 	DynamoHealthPort     = 5000
 	DynamoHealthPortName = "health"
 
+	MpiRunSshPort = 2222
+
 	EnvDynamoServicePort = "DYNAMO_PORT"
 
 	KubeLabelDynamoSelector = "nvidia.com/selector"
