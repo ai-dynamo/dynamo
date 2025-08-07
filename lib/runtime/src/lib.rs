@@ -36,8 +36,8 @@ pub use config::RuntimeConfig;
 pub mod component;
 pub mod discovery;
 pub mod engine;
-pub mod http_server;
-pub use http_server::HttpServerInfo;
+pub mod metrics_server;
+pub use metrics_server::MetricsServerInfo;
 pub mod instances;
 pub mod logging;
 pub mod metrics;
@@ -115,8 +115,8 @@ impl SystemHealth {
         self.system_health = status;
     }
 
-    pub fn set_endpoint_health_status(&mut self, endpoint: String, status: HealthStatus) {
-        self.endpoint_health.insert(endpoint, status);
+    pub fn set_endpoint_health_status(&mut self, endpoint: &str, status: HealthStatus) {
+        self.endpoint_health.insert(endpoint.to_string(), status);
     }
 
     /// Returns the overall health status and endpoint health statuses
@@ -158,7 +158,7 @@ pub struct DistributedRuntime {
     etcd_client: Option<transports::etcd::Client>,
     nats_client: transports::nats::Client,
     tcp_server: Arc<OnceCell<Arc<transports::tcp::server::TcpStreamServer>>>,
-    http_server: Arc<OnceLock<Arc<http_server::HttpServerInfo>>>,
+    metrics_server: Arc<OnceLock<Arc<metrics_server::MetricsServerInfo>>>,
 
     // local registry for components
     // the registry allows us to use share runtime resources across instances of the same component object.

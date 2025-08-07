@@ -100,6 +100,8 @@ unicode-segmentation = "1.12"
 
 # http-service
 axum = { workspace = true }
+tower-http = {workspace = true}
+
 
 # tokenizers
 tokenizers = { version = "0.21.4", default-features = false, features = [
