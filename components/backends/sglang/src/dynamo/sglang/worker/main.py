@@ -264,7 +264,9 @@ class RequestHandler(BaseWorkerHandler):
                         }
                     else:
                         next_total_toks = len(data["output_ids"])
-                        new_tokens = data["output_ids"][num_output_tokens_so_far[index] :]
+                        new_tokens = data["output_ids"][
+                            num_output_tokens_so_far[index] :
+                        ]
                         out = {
                             "token_ids": new_tokens,
                             "index": index,
@@ -277,7 +279,9 @@ class RequestHandler(BaseWorkerHandler):
                         out = {"token_ids": [], "finish_reason": finish_reason["type"]}
                     else:
                         next_total_toks = len(data["output_ids"])
-                        out = {"token_ids": data["output_ids"][num_output_tokens_so_far:]}
+                        out = {
+                            "token_ids": data["output_ids"][num_output_tokens_so_far:]
+                        }
                         num_output_tokens_so_far = next_total_toks
 
                 yield out
