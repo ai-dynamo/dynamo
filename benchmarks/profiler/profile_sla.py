@@ -21,7 +21,7 @@ import os
 
 import numpy as np
 import yaml
-from utils.config import CONFIG_MODIFIERS
+from utils.config import CONFIG_MODIFIERS, WORKER_COMPONENT_NAMES
 from utils.defaults import DECODE_NUM_REQUESTS_RANGE
 from utils.dynamo_deployment import (
     DynamoDeploymentClient,
@@ -491,6 +491,7 @@ async def run_profile(args):
             base_log_dir=work_dir,
             service_name=args.service_name,
             frontend_port=frontend_port,
+            deployment_name=f"{args.backend}-agg",
         )
         deployment_clients.append(client)  # Track for cleanup
         await client.create_deployment(decode_config_fn)
@@ -505,7 +506,7 @@ async def run_profile(args):
         )
 
         max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-            f"{work_dir}/vllm-v1-agg/vllmdecodeworker/0.log"
+            f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log"
         )
 
         osl = 500  # not too large to reduce ITL variance, not too small to have stable measurement
@@ -590,8 +591,8 @@ if __name__ == "__main__":
         "--backend",
         type=str,
         default="vllm",
-        choices=["vllm"],
-        help="backend type, currently support [vllm]",
+        choices=["vllm", "sglang"],
+        help="backend type, currently support [vllm, sglang]",
     )
     parser.add_argument(
         "--config",
