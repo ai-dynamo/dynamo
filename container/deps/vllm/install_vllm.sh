@@ -20,7 +20,7 @@ set -euo pipefail
 
 # Parse arguments
 EDITABLE=true
-VLLM_REF="v0.10.0"
+VLLM_REF="f4135232b9a8c4845f8961fb1cd17581c56ae2ce"
 MAX_JOBS=16
 INSTALLATION_DIR=/tmp
 ARCH=$(uname -m)
@@ -78,12 +78,12 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --editable        Install vllm in editable mode (default)"
             echo "  --no-editable     Install vllm in non-editable mode"
-            echo "  --vllm-ref REF    Git reference to checkout (default: 059d4cd)"
+            echo "  --vllm-ref REF    Git reference to checkout (default: f4135232b9a8c4845f8961fb1cd17581c56ae2ce)"
             echo "  --max-jobs NUM    Maximum number of parallel jobs (default: 16)"
             echo "  --arch ARCH       Architecture (amd64|arm64, default: auto-detect)"
             echo "  --installation-dir DIR  Directory to install vllm (default: /tmp/vllm)"
-            echo "  --deepgemm-ref REF  Git reference for DeepGEMM (default: 6c9558e)"
-            echo "  --flashinf-ref REF  Git reference for Flash Infer (default: 1d72ed4)"
+            echo "  --deepgemm-ref REF  Git reference for DeepGEMM (default: 1876566)"
+            echo "  --flashinf-ref REF  Git reference for Flash Infer (default: v0.2.8rc1)"
             echo "  --torch-backend BACKEND  Torch backend to use (default: cu128)"
             exit 0
             ;;
@@ -106,6 +106,9 @@ echo "  TORCH_BACKEND: $TORCH_BACKEND"
 
 # Install common dependencies
 uv pip install pip cuda-python
+
+# Install LMCache
+uv pip install lmcache
 
 # Create vllm directory and clone
 mkdir -p $INSTALLATION_DIR
