@@ -52,7 +52,8 @@ gen_gpu_memory_fraction=${11}
 eplb_num_slots=${12}
 mtp_size=${13}
 concurrency_list=${14}
-kind=${15}
+gen_nodes=${15}
+kind=${16}
 
 WORK_DIR=${MOUNT_DIR}
 LOG_DIR=$WORK_DIR/${kind}-${ISL}-${OSL}-$(date +%Y%m%d_%H%M%S)
