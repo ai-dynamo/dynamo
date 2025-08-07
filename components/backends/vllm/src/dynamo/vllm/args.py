@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 DEFAULT_ENDPOINT = "dyn://dynamo.backend.generate"
 DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
 
+# Global LMCache configuration - initialize once on module import
+ENABLE_LMCACHE = os.getenv("ENABLE_LMCACHE", "0").lower() in ("1", "true", "yes")
+
 
 class Config:
     """Command line parameters or defaults"""
@@ -209,6 +212,37 @@ def overwrite_args(config):
 
     dp_rank = config.engine_args.data_parallel_rank or 0
 
+    # Set kv_transfer_config based on LMCache setting
+    if ENABLE_LMCACHE:
+        if config.is_prefill_worker:
+            # Prefill worker use LMCache with disaggregated serving (MultiConnector) for disaggregated serving
+            kv_transfer_config = KVTransferConfig(
+                kv_connector="MultiConnector",
+                kv_role="kv_both",
+                kv_connector_extra_config={
+                    "connectors": [
+                        {"kv_connector": "LMCacheConnectorV1", "kv_role": "kv_both"},
+                        {
+                            "kv_connector": "NixlConnector",
+                            "kv_role": "kv_both",
+                        },
+                    ]
+                },
+            )
+            logger.info("Using LMCache with MultiConnector serving")
+        else:
+            # If enable lmcache, single node in default uses single connector serving
+            kv_transfer_config = KVTransferConfig(
+                kv_connector="LMCacheConnectorV1", kv_role="kv_both"
+            )
+            logger.info("Using LMCache with LMCacheConnector serving")
+
+    else:
+        kv_transfer_config = KVTransferConfig(
+            kv_connector="NixlConnector", kv_role="kv_both"
+        )
+        logger.info("Using NixlConnector configuration")
+
     defaults = {
         "task": "generate",
         # As of vLLM >=0.10.0 the engine unconditionally calls
@@ -219,9 +253,7 @@ def overwrite_args(config):
         "disable_log_requests": True,
         # KV routing relies on logging KV metrics
         "disable_log_stats": False,
-        "kv_transfer_config": KVTransferConfig(
-            kv_connector="NixlConnector", kv_role="kv_both"
-        ),
+        "kv_transfer_config": kv_transfer_config,
     }
 
     if config.engine_args.enable_prefix_caching:

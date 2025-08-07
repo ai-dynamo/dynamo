@@ -80,7 +80,7 @@ xxhash-rust = { workspace = true }
 akin = "0.4.0"
 blake3 = "1"
 bytemuck = "1.22"
-candle-core = { version = "0.8.0" }
+candle-core = { version = "0.9.1" }
 derive-getters = "0.5"
 offset-allocator = "0.2"
 regex = "1"
@@ -91,7 +91,7 @@ dialoguer = { version = "0.11", default-features = false, features = ["editor", 
 
 # block_manager
 nixl-sys = {version = "0.4.1", optional = true }
-cudarc = { version = "0.16.2", features = ["cuda-12020"], optional = true }
+cudarc = { version = "0.16.6", features = ["cuda-12020"], optional = true }
 ndarray = { version = "0.16", optional = true }
 nix = { version = "0.26", optional = true }
 
@@ -100,9 +100,11 @@ unicode-segmentation = "1.12"
 
 # http-service
 axum = { workspace = true }
+tower-http = {workspace = true}
+
 
 # tokenizers
-tokenizers = { version = "0.21.2", default-features = false, features = [
+tokenizers = { version = "0.21.4", default-features = false, features = [
   "onig",
   "esaxx_fast",
   "rustls-tls",

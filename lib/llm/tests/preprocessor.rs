@@ -1,21 +1,9 @@
 // SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-// http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
 
-use anyhow::Ok;
+use anyhow::{Ok, Result};
 
-use dynamo_llm::model_card::model::{ModelDeploymentCard, PromptContextMixin};
+use dynamo_llm::model_card::{ModelDeploymentCard, PromptContextMixin};
 use dynamo_llm::preprocessor::prompt::PromptFormatter;
 use dynamo_llm::protocols::openai::chat_completions::NvCreateChatCompletionRequest;
 use serde::{Deserialize, Serialize};
@@ -31,9 +19,33 @@ use std::path::PathBuf;
 /// set in the environment variable `HF_TOKEN`.
 /// The model is downloaded and cached in `tests/data/sample-models` directory.
 /// make sure the token has access to `meta-llama/Llama-3.1-70B-Instruct` model
-fn check_hf_token() -> bool {
-    let hf_token = std::env::var("HF_TOKEN").ok();
-    hf_token.is_some()
+/// Gets the HF_TOKEN environment variable if it exists and is not empty.
+///
+/// This function checks for the presence of the `HF_TOKEN` environment variable
+/// and validates that it's not empty or whitespace-only. The token is used for
+/// downloading models from Hugging Face to a local cache directory in
+/// `tests/data/sample-models`. These tests require a Hugging Face token to be
+/// set in the environment variable `HF_TOKEN`. The model is downloaded and
+/// cached in `tests/data/sample-models` directory.
+///
+/// # Returns
+///
+/// - `Ok(String)` - The token value if it exists and is not empty
+/// - `Err(anyhow::Error)` - An error if the token is missing or empty
+///
+/// # Errors
+///
+/// - Returns an error if `HF_TOKEN` environment variable is not set
+/// - Returns an error if `HF_TOKEN` environment variable is empty or whitespace-only
+fn get_hf_token() -> Result<String> {
+    let token = std::env::var("HF_TOKEN")
+        .map_err(|_| anyhow::anyhow!("HF_TOKEN environment variable is not set"))?;
+
+    if token.trim().is_empty() {
+        anyhow::bail!("HF_TOKEN environment variable is empty");
+    }
+
+    Ok(token)
 }
 
 async fn make_mdc_from_repo(
@@ -53,9 +65,13 @@ async fn make_mdc_from_repo(
 
 async fn maybe_download_model(local_path: &str, model: &str, revision: &str) -> String {
     let cache = Cache::new(PathBuf::from(local_path));
+
+    // Use check_hf_token for consistency with the rest of the codebase
+    let token = get_hf_token().expect("HF_TOKEN is required to download models from Hugging Face");
+
     let api = ApiBuilder::from_cache(cache)
         .with_progress(false)
-        .with_token(Some(std::env::var("HF_TOKEN").unwrap()))
+        .with_token(Some(token))
         .build()
         .unwrap();
     let repo = Repo::with_revision(String::from(model), RepoType::Model, String::from(revision));
@@ -256,8 +272,8 @@ impl Request {
 
 #[tokio::test]
 async fn test_single_turn() {
-    if !check_hf_token() {
-        println!("HF_TOKEN is not set, skipping test");
+    if let Err(e) = get_hf_token() {
+        println!("HF_TOKEN is not set, skipping test: {}", e);
         return;
     }
     let mdcs = make_mdcs().await;
@@ -288,8 +304,8 @@ async fn test_single_turn() {
 
 #[tokio::test]
 async fn test_single_turn_with_tools() {
-    if !check_hf_token() {
-        println!("HF_TOKEN is not set, skipping test");
+    if let Err(e) = get_hf_token() {
+        println!("HF_TOKEN is not set, skipping test: {}", e);
         return;
     }
     let mdcs = make_mdcs().await;
@@ -325,8 +341,8 @@ async fn test_single_turn_with_tools() {
 
 #[tokio::test]
 async fn test_mulit_turn_without_system() {
-    if !check_hf_token() {
-        println!("HF_TOKEN is not set, skipping test");
+    if let Err(e) = get_hf_token() {
+        println!("HF_TOKEN is not set, skipping test: {}", e);
         return;
     }
     let mdcs = make_mdcs().await;
@@ -357,8 +373,8 @@ async fn test_mulit_turn_without_system() {
 
 #[tokio::test]
 async fn test_mulit_turn_with_system() {
-    if !check_hf_token() {
-        println!("HF_TOKEN is not set, skipping test");
+    if let Err(e) = get_hf_token() {
+        println!("HF_TOKEN is not set, skipping test: {}", e);
         return;
     }
     let mdcs = make_mdcs().await;
@@ -395,8 +411,8 @@ async fn test_mulit_turn_with_system() {
 /// Test the prompt formatter with a multi-turn conversation that includes system message and tools
 #[tokio::test]
 async fn test_multi_turn_with_system_with_tools() {
-    if !check_hf_token() {
-        println!("HF_TOKEN is not set, skipping test");
+    if let Err(e) = get_hf_token() {
+        println!("HF_TOKEN is not set, skipping test: {}", e);
         return;
     }
     let mdcs = make_mdcs().await;
@@ -433,8 +449,8 @@ async fn test_multi_turn_with_system_with_tools() {
 /// Test the prompt formatter with a multi-turn conversation that includes a continuation
 #[tokio::test]
 async fn test_multi_turn_with_continuation() {
-    if !check_hf_token() {
-        println!("HF_TOKEN is not set, skipping test");
+    if let Err(e) = get_hf_token() {
+        println!("HF_TOKEN is not set, skipping test: {}", e);
         return;
     }
     let mdc = make_mdc_from_repo(

@@ -12,9 +12,11 @@ use crate::discovery::ModelManager;
 use crate::request_template::RequestTemplate;
 use anyhow::Result;
 use derive_builder::Builder;
+use dynamo_runtime::logging::make_request_span;
 use dynamo_runtime::transports::etcd;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+use tower_http::trace::TraceLayer;
 
 /// HTTP service shared state
 pub struct State {
@@ -229,6 +231,9 @@ impl HttpServiceConfigBuilder {
             router = router.merge(route);
             all_docs.extend(route_docs);
         }
+
+        // Add span for tracing
+        router = router.layer(TraceLayer::new_for_http().make_span_with(make_request_span));
 
         Ok(HttpService {
             state,
