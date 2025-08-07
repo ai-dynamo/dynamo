@@ -375,10 +375,11 @@ impl WorkerSelector for DefaultWorkerSelector {
 
             worker_logits.insert(worker_id, logit);
 
+            let overlap_weight = self.kv_router_config.overlap_score_weight;
             tracing::info!(
-                "Formula for {worker_id}: {logit:.3} = {:.1} * {potential_prefill_block:.3} + {decode_block:.3}  (cached_blocks: {})",
-                self.kv_router_config.overlap_score_weight,
-                overlap,
+                "Formula for {worker_id} with {overlap} cached blocks: {logit:.3} \
+                 = {overlap_weight:.1} * prefill_blocks + decode_blocks \
+                 = {overlap_weight:.1} * {potential_prefill_block:.3} + {decode_block:.3}"
             );
         }
 
