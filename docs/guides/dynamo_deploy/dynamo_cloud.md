@@ -32,7 +32,7 @@ The Dynamo cloud platform consists of several key components:
 Before getting started with the Dynamo cloud platform, ensure you have:
 
 - A Kubernetes cluster (version 1.24 or later)
-- [Earthly](https://earthly.dev/) installed for building components
+- **Make** and standard build tools
 - Docker installed and running
 - Access to a container registry (e.g., Docker Hub, NVIDIA NGC, etc.)
 - `kubectl` configured to access your cluster
