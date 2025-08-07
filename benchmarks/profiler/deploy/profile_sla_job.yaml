@@ -34,6 +34,8 @@ spec:
           - /workspace/profiling_results
           - --namespace
           - ${NAMESPACE}
+          - --backend
+          - vllm
           - --min-num-gpus-per-engine
           - "1"
           - --max-num-gpus-per-engine
