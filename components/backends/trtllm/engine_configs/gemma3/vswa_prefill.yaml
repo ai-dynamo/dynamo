@@ -15,7 +15,7 @@
 
 tensor_parallel_size: 1
 backend: pytorch
-disable_overlap_scheduler: True
+disable_overlap_scheduler: true
 
 kv_cache_config:
   max_attention_window:
@@ -25,7 +25,6 @@ kv_cache_config:
     - 512
     - 512
     - 32768
-  enable_block_reuse: false
 
 cache_transceiver_config:
   backend: default
