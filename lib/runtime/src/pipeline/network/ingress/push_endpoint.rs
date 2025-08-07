@@ -48,7 +48,7 @@ impl PushEndpoint {
     pub async fn start(
         self,
         endpoint: Endpoint,
-	namespace: String,
+        namespace: String,
         component_name: String,
         endpoint_name: String,
         instance_id: i64,
