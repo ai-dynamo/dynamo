@@ -37,7 +37,7 @@ jobs:
       - name: Define Image Tag
         id: define_image_tag
         run: |
-          echo "image_tag=dynamo:latest-dynamo" >> $GITHUB_OUTPUT
+          echo "image_tag=dynamo:latest" >> $GITHUB_OUTPUT
       - name: Build image
         env:
           GITHUB_TOKEN: ${{ secrets.CI_TOKEN }}
@@ -49,7 +49,7 @@ jobs:
           docker compose up -d nats-server etcd-server
       - name: Run Rust checks (block-manager + integration tests)
         run: |
-          docker run -w /workspace/lib/llm --name ${{ env.CONTAINER_ID }}_rust_checks ${{ steps.define_image_tag.outputs.image_tag }} bash -ec 'rustup component add rustfmt clippy && cargo fmt -- --check && cargo clippy --features block-manager --no-deps --all-targets -- -D warnings && cargo test --locked --all-targets --features=block-manager && cargo test --locked --features integration -- --nocapture'
+          docker run -v ${{ github.workspace }}:/workspace -w /workspace/lib/llm --name ${{ env.CONTAINER_ID }}_rust_checks ${{ steps.define_image_tag.outputs.image_tag }} bash -ec 'rustup component add rustfmt clippy && cargo fmt -- --check && cargo clippy --features block-manager --no-deps --all-targets -- -D warnings && cargo test --locked --all-targets --features=block-manager && cargo test --locked --features integration -- --nocapture'
       - name: Cleanup services
         if: always()
         working-directory: ./deploy
@@ -59,7 +59,7 @@ jobs:
         env:
           PYTEST_MARKS: "pre_merge or mypy"
         run: |
-          docker run -w /workspace --name ${{ env.CONTAINER_ID }}_pytest ${{ steps.define_image_tag.outputs.image_tag }} bash -c "pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
+          docker run -v ${{ github.workspace }}:/workspace -w /workspace --name ${{ env.CONTAINER_ID }}_pytest ${{ steps.define_image_tag.outputs.image_tag }} bash -c "pytest --basetemp=/tmp --junitxml=${{ env.PYTEST_XML_FILE }} -m \"${{ env.PYTEST_MARKS }}\""
       - name: Copy test report from test Container
         if: always()
         run: |
