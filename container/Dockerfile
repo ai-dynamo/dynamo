@@ -41,8 +41,7 @@ ARG NIXL_REF=0.4.1
 ENV NIXL_SRC_DIR=/opt/nixl \
     NIXL_PREFIX=/opt/nvidia/nvda_nixl \
     NIXL_LIB_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu \
-    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins \
-    LD_LIBRARY_PATH=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu:/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins:$LD_LIBRARY_PATH
+    NIXL_PLUGIN_DIR=/opt/nvidia/nvda_nixl/lib/${ARCH_ALT}-linux-gnu/plugins
 
 USER root
 ARG PYTHON_VERSION=3.12
@@ -55,7 +54,7 @@ ENV RUSTUP_HOME=/usr/local/rustup \
     PATH=/usr/local/cargo/bin:$PATH \
     RUST_VERSION=1.87.0
 
-WORKDIR /workspace
+WORKDIR /opt/dynamo
 
 # Define Rust target based on ARCH_ALT ARG
 ARG RUSTARCH=${ARCH_ALT}-unknown-linux-gnu
@@ -69,36 +68,38 @@ RUN wget --tries=3 --waitretry=5 "https://static.rust-lang.org/rustup/archive/1.
     chmod -R a+w $RUSTUP_HOME $CARGO_HOME
 
 RUN apt-get update -y && \
-    apt-get install -y \
-    # NIXL build dependencies
-    autoconf \
-    cmake \
-    git \
-    libtool \
-    meson \
-    net-tools \
-    ninja-build \
-    pybind11-dev \
-    # These headers are missing with the hpcx installer, required
-    # by UCX to find RDMA devices
-    ibverbs-providers \
-    ibverbs-utils \
-    libibumad-dev \
-    libibverbs-dev \
-    librdmacm-dev \
-    libnuma-dev \
-    rdma-core \
-    # Rust build dependencies
-    clang \
-    libclang-dev \
-    protobuf-compiler && \
-    apt-get clean && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        # NIXL build dependencies
+        autoconf \
+        automake \
+        cmake \
+        git \
+        libtool \
+        meson \
+        net-tools \
+        ninja-build \
+        pybind11-dev \
+        # These headers are missing with the hpcx installer, required
+        # by UCX to find RDMA devices
+        ibverbs-providers \
+        ibverbs-utils \
+        libibumad-dev \
+        libibverbs-dev \
+        librdmacm-dev \
+        libnuma-dev \
+        rdma-core \
+        # Rust build dependencies
+        clang \
+        libclang-dev \
+        protobuf-compiler && \
+        apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
 # Download external dependencies in parallel for better performance
+ENV NATS_VERSION="v2.10.28"
 RUN --mount=type=cache,target=/var/cache/apt \
-    wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/v2.10.28/nats-server-v2.10.28-${ARCH}.deb && \
-    dpkg -i nats-server-v2.10.28-${ARCH}.deb && rm nats-server-v2.10.28-${ARCH}.deb
+    wget --tries=3 --waitretry=5 https://github.com/nats-io/nats-server/releases/download/${NATS_VERSION}/nats-server-${NATS_VERSION}-${ARCH}.deb && \
+    dpkg -i nats-server-${NATS_VERSION}-${ARCH}.deb && rm nats-server-${NATS_VERSION}-${ARCH}.deb
 
 ENV ETCD_VERSION="v3.5.21"
 RUN wget --tries=3 --waitretry=5 https://github.com/etcd-io/etcd/releases/download/$ETCD_VERSION/etcd-$ETCD_VERSION-linux-${ARCH}.tar.gz -O /tmp/etcd.tar.gz && \
@@ -131,13 +132,14 @@ RUN rm -rf /opt/hpcx/ucx && \
       --enable-mt && \
     make -j$(nproc) &&                              \
     make -j$(nproc) install-strip &&                \
+    echo "/usr/local/ucx/lib" > /etc/ld.so.conf.d/ucx.conf && \
+    echo "/usr/local/ucx/lib/ucx" >> /etc/ld.so.conf.d/ucx.conf && \
     ldconfig && \
     cd /usr/local/src && \
     rm -rf ucx
 
 # UCX environment variables
-ENV LD_LIBRARY_PATH=/usr/lib:/usr/local/ucx/lib:/usr/local/ucx/lib/ucx:$LD_LIBRARY_PATH \
-    CPATH=/usr/include:$CPATH \
+ENV CPATH=/usr/include:$CPATH \
     PATH=/usr/bin:$PATH \
     PKG_CONFIG_PATH=/usr/lib/pkgconfig:$PKG_CONFIG_PATH
 
@@ -152,32 +154,32 @@ RUN git clone --depth 1 --branch ${NIXL_REF} "https://github.com/ai-dynamo/nixl.
     fi && \
     meson setup build/ --buildtype=release --prefix=$NIXL_PREFIX $nixl_build_args && \
     ninja -C build/ -j$(nproc) && \
-    ninja -C build/ install
+    ninja -C build/ install && \
+    echo "$NIXL_LIB_DIR" > /etc/ld.so.conf.d/nixl.conf && \
+    echo "$NIXL_PLUGIN_DIR" >> /etc/ld.so.conf.d/nixl.conf && \
+    ldconfig
 
 # Install NIXL Python module
 # TODO OPS-590: Move gds_path selection based on arch into NIXL build and re-enable gds backend for arm64
 RUN if [ "$ARCH" = "arm64" ]; then \
-        cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheelhouse/nixl \
+        cd ${NIXL_SRC_DIR} && uv build . --out-dir /opt/dynamo/wheelhouse/nixl \
         --config-settings=setup-args="-Ddisable_gds_backend=true"; \
     else \
-        cd ${NIXL_SRC_DIR} && uv build . --out-dir /workspace/wheelhouse/nixl; \
+        cd ${NIXL_SRC_DIR} && uv build . --out-dir /opt/dynamo/wheelhouse/nixl; \
     fi
 
 # Create virtual environment
-RUN mkdir /opt/dynamo && \
+RUN mkdir -p /opt/dynamo/venv && \
     uv venv /opt/dynamo/venv --python 3.12
 
 # Activate virtual environment
 ENV VIRTUAL_ENV=/opt/dynamo/venv \
     PATH="/opt/dynamo/venv/bin:${PATH}"
 
-# Common dependencies
+# Install common and test dependencies
 RUN --mount=type=bind,source=./container/deps/requirements.txt,target=/tmp/requirements.txt \
-uv pip install --requirement /tmp/requirements.txt
-
-# Install test dependencies
-RUN --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.txt \
-uv pip install --requirement /tmp/requirements.txt
+    --mount=type=bind,source=./container/deps/requirements.test.txt,target=/tmp/requirements.test.txt \
+    uv pip install --requirement /tmp/requirements.txt --requirement /tmp/requirements.test.txt
 
 ##################################
 ##### Wheel Build Image ##########
@@ -196,7 +198,7 @@ ENV CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-16}
 # Use build arg RELEASE_BUILD = true to generate wheels for Python 3.10, 3.11 and 3.12.
 ARG RELEASE_BUILD
 
-WORKDIR /workspace
+WORKDIR /opt/dynamo
 
 RUN dnf update -y \
     && dnf install -y llvm-toolset protobuf-compiler python3.12-devel \
@@ -205,7 +207,7 @@ RUN dnf update -y \
 
 ENV RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
-    CARGO_TARGET_DIR=/workspace/target \
+    CARGO_TARGET_DIR=/opt/dynamo/target \
     VIRTUAL_ENV=/opt/dynamo/venv \
     NIXL_PREFIX=/opt/nvidia/nvda_nixl
 
@@ -216,21 +218,21 @@ COPY --from=base $VIRTUAL_ENV $VIRTUAL_ENV
 ENV PATH=$CARGO_HOME/bin:$VIRTUAL_ENV/bin:$PATH
 
 # Copy configuration files first for better layer caching
-COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml /workspace/
+COPY pyproject.toml README.md LICENSE Cargo.toml Cargo.lock rust-toolchain.toml /opt/dynamo/
 
 # Copy source code
-COPY lib/ /workspace/lib/
-COPY components/ /workspace/components/
+COPY lib/ /opt/dynamo/lib/
+COPY components/ /opt/dynamo/components/
 
 # Build dynamo wheel
-RUN uv build --wheel --out-dir /workspace/dist && \
-    cd /workspace/lib/bindings/python && \
+RUN uv build --wheel --out-dir /opt/dynamo/dist && \
+    cd /opt/dynamo/lib/bindings/python && \
     uv pip install maturin[patchelf] && \
-    maturin build --release --features block-manager --out /workspace/dist && \
+    maturin build --release --features block-manager --out /opt/dynamo/dist && \
     if [ "$RELEASE_BUILD" = "true" ]; then \
         # do not enable KVBM feature, ensure compatibility with lower glibc
-        uv run --python 3.11 maturin build --release --out /workspace/dist && \
-        uv run --python 3.10 maturin build --release --out /workspace/dist; \
+        uv run --python 3.11 maturin build --release --out /opt/dynamo/dist && \
+        uv run --python 3.10 maturin build --release --out /opt/dynamo/dist; \
     fi
 
 ##############################################
@@ -239,29 +241,32 @@ RUN uv build --wheel --out-dir /workspace/dist && \
 FROM base AS dev
 
 # Application environment variables
-ENV DYNAMO_HOME=/workspace \
-    CARGO_TARGET_DIR=/workspace/target \
-    PYTHONPATH=/workspace:$PYTHONPATH
+ENV DYNAMO_HOME=/opt/dynamo \
+    CARGO_TARGET_DIR=/opt/dynamo/target \
+    PYTHONPATH=/opt/dynamo:$PYTHONPATH
 
-WORKDIR /workspace
+WORKDIR /opt/dynamo
 
-COPY --from=wheel_builder /workspace/dist/*.whl /workspace/wheelhouse/
+COPY --from=wheel_builder /opt/dynamo/dist/*.whl /opt/dynamo/wheelhouse/
 COPY --from=wheel_builder $CARGO_TARGET_DIR $CARGO_TARGET_DIR
 
 # Copy Cargo cache to avoid re-downloading dependencies
 COPY --from=wheel_builder $CARGO_HOME $CARGO_HOME
 
-# Copy rest of the code
-COPY . /workspace
+# Temporarily copy benchmarks folder for installation
+COPY benchmarks/ /opt/dynamo/benchmarks/
 
-RUN uv pip install /workspace/wheelhouse/ai_dynamo_runtime*cp312*.whl && \
-    uv pip install /workspace/wheelhouse/ai_dynamo*any.whl && \
-    uv pip install /workspace/wheelhouse/nixl/nixl*.whl && \
-    uv pip install /workspace/benchmarks
+# Install all python packages
+RUN uv pip install \
+    /opt/dynamo/wheelhouse/ai_dynamo_runtime*cp312*.whl \
+    /opt/dynamo/wheelhouse/ai_dynamo*any.whl \
+    /opt/dynamo/wheelhouse/nixl/nixl*.whl \
+    /opt/dynamo/benchmarks && \
+    rm -rf /opt/dynamo/benchmarks
 
 # Copy launch banner
-RUN --mount=type=bind,source=./container/launch_message.txt,target=/workspace/launch_message.txt \
-    sed '/^#\s/d' /workspace/launch_message.txt > ~/.launch_screen && \
+RUN --mount=type=bind,source=./container/launch_message.txt,target=/opt/dynamo/launch_message.txt \
+    sed '/^#\s/d' /opt/dynamo/launch_message.txt > ~/.launch_screen && \
     echo "cat ~/.launch_screen" >> ~/.bashrc
 
 ENTRYPOINT ["/opt/nvidia/nvidia_entrypoint.sh"]
