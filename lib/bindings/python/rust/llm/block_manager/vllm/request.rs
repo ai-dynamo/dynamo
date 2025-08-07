@@ -2,12 +2,13 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use serde::{Deserialize, Serialize};
 
 use dynamo_llm::tokens::compute_hash_v2;
 
 /// Request Inputs
 #[pyclass]
-#[derive(Debug, Clone, Dissolve)]
+#[derive(Debug, Clone, Dissolve, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct KvbmRequest {
     pub request_id: String,

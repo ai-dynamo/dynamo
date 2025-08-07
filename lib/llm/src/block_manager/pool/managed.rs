@@ -77,7 +77,7 @@ pub struct ManagedBlockPoolArgs<S: Storage, L: LocalityProvider, M: BlockMetadat
     )]
     pool_metrics: Arc<PoolMetrics>,
 
-    #[builder(default = "BlockRegistrationDuplicationSetting::Allowed")]
+    #[builder(default = "BlockRegistrationDuplicationSetting::Disabled")]
     default_duplication_setting: BlockRegistrationDuplicationSetting,
 }
 

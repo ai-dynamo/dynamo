@@ -17,7 +17,7 @@ try:
     SlotUpdate = getattr(_vllm_integration, "SlotUpdate")
 
     KvConnectorWorker = getattr(_vllm_integration, "KvConnectorWorker")
-    KvConnectorLeader = getattr(_vllm_integration, "KvConnectorLeader")
+    KvConnectorLeader = getattr(_vllm_integration, "PyKvConnectorLeader")
     SchedulerOutput = getattr(_vllm_integration, "SchedulerOutput")
 
     from dynamo.llm import BlockManager

@@ -88,6 +88,7 @@ pub enum CacheLevel {
 /// Type of channel used to reset the block manager to a specific cache level
 pub type BlockResetChannel = tokio::sync::broadcast::Receiver<CacheLevel>;
 
+#[derive(Debug)]
 struct CancelOnLastDrop {
     cancellation_token: CancellationToken,
 }
@@ -105,6 +106,7 @@ impl Drop for CancelOnLastDrop {
 // 4. construct a Blocks object for each layout providing a unique block_set_idx
 //    for each layout type.
 // 5. initialize the pools for each set of blocks
+#[derive(Debug)]
 pub struct KvBlockManager<Locality: LocalityProvider, Metadata: BlockMetadata> {
     state: Arc<state::KvBlockManagerState<Locality, Metadata>>,
     _cancellation_token: Arc<CancelOnLastDrop>,

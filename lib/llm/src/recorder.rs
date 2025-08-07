@@ -34,6 +34,7 @@ where
 }
 
 /// A generic recorder for events that streams directly to a JSONL file
+#[derive(Debug)]
 pub struct Recorder<T> {
     /// A sender for events that can be cloned and shared with producers
     event_tx: mpsc::Sender<T>,
@@ -383,6 +384,13 @@ where
         }
 
         Ok(count)
+    }
+}
+
+impl<T> Drop for Recorder<T> {
+    fn drop(&mut self) {
+        tracing::info!("Dropping Recorder");
+        self.cancel.cancel();
     }
 }
 
