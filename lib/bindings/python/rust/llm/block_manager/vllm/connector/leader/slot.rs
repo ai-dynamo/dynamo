@@ -580,12 +580,6 @@ impl Slot for VllmConnectorSlot {
             return Ok(());
         }
 
-        // early exit if we need to onboard 0 blocks
-        if (num_computed_blocks + num_matched_blocks) * block_size == self.sequence().total_tokens()
-        {
-            return Ok(());
-        }
-
         let mut num_new_matched_tokens = num_matched_blocks * block_size;
 
         // we are on a block boundary, so we need to throw away the last block
@@ -604,6 +598,11 @@ impl Slot for VllmConnectorSlot {
 
             // decrement the number of new matched tokens by the block size
             num_new_matched_tokens -= block_size;
+        }
+
+        // early exit if we need to onboard 0 blocks (after potentially dropping the last block)
+        if num_new_matched_tokens == 0 {
+            return Ok(());
         }
 
         self.staging_from_host = if !host_blocks.is_empty() {
