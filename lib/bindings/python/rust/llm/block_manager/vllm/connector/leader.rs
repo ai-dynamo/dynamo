@@ -139,11 +139,6 @@ impl Leader for KvConnectorLeader {
         let shared_slot = self.slot_manager.get_slot(&request_id)?;
         let mut slot = shared_slot.lock().map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
 
-        // vllm is telling us that the tokens have been computed, since we do not have insight into the device pool
-        // we accept this and advance the computed position
-        slot.advance_computed_position(num_computed_tokens)?;
-        slot.record_cached_device_tokens(num_computed_tokens);
-
         // early exit if we cannot match full block
         if (slot.sequence().total_tokens() - num_computed_tokens) < self.block_size {
             return Ok((0, false));
@@ -151,7 +146,7 @@ impl Leader for KvConnectorLeader {
 
         // find matches for any remaining tokens
         // this will advance the computed position and hold any newly matched blocks in the slot
-        slot.acquire_all_local_matches()?;
+        slot.acquire_local_matches(num_computed_tokens)?;
 
         // return the number of external tokens that are ready for onboarding
         // we always return true here as we always asynchronously onboard matched blocks
@@ -168,9 +163,6 @@ impl Leader for KvConnectorLeader {
         }
     }
 
-    /// We drop the need to pass in the KvCacheBlocks and the num_external_tokens as they are captured
-    /// statefully in the [`VllmLeaderKvCacheManagerAndConnector::get_num_new_matched_tokens`] function.
-    ///
     /// Note: vLLM will not provide any scheduler output data for requests that are onboarding. it is entirely
     /// on the connector's implementation to handle this case.
     #[tracing::instrument(level = "debug", skip_all, fields(request_id))]
@@ -190,11 +182,18 @@ impl Leader for KvConnectorLeader {
         let shared_slot = self.slot_manager.get_slot(&request_id)?;
         let mut slot = shared_slot.lock().map_err(|e| anyhow::anyhow!("Failed to lock slot: {}", e))?;
 
+        // we have not yet advanced the computed position, but now we can, since we have an indication that we have
+        // necessary gpu blocks into which we will load the external tokens.
+
         slot.append_mutable_device_blocks(&block_ids)?;
 
         // the second call will show num_external_tokens == 0
         // this call is just letting us know the other blocks that are being used for the remainder of the prefill
         if num_external_tokens > 0 {
+            let num_computed_tokens = block_ids.len() * self.block_size - num_external_tokens;
+            slot.record_cached_device_tokens(num_computed_tokens);
+            slot.advance_computed_position(num_computed_tokens)?;
+
             tracing::debug!(
                 request_id = request_id,
                 "triggering onboarding for {} external tokens",
@@ -207,8 +206,8 @@ impl Leader for KvConnectorLeader {
         Ok(())
     }
 
-    #[tracing::instrument(level = "debug", skip_all)]
-    fn build_connector_metadata(
+    #[tracing::instrument(level = "debug", skip_all, fields(iteration = self.iteration_counter + 1))]
+    pub fn build_connector_metadata(
         &mut self,
         scheduler_output: SchedulerOutput,
     ) -> anyhow::Result<Vec<u8>> {
@@ -220,8 +219,8 @@ impl Leader for KvConnectorLeader {
         self.iteration_counter += 1;
         let iteration = self.iteration_counter;
 
-        tracing::debug!("Building connector metadata; iteration {iteration}");
-        tracing::debug!("scheduler_output: {scheduler_output:#?}");
+        tracing::debug!("Building connector metadata");
+        tracing::debug!("SchedulerOutput: {scheduler_output:#?}");
 
         let mut inflight_requests = self.inflight_requests.clone();
         let mut md = ConnectorMetadata::new(iteration);
@@ -322,7 +321,7 @@ impl Leader for KvConnectorLeader {
             }
         }
 
-        tracing::debug!("scheduler_output: {scheduler_output:#?}");
+        tracing::debug!("metadata: {md:#?}");
         serde_json::to_vec(&md).map_err(|e| anyhow::anyhow!("Failed to serialize connector metadata: {}", e))
     }
 

@@ -132,6 +132,8 @@ impl BlockTransferHandler {
             request.to_pool()
         );
 
+        tracing::debug!("request: {request:#?}");
+
         let notify = match (request.from_pool(), request.to_pool()) {
             (Device, Host) => self.begin_transfer(&self.device, &self.host, request).await,
             (Host, Device) => self.begin_transfer(&self.host, &self.device, request).await,

@@ -6,7 +6,7 @@ use dynamo_llm::block_manager::connector::scheduler::{
     Scheduler, TransferSchedulerClient, WorkerSchedulerClient,
 };
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::{Arc, OnceLock};
 
 use super::*;
@@ -50,8 +50,7 @@ pub struct KvConnectorWorker {
     connector: WorkerSchedulerClient,
     transfer_client: TransferSchedulerClient,
 
-    // request_slots: HashMap<String, WorkerSlot>,
-    kv_caches: HashMap<String, Arc<VllmTensor>>,
+    kv_cache_names: Vec<(String, Arc<VllmTensor>)>,
 
     /// Map of request id to inflight load requests
     maybe_finished_onboarding: HashSet<String>,
@@ -65,6 +64,9 @@ pub struct KvConnectorWorker {
     bound: bool,
     iteration: u64,
     layers_complete: usize,
+
+    /// cuda events created by the python side
+    layer_events: Vec<u64>,
 }
 
 impl KvConnectorWorker {
@@ -95,13 +97,14 @@ impl KvConnectorWorker {
             kvbm_worker: OnceLock::new(),
             connector: worker_client,
             transfer_client,
-            kv_caches: HashMap::new(),
             maybe_finished_onboarding: HashSet::new(),
             maybe_finished_offloading: HashSet::new(),
             offloading_operations: Vec::new(),
             bound: false,
             iteration: 0,
             layers_complete: 0,
+            kv_cache_names: Vec::new(),
+            layer_events: Vec::new(),
         })
     }
 }
@@ -118,6 +121,7 @@ impl Worker for KvConnectorWorker {
         device_id: usize,
         dtype_width_bytes: usize,
         kv_caches: Vec<(String, Arc<VllmTensor>)>,
+        raw_event_handles: Vec<u64>,
     ) -> anyhow::Result<()> {
         if self.kvbm_worker.get().is_some() {
             tracing::warn!("kvbm worker already registered");
@@ -135,6 +139,10 @@ impl Worker for KvConnectorWorker {
             // Build ordered tensor list for worker config
             vllm_tensors.push(vllm_tensor as Arc<dyn TorchTensor>);
         }
+
+        assert_eq!(kv_cache_names.len(), raw_event_handles.len());
+        self.kv_cache_names = kv_cache_names;
+        self.layer_events = raw_event_handles;
 
         let config = KvbmWorkerConfig::builder()
             .drt(self.drt.clone())
@@ -247,8 +255,13 @@ impl Worker for KvConnectorWorker {
     /// Trigger block-wise completion signals afer last layer.
     fn save_kv_layer(&mut self, _layer_name: String) -> anyhow::Result<()> {
         self.layers_complete += 1;
-        if self.layers_complete == self.kv_caches.len() {
+        if self.layers_complete == self.kv_cache_names.len() {
             let offloading_operations = std::mem::take(&mut self.offloading_operations);
+
+            // block on the the completion of the last layer
+            // todo(ryan): capture the context, pass this to the scheduler to do the await on another thread
+            // or put the event on a stream and use stream waits to keep it all on device.
+            event_sync_blocking(self.layer_events[self.layers_complete - 1]);
             for operation in offloading_operations {
                 self.connector.enqueue_request(operation);
             }
@@ -393,4 +406,31 @@ impl PyKvConnectorWorker {
     ) -> (HashSet<String>, HashSet<String>) {
         self.connector_worker.get_finished(finished_requests)
     }
+
+
+use cudarc::driver::sys::{
+    cuCtxGetCurrent, cuEventSynchronize, cudaError_enum, CUcontext, CUevent,
+};
+use std::ptr;
+
+// todo(ryan): we will need this if we farm off the cuEventSynchronize to another thread
+fn _get_current_context() -> CUcontext {
+    let mut ctx: CUcontext = ptr::null_mut();
+    let status = unsafe { cuCtxGetCurrent(&mut ctx) };
+    assert_eq!(
+        status,
+        cudaError_enum::CUDA_SUCCESS,
+        "cuCtxGetCurrent failed"
+    );
+    assert!(!ctx.is_null(), "Torch has not set a CUDA context");
+    ctx
+}
+
+fn event_sync_blocking(event: u64) {
+    let status = unsafe { cuEventSynchronize(event as CUevent) };
+    assert_eq!(
+        status,
+        cudaError_enum::CUDA_SUCCESS,
+        "cuEventSynchronize failed"
+    );
 }

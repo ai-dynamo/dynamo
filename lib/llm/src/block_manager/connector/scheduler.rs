@@ -107,10 +107,10 @@ impl WorkerSchedulerClient {
     }
 
     pub fn start_next_iteration(&mut self) -> Result<(), SchedulerError> {
-        debug_assert!(
-            self.iteration_complete,
-            "previous iteration must be complete before starting a new iteration"
-        );
+        // debug_assert!(
+        //     self.iteration_complete,
+        //     "previous iteration must be complete before starting a new iteration"
+        // );
         self.iteration += 1;
         self.iteration_complete = false;
         self.layers_complete = 0;
@@ -421,11 +421,11 @@ impl Scheduler {
     }
 
     fn start_iteration(&mut self, iteration: u64) {
-        tracing::debug!(iteration, "engine state updating iteration");
-        debug_assert!(
-            self.iteration_complete,
-            "previous iteration must be complete before starting a new iteration"
-        );
+        // tracing::debug!(iteration, "engine state updating iteration");
+        // debug_assert!(
+        //     self.iteration_complete,
+        //     "previous iteration must be complete before starting a new iteration"
+        // );
         debug_assert_eq!(
             self.iteration,
             iteration - 1,

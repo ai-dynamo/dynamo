@@ -72,6 +72,22 @@ class KvConnectorWorker:
             )
         ]
 
+        events = [
+            torch.cuda.Event(enable_timing=False, interprocess=False)
+            for _ in range(len(ordered_kv_caches))
+        ]
+
+        # events are lazy, if we don't record them once here, the raw handles we pass to rust will be null
+        for event in events:
+            event.record(torch.cuda.current_stream())
+
+        raw_event_handles = [event.cuda_event for event in events]
+
+        self.events = {
+            layer_name: event
+            for (layer_name, _tensor), event in zip(ordered_kv_caches, events)
+        }
+
         # Get first tensor to extract common properties
         first_tensor = ordered_kv_caches[0][1]
         shape = first_tensor.shape
@@ -101,6 +117,7 @@ class KvConnectorWorker:
             device_id,
             kv_cache_dtype.itemsize,
             ordered_kv_caches,
+            raw_event_handles,
         )
 
     def bind_connector_metadata(self, data: bytes) -> None:
@@ -159,6 +176,7 @@ class KvConnectorWorker:
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
+        self.events[layer_name].record(torch.cuda.current_stream())
         self._connector.save_kv_layer(layer_name, kv_layer)
 
     def get_finished(

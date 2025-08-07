@@ -104,7 +104,9 @@ pub trait Slot: std::fmt::Debug {
     /// of any kv blocks for tokens in the isl that are not already in memory on the device, but on some local storage.
     ///
     /// If external tokens are matched, then the slot will transition to the [`SlotState::Onboarding`] state.
-    fn acquire_all_local_matches(&mut self) -> Result<(), SlotError>;
+    /// `num_computed_tokens` is the number of tokens that have been computed on the device, this indicated the number of
+    /// blocks in the ISL sequence that we should skip before we start looking for matches.
+    fn acquire_local_matches(&mut self, num_computed_tokens: usize) -> Result<(), SlotError>;
 
     /// Trigger the onboarding operation for the slot.
     fn trigger_onboarding(&mut self, num_external_tokens: usize) -> Result<(), SlotError>;
@@ -349,6 +351,7 @@ impl Slot for VllmConnectorSlot {
         tracing::debug!("recording {} cached disk tokens", num_tokens);
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(request_id = self.request_id.as_str()))]
     fn apply_scheduler_output(
         &mut self,
         tokens: &[u32],
@@ -356,10 +359,11 @@ impl Slot for VllmConnectorSlot {
         num_computed_tokens: usize,
         num_scheduled_tokens: usize,
     ) -> Result<(), SlotError> {
-        // debug_assert!(num_computed_tokens == self.computed_tokens());
-
         if !tokens.is_empty() {
-            tracing::debug!("appending {} newly decodedtokens to sequence", tokens.len());
+            tracing::debug!(
+                "appending {} newly decoded tokens to sequence",
+                tokens.len()
+            );
             self.state = SlotState::Decoding;
             self.sequence.extend(tokens.into()).unwrap();
         } else {
@@ -443,6 +447,8 @@ impl Slot for VllmConnectorSlot {
 
             self.offload_blocks(&offload_block_ids, &offload_token_blocks)
                 .expect("failed to offload blocks");
+
+            self.evaluated_blocks += num_candidate_blocks;
         }
 
         // done applying policy
@@ -494,7 +500,12 @@ impl Slot for VllmConnectorSlot {
     }
 
     #[tracing::instrument(level = "debug", skip_all)]
-    fn acquire_all_local_matches(&mut self) -> Result<(), SlotError> {
+    fn acquire_local_matches(&mut self, num_computed_tokens: usize) -> Result<(), SlotError> {
+        if matches!(self.state(), SlotState::OnboardStaged(_)) {
+            tracing::debug!("slot is already in the OnboardStaged state; skipping lookup");
+            return Ok(());
+        }
+
         if !matches!(self.state(), SlotState::Initialized) {
             return Err(SlotError::InvalidOperation(format!(
                 "slot must be in the NotScheduled state to acquire local matches; got {:?}",
@@ -503,7 +514,6 @@ impl Slot for VllmConnectorSlot {
         }
 
         let block_size = self.block_manager.block_size();
-        let num_computed_tokens = self.computed_tokens();
         let num_computed_blocks = num_computed_tokens / block_size;
         debug_assert!(num_computed_tokens % block_size == 0);
 
@@ -571,16 +581,10 @@ impl Slot for VllmConnectorSlot {
             return Ok(());
         }
 
-        // early exit if we need to onboard 0 blocks
-        if (num_computed_blocks + num_matched_blocks) * block_size == self.sequence().total_tokens()
-        {
-            return Ok(());
-        }
-
         let mut num_new_matched_tokens = num_matched_blocks * block_size;
 
         // we are on a block boundary, so we need to throw away the last block
-        if num_computed_tokens + num_new_matched_tokens == self.sequence().total_tokens() {
+        if (num_computed_tokens + num_new_matched_tokens) == self.sequence().total_tokens() {
             tracing::debug!("on a block boundary, throwing away the last block");
 
             // we should have matched at least one block
@@ -595,6 +599,11 @@ impl Slot for VllmConnectorSlot {
 
             // decrement the number of new matched tokens by the block size
             num_new_matched_tokens -= block_size;
+        }
+
+        // early exit if we need to onboard 0 blocks (after potentially dropping the last block)
+        if num_new_matched_tokens == 0 {
+            return Ok(());
         }
 
         self.staging_from_host = if !host_blocks.is_empty() {
@@ -704,6 +713,7 @@ impl ExternallyManagedDeviceSlot for VllmConnectorSlot {
         Ok(())
     }
 
+    #[tracing::instrument(level = "debug", skip_all, fields(request_id = self.request_id))]
     fn append_mutable_device_blocks(&mut self, block_ids: &[BlockId]) -> Result<(), SlotError> {
         let count = block_ids.len();
         self.device_blocks.extend(block_ids);

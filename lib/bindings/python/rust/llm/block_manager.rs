@@ -127,18 +127,18 @@ impl BlockManager {
         } else {
             tracing::info!("Leader not provided. Block transfer functionality will be disabled.");
 
-            let num_device_blocks = num_device_blocks
-                .expect("num_device_blocks must be provided if leader is not provided");
+            // let num_device_blocks = num_device_blocks
+            //     .expect("num_device_blocks must be provided if leader is not provided");
 
-            config = config.device_layout(
-                dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
-                    .num_blocks(num_device_blocks)
-                    .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
-                    .build()
-                    .map_err(to_pyerr)?,
-            );
+            // config = config.device_layout(
+            //     dynamo_llm::block_manager::KvManagerLayoutConfig::builder()
+            //         .num_blocks(num_device_blocks)
+            //         .logical(Some(BlockParallelismStrategy::LeaderWorkerSharded))
+            //         .build()
+            //         .map_err(to_pyerr)?,
+            // );
 
-            unimplemented!("construct a drt or get one from args")
+            unimplemented!("Leader not provided");
             // (
             //     None,
             //     Arc::new(
