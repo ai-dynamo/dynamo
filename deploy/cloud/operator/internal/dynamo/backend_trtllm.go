@@ -100,29 +100,16 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	gpusPerNode := getGPUsPerNode(component.Resources)
 	totalGPUs := numberOfNodes * gpusPerNode
 
-	// Collect environment variables from container
-	var envVars []string
-	for _, env := range container.Env {
-		envVars = append(envVars, fmt.Sprintf("-x %s", env.Name))
-	}
-	envVarsStr := strings.Join(envVars, " ")
-
 	// Build mpirun command with explicit SSH configuration and environment variables
 	// Wrap the entire command (trtllm-llmapi-launch + original command) in bash -c for proper shell interpretation
 	wrappedCommand := fmt.Sprintf("bash -c 'source /opt/dynamo/venv/bin/activate && trtllm-llmapi-launch %s'", originalCommand)
 
-	// Build the mpirun command parts
-	mpirunBase := fmt.Sprintf("mpirun --oversubscribe -n %d -H %s --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\"",
+	// Use -x without variable names to forward ALL environment variables
+	// This includes variables from envFrom (ConfigMaps/Secrets) that we can't enumerate at build time
+	mpirunCmd := fmt.Sprintf("mpirun --oversubscribe -n %d -H %s --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" -x %s",
 		totalGPUs,
-		workerHosts)
-
-	// Add environment variables if they exist, then the wrapped command
-	var mpirunCmd string
-	if envVarsStr != "" {
-		mpirunCmd = fmt.Sprintf("%s %s %s", mpirunBase, envVarsStr, wrappedCommand)
-	} else {
-		mpirunCmd = fmt.Sprintf("%s %s", mpirunBase, wrappedCommand)
-	}
+		workerHosts,
+		wrappedCommand)
 
 	// Combine SSH setup and mpirun command
 	fullCommand := strings.Join(append(sshSetupCommands, mpirunCmd), " && ")
