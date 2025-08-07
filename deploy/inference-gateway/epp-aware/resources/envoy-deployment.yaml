@@ -1,0 +1,27 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy-shim
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: envoy-shim
+  template:
+    metadata:
+      labels:
+        app: envoy-shim
+    spec:
+      containers:
+      - name: envoy
+        image: envoyproxy/envoy:v1.29-latest
+        args: ["-c", "/etc/envoy/envoy.yaml", "--log-level", "debug"]
+        ports:
+        - containerPort: 8080
+        volumeMounts:
+        - name: envoy-config
+          mountPath: /etc/envoy
+      volumes:
+      - name: envoy-config
+        configMap:
+          name: envoy-shim-config

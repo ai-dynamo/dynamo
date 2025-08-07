@@ -1,0 +1,111 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: envoy-shim-config
+data:
+  envoy.yaml: |
+    admin:
+      access_log_path: "/tmp/envoy_admin.log"
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 9901
+
+    static_resources:
+      listeners:
+        - name: listener_0
+          address:
+            socket_address:
+              address: 0.0.0.0
+              port_value: 8080
+          filter_chains:
+            - filters:
+                - name: envoy.filters.network.http_connection_manager
+                  typed_config:
+                    "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                    stat_prefix: ingress_http
+                    internal_address_config: {}
+                    route_config:
+                      name: local_route
+                      virtual_hosts:
+                        - name: default
+                          domains: ["*"]
+                          routes:
+                            - match:
+                                prefix: "/"
+                              route:
+                                cluster: dynamo-frontend
+                                host_rewrite_header: x-gateway-worker-id
+                                timeout: "300s"
+                    http_filters:
+                      - name: envoy.filters.http.ext_proc
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+                          grpc_service:
+                            envoy_grpc:
+                              cluster_name: epp-cluster
+                          failure_mode_allow: true
+                          processing_mode:
+                            request_header_mode: SEND
+                            response_header_mode: SEND
+                      - name: envoy.filters.http.router
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+                    access_log:
+                      - name: envoy.access_loggers.stdout
+                        typed_config:
+                          "@type": type.googleapis.com/envoy.extensions.access_loggers.stream.v3.StdoutAccessLog
+                          log_format:
+                            json_format:
+                              start_time: "%START_TIME%"
+                              method: "%REQ(:METHOD)%"
+                              path: "%REQ(:PATH)%"
+                              authority: "%REQ(:AUTHORITY)%"
+                              protocol: "%PROTOCOL%"
+                              response_code: "%RESPONSE_CODE%"
+                              x_gateway_dst_req: "%REQ(X-GATEWAY-DESTINATION-ENDPOINT)%"
+                              x_gateway_dst_resp: "%RESP(X-GATEWAY-DESTINATION-ENDPOINT)%"
+                              x_gateway_worker: "%RESP(X-GATEWAY-WORKER-ID)%"
+                              worker_instance_id: "%RESP(worker_instance_id)%"
+                              gateway_dst_resp_small: "%RESP(x-gateway-destination-endpoint)%"
+                              upstream_host: "%UPSTREAM_HOST%"
+                              upstream_service_time: "%RESP(X-ENVOY-UPSTREAM-SERVICE-TIME)%"
+                              duration: "%DURATION%"
+                              response_flags: "%RESPONSE_FLAGS%"
+
+
+      clusters:
+        - name: dynamo-frontend
+          type: LOGICAL_DNS
+          connect_timeout: 0.5s
+          lb_policy: ROUND_ROBIN
+          dns_lookup_family: V4_ONLY
+          load_assignment:
+            cluster_name: dynamo-frontend
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: igw-vllm-agg-frontend.default.svc.cluster.local
+                          port_value: 8000
+        - name: epp-cluster
+          type: STRICT_DNS
+          connect_timeout: 0.5s
+          lb_policy: ROUND_ROBIN
+          typed_extension_protocol_options:
+            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+              "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+              explicit_http_config:
+                http2_protocol_options: {}
+          load_assignment:
+            cluster_name: epp-cluster
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: dynamo-qwen-epp.default.svc.cluster.local
+                          port_value: 9002
+
+
