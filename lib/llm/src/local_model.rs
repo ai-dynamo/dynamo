@@ -16,8 +16,7 @@ use dynamo_runtime::{
 
 use crate::discovery::ModelEntry;
 use crate::entrypoint::RouterConfig;
-use crate::model_card::runtime_config::ModelRuntimeConfig;
-use crate::model_card::{self, ModelDeploymentCard};
+use crate::model_card::{self, ModelDeploymentCard, ModelRuntimeConfig};
 use crate::model_type::ModelType;
 use crate::request_template::RequestTemplate;
 
@@ -178,6 +177,7 @@ impl LocalModelBuilder {
                 template,
                 http_port: self.http_port,
                 router_config: self.router_config.take().unwrap_or_default(),
+                runtime_config: self.runtime_config.clone(),
             });
         }
 
@@ -236,6 +236,7 @@ impl LocalModelBuilder {
             template,
             http_port: self.http_port,
             router_config: self.router_config.take().unwrap_or_default(),
+            runtime_config: self.runtime_config.clone(),
         })
     }
 }
@@ -248,6 +249,7 @@ pub struct LocalModel {
     template: Option<RequestTemplate>,
     http_port: u16, // Only used if input is HTTP server
     router_config: RouterConfig,
+    runtime_config: ModelRuntimeConfig,
 }
 
 impl LocalModel {
@@ -277,6 +279,10 @@ impl LocalModel {
 
     pub fn router_config(&self) -> &RouterConfig {
         &self.router_config
+    }
+
+    pub fn runtime_config(&self) -> &ModelRuntimeConfig {
+        &self.runtime_config
     }
 
     pub fn is_gguf(&self) -> bool {
@@ -338,25 +344,6 @@ impl LocalModel {
                 None, // use primary lease
             )
             .await
-    }
-
-    pub async fn register_runtime_config(
-        &mut self,
-        endpoint: &Endpoint,
-        runtime_config: ModelRuntimeConfig,
-    ) -> anyhow::Result<()> {
-        self.card.runtime_config = Some(runtime_config);
-
-        // Update the card in etcd if we're attached
-        if let Some(etcd_client) = endpoint.drt().etcd_client() {
-            let kvstore: Box<dyn KeyValueStore> = Box::new(EtcdStorage::new(etcd_client.clone()));
-            let card_store = Arc::new(KeyValueStoreManager::new(kvstore));
-            let key = self.card.slug().to_string();
-            card_store
-                .publish(model_card::ROOT_PATH, None, &key, &mut self.card)
-                .await?;
-        }
-        Ok(())
     }
 
     /// Ensure that each component serves only one model.

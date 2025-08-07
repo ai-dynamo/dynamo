@@ -25,7 +25,6 @@ from dynamo.llm import (
     ZmqKvEventPublisher,
     ZmqKvEventPublisherConfig,
     register_llm,
-    register_runtime_config,
 )
 from dynamo.llm.model_card import ModelRuntimeConfig
 from dynamo.runtime import DistributedRuntime, dynamo_worker
@@ -336,13 +335,8 @@ async def init(
     await component.create_service()
 
     endpoint = component.endpoint("generate")
-    await register_llm(
-        ModelType.Backend,
-        endpoint,
-        server_args.model_path,
-        server_args.served_model_name,
-        kv_cache_block_size=server_args.page_size,
-        migration_limit=migration_limit,
+    await register_llm_with_runtime_config(
+        engine, endpoint, server_args, migration_limit
     )
 
     if server_args.disaggregation_mode != "null":
@@ -367,57 +361,78 @@ async def init(
     _ = ZmqKvEventPublisher(component=component, config=zmq_config)
 
     tasks = [endpoint.serve_endpoint(handler.generate)]
-    tasks.append(
-        register_runtime_config_once_engine_ready(
-            endpoint, engine, server_args.served_model_name
-        )
-    )
     tasks.extend(setup_native_endpoints(server_args, component, handler))
 
     await asyncio.gather(*tasks)
 
 
-async def register_runtime_config_once_engine_ready(
-    endpoint: Endpoint, engine: sgl.Engine, model_name: str
+async def register_llm_with_runtime_config(
+    engine: sgl.Engine,
+    endpoint: Endpoint,
+    server_args: ServerArgs,
+    migration_limit: int,
 ):
-    max_retries = 3
-    retry_delay = 2
+    """Register LLM with runtime config"""
+    runtime_config = await _get_runtime_config(engine)
+    try:
+        await register_llm(
+            ModelType.Backend,
+            endpoint,
+            server_args.model_path,
+            server_args.served_model_name,
+            kv_cache_block_size=server_args.page_size,
+            migration_limit=migration_limit,
+            runtime_config=runtime_config,
+        )
+    except Exception as e:
+        logging.error(f"Failed to register with runtime config: {e}")
+        return None
 
-    for attempt in range(max_retries):
+
+async def _get_runtime_config(engine: sgl.Engine) -> Optional[ModelRuntimeConfig]:
+    """Get runtime config from SGLang engine"""
+    MAX_RETRIES = 3
+    RETRY_DELAY = 2
+
+    for attempt in range(MAX_RETRIES):
         try:
             server_info = engine.get_server_info()
+            if not server_info:
+                logging.warning("No server info from SGLang engine")
+                return None
 
             runtime_config = ModelRuntimeConfig()
-
-            # Use actual computed values from SGLang engine
             if server_info.get("max_total_num_tokens") is not None:
                 runtime_config.total_kv_blocks = server_info["max_total_num_tokens"]
+                logging.info(
+                    f"Set model runtime config total KV blocks: {runtime_config.total_kv_blocks}"
+                )
 
             if server_info.get("max_running_requests") is not None:
                 runtime_config.max_num_seqs = server_info["max_running_requests"]
+                logging.info(
+                    f"Set model runtime config max num seqs: {runtime_config.max_num_seqs}"
+                )
 
             if server_info.get("mem_fraction_static") is not None:
                 gpu_mem_percentage = int(server_info["mem_fraction_static"] * 100)
                 runtime_config.gpu_memory_utilization = gpu_mem_percentage
+                logging.info(
+                    f"Set model runtime config GPU memory utilization: {gpu_mem_percentage}%"
+                )
 
-            # Register the runtime config
-            await register_runtime_config(endpoint, model_name, runtime_config)
-
-            logging.info(
-                f"Published runtime config for SGLang decode worker: {model_name}"
-            )
-            return  # Successfully published runtime config, exit loop
+            return runtime_config
 
         except Exception as e:
             logging.warning(
-                f"Attempt {attempt + 1}/{max_retries} failed to publish runtime config: {e}"
+                f"Attempt {attempt + 1}/{MAX_RETRIES} failed to publish runtime config: {e}"
             )
-            if attempt < max_retries - 1:
-                await asyncio.sleep(retry_delay)
-                retry_delay *= 2
+            if attempt < MAX_RETRIES - 1:
+                await asyncio.sleep(RETRY_DELAY)
+                RETRY_DELAY *= 2
             else:
                 logging.error(
-                    f"Failed to publish runtime config after {max_retries} attempts"
+                    f"Failed to publish runtime config after {MAX_RETRIES} attempts"
                 )
 
 

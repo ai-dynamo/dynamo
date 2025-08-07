@@ -93,7 +93,6 @@ impl ModelDeploymentCard {
             context_length,
             kv_cache_block_size: 0,
             migration_limit: 0,
-            runtime_config: None,
             user_data: None,
         })
     }
@@ -135,7 +134,6 @@ impl ModelDeploymentCard {
             context_length,
             kv_cache_block_size: 0, // set later
             migration_limit: 0,
-            runtime_config: None,
             user_data: None,
         })
     }

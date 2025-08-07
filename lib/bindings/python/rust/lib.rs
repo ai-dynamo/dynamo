@@ -19,12 +19,10 @@ use dynamo_runtime::{
         network::egress::push_router::RouterMode as RsRouterMode, EngineStream, ManyOut, SingleIn,
     },
     protocols::annotated::Annotated as RsAnnotated,
-    slug::Slug,
-    storage::key_value_store::{EtcdStorage, KeyValueStoreManager},
     traits::DistributedRuntimeProvider,
 };
 
-use dynamo_llm::{self as llm_rs, model_card};
+use dynamo_llm::{self as llm_rs};
 use dynamo_llm::{entrypoint::RouterConfig, kv_router::KvRouterConfig};
 
 use crate::llm::model_card::ModelRuntimeConfig;
@@ -67,7 +65,6 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(llm::kv::compute_block_hash_for_seq_py, m)?)?;
     m.add_function(wrap_pyfunction!(log_message, m)?)?;
     m.add_function(wrap_pyfunction!(register_llm, m)?)?;
-    m.add_function(wrap_pyfunction!(register_runtime_config, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::make_engine, m)?)?;
     m.add_function(wrap_pyfunction!(llm::entrypoint::run_input, m)?)?;
 
@@ -137,7 +134,7 @@ fn log_message(level: &str, message: &str, module: &str, file: &str, line: u32) 
 }
 
 #[pyfunction]
-#[pyo3(signature = (model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, user_data=None))]
+#[pyo3(signature = (model_type, endpoint, model_path, model_name=None, context_length=None, kv_cache_block_size=None, router_mode=None, migration_limit=0, runtime_config=None, user_data=None))]
 #[allow(clippy::too_many_arguments)]
 fn register_llm<'p>(
     py: Python<'p>,
@@ -149,6 +146,7 @@ fn register_llm<'p>(
     kv_cache_block_size: Option<u32>,
     router_mode: Option<RouterMode>,
     migration_limit: u32,
+    runtime_config: Option<ModelRuntimeConfig>,
     user_data: Option<&Bound<'p, PyDict>>,
 ) -> PyResult<Bound<'p, PyAny>> {
     let model_type_obj = match model_type {
@@ -179,6 +177,7 @@ fn register_llm<'p>(
             .kv_cache_block_size(kv_cache_block_size)
             .router_config(Some(router_config))
             .migration_limit(Some(migration_limit))
+            .runtime_config(runtime_config.unwrap_or_default().inner)
             .user_data(user_data_json);
         // Download from HF, load the ModelDeploymentCard
         let mut local_model = builder.build().await.map_err(to_pyerr)?;
@@ -188,60 +187,6 @@ fn register_llm<'p>(
             .await
             .map_err(to_pyerr)?;
 
-        Ok(())
-    })
-}
-
-#[pyfunction]
-fn register_runtime_config<'p>(
-    py: Python<'p>,
-    endpoint: Endpoint,
-    model_identifier: &str,
-    runtime_config: ModelRuntimeConfig,
-) -> PyResult<Bound<'p, PyAny>> {
-    let model_identifier = model_identifier.to_string();
-    let runtime_config = runtime_config.inner.clone();
-    let endpoint = endpoint.inner.clone();
-
-    pyo3_async_runtimes::tokio::future_into_py(py, async move {
-        // Get etcd client from endpoint
-        let Some(etcd_client) = endpoint.drt().etcd_client() else {
-            return Err(anyhow::anyhow!(
-                "Cannot update runtime config on static endpoint"
-            ))
-            .map_err(to_pyerr);
-        };
-
-        // Create storage manager
-        let kvstore = EtcdStorage::new(etcd_client.clone());
-        let card_store = KeyValueStoreManager::new(Box::new(kvstore));
-
-        // Generate the model slug - this should match what register_llm used
-        // The register_llm function uses the model_name (or model_path if no model_name)
-        // and then calls card.set_name() which sets both display_name and service_name
-        let model_slug = Slug::slugify(&model_identifier);
-
-        // Get existing card
-        let mut card = card_store
-            .load::<llm_rs::model_card::ModelDeploymentCard>(model_card::ROOT_PATH, &model_slug)
-            .await
-            .map_err(to_pyerr)?
-            .ok_or_else(|| anyhow::anyhow!("Cannot find model card"))
-            .map_err(to_pyerr)?;
-
-        // Update the card
-        card.runtime_config = Some(runtime_config);
-
-        // Publish the card
-        card_store
-            .publish(model_card::ROOT_PATH, None, model_slug.as_ref(), &mut card)
-            .await
-            .map_err(to_pyerr)?;
-
-        tracing::info!(
-            "Successfully updated runtime config for model card: {}",
-            model_slug
-        );
         Ok(())
     })
 }

@@ -27,7 +27,6 @@ use tokenizers::Tokenizer as HfTokenizer;
 use url::Url;
 
 use crate::gguf::{Content, ContentConfig, ModelConfigLike};
-use crate::model_card::runtime_config::ModelRuntimeConfig;
 use crate::protocols::TokenIdType;
 
 /// If a model deployment card hasn't been refreshed in this much time the worker is likely gone
@@ -133,11 +132,6 @@ pub struct ModelDeploymentCard {
     /// connection to the current worker.
     pub migration_limit: u32,
 
-    /// Runtime configuration data that is computed during initialization
-    /// but remains constant during the worker session
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_config: Option<ModelRuntimeConfig>,
-
     /// User-defined metadata for custom worker behavior
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_data: Option<serde_json::Value>,
@@ -242,16 +236,6 @@ impl ModelDeploymentCard {
             Some(info) => info.is_gguf(),
             None => false,
         }
-    }
-
-    /// Update an existing runtime config or create a new one if none exists
-    pub fn update_runtime_config<F>(&mut self, updater: F)
-    where
-        F: FnOnce(&mut ModelRuntimeConfig),
-    {
-        let mut config = self.runtime_config.take().unwrap_or_default();
-        updater(&mut config);
-        self.runtime_config = Some(config);
     }
 
     /// Move the files this MDC uses into the NATS object store.

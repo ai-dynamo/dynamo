@@ -47,52 +47,10 @@ impl ModelDeploymentCard {
         let json = self.inner.to_json().map_err(to_pyerr)?;
         Ok(json)
     }
-
-    #[setter]
-    fn register_runtime_config(&mut self, runtime_config: ModelRuntimeConfig) {
-        self.inner.runtime_config = Some(runtime_config.inner);
-    }
-
-    #[getter]
-    fn runtime_config(&self) -> Option<ModelRuntimeConfig> {
-        self.inner
-            .runtime_config
-            .as_ref()
-            .map(|config| ModelRuntimeConfig {
-                inner: config.clone(),
-            })
-    }
-
-    #[getter]
-    fn total_kv_blocks(&self) -> Option<u64> {
-        self.inner
-            .runtime_config
-            .as_ref()
-            .map(|config| config.total_kv_blocks)
-            .flatten()
-    }
-
-    #[getter]
-    fn max_num_seqs(&self) -> Option<u64> {
-        self.inner
-            .runtime_config
-            .as_ref()
-            .map(|config| config.max_num_seqs)
-            .flatten()
-    }
-
-    #[getter]
-    fn gpu_memory_utilization(&self) -> Option<u64> {
-        self.inner
-            .runtime_config
-            .as_ref()
-            .map(|config| config.gpu_memory_utilization)
-            .flatten()
-    }
 }
 
 #[pyclass]
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ModelRuntimeConfig {
     pub(crate) inner: RsModelRuntimeConfig,
 }
