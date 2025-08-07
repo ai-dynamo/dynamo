@@ -43,7 +43,6 @@
 //!
 //! This module provides a scalable and efficient way to manage and retrieve data blocks for LLM inference, leveraging a global KV cache to optimize performance.
 
-use bytes::Bytes;
 // use prometheus::{IntCounter, IntGauge};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -120,16 +119,36 @@ pub fn compute_block_hash(data: &[u8]) -> LocalBlockHash {
 /// ### Returns
 ///
 /// A vector of `LocalBlockHash` representing the computed hashes for each chunk of tokens.
+#[cfg(target_endian = "little")]
 pub fn compute_block_hash_for_seq(tokens: &[u32], kv_block_size: u32) -> Vec<LocalBlockHash> {
     tokens
-        .chunks_exact(kv_block_size as usize) // Split into chunks of kv_block_size elements
+        .chunks_exact(kv_block_size as usize)
         .map(|chunk| {
-            let bytes: Vec<u8> = chunk
-                .iter()
-                .flat_map(|&num| num.to_le_bytes()) // Convert each i32 to its little-endian bytes
-                .collect();
+            let bytes = bytemuck::cast_slice::<u32, u8>(chunk);
+            compute_block_hash(bytes)
+        })
+        .collect()
+}
 
-            compute_block_hash(&Bytes::from(bytes)) // Convert the byte Vec to Bytes
+/// Compute the hash for a sequence of tokens (non-little-endian fallback).
+///
+/// This implementation ensures consistent hashing across different architectures
+/// by explicitly converting each u32 to little-endian bytes.
+///
+/// ### Arguments
+///
+/// * `tokens` - A vector of `u32` tokens.
+///
+/// ### Returns
+///
+/// A vector of `LocalBlockHash` representing the computed hashes for each chunk of tokens.
+#[cfg(not(target_endian = "little"))]
+pub fn compute_block_hash_for_seq(tokens: &[u32], kv_block_size: u32) -> Vec<LocalBlockHash> {
+    tokens
+        .chunks_exact(kv_block_size as usize)
+        .map(|chunk| {
+            let bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
+            compute_block_hash(&bytes)
         })
         .collect()
 }
@@ -1527,6 +1546,47 @@ mod tests {
         let sequence = (0..(2 * kv_block_size + 1)).collect::<Vec<u32>>();
         let hashes = compute_block_hash_for_seq(&sequence, kv_block_size);
         assert_eq!(hashes.len(), 2);
+    }
+
+    /// Test that the optimized implementation produces the same results as the original
+    /// by comparing against a reference implementation that uses the old approach.
+    #[test]
+    fn test_compute_block_hash_for_seq_optimization_correctness() {
+        setup();
+
+        // Reference implementation using the original approach
+        fn compute_block_hash_for_seq_reference(
+            tokens: &[u32],
+            kv_block_size: u32,
+        ) -> Vec<LocalBlockHash> {
+            tokens
+                .chunks_exact(kv_block_size as usize)
+                .map(|chunk| {
+                    let bytes: Vec<u8> = chunk.iter().flat_map(|&num| num.to_le_bytes()).collect();
+                    compute_block_hash(&bytes)
+                })
+                .collect()
+        }
+
+        // Test various scenarios
+        let test_cases = vec![
+            (vec![1, 2, 3, 4], 4),
+            (vec![0, 1, 2, 3, 4, 5, 6, 7], 4),
+            (vec![42, 1337, 0xDEADBEEF, 0xCAFEBABE], 2),
+            ((0..100).collect::<Vec<u32>>(), 32),
+            (vec![u32::MAX, u32::MIN, 12345, 67890], 4),
+        ];
+
+        for (tokens, kv_block_size) in test_cases {
+            let optimized_result = compute_block_hash_for_seq(&tokens, kv_block_size);
+            let reference_result = compute_block_hash_for_seq_reference(&tokens, kv_block_size);
+
+            assert_eq!(
+                optimized_result, reference_result,
+                "Optimized implementation should produce same results as reference for tokens: {:?}, block_size: {}",
+                tokens, kv_block_size
+            );
+        }
     }
 
     fn make_indexer(
