@@ -148,7 +148,12 @@ fi
 # Install ep_kernels and DeepGEMM
 echo "Installing ep_kernels and DeepGEMM"
 cd tools/ep_kernels
-bash install_python_libraries.sh # These libraries aren't pinned.
+
+# These libraries lack version pinning and would download the latest PyTorch version,
+# which can cause compatibility issues with torchvision. The actual PyTorch version pinning
+# to 2.7.1 is implemented later in this script.
+bash install_python_libraries.sh
+
 cd ep_kernels_workspace
 git clone https://github.com/deepseek-ai/DeepGEMM.git
 cd DeepGEMM
@@ -175,6 +180,13 @@ else
     cd flashinfer
     git checkout $FLASHINF_REF
     python -m pip install -v .
+fi
+
+if [ "$ARCH" = "amd64" ]; then
+    # NOTE: PyTorch 2.8.0 compatibility issue
+    # PyTorch 2.8.0 causes "RuntimeError: operator torchvision::nms does not exist" error.
+    # Temporarily pinning to PyTorch 2.7.1 until this compatibility issue is resolved.
+    uv pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu128
 fi
 
 echo "vllm installation completed successfully"
