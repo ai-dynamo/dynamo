@@ -1,14 +1,14 @@
 #!/bin/bash
 
-# 添加错误处理
+# Add error handling
 set -e
 set -u
 trap 'echo "Error occurred at line $LINENO"; exit 1' ERR
 
-# 添加参数检查
+# Add argument checking
 if [ "$#" -lt 6 ]; then
     echo "Error: Missing required arguments"
-    echo "Usage: $0 model_name multi_round concurrency_list streaming log_path total_gpus artifacts_root_dir model_path isl osl"
+    echo "Usage: $0 model_name multi_round concurrency_list streaming log_path total_gpus artifacts_dir model_path isl osl"
     exit 1
 fi
 
@@ -20,14 +20,14 @@ concurrency_list=$4
 streaming=$5
 log_path=$6
 total_gpus=$7
-artifacts_root_dir=$8
+artifacts_dir=$8
 model_path=$9
 isl=${10}
 osl=${11}
-
+kind=${12}
 
 if [ $# -lt 12 ]; then
-  echo "Usage: $0 $model $multi_round $num_gen_servers $concurrency_list $streaming $log_path $total_gpus $artifacts_root_dir $model_path $isl $osl"
+  echo "Usage: $0 $model $multi_round $num_gen_servers $concurrency_list $streaming $log_path $total_gpus $artifacts_dir $model_path $isl $osl $kind"
   exit 1
 fi
 
@@ -40,23 +40,14 @@ fi
 set -x
 config_file=${log_path}/config.yaml
 
-# check if the config file exists every 10 seconds timeout 1800 seconds
-timeout=1800
+
+# install genai-perf
+pip install genai-perf
 
 # Create artifacts root directory if it doesn't exist
-if [ ! -d "${artifacts_root_dir}" ]; then
-    mkdir -p "${artifacts_root_dir}"
+if [ ! -d "${artifacts_dir}" ]; then
+    mkdir -p "${artifacts_dir}"
 fi
-
-# Find the next available artifacts directory index
-index=0
-while [ -d "${artifacts_root_dir}/artifacts_${index}" ]; do
-    index=$((index + 1))
-done
-
-# Create the new artifacts directory
-artifact_dir="${artifacts_root_dir}/artifacts_${index}"
-mkdir -p "${artifact_dir}"
 
 hostname=$HEAD_NODE_IP
 port=8000
@@ -133,8 +124,6 @@ curl -v  -w "%{http_code}" "${hostname}:${port}/v1/chat/completions" \
   "max_tokens": 30
 }'
 
-pip install genai-perf
-
 cp ${log_path}/output_workers.log ${log_path}/workers_start.log
 echo "Starting benchmark..."
 for concurrency in ${concurrency_list}; do
@@ -162,7 +151,7 @@ for concurrency in ${concurrency_list}; do
     	--warmup-request-count $(($concurrency*2)) \
 	--num-dataset-entries ${num_prompts} \
     	--random-seed 100 \
-    	--artifact-dir ${artifact_dir} \
+    	--artifact-dir ${artifacts_dir} \
     	-- \
     	-v \
     	--max-threads ${concurrency} \
@@ -177,19 +166,19 @@ done
 # being benchmarked.
 deployment_config=$(cat << EOF
 {
-  "kind": "dynamo_trtllm_wideep",
+  "kind": "${kind}",
   "model": "${model}",
   "total_gpus": "${total_gpus}"
 }
 EOF
 )
 
-mkdir -p "${artifact_dir}"
-if [ -f "${artifact_dir}/deployment_config.json" ]; then
+mkdir -p "${artifacts_dir}"
+if [ -f "${artifacts_dir}/deployment_config.json" ]; then
   echo "Deployment configuration already exists. Overwriting..."
-  rm -f "${artifact_dir}/deployment_config.json"
+  rm -f "${artifacts_dir}/deployment_config.json"
 fi
-echo "${deployment_config}" > "${artifact_dir}/deployment_config.json"
+echo "${deployment_config}" > "${artifacts_dir}/deployment_config.json"
 
 
 job_id=${SLURM_JOB_ID}

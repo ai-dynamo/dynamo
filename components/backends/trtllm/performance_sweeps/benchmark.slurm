@@ -60,6 +60,7 @@ gen_gpu_memory_fraction=${11}
 eplb_num_slots=${12}
 mtp_size=${13}
 concurrency_list=${14}
+kind=${15}
 
 sub_dir=${LOG_DIR}/ctx${num_ctx_servers}_gen${num_gen_servers}_dep${gen_tp_size}_batch${gen_batch_size}_eplb${eplb_num_slots}_mtp${mtp_size}
 
@@ -78,10 +79,8 @@ if [ "${gen_enable_attention_dp}" = "false" ]; then
 fi
 
 full_logdir=${sub_dir}
-mkdir -p ${full_logdir}
-
-artifacts_root_dir=${full_logdir}/genai_perf_artifacts
-mkdir -p ${artifacts_root_dir}
+artifacts_dir=${full_logdir}/genai_perf_artifacts
+mkdir -p ${artifacts_dir}
 
 
 # Set clock
@@ -143,6 +142,7 @@ srun -l --container-name=${CONTAINER_NAME} \
         -w ${nodes[0]} \
         bash ${SCRIPTS_DIR}/disagg/start_server.sh ${full_logdir}/config.yaml &> ${full_logdir}/output_server.log &
 
+# wait for the server to start
 sleep 10
 
 PREFILL_COUNT=$(grep 'prefill_count:' "${full_logdir}/instance_config.yaml" | awk '{print $2}')
@@ -197,10 +197,10 @@ total_gpus=$((ctx_gpus + gen_gpus))
 
 # start the loadgen
 srun -l --container-name=${CONTAINER_NAME} \
-        --container-mounts=${container_mounts},${artifacts_root_dir}:${artifacts_root_dir} \
+        --container-mounts=${container_mounts},${artifacts_dir}:${artifacts_dir} \
         --mpi=pmix --overlap -N 1 -n 1 \
 	-w ${nodes[0]} \
-        bash ${SCRIPTS_DIR}/disagg/bench.sh ${SERVED_MODEL_NAME} ${MULTI_ROUND} ${num_gen_servers} "${concurrency_list}" ${STREAMING} ${full_logdir} ${total_gpus} ${artifacts_root_dir} ${MODEL_PATH} ${ISL} ${OSL} > ${full_logdir}/bench.log 2>&1 
+        bash ${SCRIPTS_DIR}/disagg/bench.sh ${SERVED_MODEL_NAME} ${MULTI_ROUND} ${num_gen_servers} "${concurrency_list}" ${STREAMING} ${full_logdir} ${total_gpus} ${artifacts_dir} ${MODEL_PATH} ${ISL} ${OSL} ${kind} > ${full_logdir}/bench.log 2>&1 
 
 
 # srun -l --container-name=${CONTAINER_NAME} \

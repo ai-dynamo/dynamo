@@ -46,11 +46,14 @@ run_single() {
     local gen_eplb_num_slots=$9
     local gen_concurrency_list=${10}
 
+    # TODO: expose kind to the command line
+    local kind="dynamo_disagg"
+
     gen_nodes=$(((gen_tp_size + 3)/4 * gen_num))
     total_nodes=$((ctx_num + gen_nodes))
     total_tasks=$((total_nodes * 4))
     set -x
-    sbatch --nodes=${total_nodes} --ntasks=${total_tasks} --ntasks-per-node=4 --segment=${total_nodes} benchmark.slurm ${ctx_num} 4 1 8448 true ${gen_num} ${gen_tp_size} ${gen_batch_size} ${gen_max_num_tokens} ${gen_enable_attention_dp} ${gen_gpu_memory_fraction} ${gen_eplb_num_slots} ${gen_mtp_size} "${gen_concurrency_list}" ${gen_nodes}
+    sbatch --nodes=${total_nodes} --ntasks=${total_tasks} --ntasks-per-node=4 --segment=${total_nodes} benchmark.slurm ${ctx_num} 4 1 8448 true ${gen_num} ${gen_tp_size} ${gen_batch_size} ${gen_max_num_tokens} ${gen_enable_attention_dp} ${gen_gpu_memory_fraction} ${gen_eplb_num_slots} ${gen_mtp_size} "${gen_concurrency_list}" ${gen_nodes} ${kind}
     set +x
 }
 
