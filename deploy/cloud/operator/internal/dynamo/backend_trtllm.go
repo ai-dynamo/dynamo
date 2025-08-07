@@ -2,6 +2,7 @@ package dynamo
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -104,11 +105,13 @@ func (b *TRTLLMBackend) setupLeaderContainer(container *corev1.Container, number
 	// Wrap the entire command (trtllm-llmapi-launch + original command) in bash -c for proper shell interpretation
 	wrappedCommand := fmt.Sprintf("bash -c 'source /opt/dynamo/venv/bin/activate && trtllm-llmapi-launch %s'", originalCommand)
 
-	// Use -x without variable names to forward ALL environment variables
-	// This includes variables from envFrom (ConfigMaps/Secrets) that we can't enumerate at build time
-	mpirunCmd := fmt.Sprintf("mpirun --oversubscribe -n %d -H %s --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" -x %s",
+	// Generate environment variable flags for mpirun
+	envVarsStr := generateEnvVarFlags(container.Env)
+
+	mpirunCmd := fmt.Sprintf("mpirun --oversubscribe -n %d -H %s --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" %s %s",
 		totalGPUs,
 		workerHosts,
+		envVarsStr,
 		wrappedCommand)
 
 	// Combine SSH setup and mpirun command
@@ -187,4 +190,49 @@ func getGPUsPerNode(resources *common.Resources) int32 {
 		}
 	}
 	return 0 // Default to 0 GPUs if not specified
+}
+
+// getCommonTRTLLMEnvVars returns a map of common environment variables for TRTLLM deployments
+func getCommonTRTLLMEnvVars() map[string]bool {
+	return map[string]bool{
+		"CUDA_VISIBLE_DEVICES": true, "MODEL_PATH": true, "HF_TOKEN": true, "HUGGING_FACE_HUB_TOKEN": true,
+		"TOKENIZERS_PARALLELISM": true, "NCCL_DEBUG": true, "NCCL_IB_DISABLE": true, "NCCL_P2P_DISABLE": true,
+		"TENSORRT_LLM_CACHE_DIR": true, "HF_HOME": true, "TRANSFORMERS_CACHE": true, "HF_DATASETS_CACHE": true,
+		"PATH": true, "LD_LIBRARY_PATH": true, "PYTHONPATH": true, "HOME": true, "USER": true,
+	}
+}
+
+// collectAllEnvVars combines explicit container env vars with common TRTLLM env vars, removing duplicates
+func collectAllEnvVars(containerEnvVars []corev1.EnvVar) []string {
+	// Initialize set with common environment variables
+	envVarSet := getCommonTRTLLMEnvVars()
+
+	// Add explicit environment variables from container
+	for _, env := range containerEnvVars {
+		envVarSet[env.Name] = true
+	}
+
+	// Convert set to sorted slice for consistent output
+	var envVarNames []string
+	for envVar := range envVarSet {
+		envVarNames = append(envVarNames, envVar)
+	}
+	sort.Strings(envVarNames)
+
+	return envVarNames
+}
+
+// formatEnvVarFlags converts environment variable names to mpirun -x flags
+func formatEnvVarFlags(envVarNames []string) string {
+	var envVars []string
+	for _, envVar := range envVarNames {
+		envVars = append(envVars, fmt.Sprintf("-x %s", envVar))
+	}
+	return strings.Join(envVars, " ")
+}
+
+// generateEnvVarFlags generates the complete environment variable flags string for mpirun
+func generateEnvVarFlags(containerEnvVars []corev1.EnvVar) string {
+	envVarNames := collectAllEnvVars(containerEnvVars)
+	return formatEnvVarFlags(envVarNames)
 }
