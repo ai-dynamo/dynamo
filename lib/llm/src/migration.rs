@@ -29,6 +29,11 @@ pub struct Migration {
 
 impl Migration {
     pub async fn from_mdc(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
+        tracing::debug!(
+            "model {} migration limit {}",
+            mdc.display_name,
+            mdc.migration_limit
+        );
         Ok(Arc::new(Self {
             migration_limit: mdc.migration_limit,
         }))
