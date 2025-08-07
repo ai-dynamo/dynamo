@@ -119,7 +119,7 @@ dynamo_component_response_bytes_total{dynamo_component="example_component",dynam
 
 # HELP uptime_seconds Total uptime of the DistributedRuntime in seconds
 # TYPE uptime_seconds gauge
-uptime_seconds{dynamo_namespace="http_server"} 1.8226759879999999
+uptime_seconds{dynamo_namespace="metrics_server"} 1.8226759879999999
 ```
 
 ## Example
@@ -176,13 +176,13 @@ if enable_custom_metrics {
 
 ## Running the Example
 
-**Important**: You must set the `DYN_SYSTEM_PORT` environment variable to specify which port the HTTP server will run on.
+**Important**: You must set the `DYN_SYSTEM_PORT` environment variable to specify which port the HTTP system metrics server will run on.
 
 ```bash
 # Run the system metrics example
 DYN_SYSTEM_ENABLED=true DYN_SYSTEM_PORT=8081 cargo run --bin system_server
 ```
-The server will start an HTTP server on the specified port (8081 in this example) that exposes the Prometheus metrics endpoint at `/metrics`.
+The server will start an HTTP system metrics server on the specified port (8081 in this example) that exposes the Prometheus metrics endpoint at `/metrics`.
 
 
 To Run an actual LLM frontend + server (aggregated example), launch both of them. By default, the frontend listens to port 8080.

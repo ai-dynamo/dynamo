@@ -28,14 +28,14 @@ use tokio_util::sync::CancellationToken;
 use tracing;
 use tracing::Instrument;
 
-/// HTTP server information containing socket address and handle
+/// Metrics server information containing socket address and handle
 #[derive(Debug)]
-pub struct HttpServerInfo {
+pub struct MetricsServerInfo {
     pub socket_addr: std::net::SocketAddr,
     pub handle: Option<Arc<JoinHandle<()>>>,
 }
 
-impl HttpServerInfo {
+impl MetricsServerInfo {
     pub fn new(socket_addr: std::net::SocketAddr, handle: Option<JoinHandle<()>>) -> Self {
         Self {
             socket_addr,
@@ -56,7 +56,7 @@ impl HttpServerInfo {
     }
 }
 
-impl Clone for HttpServerInfo {
+impl Clone for MetricsServerInfo {
     fn clone(&self) -> Self {
         Self {
             socket_addr: self.socket_addr,
@@ -65,16 +65,16 @@ impl Clone for HttpServerInfo {
     }
 }
 
-/// HTTP server state containing metrics and uptime tracking
-pub struct HttpServerState {
+/// Metrics server state containing metrics and uptime tracking
+pub struct MetricsServerState {
     // global drt registry is for printing out the entire Prometheus format output
     root_drt: Arc<crate::DistributedRuntime>,
     start_time: OnceLock<Instant>,
     uptime_gauge: Arc<prometheus::Gauge>,
 }
 
-impl HttpServerState {
-    /// Create new HTTP server state with the provided metrics registry
+impl MetricsServerState {
+    /// Create new metrics server state with the provided metrics registry
     pub fn new(drt: Arc<crate::DistributedRuntime>) -> anyhow::Result<Self> {
         // Note: This metric is created at the DRT level (no namespace), so we manually add "dynamo_" prefix
         // to maintain consistency with the project's metric naming convention
@@ -121,15 +121,15 @@ impl HttpServerState {
     }
 }
 
-/// Start HTTP server with metrics support
-pub async fn spawn_http_server(
+/// Start metrics server with metrics support
+pub async fn spawn_metrics_server(
     host: &str,
     port: u16,
     cancel_token: CancellationToken,
     drt: Arc<crate::DistributedRuntime>,
 ) -> anyhow::Result<(std::net::SocketAddr, tokio::task::JoinHandle<()>)> {
-    // Create HTTP server state with the provided metrics registry
-    let server_state = Arc::new(HttpServerState::new(drt)?);
+    // Create metrics server state with the provided metrics registry
+    let server_state = Arc::new(MetricsServerState::new(drt)?);
     let health_path = server_state
         .drt()
         .system_health
@@ -187,14 +187,14 @@ pub async fn spawn_http_server(
         });
 
     let address = format!("{}:{}", host, port);
-    tracing::info!("[spawn_http_server] binding to: {}", address);
+    tracing::info!("[spawn_metrics_server] binding to: {}", address);
 
     let listener = match TcpListener::bind(&address).await {
         Ok(listener) => {
             // get the actual address and port, print in debug level
             let actual_address = listener.local_addr()?;
             tracing::info!(
-                "[spawn_http_server] HTTP server bound to: {}",
+                "[spawn_metrics_server] metrics server bound to: {}",
                 actual_address
             );
             (listener, actual_address)
@@ -213,7 +213,7 @@ pub async fn spawn_http_server(
             .with_graceful_shutdown(observer.cancelled_owned())
             .await
         {
-            tracing::error!("HTTP server error: {}", e);
+            tracing::error!("Metrics server error: {}", e);
         }
     });
     Ok((actual_address, handle))
@@ -226,7 +226,7 @@ pub async fn spawn_http_server(
 						      x_request_id= trace_parent.x_request_id,
 						      tracestate= trace_parent.tracestate))]
 async fn health_handler(
-    state: Arc<HttpServerState>,
+    state: Arc<MetricsServerState>,
     route: &'static str,       // Used for tracing only
     trace_parent: TraceParent, // Used for tracing only
 ) -> impl IntoResponse {
@@ -270,7 +270,7 @@ async fn health_handler(
 						      x_request_id = trace_parent.x_request_id,
                                                       tracestate = trace_parent.tracestate))]
 async fn metrics_handler(
-    state: Arc<HttpServerState>,
+    state: Arc<MetricsServerState>,
     route: &'static str,       // Used for tracing only
     trace_parent: TraceParent, // Used for tracing only
 ) -> impl IntoResponse {
@@ -290,8 +290,8 @@ async fn metrics_handler(
     }
 }
 
-// Regular tests: cargo test http_server --lib
-// Integration tests: cargo test http_server --lib --features integration
+// Regular tests: cargo test metrics_server --lib
+// Integration tests: cargo test metrics_server --lib --features integration
 
 #[cfg(test)]
 /// Helper function to create a DRT instance for async testing
@@ -354,7 +354,7 @@ mod tests {
     async fn test_runtime_metrics_initialization_and_namespace() {
         // Test that metrics have correct namespace
         let drt = create_test_drt_async().await;
-        let runtime_metrics = HttpServerState::new(Arc::new(drt)).unwrap();
+        let runtime_metrics = MetricsServerState::new(Arc::new(drt)).unwrap();
 
         // Initialize start time
         runtime_metrics.initialize_start_time().unwrap();
@@ -377,7 +377,7 @@ dynamo_component_dynamo_uptime_seconds 42
     async fn test_start_time_initialization() {
         // Test that start time can only be initialized once
         let drt = create_test_drt_async().await;
-        let runtime_metrics = HttpServerState::new(Arc::new(drt)).unwrap();
+        let runtime_metrics = MetricsServerState::new(Arc::new(drt)).unwrap();
 
         // First initialization should succeed
         assert!(runtime_metrics.initialize_start_time().is_ok());
@@ -440,7 +440,7 @@ dynamo_component_dynamo_uptime_seconds 42
                         .unwrap(),
                 );
                 let cancel_token = CancellationToken::new();
-                let (addr, _) = spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt)
+                let (addr, _) = spawn_metrics_server("127.0.0.1", 0, cancel_token.clone(), drt)
                     .await
                     .unwrap();
                 println!("[test] Waiting for server to start...");
@@ -525,7 +525,7 @@ dynamo_component_dynamo_uptime_seconds 42
                         .unwrap(),
                 );
                 let cancel_token = CancellationToken::new();
-                let (addr, _) = spawn_http_server("127.0.0.1", 0, cancel_token.clone(), drt)
+                let (addr, _) = spawn_metrics_server("127.0.0.1", 0, cancel_token.clone(), drt)
                     .await
                     .unwrap();
                 sleep(std::time::Duration::from_millis(1000)).await;
@@ -562,7 +562,7 @@ dynamo_component_dynamo_uptime_seconds 42
     async fn test_uptime_without_initialization() {
         // Test that uptime returns an error if start time is not initialized
         let drt = create_test_drt_async().await;
-        let runtime_metrics = HttpServerState::new(Arc::new(drt)).unwrap();
+        let runtime_metrics = MetricsServerState::new(Arc::new(drt)).unwrap();
 
         // This should return an error because start time is not initialized
         let result = runtime_metrics.uptime();
@@ -572,7 +572,7 @@ dynamo_component_dynamo_uptime_seconds 42
 
     #[cfg(feature = "integration")]
     #[tokio::test]
-    async fn test_spawn_http_server_endpoints() {
+    async fn test_spawn_metrics_server_endpoints() {
         // use reqwest for HTTP requests
         temp_env::async_with_vars(
             [("DYN_SYSTEM_STARTING_HEALTH_STATUS", Some("ready"))],
@@ -580,7 +580,7 @@ dynamo_component_dynamo_uptime_seconds 42
                 let cancel_token = CancellationToken::new();
                 let drt = create_test_drt_async().await;
                 let (addr, server_handle) =
-                    spawn_http_server("127.0.0.1", 0, cancel_token.clone(), Arc::new(drt))
+                    spawn_metrics_server("127.0.0.1", 0, cancel_token.clone(), Arc::new(drt))
                         .await
                         .unwrap();
                 println!("[test] Waiting for server to start...");
