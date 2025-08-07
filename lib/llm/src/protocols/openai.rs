@@ -125,7 +125,7 @@ impl<T: OpenAISamplingOptionsProvider> SamplingOptionsProvider for T {
             seed: None,
             use_beam_search: None,
             length_penalty: None,
-            guided_decoding: guided_decoding,
+            guided_decoding,
         })
     }
 }
