@@ -352,7 +352,7 @@ func applyCliqueStartupDependencies(
 	var workerCliqueNames []string
 
 	for _, r := range roles {
-		cliqueName := strings.ToLower(string(r.Name))
+		cliqueName := strings.ToLower(r.Name)
 		switch r.Role {
 		case RoleLeader:
 			leaderCliqueName = cliqueName
@@ -367,7 +367,7 @@ func applyCliqueStartupDependencies(
 		// Find the corresponding role for this clique
 		var cliqueRole Role
 		for _, r := range roles {
-			if strings.ToLower(string(r.Name)) == clique.Name {
+			if strings.ToLower(r.Name) == clique.Name {
 				cliqueRole = r.Role
 				break
 			}
@@ -845,12 +845,12 @@ func GenerateGrovePodGangSet(
 			}
 
 			clique := &grovev1alpha1.PodCliqueTemplateSpec{
-				Name: strings.ToLower(string(r.Name)),
+				Name: strings.ToLower(r.Name),
 				Labels: map[string]string{
-					commonconsts.KubeLabelDynamoSelector: GetDynamoComponentName(dynamoDeployment, string(r.Name)),
+					commonconsts.KubeLabelDynamoSelector: GetDynamoComponentName(dynamoDeployment, r.Name),
 				},
 				Spec: grovev1alpha1.PodCliqueSpec{
-					RoleName: strings.ToLower(string(r.Name)),
+					RoleName: strings.ToLower(r.Name),
 					Replicas: r.Replicas,
 					PodSpec:  podSpec,
 				},
@@ -858,11 +858,17 @@ func GenerateGrovePodGangSet(
 
 			if component.ExtraPodMetadata != nil {
 				// merge the extraPodMetadata from the parent deployment with the extraPodMetadata from the service
-				mergo.Merge(&clique.Annotations, component.ExtraPodMetadata.Annotations, mergo.WithOverride)
-				mergo.Merge(&clique.Labels, component.ExtraPodMetadata.Labels, mergo.WithOverride)
+				err := mergo.Merge(&clique.Annotations, component.ExtraPodMetadata.Annotations, mergo.WithOverride)
+				if err != nil {
+					return nil, fmt.Errorf("failed to merge extraPodMetadata annotations: %w", err)
+				}
+				err = mergo.Merge(&clique.Labels, component.ExtraPodMetadata.Labels, mergo.WithOverride)
+				if err != nil {
+					return nil, fmt.Errorf("failed to merge extraPodMetadata labels: %w", err)
+				}
 			}
 			gangSet.Spec.Template.Cliques = append(gangSet.Spec.Template.Cliques, clique)
-			cliqueNames = append(cliqueNames, strings.ToLower(string(r.Name)))
+			cliqueNames = append(cliqueNames, strings.ToLower(r.Name))
 		}
 
 		// Apply startup dependencies for this service

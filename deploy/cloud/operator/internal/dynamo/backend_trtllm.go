@@ -50,10 +50,10 @@ func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int
 	// Add SSH keypair volume for TRTLLM multinode deployments
 	if numberOfNodes > 1 {
 		sshVolume := corev1.Volume{
-			Name: "ssh-keypair",
+			Name: commonconsts.MpiRunSshSecretName,
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
-					SecretName:  "ssh-keypair-secret",
+					SecretName:  commonconsts.MpiRunSshSecretName,
 					DefaultMode: func() *int32 { mode := int32(0644); return &mode }(),
 				},
 			},
@@ -65,7 +65,7 @@ func (b *TRTLLMBackend) UpdatePodSpec(podSpec *corev1.PodSpec, numberOfNodes int
 // addSSHVolumeMount adds the SSH keypair secret volume mount to the container
 func (b *TRTLLMBackend) addSSHVolumeMount(container *corev1.Container) {
 	sshVolumeMount := corev1.VolumeMount{
-		Name:      "ssh-keypair",
+		Name:      commonconsts.MpiRunSshSecretName,
 		MountPath: "/ssh-pk",
 		ReadOnly:  true,
 	}
@@ -213,7 +213,7 @@ func collectAllEnvVars(containerEnvVars []corev1.EnvVar) []string {
 	}
 
 	// Convert set to sorted slice for consistent output
-	var envVarNames []string
+	envVarNames := make([]string, 0, len(envVarSet))
 	for envVar := range envVarSet {
 		envVarNames = append(envVarNames, envVar)
 	}
@@ -224,7 +224,7 @@ func collectAllEnvVars(containerEnvVars []corev1.EnvVar) []string {
 
 // formatEnvVarFlags converts environment variable names to mpirun -x flags
 func formatEnvVarFlags(envVarNames []string) string {
-	var envVars []string
+	envVars := make([]string, 0, len(envVarNames))
 	for _, envVar := range envVarNames {
 		envVars = append(envVars, fmt.Sprintf("-x %s", envVar))
 	}

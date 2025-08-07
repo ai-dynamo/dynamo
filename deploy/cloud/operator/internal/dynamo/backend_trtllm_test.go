@@ -17,12 +17,11 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 		role                    Role
 		multinodeDeploymentType commonconsts.MultinodeDeploymentType
 		component               *v1alpha1.DynamoComponentDeploymentOverridesSpec
-		expectedVolumeMounts    int
+		expectedVolumeMounts    []corev1.VolumeMount
 		expectedCommand         []string
-		shouldContainMpirun     bool
-		shouldContainSSHSetup   bool
-		shouldContainSSHDaemon  bool
-		shouldContainTotalGPUs  bool
+		expectedArgs            []string
+		expectedEnv             []corev1.EnvVar
+		expectProbesRemoved     bool
 	}{
 		{
 			name:                    "Single node - no changes",
@@ -30,12 +29,11 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 			role:                    RoleMain,
 			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeGrove,
 			component:               &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
-			expectedVolumeMounts:    0,
-			expectedCommand:         nil,
-			shouldContainMpirun:     false,
-			shouldContainSSHSetup:   false,
-			shouldContainSSHDaemon:  false,
-			shouldContainTotalGPUs:  false,
+			expectedVolumeMounts:    []corev1.VolumeMount{},
+			expectedCommand:         []string{},
+			expectedArgs:            []string{"python3", "--model", "test"},
+			expectedEnv:             []corev1.EnvVar{},
+			expectProbesRemoved:     false,
 		},
 		{
 			name:                    "Multinode leader with GPU resources",
@@ -51,12 +49,15 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 					},
 				},
 			},
-			expectedVolumeMounts:   1,
-			expectedCommand:        []string{"/bin/sh", "-c"},
-			shouldContainMpirun:    true,
-			shouldContainSSHSetup:  true,
-			shouldContainSSHDaemon: false,
-			shouldContainTotalGPUs: true,
+			expectedVolumeMounts: []corev1.VolumeMount{
+				{Name: commonconsts.MpiRunSshSecretName, MountPath: "/ssh-pk", ReadOnly: true},
+			},
+			expectedCommand: []string{"/bin/sh", "-c"},
+			expectedArgs:    []string{"mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 6 -H ${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-ldr-0.${GROVE_HEADLESS_SERVICE},${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-wkr-0.${GROVE_HEADLESS_SERVICE},${GROVE_PCSG_NAME}-${GROVE_PCSG_INDEX}-test-service-wkr-1.${GROVE_HEADLESS_SERVICE} --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x OMPI_MCA_orte_keep_fqdn_hostnames -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x USER bash -c 'source /opt/dynamo/venv/bin/activate && trtllm-llmapi-launch python3 --model test'"},
+			expectedEnv: []corev1.EnvVar{
+				{Name: "OMPI_MCA_orte_keep_fqdn_hostnames", Value: "1"},
+			},
+			expectProbesRemoved: true,
 		},
 		{
 			name:                    "Multinode worker",
@@ -64,12 +65,15 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 			role:                    RoleWorker,
 			multinodeDeploymentType: commonconsts.MultinodeDeploymentTypeGrove,
 			component:               &v1alpha1.DynamoComponentDeploymentOverridesSpec{},
-			expectedVolumeMounts:    1,
-			expectedCommand:         []string{"/bin/sh", "-c"},
-			shouldContainMpirun:     false,
-			shouldContainSSHSetup:   true,
-			shouldContainSSHDaemon:  true,
-			shouldContainTotalGPUs:  false,
+			expectedVolumeMounts: []corev1.VolumeMount{
+				{Name: commonconsts.MpiRunSshSecretName, MountPath: "/ssh-pk", ReadOnly: true},
+			},
+			expectedCommand: []string{"/bin/sh", "-c"},
+			expectedArgs:    []string{"mkdir -p ~/.ssh ~/.ssh/host_keys ~/.ssh/run && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && ssh-keygen -t rsa -f ~/.ssh/host_keys/ssh_host_rsa_key -N '' && ssh-keygen -t ecdsa -f ~/.ssh/host_keys/ssh_host_ecdsa_key -N '' && ssh-keygen -t ed25519 -f ~/.ssh/host_keys/ssh_host_ed25519_key -N '' && printf 'Port 2222\\nHostKey ~/.ssh/host_keys/ssh_host_rsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ecdsa_key\\nHostKey ~/.ssh/host_keys/ssh_host_ed25519_key\\nPidFile ~/.ssh/run/sshd.pid\\nPermitRootLogin yes\\nPasswordAuthentication no\\nPubkeyAuthentication yes\\nAuthorizedKeysFile ~/.ssh/authorized_keys\\n' > ~/.ssh/sshd_config && mkdir -p /run/sshd && /usr/sbin/sshd -D -f ~/.ssh/sshd_config"},
+			expectedEnv: []corev1.EnvVar{
+				{Name: "OMPI_MCA_orte_keep_fqdn_hostnames", Value: "1"},
+			},
+			expectProbesRemoved: true,
 		},
 		{
 			name:                    "Multinode leader with LWS deployment",
@@ -85,12 +89,15 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 					},
 				},
 			},
-			expectedVolumeMounts:   1,
-			expectedCommand:        []string{"/bin/sh", "-c"},
-			shouldContainMpirun:    true,
-			shouldContainSSHSetup:  true,
-			shouldContainSSHDaemon: false,
-			shouldContainTotalGPUs: true,
+			expectedVolumeMounts: []corev1.VolumeMount{
+				{Name: commonconsts.MpiRunSshSecretName, MountPath: "/ssh-pk", ReadOnly: true},
+			},
+			expectedCommand: []string{"/bin/sh", "-c"},
+			expectedArgs:    []string{"mkdir -p ~/.ssh && ls -la /ssh-pk/ && cp /ssh-pk/private.key ~/.ssh/id_rsa && cp /ssh-pk/private.key.pub ~/.ssh/id_rsa.pub && cp /ssh-pk/private.key.pub ~/.ssh/authorized_keys && chmod 600 ~/.ssh/id_rsa ~/.ssh/authorized_keys && chmod 644 ~/.ssh/id_rsa.pub ~/.ssh/authorized_keys && printf 'Host *\\nIdentityFile ~/.ssh/id_rsa\\nStrictHostKeyChecking no\\nPort 2222\\n' > ~/.ssh/config && mpirun --oversubscribe -n 2 -H ${LWS_LEADER_ADDRESS},${LWS_WORKER_1_ADDRESS} --mca pml ob1 --mca plm_rsh_args \"-p 2222 -o StrictHostKeyChecking=no -i ~/.ssh/id_rsa\" -x CUDA_VISIBLE_DEVICES -x HF_DATASETS_CACHE -x HF_HOME -x HF_TOKEN -x HOME -x HUGGING_FACE_HUB_TOKEN -x LD_LIBRARY_PATH -x MODEL_PATH -x NCCL_DEBUG -x NCCL_IB_DISABLE -x NCCL_P2P_DISABLE -x OMPI_MCA_orte_keep_fqdn_hostnames -x PATH -x PYTHONPATH -x TENSORRT_LLM_CACHE_DIR -x TOKENIZERS_PARALLELISM -x TRANSFORMERS_CACHE -x USER bash -c 'source /opt/dynamo/venv/bin/activate && trtllm-llmapi-launch python3 --model test'"},
+			expectedEnv: []corev1.EnvVar{
+				{Name: "OMPI_MCA_orte_keep_fqdn_hostnames", Value: "1"},
+			},
+			expectProbesRemoved: true,
 		},
 	}
 
@@ -108,63 +115,66 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 			backend.UpdateContainer(container, tt.numberOfNodes, tt.role, tt.component, tt.multinodeDeploymentType, "test-service")
 
 			// Check volume mounts
-			if len(container.VolumeMounts) != tt.expectedVolumeMounts {
-				t.Errorf("UpdateContainer() volume mounts = %d, want %d", len(container.VolumeMounts), tt.expectedVolumeMounts)
+			if len(container.VolumeMounts) != len(tt.expectedVolumeMounts) {
+				t.Errorf("UpdateContainer() volume mounts count = %d, want %d", len(container.VolumeMounts), len(tt.expectedVolumeMounts))
+				return
 			}
 
-			if tt.expectedVolumeMounts > 0 {
-				found := false
-				for _, vm := range container.VolumeMounts {
-					if vm.Name == "ssh-keypair" && vm.MountPath == "/ssh-pk" && vm.ReadOnly {
-						found = true
-						break
-					}
+			for i, expectedVolumeMount := range tt.expectedVolumeMounts {
+				actualVolumeMount := container.VolumeMounts[i]
+				if actualVolumeMount.Name != expectedVolumeMount.Name {
+					t.Errorf("UpdateContainer() volume mount[%d].Name = %s, want %s", i, actualVolumeMount.Name, expectedVolumeMount.Name)
 				}
-				if !found {
-					t.Errorf("UpdateContainer() should add ssh-keypair volume mount")
+				if actualVolumeMount.MountPath != expectedVolumeMount.MountPath {
+					t.Errorf("UpdateContainer() volume mount[%d].MountPath = %s, want %s", i, actualVolumeMount.MountPath, expectedVolumeMount.MountPath)
+				}
+				if actualVolumeMount.ReadOnly != expectedVolumeMount.ReadOnly {
+					t.Errorf("UpdateContainer() volume mount[%d].ReadOnly = %t, want %t", i, actualVolumeMount.ReadOnly, expectedVolumeMount.ReadOnly)
 				}
 			}
 
 			// Check command
-			if tt.expectedCommand != nil {
-				if len(container.Command) != len(tt.expectedCommand) {
-					t.Errorf("UpdateContainer() command length = %d, want %d", len(container.Command), len(tt.expectedCommand))
-				} else {
-					for i, cmd := range tt.expectedCommand {
-						if container.Command[i] != cmd {
-							t.Errorf("UpdateContainer() command[%d] = %s, want %s", i, container.Command[i], cmd)
-						}
-					}
+			if len(container.Command) != len(tt.expectedCommand) {
+				t.Errorf("UpdateContainer() command length = %d, want %d", len(container.Command), len(tt.expectedCommand))
+				return
+			}
+
+			for i, expectedCmd := range tt.expectedCommand {
+				if container.Command[i] != expectedCmd {
+					t.Errorf("UpdateContainer() command[%d] = %s, want %s", i, container.Command[i], expectedCmd)
 				}
 			}
 
-			// Check args content
-			if len(container.Args) > 0 {
-				argsStr := strings.Join(container.Args, " ")
+			// Check args
+			if len(container.Args) != len(tt.expectedArgs) {
+				t.Errorf("UpdateContainer() args length = %d, want %d", len(container.Args), len(tt.expectedArgs))
+				return
+			}
 
-				if tt.shouldContainMpirun && !strings.Contains(argsStr, "mpirun") {
-					t.Errorf("UpdateContainer() args should contain mpirun but got: %s", argsStr)
-				}
-
-				if tt.shouldContainSSHSetup && !strings.Contains(argsStr, "mkdir -p ~/.ssh") {
-					t.Errorf("UpdateContainer() args should contain SSH setup but got: %s", argsStr)
-				}
-
-				if tt.shouldContainSSHDaemon && !strings.Contains(argsStr, "/usr/sbin/sshd") {
-					t.Errorf("UpdateContainer() args should contain SSH daemon but got: %s", argsStr)
-				}
-
-				if tt.shouldContainTotalGPUs && !strings.Contains(argsStr, "-n ") {
-					t.Errorf("UpdateContainer() args should contain GPU count (-n) but got: %s", argsStr)
-				}
-
-				if !tt.shouldContainMpirun && strings.Contains(argsStr, "mpirun") {
-					t.Errorf("UpdateContainer() args should not contain mpirun but got: %s", argsStr)
+			for i, expectedArg := range tt.expectedArgs {
+				if container.Args[i] != expectedArg {
+					t.Errorf("UpdateContainer() args[%d] = %s, want %s", i, container.Args[i], expectedArg)
 				}
 			}
 
-			// Check that probes are removed for multinode
-			if tt.numberOfNodes > 1 && (tt.role == RoleLeader || tt.role == RoleWorker) {
+			// Check environment variables
+			if len(container.Env) != len(tt.expectedEnv) {
+				t.Errorf("UpdateContainer() env count = %d, want %d", len(container.Env), len(tt.expectedEnv))
+				return
+			}
+
+			for i, expectedEnv := range tt.expectedEnv {
+				actualEnv := container.Env[i]
+				if actualEnv.Name != expectedEnv.Name {
+					t.Errorf("UpdateContainer() env[%d].Name = %s, want %s", i, actualEnv.Name, expectedEnv.Name)
+				}
+				if actualEnv.Value != expectedEnv.Value {
+					t.Errorf("UpdateContainer() env[%d].Value = %s, want %s", i, actualEnv.Value, expectedEnv.Value)
+				}
+			}
+
+			// Check probes are removed when expected
+			if tt.expectProbesRemoved {
 				if container.LivenessProbe != nil {
 					t.Errorf("UpdateContainer() should remove LivenessProbe for multinode %s", tt.role)
 				}
@@ -174,26 +184,16 @@ func TestTRTLLMBackend_UpdateContainer(t *testing.T) {
 				if container.StartupProbe != nil {
 					t.Errorf("UpdateContainer() should remove StartupProbe for multinode %s", tt.role)
 				}
-			}
-
-			// Check for OMPI_MCA_orte_keep_fqdn_hostnames environment variable
-			hasOMPIEnvVar := false
-			for _, envVar := range container.Env {
-				if envVar.Name == "OMPI_MCA_orte_keep_fqdn_hostnames" {
-					hasOMPIEnvVar = true
-					if envVar.Value != "1" {
-						t.Errorf("UpdateContainer() OMPI_MCA_orte_keep_fqdn_hostnames should be '1', got '%s'", envVar.Value)
-					}
-					break
+			} else {
+				if container.LivenessProbe == nil {
+					t.Errorf("UpdateContainer() should not remove LivenessProbe for single node")
 				}
-			}
-
-			if tt.numberOfNodes > 1 && !hasOMPIEnvVar {
-				t.Errorf("UpdateContainer() should add OMPI_MCA_orte_keep_fqdn_hostnames env var for multinode deployment")
-			}
-
-			if tt.numberOfNodes == 1 && hasOMPIEnvVar {
-				t.Errorf("UpdateContainer() should not add OMPI_MCA_orte_keep_fqdn_hostnames env var for single node deployment")
+				if container.ReadinessProbe == nil {
+					t.Errorf("UpdateContainer() should not remove ReadinessProbe for single node")
+				}
+				if container.StartupProbe == nil {
+					t.Errorf("UpdateContainer() should not remove StartupProbe for single node")
+				}
 			}
 		})
 	}
@@ -274,14 +274,14 @@ func TestTRTLLMBackend_UpdatePodSpec(t *testing.T) {
 			// Check for SSH volume
 			hasSSHVolume := false
 			for _, volume := range podSpec.Volumes {
-				if volume.Name == "ssh-keypair" {
+				if volume.Name == commonconsts.MpiRunSshSecretName {
 					hasSSHVolume = true
 					// Verify volume configuration
 					if volume.VolumeSource.Secret == nil {
 						t.Errorf("UpdatePodSpec() SSH volume should use Secret volume source")
 					} else {
-						if volume.VolumeSource.Secret.SecretName != "ssh-keypair-secret" {
-							t.Errorf("UpdatePodSpec() SSH volume secret name = %s, want ssh-keypair-secret", volume.VolumeSource.Secret.SecretName)
+						if volume.VolumeSource.Secret.SecretName != commonconsts.MpiRunSshSecretName {
+							t.Errorf("UpdatePodSpec() SSH volume secret name = %s, want %s", volume.VolumeSource.Secret.SecretName, commonconsts.MpiRunSshSecretName)
 						}
 						if volume.VolumeSource.Secret.DefaultMode == nil || *volume.VolumeSource.Secret.DefaultMode != 0644 {
 							t.Errorf("UpdatePodSpec() SSH volume should have DefaultMode 0644")
@@ -394,22 +394,31 @@ func TestTRTLLMBackend_generateWorkerHostnames(t *testing.T) {
 }
 
 func TestTRTLLMBackend_addSSHVolumeMount(t *testing.T) {
+	expectedSSHVolumeMount := corev1.VolumeMount{
+		Name:      commonconsts.MpiRunSshSecretName,
+		MountPath: "/ssh-pk",
+		ReadOnly:  true,
+	}
+
 	tests := []struct {
-		name                     string
-		initialVolumeMounts      []corev1.VolumeMount
-		expectedVolumeMountCount int
+		name                 string
+		initialVolumeMounts  []corev1.VolumeMount
+		expectedVolumeMounts []corev1.VolumeMount
 	}{
 		{
-			name:                     "Add SSH volume mount to empty container",
-			initialVolumeMounts:      []corev1.VolumeMount{},
-			expectedVolumeMountCount: 1,
+			name:                 "Add SSH volume mount to empty container",
+			initialVolumeMounts:  []corev1.VolumeMount{},
+			expectedVolumeMounts: []corev1.VolumeMount{expectedSSHVolumeMount},
 		},
 		{
 			name: "Add SSH volume mount to container with existing mounts",
 			initialVolumeMounts: []corev1.VolumeMount{
 				{Name: "existing-mount", MountPath: "/existing"},
 			},
-			expectedVolumeMountCount: 2,
+			expectedVolumeMounts: []corev1.VolumeMount{
+				{Name: "existing-mount", MountPath: "/existing"},
+				expectedSSHVolumeMount,
+			},
 		},
 	}
 
@@ -422,28 +431,23 @@ func TestTRTLLMBackend_addSSHVolumeMount(t *testing.T) {
 
 			backend.addSSHVolumeMount(container)
 
-			// Check volume mount count
-			if len(container.VolumeMounts) != tt.expectedVolumeMountCount {
-				t.Errorf("addSSHVolumeMount() volume mount count = %d, want %d", len(container.VolumeMounts), tt.expectedVolumeMountCount)
+			// Check that volume mounts match expected
+			if len(container.VolumeMounts) != len(tt.expectedVolumeMounts) {
+				t.Errorf("addSSHVolumeMount() volume mount count = %d, want %d", len(container.VolumeMounts), len(tt.expectedVolumeMounts))
+				return
 			}
 
-			// Find and verify SSH volume mount
-			found := false
-			for _, vm := range container.VolumeMounts {
-				if vm.Name == "ssh-keypair" {
-					found = true
-					if vm.MountPath != "/ssh-pk" {
-						t.Errorf("addSSHVolumeMount() mount path = %s, want /ssh-pk", vm.MountPath)
-					}
-					if !vm.ReadOnly {
-						t.Errorf("addSSHVolumeMount() ReadOnly should be true")
-					}
-					break
+			for i, expected := range tt.expectedVolumeMounts {
+				actual := container.VolumeMounts[i]
+				if actual.Name != expected.Name {
+					t.Errorf("addSSHVolumeMount() volume mount[%d].Name = %s, want %s", i, actual.Name, expected.Name)
 				}
-			}
-
-			if !found {
-				t.Errorf("addSSHVolumeMount() should add ssh-keypair volume mount")
+				if actual.MountPath != expected.MountPath {
+					t.Errorf("addSSHVolumeMount() volume mount[%d].MountPath = %s, want %s", i, actual.MountPath, expected.MountPath)
+				}
+				if actual.ReadOnly != expected.ReadOnly {
+					t.Errorf("addSSHVolumeMount() volume mount[%d].ReadOnly = %t, want %t", i, actual.ReadOnly, expected.ReadOnly)
+				}
 			}
 		})
 	}

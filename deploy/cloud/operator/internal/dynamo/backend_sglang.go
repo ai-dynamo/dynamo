@@ -62,8 +62,7 @@ func (b *SGLangBackend) getMultinodeFlags(numberOfNodes int32, role Role, multin
 		if multinodeDeploymentType == commonconsts.MultinodeDeploymentTypeGrove {
 			nodeRank = "$((GROVE_PCLQ_POD_INDEX + 1))"
 		} else {
-			// todo: add node rank for LWS
-			nodeRank = "1"
+			nodeRank = "${LWS_WORKER_INDEX}"
 		}
 	}
 

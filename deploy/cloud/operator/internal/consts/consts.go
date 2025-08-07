@@ -47,6 +47,8 @@ const (
 	// Grove multinode role suffixes
 	GroveRoleSuffixLeader = "ldr"
 	GroveRoleSuffixWorker = "wkr"
+
+	MpiRunSshSecretName = "mpi-run-ssh-secret"
 )
 
 type MultinodeDeploymentType string
