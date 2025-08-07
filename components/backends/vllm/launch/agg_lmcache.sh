@@ -7,6 +7,9 @@ trap 'echo Cleaning up...; kill 0' EXIT
 # run ingress
 python -m dynamo.frontend &
 
-# run worker
-# --enforce-eager is added for quick deployment. for production use, need to remove this flag
-python -m dynamo.vllm --model Qwen/Qwen3-0.6B --enforce-eager --no-enable-prefix-caching
+# run worker with LMCache enabled
+ENABLE_LMCACHE=1 \
+LMCACHE_CHUNK_SIZE=256 \
+LMCACHE_LOCAL_CPU=True \
+LMCACHE_MAX_LOCAL_CPU_SIZE=20 \
+  python -m dynamo.vllm --model Qwen/Qwen3-0.6B
