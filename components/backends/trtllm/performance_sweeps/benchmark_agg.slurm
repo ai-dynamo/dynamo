@@ -26,6 +26,8 @@ model_path=${11}
 served_model_name=${12}
 image=${13}
 
+echo "Received arguments: tp_size=$tp_size ep_size=$ep_size max_batch_size=$max_batch_size max_num_tokens=$max_num_tokens enable_attention_dp=$enable_attention_dp concurrency_list=$concurrency_list mtp_size=$mtp_size kind=$kind isl=$isl osl=$osl model_path=$model_path served_model_name=$served_model_name image=$image"
+
 max_seq_len=$((${isl} + ${osl}))
 
 WORK_DIR=${MOUNT_DIR}
