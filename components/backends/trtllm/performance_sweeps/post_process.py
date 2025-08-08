@@ -263,6 +263,7 @@ def main():
     
     # Collect all results from all directories
     all_results = []
+    skipped_directories = []
     
     # Process each directory
     for dir_path in directories:
@@ -272,6 +273,7 @@ def main():
         
         if results is None or not results:
             print(f"  Skipping {os.path.basename(dir_path)} - no valid data found")
+            skipped_directories.append(os.path.basename(dir_path))
             continue
         
         # Add directory name to each result for identification
@@ -284,7 +286,7 @@ def main():
         print(f"  Found {len(results)} results:")
         for result in results:
             print(f"    Concurrency {result['concurrency']}: "
-                  f"{result['output_token_throughput']:.2f} tokens/sec, "
+                  f"{result['output_token_throughput_per_gpu']:.2f} tokens/sec/gpu, "
                   f"{result['output_token_throughput_per_user']:.2f} tokens/sec/user")
     
     if not all_results:
@@ -301,6 +303,14 @@ def main():
         json.dump(all_results, f, indent=2)
     
     print(f"\nCreated {output_file} with {len(all_results)} total results from {len(directories)} directories")
+    
+    # Print summary of skipped directories
+    if skipped_directories:
+        print(f"\nSkipped directories with no valid data ({len(skipped_directories)}):")
+        for skipped_dir in skipped_directories:
+            print(f"  - {skipped_dir}")
+    else:
+        print(f"\nAll {len(directories)} directories had valid data.")
 
 
 if __name__ == '__main__':
