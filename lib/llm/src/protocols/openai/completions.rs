@@ -22,6 +22,7 @@ use crate::engines::ValidateRequest;
 
 use super::{
     common::{self, SamplingOptionsProvider, StopConditionsProvider},
+    common_ext::{CommonExt, CommonExtProvider},
     nvext::{NvExt, NvExtProvider},
     validate, ContentProvider, OpenAISamplingOptionsProvider, OpenAIStopConditionsProvider,
 };
@@ -36,6 +37,9 @@ pub use delta::DeltaGenerator;
 pub struct NvCreateCompletionRequest {
     #[serde(flatten)]
     pub inner: async_openai::types::CreateCompletionRequest,
+
+    #[serde(flatten)]
+    pub common: CommonExt,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
@@ -131,13 +135,30 @@ impl OpenAISamplingOptionsProvider for NvCreateCompletionRequest {
     }
 }
 
+impl CommonExtProvider for NvCreateCompletionRequest {
+    fn common_ext(&self) -> Option<&CommonExt> {
+        Some(&self.common)
+    }
+
+    fn effective_ignore_eos(&self) -> Option<bool> {
+        self.nvext
+            .as_ref()
+            .and_then(|nv| nv.ignore_eos)
+            .or(self.common.ignore_eos)
+    }
+
+    fn effective_min_tokens(&self) -> Option<u32> {
+        self.common.min_tokens
+    }
+}
+
 impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
     fn get_max_tokens(&self) -> Option<u32> {
         self.inner.max_tokens
     }
 
     fn get_min_tokens(&self) -> Option<u32> {
-        None
+        self.effective_min_tokens()
     }
 
     fn get_stop(&self) -> Option<Vec<String>> {
@@ -146,6 +167,10 @@ impl OpenAIStopConditionsProvider for NvCreateCompletionRequest {
 
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
+    }
+
+    fn get_ignore_eos(&self) -> Option<bool> {
+        self.effective_ignore_eos()
     }
 }
 

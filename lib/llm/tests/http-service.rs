@@ -765,6 +765,7 @@ async fn test_nv_custom_client(
 
     let request = NvCreateChatCompletionRequest {
         inner: inner_request,
+        common: Default::default(),
         nvext: None,
     };
 
@@ -802,6 +803,7 @@ async fn test_nv_custom_client(
 
     let request = NvCreateChatCompletionRequest {
         inner: inner_request,
+        common: Default::default(),
         nvext: None,
     };
 
@@ -840,6 +842,7 @@ async fn test_nv_custom_client(
 
     let request = NvCreateChatCompletionRequest {
         inner: inner_request,
+        common: Default::default(),
         nvext: None,
     };
 

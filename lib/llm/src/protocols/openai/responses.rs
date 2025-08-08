@@ -185,6 +185,7 @@ impl TryFrom<NvCreateResponse> for NvCreateChatCompletionRequest {
                 stream: Some(true), // Set this to Some(True) by default to aggregate stream
                 ..Default::default()
             },
+            common: Default::default(),
             nvext: resp.nvext,
         })
     }
