@@ -165,6 +165,17 @@ func GenerateDynamoComponentsDeployments(ctx context.Context, parentDynamoGraphD
 		deployment.Labels = labels
 		labels[commonconsts.KubeLabelDynamoComponent] = componentName
 		labels[commonconsts.KubeLabelDynamoNamespace] = dynamoNamespace
+
+		// Propagate metrics annotation from parent deployment if present
+		if parentDynamoGraphDeployment.Annotations != nil {
+			if val, exists := parentDynamoGraphDeployment.Annotations[commonconsts.KubeAnnotationEnableMetrics]; exists {
+				if deployment.Spec.Annotations == nil {
+					deployment.Spec.Annotations = make(map[string]string)
+				}
+				deployment.Spec.Annotations[commonconsts.KubeAnnotationEnableMetrics] = val
+			}
+		}
+
 		if component.ComponentType == commonconsts.ComponentTypePlanner {
 			// ensure that the extraPodSpec is not nil
 			if deployment.Spec.ExtraPodSpec == nil {
@@ -337,13 +348,18 @@ func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.Dyn
 					Name:          commonconsts.DynamoContainerPortName,
 					ContainerPort: int32(commonconsts.DynamoServicePort),
 				},
-				{
-					Protocol:      corev1.ProtocolTCP,
-					Name:          commonconsts.DynamoHealthPortName,
-					ContainerPort: int32(commonconsts.DynamoHealthPort),
-				},
 			},
 		}
+
+		// Add system port for worker components
+		if component.ComponentType == commonconsts.ComponentTypeWorker {
+			container.Ports = append(container.Ports, corev1.ContainerPort{
+				Protocol:      corev1.ProtocolTCP,
+				Name:          commonconsts.DynamoSystemPortName,
+				ContainerPort: int32(commonconsts.DynamoSystemPort),
+			})
+		}
+
 		resourcesConfig, err := controller_common.GetResourcesConfig(component.Resources)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get resources config: %w", err)
@@ -415,6 +431,32 @@ func GenerateGrovePodGangSet(ctx context.Context, dynamoDeployment *v1alpha1.Dyn
 				},
 			},
 		})
+
+		// Add metrics labels if not disabled
+		cliqueIndex := len(gangSet.Spec.Template.Cliques) - 1
+		labels := gangSet.Spec.Template.Cliques[cliqueIndex].Labels
+
+		// Convert user-provided metrics annotation into controller-managed label
+		// By default (no annotation), metrics are enabled
+		metricsAnnotationValue := ""
+		if dynamoDeployment.Annotations != nil {
+			metricsAnnotationValue = dynamoDeployment.Annotations[commonconsts.KubeAnnotationEnableMetrics]
+		}
+		switch metricsAnnotationValue {
+		case commonconsts.KubeLabelValueFalse:
+			// Explicitly disabled, don't add the label
+		default:
+			// Any other value (including empty) enables metrics
+			labels[commonconsts.KubeLabelMetricsEnabled] = commonconsts.KubeLabelValueTrue
+		}
+
+		// Add component type label if specified
+		if component.ComponentType != "" {
+			labels[commonconsts.KubeLabelDynamoComponentType] = component.ComponentType
+		}
+
+		gangSet.Spec.Template.Cliques[cliqueIndex].Labels = labels
+
 		if component.PVC != nil {
 			cliqueIndex := len(gangSet.Spec.Template.Cliques) - 1
 			gangSet.Spec.Template.Cliques[cliqueIndex].Spec.PodSpec.Volumes = append(gangSet.Spec.Template.Cliques[cliqueIndex].Spec.PodSpec.Volumes, corev1.Volume{
