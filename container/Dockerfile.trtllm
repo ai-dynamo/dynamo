@@ -57,6 +57,8 @@ RUN apt update -y && \
     meson \
     ninja-build \
     pybind11-dev \
+    ## support UCX to establish connections with zmq
+    libzmq3-dev \
     # These headers are missing with the hpcx installer, required
     # by UCX to find RDMA devices
     libibverbs-dev rdma-core ibverbs-utils libibumad-dev \
@@ -373,6 +375,8 @@ RUN apt-get update && \
         curl \
         # For debugging
         vim \
+        # support UCX to establish connections with zmq
+        libzmq3-dev \
         # Libraries required by UCX to find RDMA devices
         libibverbs1 rdma-core ibverbs-utils libibumad3 \
         libnuma1 librdmacm1 ibverbs-providers \
