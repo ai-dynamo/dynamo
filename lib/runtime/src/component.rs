@@ -125,6 +125,10 @@ pub struct Component {
     #[validate(custom(function = "validate_allowed_chars"))]
     name: String,
 
+    /// Name of the model
+    #[builder(setter(into), default)]
+    model: Option<String>,
+
     // todo - restrict the namespace to a-z0-9-_A-Z
     /// Namespace
     #[builder(setter(into))]
@@ -176,6 +180,10 @@ impl MetricsRegistry for Component {
         self.name.clone()
     }
 
+    fn model(&self) -> Option<String> {
+        self.model.clone()
+    }
+
     fn parent_hierarchy(&self) -> Vec<String> {
         [
             self.namespace.parent_hierarchy(),
@@ -213,6 +221,10 @@ impl Component {
 
     pub fn name(&self) -> String {
         self.name.clone()
+    }
+
+    pub fn model(&self) -> Option<String> {
+        self.model.clone()
     }
 
     pub fn endpoint(&self, endpoint: impl Into<String>) -> Endpoint {
@@ -320,6 +332,10 @@ impl RuntimeProvider for Endpoint {
 impl MetricsRegistry for Endpoint {
     fn basename(&self) -> String {
         self.name.clone()
+    }
+
+    fn model(&self) -> Option<String> {
+        self.component.model()
     }
 
     fn parent_hierarchy(&self) -> Vec<String> {
@@ -487,9 +503,10 @@ impl Namespace {
     }
 
     /// Create a [`Component`] in the namespace who's endpoints can be discovered with etcd
-    pub fn component(&self, name: impl Into<String>) -> Result<Component> {
+    pub fn component(&self, name: impl Into<String>, model: Option<String>) -> Result<Component> {
         Ok(ComponentBuilder::from_runtime(self.runtime.clone())
             .name(name)
+            .model(model)
             .namespace(self.clone())
             .is_static(self.is_static)
             .build()?)

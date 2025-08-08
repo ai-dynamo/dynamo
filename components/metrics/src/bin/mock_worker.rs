@@ -146,7 +146,7 @@ async fn backend(runtime: DistributedRuntime) -> Result<()> {
     let namespace = runtime.namespace("dynamo")?;
     // we must first create a service, then we can attach one more more endpoints
     let component = namespace
-        .component("MyComponent")?
+        .component("MyComponent", Some("MyModel".to_string()))?
         .service_builder()
         .create()
         .await?;

@@ -31,9 +31,16 @@ pub async fn run(
     let cancel_token = distributed_runtime.primary_token().clone();
     let endpoint_id: EndpointId = path.parse()?;
 
+    let model_name = match &engine_config {
+        EngineConfig::StaticFull { model, .. } | EngineConfig::StaticCore { model, .. } => {
+            Some(model.card().service_name.clone())
+        }
+        EngineConfig::Dynamic(model) => Some(model.card().service_name.clone()),
+    };
+
     let component = distributed_runtime
         .namespace(&endpoint_id.namespace)?
-        .component(&endpoint_id.component)?;
+        .component(&endpoint_id.component, model_name)?;
     let endpoint = component
         .service_builder()
         .create()

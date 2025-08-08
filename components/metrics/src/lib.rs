@@ -145,6 +145,7 @@ impl MetricsMode {
 pub struct LLMWorkerLoadCapacityConfig {
     pub component_name: String,
     pub endpoint_name: String,
+    pub model_name: Option<String>,
 }
 
 /// Metrics collector for exposing metrics to prometheus/grafana
