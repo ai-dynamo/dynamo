@@ -70,6 +70,8 @@ srun -l --container-image=${IMAGE} \
         --mpi=pmix \
         echo "Container up."
 
+nodes=($(scontrol show hostnames "$SLURM_JOB_NODELIST"))
+
 export HEAD_NODE="${nodes[0]}"
 export HEAD_NODE_IP="$(hostname -i)"
 export ETCD_ENDPOINTS="${HEAD_NODE_IP}:2379"
