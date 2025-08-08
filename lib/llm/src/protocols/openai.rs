@@ -64,7 +64,6 @@ trait OpenAIStopConditionsProvider {
     fn nvext(&self) -> Option<&nvext::NvExt>;
 
     /// Get the effective ignore_eos value, considering both CommonExt and NvExt.
-    /// Default implementation uses nvext only for backward compatibility.
     fn get_ignore_eos(&self) -> Option<bool> {
         self.nvext().and_then(|nv| nv.ignore_eos)
     }

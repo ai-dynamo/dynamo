@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: Copyright (c) 2024-2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 // SPDX-License-Identifier: Apache-2.0
 
 use dynamo_llm::protocols::openai::{
@@ -159,6 +159,4 @@ fn test_min_tokens_only_at_root_level() {
     assert_eq!(request.common.min_tokens, Some(150));
     assert_eq!(request.effective_min_tokens(), Some(150));
 
-    // Verify nvext doesn't have min_tokens field (this is a compile-time guarantee)
-    // The NvExt struct doesn't have a min_tokens field
 }

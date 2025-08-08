@@ -19,12 +19,7 @@ use validator::{Validate, ValidationError};
 
 /// Common extensions for OpenAI API requests that are not part of the standard OpenAI spec
 /// but are commonly needed across different request types.
-///
-/// This struct contains fields that are promoted from nvext to root-level for better API ergonomics.
-/// These fields can still be specified in nvext for backward compatibility, where nvext values
-/// take precedence over root-level values.
 #[derive(Serialize, Deserialize, Builder, Validate, Debug, Clone, Default)]
-#[validate(schema(function = "validate_common_ext"))]
 pub struct CommonExt {
     /// If true, the model will ignore the end of string token and generate to max_tokens.
     /// This field can also be specified in nvext, where the nvext value takes precedence.
@@ -57,11 +52,6 @@ impl CommonExt {
 
         (ignore_eos, min_tokens)
     }
-}
-
-fn validate_common_ext(_common_ext: &CommonExt) -> Result<(), ValidationError> {
-    // Add any cross-field validation if needed in the future
-    Ok(())
 }
 
 /// Trait for types that provide CommonExt fields
