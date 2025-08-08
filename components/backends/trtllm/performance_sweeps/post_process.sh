@@ -2,7 +2,7 @@
 
 # Post-process script wrapper for performance sweep results
 # This script processes directories containing performance sweep results and extracts
-# throughput data and deployment configuration, creating JSON summary files.
+# throughput data and deployment configuration, creating a single consolidated JSON file.
 
 set -e
 
@@ -12,20 +12,23 @@ PYTHON_SCRIPT="$SCRIPT_DIR/post_process.py"
 
 # Function to show usage
 usage() {
-    echo "Usage: $0 <base_path> [--output-dir <output_directory>]"
+    echo "Usage: $0 <base_path> [--output-dir <output_directory>] [--output-file <filename>]"
     echo ""
     echo "Arguments:"
-    echo "  base_path           Base directory containing performance sweep results"
-    echo "  --output-dir DIR    Output directory for JSON files (default: same as input)"
+    echo "  base_path              Base directory containing performance sweep results"
+    echo "  --output-dir DIR       Output directory for JSON file (default: same as input)"
+    echo "  --output-file FILE     Output JSON filename (default: performance_sweep_results.json)"
     echo ""
     echo "Examples:"
     echo "  $0 ./8150-1024-20250806_174027"
     echo "  $0 ./results --output-dir ./summaries"
+    echo "  $0 ./results --output-file my_results.json"
+    echo "  $0 ./results --output-dir ./summaries --output-file consolidated_results.json"
     echo ""
     echo "This script will:"
     echo "  1. Find all subdirectories matching pattern 'ctx*_gen*_*'"
     echo "  2. Extract throughput data from genai_perf_artifacts"
-    echo "  3. Create JSON files with results for each subdirectory"
+    echo "  3. Create a single consolidated JSON file with all results"
     exit 1
 }
 
@@ -50,10 +53,15 @@ BASE_PATH="$1"
 shift
 
 OUTPUT_DIR=""
+OUTPUT_FILE=""
 while [[ $# -gt 0 ]]; do
     case $1 in
         --output-dir)
             OUTPUT_DIR="$2"
+            shift 2
+            ;;
+        --output-file)
+            OUTPUT_FILE="$2"
             shift 2
             ;;
         -h|--help)
@@ -76,6 +84,9 @@ fi
 CMD="python3 \"$PYTHON_SCRIPT\" \"$BASE_PATH\""
 if [ -n "$OUTPUT_DIR" ]; then
     CMD="$CMD --output-dir \"$OUTPUT_DIR\""
+fi
+if [ -n "$OUTPUT_FILE" ]; then
+    CMD="$CMD --output-file \"$OUTPUT_FILE\""
 fi
 
 echo "Running post-process script..."

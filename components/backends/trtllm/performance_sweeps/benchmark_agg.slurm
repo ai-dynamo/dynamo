@@ -93,7 +93,7 @@ srun -l --container-name=${CONTAINER_NAME} \
         --container-mounts=${container_mounts} \
         --mpi=pmix --overlap \
         --container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE \
-        bash -x ${WORK_DIR}/scripts/start_agg_worker.sh ${MODEL_PATH} ${max_batch_size} ${max_num_tokens} ${tp_size} ${ep_size} ${enable_attention_dp} ${GPU_FRAC} ${max_seq_len} ${mtp_size} ${SERVED_MODEL_NAME} &> ${full_logdir}/output_server.log &
+        bash -x ${WORK_DIR}/scripts/start_agg_worker.sh ${MODEL_PATH} ${max_batch_size} ${max_num_tokens} ${tp_size} ${ep_size} ${enable_attention_dp} ${GPU_FRAC} ${max_seq_len} ${mtp_size} ${SERVED_MODEL_NAME} &> ${full_logdir}/output_worker.log &
 
 # start the loadgen
 srun -l --container-name=${CONTAINER_NAME} \
