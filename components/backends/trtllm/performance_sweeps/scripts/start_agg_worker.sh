@@ -9,7 +9,7 @@ enable_attention_dp=$6
 gpu_fraction=$7
 max_seq_len=$8
 mtp=$9
-model_name=$10
+model_name=${10}
 
 # echo all parameters
 echo "model_path: ${model_path}"
