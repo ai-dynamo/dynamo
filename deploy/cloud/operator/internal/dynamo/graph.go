@@ -506,32 +506,34 @@ func GenerateComponentVirtualService(ctx context.Context, componentName, compone
 			Namespace: componentNamespace,
 		},
 	}
-	vs.Spec = istioNetworking.VirtualService{
-		Hosts: []string{
-			getIngressHost(ingressSpec),
-		},
-		Gateways: []string{*ingressSpec.VirtualServiceGateway},
-		Http: []*istioNetworking.HTTPRoute{
-			{
-				Match: []*istioNetworking.HTTPMatchRequest{
-					{
-						Uri: &istioNetworking.StringMatch{
-							MatchType: &istioNetworking.StringMatch_Prefix{Prefix: "/"},
+	if ingressSpec.IsVirtualServiceEnabled() {
+		vs.Spec = istioNetworking.VirtualService{
+			Hosts: []string{
+				getIngressHost(ingressSpec),
+			},
+			Gateways: []string{*ingressSpec.VirtualServiceGateway},
+			Http: []*istioNetworking.HTTPRoute{
+				{
+					Match: []*istioNetworking.HTTPMatchRequest{
+						{
+							Uri: &istioNetworking.StringMatch{
+								MatchType: &istioNetworking.StringMatch_Prefix{Prefix: "/"},
+							},
 						},
 					},
-				},
-				Route: []*istioNetworking.HTTPRouteDestination{
-					{
-						Destination: &istioNetworking.Destination{
-							Host: componentName,
-							Port: &istioNetworking.PortSelector{
-								Number: commonconsts.DynamoServicePort,
+					Route: []*istioNetworking.HTTPRouteDestination{
+						{
+							Destination: &istioNetworking.Destination{
+								Host: componentName,
+								Port: &istioNetworking.PortSelector{
+									Number: commonconsts.DynamoServicePort,
+								},
 							},
 						},
 					},
 				},
 			},
-		},
+		}
 	}
 	return vs
 }

@@ -979,8 +979,7 @@ func (r *DynamoComponentDeploymentReconciler) generateVirtualService(ctx context
 		},
 	}
 
-	vsEnabled := opt.dynamoComponentDeployment.Spec.Ingress != nil && opt.dynamoComponentDeployment.Spec.Ingress.Enabled && opt.dynamoComponentDeployment.Spec.Ingress.UseVirtualService && opt.dynamoComponentDeployment.Spec.Ingress.VirtualServiceGateway != nil
-	if !vsEnabled {
+	if !opt.dynamoComponentDeployment.Spec.Ingress.IsVirtualServiceEnabled() {
 		log.Info("VirtualService is not enabled")
 		return vs, true, nil
 	}

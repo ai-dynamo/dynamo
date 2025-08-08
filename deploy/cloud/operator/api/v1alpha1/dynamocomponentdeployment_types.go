@@ -114,6 +114,13 @@ type IngressSpec struct {
 	IngressControllerClassName *string           `json:"ingressControllerClassName,omitempty"`
 }
 
+func (i *IngressSpec) IsVirtualServiceEnabled() bool {
+	if i == nil {
+		return false
+	}
+	return i.Enabled && i.UseVirtualService && i.VirtualServiceGateway != nil
+}
+
 // DynamoComponentDeploymentStatus defines the observed state of DynamoComponentDeployment
 type DynamoComponentDeploymentStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster

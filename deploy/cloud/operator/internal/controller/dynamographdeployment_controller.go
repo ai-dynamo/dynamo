@@ -228,8 +228,7 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 				return "", "", "", fmt.Errorf("failed to generate the main component virtual service: %w", err)
 			}
 			_, syncedMainComponentVirtualService, err := commonController.SyncResource(ctx, r, dynamoDeployment, func(ctx context.Context) (*networkingv1beta1.VirtualService, bool, error) {
-				vsEnabled := ingressSpec.Enabled && ingressSpec.UseVirtualService && ingressSpec.VirtualServiceGateway != nil
-				if !vsEnabled {
+				if !ingressSpec.IsVirtualServiceEnabled() {
 					logger.Info("VirtualService is not enabled")
 					return mainComponentVirtualService, true, nil
 				}
