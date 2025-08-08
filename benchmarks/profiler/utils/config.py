@@ -304,6 +304,10 @@ class SGLangConfigModifier:
             idx = args.index("dynamo.sglang.decode_worker")
             args[idx] = "dynamo.sglang.worker"
 
+            # remove `--disaggregation-mode` and `--disaggregation-transfer-backend`
+            args = remove_valued_arguments(args, "--disaggregation-mode")
+            args = remove_valued_arguments(args, "--disaggregation-transfer-backend")
+
             # enable prefix caching
             if "--disable-radix-cache" in args:
                 args.remove("--disable-radix-cache")
