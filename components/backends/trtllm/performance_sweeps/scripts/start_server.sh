@@ -10,16 +10,16 @@ echo "short_hostname: ${short_hostname}"
 
 config_file=$1
 
-# 检查并替换config_file中的hostname设置
+# Check and replace the hostname setting in config_file
 if [ -f "$config_file" ]; then
-    # 使用sed查找hostname行并检查是否需要替换
+    # Use sed to find the hostname line and check if replacement is needed
     if grep -q "hostname:" "$config_file"; then
-        # 提取当前config中的hostname值
+        # Extract the current hostname value from the config
         current_hostname=$(grep "hostname:" "$config_file" | sed 's/.*hostname:[ ]*//' | awk '{print $1}')
         
         if [ "$current_hostname" != "$short_hostname" ]; then
             echo "Replacing hostname '$current_hostname' with '$short_hostname' in $config_file"
-            # 使用sed替换hostname值
+            # Use sed to replace the hostname value
             sed -i "s/hostname:[ ]*[^ ]*/hostname: $short_hostname/" "$config_file"
         else
             echo "Hostname '$current_hostname' already matches '$short_hostname', no change needed"

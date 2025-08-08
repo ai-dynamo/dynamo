@@ -140,7 +140,7 @@ srun -l --container-name=${CONTAINER_NAME} \
 	--overlap \
 	--container-env ETCD_ENDPOINTS,NATS_SERVER,HEAD_NODE_IP,HEAD_NODE \
         -w ${nodes[0]} \
-        bash ${SCRIPTS_DIR}/disagg/start_server.sh ${full_logdir}/config.yaml &> ${full_logdir}/output_server.log &
+        bash ${SCRIPTS_DIR}/scripts/start_frontend.sh &> ${full_logdir}/output_server.log &
 
 # wait for the server to start
 sleep 10
@@ -161,7 +161,7 @@ for ((i=1; i<=PREFILL_COUNT; i++)); do
       --overlap \
       --ntasks 4 \
       --nodes 1 \
-      bash ${SCRIPTS_DIR}/disagg/start_worker.sh ${full_logdir}/prefill_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${SERVED_MODEL_NAME} ${MODEL_PATH} 'prefill' &> ${full_logdir}/output_workers.log &
+      bash ${SCRIPTS_DIR}/scripts/start_worker.sh ${full_logdir}/prefill_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${SERVED_MODEL_NAME} ${MODEL_PATH} 'prefill' &> ${full_logdir}/output_workers.log &
   prefill_pids+=($!)
 done
 
@@ -190,7 +190,7 @@ for ((i=1; i<=DECODE_COUNT; i++)); do
       --ntasks $gen_tp_size \
       --oversubscribe \
       --overlap \
-      bash ${SCRIPTS_DIR}/disagg/start_worker.sh ${full_logdir}/decode_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${SERVED_MODEL_NAME} ${MODEL_PATH} 'decode' &> ${full_logdir}/output_workers.log &
+      bash ${SCRIPTS_DIR}/scripts/start_worker.sh ${full_logdir}/decode_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${SERVED_MODEL_NAME} ${MODEL_PATH} 'decode' &> ${full_logdir}/output_workers.log &
 done
 
 total_gpus=$((ctx_gpus + gen_gpus))
@@ -200,7 +200,7 @@ srun -l --container-name=${CONTAINER_NAME} \
         --container-mounts=${container_mounts},${artifacts_dir}:${artifacts_dir} \
         --mpi=pmix --overlap -N 1 -n 1 \
 	-w ${nodes[0]} \
-        bash ${SCRIPTS_DIR}/disagg/bench.sh ${SERVED_MODEL_NAME} ${MULTI_ROUND} ${num_gen_servers} "${concurrency_list}" ${STREAMING} ${full_logdir} ${total_gpus} ${artifacts_dir} ${MODEL_PATH} ${ISL} ${OSL} ${kind} > ${full_logdir}/bench.log 2>&1 
+        bash ${SCRIPTS_DIR}/scripts/bench.sh ${SERVED_MODEL_NAME} ${MULTI_ROUND} ${num_gen_servers} "${concurrency_list}" ${STREAMING} ${full_logdir} ${total_gpus} ${artifacts_dir} ${MODEL_PATH} ${ISL} ${OSL} ${kind} > ${full_logdir}/bench.log 2>&1 
 
 
 # srun -l --container-name=${CONTAINER_NAME} \
@@ -212,5 +212,5 @@ srun -l --container-name=${CONTAINER_NAME} \
 srun -l --container-name=${CONTAINER_NAME} \
         --container-mounts=${container_mounts} \
         --mpi=pmix --overlap \
-        kill -9 $(ps aux | grep '[t]rtllm-serve' | awk '{print $2}') >/dev/null 2>&1 || true
+        kill -9 $(ps aux | grep '[p]ython3' | awk '{print $2}') >/dev/null 2>&1 || true
 wait
