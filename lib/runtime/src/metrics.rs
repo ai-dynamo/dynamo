@@ -19,7 +19,7 @@
 //! that auto populates the labels with the component-endpoint hierarchy.
 //! All metrics are prefixed with "dynamo_component_" to avoid collisions with Kubernetes and other monitoring system labels.
 
-pub mod constants;
+pub mod prometheus_names;
 
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -901,7 +901,7 @@ mod test_prefixes {
 mod test_simple_metricsregistry_trait {
     use super::create_test_drt;
     use super::*;
-    use super::constants::nats as nats_metrics;
+            use super::prometheus_names::nats as nats_metrics;
     use prometheus::Counter;
     use std::sync::Arc;
 
@@ -1067,7 +1067,7 @@ dynamo_component_testintcounter{{dynamo_namespace="testnamespace"}} 12345
         fn filter_out_nats_metrics(metrics: &str) -> String {
             metrics
                 .lines()
-                .filter(|line| !line.contains("nats_client") && !line.trim().is_empty())
+                .filter(|line| !line.contains(nats_metrics::PREFIX) && !line.trim().is_empty())
                 .collect::<Vec<_>>()
                 .join("\n")
         }
@@ -1132,7 +1132,7 @@ dynamo_component_testintgaugevec{{instance="server2",service="api",status="inact
         // Additional checks for NATS client metrics (without checking specific values)
         let nats_metrics = drt_output
             .lines()
-            .filter(|line| line.contains("nats_client"))
+            .filter(|line| line.contains(nats_metrics::PREFIX))
             .collect::<Vec<_>>();
 
         // Check that NATS client metrics are present
@@ -1144,7 +1144,7 @@ dynamo_component_testintgaugevec{{instance="server2",service="api",status="inact
         // Check for specific NATS client metric names (without values)
         let nats_metric_names: Vec<&str> = nats_metrics
             .iter()
-            .filter(|line| line.starts_with("dynamo_component_nats_client_"))
+            .filter(|line| line.starts_with(&format!("dynamo_component_{}_", nats_metrics::PREFIX)))
             .map(|line| line.split('{').next().unwrap_or(line))
             .collect();
 
@@ -1152,14 +1152,10 @@ dynamo_component_testintgaugevec{{instance="server2",service="api",status="inact
             println!("NATS metric name: {}", name);
         }
 
-        let expected_nats_metrics = vec![
-            format!("dynamo_component_{}", nats_metrics::CONNECTION_STATE),
-            format!("dynamo_component_{}", nats_metrics::CONNECTS),
-            format!("dynamo_component_{}", nats_metrics::IN_BYTES),
-            format!("dynamo_component_{}", nats_metrics::IN_MESSAGES),
-            format!("dynamo_component_{}", nats_metrics::OUT_BYTES),
-            format!("dynamo_component_{}", nats_metrics::OUT_MESSAGES),
-        ];
+        let expected_nats_metrics: Vec<String> = super::prometheus_names::ALL_NATS_METRICS
+            .iter()
+            .map(|metric| format!("dynamo_component_{}", metric))
+            .collect();
 
         for expected_metric in &expected_nats_metrics {
             assert!(

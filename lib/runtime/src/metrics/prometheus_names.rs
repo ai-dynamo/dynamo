@@ -13,13 +13,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! NATS client metrics constants
+//! NATS client Prometheus metrics constants
 //!
-//! This module provides centralized constants for NATS client metric names
+//! This module provides centralized Prometheus metric name constants for NATS client metrics
 //! to ensure consistency and avoid duplication across the codebase.
 
-/// NATS client metrics
+/// NATS client Prometheus metric names
 pub mod nats {
+    /// Prefix for all NATS client metrics
+    pub const PREFIX: &str = "nats_client";
+
     /// Total number of bytes received by NATS client
     pub const IN_BYTES: &str = "nats_client_in_bytes";
 
@@ -39,7 +42,7 @@ pub mod nats {
     pub const CONNECTION_STATE: &str = "nats_client_connection_state";
 }
 
-/// All NATS client metric names as an array for iteration/validation
+/// All NATS client Prometheus metric names as an array for iteration/validation
 #[allow(dead_code)]
 pub const ALL_NATS_METRICS: &[&str] = &[
     nats::CONNECTION_STATE,

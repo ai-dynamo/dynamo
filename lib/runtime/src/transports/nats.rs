@@ -45,7 +45,7 @@ use validator::{Validate, ValidationError};
 
 pub use crate::slug::Slug;
 use tracing as log;
-use crate::metrics::constants::nats as nats_metrics;
+use crate::metrics::prometheus_names::nats as nats_metrics;
 
 pub const URL_PREFIX: &str = "nats://";
 
