@@ -88,7 +88,7 @@ srun -l --container-name=${CONTAINER_NAME} \
         --container-mounts=${container_mounts} \
         --mpi=pmix --overlap \
 	-n 1 -N 1 \
-        python3 ${SCRIPTS_DIR}/disagg/gen_yaml.py --config ${full_logdir}/config.yaml \
+        python3 ${SCRIPTS_DIR}/scripts/gen_yaml.py --config ${full_logdir}/config.yaml \
             --model ${model_path} \
             --num_ctx_servers ${num_ctx_servers} \
             --ctx_tp_size ${ctx_tp_size} \
@@ -189,12 +189,6 @@ srun -l --container-name=${CONTAINER_NAME} \
         --mpi=pmix --overlap -N 1 -n 1 \
 	-w ${nodes[0]} \
         bash ${SCRIPTS_DIR}/scripts/bench.sh ${served_model_name} ${MULTI_ROUND} ${num_gen_servers} "${concurrency_list}" ${STREAMING} ${full_logdir} ${total_gpus} ${artifacts_dir} ${model_path} ${isl} ${osl} ${kind} > ${full_logdir}/bench.log 2>&1 
-
-
-# srun -l --container-name=${CONTAINER_NAME} \
-#         --container-mounts=${MOUNT_DIR}:${MOUNT_DIR} \
-#         --mpi=pmix --overlap -N 1 -n 1 \
-#         bash ${SCRIPTS_DIR}/disagg/post_process.sh ${full_logdir} ${gen_tp_size} ${mtp_size} ${nsys_on} > ${full_logdir}/post_process.log 2>&1
 
 # try to kill the server and workers
 srun -l --container-name=${CONTAINER_NAME} \
