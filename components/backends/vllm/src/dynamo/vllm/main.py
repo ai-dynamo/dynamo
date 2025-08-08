@@ -58,7 +58,6 @@ def setup_lmcache_environment():
 async def health_monitor(
     logger, gpu_check_interval=30, nic_check_interval=60, local_rank=None
 ):
-
     async def on_gpu_failure():
         logger.error("GPU health check failed - considering graceful shutdown")
         # TODO: failure handling solutions
