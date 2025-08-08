@@ -140,7 +140,7 @@ echo "Prefill Count: $PREFILL_COUNT"
 prefill_pids=()
 for ((i=1; i<=PREFILL_COUNT; i++)); do
   echo "Running Prefill Worker: ${i}"
-  node_idx=$(( (i-1) % ${#nodes[@]}))
+  node_idx=$(i-1)
   echo "Running Prefill Nodes: ${nodes[node_idx]}"
   srun -l --container-name=${CONTAINER_NAME} \
       --container-mounts=${container_mounts} \
@@ -156,16 +156,13 @@ done
 DECODE_COUNT=$(grep 'decode_count:' "${full_logdir}/instance_config.yaml" | awk '{print $2}')
 echo "Decode Count: $DECODE_COUNT"
 
-# Assign decode workers to nodes not used by prefill workers (i.e., skip nodes[0..$PREFILL_COUNT-1])
-num_decode_nodes=$((gen_tp_size/4))
-num_total_nodes=${#nodes[@]}
-decode_start_idx=$PREFILL_COUNT  # nodes[0] is head, nodes[1..PREFILL_COUNT-1] are prefill
-
+num_gen_nodes=$((gen_nodes/num_gen_servers))
+decode_start_idx=$PREFILL_COUNT 
 for ((i=1; i<=DECODE_COUNT; i++)); do
   echo "Running Decode Worker: ${i}"
   decode_node_list=()
-  for ((j=0; j<num_decode_nodes; j++)); do
-    node_idx=$(( (decode_start_idx + (i-1)*num_decode_nodes + j) % (num_total_nodes - decode_start_idx) + decode_start_idx ))
+  for ((j=0; j<num_gen_nodes; j++)); do
+    node_idx=$((decode_start_idx + (i-1)*num_gen_nodes + j))
     decode_node_list+=("${nodes[node_idx]}")
   done
   decode_nodes_csv=$(IFS=, ; echo "${decode_node_list[*]}")
@@ -174,7 +171,7 @@ for ((i=1; i<=DECODE_COUNT; i++)); do
       --container-mounts=${container_mounts} \
       --mpi=pmix \
       -w ${decode_nodes_csv} \
-      --nodes ${num_decode_nodes} \
+      --nodes ${num_gen_nodes} \
       --ntasks $gen_tp_size \
       --oversubscribe \
       --overlap \
