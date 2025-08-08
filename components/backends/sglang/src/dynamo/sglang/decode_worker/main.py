@@ -43,9 +43,13 @@ class DecodeRequestHandler(BaseWorkerHandler):
             bootstrap_port=req["bootstrap_port"],
             bootstrap_room=req["bootstrap_room"],
         )
-
-        async for result in results:
-            yield result
+        try:
+            async for result in results:
+                yield result
+        except asyncio.CancelledError:
+            raise GeneratorExit(
+                "SGLang decode engine was shut down during token generation."
+            ) from None
 
 
 @dynamo_worker(static=False)
@@ -78,7 +82,7 @@ async def init(runtime: DistributedRuntime, server_args: ServerArgs):
 
     gen_endpoint = component.endpoint("generate")
 
-    tasks = [gen_endpoint.serve_endpoint(handler.generate)]
+    tasks = [gen_endpoint.serve_endpoint(handler.generate, graceful_shutdown=False)]
 
     tasks.extend(setup_native_endpoints(server_args, component, handler))
 

@@ -244,42 +244,51 @@ class RequestHandler(BaseWorkerHandler):
         else:
             num_output_tokens_so_far = 0
 
-        async for res in stream_source:
-            data = res.data() if unpack else res
-            finish_reason = data["meta_info"]["finish_reason"]
+        try:
+            async for res in stream_source:
+                data = res.data() if unpack else res
+                finish_reason = data["meta_info"]["finish_reason"]
 
-            if is_batch:
-                # Handle batch response
-                assert isinstance(num_output_tokens_so_far, dict)
-                index = data.get("index", 0)
-                if index not in num_output_tokens_so_far:
-                    num_output_tokens_so_far[index] = 0
+                if is_batch:
+                    # Handle batch response
+                    assert isinstance(num_output_tokens_so_far, dict)
+                    index = data.get("index", 0)
+                    if index not in num_output_tokens_so_far:
+                        num_output_tokens_so_far[index] = 0
 
-                if finish_reason:
-                    out = {
-                        "token_ids": [],
-                        "finish_reason": finish_reason["type"],
-                        "index": index,
-                    }
+                    if finish_reason:
+                        out = {
+                            "token_ids": [],
+                            "finish_reason": finish_reason["type"],
+                            "index": index,
+                        }
+                    else:
+                        next_total_toks = len(data["output_ids"])
+                        new_tokens = data["output_ids"][
+                            num_output_tokens_so_far[index] :
+                        ]
+                        out = {
+                            "token_ids": new_tokens,
+                            "index": index,
+                        }
+                        num_output_tokens_so_far[index] = next_total_toks
                 else:
-                    next_total_toks = len(data["output_ids"])
-                    new_tokens = data["output_ids"][num_output_tokens_so_far[index] :]
-                    out = {
-                        "token_ids": new_tokens,
-                        "index": index,
-                    }
-                    num_output_tokens_so_far[index] = next_total_toks
-            else:
-                # Handle single response
-                assert isinstance(num_output_tokens_so_far, int)
-                if finish_reason:
-                    out = {"token_ids": [], "finish_reason": finish_reason["type"]}
-                else:
-                    next_total_toks = len(data["output_ids"])
-                    out = {"token_ids": data["output_ids"][num_output_tokens_so_far:]}
-                    num_output_tokens_so_far = next_total_toks
+                    # Handle single response
+                    assert isinstance(num_output_tokens_so_far, int)
+                    if finish_reason:
+                        out = {"token_ids": [], "finish_reason": finish_reason["type"]}
+                    else:
+                        next_total_toks = len(data["output_ids"])
+                        out = {
+                            "token_ids": data["output_ids"][num_output_tokens_so_far:]
+                        }
+                        num_output_tokens_so_far = next_total_toks
 
-            yield out
+                yield out
+        except asyncio.CancelledError:
+            raise GeneratorExit(
+                "SGLang decode engine was shut down during token generation"
+            ) from None
 
     async def _prefill_generator(self, prefill):
         async for _ in prefill:
@@ -363,7 +372,7 @@ async def init(
     )
     _ = ZmqKvEventPublisher(component=component, config=zmq_config)
 
-    tasks = [endpoint.serve_endpoint(handler.generate)]
+    tasks = [endpoint.serve_endpoint(handler.generate, graceful_shutdown=False)]
 
     tasks.extend(setup_native_endpoints(server_args, component, handler))
 

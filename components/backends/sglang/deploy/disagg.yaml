@@ -171,3 +171,4 @@ spec:
             - "prefill"
             - "--disaggregation-transfer-backend"
             - "nixl"
+            - "--migration-limit=3"
