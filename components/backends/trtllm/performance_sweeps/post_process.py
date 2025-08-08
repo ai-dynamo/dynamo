@@ -237,7 +237,9 @@ def process_directory(dir_path: str) -> Optional[Dict]:
 def main():
     parser = argparse.ArgumentParser(description='Post-process performance sweep results')
     parser.add_argument('base_path', help='Base directory containing performance sweep results')
-    parser.add_argument('--output-dir', help='Output directory for JSON files (default: same as input)')
+    parser.add_argument('--output-dir', help='Output directory for JSON file (default: same as input)')
+    parser.add_argument('--output-file', default='performance_sweep_results.json', 
+                       help='Output JSON filename (default: performance_sweep_results.json)')
     
     args = parser.parse_args()
     
@@ -252,6 +254,9 @@ def main():
     for dir_path in directories:
         print(f"  - {os.path.basename(dir_path)}")
     
+    # Collect all results from all directories
+    all_results = []
+    
     # Process each directory
     for dir_path in directories:
         print(f"\nProcessing {os.path.basename(dir_path)}...")
@@ -262,22 +267,33 @@ def main():
             print(f"  Skipping {os.path.basename(dir_path)} - no valid data found")
             continue
         
-        # Create output JSON file
-        output_dir = args.output_dir if args.output_dir else dir_path
-        os.makedirs(output_dir, exist_ok=True)
+        # Add directory name to each result for identification
+        for result in results:
+            result['directory'] = os.path.basename(dir_path)
         
-        output_file = os.path.join(output_dir, f"{os.path.basename(dir_path)}_results.json")
+        all_results.extend(results)
         
-        with open(output_file, 'w') as f:
-            json.dump(results, f, indent=2)
-        
-        print(f"  Created {output_file} with {len(results)} results")
-        
-        # Print summary
+        # Print summary for this directory
+        print(f"  Found {len(results)} results:")
         for result in results:
             print(f"    Concurrency {result['concurrency']}: "
                   f"{result['output_token_throughput']:.2f} tokens/sec, "
                   f"{result['output_token_throughput_per_user']:.2f} tokens/sec/user")
+    
+    if not all_results:
+        print("No valid data found in any directory")
+        return
+    
+    # Create output directory and file
+    output_dir = args.output_dir if args.output_dir else args.base_path
+    os.makedirs(output_dir, exist_ok=True)
+    
+    output_file = os.path.join(output_dir, args.output_file)
+    
+    with open(output_file, 'w') as f:
+        json.dump(all_results, f, indent=2)
+    
+    print(f"\nCreated {output_file} with {len(all_results)} total results from {len(directories)} directories")
 
 
 if __name__ == '__main__':
