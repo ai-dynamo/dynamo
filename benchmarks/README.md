@@ -22,7 +22,10 @@ This directory contains benchmarking scripts and tools for performance evaluatio
 This is already included as part of the dynamo vllm image. To install locally or standalone, run:
 
 ```bash
-pip install -e .
+uv venv .venv --python 3.12 --seed
+source .venv/bin/activate
+
+uv pip install -e .
 ```
 
 Currently, this will install lightweight tools for:
