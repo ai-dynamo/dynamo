@@ -45,7 +45,7 @@ pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
     pub inner: async_openai::types::CreateChatCompletionRequest,
 
-    #[serde(flatten)]
+    #[serde(flatten, default)]
     pub common: CommonExt,
 
     #[serde(skip_serializing_if = "Option::is_none")]
