@@ -37,7 +37,6 @@ use futures::{StreamExt, TryStreamExt};
 use prometheus::{Counter, Gauge, Histogram, HistogramOpts, IntCounter, IntGauge, Opts, Registry};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
-use std::sync::Arc;
 use tokio::fs::File as TokioFile;
 use tokio::io::AsyncRead;
 use tokio::time;
@@ -77,9 +76,7 @@ impl Client {
         //nats_metrics.copy_from_nats_client_stats(&self.client);
 
         // Create a callback that updates the metrics when called
-        let nats_metrics_arc = std::sync::Arc::new(nats_metrics.clone());
-
-        let nats_metrics_clone = nats_metrics_arc.clone();
+        let nats_metrics_clone = nats_metrics.clone();
         let client_clone = self.client.clone();
         drt.add_metrics_callback("", move |_runtime| {
             // Use the cloned client directly
@@ -515,52 +512,52 @@ impl NatsQueue {
 #[derive(Debug, Clone)]
 pub struct NatsClientMetrics {
     /// Number of bytes received (excluding protocol overhead)
-    pub in_bytes: std::sync::Arc<IntGauge>,
+    pub in_bytes: IntGauge,
     /// Number of bytes sent (excluding protocol overhead)
-    pub out_bytes: std::sync::Arc<IntGauge>,
+    pub out_bytes: IntGauge,
     /// Number of messages received
-    pub in_messages: std::sync::Arc<IntGauge>,
+    pub in_messages: IntGauge,
     /// Number of messages sent
-    pub out_messages: std::sync::Arc<IntGauge>,
+    pub out_messages: IntGauge,
     /// Number of times connection was established
-    pub connects: std::sync::Arc<IntGauge>,
+    pub connects: IntGauge,
     /// Current connection state (0 = disconnected, 1 = connected, 2 = reconnecting)
-    pub connection_state: std::sync::Arc<IntGauge>,
+    pub connection_state: IntGauge,
 }
 
 impl NatsClientMetrics {
     /// Create a new instance of NATS client metrics using a DistributedRuntime's Prometheus constructors
     pub fn new(drt: &crate::DistributedRuntime) -> Result<Self> {
-        let in_bytes = Arc::new(drt.create_intgauge(
+        let in_bytes = drt.create_intgauge(
             "nats_client_in_bytes",
             "Total number of bytes received by NATS client",
             &[],
-        )?);
-        let out_bytes = Arc::new(drt.create_intgauge(
+        )?;
+        let out_bytes = drt.create_intgauge(
             "nats_client_out_bytes",
             "Total number of bytes sent by NATS client",
             &[],
-        )?);
-        let in_messages = Arc::new(drt.create_intgauge(
+        )?;
+        let in_messages = drt.create_intgauge(
             "nats_client_in_messages",
             "Total number of messages received by NATS client",
             &[],
-        )?);
-        let out_messages = Arc::new(drt.create_intgauge(
+        )?;
+        let out_messages = drt.create_intgauge(
             "nats_client_out_messages",
             "Total number of messages sent by NATS client",
             &[],
-        )?);
-        let connects = Arc::new(drt.create_intgauge(
+        )?;
+        let connects = drt.create_intgauge(
             "nats_client_connects",
             "Total number of connections established by NATS client",
             &[],
-        )?);
-        let connection_state = Arc::new(drt.create_intgauge(
+        )?;
+        let connection_state = drt.create_intgauge(
             "nats_client_connection_state",
             "Current connection state of NATS client (0=disconnected, 1=connected, 2=reconnecting)",
             &[],
-        )?);
+        )?;
 
         Ok(Self {
             in_bytes,

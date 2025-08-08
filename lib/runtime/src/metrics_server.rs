@@ -302,10 +302,10 @@ mod tests {
         let cancel_token = CancellationToken::new();
         let cancel_token_for_server = cancel_token.clone();
 
-        // Test basic system server (HTTP) lifecycle without DistributedRuntime
+        // Test basic HTTP server lifecycle without DistributedRuntime
         let app = Router::new().route("/test", get(|| async { (StatusCode::OK, "test") }));
 
-        // start system server (HTTP)
+        // start HTTP server
         let server_handle = tokio::spawn(async move {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let _ = axum::serve(listener, app)
@@ -323,7 +323,7 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
         assert!(
             result.is_ok(),
-            "System server (HTTP) should shut down when cancel token is cancelled"
+            "HTTP server should shut down when cancel token is cancelled"
         );
     }
 
@@ -616,14 +616,14 @@ dynamo_component_dynamo_uptime_seconds 42";
     #[cfg(feature = "integration")]
     #[tokio::test]
     async fn test_http_server_basic_functionality() {
-        // Test basic system server (HTTP) functionality without requiring etcd
+        // Test basic HTTP server functionality without requiring etcd
         let cancel_token = CancellationToken::new();
         let cancel_token_for_server = cancel_token.clone();
 
-        // Test basic system server (HTTP) lifecycle
+        // Test basic HTTP server lifecycle
         let app = Router::new().route("/test", get(|| async { (StatusCode::OK, "test") }));
 
-        // start system server (HTTP)
+        // start HTTP server
         let server_handle = tokio::spawn(async move {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let _ = axum::serve(listener, app)
@@ -641,7 +641,7 @@ dynamo_component_dynamo_uptime_seconds 42";
         let result = tokio::time::timeout(Duration::from_secs(5), server_handle).await;
         assert!(
             result.is_ok(),
-            "System server (HTTP) should shut down when cancel token is cancelled"
+            "HTTP server should shut down when cancel token is cancelled"
         );
     }
 }
