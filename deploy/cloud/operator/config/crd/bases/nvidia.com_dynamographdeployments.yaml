@@ -44,6 +44,12 @@ spec:
               type: object
             spec:
               properties:
+                backendFramework:
+                  enum:
+                    - sglang
+                    - vllm
+                    - trtllm
+                  type: string
                 dynamoGraph:
                   type: string
                 envs:
@@ -5094,6 +5100,8 @@ spec:
                                 type: string
                               memory:
                                 type: string
+                              nodes:
+                                type: string
                             type: object
                           requests:
                             properties:
@@ -5106,6 +5114,8 @@ spec:
                               gpu:
                                 type: string
                               memory:
+                                type: string
+                              nodes:
                                 type: string
                             type: object
                         type: object

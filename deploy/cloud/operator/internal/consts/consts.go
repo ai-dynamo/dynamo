@@ -15,6 +15,8 @@ const (
 	DynamoHealthPort     = 5000
 	DynamoHealthPortName = "health"
 
+	MpiRunSshPort = 2222
+
 	EnvDynamoServicePort = "DYNAMO_PORT"
 
 	KubeLabelDynamoSelector = "nvidia.com/selector"
@@ -37,8 +39,23 @@ const (
 	ComponentTypePlanner      = "planner"
 	ComponentTypeMain         = "main"
 	PlannerServiceAccountName = "planner-serviceaccount"
+	ComponentTypeWorker       = "worker"
 
 	DefaultIngressSuffix = "local"
 
 	DefaultGroveTerminationDelay = 15 * time.Minute
+	KubeValueNameSharedMemory    = "shared-memory"
+
+	// Grove multinode role suffixes
+	GroveRoleSuffixLeader = "ldr"
+	GroveRoleSuffixWorker = "wkr"
+
+	MpiRunSshSecretName = "mpi-run-ssh-secret"
+)
+
+type MultinodeDeploymentType string
+
+const (
+	MultinodeDeploymentTypeGrove MultinodeDeploymentType = "grove"
+	MultinodeDeploymentTypeLWS   MultinodeDeploymentType = "lws"
 )

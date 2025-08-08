@@ -404,6 +404,12 @@ spec:
                     minReplicas:
                       type: integer
                   type: object
+                backendFramework:
+                  enum:
+                    - sglang
+                    - vllm
+                    - trtllm
+                  type: string
                 componentType:
                   type: string
                 dynamoComponent:
@@ -5039,6 +5045,8 @@ spec:
                           type: string
                         memory:
                           type: string
+                        nodes:
+                          type: string
                       type: object
                     requests:
                       properties:
@@ -5051,6 +5059,8 @@ spec:
                         gpu:
                           type: string
                         memory:
+                          type: string
+                        nodes:
                           type: string
                       type: object
                   type: object

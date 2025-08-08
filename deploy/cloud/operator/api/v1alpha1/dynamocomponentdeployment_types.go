@@ -42,6 +42,10 @@ type DynamoComponentDeploymentSpec struct {
 	// contains the tag of the DynamoComponent: for example, "my_package:MyService"
 	DynamoTag string `json:"dynamoTag,omitempty"`
 
+	// BackendFramework specifies the backend framework (e.g., "sglang", "vllm", "trtllm")
+	// +kubebuilder:validation:Enum=sglang;vllm;trtllm
+	BackendFramework string `json:"backendFramework,omitempty"`
+
 	DynamoComponentDeploymentSharedSpec `json:",inline"`
 }
 
@@ -108,6 +112,13 @@ type IngressSpec struct {
 	TLS                        *IngressTLSSpec   `json:"tls,omitempty"`
 	HostSuffix                 *string           `json:"hostSuffix,omitempty"`
 	IngressControllerClassName *string           `json:"ingressControllerClassName,omitempty"`
+}
+
+func (i *IngressSpec) IsVirtualServiceEnabled() bool {
+	if i == nil {
+		return false
+	}
+	return i.Enabled && i.UseVirtualService && i.VirtualServiceGateway != nil
 }
 
 // DynamoComponentDeploymentStatus defines the observed state of DynamoComponentDeployment
@@ -194,12 +205,4 @@ func (s *DynamoComponentDeployment) SetDynamoDeploymentConfig(config []byte) {
 		Name:  commonconsts.DynamoDeploymentConfigEnvVar,
 		Value: string(config),
 	})
-}
-
-// GetImage returns the docker image of the DynamoComponent
-func (s *DynamoComponentDeployment) GetImage() string {
-	if s.Spec.ExtraPodSpec != nil && s.Spec.ExtraPodSpec.MainContainer != nil {
-		return s.Spec.ExtraPodSpec.MainContainer.Image
-	}
-	return ""
 }
