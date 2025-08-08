@@ -3,7 +3,7 @@
 
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
-use validator::{Validate, ValidationError};
+use validator::Validate;
 
 /// Common extensions for OpenAI API requests that are not part of the standard OpenAI spec
 /// but are commonly needed across different request types.
@@ -30,10 +30,11 @@ impl CommonExt {
 
     /// Merge values from this CommonExt with values from NvExt, giving precedence to NvExt values.
     /// This allows backward compatibility where nvext values override root-level values.
-    pub fn merge_with_nvext(&self, nvext: Option<&super::nvext::NvExt>) -> (Option<bool>, Option<u32>) {
-        let ignore_eos = nvext
-            .and_then(|nv| nv.ignore_eos)
-            .or(self.ignore_eos);
+    pub fn merge_with_nvext(
+        &self,
+        nvext: Option<&super::nvext::NvExt>,
+    ) -> (Option<bool>, Option<u32>) {
+        let ignore_eos = nvext.and_then(|nv| nv.ignore_eos).or(self.ignore_eos);
 
         // min_tokens is only available at root level (not in nvext currently)
         let min_tokens = self.min_tokens;
@@ -88,14 +89,14 @@ mod tests {
             .unwrap();
 
         let nvext = NvExt::builder()
-            .ignore_eos(true)  // This should override CommonExt's false value
+            .ignore_eos(true) // This should override CommonExt's false value
             .build()
             .unwrap();
 
         let (ignore_eos, min_tokens) = common_ext.merge_with_nvext(Some(&nvext));
 
-        assert_eq!(ignore_eos, Some(true));  // nvext value takes precedence
-        assert_eq!(min_tokens, Some(5));     // min_tokens from CommonExt
+        assert_eq!(ignore_eos, Some(true)); // nvext value takes precedence
+        assert_eq!(min_tokens, Some(5)); // min_tokens from CommonExt
     }
 
     #[test]
@@ -114,7 +115,7 @@ mod tests {
 
         let (ignore_eos, min_tokens) = common_ext.merge_with_nvext(Some(&nvext));
 
-        assert_eq!(ignore_eos, Some(true));  // Falls back to CommonExt value
+        assert_eq!(ignore_eos, Some(true)); // Falls back to CommonExt value
         assert_eq!(min_tokens, Some(10));
     }
 
@@ -138,7 +139,7 @@ mod tests {
         // Test that negative min_tokens fails validation
         let common_ext = CommonExt {
             ignore_eos: None,
-            min_tokens: Some(0),  // Should be valid (min = 0)
+            min_tokens: Some(0), // Should be valid (min = 0)
         };
         assert!(common_ext.validate().is_ok());
     }

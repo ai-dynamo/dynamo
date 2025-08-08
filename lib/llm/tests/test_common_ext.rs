@@ -43,7 +43,10 @@ fn test_chat_completions_nvext_overrides_common() {
     let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
 
     assert_eq!(request.common.ignore_eos, Some(false));
-    assert_eq!(request.nvext.as_ref().and_then(|nv| nv.ignore_eos), Some(true));
+    assert_eq!(
+        request.nvext.as_ref().and_then(|nv| nv.ignore_eos),
+        Some(true)
+    );
     assert_eq!(request.effective_ignore_eos(), Some(true)); // nvext value takes precedence
     assert_eq!(request.effective_min_tokens(), Some(50));
 }
@@ -62,7 +65,10 @@ fn test_chat_completions_backward_compatibility() {
     let request: NvCreateChatCompletionRequest = serde_json::from_str(json_str).unwrap();
 
     assert_eq!(request.common.ignore_eos, None);
-    assert_eq!(request.nvext.as_ref().and_then(|nv| nv.ignore_eos), Some(true));
+    assert_eq!(
+        request.nvext.as_ref().and_then(|nv| nv.ignore_eos),
+        Some(true)
+    );
     assert_eq!(request.effective_ignore_eos(), Some(true));
     assert_eq!(request.effective_min_tokens(), None);
 }
@@ -101,7 +107,10 @@ fn test_completions_nvext_overrides_common() {
     let request: NvCreateCompletionRequest = serde_json::from_str(json_str).unwrap();
 
     assert_eq!(request.common.ignore_eos, Some(false));
-    assert_eq!(request.nvext.as_ref().and_then(|nv| nv.ignore_eos), Some(true));
+    assert_eq!(
+        request.nvext.as_ref().and_then(|nv| nv.ignore_eos),
+        Some(true)
+    );
     assert_eq!(request.effective_ignore_eos(), Some(true)); // nvext value takes precedence
     assert_eq!(request.effective_min_tokens(), Some(75));
 }
@@ -115,10 +124,10 @@ fn test_serialization_preserves_structure() {
             messages: vec![async_openai::types::ChatCompletionRequestMessage::User(
                 async_openai::types::ChatCompletionRequestUserMessage {
                     content: async_openai::types::ChatCompletionRequestUserMessageContent::Text(
-                        "Hello".to_string()
+                        "Hello".to_string(),
                     ),
                     ..Default::default()
-                }
+                },
             )],
             ..Default::default()
         },
@@ -158,5 +167,4 @@ fn test_min_tokens_only_at_root_level() {
 
     assert_eq!(request.common.min_tokens, Some(150));
     assert_eq!(request.effective_min_tokens(), Some(150));
-
 }
