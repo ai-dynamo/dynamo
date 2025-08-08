@@ -142,6 +142,7 @@ async def run_profile(args):
                 model_name=model_name,
                 service_name=args.service_name,
                 frontend_port=frontend_port,
+                deployment_name=prefill_config["metadata"]["name"],
             )
             logger.info(f"Created client with service_name: {client.service_name}")
             deployment_clients.append(client)  # Track for cleanup
@@ -249,6 +250,7 @@ async def run_profile(args):
                 model_name=model_name,
                 service_name=args.service_name,
                 frontend_port=frontend_port,
+                deployment_name=decode_config["metadata"]["name"],
             )
             deployment_clients.append(client)  # Track for cleanup
             await client.create_deployment(decode_config_fn)
@@ -398,6 +400,7 @@ async def run_profile(args):
             model_name=model_name,
             service_name=args.service_name,
             frontend_port=frontend_port,
+            deployment_name=prefill_config["metadata"]["name"],
         )
         deployment_clients.append(client)  # Track for cleanup
         await client.create_deployment(prefill_config_fn)
@@ -489,9 +492,10 @@ async def run_profile(args):
         client = DynamoDeploymentClient(
             namespace=args.namespace,
             base_log_dir=work_dir,
+            model_name=model_name,
             service_name=args.service_name,
             frontend_port=frontend_port,
-            deployment_name=f"{args.backend}-agg",
+            deployment_name=decode_config["metadata"]["name"],
         )
         deployment_clients.append(client)  # Track for cleanup
         await client.create_deployment(decode_config_fn)
