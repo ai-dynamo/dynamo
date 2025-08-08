@@ -174,7 +174,7 @@ def _parse_command_line_args(args: list[str] | None = None) -> argparse.Namespac
     parser.add_argument(
         "--gpu_type",
         type=str,
-        choices=["h100", "gb200"],
+        choices=["h100", "gb200-fp8", "gb200-fp4"],
         default="h100",
         help="Type of GPU to use",
     )
@@ -213,7 +213,7 @@ def setup_env_vars_for_gpu_script(
     total_nodes: int,
     port: int = DIST_INIT_PORT,
 ):
-    """Setup environment variables required by GPU scripts (h100.sh, gb200.sh)"""
+    """Setup environment variables required by GPU scripts (h100.sh, gb200-fp8.sh, gb200-fp4.sh)"""
     os.environ["HOST_IP"] = host_ip
     os.environ["PORT"] = str(port)
     os.environ["TOTAL_GPUS"] = str(total_gpus)
