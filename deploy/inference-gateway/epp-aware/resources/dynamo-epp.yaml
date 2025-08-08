@@ -1,0 +1,103 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: qwen-epp
+  labels:
+    app: qwen-epp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qwen-epp
+  template:
+    metadata:
+      labels:
+        app: qwen-epp
+    spec:
+      imagePullSecrets:
+        - name: docker-imagepullsecret
+      terminationGracePeriodSeconds: 130
+      containers:
+      - name: epp
+        image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo-custom-epp:v0.3.0-1
+        env:
+          - name: USE_STREAMING
+            value: "true"
+        imagePullPolicy: IfNotPresent
+        args:
+          - "-poolName=qwen-pool"
+          - "-poolNamespace=default"
+          - "-v=5"
+          - "-zap-encoder=json"
+          - "-grpcPort=9002"
+          - "-grpcHealthPort=9003"
+        ports:
+        - containerPort: 9002
+        - containerPort: 9003
+        - name: metrics
+          containerPort: 9090
+        livenessProbe:
+          grpc:
+            port: 9003
+            service: inference-extension
+          initialDelaySeconds: 5
+          periodSeconds: 10
+        readinessProbe:
+          grpc:
+            port: 9003
+            service: inference-extension
+          initialDelaySeconds: 5
+          periodSeconds: 10
+      - name: frontend-router
+        image: gitlab-master.nvidia.com:5005/dl/ai-dynamo/dynamo/dynamo:fresh
+        imagePullPolicy: IfNotPresent
+        command: ["/bin/sh", "-c"]
+        args: ["python3 -m dynamo.frontend --http-port 8000 --router-mode kv"]
+        env:
+        - name: ETCD_ENDPOINTS
+          value: "http://dynamo-platform-etcd:2379"
+        - name: NATS_SERVER
+          value: "nats://dynamo-platform-nats:4222"
+        ports:
+          - containerPort: 8000
+        resources:
+          requests:
+            cpu: "1"
+            memory: "2Gi"
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 60
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          periodSeconds: 5
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+
