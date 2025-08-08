@@ -903,7 +903,7 @@ mod test_simple_metricsregistry_trait {
     use std::sync::Arc;
 
     #[test]
-    fn test_factory_methods_via_registry_trait() {
+    fn test_prometheusfactory_using_metrics_registry_trait() {
         // Setup real DRT and registry using the test-friendly constructor
         let drt = create_test_drt();
 
@@ -1061,7 +1061,7 @@ dynamo_component_testintcounter{{dynamo_namespace="testnamespace"}} 12345
         println!("{}", drt_output);
 
         // Helper function to filter out NATS client metrics
-        fn filter_nats_metrics(metrics: &str) -> String {
+        fn filter_out_nats_metrics(metrics: &str) -> String {
             metrics
                 .lines()
                 .filter(|line| !line.contains("nats_client") && !line.trim().is_empty())
@@ -1070,7 +1070,7 @@ dynamo_component_testintcounter{{dynamo_namespace="testnamespace"}} 12345
         }
 
         // Filter out NATS client metrics for comparison
-        let filtered_drt_output = filter_nats_metrics(&drt_output);
+        let filtered_drt_output = filter_out_nats_metrics(&drt_output);
 
         let expected_drt_output = format!(
             r#"# HELP dynamo_component_testcounter A test counter
@@ -1113,6 +1113,19 @@ dynamo_component_testintgaugevec{{instance="server2",service="api",status="inact
             expected_drt_output, filtered_drt_output
         );
 
+        println!("✓ All Prometheus format outputs verified successfully!");
+    }
+
+    #[test]
+    fn test_nats_client_metrics_integration() {
+        // Setup real DRT and registry using the test-friendly constructor
+        let drt = create_test_drt();
+
+        // Get DRT output which should include NATS client metrics
+        let drt_output = drt.prometheus_metrics_fmt().unwrap();
+        println!("DRT output with NATS metrics:");
+        println!("{}", drt_output);
+
         // Additional checks for NATS client metrics (without checking specific values)
         let nats_metrics = drt_output
             .lines()
@@ -1131,6 +1144,10 @@ dynamo_component_testintgaugevec{{instance="server2",service="api",status="inact
             .filter(|line| line.starts_with("dynamo_component_nats_client_"))
             .map(|line| line.split('{').next().unwrap_or(line))
             .collect();
+
+        for name in &nats_metric_names {
+            println!("NATS metric name: {}", name);
+        }
 
         let expected_nats_metrics = [
             "dynamo_component_nats_client_connection_state",
@@ -1156,6 +1173,6 @@ dynamo_component_testintgaugevec{{instance="server2",service="api",status="inact
             nats_metrics.len()
         );
 
-        println!("✓ All Prometheus format outputs verified successfully!");
+        println!("✓ NATS client metrics integration test passed!");
     }
 }
