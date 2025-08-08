@@ -45,6 +45,7 @@ use validator::{Validate, ValidationError};
 
 pub use crate::slug::Slug;
 use tracing as log;
+use crate::metrics::constants::nats as nats_metrics;
 
 pub const URL_PREFIX: &str = "nats://";
 
@@ -529,32 +530,32 @@ impl NatsClientMetrics {
     /// Create a new instance of NATS client metrics using a DistributedRuntime's Prometheus constructors
     pub fn new(drt: &crate::DistributedRuntime) -> Result<Self> {
         let in_bytes = drt.create_intgauge(
-            "nats_client_in_bytes",
+            nats_metrics::IN_BYTES,
             "Total number of bytes received by NATS client",
             &[],
         )?;
         let out_bytes = drt.create_intgauge(
-            "nats_client_out_bytes",
+            nats_metrics::OUT_BYTES,
             "Total number of bytes sent by NATS client",
             &[],
         )?;
         let in_messages = drt.create_intgauge(
-            "nats_client_in_messages",
+            nats_metrics::IN_MESSAGES,
             "Total number of messages received by NATS client",
             &[],
         )?;
         let out_messages = drt.create_intgauge(
-            "nats_client_out_messages",
+            nats_metrics::OUT_MESSAGES,
             "Total number of messages sent by NATS client",
             &[],
         )?;
         let connects = drt.create_intgauge(
-            "nats_client_connects",
+            nats_metrics::CONNECTS,
             "Total number of connections established by NATS client",
             &[],
         )?;
         let connection_state = drt.create_intgauge(
-            "nats_client_connection_state",
+            nats_metrics::CONNECTION_STATE,
             "Current connection state of NATS client (0=disconnected, 1=connected, 2=reconnecting)",
             &[],
         )?;

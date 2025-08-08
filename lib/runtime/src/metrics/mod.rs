@@ -19,6 +19,8 @@
 //! that auto populates the labels with the component-endpoint hierarchy.
 //! All metrics are prefixed with "dynamo_component_" to avoid collisions with Kubernetes and other monitoring system labels.
 
+pub mod constants;
+
 use once_cell::sync::Lazy;
 use regex::Regex;
 use std::any::Any;
@@ -899,6 +901,7 @@ mod test_prefixes {
 mod test_simple_metricsregistry_trait {
     use super::create_test_drt;
     use super::*;
+    use super::constants::nats as nats_metrics;
     use prometheus::Counter;
     use std::sync::Arc;
 
@@ -1149,13 +1152,13 @@ dynamo_component_testintgaugevec{{instance="server2",service="api",status="inact
             println!("NATS metric name: {}", name);
         }
 
-        let expected_nats_metrics = [
-            "dynamo_component_nats_client_connection_state",
-            "dynamo_component_nats_client_connects",
-            "dynamo_component_nats_client_in_bytes",
-            "dynamo_component_nats_client_in_messages",
-            "dynamo_component_nats_client_out_bytes",
-            "dynamo_component_nats_client_out_messages",
+        let expected_nats_metrics = vec![
+            format!("dynamo_component_{}", nats_metrics::CONNECTION_STATE),
+            format!("dynamo_component_{}", nats_metrics::CONNECTS),
+            format!("dynamo_component_{}", nats_metrics::IN_BYTES),
+            format!("dynamo_component_{}", nats_metrics::IN_MESSAGES),
+            format!("dynamo_component_{}", nats_metrics::OUT_BYTES),
+            format!("dynamo_component_{}", nats_metrics::OUT_MESSAGES),
         ];
 
         for expected_metric in &expected_nats_metrics {
