@@ -47,6 +47,7 @@ cuda_graph_config:
 kv_cache_config:
     dtype: fp8
     free_gpu_memory_fraction: ${gpu_fraction}
+    enable_block_reuse: false
 print_iter_log: true
 enable_attention_dp: ${enable_attention_dp_flag}
 stream_interval: 10
@@ -73,6 +74,7 @@ print_iter_log: true
 kv_cache_config:
     dtype: fp8
     free_gpu_memory_fraction: ${gpu_fraction}
+    enable_block_reuse: false
 stream_interval: 10
 moe_config:
     backend: ${moe_backend}
