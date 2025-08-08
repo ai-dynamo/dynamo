@@ -76,37 +76,35 @@ kubectl create secret docker-registry nvcr-imagepullsecret \
   -n $NAMESPACE
 ```
 
-**Step 1: Build your own vLLM image for profiling**
+**Step 1: Configure container image**
 
-```bash
-# in the project's root folder
-./container/build.sh --framework VLLM
-# Tag and push to your container registry
-export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.3.2 # or your own dynamoimage
-```
+You have two options for configuring your profiling setup:
 
-Replace the `image` within `profile_sla_job.yaml` with the tag of the image you pushed.
+**Option A: Use pre-built image with custom config injection (recommended)**
 
-**Step 1.5: Inject custom DGD config into profiling PVC (optional but recommended)**
+Use the default pre-built image and inject custom configurations via PVC:
 
-To use a custom DynamoGraphDeployment configuration for profiling, you can inject it into the profiling PVC:
+1. **Set the container image:**
+   ```bash
+   export DOCKER_IMAGE=nvcr.io/nvidia/ai-dynamo/vllm-runtime:0.4.0 # or any existing image tag
+   ```
 
-```bash
-# Use the default disagg.yaml config
-python3 benchmarks/profiler/inject_disagg_config.py --namespace $NAMESPACE
+2. **Inject your custom disagg configuration:**
+   ```bash
+   # Use default disagg.yaml config
+   python3 benchmarks/profiler/inject_disagg_config.py --namespace $NAMESPACE
 
-# Or use a custom disagg config file
-python3 benchmarks/profiler/inject_disagg_config.py --namespace $NAMESPACE --disagg-config my-custom-disagg.yaml
+   # Or use a custom disagg config file
+   python3 benchmarks/profiler/inject_disagg_config.py --namespace $NAMESPACE --disagg-config my-custom-disagg.yaml
 
-# Or specify a custom target path in the PVC
-python3 benchmarks/profiler/inject_disagg_config.py --namespace $NAMESPACE --target-path /profiling_results/my-disagg.yaml
-```
+   # Or specify a custom target path in the PVC
+   python3 benchmarks/profiler/inject_disagg_config.py --namespace $NAMESPACE --target-path /profiling_results/my-disagg.yaml
+   ```
 
-Then set the `DGD_CONFIG_FILE` environment variable in your profiling job to reference the injected config:
-
-```bash
-export DGD_CONFIG_FILE=/profiling_results/disagg.yaml # or your custom path
-```
+3. **Set the config path for the profiling job:**
+   ```bash
+   export DGD_CONFIG_FILE=/profiling_results/disagg.yaml # or your custom path
+   ```
 
 This approach allows you to:
 - Customize DGD configurations without rebuilding container images
@@ -116,6 +114,17 @@ This approach allows you to:
 > **Important**: For profiling, disagg configs should be run with Grove disabled by adding the annotation `nvidia.com/enable-grove: "false"` to avoid alpha Grove status issues.
 
 > **Note**: The default location in the PVC is `/profiling_results/disagg.yaml`. If you don't inject a config, the profiler will fall back to the built-in config at `/workspace/components/backends/vllm/deploy/disagg.yaml`.
+
+**Option B: Build custom image (only if you need code changes)**
+
+Only needed if you require custom code modifications beyond configuration changes:
+```bash
+# in the project's root folder
+./container/build.sh --framework VLLM
+# Tag and push to your container registry
+export DOCKER_IMAGE=<your docker tag>
+export DGD_CONFIG_FILE=<disagg config path> # path to your disagg.yaml file within the DOCKER_IMAGE
+```
 
 **Step 2: Set SLA target**
 
