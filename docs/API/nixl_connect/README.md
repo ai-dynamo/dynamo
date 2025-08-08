@@ -99,7 +99,7 @@ flowchart LR
 ```
 
 > [!Note]
-> When RDMA isn't available, NIXL the data transfer will still complete using non-accelerated methods.
+> When RDMA isn't available, the NIXL data transfer will still complete using non-accelerated methods.
 
 ### Multimodal Example
 
