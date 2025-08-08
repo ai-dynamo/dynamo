@@ -8,13 +8,13 @@ use crate::{
     endpoint_type::EndpointType,
     engines::StreamingEngineAdapter,
     entrypoint::{self, input::common, EngineConfig},
+    http::service::service_v2::{self, HttpService},
+    kv_router::KvRouterConfig,
+    model_type::ModelType,
     types::openai::{
         chat_completions::{NvCreateChatCompletionRequest, NvCreateChatCompletionStreamResponse},
         completions::{NvCreateCompletionRequest, NvCreateCompletionResponse},
     },
-    http::service::service_v2::{self, HttpService},
-    kv_router::KvRouterConfig,
-    model_type::ModelType
 };
 use dynamo_runtime::transports::etcd;
 use dynamo_runtime::{distributed::DistributedConfig, pipeline::RouterMode};

@@ -296,7 +296,7 @@ impl HttpServiceConfigBuilder {
         self.etcd_client = Some(etcd_client);
         self
     }
-    
+
     fn get_endpoints_router(
         state: Arc<State>,
         request_template: &Option<RequestTemplate>,
