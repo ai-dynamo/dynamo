@@ -7,7 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 
 ## Overview
 
-Dynamo's KV Router makes intelligent routing decisions by evaluating the computational cost of processing requests on different workers. The router considers both the decoding cost (active blocks) and prefill cost (new blocks that need to be computed). Optimizing the KV Router is critical for achieving maximum throughput and minimum latency in a distributed inference setup.
+The Dynamo KV Router intelligently routes requests by evaluating their computational costs across different workers. It considers both decoding costs (from active blocks) and prefill costs (from newly computed blocks). Optimizing the KV Router is critical for achieving maximum throughput and minimum latency in distributed inference setups.
 
 ## Quick Start
 
@@ -22,10 +22,10 @@ This command:
 - Exposes the service on port 8080 (configurable)
 - Automatically handles all backend workers registered to the Dynamo endpoint
 
-Backend workers can register themselves using the `register_llm` API, and the KV Router will automatically include them in its routing decisions. The router will:
-- Track the state of all registered workers
-- Make intelligent routing decisions based on KV cache overlap
-- Balance load across available workers
+Backend workers register themselves using the `register_llm` API, after which the KV Router automatically:
+- Tracks the state of all registered workers
+- Makes routing decisions based on KV cache overlap
+- Balances load across available workers
 
 ### Important Arguments
 
@@ -51,9 +51,9 @@ python -m dynamo.frontend --help
 
 The KV Router tracks two key metrics for each worker:
 
-1. **Potential Active Blocks**: The total number of blocks that would be actively used for decoding if a request were routed to that worker. This includes existing active blocks plus new blocks from the incoming request.
+1. **Potential Active Blocks**: The number of blocks that would be used for decoding if a request is routed to a worker. This includes both existing active blocks and new blocks from the incoming request.
 
-2. **Potential New Prefill Blocks**: The number of new tokens that would need to be prefilled (computed from scratch) on that worker, calculated as:
+2. **Potential New Prefill Blocks**: The number of tokens that need to be computed from scratch on a worker, calculated as:
    - New prefill tokens = Total input tokens - (Overlap blocks × Block size)
    - Potential prefill blocks = New prefill tokens / Block size
 
@@ -61,12 +61,12 @@ The KV Router tracks two key metrics for each worker:
 
 The router maintains block information through two complementary systems:
 
-- **Active Decoding Blocks**: Tracked locally by the router based on the request lifecycle:
-  - Incremented when a new request is added
-  - Updated as new tokens are generated
-  - Decremented when a request completes
+- **Active Decoding Blocks**: Tracked locally by the router throughout the request lifecycle:
+  - Incremented when adding a new request
+  - Updated during token generation
+  - Decremented upon request completion
 
-- **Cached Blocks**: Maintained globally by the KvIndexer, which builds a prefix tree from KV events reported by workers. This provides accurate overlap information for routing decisions.
+- **Cached Blocks**: Maintained globally by the KvIndexer using a prefix tree built from worker-reported KV events. This provides accurate overlap information for routing decisions.
 
 ## Cost Function
 
@@ -96,18 +96,18 @@ The `kv-overlap-score-weight` parameter (default: 1.0) controls the balance betw
 
 ## KV Events vs. Approximation Mode
 
-By default, the router uses KV events from workers to maintain an accurate global view of cached blocks. However, you can disable this with the `--no-kv-events` flag:
+The router uses KV events from workers by default to maintain an accurate global view of cached blocks. You can disable this with the `--no-kv-events` flag:
 
 - **With KV Events (default)**:
-  - Accurate overlap calculation based on actual cached blocks
-  - Higher accuracy but requires event processing overhead
-  - Best for production deployments
+  - Calculates overlap accurately using actual cached blocks
+  - Provides higher accuracy with event processing overhead
+  - Recommended for production deployments
 
 - **Without KV Events (--no-kv-events)**:
-  - Uses the ApproxKvIndexer to approximate cached blocks based on routing decisions
-  - Assumes that recently routed requests will have their blocks cached
-  - Lower overhead but potentially less accurate routing
-  - Useful for testing or environments where event processing is a bottleneck
+  - Uses ApproxKvIndexer to estimate cached blocks from routing decisions
+  - Assumes blocks from recent requests remain cached
+  - Reduces overhead at the cost of routing accuracy
+  - Suitable for testing or when event processing becomes a bottleneck
 
 ## Tuning Guidelines
 
@@ -138,9 +138,9 @@ The `router_temperature` parameter controls routing randomness:
 
 ### 4. Iterative Optimization
 
-1. Start with default settings
+1. Begin with default settings
 2. Monitor TTFT and ITL metrics
-3. Adjust `kv-overlap-score-weight` based on your optimization goals:
-   - If TTFT is too high: Increase the weight
-   - If ITL is too high: Decrease the weight
-4. Increase temperature if severe load imbalance occurs
+3. Adjust `kv-overlap-score-weight` to meet your performance goals:
+   - To reduce TTFT: Increase the weight
+   - To reduce ITL: Decrease the weight
+4. If you observe severe load imbalance, increase the temperature setting

@@ -1152,6 +1152,7 @@ dependencies = [
  "candle-core",
  "chrono",
  "cudarc",
+ "dashmap",
  "derive-getters",
  "derive_builder",
  "dialoguer",

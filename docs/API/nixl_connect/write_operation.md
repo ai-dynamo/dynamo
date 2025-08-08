@@ -19,12 +19,12 @@ limitations under the License.
 
 An operation which transfers data from the local worker to a remote worker.
 
-To create the operation, RDMA metadata ([RdmaMetadata](rdma_metadata.md)) from a remote worker's [`WritableOperation`](writable_operation.md)
+To create the operation, NIXL metadata ([RdmaMetadata](rdma_metadata.md)) from a remote worker's [`WritableOperation`](writable_operation.md)
 along with a matching set of local [`Descriptor`](descriptor.md) objects which reference memory to be transferred to the remote worker must be provided.
-The RDMA metadata must be transferred from the remote to the local worker via a secondary channel, most likely HTTP or TCP+NATS.
+The NIXL metadata must be transferred from the remote to the local worker via a secondary channel, most likely HTTP or TCP+NATS.
 
 Once created, data transfer will begin immediately.
-Disposal of the object will instruct the RDMA subsystem to cancel the operation,
+Disposal of the object will instruct the NIXL subsystem to cancel the operation,
 therefore the operation should be awaited until completed unless cancellation is intended.
 Cancellation is handled asynchronously.
 
@@ -53,7 +53,7 @@ Cancellation is handled asynchronously.
 def cancel(self) -> None:
 ```
 
-Instructs the RDMA subsystem to cancel the operation.
+Instructs the NIXL subsystem to cancel the operation.
 Completed operations cannot be cancelled.
 
 ### `wait_for_completion`

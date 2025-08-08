@@ -16,12 +16,13 @@
 use crate::kv_router::{
     indexer::{compute_block_hash_for_seq, RouterEvent},
     protocols::*,
-    KV_EVENT_SUBJECT, KV_METRICS_ENDPOINT,
+    scoring::LoadEvent,
+    KV_EVENT_SUBJECT, KV_METRICS_ENDPOINT, KV_METRICS_SUBJECT,
 };
 use async_trait::async_trait;
 use dynamo_runtime::traits::{events::EventPublisher, DistributedRuntimeProvider};
 use dynamo_runtime::{
-    component::Component,
+    component::{Component, Namespace},
     pipeline::{
         network::Ingress, AsyncEngine, AsyncEngineContextProvider, ManyOut, ResponseStream,
         SingleIn,
@@ -499,8 +500,17 @@ impl WorkerMetricsPublisher {
 
     pub async fn create_endpoint(&self, component: Component) -> Result<()> {
         let mut metrics_rx = self.rx.clone();
-        let handler = Arc::new(KvLoadEndpoingHander::new(metrics_rx.clone()));
+        let handler = Arc::new(KvLoadEndpointHandler::new(metrics_rx.clone()));
         let handler = Ingress::for_engine(handler)?;
+
+        // let worker_id = component
+        //     .drt()
+        //     .primary_lease()
+        //     .map(|lease| lease.id())
+        //     .unwrap_or_else(|| {
+        //         tracing::warn!("Component is static, assuming worker_id of 0");
+        //         0
+        //     });
 
         component
             .endpoint(KV_METRICS_ENDPOINT)
@@ -513,13 +523,90 @@ impl WorkerMetricsPublisher {
             .start()
             .await
     }
+
+    /// Starts a background task to publish metrics over NATS
+    ///
+    /// This task monitors metric changes (specifically kv_active_blocks and num_requests_waiting)
+    /// and publishes stable metrics to NATS after they've been unchanged for 1ms.
+    #[allow(dead_code)]
+    fn start_nats_metrics_publishing(&self, namespace: Namespace, worker_id: i64) {
+        let nats_rx = self.rx.clone();
+
+        tokio::spawn(async move {
+            let mut rx = nats_rx;
+            let mut last_kv_active_blocks: Option<u64> = None;
+            let mut last_num_requests_waiting: Option<u64> = None;
+            let mut pending_publish: Option<Arc<ForwardPassMetrics>> = None;
+            let mut publish_timer =
+                Box::pin(tokio::time::sleep(tokio::time::Duration::from_secs(0)));
+            publish_timer.as_mut().reset(tokio::time::Instant::now()); // Complete immediately
+
+            loop {
+                tokio::select! {
+                    // Handle metrics changes
+                    result = rx.changed() => {
+                        if result.is_err() {
+                            tracing::debug!(
+                                "Metrics publisher sender dropped, stopping NATS background task"
+                            );
+                            break;
+                        }
+
+                        let metrics = rx.borrow_and_update().clone();
+
+                        // Extract the values we care about
+                        let current_kv_active_blocks = metrics.kv_stats.kv_active_blocks;
+                        let current_num_requests_waiting =
+                            metrics.worker_stats.num_requests_waiting;
+
+                        // Check if these specific metrics have changed
+                        let has_changed = match (last_kv_active_blocks, last_num_requests_waiting) {
+                            (Some(last_kv), Some(last_requests)) => {
+                                last_kv != current_kv_active_blocks
+                                    || last_requests != current_num_requests_waiting
+                            }
+                            _ => true, // First time, consider it changed
+                        };
+
+                        // If load metrics changed, schedule a publish
+                        if has_changed {
+                            pending_publish = Some(metrics.clone());
+                            last_kv_active_blocks = Some(current_kv_active_blocks);
+                            last_num_requests_waiting = Some(current_num_requests_waiting);
+
+                            // Start the 1ms timer
+                            publish_timer.as_mut().reset(
+                                tokio::time::Instant::now() + tokio::time::Duration::from_millis(1)
+                            );
+                        }
+                    }
+                    // Timer expired - publish if we have pending metrics
+                    _ = &mut publish_timer => {
+                        if let Some(metrics) = pending_publish.take() {
+                            // Create LoadEvent wrapping the metrics
+                            let load_event = LoadEvent {
+                                worker_id,
+                                data: (*metrics).clone(),
+                            };
+
+                            if let Err(e) =
+                                namespace.publish(KV_METRICS_SUBJECT, &load_event).await
+                            {
+                                tracing::warn!("Failed to publish metrics over NATS: {}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        });
+    }
 }
 
-struct KvLoadEndpoingHander {
+struct KvLoadEndpointHandler {
     metrics_rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>,
 }
 
-impl KvLoadEndpoingHander {
+impl KvLoadEndpointHandler {
     pub fn new(metrics_rx: tokio::sync::watch::Receiver<Arc<ForwardPassMetrics>>) -> Self {
         Self { metrics_rx }
     }
@@ -527,7 +614,7 @@ impl KvLoadEndpoingHander {
 
 #[async_trait]
 impl AsyncEngine<SingleIn<()>, ManyOut<Annotated<ForwardPassMetrics>>, Error>
-    for KvLoadEndpoingHander
+    for KvLoadEndpointHandler
 {
     async fn generate(
         &self,
@@ -878,5 +965,118 @@ mod test_exponential_backoff {
         // Max calculated value should be less than MAX_BACKOFF_MS
         let max_calculated = INITIAL_BACKOFF_MS * 2_u64.pow(MAX_BACKOFF_EXPONENT);
         assert!(max_calculated <= MAX_BACKOFF_MS);
+    }
+}
+
+#[cfg(test)]
+mod test_worker_metrics_publisher {
+    use super::*;
+    use crate::kv_router::protocols::{ForwardPassMetrics, KvStats, WorkerStats};
+    use dynamo_runtime::traits::events::EventSubscriber; // Add this import
+    use dynamo_runtime::{DistributedRuntime, Runtime};
+    use futures::StreamExt;
+
+    #[tokio::test]
+    #[ignore] // Mark as ignored as requested
+    async fn test_metrics_publishing_behavior() -> Result<()> {
+        // Set up runtime and namespace
+        let rt = Runtime::from_current().unwrap();
+        let drt = DistributedRuntime::from_settings(rt.clone()).await?;
+        let namespace = drt.namespace("test".to_string())?;
+
+        // Create a subscriber for the metrics events using subscribe_with_type
+        let mut subscriber = namespace
+            .subscribe_with_type::<LoadEvent>(KV_METRICS_SUBJECT)
+            .await
+            .unwrap();
+
+        // Create WorkerMetricsPublisher
+        let publisher = WorkerMetricsPublisher::new().unwrap();
+        let worker_id = 1234;
+
+        // Start NATS metrics publishing
+        publisher.start_nats_metrics_publishing(namespace.clone(), worker_id);
+
+        // Allow some time for the background task to start
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Test 1: Publish 10 different metrics with 0.5ms intervals
+        // Only the last one should be published after 1ms of stability
+        for i in 0..10 {
+            let metrics = Arc::new(ForwardPassMetrics {
+                kv_stats: KvStats {
+                    kv_active_blocks: (i * 100) as u64, // Changing load metric
+                    kv_total_blocks: 1000,
+                    gpu_cache_usage_perc: 0.5,
+                    gpu_prefix_cache_hit_rate: 0.8,
+                },
+                worker_stats: WorkerStats {
+                    num_requests_waiting: (i * 10) as u64, // Changing load metric
+                    data_parallel_rank: None,
+                    request_active_slots: 50,
+                    request_total_slots: 100,
+                },
+                spec_decode_stats: None,
+            });
+
+            publisher.publish(metrics).unwrap();
+            tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
+        }
+
+        // Wait a bit more than 1ms to ensure the last metric is published
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Verify we receive exactly one event with the last metric values
+        let result =
+            tokio::time::timeout(tokio::time::Duration::from_millis(500), subscriber.next())
+                .await
+                .unwrap();
+
+        let event = result.unwrap().unwrap(); // Unwrap the Option and the Result
+        assert_eq!(event.worker_id, worker_id);
+        assert_eq!(event.data.kv_stats.kv_active_blocks, 900); // Last value: 9 * 100
+        assert_eq!(event.data.worker_stats.num_requests_waiting, 90); // Last value: 9 * 10
+
+        // Ensure no more events are waiting
+        let no_msg =
+            tokio::time::timeout(tokio::time::Duration::from_millis(50), subscriber.next()).await;
+        assert!(no_msg.is_err(), "Expected no more messages, but found one");
+
+        // Test 2: Publish 10 more metrics where everything changes EXCEPT the load metrics
+        for i in 0..10 {
+            let metrics = Arc::new(ForwardPassMetrics {
+                kv_stats: KvStats {
+                    kv_active_blocks: 900,                         // Keep same as last published
+                    kv_total_blocks: 1000 + (i * 100) as u64,      // Change other metrics
+                    gpu_cache_usage_perc: 0.3 + (i as f32 * 0.05), // Change other metrics
+                    gpu_prefix_cache_hit_rate: 0.7 + (i as f32 * 0.01), // Change other metrics
+                },
+                worker_stats: WorkerStats {
+                    num_requests_waiting: 90, // Keep same as last published
+                    data_parallel_rank: None,
+                    request_active_slots: 40 + (i * 5) as u64, // Change other metrics
+                    request_total_slots: 100 + (i * 10) as u64, // Change other metrics
+                },
+                spec_decode_stats: None,
+            });
+
+            publisher.publish(metrics).unwrap();
+            tokio::time::sleep(tokio::time::Duration::from_micros(100)).await;
+        }
+
+        // Wait to ensure no events are published
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+
+        // Verify no events are received
+        let no_msg =
+            tokio::time::timeout(tokio::time::Duration::from_millis(50), subscriber.next()).await;
+        assert!(
+            no_msg.is_err(),
+            "Expected no messages when load metrics don't change"
+        );
+
+        rt.shutdown();
+
+        Ok(())
     }
 }

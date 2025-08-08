@@ -15,10 +15,39 @@
 
 //! Scoring functions for the KV router.
 
+use super::protocols::{ForwardPassMetrics, LoadMetrics};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::kv_router::scheduler::Endpoint;
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct LoadEvent {
+    pub worker_id: i64,
+    pub data: ForwardPassMetrics,
+}
+
+/// [gluo FIXME] exactly the same as EndpointInfo except that 'data'
+/// is cleaned (not optional)
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Endpoint {
+    pub name: String,
+    pub subject: String,
+    pub data: LoadMetrics,
+}
+
+impl Endpoint {
+    pub fn worker_id(&self) -> i64 {
+        i64::from_str_radix(
+            self.subject
+                .split("-")
+                .last()
+                .expect("invalid subject")
+                .to_string()
+                .as_str(),
+            16,
+        )
+        .expect("invalid worker id")
+    }
+}
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
 pub struct ProcessedEndpoints {

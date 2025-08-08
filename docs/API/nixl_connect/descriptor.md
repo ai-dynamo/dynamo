@@ -16,8 +16,8 @@ limitations under the License.
 -->
 # dynamo.nixl_connect.Descriptor
 
-Memory descriptor that ensures memory is registered with the NIXL base RDMA subsystem.
-Memory must be registered with the RDMA subsystem to enable interaction with the memory.
+Memory descriptor that ensures memory is registered with the NIXL-base I/O subsystem.
+Memory must be registered with the NIXL subsystem to enable interaction with the memory.
 
 Descriptor objects are administrative and do not copy, move, or otherwise modify the registered memory.
 
@@ -41,11 +41,11 @@ There are four ways to create a descriptor:
 def register_memory(self, connector: Connector) -> None:
 ```
 
-Instructs the descriptor to register its memory buffer with the NIXL based RDMA subsystem.
+Instructs the descriptor to register its memory buffer with the NIXL-based I/O subsystem.
 
 Calling this method more than once on the same descriptor has no effect.
 
-When the descriptor is assigned to an RDMA operation, it will be automatically registered if was not explicitly registered.
+When the descriptor is assigned to a NIXL operation, it will be automatically registered if was not explicitly registered.
 
 
 ## Properties

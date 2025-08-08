@@ -18,7 +18,7 @@ use std::sync::Once;
 pub use crate::kv_router::protocols::{ForwardPassMetrics, LoadMetrics, PredictiveLoadMetrics};
 use crate::kv_router::KV_METRICS_ENDPOINT;
 
-use crate::kv_router::scheduler::Endpoint;
+use crate::kv_router::scoring::Endpoint;
 use crate::kv_router::ProcessedEndpoints;
 use dynamo_runtime::component::Component;
 use dynamo_runtime::{service::EndpointInfo, utils::Duration, Result};

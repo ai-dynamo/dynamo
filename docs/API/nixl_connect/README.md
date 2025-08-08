@@ -17,9 +17,22 @@ limitations under the License.
 
 # Dynamo NIXL Connect
 
-Dynamo connect provides utilities for using the NIXL base RDMA subsystem via a set of Python classes.
-The primary goal of this library to simplify the integration of NIXL based RDMA into inference applications.
+Dynamo NIXL Connect specializes in moving data between models/workers in a Dynamo Graph, and for the use cases where registration and memory regions need to be dynamic.
+Dynamo connect provides utilities for such use cases, using the NIXL-based I/O subsystem via a set of Python classes.
+The relaxed registration comes with some performance overheads, but simplifies the integration process.
+Especially for larger data transfer operations, such as between models in a multi-model graph, the overhead would be marginal.
 The `dynamo.nixl_connect` library can be imported by any Dynamo container hosted application.
+
+> [!Note]
+> Dynamo NIXL Connect will pick the best available method of data transfer available to it.
+> The available methods depend on the hardware and software configuration of the machines and network running the graph.
+> GPU Direct RDMA operations require that both ends of the operation have:
+> - NIC and GPU capable of performing RDMA operations
+> - Device drivers that support GPU-NIC direct interactions (aka "zero copy") and RDMA operations
+> - Network that supports InfiniBand or RoCE
+>
+> With any of the above not satisfied, GPU Direct RDMA will not be available to the graph's workers, and less-optimal methods will be utilized to ensure basic functionality.
+> For additional information, please read this [GPUDirect RDMA](https://docs.nvidia.com/cuda/pdf/GPUDirect_RDMA.pdf) document.
 
 ```python
 import dynamo.nixl_connect
@@ -30,11 +43,11 @@ There are four types of supported operations:
 
  1. **Register local readable memory**:
 
-    Register local memory buffer(s) with the RDMA subsystem to enable a remote worker to read from.
+    Register local memory buffer(s) with the NIXL subsystem to enable a remote worker to read from.
 
  2. **Register local writable memory**:
 
-    Register local memory buffer(s) with the RDMA subsystem to enable a remote worker to write to.
+    Register local memory buffer(s) with the NIXL subsystem to enable a remote worker to write to.
 
  3. **Read from registered, remote memory**:
 
@@ -44,7 +57,7 @@ There are four types of supported operations:
 
     Write local memory buffer(s) to remote memory buffer(s) registered by a remote worker to writable.
 
-By connecting correctly paired operations, high-throughput GPU Direct RDMA data transfers can be completed.
+When available, by connecting correctly paired operations, high-throughput GPU Direct RDMA data transfers can be completed.
 Given the list above, the correct pairing of operations would be 1 & 3 or 2 & 4.
 Where one side is a "(read|write)-able operation" and the other is its correctly paired "(read|write) operation".
 Specifically, a read operation must be paired with a readable operation, and a write operation must be paired with a writable operation.
@@ -58,9 +71,9 @@ sequenceDiagram
     LocalWorker ->> NIXL: Register memory (Descriptor)
     RemoteWorker ->> NIXL: Register memory (Descriptor)
     LocalWorker ->> LocalWorker: Create Readable/WritableOperation
-    LocalWorker ->> RemoteWorker: Send RDMA metadata (via HTTP/TCP+NATS)
+    LocalWorker ->> RemoteWorker: Send NIXL metadata (via HTTP/TCP+NATS)
     RemoteWorker ->> NIXL: Begin Read/WriteOperation with metadata
-    NIXL -->> RemoteWorker: Data transfer (RDMA)
+    NIXL -->> RemoteWorker: Data transfer
     RemoteWorker -->> LocalWorker: Notify completion (unblock awaiter)
 ```
 
@@ -69,12 +82,12 @@ sequenceDiagram
 ### Generic Example
 
 In the diagram below, Local creates a [`WritableOperation`](writable_operation.md) intended to receive data from Remote.
-Local then sends metadata about the requested RDMA operation to Remote.
-Remote then uses the metadata to create a [`WriteOperation`](write_operation.md) which will perform the GPU Direct RDMA memory transfer from Remote's GPU memory to Local's GPU memory.
+Local then sends metadata about the requested operation to Remote.
+Remote then uses the metadata to create a [`WriteOperation`](write_operation.md) which will perform the GPU Direct RDMA memory transfer, when available, from Remote's GPU memory to Local's GPU memory.
 
 ```mermaid
 ---
-title: Write Operation Between Two Workers
+title: Write Operation Between Two Workers (RDMA available)
 ---
 flowchart LR
   c1[Remote] --"3: .begin_write()"--- WriteOperation
@@ -84,6 +97,9 @@ flowchart LR
   e1@{ animate: true; }
   e2@{ animate: true; }
 ```
+
+> [!Note]
+> When RDMA isn't available, the NIXL data transfer will still complete using non-accelerated methods.
 
 ### Multimodal Example
 
@@ -133,7 +149,7 @@ flowchart LR
 
 > [!Note]
 > In this example, it is the data transfer between the Prefill Worker and the Encode Worker that utilizes the Dynamo NIXL Connect library.
-> The KV Cache transfer between Decode Worker and Prefill Worker utilizes the NIXL base RDMA subsystem directly without using the Dynamo NIXL Connect library.
+> The KV Cache transfer between Decode Worker and Prefill Worker utilizes a different connector that also uses the NIXL-based I/O subsystem underneath.
 
 #### Code Examples
 
@@ -142,7 +158,7 @@ for how they coordinate directly with the Encode Worker by creating a [`Writable
 sending the operation's metadata via Dynamo's round-robin dispatcher, and awaiting the operation for completion before making use of the transferred data.
 
 See [encode_worker](https://github.com/ai-dynamo/dynamo/tree/main/examples/multimodal/components/encode_worker.py#L190) from our Multimodal example,
-for how the resulting embeddings are registered with the RDMA subsystem by creating a [`Descriptor`](descriptor.md),
+for how the resulting embeddings are registered with the NIXL subsystem by creating a [`Descriptor`](descriptor.md),
 a [`WriteOperation`](write_operation.md) is created using the metadata provided by the requesting worker,
 and the worker awaits for the data transfer to complete for yielding a response.
 

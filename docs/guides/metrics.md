@@ -31,9 +31,7 @@ Dynamo automatically exposes metrics with the `dynamo_` name prefixes. It also a
 
 **Specialized Component Metrics**: Components can also expose additional metrics specific to their functionality. For example, a `preprocessor` component exposes metrics with the `dynamo_preprocessor_*` prefix. See the [Available Metrics section](../../deploy/metrics/README.md#available-metrics) for details on specialized component metrics.
 
-## Coming Soon
-
-**Kubernetes Integration**: Comprehensive Kubernetes deployment and monitoring information will be available soon, including Helm charts, Kubernetes-native metrics collection, and cluster-wide observability solutions.
+**Kubernetes Integration**: For comprehensive Kubernetes deployment and monitoring setup, see the [Kubernetes Metrics Guide](deploy/k8s_metrics.md). This includes Prometheus Operator setup, metrics collection configuration, and visualization in Grafana.
 
 ## Metrics Hierarchy
 

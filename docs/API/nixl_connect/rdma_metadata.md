@@ -17,12 +17,12 @@ limitations under the License.
 
 # dynamo.nixl_connect.RdmaMetadata
 
-A Pydantic type intended to provide JSON serialized RDMA metadata about a [`ReadableOperation`](readable_operation.md) or [`WritableOperation`](writable_operation.md) object.
-RDMA metadata contains detailed information about a worker process and how to access memory descriptors registered with it.
-This data is required to perform data transfers using the NIXL based RDMA subsystem.
+A Pydantic type intended to provide JSON serialized NIXL metadata about a [`ReadableOperation`](readable_operation.md) or [`WritableOperation`](writable_operation.md) object.
+NIXL metadata contains detailed information about a worker process and how to access memory regions registered with the corresponding agent.
+This data is required to perform data transfers using the NIXL-based I/O subsystem.
 
 > [!Warning]
-> RDMA metadata contains a worker's address as well as security keys to access specific registered memory descriptors.
+> NIXL metadata contains information to connect corresponding backends across agents, as well as identification keys to access specific registered memory regions.
 > This data provides direct memory access between workers, and should be considered sensitive and therefore handled accordingly.
 
 Use the respective class's `.metadata()` method to generate an `RdmaMetadata` object for an operation.

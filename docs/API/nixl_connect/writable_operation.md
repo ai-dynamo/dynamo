@@ -21,10 +21,10 @@ An operation which enables a remote worker to write data to the local worker.
 
 To create the operation, a set of local [`Descriptor`](descriptor.md) objects must be provided which reference memory intended to receive data from a remote worker.
 Once created, the memory referenced by the provided descriptors becomes immediately writable by a remote worker with the necessary metadata.
-The RDMA metadata ([RdmaMetadata](rdma_metadata.md)) required to access the memory referenced by the provided descriptors is accessible via the operations `.metadata()` method.
+The NIXL metadata ([RdmaMetadata](rdma_metadata.md)) required to access the memory referenced by the provided descriptors is accessible via the operations `.metadata()` method.
 Once acquired, the metadata needs to be provided to a remote worker via a secondary channel, most likely HTTP or TCP+NATS.
 
-Disposal of the object will instruct the RDMA subsystem to cancel the operation,
+Disposal of the object will instruct the NIXL subsystem to cancel the operation,
 therefore the operation should be awaited until completed unless cancellation is intended.
 Cancellation is handled asynchronously.
 
@@ -57,7 +57,7 @@ Cancellation is handled asynchronously.
 def metadata(self) -> RdmaMetadata:
 ```
 
-Generates and returns the RDMA metadata ([RdmaMetadata](rdma_metadata.md)) required for a remote worker to write to the operation.
+Generates and returns the NIXL metadata ([RdmaMetadata](rdma_metadata.md)) required for a remote worker to write to the operation.
 Once acquired, the metadata needs to be provided to a remote worker via a secondary channel, most likely HTTP or TCP+NATS.
 
 ### `wait_for_completion`
