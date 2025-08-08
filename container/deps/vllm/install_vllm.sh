@@ -148,12 +148,7 @@ fi
 # Install ep_kernels and DeepGEMM
 echo "Installing ep_kernels and DeepGEMM"
 cd tools/ep_kernels
-
-# These libraries lack version pinning and would download the latest PyTorch version,
-# which can cause compatibility issues with torchvision. The actual PyTorch version pinning
-# to 2.7.1 is implemented later in this script.
-bash install_python_libraries.sh
-
+bash install_python_libraries.sh # These libraries aren't pinned.
 cd ep_kernels_workspace
 git clone https://github.com/deepseek-ai/DeepGEMM.git
 cd DeepGEMM
