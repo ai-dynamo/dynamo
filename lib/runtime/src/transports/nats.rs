@@ -509,7 +509,7 @@ impl NatsQueue {
     }
 }
 
-/// Prometheus metrics that mirror the NATS client statistics
+/// Prometheus metrics that mirror the NATS client statistics (in primitive types)
 #[derive(Debug, Clone)]
 pub struct NatsClientMetrics {
     /// Number of bytes received (excluding protocol overhead)
