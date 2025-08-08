@@ -1,0 +1,336 @@
+# SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+{{- if .Capabilities.ApiVersions.Has "nvidia.com/v1alpha1/DynamoGraphDeployment" }}
+{{- else }}
+{{- fail "nvidia.com/v1alpha1/DynamoGraphDeployment is required to use this Helm chart. Use 'helm install dynamo-platform ./deploy/cloud/helm/platform/' before installing this chart again." }}
+{{- end }}
+
+{{- $ := . }}
+{{- $releaseName := .Release.Name | lower }}
+{{- $namespace := .Release.Namespace | lower }}
+{{- $chartName := .Chart.Name | lower }}
+{{- $chartVersion := .Chart.Version | lower }}
+{{- $etcdUrl := "dynamo-platform-etcd:2379" }}
+{{- $natsUrl := "nats://dynamo-platform-nats:4222" }}
+{{- with $.Values.services }}
+{{-   with .etcd }}
+{{-     $etcdUrl = . }}
+{{-   end }}
+{{-   with .nats }}
+{{-     $natsUrl = . }}
+{{-   end }}
+{{- end }}
+{{- $secretModelKey := "" }}
+{{- $secretModelName := "" }}
+{{- with $.Values.pullSecrets }}
+{{-   with .model }}
+{{-     with .key }}
+{{-       $secretModelKey = . }}
+{{-     end }}
+{{-     with .name }}
+{{-       $secretModelName = . }}
+{{-     end }}
+{{-   end }}
+{{- end }}
+{{- with $.Values.dynamo }}
+{{-   $namespace := required "The dynamo.name property is required" .name }}
+apiVersion: nvidia.com/v1alpha1
+kind: DynamoGraphDeployment
+metadata:
+  name: dynamo-{{ $namespace | lower }}-{{ $.Release.Name | lower }}
+spec:
+  services:
+    Frontend:
+{{-   with .frontend }}
+{{-     $image := required "The dynamo.frontend.image property is required" .image }}
+
+{{-     $livenessPath := "/live" }}
+{{-     $livenessPort := 8000 }}
+{{-     $metricsPath := "/metrics" }}
+{{-     $readinessPath := "/health" }}
+{{-     $readinessPort := 8000 }}
+{{-     $startupPath := "/health" }}
+{{-     $startupPort := 8000 }}
+{{-     with .probes }}
+{{-       with .liveness }}
+{{-         with .path }}
+{{-           $livenessPath = . }}
+{{-         end }}
+{{-         with .port }}
+{{-           $livenessPort = . }}
+{{-         end }}
+{{-       end }}
+{{-       with .metrics }}
+{{-         with .path }}
+{{-           $metricsPath = . }}
+{{-         end }}
+{{-       end }}
+{{-       with .readiness }}
+{{-         with .path }}
+{{-           $readinessPath = . }}
+{{-         end }}
+{{-         with .port }}
+{{-           $readinessPort = . }}
+{{-         end }}
+{{-       end }}
+{{-       with .startup }}
+{{-         with .path }}
+{{-           $startupPath = . }}
+{{-         end }}
+{{-         with .port }}
+{{-           $startupPort = . }}
+{{-         end }}
+{{-       end }}
+{{-     end }}
+{{-     $resourceCpu := 1 }}
+{{-     $resourceGpu := 0 }}
+{{-     $resourceMemory := "4Gi" }}
+{{-     with .resources }}
+{{-       with .cpu }}
+{{-         $resourceCpu = . }}
+{{-       end }}
+{{-       with .gpu }}
+{{-         $resourceGpu = . }}
+{{-       end }}
+{{-       with .memory }}
+{{-         $resourceMemory = . }}
+{{-       end }}
+{{-     end }}
+{{-     $debugLogLevel := "info" }}
+{{-     with .logLevel }}
+{{-       $debugLogLevel = . }}
+{{-     end }}
+{{-     $command := "python3 -m dynamo.frontend --http-port 8000" }}
+{{-     $workingDir := "/workspace" }}
+{{-     with .command }}
+{{-       $command = . }}
+{{-     end }}
+{{      with .routerMode }}
+{{-       if eq . "kv" }}
+{{-         $command = $command | printf "%s --router-mode kv" }}
+{{-       else }}
+{{-         . | printf "Property dynamo.frontend.routerMode does not support value '%s'." | fail  }}
+{{-       end }}
+{{-     end }}
+{{-     with .workingDir }}
+{{-       $workingDir = . }}
+{{-     end }}
+      livenessProbe:
+        httpGet:
+          path: {{ $livenessPath }}
+          port: {{ $livenessPort }}
+        initialDelaySeconds: 15
+        periodSeconds: 15
+        timeoutSeconds: 30
+        failureThreshold: 60
+      readinessProbe:
+        httpGet:
+          path: {{ $readinessPath }}
+          port: {{ $readinessPort }}
+        initialDelaySeconds: 60
+        periodSeconds: 5
+        timeoutSeconds: 30
+        failureThreshold: 10
+      dynamoNamespace: {{ $namespace }}
+      componentType: main
+      resources:
+        requests:
+          cpu: {{ $resourceCpu | quote }}
+{{-     if (gt (int $resourceGpu) 0) }}
+          gpu: {{ $resourceGpu | quote }}
+{{-     end }}
+          memory: {{ $resourceMemory | quote }}
+        limits:
+          cpu: {{ $resourceCpu | quote }}
+{{-     if (gt (int $resourceGpu) 0) }}
+           gpu: {{ $resourceGpu | quote }}
+{{-     end }}
+          memory: {{ $resourceMemory | quote }}
+      envs:
+      - name: DYN_LOG
+        value: {{ $debugLogLevel | quote }}
+      - name: NATS_SERVER
+        value: {{ $natsUrl }}
+      - name: ETCD_ENDPOINTS
+        value: {{ $etcdUrl }}
+{{-     with .envs }}
+{{-       if gt (len .) 0 }}
+{{-         toYaml . | indent 6 }}
+{{-       end }}
+{{-     end }}
+      extraPodSpec:
+        mainContainer:
+          image: {{ $image }}
+          workingDir: {{ $workingDir }}
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - {{ $command }}
+          startupProbe:
+            httpGet:
+              path: {{ $startupPath }}
+              port: {{ $startupPort }}
+            periodSeconds: 10
+            failureThreshold: 60
+{{-   else }}
+{{-     fail "The dynamo.frontend property is required." }}
+{{-   end }}
+{{-   with .components }}
+{{-     range . }}
+{{-       $componentName := required "Each component in dynamo.components must have a .name property" .name }}
+{{-       $command := required "Each component in dynamo.components must have a .command property" .command }}
+{{-       $image := required "Each component in dynamo.components must have a .image property" .image }}
+{{-       $livenessPath := "/live" }}
+{{-       $livenessPort := 8000 }}
+{{-       $metricsPath := "/metrics" }}
+{{-       $readinessPath := "/health" }}
+{{-       $readinessPort := 8000 }}
+{{-       $startupPath := "/health" }}
+{{-       $startupPort := 8000 }}
+{{-       with .probes }}
+{{-         with .liveness }}
+{{-           with .path }}
+{{-             $livenessPath = . }}
+{{-           end }}
+{{-           with .port }}
+{{-             $livenessPort = . }}
+{{-           end }}
+{{-         end }}
+{{-         with .metrics }}
+{{-           with .path }}
+{{-             $metricsPath = . }}
+{{-           end }}
+{{-         end }}
+{{-         with .readiness }}
+{{-           with .path }}
+{{-             $readinessPath = . }}
+{{-           end }}
+{{-           with .port }}
+{{-             $readinessPort = . }}
+{{-           end }}
+{{-         end }}
+{{-         with .startup }}
+{{-           with .path }}
+{{-             $startupPath = . }}
+{{-           end }}
+{{-           with .port }}
+{{-             $startupPort = . }}
+{{-           end }}
+{{-         end }}
+{{-       end }}
+{{-       $resourceCpu := 4 }}
+{{-       $resourceGpu := 1 }}
+{{-       $resourceMemory := "16Gi" }}
+{{-       with .resources }}
+{{-         with .cpu }}
+{{-           $resourceCpu = . }}
+{{-         end }}
+{{-         with .gpu }}
+{{-           $resourceGpu = . }}
+{{-         end }}
+{{-         with .memory }}
+{{-           $resourceMemory = . }}
+{{-         end }}
+{{-       end }}
+{{-       $systemEnabled := "true" }}
+{{-       $systemUseEndpointHealthStatus := "[\"generate\"]" }}
+{{-       $systemPort := 8000 }}
+{{-       with .systems }}
+{{-         with .enable }}
+{{-           $systemEnabled = . | ternary "true" "false" }}
+{{-         end }}
+{{-         with .port }}
+{{-           $systemPort = . }}
+{{-         end }}
+{{-         with .useEndpointHealthStatus }}
+{{-           $systemUseEndpointHealthStatus = . }}
+{{-         end }}
+{{-       end }}
+{{-       $debugLogLevel := "info" }}
+{{-       with .logLevel }}
+{{-         $debugLogLevel = . }}
+{{-       end }}
+{{-       $workingDir := "/workspace" }}
+{{-       with .workingDir }}
+{{-         $workingDir = . }}
+{{-       end }}
+    {{ $componentName }}:
+      livenessProbe:
+        httpGet:
+          path: {{ $livenessPath }}
+          port: {{ $livenessPort }}
+        initialDelaySeconds: 15
+        periodSeconds: 15
+        timeoutSeconds: 30
+        failureThreshold: 1
+      readinessProbe:
+        httpGet:
+          path: {{ $readinessPath }}
+          port: {{ $readinessPort }}
+        initialDelaySeconds: 60
+        periodSeconds: 10
+        timeoutSeconds: 30
+        failureThreshold: 60
+      dynamoNamespace: {{ $namespace }}
+      componentType: worker
+      resources:
+        requests:
+          cpu: {{ $resourceCpu | quote }}
+{{-       if (gt (int $resourceGpu) 0) }}
+          gpu: {{ $resourceGpu | quote }}
+{{-       end }}
+          memory: {{ $resourceMemory | quote }}
+        limits:
+          cpu: {{ $resourceCpu | quote }}
+{{-       if (gt (int $resourceGpu) 0) }}
+          gpu: {{ $resourceGpu | quote }}
+{{-       end }}
+          memory: {{ $resourceMemory | quote }}
+      envs:
+      - name: DYN_SYSTEM_ENABLED
+        value: {{ $systemEnabled | lower | quote }}
+      - name: DYN_SYSTEM_USE_ENDPOINT_HEALTH_STATUS
+        value: {{ $systemUseEndpointHealthStatus | quote }}
+      - name: DYN_SYSTEM_PORT
+        value: {{ $systemPort | quote }}
+      - name: DYN_LOG
+        value: {{ $debugLogLevel | quote }}
+      - name: NATS_SERVER
+        value: {{ $natsUrl }}
+      - name: ETCD_ENDPOINTS
+        value: {{ $etcdUrl }}
+{{-     with .envs }}
+{{-       if gt (len .) 0 }}
+{{-         toYaml . | indent 6 }}
+{{-       end }}
+{{-     end }}
+{{-       if (and (ne $secretModelKey "") (ne $secretModelName "")) }}
+      - name: HF_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: {{ $secretModelName }}
+            key: {{ $secretModelKey }}
+{{-       end }}
+      extraPodSpec:
+        mainContainer:
+          startupProbe:
+            httpGet:
+              path: {{ $startupPath }}
+              port: {{ $startupPort }}
+            periodSeconds: 10
+            failureThreshold: 60
+          image: {{ $image }}
+          workingDir: {{ $workingDir }}
+          command:
+          - /bin/sh
+          - -c
+          args:
+          - {{ $command }}
+{{-     end }}
+{{-   else }}
+{{-     fail "The dynamo.components property is required and must contain at least one component." }}
+{{-   end }}
+{{- else }}
+{{-   fail "The dynamo property is required." }}
+{{- end }}
