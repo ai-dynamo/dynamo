@@ -47,31 +47,40 @@ class BaseWorkerHandler(ABC):
         pass
 
     async def generate_tokens(self, prompt, sampling_params, request_id):
-        gen = self.engine_client.generate(prompt, sampling_params, request_id)
+        logger.error("generate_tokens()")
+        try:
+            gen = self.engine_client.generate(prompt, sampling_params, request_id)
 
-        num_output_tokens_so_far = 0
-        async for res in gen:
-            # res is vllm's RequestOutput
+            num_output_tokens_so_far = 0
+            async for res in gen:
+                # res is vllm's RequestOutput
 
-            # This is the expected way for a request to end.
-            # The new token ID will be eos, don't forward it.
-            if res.finished:
-                yield {"finish_reason": "stop", "token_ids": []}
-                break
+                # This is the expected way for a request to end.
+                # The new token ID will be eos, don't forward it.
+                if res.finished:
+                    yield {"finish_reason": "stop", "token_ids": []}
+                    break
 
-            if not res.outputs:
-                yield {"finish_reason": "error", "token_ids": []}
-                break
+                if not res.outputs:
+                    yield {"finish_reason": "error", "token_ids": []}
+                    break
 
-            output = res.outputs[0]
-            next_total_toks = len(output.token_ids)
-            out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
-            if output.finish_reason:
-                out["finish_reason"] = output.finish_reason
-            if output.stop_reason:
-                out["stop_reason"] = output.stop_reason
-            yield out
-            num_output_tokens_so_far = next_total_toks
+                output = res.outputs[0]
+                next_total_toks = len(output.token_ids)
+                out = {"token_ids": output.token_ids[num_output_tokens_so_far:]}
+                if output.finish_reason:
+                    out["finish_reason"] = output.finish_reason
+                if output.stop_reason:
+                    out["stop_reason"] = output.stop_reason
+                yield out
+                num_output_tokens_so_far = next_total_toks
+        
+        except asyncio.CancelledError:
+            logger.error(f"Cancelled in generate_tokens")
+            raise
+        except Exception as e:
+            logger.error(f"Error in generate_tokens: {e}")
+            raise e
 
 
 class DecodeWorkerHandler(BaseWorkerHandler):
@@ -105,58 +114,65 @@ class DecodeWorkerHandler(BaseWorkerHandler):
         super().cleanup()
 
     async def generate(self, request):
-        request_id = str(uuid.uuid4().hex)
-        logger.debug(f"New Request ID: {request_id}")
+        logger.error("generate()")
+        try:
+            request_id = str(uuid.uuid4().hex)
+            logger.debug(f"New Request ID: {request_id}")
 
-        prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
+            prompt = TokensPrompt(prompt_token_ids=request["token_ids"])
 
-        sampling_params = SamplingParams(**self.default_sampling_params)
+            sampling_params = SamplingParams(**self.default_sampling_params)
 
-        sampling_params.detokenize = False
-        for key, value in request["sampling_options"].items():
-            if value is not None and hasattr(sampling_params, key):
-                setattr(sampling_params, key, value)
+            sampling_params.detokenize = False
+            for key, value in request["sampling_options"].items():
+                if value is not None and hasattr(sampling_params, key):
+                    setattr(sampling_params, key, value)
 
-        for key, value in request["stop_conditions"].items():
-            if value is not None and hasattr(sampling_params, key):
-                setattr(sampling_params, key, value)
+            for key, value in request["stop_conditions"].items():
+                if value is not None and hasattr(sampling_params, key):
+                    setattr(sampling_params, key, value)
 
-        if self.can_prefill:
-            # Create a copy for prefill with specific modifications
-            prefill_sampling_params = deepcopy(sampling_params)
+            if self.can_prefill:
+                # Create a copy for prefill with specific modifications
+                prefill_sampling_params = deepcopy(sampling_params)
 
-            if prefill_sampling_params.extra_args is None:
-                prefill_sampling_params.extra_args = {}
-            prefill_sampling_params.extra_args["kv_transfer_params"] = {
-                "do_remote_decode": True,
-            }
-            prefill_sampling_params.max_tokens = 1
-            prefill_sampling_params.min_tokens = 1
+                if prefill_sampling_params.extra_args is None:
+                    prefill_sampling_params.extra_args = {}
+                prefill_sampling_params.extra_args["kv_transfer_params"] = {
+                    "do_remote_decode": True,
+                }
+                prefill_sampling_params.max_tokens = 1
+                prefill_sampling_params.min_tokens = 1
 
-            prefill_request = {
-                "token_ids": request["token_ids"],
-                "sampling_params": msgspec.to_builtins(prefill_sampling_params),
-                "request_id": request_id,
-            }
+                prefill_request = {
+                    "token_ids": request["token_ids"],
+                    "sampling_params": msgspec.to_builtins(prefill_sampling_params),
+                    "request_id": request_id,
+                }
 
-            # TODO Change to prefill queue
-            if self.prefill_worker_client is not None:
-                prefill_response = await anext(
-                    await self.prefill_worker_client.round_robin(prefill_request)
-                )
-                prefill_response = MyRequestOutput.model_validate_json(
-                    prefill_response.data()
-                )
+                # TODO Change to prefill queue
+                if self.prefill_worker_client is not None:
+                    prefill_response = await anext(
+                        await self.prefill_worker_client.round_robin(prefill_request)
+                    )
+                    prefill_response = MyRequestOutput.model_validate_json(
+                        prefill_response.data()
+                    )
 
-                # Modify original sampling_params for decode
-                if sampling_params.extra_args is None:
-                    sampling_params.extra_args = {}
-                sampling_params.extra_args[
-                    "kv_transfer_params"
-                ] = prefill_response.kv_transfer_params
+                    # Modify original sampling_params for decode
+                    if sampling_params.extra_args is None:
+                        sampling_params.extra_args = {}
+                    sampling_params.extra_args[
+                        "kv_transfer_params"
+                    ] = prefill_response.kv_transfer_params
 
-        async for tok in self.generate_tokens(prompt, sampling_params, request_id):
-            yield tok
+            async for tok in self.generate_tokens(prompt, sampling_params, request_id):
+                yield tok
+        
+        except asyncio.CancelledError:
+            logger.error(f"Cancelled in generate")
+        except Exception as e:
+            logger.error(f"Error in generate: {e}")
 
 
 class PrefillWorkerHandler(BaseWorkerHandler):
