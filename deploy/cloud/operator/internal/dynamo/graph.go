@@ -522,11 +522,18 @@ func GenerateComponentVirtualService(ctx context.Context, componentName, compone
 			Namespace: componentNamespace,
 		},
 	}
+
+	// Handle nil VirtualServiceGateway gracefully
+	gateways := []string{}
+	if ingressSpec.VirtualServiceGateway != nil {
+		gateways = []string{*ingressSpec.VirtualServiceGateway}
+	}
+
 	vs.Spec = istioNetworking.VirtualService{
 		Hosts: []string{
 			getIngressHost(ingressSpec),
 		},
-		Gateways: []string{*ingressSpec.VirtualServiceGateway},
+		Gateways: gateways,
 		Http: []*istioNetworking.HTTPRoute{
 			{
 				Match: []*istioNetworking.HTTPMatchRequest{

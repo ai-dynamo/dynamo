@@ -20,6 +20,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	grovev1alpha1 "github.com/NVIDIA/grove/operator/api/core/v1alpha1"
 	networkingv1beta1 "istio.io/client-go/pkg/apis/networking/v1beta1"
@@ -172,10 +173,69 @@ func (r *DynamoGraphDeploymentReconciler) reconcileGroveResources(ctx context.Co
 		return "", "", "", fmt.Errorf("failed to sync the Grove GangSet: %w", err)
 	}
 	groveGangSetAsResource := commonController.WrapResource(syncedGroveGangSet, func() bool {
-		if syncedGroveGangSet.Status.LastOperation != nil && syncedGroveGangSet.Status.LastOperation.State == grovev1alpha1.LastOperationStateSucceeded {
-			return true
+		// Check if LastOperation exists and succeeded
+		if syncedGroveGangSet.Status.LastOperation == nil {
+			return false
 		}
-		return false
+
+		// If LastOperation failed, definitely not ready
+		if syncedGroveGangSet.Status.LastOperation.State != grovev1alpha1.LastOperationStateSucceeded {
+			return false
+		}
+
+		// Additional check: if LastOperation has an error description, we're not ready
+		// This catches cases where Grove reports "Succeeded" but actually had issues
+		if syncedGroveGangSet.Status.LastOperation.Description != "" {
+			// Check if description contains admission webhook errors
+			description := strings.ToLower(syncedGroveGangSet.Status.LastOperation.Description)
+			if strings.Contains(description, "admission webhook") ||
+				strings.Contains(description, "denied the request") ||
+				strings.Contains(description, "field is immutable") {
+				return false
+			}
+		}
+
+		// Enhanced check: Verify actual pod readiness
+		// Grove may report "Succeeded" when PodGangSet is created, but pods might not be ready yet
+		// We need to check if the pods managed by this PodGangSet are actually ready
+		logger := log.FromContext(ctx)
+
+		// Get pods managed by this PodGangSet using label selector
+		podList := &corev1.PodList{}
+		listOpts := []client.ListOption{
+			client.InNamespace(syncedGroveGangSet.Namespace),
+			client.MatchingLabels(map[string]string{
+				"app.kubernetes.io/part-of": dynamoDeployment.Name,
+			}),
+		}
+
+		if err := r.Client.List(ctx, podList, listOpts...); err != nil {
+			logger.Error(err, "Failed to list pods for PodGangSet", "podgangset", syncedGroveGangSet.Name)
+			return false
+		}
+
+		// Check if we have pods and if they're all ready
+		if len(podList.Items) == 0 {
+			logger.Info("No pods found for PodGangSet yet", "podgangset", syncedGroveGangSet.Name)
+			return false
+		}
+
+		allPodsReady := true
+		for _, pod := range podList.Items {
+			podReady := false
+			for _, condition := range pod.Status.Conditions {
+				if condition.Type == corev1.PodReady && condition.Status == corev1.ConditionTrue {
+					podReady = true
+					break
+				}
+			}
+			if !podReady {
+				logger.Info("Pod not ready yet", "pod", pod.Name, "podgangset", syncedGroveGangSet.Name)
+				allPodsReady = false
+			}
+		}
+
+		return allPodsReady
 	})
 	resources := []Resource{groveGangSetAsResource}
 	for componentName, component := range dynamoDeployment.Spec.Services {
