@@ -265,7 +265,7 @@ async def run_profile(args):
             )
 
             max_kv_tokens = config_modifier.get_kv_cache_size_from_dynamo_log(
-                f"{work_dir}/vllm-v1-agg/vllmdecodeworker/0.log"
+                f"{work_dir}/{client.deployment_name}/{WORKER_COMPONENT_NAMES[args.backend].decode_worker_k8s_name.lower()}/0.log"
             )
             max_concurrency = max_kv_tokens // (args.isl + args.osl)
             sweep_num_request = [
