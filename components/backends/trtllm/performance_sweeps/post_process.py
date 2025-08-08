@@ -61,6 +61,11 @@ def parse_directory_config(dir_name: str) -> Dict[str, str]:
     if tep_match:
         config['tep_mode'] = tep_match.group(1)
     
+    # Parse tep (tensor expert parallel) mode
+    dep_match = re.search(r'dep(\d+)', dir_name)
+    if dep_match:
+        config['dep_mode'] = dep_match.group(1)
+    
     return config
 
 
@@ -219,6 +224,7 @@ def process_directory(dir_path: str) -> Optional[Dict]:
                 'concurrency': concurrency,
                 'output_token_throughput': output_throughput,
                 'output_token_throughput_per_user': output_throughput_per_user,
+                'output_token_throughput_per_gpu': output_throughput / deployment_config['total_gpus'],
                 'model': deployment_config['model'],
                 'kind': deployment_config['kind'],
                 'total_gpus': deployment_config['total_gpus'],
@@ -227,7 +233,8 @@ def process_directory(dir_path: str) -> Optional[Dict]:
                 'batch_size': dir_config.get('batch_size', ''),
                 'eplb': dir_config.get('eplb', ''),
                 'mtp_mode': dir_config.get('mtp_mode', ''),
-                'tep_mode': dir_config.get('tep_mode', '')
+                'tep_mode': dir_config.get('tep_mode', ''),
+                'dep_mode': dir_config.get('dep_mode', '')
             }
             results.append(result)
     

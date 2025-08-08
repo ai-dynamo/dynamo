@@ -7,22 +7,6 @@
 #SBATCH --time=03:00:00
 #SBATCH --job-name="gtc_inference-job-1:disaggr-test"
 
-if [[ -z ${MODEL_PATH} ]]; then
-    echo "ERROR: MODEL_PATH was not set."
-    echo "ERROR: MODEL_PATH must be set to either the HuggingFace ID or locally " \
-         "downloaded path to the model weights. Since Deepseek R1 is large, it is " \
-         "recommended to pre-download them to a shared location and provide the path."
-    exit 1
-fi
-
-if [[ -z ${SERVED_MODEL_NAME} ]]; then
-    echo "WARNING: SERVED_MODEL_NAME was not set. It will be derived from MODEL_PATH."
-fi
-
-IMAGE="${IMAGE:-""}"
-
-ISL="${ISL:-8150}"
-OSL="${OSL:-1024}"
 MULTI_ROUND="${MULTI_ROUND:-8}"
 
 # set MOUNT_DIR
@@ -33,10 +17,6 @@ CONTAINER_NAME=disaggr-test
 STREAMING=true
 CTX_GPU_FRAC=0.75
 CACHE_TRANSCEIVER_MAX_NUM_TOKENS=8448
-
-
-ctx_max_seq_len=$((${ISL} + 203))
-gen_max_seq_len=$((${ISL} + ${OSL} + 203))
 
 num_ctx_servers=$1
 ctx_tp_size=$2
@@ -54,9 +34,17 @@ mtp_size=${13}
 concurrency_list=${14}
 gen_nodes=${15}
 kind=${16}
+model_path=${17}
+served_model_name=${18}
+image=${19}
+isl=${20}
+osl=${21}
+
+ctx_max_seq_len=$((${isl} + 203))
+gen_max_seq_len=$((${isl} + ${osl} + 203))
 
 WORK_DIR=${MOUNT_DIR}
-LOG_DIR=$WORK_DIR/${kind}-bm-${ISL}-${OSL}
+LOG_DIR=$WORK_DIR/${kind}-bm-${isl}-${osl}
 SCRIPTS_DIR=${WORK_DIR}/
 set_clock_cmd="bash ${SCRIPTS_DIR}/set_clock.sh"
 mkdir -p ${LOG_DIR}
@@ -86,10 +74,10 @@ mkdir -p ${artifacts_dir}
 # Set clock
 srun ${set_clock_cmd}
 
-container_mounts=${MOUNT_DIR}:${MOUNT_DIR},${MODEL_PATH}:${MODEL_PATH}
+container_mounts=${MOUNT_DIR}:${MOUNT_DIR},${model_path}:${model_path}
 
 # start the container
-srun -l --container-image=${IMAGE} \
+srun -l --container-image=${image} \
         --container-name=${CONTAINER_NAME} \
         --container-mounts=${container_mounts} \
         --mpi=pmix \
@@ -101,7 +89,7 @@ srun -l --container-name=${CONTAINER_NAME} \
         --mpi=pmix --overlap \
 	-n 1 -N 1 \
         python3 ${SCRIPTS_DIR}/disagg/gen_yaml.py --config ${full_logdir}/config.yaml \
-            --model ${MODEL_PATH} \
+            --model ${model_path} \
             --num_ctx_servers ${num_ctx_servers} \
             --ctx_tp_size ${ctx_tp_size} \
             --ctx_batch_size ${ctx_batch_size} \
@@ -161,7 +149,7 @@ for ((i=1; i<=PREFILL_COUNT; i++)); do
       --overlap \
       --ntasks 4 \
       --nodes 1 \
-      bash ${SCRIPTS_DIR}/scripts/start_worker.sh ${full_logdir}/prefill_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${SERVED_MODEL_NAME} ${MODEL_PATH} 'prefill' &> ${full_logdir}/output_workers.log &
+      bash ${SCRIPTS_DIR}/scripts/start_worker.sh ${full_logdir}/prefill_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'prefill' &> ${full_logdir}/output_workers.log &
   prefill_pids+=($!)
 done
 
@@ -190,7 +178,7 @@ for ((i=1; i<=DECODE_COUNT; i++)); do
       --ntasks $gen_tp_size \
       --oversubscribe \
       --overlap \
-      bash ${SCRIPTS_DIR}/scripts/start_worker.sh ${full_logdir}/decode_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${SERVED_MODEL_NAME} ${MODEL_PATH} 'decode' &> ${full_logdir}/output_workers.log &
+      bash ${SCRIPTS_DIR}/scripts/start_worker.sh ${full_logdir}/decode_config.yaml "${enable_pdl}" ${ctx_gpus} ${nsys_on} ${served_model_name} ${model_path} 'decode' &> ${full_logdir}/output_workers.log &
 done
 
 total_gpus=$((ctx_gpus + gen_gpus))
@@ -200,7 +188,7 @@ srun -l --container-name=${CONTAINER_NAME} \
         --container-mounts=${container_mounts},${artifacts_dir}:${artifacts_dir} \
         --mpi=pmix --overlap -N 1 -n 1 \
 	-w ${nodes[0]} \
-        bash ${SCRIPTS_DIR}/scripts/bench.sh ${SERVED_MODEL_NAME} ${MULTI_ROUND} ${num_gen_servers} "${concurrency_list}" ${STREAMING} ${full_logdir} ${total_gpus} ${artifacts_dir} ${MODEL_PATH} ${ISL} ${OSL} ${kind} > ${full_logdir}/bench.log 2>&1 
+        bash ${SCRIPTS_DIR}/scripts/bench.sh ${served_model_name} ${MULTI_ROUND} ${num_gen_servers} "${concurrency_list}" ${STREAMING} ${full_logdir} ${total_gpus} ${artifacts_dir} ${model_path} ${isl} ${osl} ${kind} > ${full_logdir}/bench.log 2>&1 
 
 
 # srun -l --container-name=${CONTAINER_NAME} \

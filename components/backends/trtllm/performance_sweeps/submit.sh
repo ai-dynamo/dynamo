@@ -1,5 +1,22 @@
 #!/bin/bash
 
+if [[ -z ${MODEL_PATH} ]]; then
+    echo "ERROR: MODEL_PATH was not set."
+    echo "ERROR: MODEL_PATH must be set to either the HuggingFace ID or locally " \
+         "downloaded path to the model weights. Since Deepseek R1 is large, it is " \
+         "recommended to pre-download them to a shared location and provide the path."
+    exit 1
+fi
+
+if [[ -z ${SERVED_MODEL_NAME} ]]; then
+    echo "WARNING: SERVED_MODEL_NAME was not set. It will be derived from MODEL_PATH."
+fi
+
+IMAGE="${IMAGE:-""}"
+
+ISL="${ISL:-8150}"
+OSL="${OSL:-1024}"
+
 # Usage Instructions
 usage() {
     echo "Usage: $0 <mtp_mode> <mode> [ctx_num] [gen_num] [gen_tp_size] [gen_batch_size] [gen_max_num_tokens] [gen_gpu_memory_fraction] [gen_eplb_num_slots] [gen_mtp_size] [gen_concurrency_list]"
@@ -53,7 +70,7 @@ run_single() {
     total_nodes=$((ctx_num + gen_nodes))
     total_tasks=$((total_nodes * 4))
     set -x
-    sbatch --nodes=${total_nodes} --ntasks=${total_tasks} --ntasks-per-node=4 --segment=${total_nodes} benchmark.slurm ${ctx_num} 4 1 8448 true ${gen_num} ${gen_tp_size} ${gen_batch_size} ${gen_max_num_tokens} ${gen_enable_attention_dp} ${gen_gpu_memory_fraction} ${gen_eplb_num_slots} ${gen_mtp_size} "${gen_concurrency_list}" ${gen_nodes} ${kind}
+    sbatch --nodes=${total_nodes} --ntasks=${total_tasks} --ntasks-per-node=4 --segment=${total_nodes} benchmark.slurm ${ctx_num} 4 1 8448 true ${gen_num} ${gen_tp_size} ${gen_batch_size} ${gen_max_num_tokens} ${gen_enable_attention_dp} ${gen_gpu_memory_fraction} ${gen_eplb_num_slots} ${gen_mtp_size} "${gen_concurrency_list}" ${gen_nodes} ${kind} ${MODEL_PATH} ${SERVED_MODEL_NAME} ${IMAGE} ${ISL} ${OSL}
     set +x
 }
 
