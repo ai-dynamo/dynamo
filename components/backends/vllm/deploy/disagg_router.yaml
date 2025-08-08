@@ -11,24 +11,6 @@ spec:
       dynamoNamespace: vllm-v1-disagg-router
       componentType: main
       replicas: 1
-      livenessProbe:
-        httpGet:
-          path: /health
-          port: 8000
-        initialDelaySeconds: 20
-        periodSeconds: 5
-        timeoutSeconds: 5
-        failureThreshold: 3
-      readinessProbe:
-        exec:
-          command:
-            - /bin/sh
-            - -c
-            - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
-        initialDelaySeconds: 60
-        periodSeconds: 60
-        timeoutSeconds: 30
-        failureThreshold: 10
       resources:
         requests:
           cpu: "1"
@@ -45,6 +27,29 @@ spec:
             - -c
           args:
             - "python3 -m dynamo.frontend --http-port 8000 --router-mode kv"
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - 'curl -s http://localhost:8000/health | jq -e ".status == \"healthy\""'
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
     VllmDecodeWorker:
       dynamoNamespace: vllm-v1-disagg-router
       envFromSecret: hf-token-secret
