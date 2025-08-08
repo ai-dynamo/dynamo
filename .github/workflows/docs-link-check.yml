@@ -1,0 +1,66 @@
+name: Docs link check
+
+on:
+  # TODO: Determine push/pull or both
+  push:
+    paths:
+      - '**/*.md'
+      - 'docs/**'
+      - '.github/workflows/docs-link-check.yml'
+  pull_request:
+    paths:
+      - '**/*.md'
+      - 'docs/**'
+      - '.github/workflows/docs-link-check.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  lychee:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      #- name: Cache lychee response cache
+      #  uses: actions/cache@v4
+      #  with:
+      #    path: .lycheecache
+      #    key: lychee-${{ runner.os }}-${{ hashFiles('**/*.md', 'docs/**/*') }}
+      #    restore-keys: |
+      #      lychee-${{ runner.os }}-
+
+      - name: Install lychee (v0.19.1)
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.local/bin"
+          cd "$RUNNER_TEMP"
+          curl -sSL -o lychee.tar.gz \
+            https://github.com/lycheeverse/lychee/releases/download/lychee-v0.19.1/lychee-x86_64-unknown-linux-gnu.tar.gz
+          tar -xzf lychee.tar.gz
+          BIN_PATH=$(find . -maxdepth 2 -type f -name lychee | head -n1)
+          install -m 0755 "$BIN_PATH" "$HOME/.local/bin/lychee"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          lychee --version
+
+      - name: Check documentation links with lychee
+        #env:
+        #  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          FILES=$(git ls-files | grep -E '\.(md|rst)$' || true)
+          if [ -z "$FILES" ]; then
+            echo "No documentation files found to check."
+            exit 0
+          fi
+          # Run lychee against all doc files; cache results and require HTTPS when available
+          echo "$FILES" | xargs -r lychee \
+            --no-progress \
+            --cache \
+            --max-concurrency 20 \
+            --timeout 20 \
+            --require-https
+
