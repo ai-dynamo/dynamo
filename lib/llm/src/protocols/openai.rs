@@ -22,6 +22,7 @@ use super::{
 };
 
 pub mod chat_completions;
+pub mod common_ext;
 pub mod completions;
 pub mod embeddings;
 pub mod models;
@@ -61,6 +62,12 @@ trait OpenAIStopConditionsProvider {
     fn get_stop(&self) -> Option<Vec<String>>;
 
     fn nvext(&self) -> Option<&nvext::NvExt>;
+
+    /// Get the effective ignore_eos value, considering both CommonExt and NvExt.
+    /// Default implementation uses nvext only for backward compatibility.
+    fn get_ignore_eos(&self) -> Option<bool> {
+        self.nvext().and_then(|nv| nv.ignore_eos)
+    }
 }
 
 impl<T: OpenAISamplingOptionsProvider> SamplingOptionsProvider for T {
@@ -142,11 +149,8 @@ impl<T: OpenAIStopConditionsProvider> StopConditionsProvider for T {
             }
         }
 
-        let mut ignore_eos = None;
-
-        if let Some(nvext) = self.nvext() {
-            ignore_eos = nvext.ignore_eos;
-        }
+        // Use the trait method to get ignore_eos, which handles precedence
+        let ignore_eos = self.get_ignore_eos();
 
         Ok(common::StopConditions {
             max_tokens,

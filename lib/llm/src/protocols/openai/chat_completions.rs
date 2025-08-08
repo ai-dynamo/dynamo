@@ -20,6 +20,7 @@ use validator::Validate;
 use crate::engines::ValidateRequest;
 
 use super::{
+    common_ext::{CommonExt, CommonExtProvider},
     nvext::NvExt, nvext::NvExtProvider, validate, OpenAISamplingOptionsProvider,
     OpenAIStopConditionsProvider,
 };
@@ -31,16 +32,20 @@ pub use aggregator::DeltaAggregator;
 pub use delta::DeltaGenerator;
 
 /// A request structure for creating a chat completion, extending OpenAI's
-/// `CreateChatCompletionRequest` with [`NvExt`] extensions.
+/// `CreateChatCompletionRequest` with [`NvExt`] extensions and common fields.
 ///
 /// # Fields
 /// - `inner`: The base OpenAI chat completion request, embedded using `serde(flatten)`.
-/// - `nvext`: The optional NVIDIA extension field. See [`NvExt`] for
-///   more details.
+/// - `common`: Common extension fields (ignore_eos, min_tokens) at root level, embedded using `serde(flatten)`.
+/// - `nvext`: The optional NVIDIA extension field. See [`NvExt`] for more details.
+///   Note: If ignore_eos is specified in both common and nvext, the nvext value takes precedence.
 #[derive(Serialize, Deserialize, Validate, Debug, Clone)]
 pub struct NvCreateChatCompletionRequest {
     #[serde(flatten)]
     pub inner: async_openai::types::CreateChatCompletionRequest,
+
+    #[serde(flatten)]
+    pub common: CommonExt,
 
     #[serde(skip_serializing_if = "Option::is_none")]
     pub nvext: Option<NvExt>,
@@ -139,6 +144,28 @@ impl OpenAISamplingOptionsProvider for NvCreateChatCompletionRequest {
     }
 }
 
+/// Implements `CommonExtProvider` for `NvCreateChatCompletionRequest`,
+/// providing access to common extension fields with proper precedence handling.
+impl CommonExtProvider for NvCreateChatCompletionRequest {
+    /// Returns a reference to the CommonExt struct.
+    fn common_ext(&self) -> Option<&CommonExt> {
+        Some(&self.common)
+    }
+
+    /// Gets the effective ignore_eos value, with nvext taking precedence over common.
+    fn effective_ignore_eos(&self) -> Option<bool> {
+        self.nvext
+            .as_ref()
+            .and_then(|nv| nv.ignore_eos)
+            .or(self.common.ignore_eos)
+    }
+
+    /// Gets the effective min_tokens value from common extensions.
+    fn effective_min_tokens(&self) -> Option<u32> {
+        self.common.min_tokens
+    }
+}
+
 /// Implements `OpenAIStopConditionsProvider` for `NvCreateChatCompletionRequest`,
 /// providing access to stop conditions that control chat completion behavior.
 impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
@@ -149,12 +176,10 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     }
 
     /// Retrieves the minimum number of tokens required in the response.
-    ///
-    /// # Note
-    /// This method is currently a placeholder and always returns `None`
-    /// since `min_tokens` is not an OpenAI-supported parameter.
+    /// Returns `min_tokens` Value
+    /// `min_tokens` is not an OpenAI-supported parameter.
     fn get_min_tokens(&self) -> Option<u32> {
-        None
+        self.effective_min_tokens()
     }
 
     /// Retrieves the stop conditions that terminate the chat completion response.
@@ -174,6 +199,11 @@ impl OpenAIStopConditionsProvider for NvCreateChatCompletionRequest {
     /// Returns a reference to the optional `NvExt` extension, if available.
     fn nvext(&self) -> Option<&NvExt> {
         self.nvext.as_ref()
+    }
+
+    /// Get the effective ignore_eos value, with nvext taking precedence over common.
+    fn get_ignore_eos(&self) -> Option<bool> {
+        self.effective_ignore_eos()
     }
 }
 
