@@ -28,6 +28,9 @@ git checkout $(git describe --tags $(git rev-list --tags --max-count=1))
 - [Multi-Node and Advanced Examples](#advanced-examples)
 - [Deploy on SLURM or Kubernetes](#deployment)
 
+> [!NOTE]
+> We just added a full step by step example guide for writing a completely custom SGLang inference graph using Dynamo! You can check it out [here](from_scratch/README.md)
+
 ## Feature Support Matrix
 
 ### Core Dynamo Features
