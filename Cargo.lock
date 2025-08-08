@@ -1986,6 +1986,7 @@ dependencies = [
  "temp-env",
  "tempfile",
  "thiserror 2.0.12",
+ "thread-priority",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -7242,6 +7243,16 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.100",
+]
+
+[[package]]
+name = "thread-priority"
+version = "0.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cbb8681124ddad2b07e677d7a99f564c9edbd289cc53cdc0010fd110cb4818ec"
+dependencies = [
+ "libc",
+ "winapi 0.3.9",
 ]
 
 [[package]]
