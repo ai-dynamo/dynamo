@@ -92,9 +92,7 @@ pub struct ModelDeploymentCard {
     pub display_name: String,
 
     // Cache the Slugified display_name so we can share references to it
-    // This is `pub` so that it gets serialized to etcd, which is simpler than
-    // having the frontend re-calcuate it (which would be fine too).
-    pub slug: Slug,
+    slug: Slug,
 
     /// Model information
     pub model_info: Option<ModelInfoType>,
