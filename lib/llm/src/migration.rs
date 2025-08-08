@@ -29,6 +29,11 @@ pub struct Migration {
 
 impl Migration {
     pub async fn from_mdc(mdc: ModelDeploymentCard) -> Result<Arc<Self>> {
+        tracing::debug!(
+            "model {} migration limit {}",
+            mdc.display_name,
+            mdc.migration_limit
+        );
         Ok(Arc::new(Self {
             migration_limit: mdc.migration_limit,
         }))
@@ -51,13 +56,20 @@ impl
     ) -> Result<ManyOut<Annotated<LLMEngineOutput>>> {
         let (preprocessed_request, context) = request.transfer(());
         let engine_ctx = context.context();
+        let engine_ctx_ = engine_ctx.clone();
         let retry_manager =
             RetryManager::build(preprocessed_request, next, self.migration_limit).await?;
-        let response_stream = stream::unfold(retry_manager, |mut retry_manager| async move {
-            retry_manager
-                .next()
-                .await
-                .map(|response| (response, retry_manager))
+        let response_stream = stream::unfold(retry_manager, move |mut retry_manager| {
+            let engine_ctx = engine_ctx_.clone();
+            async move {
+                if engine_ctx.is_stopped() || engine_ctx.is_killed() {
+                    return None; // Stop if the context is cancelled or stopped
+                }
+                retry_manager
+                    .next()
+                    .await
+                    .map(|response| (response, retry_manager))
+            }
         });
         Ok(ResponseStream::new(Box::pin(response_stream), engine_ctx))
     }
