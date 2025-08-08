@@ -224,7 +224,7 @@ def process_directory(dir_path: str) -> Optional[Dict]:
                 'concurrency': concurrency,
                 'output_token_throughput': output_throughput,
                 'output_token_throughput_per_user': output_throughput_per_user,
-                'output_token_throughput_per_gpu': output_throughput / deployment_config['total_gpus'],
+                'output_token_throughput_per_gpu': output_throughput / int(deployment_config['total_gpus']),
                 'model': deployment_config['model'],
                 'kind': deployment_config['kind'],
                 'total_gpus': deployment_config['total_gpus'],
