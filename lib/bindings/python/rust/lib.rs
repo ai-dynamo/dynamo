@@ -535,8 +535,9 @@ impl Endpoint {
 
 #[pymethods]
 impl Namespace {
-    fn component(&self, name: String) -> PyResult<Component> {
-        let inner = self.inner.component(name).map_err(to_pyerr)?;
+    #[pyo3(signature = (name, model = None))]
+    fn component(&self, name: String, model: Option<String>) -> PyResult<Component> {
+        let inner = self.inner.component(name, model).map_err(to_pyerr)?;
         Ok(Component {
             inner,
             event_loop: self.event_loop.clone(),

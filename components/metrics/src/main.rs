@@ -60,6 +60,10 @@ struct Args {
     #[arg(long)]
     endpoint: String,
 
+    /// Model name for the target component (optional)
+    #[arg(long)]
+    model_name: String,
+
     /// Polling interval in seconds for scraping dynamo endpoint stats (minimum 1 second)
     #[arg(long, default_value = "1")]
     poll_interval: u64,
@@ -109,6 +113,7 @@ fn get_config(args: &Args) -> Result<LLMWorkerLoadCapacityConfig> {
     Ok(LLMWorkerLoadCapacityConfig {
         component_name: args.component.clone(),
         endpoint_name: args.endpoint.clone(),
+        model_name: Some(args.model_name.clone()),
     })
 }
 
@@ -120,7 +125,9 @@ async fn app(runtime: Runtime) -> Result<()> {
     let drt = DistributedRuntime::from_settings(runtime.clone()).await?;
 
     let namespace = drt.namespace(args.namespace)?;
-    let component = namespace.component("count")?;
+    // The metrics aggregator operates independently of any model,
+    // hence the model name is set to None.
+    let component = namespace.component("count", None)?;
 
     // Create unique instance of Count
     let key = format!("{}/instance", component.etcd_root());
@@ -131,7 +138,7 @@ async fn app(runtime: Runtime) -> Result<()> {
         .await
         .context("Unable to create unique instance of Count; possibly one already exists")?;
 
-    let target_component = namespace.component(&config.component_name)?;
+    let target_component = namespace.component(&config.component_name, config.model_name.clone())?;
     let target_endpoint = target_component.endpoint(&config.endpoint_name);
 
     let service_path = target_endpoint.path();

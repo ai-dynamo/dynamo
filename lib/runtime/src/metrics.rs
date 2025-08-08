@@ -249,6 +249,14 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
                 }
             }
         }
+        if let Some(model) = registry.model() {
+            if !model.is_empty() {
+                let valid_model = lint_prometheus_name(&model)?;
+                if !valid_model.is_empty() {
+                    updated_labels.push(("model".to_string(), valid_model));
+                }
+            }
+        }
         if hierarchy.len() > 3 {
             let endpoint = &hierarchy[3];
             if !endpoint.is_empty() {
@@ -385,6 +393,11 @@ fn create_metric<T: PrometheusMetric, R: MetricsRegistry + ?Sized>(
 pub trait MetricsRegistry: Send + Sync + crate::traits::DistributedRuntimeProvider {
     // Get the name of this registry (without any prefix)
     fn basename(&self) -> String;
+
+    // Get the model name for this registry
+    fn model(&self) -> Option<String> {
+        None
+    }
 
     /// Retrieve the complete hierarchy and basename for this registry. Currently, the prefix for drt is an empty string,
     /// so we must account for the leading underscore. The existing code remains unchanged to accommodate any future

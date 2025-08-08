@@ -169,7 +169,7 @@ impl ModelWatcher {
         let component = self
             .drt
             .namespace(&endpoint_id.namespace)?
-            .component(&endpoint_id.component)?;
+            .component(&endpoint_id.component, Some(model_entry.name.clone()))?;
         let client = component.endpoint(&endpoint_id.name).client().await?;
 
         let Some(etcd_client) = self.drt.etcd_client() else {
